@@ -4,6 +4,9 @@ import { fileTaskProposal } from "./proposal.js";
 import { verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { credentialKeyOf } from "./converse.js";
 import { confirmMateProposal, dismissMateProposal } from "./mate-doors.js";
+import { executeMateTool } from "./mate-tools.js";
+import { approve, approvalOf, hashToken, propose } from "./scope.js";
+import { routeDigestOf } from "./phase-routing.js";
 
 const T0 = new Date("2026-09-02T12:00:00.000Z");
 const REPO = "/repo/doors";
@@ -23,7 +26,7 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
   const session = () =>
     store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey: CREDENTIAL, ceilingMicrousd: 5_000_000, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64) }, clock());
   /** An answered turn holding one pending proposal of the given kind. */
-  const pending = (kind: "task" | "next" | "reserve" | "hold" | "steer" | "answer" | "repair", payload: Record<string, unknown>): number => {
+  const pending = (kind: "task" | "next" | "reserve" | "hold" | "steer" | "answer" | "repair" | "agents", payload: Record<string, unknown>): number => {
     const thread = store.openMateThread("alex", who.ceilingDigest, clock()).thread;
     const live = store.activeMateSession("alex")!;
     const opened = store.openMateTurn({ approver: "alex", session: live.id, thread: thread.id, credentialKey: CREDENTIAL, reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, clock());
@@ -191,6 +194,85 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     clockAt += 120_000;
     expect(confirmMateProposal(store, who, timed, clock(), { via: "web" })).toMatchObject({ ok: false, reason: "stale" });
     expect(store.getDecision(3)?.state).toBe("open");
+  });
+
+  test("chat-steer: get_agents reads risk and agents in the route's own words; propose_agents drafts only a configured, role-valid choice; the confirmed card changes the agents through the authenticated route edit and stales the approval", () => {
+    // A routed installation: everyday and strong agents named once, in configuration.
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "ops", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "ops", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "ops", T0);
+    store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "ops", T0);
+    store.setPhaseTierConfig("installation", "build", "strong", "gemini", "gemini-2.5-pro", "ops", T0);
+    store.setPhaseTierConfig("installation", "plan", "strong", "codex", "gpt-5", "ops", T0);
+    // alex's real password, so the approval ceremony below can run.
+    store.saveApprover("alex", hashToken("alex-password"), T0);
+    who = principal();
+    propose(store, { taskId: "a", goal: "Harden the payouts flow", acceptance: [{ id: "c1", statement: "Payouts never double-send", how: null, evidence: ["check"] }], now: T0 });
+    session();
+    const ctx = { store, who, now: clock(), draft: (kind: string, payload: Record<string, unknown>) => pending(kind as "agents", payload), step: 1, readDecisions: new Map<number, number>() };
+    const read = executeMateTool(ctx, "get_agents", { task: "a" });
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    const body = read.body as Record<string, unknown>;
+    expect(body).toMatchObject({
+      task: "a",
+      risk: { level: "routine", title: "Routine", consequence: expect.stringContaining("everyday configured agent") },
+      standing: "awaiting approval",
+      summary: "claude · sonnet plans, builds, repairs, and reviews",
+      editable: true,
+      approval: "not approved",
+    });
+    expect((body["riskChoices"] as { risk: string; consequence: string }[]).map(one => one.risk)).toEqual(["routine", "elevated", "high"]);
+    expect((body["agents"] as { role: string; provider: string; reasons: string[] }[]).map(one => one.role)).toEqual(["planner", "builder", "repair", "reviewer"]);
+    const choices = body["choices"] as Record<string, { provider: string; model: string; current: boolean }[]>;
+    // Only configured pairs; gemini never reviews; repair stays on the build provider.
+    expect(choices["reviewer"]).toEqual([{ provider: "claude", model: "sonnet", current: true }, { provider: "codex", model: "gpt-5", current: false }, { provider: "codex", model: "gpt-5-codex", current: false }]);
+    expect(choices["reviewer"].some(one => one.provider === "gemini")).toBe(false);
+    expect(choices["builder"]).toEqual(expect.arrayContaining([{ provider: "gemini", model: "gemini-2.5-pro", current: false }]));
+    expect(choices["repair"]).toEqual([{ provider: "claude", model: "sonnet", current: true }]);
+    expect(choices["builder"]).toEqual(expect.arrayContaining([{ provider: "codex", model: "gpt-5", current: false }]));
+    // An unlisted agent is refused, naming the choices; so is a no-op.
+    expect(executeMateTool(ctx, "propose_agents", { task: "a", role: "reviewer", agent: { provider: "claude", model: "opus" } })).toMatchObject({ ok: false, message: expect.stringContaining("one of the reviewer choices") });
+    expect(executeMateTool(ctx, "propose_agents", { task: "a", role: "reviewer", agent: { provider: "gemini", model: "gemini-2.5-pro" } })).toMatchObject({ ok: false });
+    expect(executeMateTool(ctx, "propose_agents", { task: "a", role: "reviewer", agent: { provider: "claude", model: "sonnet" } })).toMatchObject({ ok: false, message: expect.stringContaining("already runs") });
+    expect(executeMateTool(ctx, "propose_agents", { task: "a", risk: "routine" })).toMatchObject({ ok: false, message: expect.stringContaining("already declared") });
+    expect(executeMateTool(ctx, "propose_agents", { task: "a", role: "reviewer", clear: true })).toMatchObject({ ok: false, message: expect.stringContaining("nothing to clear") });
+    // Approve the scope as it stands, then propose a real change.
+    const first = store.getScope("a")!;
+    expect(approve(store, "a", "alex", T0, first.digest, "alex-password").ok).toBe(true);
+    const sealedBefore = store.approvedRouteOf("a")!;
+    // A card naming an agent that is no longer configured refuses — even
+    // with the right digest — and the approval stands untouched.
+    store.clearPhaseTierConfig("installation", "plan", "strong");
+    const gone = pending("agents", { task: "a", phase: "build", role: "builder", provider: "codex", model: "gpt-5", sawDigest: first.digest });
+    expect(confirmMateProposal(store, who, gone, clock(), { via: "web" })).toMatchObject({ ok: false, reason: "stale", said: expect.stringContaining("no longer one of the configured agents") });
+    expect(approvalOf(store.getScope("a")!).approved).toBe(true);
+    const proposed = executeMateTool({ ...ctx, now: clock() }, "propose_agents", { task: "a", risk: "high", role: "reviewer", agent: { provider: "codex", model: "gpt-5-codex" }, why: "payouts move money" });
+    expect(proposed).toMatchObject({ ok: true, body: { kind: "agents", task: "a", risk: "high", role: "reviewer", agent: { provider: "codex", model: "gpt-5-codex" }, awaiting: expect.stringContaining("renewing") } });
+    if (!proposed.ok) return;
+    const id = (proposed.body as { proposal: number }).proposal;
+    expect(store.getMateProposal(id)?.payload).toMatchObject({ task: "a", risk: "high", phase: "review", role: "reviewer", provider: "codex", model: "gpt-5-codex", sawDigest: first.digest, approval: "approved" });
+    // Confirmed: the ONE authenticated route edit — recorded as the
+    // operator, the approval staled, the sealed route gone.
+    const outcome = confirmMateProposal(store, who, id, clock(), { via: "web" });
+    expect(outcome).toMatchObject({ ok: true, kind: "agents", taskId: "a", said: expect.stringContaining("risk is now high risk; the reviewer is now codex · gpt-5-codex — the earlier approval no longer covers this task; approve it again") });
+    const ref = store.refFor("built-in", "a");
+    expect(ref.riskLevel).toBe("high");
+    expect(ref.routeOverrides).toEqual([expect.objectContaining({ phase: "review", provider: "codex", model: "gpt-5-codex", by: "alex" })]);
+    const after = store.getScope("a")!;
+    expect(approvalOf(after)).toMatchObject({ approved: false, reason: "changed" });
+    expect(store.approvedRouteOf("a")).toBeNull();
+    expect(routeDigestOf(sealedBefore)).not.toBe(after.proposedRouteJson === null ? "" : routeDigestOf(JSON.parse(after.proposedRouteJson!) as never));
+    // A stale card — drafted against the earlier digest — refuses; nothing moves again.
+    const stale = pending("agents", { task: "a", phase: "review", role: "reviewer", provider: "claude", model: "sonnet", sawDigest: first.digest });
+    expect(confirmMateProposal(store, who, stale, clock(), { via: "web" })).toMatchObject({ ok: false, reason: "stale" });
+    expect(store.refFor("built-in", "a").routeOverrides).toHaveLength(1);
+    // Clearing the hand-picked reviewer restores the recommendation.
+    const clear = executeMateTool({ ...ctx, now: clock() }, "propose_agents", { task: "a", role: "reviewer", clear: true });
+    expect(clear).toMatchObject({ ok: true, body: { role: "reviewer", clear: true } });
+    if (!clear.ok) return;
+    expect(confirmMateProposal(store, who, (clear.body as { proposal: number }).proposal, clock(), { via: "web" })).toMatchObject({ ok: true, said: expect.stringContaining("the reviewer choice was cleared") });
+    expect(store.refFor("built-in", "a").routeOverrides).toEqual([]);
   });
 
   test("a structural principal never confirms", () => {

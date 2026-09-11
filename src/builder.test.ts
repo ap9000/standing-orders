@@ -2117,15 +2117,16 @@ describe("bounded repair", () => {
     const repair = store.runsFor(taskRef).find(r => r.role === "repair")!;
     expect(store.runRoute(repair.id)).toMatchObject({ phase: "repair", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: routeDigestOf(sealed) });
 
-    // A fallback parent: the repair's provenance stays `fallback`.
-    const fallbackRun = store.startRun({
-      taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0,
-      route: { routeDigest: routeDigestOf(sealed), phase: "build", provider: "claude", model: "sonnet", chosen: "fallback" },
-    });
-    const second = staged([invalid, valid], ["sess-2"]);
-    expect(await build(store, request({ agent: second.agent, runId: fallbackRun }))).toMatchObject({ ok: true });
-    const fallbackRepair = store.runsFor(taskRef).filter(r => r.role === "repair" && r.parentRun === fallbackRun)[0]!;
-    expect(store.runRoute(fallbackRepair.id)).toMatchObject({ phase: "repair", chosen: "fallback", provider: "claude", model: "sonnet" });
+    // A `fallback` stamp with no approved chain behind it is refused at
+    // admission (v48): no run row, no repair, nothing spends as a fallback
+    // nobody approved. (A real approved fallback and its repair are proved
+    // end to end in fallback-e2e.test.ts.)
+    expect(() =>
+      store.startRun({
+        taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0,
+        route: { routeDigest: routeDigestOf(sealed), phase: "build", provider: "claude", model: "sonnet", chosen: "fallback" },
+      }),
+    ).toThrow(/no approved fallback chain/);
 
     // The route removed from the routed row while the build runs: the
     // repair refuses — no mending under agents nobody can read.
@@ -2145,20 +2146,33 @@ describe("bounded repair", () => {
     expect(store.runsFor(taskRef).filter(r => r.role === "repair" && r.parentRun === third)).toHaveLength(0);
   });
 
-  test("set-once provenance (v47): a run admitted as one agent refuses to spend as another", async () => {
+  test("set-once provenance (v47/v48): admission refuses a stamp the sealed route does not name, and a stamp that drifts after admission refuses to spend", async () => {
     const sealed = store.approvedRouteOf("t-1")!;
-    const admittedAsCodex = store.startRun({
+    // Admission itself refuses an agent the sealed route never named — no
+    // run row exists to spend under.
+    const before = store.runsFor(taskRef).length;
+    expect(() =>
+      store.startRun({
+        taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0,
+        route: { routeDigest: routeDigestOf(sealed), phase: "build", provider: "codex", model: "gpt-5", chosen: "override" },
+      }),
+    ).toThrow(/build leg is claude · sonnet \[recommended\], not codex · gpt-5 \[override\]/);
+    expect(store.runsFor(taskRef)).toHaveLength(before);
+    // A run admitted honestly whose provenance is then rewritten underneath
+    // it (simulated drift) refuses to spend as anything but its stamp.
+    const admitted = store.startRun({
       taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0,
-      route: { routeDigest: routeDigestOf(sealed), phase: "build", provider: "codex", model: "gpt-5", chosen: "override" },
+      route: { routeDigest: routeDigestOf(sealed), phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" },
     });
+    store.raw().prepare("UPDATE run_route SET provider = 'codex', model = 'gpt-5', chosen = 'override' WHERE run = ?").run(admitted);
     const { agent, calls } = staged([valid]);
-    const refused = await build(store, request({ agent, runId: admittedAsCodex }));
+    const refused = await build(store, request({ agent, runId: admitted }));
     expect(refused).toMatchObject({ ok: false, reason: "stale-approval" });
     if (refused.ok) throw new Error("expected a refusal");
     expect(refused.message).toContain("route provenance conflict");
     expect(calls).toHaveLength(0);
     // The stamp itself never moved.
-    expect(store.runRoute(admittedAsCodex)).toMatchObject({ provider: "codex", model: "gpt-5", chosen: "override" });
+    expect(store.runRoute(admitted)).toMatchObject({ provider: "codex", model: "gpt-5", chosen: "override" });
   });
 
   test("two failed repairs exhaust the bound, and the last problems are the answer", async () => {

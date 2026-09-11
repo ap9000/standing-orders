@@ -1,5 +1,35 @@
 # Progress
 
+**2026-09-11 — Routing authority is closed end to end, and chat can steer
+it.** Run admission now proves a run's route stamp before any row exists: a
+malformed stamp (unknown phase, provenance word, or provider; an empty digest;
+a missing model), a phase that disagrees with the run's role, a provider or
+model the run would not spend as, or provenance the task does not hold — a leg
+the sealed route never named, a `fallback` with no approved chain entry behind
+it, `legacy` on a routed row — opens nothing and says why; the late-stamp road
+wears the same proof. A real approved non-primary fallback and its bounded
+repair are proved end to end to keep the same exact agent, chain entry and
+credential mode, route digest, and `fallback` provenance. Routines freeze their
+agents: filing resolves an exact four-role route beside the profile and binds
+both into the digest, approval seals the snapshot, and every firing copies it
+onto the instance verbatim so a later configuration change cannot re-route a
+firing; a routine approved before agents were frozen fires nothing and pages
+once until approved again. Every approval surface — task page, focused chat,
+and `/next` — restates one concise line of exact agents above the password,
+with the declared risk explained in a plain sentence and runtime limits behind
+a closed disclosure; changing any agent stales the approval every surface
+signed under. The task page's controls offer only configured, role-valid agents
+from a select (gemini never reviews, repairs stay on the build provider) and
+explain every risk choice; command-line hints left the route's reasons for the
+CLI's own output. Chat gained `get_agents` and `propose_agents`: it reads the
+task's risk, agents, reasons, and configured choices, and proposes one
+confirmation-gated change — a risk, one role to a listed agent, or a cleared
+hand-pick — that lands through the same authenticated route edit when the
+operator confirms the card. Schema v48 adds the routine's route columns and
+the `agents` proposal kind by the usual additive and exact-rebuild roads. Fresh
+1400×900 and 390×844 captures of the task and chat flows sit under
+`evidence/explainable-risk-aware-phase-routing-v1/`.
+
 **2026-09-11 — Which agent runs each phase is decided once, explained, and
 sealed.** Every task now carries an explainable route: one pure policy
 (`src/phase-routing.ts`) recommends the plan, build, repair, and review agents

@@ -2554,3 +2554,141 @@ describe("migration to v30 (fallback chains) from an AUTHENTIC v29 fixture", () 
     again.close();
   });
 });
+
+describe("run admission proves route provenance before any row exists (v48)", () => {
+  let store: Store;
+  let sealed: import("./phase-routing.js").PhaseRoute;
+  let taskRef: number;
+  let digest: string;
+
+  beforeEach(async () => {
+    const { addApprover, approve, propose } = await import("./scope.js");
+    const { routeDigestOf } = await import("./phase-routing.js");
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
+    store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "test", T0);
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("approver");
+    store.createTask({ id: "t", title: "t" }, T0);
+    taskRef = store.refFor(BUILT_IN, "t").id;
+    store.placeTask(taskRef, REPO);
+    propose(store, { taskId: "t", goal: "guard", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], riskLevel: "elevated", now: T0 });
+    expect(approve(store, "t", "alex", T0, store.getScope("t")!.digest, added.token).ok).toBe(true);
+    sealed = store.approvedRouteOf("t")!;
+    digest = routeDigestOf(sealed);
+  });
+  afterEach(() => store.close());
+
+  const admit = (over: Record<string, unknown>) =>
+    store.startRun({ taskRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0, ...over } as Parameters<Store["startRun"]>[0]);
+  const runs = () => store.runsFor(taskRef).length;
+
+  test("phase, provider, model, and provenance mismatches are refused before the insert; the honest stamp is admitted and becomes the row's agent", () => {
+    const build = { routeDigest: digest, phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" } as const;
+    // phase vs role
+    expect(() => admit({ route: { ...build, phase: "plan" } })).toThrow(/a builder run spends as the build leg, but the stamp says plan/);
+    expect(() => admit({ role: "planner", route: build })).toThrow(/a planner run spends as the plan leg/);
+    // provider / model vs what the run would spend as
+    expect(() => admit({ provider: "codex", route: build })).toThrow(/names claude but the run would spend as codex/);
+    expect(() => admit({ model: "opus", route: build })).toThrow(/names model sonnet but the run would spend as opus/);
+    // provenance vs the sealed route: a foreign digest, a leg the route never named, a chosen word that lies
+    expect(() => admit({ route: { ...build, routeDigest: "0".repeat(32) } })).toThrow(/is not the governing route/);
+    expect(() => admit({ route: { ...build, provider: "codex", model: "gpt-5-codex" }, provider: "codex", model: "gpt-5-codex" })).toThrow(/build leg is claude · sonnet \[recommended\], not codex · gpt-5-codex \[recommended\]/);
+    expect(() => admit({ route: { ...build, chosen: "override" } })).toThrow(/\[recommended\], not claude · sonnet \[override\]/);
+    // a fallback nobody approved; legacy under a sealed route
+    expect(() => admit({ route: { ...build, chosen: "fallback" } })).toThrow(/no approved fallback chain/);
+    expect(() => admit({ route: { ...build, routeDigest: "legacy", chosen: "legacy" } })).toThrow(/a sealed agent route governs this task — nothing spends as legacy/);
+    // a reviewer role on the build leg
+    expect(() => admit({ role: "reviewer", parentRun: 1, branch: undefined, worktree: undefined, route: build })).toThrow(/a reviewer run spends as the review leg/);
+    expect(runs()).toBe(0);
+    // The honest stamp: admitted, and the row carries the exact agent it names.
+    const id = admit({ route: build });
+    expect(store.getRun(id)).toMatchObject({ provider: "claude", model: "sonnet" });
+    expect(store.runRoute(id)).toMatchObject({ phase: "build", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: digest });
+    // The review leg is the strong reviewer the elevated risk asked for.
+    const review = admit({ role: "reviewer", parentRun: id, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex", route: { routeDigest: digest, phase: "review", provider: "codex", model: "gpt-5-codex", chosen: "recommended" } });
+    expect(store.runRoute(review)).toMatchObject({ phase: "review", chosen: "recommended" });
+    expect(runs()).toBe(2);
+  });
+
+  test("malformed authority fails closed: unknown phase, provenance word, or provider, an empty digest, a missing model — nothing is inserted", () => {
+    const good = { routeDigest: digest, phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" };
+    expect(() => admit({ route: { ...good, phase: "deploy" } })).toThrow(/unknown phase/);
+    expect(() => admit({ route: { ...good, chosen: "guess" } })).toThrow(/unknown provenance/);
+    expect(() => admit({ route: { ...good, provider: "gpt" }, provider: "gpt" })).toThrow(/unknown provider/);
+    expect(() => admit({ route: { ...good, routeDigest: "" } })).toThrow(/names no route digest/);
+    expect(() => admit({ route: { ...good, model: null } })).toThrow(/names an exact model — the stamp carries none/);
+    expect(() => admit({ route: { ...good, model: 42 } })).toThrow(/neither an exact id nor null/);
+    expect(() => admit({ route: "recommended" })).toThrow(/not an object/);
+    expect(runs()).toBe(0);
+    // The late-stamp road refuses the same way, in words, and stamps nothing.
+    const bare = admit({});
+    expect(store.stampRunRoute(bare, { routeDigest: digest, phase: "build", provider: "claude", model: "opus", chosen: "recommended" }, T0)).toMatchObject({ ok: false, conflict: expect.stringContaining("build leg is claude · sonnet") });
+    expect(store.stampRunRoute(bare, { routeDigest: digest, phase: "review", provider: "claude", model: "sonnet", chosen: "recommended" }, T0)).toMatchObject({ ok: false, conflict: expect.stringContaining("spends as the build leg") });
+    expect(store.runRoute(bare)).toBeNull();
+    expect(store.stampRunRoute(bare, { routeDigest: digest, phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" }, T0)).toEqual({ ok: true, first: true });
+    expect(store.getRun(bare)?.model).toBe("sonnet");
+  });
+
+  test("a stamp is proved against the authority the task holds NOW: a re-filed scope unseals the route, and the old digest no longer admits anything", async () => {
+    const build = { routeDigest: digest, phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" } as const;
+    const edited = store.editTaskRoute(taskRef, { by: "alex", authenticate: () => ({ ok: true }), risk: "high" }, T0);
+    expect(edited.ok).toBe(true);
+    expect(() => admit({ route: build })).toThrow(/nothing spends as a recommended build leg without a sealed route/);
+    expect(runs()).toBe(0);
+    // A planner still runs before approval — under the WORKING proposed route, exactly.
+    const { routeDigestOf, routeFromJson } = await import("./phase-routing.js");
+    const proposed = routeFromJson(store.getScope("t")!.proposedRouteJson ?? null)!;
+    expect(() => admit({ role: "planner", route: { routeDigest: digest, phase: "plan", provider: "claude", model: "sonnet", chosen: "recommended" } })).toThrow(/is not the governing route/);
+    const planner = admit({ role: "planner", route: { routeDigest: routeDigestOf(proposed), phase: "plan", provider: "claude", model: "sonnet", chosen: "recommended" } });
+    expect(store.runRoute(planner)).toMatchObject({ phase: "plan", routeDigest: routeDigestOf(proposed) });
+  });
+});
+
+describe("migration to v48: the routine freezes its route; `agents` joins the proposal kinds", () => {
+  test("a v47-shaped database gains the two routine columns and the widened proposal CHECK, rows and ids intact; the version marker lands", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "standing-orders-v48-"));
+    const db = join(dir, "orders.db");
+    const seeded = openStore(db);
+    // Roll the file back to the v47 shape: no routine route columns, the v43 proposal CHECK.
+    const raw = seeded.raw();
+    raw.exec("ALTER TABLE routine DROP COLUMN route_json");
+    raw.exec("ALTER TABLE routine DROP COLUMN approved_route_json");
+    raw.exec(`CREATE TABLE mate_proposal_v43 (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
+  turn           INTEGER NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','steer','scope','cancel','answer','repair')),
+  payload_json   TEXT NOT NULL,
+  ceiling_digest TEXT NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
+  created_at     TEXT NOT NULL,
+  resolved_at    TEXT,
+  resolved_by    TEXT,
+  outcome_json   TEXT
+)`);
+    raw.exec("DROP TABLE mate_proposal");
+    raw.exec("ALTER TABLE mate_proposal_v43 RENAME TO mate_proposal");
+    raw.exec("INSERT INTO mate_thread (approver, ceiling_digest, opened_at) VALUES ('alex', 'c', '2026-09-01T00:00:00.000Z')");
+    raw.exec("INSERT INTO mate_proposal (id, thread, turn, kind, payload_json, ceiling_digest, state, created_at) VALUES (7, 1, 1, 'steer', '{}', 'c', 'pending', '2026-09-01T00:00:00.000Z')");
+    raw.prepare("UPDATE schema_version SET version = 47").run();
+    seeded.close();
+    // Reopen: the migration runs.
+    const store = openStore(db);
+    expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(SCHEMA_VERSION);
+    expect(SCHEMA_VERSION).toBe(48);
+    const columns = (store.raw().prepare("PRAGMA table_info(routine)").all() as { name: string }[]).map(one => one.name);
+    expect(columns).toEqual(expect.arrayContaining(["route_json", "approved_route_json"]));
+    // The old row survived with its id; the new kind is admitted.
+    expect(store.raw().prepare("SELECT id, kind, state FROM mate_proposal").all()).toEqual([{ id: 7, kind: "steer", state: "pending" }]);
+    expect(() => store.raw().prepare("INSERT INTO mate_proposal (thread, turn, kind, payload_json, ceiling_digest, state, created_at) VALUES (1, 1, 'agents', '{}', 'c', 'pending', '2026-09-01T00:00:00.000Z')").run()).not.toThrow();
+    // A pre-v48 routine reads back with no route: unapprovable and unfireable until filed again (routine.test.ts proves both roads).
+    store.close();
+    const again = openStore(db);
+    expect(again.raw().prepare("SELECT version FROM schema_version").get()).toMatchObject({ version: SCHEMA_VERSION });
+    again.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

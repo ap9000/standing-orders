@@ -476,6 +476,35 @@ admission re-check readiness and the exact leg inside their transactions.
 Every run is stamped with its route and the actual provider and model at
 admission — set once; a run that would spend as anything else refuses.
 
+Admission proves that stamp before any run row exists: its shape (a known
+phase, provenance word, and provider; a digest; an exact model), its phase
+against the run's role, its provider and model against what the run would
+spend as, and its provenance against the authority the task actually holds —
+the sealed route's digest and that phase's exact leg, a non-primary entry of
+the approved fallback chain for a `fallback` run (and its repair model for a
+repair), or a proven pre-routing row for `legacy`. A stamp that cannot be
+proved opens no run; malformed authority data fails closed in words. An
+approved fallback's repair keeps the same exact agent, chain entry, route
+digest, credential mode, and `fallback` provenance as the run it mends.
+
+A **routine** freezes its agents too. Filing a standing order resolves its
+four-role route from the configuration of that moment and binds it into the
+digest you sign; approval seals the snapshot, and every firing copies it onto
+the instance verbatim — a later `config set` cannot re-route a firing. A
+routine approved before agents were frozen fires nothing and pages once until
+you approve it again under the agents it now names.
+
+Every approval surface — the task page, the focused chat, and `/next` — shows
+the same concise line of exact agents above the password, with the declared
+risk explained in plain words and the runtime limits one tap away; changing
+any agent invalidates the approval every surface signed under. The task
+page's controls offer only agents you have configured and only where they can
+run (gemini never reviews; repairs stay on the build provider), and each risk
+level says what it does. Chat reads the same route (`get_agents`) and proposes
+one confirmation-gated change (`propose_agents`) — a risk, one role switched
+to a listed agent, or a hand-picked role cleared — which lands, when you
+confirm the card, through the same authenticated route edit the page uses.
+
 ## The phone, both directions
 
 The Telegram bridge closes the loop without a terminal: a parked decision

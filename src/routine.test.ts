@@ -8,6 +8,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, BUILT_IN, type Store } from "./store.js";
 import { addApprover, approvalOf } from "./scope.js";
+import { legOf, recommendRoute, routeDigestOf, type PhaseRoute } from "./phase-routing.js";
 import {
   approveRoutine,
   describeSchedule,
@@ -34,6 +35,17 @@ const V24_PROFILE = {
   maxTurns: 40, repairMaxTurns: 4, timeoutSeconds: 1800, repairTimeoutSeconds: 300,
   repairModel: "inherit",
 };
+/** v48: the four-role route a routine's approval freezes — the profile
+ * above restates its build and repair legs exactly. */
+const SONNET = { provider: "claude" as const, model: "sonnet", source: "installation" };
+const V48_ROUTE: PhaseRoute = recommendRoute({
+  risk: "routine",
+  qualityMode: "default",
+  evidence: ["check"],
+  publication: "none",
+  candidates: { plan: { routine: SONNET, strong: null }, build: { routine: SONNET, strong: null }, repair: { routine: null, strong: null }, review: { routine: SONNET, strong: null } },
+  overrides: [],
+});
 
 describe("the schedule algebra", () => {
   test("parses the two shapes and refuses everything else", () => {
@@ -104,6 +116,16 @@ describe("the template digest", () => {
     expect(
       routineDigestOf({ ...TERMS, touches: ["b", "a"] }),
     ).toBe(routineDigestOf({ ...TERMS, touches: ["a", "b"] }));
+    // v48: the four-role route is a term — a different reviewer is a
+    // different standing order; no route at all keeps the legacy bytes.
+    const routed = routineDigestOf(TERMS, V24_PROFILE, V48_ROUTE);
+    expect(routed).not.toBe(routineDigestOf(TERMS, V24_PROFILE));
+    expect(routineDigestOf(TERMS, V24_PROFILE, null)).toBe(routineDigestOf(TERMS, V24_PROFILE));
+    const otherReviewer = recommendRoute({
+      risk: "routine", qualityMode: "default", evidence: ["check"], publication: "none", overrides: [],
+      candidates: { plan: { routine: SONNET, strong: null }, build: { routine: SONNET, strong: null }, repair: { routine: null, strong: null }, review: { routine: { provider: "codex", model: "gpt-5-codex", source: "installation" }, strong: null } },
+    });
+    expect(routineDigestOf(TERMS, V24_PROFILE, otherReviewer)).not.toBe(routed);
   });
 
   test("validation names every problem at once", () => {
@@ -127,7 +149,7 @@ describe("firing, inside one proving transaction", () => {
 
   const create = (terms: RoutineTerms = TERMS, name = "deps") => {
     const created = store.createRoutine(
-      { name, ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE },
+      { name, ...terms, digest: routineDigestOf(terms, V24_PROFILE, V48_ROUTE), profile: V24_PROFILE, route: V48_ROUTE },
       T0,
     );
     if (!created.ok) throw new Error("duplicate routine in test setup");
@@ -205,6 +227,64 @@ describe("firing, inside one proving transaction", () => {
     expect(fires).toHaveLength(1);
     expect(fires[0]).toMatchObject({ outcome: "fired", scheduledFor: later(HOUR).toISOString() });
     expect(store.getRoutine(withReqs)?.nextFireAt).toBe(later(2 * HOUR).toISOString());
+  });
+
+  test("routine-freeze: approval seals the four-role route; a configuration change after the yes cannot re-route a firing", () => {
+    // Configuration exists and names OTHER agents than the frozen route —
+    // a firing must never read it.
+    store.setPhaseConfig("installation", "plan", "codex", "gpt-5-codex", "ops", T0);
+    store.setPhaseConfig("installation", "build", "codex", "gpt-5-codex", "ops", T0);
+    store.setPhaseConfig("installation", "review", "codex", "gpt-5-codex", "ops", T0);
+    store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "ops", T0);
+    approve(routineId);
+    const routine = store.getRoutine(routineId)!;
+    expect(routine.approvedRoute).not.toBeNull();
+    expect(routeDigestOf(routine.approvedRoute!)).toBe(routeDigestOf(V48_ROUTE));
+    // More configuration lands after the yes.
+    store.setPhaseConfig("installation", "review", "codex", "gpt-5", "ops", later(MINUTE));
+    const fired = fireRoutine(store, routineId, later(HOUR));
+    expect(fired.ok).toBe(true);
+    if (!fired.ok) return;
+    // The instance's SEALED route is the routine's frozen snapshot, every
+    // leg — planner and reviewer included — not today's configuration.
+    const sealed = store.sealedRouteOf(fired.taskId);
+    expect(sealed.ok).toBe(true);
+    if (!sealed.ok) return;
+    expect(routeDigestOf(sealed.route)).toBe(routeDigestOf(V48_ROUTE));
+    expect(sealed.route.legs.map(leg => [leg.phase, leg.provider, leg.model])).toEqual([
+      ["plan", "claude", "sonnet"], ["build", "claude", "sonnet"], ["repair", "claude", "sonnet"], ["review", "claude", "sonnet"],
+    ]);
+    expect(legOf(sealed.route, "review").provider).toBe("claude");
+    const scope = store.getScope(fired.taskId)!;
+    expect(scope.profileState).toBe("resolved");
+    expect(scope.approvedProfile).toMatchObject({ provider: "claude", model: "sonnet" });
+    expect(approvalOf(scope)).toMatchObject({ approved: true, by: "alex" });
+    // The pin is the frozen build leg.
+    const ref = store.refFor(BUILT_IN, fired.taskId);
+    expect([ref.agentProvider, ref.agentModel]).toEqual(["claude", "sonnet"]);
+  });
+
+  test("routine-freeze: a routine with no frozen route cannot be approved, and one approved before agents were frozen fires nothing and pages once", () => {
+    // Filed without a route (a configuration that could not make one, or a
+    // row that predates v48): unapprovable until filed again.
+    const legacy = store.createRoutine({ name: "legacy", ...TERMS, digest: routineDigestOf(TERMS, V24_PROFILE), profile: V24_PROFILE }, T0);
+    if (!legacy.ok) throw new Error("setup");
+    expect(approveRoutine(store, legacy.id, "alex", T0, store.getRoutine(legacy.id)!.digest, token)).toMatchObject({ ok: false, reason: "profile-unresolved" });
+    // A pre-v48 approval: the columns say approved, no route was ever sealed.
+    store.raw().prepare("UPDATE routine SET approved_at = ?, approved_by = 'alex', approved_digest = digest, approved_profile_json = profile_json, next_fire_at = ? WHERE id = ?").run(T0.toISOString(), later(HOUR).toISOString(), legacy.id);
+    const refused = fireRoutine(store, legacy.id, later(2 * HOUR));
+    expect(refused).toMatchObject({ ok: false, reason: "route-unfrozen" });
+    expect(store.listTasks()).toHaveLength(0);
+    // Paged once — the same slot does not page twice — and the slot stays
+    // due (no skip on the ledger) until a person approves it again.
+    const pages = () => store.raw().prepare("SELECT COUNT(*) AS n FROM notification WHERE dedupe_key LIKE 'routine-route:%'").get() as { n: number };
+    expect(pages().n).toBe(1);
+    fireRoutine(store, legacy.id, later(3 * HOUR));
+    expect(pages().n).toBe(1);
+    expect(store.routineFires(legacy.id)).toHaveLength(0);
+    // Run-now refuses to the person's face in the same words, paging nobody more.
+    expect(fireRoutine(store, legacy.id, later(3 * HOUR), { manual: true })).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("approve it again") });
+    expect(pages().n).toBe(1);
   });
 
   test("early is not due, and a recorded slot cannot fire twice", () => {
@@ -319,7 +399,7 @@ describe("firing, inside one proving transaction", () => {
   });
 
   test("two standing orders cannot share a name", () => {
-    expect(store.createRoutine({ name: "deps", ...TERMS, digest: routineDigestOf(TERMS, V24_PROFILE), profile: V24_PROFILE }, T0)).toMatchObject({
+    expect(store.createRoutine({ name: "deps", ...TERMS, digest: routineDigestOf(TERMS, V24_PROFILE, V48_ROUTE), profile: V24_PROFILE, route: V48_ROUTE }, T0)).toMatchObject({
       ok: false,
       reason: "duplicate",
     });
@@ -345,7 +425,7 @@ describe("the review's regressions (Codex Phase C findings)", () => {
   let routineId: number;
 
   const create = (terms: RoutineTerms = TERMS, name = "deps") => {
-    const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE }, T0);
+    const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms, V24_PROFILE, V48_ROUTE), profile: V24_PROFILE, route: V48_ROUTE }, T0);
     if (!created.ok) throw new Error("duplicate routine in test setup");
     return created.id;
   };

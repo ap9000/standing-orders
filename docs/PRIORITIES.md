@@ -122,8 +122,16 @@ digest-checked transaction; approval seals the route and any explicit fallback
 chain; task-level route edits stale the approval while global configuration
 never rewrites a sealed route; a routed row with unreadable route data fails
 closed; an unavailable provider halts rather than being substituted, moving
-only to an explicitly approved fallback entry. The learning half (project
-memory) is not started.
+only to an explicitly approved fallback entry. Its authority is now closed end
+to end: run admission proves every route stamp — shape, phase against role,
+exact provider and model, and provenance against the sealed route, the
+approved fallback chain, or a proven pre-routing row — before a run row
+exists; a routine's approval freezes an exact four-role snapshot that every
+firing copies verbatim; task, chat, and triage approvals restate one concise
+line of exact agents before the password, with each risk level explained; the
+console offers only configured, role-valid agent choices; and chat reads the
+route and proposes confirmation-gated changes through the same authenticated
+edit. The learning half (project memory) is not started.
 
 ## Current focus
 

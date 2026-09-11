@@ -26,7 +26,7 @@
  * and stays inert until the operator's own ceremony says otherwise.
  */
 
-import { resolveScopeProfile } from "./agentconfig.js";
+import { resolveRoutineAuthority } from "./agentconfig.js";
 import { resolve } from "node:path";
 import { hasForbiddenControls, hasDisguisedText } from "./decision.js";
 import { canonicalProject } from "./project.js";
@@ -325,21 +325,25 @@ export function fileRoutineProposal(
     const named = problems.map(one => `${one.field}: ${one.problem}`).join("; ");
     return refuse(problems.some(one => one.field === "name") ? "bad-name" : "bad-terms", named);
   }
-  // v24 filing invariant, routine flavor: resolve the execution profile
-  // once, here, and bind it into the digest a person will sign. Unresolved
-  // saves too (finding 19) — approval then refuses until restated.
-  const resolvedProfile = resolveScopeProfile(store, repo.repo, undefined, {});
-  const routineProfile = resolvedProfile.ok ? resolvedProfile.profile : null;
+  // v24 filing invariant, routine flavor — since v48 the whole four-role
+  // ROUTE: resolve which agents plan, build, repair, and review a firing
+  // once, here, from the configuration of this moment, and bind route and
+  // profile into the digest a person will sign. Unresolved saves too
+  // (finding 19) — approval then refuses until the routine is restated.
+  const authority = resolveRoutineAuthority(store, repo.repo, terms.acceptance, now);
+  const routineProfile = authority.ok ? authority.profile : null;
+  const routineRoute = authority.ok ? authority.route : null;
   const created = store.createRoutine(
     {
       name: input.name,
       ...terms,
-      digest: routineDigestOf(terms, routineProfile),
+      digest: routineDigestOf(terms, routineProfile, routineRoute),
       filedVia: input.filedVia,
       ...(routineProfile === null ? {} : { profile: routineProfile }),
+      ...(routineRoute === null ? {} : { route: routineRoute }),
     },
     now,
   );
   if (!created.ok) return refuse("duplicate", `a routine named ${input.name} already exists`);
-  return { ok: true, id: created.id, digest: routineDigestOf(terms, routineProfile) };
+  return { ok: true, id: created.id, digest: routineDigestOf(terms, routineProfile, routineRoute) };
 }

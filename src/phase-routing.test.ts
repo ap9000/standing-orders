@@ -18,6 +18,10 @@ import {
   routeFromJson,
   routeProblems,
   routeWords,
+  routeStampProblem,
+  phaseOfRole,
+  riskConsequence,
+  RISK_CHOICES,
   NO_READINESS,
   type RouteCandidates,
   type RouteInput,
@@ -323,6 +327,46 @@ describe("the shared projection", () => {
     // Same projection, same bytes, every time.
     expect(routeWords(projectRoute(route, NO_READINESS))).toEqual(routeWords(projectRoute(route, NO_READINESS)));
     expect(projectRoute(route, NO_READINESS).legs[0]!.readinessReason).toBe("no runner has reported this provider yet");
+  });
+});
+
+describe("plain-English risk consequences and route stamp shape (v48)", () => {
+  test("every risk level explains itself in one sentence that agrees with the tiering table", () => {
+    expect(RISK_CHOICES.map(one => one.risk)).toEqual(["routine", "elevated", "high"]);
+    expect(RISK_CHOICES.map(one => one.title)).toEqual(["Routine", "Elevated risk", "High risk"]);
+    for (const risk of ["routine", "elevated", "high"] as const) {
+      expect(riskConsequence(risk)).toBe(RISK_CHOICES.find(one => one.risk === risk)!.consequence);
+      // Never a command line: these words are the console's and the chat's.
+      expect(riskConsequence(risk)).not.toMatch(/config set|--tier|task route/);
+    }
+    // The consequence matches what the policy does with the same inputs.
+    const base = { qualityMode: "default" as const, evidence: [] as const, publication: "none" as const, candidates: candidates(true), overrides: [] };
+    const high = recommendRoute({ ...base, risk: "high" });
+    expect(high.legs.every(leg => leg.tier === "strong")).toBe(true);
+    expect(riskConsequence("high")).toContain("every role");
+    const elevated = recommendRoute({ ...base, risk: "elevated" });
+    expect(elevated.legs.map(leg => leg.tier)).toEqual(["routine", "routine", "routine", "strong"]);
+    expect(riskConsequence("elevated")).toContain("the review runs on the strongest configured reviewer");
+    const routine = recommendRoute({ ...base, risk: "routine" });
+    expect(routine.legs.every(leg => leg.tier === "routine")).toBe(true);
+    // The "no stronger agent configured" reason speaks plainly, no CLI quoted.
+    const noStrong = recommendRoute({ ...base, risk: "high", candidates: candidates(false) });
+    expect(legOf(noStrong, "build").reasons).toContain("no stronger builder is configured — using the configured default from installation");
+    expect(legOf(noStrong, "build").reasons.join(" ")).not.toContain("config set");
+  });
+
+  test("a route stamp is proved by shape before it is believed: phase, provenance word, provider, digest, exact model", () => {
+    const good = { routeDigest: "d".repeat(32), phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" };
+    expect(routeStampProblem(good)).toBeNull();
+    expect(routeStampProblem({ ...good, model: null, chosen: "legacy", routeDigest: "legacy" })).toBeNull();
+    expect(routeStampProblem(null)).toBe("the route stamp is not an object");
+    expect(routeStampProblem({ ...good, routeDigest: "" })).toBe("the route stamp names no route digest");
+    expect(routeStampProblem({ ...good, phase: "deploy" })).toContain("unknown phase");
+    expect(routeStampProblem({ ...good, chosen: "guess" })).toContain("unknown provenance");
+    expect(routeStampProblem({ ...good, provider: "gpt" })).toContain("unknown provider");
+    expect(routeStampProblem({ ...good, model: null })).toContain("names an exact model — the stamp carries none");
+    expect(routeStampProblem({ ...good, model: 7 })).toContain("neither an exact id nor null");
+    expect(["builder", "repair", "planner", "reviewer", "scout"].map(role => phaseOfRole(role as "builder"))).toEqual(["build", "repair", "plan", "review", "build"]);
   });
 });
 

@@ -172,7 +172,7 @@ import { TEMPLATES, templateByName } from "./templates.js";
 import { planTournament, planComparison, contestNoun, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant, recoverContests, maybeAggregate as contestMaybeAggregate, sweepContestCleanup, escalateOverdueContests } from "./contest.js";
 import { isDirectChatProvider, isSubscriptionChatProvider, priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, routeOfTask, INSTALLATION_SCOPE, type TaskRoute } from "./agentconfig.js";
-import { isRiskLevel, legOf, projectRoute, routeDigestOf, routeWords, RISK_LEVELS, PHASES as ROUTE_PHASES, type ReadinessLookup, type ReadinessObservation, type RiskLevel, type RouteOverride, type RouteStamp } from "./phase-routing.js";
+import { isRiskLevel, legOf, projectRoute, riskConsequence, routeDigestOf, routeWords, RISK_LEVELS, PHASES as ROUTE_PHASES, type ReadinessLookup, type ReadinessObservation, type RiskLevel, type RouteOverride, type RouteStamp } from "./phase-routing.js";
 import { observeProviderReadiness, reportProviderReadinessAuthed } from "./runner.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validModelId, validateSpec, type ProviderAudit, type ProviderId, ALL_CREDENTIAL_ENV } from "./provider.js";
@@ -10033,7 +10033,7 @@ async function routeTaskCommand(
       write,
       json,
       "task route",
-      { id, risk: current.riskLevel ?? scope?.riskLevel ?? "routine", source: routed !== null && routed.kind === "route" ? routed.source : routed?.kind ?? null, route: view, overrides: current.routeOverrides ?? [], digest: scope?.digest ?? null, approval: approvalOf(scope) },
+      { id, risk: current.riskLevel ?? scope?.riskLevel ?? "routine", riskConsequence: riskConsequence(current.riskLevel ?? scope?.riskLevel ?? "routine"), source: routed !== null && routed.kind === "route" ? routed.source : routed?.kind ?? null, route: view, overrides: current.routeOverrides ?? [], digest: scope?.digest ?? null, approval: approvalOf(scope) },
       () =>
         routed === null
           ? [`${id}: no route can be recommended yet — ${scope === null ? "place the task in a repository and file a scope" : scope.unresolvedReason ?? "the phase configuration cannot resolve"}`]
@@ -10043,6 +10043,13 @@ async function routeTaskCommand(
                 : [
                     `${id}: route ${routed.kind === "route" && routed.source === "approved" ? "SEALED by the approval" : routed.kind === "route" && routed.source === "proposed" ? "proposed — the next approval seals it" : "recommended live — no scope filed yet"}`,
                     ...routeWords(projection),
+                    // The declared risk, in the words the console and chat
+                    // use — and the one CLI hint that belongs here, not in
+                    // the route's own reasons: how a stronger tier is named.
+                    `  risk         ${current.riskLevel ?? scope?.riskLevel ?? "routine"} — ${riskConsequence(current.riskLevel ?? scope?.riskLevel ?? "routine")}`,
+                    ...(projection.legs.some(leg => leg.reasons.some(reason => reason.startsWith("no stronger")))
+                      ? [`               name a stronger agent once with \`config set <phase> --tier strong --provider … --model …\``]
+                      : []),
                   ]),
               ...(scope === null
                 ? []
@@ -10258,6 +10265,7 @@ function describeApproveFailure(reason: string, id: string): string {
     return "nobody can approve anything yet — `standing-orders approver add <you>` mints the credential that lets a person say yes";
   }
   if (reason === "not-an-approver") return "that is not an approver, or the token does not match";
+  if (reason === "profile-unresolved") return `${id} cannot name an exact agent for every role — configure the project's agents (\`config set <phase> --provider … --model …\`) and file it again`;
   return `${id} has no scope to approve`;
 }
 

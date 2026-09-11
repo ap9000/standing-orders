@@ -18,7 +18,7 @@ import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
 import { createDecisionServer, SENSITIVE_INPUT, reviewPriorityOf, rankReviewQueue, withinSignedTouches, diffFileAnchor, reviewFilePriority, orderChangedFiles, type ReviewQueueFacts, type ReviewFileRow } from "./serve.js";
 import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
-import { resolveScopeProfile, routeOfTask } from "./agentconfig.js";
+import { resolveRoutineAuthority, routeOfTask } from "./agentconfig.js";
 import { projectRoute, readinessWords } from "./phase-routing.js";
 import type { MateProviderAnswer } from "./converse.js";
 
@@ -2364,11 +2364,12 @@ describe("routines — standing orders on the console", () => {
   };
 
   const file = (name: string, terms = TERMS): number => {
-    // v24: filing binds the profile the config resolves, like the real door.
-    const resolved = resolveScopeProfile(store, terms.repo, undefined, {});
-    if (!resolved.ok) throw new Error(resolved.problem);
+    // v24/v48: filing binds the profile AND the four-role route the
+    // configuration resolves, like the real door.
+    const authority = resolveRoutineAuthority(store, terms.repo, terms.acceptance, T0);
+    if (!authority.ok) throw new Error(authority.problem);
     const created = store.createRoutine(
-      { name, ...terms, digest: routineDigestOf(terms, resolved.profile), profile: resolved.profile },
+      { name, ...terms, digest: routineDigestOf(terms, authority.profile, authority.route), profile: authority.profile, route: authority.route },
       T0,
     );
     if (!created.ok) throw new Error("duplicate in setup");
@@ -2427,6 +2428,14 @@ describe("routines — standing orders on the console", () => {
     const screen = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
     expect(screen).toContain("BUILDS IT WITHOUT ASKING");
     expect(screen).toContain("every 1 hour(s)");
+    // routine-freeze (v48): the exact four-role agents the yes freezes are
+    // restated before the password, in the same block a task's ceremony uses.
+    const ceremony = /<form method="post" action="\/routines\/\d+\/approve"(.*?)<\/form>/s.exec(screen)?.[1] ?? "";
+    expect(ceremony).toContain('<p class="approval-label">agents</p>');
+    expect(ceremony).toContain('<p class="agents-summary">claude · sonnet plans, builds, repairs, and reviews</p>');
+    expect(ceremony).toContain('<span class="badge">frozen when you approve</span>');
+    expect(ceremony).toContain("a configuration change afterwards cannot re-route one");
+    expect(ceremony.indexOf('<p class="approval-label">agents</p>')).toBeLessThan(ceremony.indexOf('name="token"'));
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(screen)?.[1] as string;
     const nonce = /name="nonce" value="([0-9a-f]{32})"/.exec(screen)?.[1] as string;
     const digest = /name="digest" value="([0-9a-f]{32})"/.exec(screen)?.[1] as string;
@@ -2453,6 +2462,10 @@ describe("routines — standing orders on the console", () => {
     expect(approved.status).toBe(303);
     const routine = store.getRoutine(id);
     expect(routine?.approvedBy).toBe("alex");
+    expect(routine?.approvedRoute).not.toBeNull();
+    const after = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
+    expect(after).toContain('<span class="badge">frozen by the approval</span>');
+    expect(after).toContain("Every firing runs on exactly these agents; a configuration change cannot re-route it.");
     expect(routine?.nextFireAt).not.toBeNull();
   });
 
@@ -8081,6 +8094,52 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     ]);
   });
 
+  test("chat-steer: the mate reads the current risk and agents, proposes a confirmation-gated agent change, the card says exactly what changes, and confirming goes through the authenticated route edit", async () => {
+    store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "test", T0);
+    const cookie = await login();
+    let html = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    const csrf = csrfFrom(html);
+    const minted = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "5", token: approverToken, return: "/chat?task=a" });
+    expect(minted.status).toBe(303);
+    // Approve the scope as it stands so the change has an approval to stale.
+    const scope = store.getScope("a")!;
+    expect(approve(store, "a", "alex", clockNow, scope.digest, approverToken).ok).toBe(true);
+    script.push(
+      () => answer([{ type: "tool_use", id: "g1", name: "get_agents", input: { task: "a" } }]),
+      () => {
+        return answer([{ type: "tool_use", id: "p1", name: "propose_agents", input: { task: "a", risk: "elevated", role: "reviewer", agent: { provider: "codex", model: "gpt-5-codex" }, why: "the change touches money" } }]);
+      },
+      () => answer([{ type: "text", text: "I propose declaring this elevated and reviewing on codex · gpt-5-codex." }]),
+    );
+    const sent = await post(cookie, "/chat", { csrf, task: "a", message: "Who reviews this, and can we use the stronger reviewer?" });
+    expect(sent.status).toBe(303);
+    await settle();
+    // The turn ran both tools and answered; the proposal waits pending.
+    expect(store.recentMateTurns("alex", 1)[0]).toMatchObject({ state: "answered" });
+    expect(store.getMateProposal(1)).toMatchObject({ kind: "agents", state: "pending", payload: expect.objectContaining({ task: "a", risk: "elevated", phase: "review", provider: "codex", model: "gpt-5-codex", approval: "approved", before: "claude · sonnet plans, builds, repairs, and reviews" }) });
+    // The card: the role, the exact agent, what the risk does, the approval consequence.
+    html = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    expect(html).toContain('data-card-kind="agents"');
+    expect(html).toContain("Agents change");
+    expect(html).toContain("reviewer on <span class=\"mono\">codex · gpt-5-codex</span>");
+    expect(html).toContain("<dt>agents now</dt><dd>claude · sonnet plans, builds, repairs, and reviews</dd>");
+    expect(html).toContain("Elevated risk: the review runs on the strongest configured reviewer; planning and building keep the everyday agents.");
+    expect(html).toContain("The current approval no longer covers the task afterwards — approve it again on the task.");
+    expect(store.refFor("built-in", "a").routeOverrides).toEqual([]);
+    expect(approvalOf(store.getScope("a"))).toMatchObject({ approved: true });
+    // Confirming is the operator's own act through the one route edit: recorded as alex, the approval staled.
+    const confirmed = await post(cookie, "/chat/proposal/1/confirm", { csrf, return: "/chat?task=a" });
+    expect(confirmed.status).toBe(303);
+    const ref = store.refFor("built-in", "a");
+    expect(ref.riskLevel).toBe("elevated");
+    expect(ref.routeOverrides).toEqual([expect.objectContaining({ phase: "review", provider: "codex", model: "gpt-5-codex", by: "alex" })]);
+    expect(approvalOf(store.getScope("a"))).toMatchObject({ approved: false, reason: "changed" });
+    html = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    expect(html).toContain("risk is now elevated risk; the reviewer is now codex · gpt-5-codex — the earlier approval no longer covers this task; approve it again");
+    expect(html).toContain('<p class="agents-summary">claude · sonnet plans, builds, and repairs; codex · gpt-5-codex reviews</p>');
+    expect(html).toContain('action="/t/a/approve"');
+  });
+
   test("a focused chat answers a blocking decision and returns to the same conversation", async () => {
     const ref = store.refFor("built-in", "a").id;
     const scope = store.getScope("a");
@@ -10015,7 +10074,13 @@ describe("the phase route on the console (v47): one projection on the task page,
     const ceremony = /<form method="post" action="\/t\/payouts\/approve"(.*?)<\/form>/s.exec(html)?.[1] ?? "";
     expect(ceremony).toContain('<p class="approval-label">agents</p>');
     expect(ceremony).toContain("claude · sonnet plans; claude · opus builds and repairs; codex · gpt-5-codex reviews");
-    expect(ceremony).toContain("These agents are part of what you approve");
+    expect(ceremony).toContain("These exact agents are part of what you approve");
+    // Plain-English risk consequence, and the runtime mechanics closed away.
+    expect(ceremony).toContain("High risk: every role — planner, builder, repair, and reviewer — uses the strongest agent you have configured.");
+    expect(ceremony).toContain('<details class="agents-runtime"><summary>Runtime limits</summary>');
+    expect(ceremony).not.toContain("--dangerously");
+    // No duplicate provider · model chip beside the agents summary.
+    expect(ceremony).not.toMatch(/<span class="approval-chip">claude · opus<\/span>/);
     expect(ceremony).not.toContain("unavailable");
     expect(ceremony).not.toContain("not yet checked");
     expect(ceremony.replace(/<[^>]+>/g, " ")).not.toMatch(JARGON);
@@ -10120,6 +10185,86 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(approvalCard).toContain('<p class="approval-label">agents</p>');
     expect(approvalCard).toContain("codex · gpt-5-codex");
     expect(approvalCard).not.toContain("not yet checked");
+  });
+
+  test("simple-controls: the change controls offer only configured, role-valid agents from a select, explain every risk choice, and quote no command line; an unconfigured pair is refused", async () => {
+    const cookie = await loginAs("alex", approverToken);
+    const html = await page(cookie, "/t/payouts");
+    const card = agentsCardOf(html);
+    const change = /<details class="agents-change">(.*?)<\/details>/s.exec(card)?.[1] ?? "";
+    // Every risk level explained in plain words, beside the control.
+    expect(change).toContain('<dl class="agents-risk-guide">');
+    expect(change).toContain("<dt>Routine</dt><dd>every role uses the everyday configured agent unless the work itself asks for more");
+    expect(change).toContain("<dt>Elevated risk</dt><dd>the review runs on the strongest configured reviewer");
+    expect(change).toContain("<dt>High risk</dt><dd>every role — planner, builder, repair, and reviewer — uses the strongest agent you have configured");
+    // One form per role, a select of exact configured pairs, no free text.
+    expect(change).not.toContain('name="model"');
+    expect(change).not.toContain('name="provider"');
+    const forms = [...change.matchAll(/<form method="post" action="\/t\/payouts\/route" class="agents-form"[^>]*>(.*?)<\/form>/gs)].map(one => one[1] ?? "");
+    expect(forms).toHaveLength(4);
+    const optionsOf = (form: string): string[] => [...form.matchAll(/<option value="([^"]+)"/g)].map(one => one[1] ?? "");
+    const byPhase = Object.fromEntries(forms.map(form => [/name="phase" value="([a-z]+)"/.exec(form)?.[1] ?? "", optionsOf(form)]));
+    // Configured pairs only: the everyday sonnet, the strong opus builder, the strong codex reviewer.
+    expect(byPhase["plan"]).toEqual(["claude|sonnet", "claude|opus", "codex|gpt-5-codex"]);
+    expect(byPhase["build"]).toEqual(["claude|sonnet", "claude|opus", "codex|gpt-5-codex"]);
+    // Repairs stay on the build provider; gemini never reviews (and was never configured).
+    expect(byPhase["repair"]).toEqual(["claude|sonnet", "claude|opus"]);
+    expect(byPhase["review"]).toEqual(["claude|sonnet", "claude|opus", "codex|gpt-5-codex"]);
+    expect(change).not.toContain("gemini");
+    // The current agent is marked, and selected.
+    expect(forms.find(form => form.includes('value="build"'))).toContain('<option value="claude|opus" selected>claude · opus — current</option>');
+    // No command-line jargon anywhere on the card, and no runtime switches.
+    const visible = card.replace(/<[^>]+>/g, " ");
+    expect(visible).not.toMatch(/config set|task route|--tier|--provider|--model|--dangerously/);
+    expect(visible).not.toMatch(JARGON);
+    // A pair nobody configured is refused, in words, whatever the client typed.
+    const csrf = csrfOf(html);
+    const digest = store.getScope("payouts")!.digest;
+    const unconfigured = await post(cookie, "/t/payouts/route", { csrf, sawDigest: digest, phase: "review", agent: "codex|gpt-5" });
+    expect(unconfigured.status).toBe(400);
+    expect(await unconfigured.text()).toContain("choose one of the configured agents for the reviewer (claude · sonnet, claude · opus, codex · gpt-5-codex)");
+    expect(store.refFor("built-in", "payouts").routeOverrides).toEqual([]);
+    // The select's own value lands as an exact, attributed choice.
+    const chosen = await post(cookie, "/t/payouts/route", { csrf, sawDigest: digest, phase: "plan", agent: "claude|opus" });
+    expect(chosen.status).toBe(303);
+    expect(store.refFor("built-in", "payouts").routeOverrides).toEqual([expect.objectContaining({ phase: "plan", provider: "claude", model: "opus", by: "alex" })]);
+    // A planner choice IS the plan pin (v47): the leg reads pinned, exactly.
+    expect(agentsCardOf(await page(cookie, "/t/payouts"))).toContain("<dt>Planner</dt><dd><span class=\"mono\">claude · opus</span> <span class=\"badge\">pinned</span>");
+  });
+
+  test("consent: the task page, the focused chat, and the next-up triage all restate the same concise exact agents before the password, with runtime limits closed away", async () => {
+    const cookie = await loginAs("alex", approverToken);
+    const summary = "claude · sonnet plans; claude · opus builds and repairs; codex · gpt-5-codex reviews";
+    const risk = "High risk: every role — planner, builder, repair, and reviewer — uses the strongest agent you have configured.";
+    const ceremonyOf = (html: string, action: string): string => new RegExp(`<form method="post" action="${action}"(.*?)<\\/form>`, "s").exec(html)?.[1] ?? "";
+    const check = (ceremony: string): void => {
+      const agentsAt = ceremony.indexOf('<p class="approval-label">agents</p>');
+      const passwordAt = ceremony.indexOf('name="token"');
+      expect(agentsAt).toBeGreaterThan(-1);
+      expect(passwordAt).toBeGreaterThan(agentsAt);
+      expect(ceremony).toContain(`<p class="agents-summary">${summary}</p>`);
+      expect(ceremony).toContain(risk);
+      expect(ceremony).toContain('<details class="agents-runtime"><summary>Runtime limits</summary>');
+      expect(ceremony).not.toContain("<details open");
+      expect(ceremony).not.toContain("not yet checked");
+      expect(ceremony.replace(/<[^>]+>/g, " ")).not.toMatch(/--dangerously|config set|task route/);
+    };
+    check(ceremonyOf(await page(cookie, "/t/payouts"), "\\/t\\/payouts\\/approve"));
+    check(ceremonyOf(await page(cookie, "/chat?task=payouts"), "\\/t\\/payouts\\/approve"));
+    const next = await page(cookie, "/next");
+    expect(next).toContain("the last thing waiting on you");
+    check(ceremonyOf(next, "\\/t\\/payouts\\/approve"));
+    // Changing an agent invalidates the approval every surface signed under.
+    const before = store.getScope("payouts")!;
+    expect(approve(store, "payouts", "alex", T0, before.digest, approverToken).ok).toBe(true);
+    expect((await page(cookie, "/next"))).toContain("Nothing needs you");
+    const html = await page(cookie, "/t/payouts");
+    const changed = await post(cookie, "/t/payouts/route", { csrf: csrfOf(html), sawDigest: before.digest, phase: "review", agent: "claude|opus" });
+    expect(changed.status).toBe(303);
+    expect(approvalOf(store.getScope("payouts")!)).toMatchObject({ approved: false, reason: "changed" });
+    const again = await page(cookie, "/next");
+    expect(again).toContain("the last thing waiting on you");
+    expect(ceremonyOf(again, "\\/t\\/payouts\\/approve")).toContain("claude · sonnet plans; claude · opus builds, repairs, and reviews");
   });
 
   test("a routed task whose approval lost its agents shows the closed door in words, and a proven pre-routing approval shows its profile", async () => {

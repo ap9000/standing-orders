@@ -18,6 +18,10 @@ import type { VerifiedApprover } from "./principal.js";
 import { isVerifiedApprover, reproveApprover } from "./principal.js";
 import { fileTaskProposal } from "./proposal.js";
 import { proposeGuarded } from "./scope.js";
+import { agentChoicesFor, routeOfTask } from "./agentconfig.js";
+import { isRiskLevel, PHASES, riskTitle, specWords } from "./phase-routing.js";
+import { isProviderId } from "./provider.js";
+import type { Phase, ProviderId } from "./provider.js";
 
 export type ProposalKind = MateProposal["kind"];
 
@@ -379,6 +383,74 @@ function executeProposal(
       return { ok: true, kind, said: `${taskName} will now wait for ${replacementName} instead of ${blockerName}`, taskId };
     }
     return refuse("refused", "this request does not say how the waiting task should continue");
+  }
+
+  if (kind === "agents") {
+    // THE AGENTS CHANGE (v48): the operator's own act through the ONE
+    // authenticated route-edit transaction — the same door the task page
+    // uses. Re-proved here, inside it: the actor's standing (the edit's
+    // own authenticate hook), the digest the card was drafted against
+    // (CAS — a scope rewritten meanwhile refuses), a live claim or open
+    // contest (refused inside the store), and — for an agent — that the
+    // pair is STILL one of the configured, role-valid choices right now.
+    // Nothing the mate wrote becomes authority: only a configured pair,
+    // recorded under the operator's name, ever reaches the route.
+    const risk = payload["risk"];
+    const phase = payload["phase"];
+    const clear = payload["clear"] === true;
+    const provider = payloadString(payload, "provider");
+    const model = payloadString(payload, "model");
+    if (risk !== undefined && !isRiskLevel(risk)) return refuse("refused", "this proposal carries an unknown risk level");
+    if (phase !== undefined && (typeof phase !== "string" || !PHASES.includes(phase as Phase))) return refuse("refused", "this proposal names an unknown role");
+    if (risk === undefined && phase === undefined) return refuse("refused", "this proposal changes nothing about the agents");
+    let override: { phase: Phase; provider: ProviderId; model: string } | { phase: Phase; clear: true } | undefined;
+    if (typeof phase === "string") {
+      if (clear) {
+        override = { phase: phase as Phase, clear: true };
+      } else {
+        if (provider === null || model === null || !isProviderId(provider)) return refuse("refused", "this proposal names no exact agent");
+        const routed = routeOfTask(store, taskId, ref, now);
+        const choices = agentChoicesFor(store, ref.repo, routed !== null && routed.kind === "route" ? routed.route : null)[phase as Phase];
+        if (!choices.some(one => one.provider === provider && one.model === model)) {
+          return refuse("stale", `${specWords({ provider, model })} is no longer one of the configured agents for that role — look again`);
+        }
+        override = { phase: phase as Phase, provider, model };
+      }
+    }
+    const edited = store.editTaskRoute(
+      ref.id,
+      {
+        by: actor.name,
+        authenticate: () => {
+          const standing = reproveApprover(store, actor);
+          return standing.ok ? { ok: true } : { ok: false, reason: `your approver standing changed (${standing.reason}) — sign in again` };
+        },
+        ...(isRiskLevel(risk) ? { risk } : {}),
+        ...(override === undefined ? {} : { override }),
+        expectDigest: payloadString(payload, "sawDigest"),
+      },
+      now,
+    );
+    if (!edited.ok) {
+      if (edited.reason === "changed") return refuse("stale", "the scope was rewritten since this was proposed — look again");
+      if (edited.reason === "live-claim") return refuse("claimed", "this task is being built right now");
+      if (edited.reason === "contest-open") return refuse("contest-open", "a tournament is running on this task — let it finish first");
+      if (edited.reason === "unauthenticated") return refuse("standing", edited.detail);
+      if (edited.reason === "no-task") return refuse("unknown-task", "no such task");
+      return refuse("refused", edited.detail);
+    }
+    const taskName = payloadString(payload, "taskTitle") ?? taskId;
+    const roleWord = typeof phase === "string" ? ({ plan: "planner", build: "builder", repair: "repair", review: "reviewer" } as Record<string, string>)[phase] ?? phase : null;
+    const changed = [
+      ...(isRiskLevel(risk) ? [`risk is now ${riskTitle(risk).toLowerCase()}`] : []),
+      ...(roleWord === null ? [] : clear ? [`the ${roleWord} choice was cleared — the recommendation stands again`] : [`the ${roleWord} is now ${specWords({ provider: provider as string, model: model as string })}`]),
+    ];
+    return {
+      ok: true,
+      kind,
+      said: `Agents changed for ${taskName}: ${changed.join("; ")}${edited.staled ? " — the earlier approval no longer covers this task; approve it again" : ""}${edited.replanned ? " — a new plan was requested" : ""}`,
+      taskId,
+    };
   }
 
   if (kind === "scope") {

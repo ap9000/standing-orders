@@ -33,17 +33,19 @@ import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
 import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, parseAcceptanceCriteria, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
-import { resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, exactPinOf } from "./agentconfig.js";
+import { resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, exactPinOf, routeOfTask } from "./agentconfig.js";
 import {
   canonicalOverridesJson,
   canonicalRouteJson,
   isRiskLevel,
   legOf,
   overridesFromJson,
+  phaseOfRole,
   recommendRoute,
   routeDigestOf,
   routeFromJson,
   routeProblems,
+  routeStampProblem,
   sameSpec,
   ROUTE_ERA,
   type ExactSpec,
@@ -69,7 +71,7 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 47;
+export const SCHEMA_VERSION = 48;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -363,7 +365,7 @@ export type MateThread = { id: number; approver: string; ceilingDigest: string; 
 
 export type MateMessage = { id: number; thread: number; turn: number | null; role: "operator" | "assistant"; text: string; activity: string | null; createdAt: string };
 
-export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "steer" | "scope" | "cancel" | "answer" | "repair";
+export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "steer" | "scope" | "cancel" | "answer" | "repair" | "agents";
 
 /** A coordinator's proposal over the MCP gateway (mate arc v3): the same
  * kinds as the mate's (no `task` — filing has its own door), confirmed by
@@ -450,6 +452,12 @@ export type Routine = {
   /** v24: the working execution profile and the approval's sealed snapshot. */
   profile?: ExecutionProfile | null;
   approvedProfile?: ExecutionProfile | null;
+  /** v48: the four-role agent route the digest binds, and the snapshot the
+   * approval sealed. Null on a routine filed before routing froze — such a
+   * routine cannot be approved or fired until it is filed again. A row
+   * carrying unreadable route bytes reads null too, and fails closed. */
+  route?: PhaseRoute | null;
+  approvedRoute?: PhaseRoute | null;
 };
 
 /** One scheduled slot's outcome, fired or skipped — never silent. */
@@ -1268,6 +1276,11 @@ CREATE TABLE IF NOT EXISTS routine (
   approved_profile_json TEXT,
   digest_version        INTEGER NOT NULL DEFAULT 1,
   profile_provenance    TEXT,
+  -- v48: the routine's four-role agent route, and the snapshot approval
+  -- sealed. Every firing copies the APPROVED route onto its instance, so a
+  -- configuration change after the yes can never re-route a firing.
+  route_json            TEXT,
+  approved_route_json   TEXT,
   -- The next scheduled occurrence. NULL until approved; advanced by the
   -- fire transaction and nothing else, aligned to cadence (finding 10).
   next_fire_at     TEXT,
@@ -1597,7 +1610,7 @@ CREATE TABLE IF NOT EXISTS mate_proposal (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
   turn           INTEGER NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','steer','scope','cancel','answer','repair')),
+  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','steer','scope','cancel','answer','repair','agents')),
   payload_json   TEXT NOT NULL,
   ceiling_digest TEXT NOT NULL,
   state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
@@ -4008,6 +4021,17 @@ function migrate(db: Database): void {
   // saveScope since. Never backfilled.
   addColumn(db, "task_scope", "route_era", "INTEGER");
   addColumn(db, "review_request", "route_digest", "TEXT");
+
+  // v48 (routing authority): a routine freezes its four-role agent route
+  // at filing and approval seals it — two additive columns, NULL on every
+  // routine that predates this migration (such a routine cannot fire again
+  // until approved afresh, in words). Chat may propose one confirmed agent
+  // change, so `agents` joins the proposal kinds through the same exact,
+  // row-preserving copy-rename every earlier widening used.
+  addColumn(db, "routine", "route_json", "TEXT");
+  addColumn(db, "routine", "approved_route_json", "TEXT");
+  rebuildMateProposalForV48(db);
+  db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -4258,6 +4282,8 @@ const MATE_PROPOSAL_V42_DDL = (name: string): string =>
   MATE_PROPOSAL_V33_DDL(name).replace("'cancel','answer'", "'cancel','answer','repair'");
 const MATE_PROPOSAL_V43_DDL = (name: string): string =>
   MATE_PROPOSAL_V42_DDL(name).replace("'hold','unhold'", "'hold','unhold','steer'");
+const MATE_PROPOSAL_V48_DDL = (name: string): string =>
+  MATE_PROPOSAL_V43_DDL(name).replace("'answer','repair'", "'answer','repair','agents'");
 
 /**
  * v33 (mate v3): `answer` joins mate_proposal's kinds — an EXACT recognizer
@@ -4273,7 +4299,7 @@ export function rebuildMateProposalForV33(db: Database): void {
   // A fresh database already carries the later widening. Older
   // normalizers run on every open, so they must recognize later canonical
   // shapes as complete rather than trying to migrate them backwards.
-  if (stored === canonicalDdl(MATE_PROPOSAL_V42_DDL("mate_proposal")) || stored === canonicalDdl(MATE_PROPOSAL_V43_DDL("mate_proposal"))) return;
+  if (stored === canonicalDdl(MATE_PROPOSAL_V42_DDL("mate_proposal")) || stored === canonicalDdl(MATE_PROPOSAL_V43_DDL("mate_proposal")) || stored === canonicalDdl(MATE_PROPOSAL_V48_DDL("mate_proposal"))) return;
   const target = canonicalDdl(MATE_PROPOSAL_V33_DDL("mate_proposal_next")).replace("mate_proposal_next", "mate_proposal");
   if (stored === target) return;
   if (stored !== canonicalDdl(MATE_PROPOSAL_V32_DDL).replace("IF NOT EXISTS ", "")) {
@@ -4304,7 +4330,7 @@ export function rebuildMateProposalForV33(db: Database): void {
  * row-preserving copy-rename used for v33. */
 export function rebuildMateProposalForV42(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
-  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(MATE_PROPOSAL_V43_DDL("mate_proposal"))) return;
+  if (row !== undefined && (canonicalDdl(String(row["sql"])) === canonicalDdl(MATE_PROPOSAL_V43_DDL("mate_proposal")) || canonicalDdl(String(row["sql"])) === canonicalDdl(MATE_PROPOSAL_V48_DDL("mate_proposal")))) return;
   rebuildExact(
     db,
     "mate_proposal",
@@ -4318,11 +4344,26 @@ export function rebuildMateProposalForV42(db: Database): void {
 /** v43: `steer` joins the mate proposal kinds through the same exact,
  * row-preserving copy-rename used for v33 and v42. */
 export function rebuildMateProposalForV43(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
+  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(MATE_PROPOSAL_V48_DDL("mate_proposal"))) return;
   rebuildExact(
     db,
     "mate_proposal",
     name => MATE_PROPOSAL_V42_DDL(name),
     name => MATE_PROPOSAL_V43_DDL(name),
+    ["id", "thread", "turn", "kind", "payload_json", "ceiling_digest", "state", "created_at", "resolved_at", "resolved_by", "outcome_json"],
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
+}
+
+/** v48: `agents` joins the mate proposal kinds — the same exact,
+ * row-preserving copy-rename as v33, v42, and v43. */
+export function rebuildMateProposalForV48(db: Database): void {
+  rebuildExact(
+    db,
+    "mate_proposal",
+    name => MATE_PROPOSAL_V43_DDL(name),
+    name => MATE_PROPOSAL_V48_DDL(name),
     ["id", "thread", "turn", "kind", "payload_json", "ceiling_digest", "state", "created_at", "resolved_at", "resolved_by", "outcome_json"],
   );
   db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
@@ -6941,7 +6982,23 @@ export class Store {
 
   // ---- scope --------------------------------------------------------------
 
-  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; permissionMode?: UnattendedPermissionMode; qualityMode?: QualityMode; riskLevel?: RiskLevel; posture?: "escalated"; proposedVia?: "mate" | "coordinator" | "scout" | null } = {}): void {
+  saveScope(
+    scope: Scope,
+    mutation: Mutation = {},
+    options: {
+      profile?: ExecutionProfile;
+      /** v48: a FROZEN route — a routine firing's approved snapshot —
+       * filed verbatim instead of being recommended afresh from today's
+       * configuration. Requires an explicit profile, and the two must
+       * agree exactly (the same belt every other road wears). */
+      route?: PhaseRoute;
+      permissionMode?: UnattendedPermissionMode;
+      qualityMode?: QualityMode;
+      riskLevel?: RiskLevel;
+      posture?: "escalated";
+      proposedVia?: "mate" | "coordinator" | "scout" | null;
+    } = {},
+  ): void {
     this.once(mutation, "saveScope", () => this.transact(() => {
       // THE filing invariant (foundations findings 5/13/19): every scope
       // row leaves this method either RESOLVED (working profile stamped,
@@ -6996,8 +7053,22 @@ export class Store {
       const repairPin: ExactSpec | null =
         options.profile === undefined ? null : { provider: options.profile.provider, model: options.profile.repairModel === "inherit" ? options.profile.model : options.profile.repairModel };
       const planPin = exactPinOf(ref?.planProvider ?? null, ref?.planModel ?? null, "plan");
-      const candidatesResolved = resolveRouteCandidates(this, ref?.repo ?? null, { plan: planPin.ok ? planPin.pin : null, build: buildPin.ok ? buildPin.pin : null });
-      if (!candidatesResolved.ok) {
+      const candidatesResolved: ReturnType<typeof resolveRouteCandidates> =
+        options.route !== undefined
+          ? { ok: false, phase: "build", problem: "a frozen route never consults today's configuration" }
+          : resolveRouteCandidates(this, ref?.repo ?? null, { plan: planPin.ok ? planPin.pin : null, build: buildPin.ok ? buildPin.pin : null });
+      if (options.route !== undefined) {
+        // The frozen road (v48): a routine firing files the route its
+        // approval sealed, byte for byte. Nothing here re-reads
+        // configuration — a later `config set` cannot touch a firing.
+        if (options.profile === undefined) {
+          unresolvedReason = "a frozen agent route needs the approved agent profile beside it — the firing cannot file";
+        } else {
+          route = options.route;
+          const problems = routeProblems(route);
+          if (problems.length > 0) unresolvedReason = problems.join("; ");
+        }
+      } else if (!candidatesResolved.ok) {
         unresolvedReason = candidatesResolved.problem;
       } else if (overrides === null) {
         unresolvedReason = "the task's recorded route overrides cannot be read — clear or re-record them with `task route`";
@@ -11133,6 +11204,86 @@ export class Store {
   }
 
   /**
+   * The ADMISSION PROOF for one route stamp (v48), in words or null.
+   * Shape first (a malformed stamp proves nothing), then phase against
+   * role, then exact provider and model against the run, then provenance
+   * against the authority the task holds RIGHT NOW, inside the caller's
+   * transaction:
+   *
+   *   recommended / override / pinned — the sealed route's digest and that
+   *     phase's exact leg. A planner may also run under the working
+   *     proposed route, or — with no scope yet — the live recommendation,
+   *     re-derived here from durable state. Nothing else.
+   *   fallback — the task's approved chain: the digest is the sealed
+   *     route's (or the chain's, when no route is sealed) and the pair is
+   *     a NON-primary entry of that chain (its repair model for a repair).
+   *   legacy — only a row proven to predate routing, a task with no scope,
+   *     a tournament lane, or an attended session; never a routed row.
+   */
+  private routeAdmissionProblem(
+    run: { taskRef: number; role: Run["role"] | "scout"; provider: string; model: string | null; contestant: number | null },
+    stamp: unknown,
+    now: Date,
+  ): string | null {
+    const shape = routeStampProblem(stamp);
+    if (shape !== null) return shape;
+    const leg = stamp as RouteStamp;
+    const phase = phaseOfRole(run.role);
+    if (leg.phase !== phase) return `a ${run.role} run spends as the ${phase} leg, but the stamp says ${leg.phase}`;
+    if (leg.provider !== run.provider) return `the stamp names ${leg.provider} but the run would spend as ${run.provider}`;
+    if (leg.model !== run.model) return `the stamp names model ${leg.model ?? "(none)"} but the run would spend as ${run.model ?? "(none)"}`;
+    const ref = this.refForId(run.taskRef);
+    if (ref === null) return "no such task";
+    const taskId = ref.externalId;
+    const sealed = this.sealedRouteOf(taskId);
+    const scope = this.getScope(taskId);
+    const routed = scope !== null && scope.routeEra != null;
+    const sameLeg = (route: PhaseRoute): string | null => {
+      const expected = legOf(route, phase);
+      if (leg.routeDigest !== routeDigestOf(route)) return `the stamp's route ${leg.routeDigest} is not the governing route ${routeDigestOf(route)}`;
+      if (expected.provider !== leg.provider || expected.model !== leg.model || expected.chosen !== leg.chosen) {
+        return `the governing route's ${phase} leg is ${expected.provider} · ${expected.model} [${expected.chosen}], not ${leg.provider} · ${leg.model ?? "(none)"} [${leg.chosen}]`;
+      }
+      return null;
+    };
+    if (leg.chosen === "recommended" || leg.chosen === "override" || leg.chosen === "pinned") {
+      if (sealed.ok) return sameLeg(sealed.route);
+      if (phase !== "plan") return `nothing spends as a ${leg.chosen} ${phase} leg without a sealed route — ${sealed.detail}`;
+      // A planner runs before any approval: under the working proposed
+      // route when a scope exists, else the live recommendation.
+      if (scope !== null) {
+        if (!routed) return "a row that predates agent routing plans as legacy, never as a routed leg";
+        const proposed = routeFromJson(scope.proposedRouteJson ?? null);
+        if (proposed === null) return sealed.reason === "unreadable" ? sealed.detail : (scope.unresolvedReason ?? "the task's filed route cannot be read");
+        return sameLeg(proposed);
+      }
+      const live = routeOfTask(this, taskId, ref, now);
+      if (live === null || live.kind !== "route") return live !== null && live.kind === "unreadable" ? live.problem : "no route governs this task";
+      return sameLeg(live.route);
+    }
+    if (leg.chosen === "fallback") {
+      const chain = this.approvedChainOf(taskId);
+      if (chain === null) return "no approved fallback chain stands for this task — nothing spends as a fallback";
+      const expectedDigest = sealed.ok ? routeDigestOf(sealed.route) : `chain:${chainDigestOf(chain)}`;
+      if (leg.routeDigest !== expectedDigest) return `the fallback stamp's route ${leg.routeDigest} is not the approved authority ${expectedDigest}`;
+      if (phase !== "build" && phase !== "repair") return `an approved fallback entry builds and repairs — it does not ${phase}`;
+      const index = chain.findIndex(entry => {
+        const modelOf = phase === "repair" ? (entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel) : entry.profile.model;
+        return entry.profile.provider === leg.provider && modelOf === leg.model;
+      });
+      if (index === -1) return `${leg.provider} · ${leg.model ?? "(none)"} is not an entry of the approved fallback chain`;
+      if (index === 0) return `${leg.provider} · ${leg.model ?? "(none)"} is the chain's primary entry — it spends as the sealed build leg, not as a fallback`;
+      return null;
+    }
+    // legacy
+    if (leg.routeDigest !== "legacy" && !leg.routeDigest.startsWith("profile:")) return `a legacy stamp names a profile digest or the word legacy, not ${leg.routeDigest}`;
+    if (routed && run.contestant === null && this.openAuthorizationFor(run.taskRef) === null) {
+      return sealed.ok ? "a sealed agent route governs this task — nothing spends as legacy under it" : "this task is filed under agent routing — nothing spends as legacy on it";
+    }
+    return null;
+  }
+
+  /**
    * Route provenance per run (v47), IMMUTABLE and set-once: the first
    * exact stamp succeeds, an identical restamp is idempotent, and a stamp
    * that disagrees with what the run already carries is a CONFLICT the
@@ -11144,6 +11295,18 @@ export class Store {
     return this.transact(() => {
       const existing = this.runRoute(run);
       if (existing === null) {
+        // The late-stamp road wears the same admission proof as startRun:
+        // the run row already says what spends, and the stamp must BE it.
+        const row = this.getRun(run);
+        if (row !== null) {
+          // A row admitted with its model unsaid takes the stamp's exact
+          // model as its own (COALESCE below) — a row that names one must
+          // agree with the stamp.
+          const stampModel = typeof (leg as { model?: unknown }).model === "string" ? (leg as { model: string }).model : null;
+          const problem = this.routeAdmissionProblem({ taskRef: row.taskRef, role: row.role, provider: row.provider, model: row.model ?? stampModel, contestant: row.contestant ?? null }, leg, now);
+          if (problem !== null) return { ok: false as const, conflict: `run #${run} cannot carry route provenance ${leg.phase} ${leg.provider} · ${leg.model ?? "(no model)"} [${leg.chosen}]: ${problem}` };
+          if (row.model === null && stampModel !== null) this.db.prepare("UPDATE run SET model = COALESCE(model, ?) WHERE id = ?").run(stampModel, run);
+        }
         const inserted = this.db
           .prepare(
             `INSERT INTO run_route (run, route_digest, phase, provider, model, chosen, stamped_at)
@@ -11260,6 +11423,9 @@ export class Store {
       /** v24: resolved at filing by the caller who computed the digest —
        * stored verbatim so digest and profile can never disagree. */
       profile?: ExecutionProfile;
+      /** v48: the four-role route the digest binds, computed by the same
+       * caller from the same configuration — stored verbatim. */
+      route?: PhaseRoute;
     },
     now: Date,
   ): { ok: true; id: number } | { ok: false; reason: "duplicate" } {
@@ -11272,8 +11438,8 @@ export class Store {
           `INSERT INTO routine
              (name, repo, goal, out_of_scope, touches, requirements, schedule,
               single_flight, cost_ceiling_usd, budget_per_run_microusd, digest, created_at, updated_at, filed_via,
-              profile_json, digest_version, acceptance_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              profile_json, digest_version, acceptance_json, route_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           spec.name,
@@ -11293,6 +11459,7 @@ export class Store {
           spec.profile === undefined ? null : canonicalProfileJson(spec.profile),
           spec.profile === undefined ? 1 : 2,
           spec.acceptance.length === 0 ? null : JSON.stringify(spec.acceptance),
+          spec.route === undefined ? null : canonicalRouteJson(spec.route),
         );
       return { ok: true as const, id: Number(inserted.lastInsertRowid) };
     });
@@ -12426,6 +12593,9 @@ export class Store {
       digest: string;
       /** v24: restatement carries the profile its digest binds. */
       profile?: ExecutionProfile | null;
+      /** v48: restatement carries the route its digest binds; absent or
+       * null leaves the stored route untouched. */
+      route?: PhaseRoute | null;
     },
     now: Date,
   ): boolean {
@@ -12434,7 +12604,8 @@ export class Store {
         `UPDATE routine SET goal = ?, out_of_scope = ?, touches = ?, requirements = ?,
                             schedule = ?, cost_ceiling_usd = ?, digest = ?, updated_at = ?,
                             profile_json = COALESCE(?, profile_json),
-                            acceptance_json = COALESCE(?, acceptance_json)
+                            acceptance_json = COALESCE(?, acceptance_json),
+                            route_json = COALESCE(?, route_json)
           WHERE id = ?`,
       )
       .run(
@@ -12448,6 +12619,7 @@ export class Store {
         now.toISOString(),
         terms.profile === undefined || terms.profile === null ? null : canonicalProfileJson(terms.profile),
         terms.acceptance === undefined ? null : terms.acceptance.length === 0 ? null : JSON.stringify(terms.acceptance),
+        terms.route === undefined || terms.route === null ? null : canonicalRouteJson(terms.route),
         id,
       );
     return Number(changes) > 0;
@@ -12462,6 +12634,7 @@ export class Store {
       .prepare(
         `UPDATE routine SET approved_at = ?, approved_by = ?, approved_digest = ?,
                             approved_profile_json = profile_json,
+                            approved_route_json = route_json,
                             next_fire_at = ?, updated_at = ?
           WHERE id = ?`,
       )
@@ -12858,6 +13031,25 @@ export class Store {
 
   private startRunInTransaction(run: Parameters<Store["startRun"]>[0]): number {
     const role = run.role ?? "builder";
+    // THE ADMISSION PROOF (v48): a run that names its route provenance is
+    // held to it BEFORE the row exists — the stamp's shape, its phase
+    // against the role, its exact provider and model against what the
+    // run will spend as, and its digest and leg against the authority the
+    // task actually holds (the sealed route, the approved chain entry, or
+    // a proven pre-routing row). A stamp that cannot be proved opens no
+    // run: nothing spends with provenance that disagrees with authority.
+    // The stamp is the authority for the provider and model columns when
+    // the caller left them unsaid; a caller who says otherwise is refused.
+    let provider = run.provider ?? null;
+    let model = run.model ?? null;
+    if (run.route !== undefined) {
+      const stampProvider = typeof (run.route as { provider?: unknown }).provider === "string" ? (run.route as { provider: string }).provider : null;
+      const stampModel = (run.route as { model?: unknown }).model;
+      provider = provider ?? stampProvider;
+      model = model ?? (typeof stampModel === "string" ? stampModel : null);
+      const problem = this.routeAdmissionProblem({ taskRef: run.taskRef, role, provider: provider ?? "claude", model, contestant: run.contestant ?? null }, run.route, run.now);
+      if (problem !== null) throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): ${problem}`);
+    }
     const qualityMode: QualityMode =
       role === "reviewer" && run.parentRun !== undefined
         ? this.getRun(run.parentRun)?.qualityMode ?? "default"
@@ -12882,9 +13074,9 @@ export class Store {
         run.runner,
         run.branch ?? null,
         run.worktree ?? null,
-        run.model ?? null,
+        model,
         role,
-        run.provider ?? "claude",
+        provider ?? "claude",
         run.parentRun ?? null,
         run.sessionId ?? null,
         run.contestant ?? null,
@@ -15775,6 +15967,12 @@ export class Store {
     });
   }
 
+  /** The approver's live thread, read only — null when none is open. */
+  liveMateThreadFor(approver: string): MateThread | null {
+    const row = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND closed_at IS NULL ORDER BY id DESC LIMIT 1").get(approver);
+    return row === undefined ? null : readMateThread(row);
+  }
+
   getMateThread(id: number): MateThread | null {
     const row = this.db.prepare("SELECT * FROM mate_thread WHERE id = ?").get(id);
     return row === undefined ? null : readMateThread(row);
@@ -18350,6 +18548,8 @@ function readRoutine(row: Record<string, unknown>): Routine {
     approvedProfile: profileFromJson(
       row["approved_profile_json"] === null || row["approved_profile_json"] === undefined ? null : String(row["approved_profile_json"]),
     ),
+    route: routeFromJson(row["route_json"] === null || row["route_json"] === undefined ? null : String(row["route_json"])),
+    approvedRoute: routeFromJson(row["approved_route_json"] === null || row["approved_route_json"] === undefined ? null : String(row["approved_route_json"])),
   };
 }
 

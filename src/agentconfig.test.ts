@@ -9,7 +9,7 @@ import { openStore, BUILT_IN, type Store } from "./store.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { resolvePhaseAgent, resolveRouteCandidates, routeOfTask, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { approveRoutine, fireRoutine, routineDigestOf, type RoutineTerms } from "./routine.js";
-import { resolveScopeProfile } from "./agentconfig.js";
+import { resolveScopeProfile, resolveRoutineAuthority, agentChoicesFor } from "./agentconfig.js";
 
 const T0 = new Date("2026-08-13T22:00:00.000Z");
 const HOUR = 60 * 60_000;
@@ -157,12 +157,13 @@ describe("firing pins the agent and re-proves the ceiling against it", () => {
   afterEach(() => store.close());
 
   const arm = (terms: RoutineTerms, name: string): number => {
-    // v24: filing resolves the profile from the config the test just set,
-    // exactly as fileRoutineProposal does — the digest binds it.
-    const resolved = resolveScopeProfile(store, terms.repo, undefined, {});
-    if (!resolved.ok) throw new Error(`setup: ${resolved.problem}`);
-    const digest = routineDigestOf(terms, resolved.profile);
-    const created = store.createRoutine({ name, ...terms, digest, profile: resolved.profile }, T0);
+    // v24/v48: filing resolves the profile AND the four-role route from the
+    // config the test just set, exactly as fileRoutineProposal does — the
+    // digest binds both.
+    const authority = resolveRoutineAuthority(store, terms.repo, terms.acceptance, T0);
+    if (!authority.ok) throw new Error(`setup: ${authority.problem}`);
+    const digest = routineDigestOf(terms, authority.profile, authority.route);
+    const created = store.createRoutine({ name, ...terms, digest, profile: authority.profile, route: authority.route }, T0);
     if (!created.ok) throw new Error("setup");
     const approved = approveRoutine(store, created.id, "alex", T0, digest, token);
     expect(approved.ok).toBe(true);
@@ -171,6 +172,8 @@ describe("firing pins the agent and re-proves the ceiling against it", () => {
 
   test("the instance carries the agent the fire resolved — later flags cannot re-route it", () => {
     store.setPhaseConfig("/work/repo", "build", "codex", "gpt-5-codex", "alex", T0);
+    store.setPhaseConfig("/work/repo", "plan", "codex", "gpt-5-codex", "alex", T0);
+    store.setPhaseConfig("/work/repo", "review", "codex", "gpt-5-codex", "alex", T0);
     const id = arm(TERMS, "notes");
     const fired = fireRoutine(store, id, new Date(T0.getTime() + 2 * HOUR));
     expect(fired.ok).toBe(true);
@@ -186,6 +189,8 @@ describe("firing pins the agent and re-proves the ceiling against it", () => {
 
   test("a ceiling against a provider that reports no dollars skips the slot and says why", () => {
     store.setPhaseConfig("/work/repo", "build", "codex", "gpt-5-codex", "alex", T0);
+    store.setPhaseConfig("/work/repo", "plan", "codex", "gpt-5-codex", "alex", T0);
+    store.setPhaseConfig("/work/repo", "review", "codex", "gpt-5-codex", "alex", T0);
     const id = arm({ ...TERMS, costCeilingUsd: 5 }, "capped");
     const refused = fireRoutine(store, id, new Date(T0.getTime() + 2 * HOUR));
     expect(refused).toMatchObject({ ok: false, reason: "unmeasured" });
@@ -197,11 +202,11 @@ describe("firing pins the agent and re-proves the ceiling against it", () => {
     // IS the routing. The road is restatement onto claude and a fresh yes.
     store.clearPhaseConfig("/work/repo", "build");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
-    const restated = resolveScopeProfile(store, "/work/repo", undefined, {});
+    const restated = resolveRoutineAuthority(store, "/work/repo", TERMS.acceptance, T0);
     if (!restated.ok) throw new Error(restated.problem);
     const terms = { ...TERMS, costCeilingUsd: 5 };
-    const newDigest = routineDigestOf(terms, restated.profile);
-    expect(store.updateRoutineTerms(id, { ...terms, digest: newDigest, profile: restated.profile }, new Date(T0.getTime() + 2 * HOUR))).toBe(true);
+    const newDigest = routineDigestOf(terms, restated.profile, restated.route);
+    expect(store.updateRoutineTerms(id, { ...terms, digest: newDigest, profile: restated.profile, route: restated.route }, new Date(T0.getTime() + 2 * HOUR))).toBe(true);
     expect(approveRoutine(store, id, "alex", new Date(T0.getTime() + 2 * HOUR), newDigest, token).ok).toBe(true);
     const fired = fireRoutine(store, id, new Date(T0.getTime() + 3 * HOUR));
     expect(fired.ok).toBe(true);
@@ -238,6 +243,48 @@ describe("route candidates and the task route (v47)", () => {
     // Repair with no row: null — the policy inherits the build leg.
     expect(exact.candidates.repair).toEqual({ routine: null, strong: null });
     expect(exact.candidates.review.strong).toBeNull();
+  });
+
+  test("agent choices (v48): only configured exact pairs, de-duplicated, filtered by what the role can run — gemini never reviews, repair stays on the build provider; a bare configuration offers nothing", () => {
+    expect(agentChoicesFor(store, "/repo", null)).toEqual({ plan: [], build: [], repair: [], review: [] });
+    exactInstall();
+    store.setPhaseTierConfig(INSTALLATION_SCOPE, "build", "strong", "gemini", "gemini-2.5-pro", "alex", T0);
+    store.setPhaseTierConfig(INSTALLATION_SCOPE, "review", "strong", "codex", "gpt-5-codex", "alex", T0);
+    store.setPhaseConfig("/repo", "repair", "claude", "haiku", "alex", T0);
+    const bare = agentChoicesFor(store, "/repo", null);
+    const pairs = (list: { provider: string; model: string }[]) => list.map(one => `${one.provider} · ${one.model}`);
+    expect(pairs(bare.plan)).toEqual(["claude · sonnet", "gemini · gemini-2.5-pro", "claude · haiku", "codex · gpt-5-codex"]);
+    expect(pairs(bare.review)).toEqual(["claude · sonnet", "claude · haiku", "codex · gpt-5-codex"]);
+    // With no route the repair role is unfiltered by provider; with a route it follows the build leg.
+    expect(pairs(bare.repair)).toEqual(["claude · sonnet", "gemini · gemini-2.5-pro", "claude · haiku", "codex · gpt-5-codex"]);
+    store.createTask({ id: "t", title: "t" }, T0);
+    const ref = store.refFor(BUILT_IN, "t");
+    store.placeTask(ref.id, "/repo");
+    propose(store, { taskId: "t", goal: "g", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], riskLevel: "high", now: T0 });
+    const routed = routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0);
+    if (routed === null || routed.kind !== "route") throw new Error("expected a route");
+    expect(routed.route.legs.find(one => one.phase === "build")).toMatchObject({ provider: "gemini", model: "gemini-2.5-pro" });
+    const withRoute = agentChoicesFor(store, "/repo", routed.route);
+    expect(pairs(withRoute.repair)).toEqual(["gemini · gemini-2.5-pro"]);
+    expect(withRoute.build.find(one => one.provider === "gemini")).toMatchObject({ current: true });
+    expect(withRoute.review.every(one => one.provider !== "gemini")).toBe(true);
+    expect(withRoute.review.find(one => one.model === "gpt-5-codex")).toMatchObject({ current: true });
+  });
+
+  test("routine authority (v48): the four-role route and its exact profile resolve together from configuration, or refuse with the words", () => {
+    expect(resolveRoutineAuthority(store, "/repo", [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], T0)).toMatchObject({ ok: false, problem: expect.stringContaining("planner") });
+    exactInstall();
+    store.setPhaseConfig("/repo", "repair", "claude", "haiku", "alex", T0);
+    const authority = resolveRoutineAuthority(store, "/repo", [{ id: "c1", statement: "s", how: null, evidence: ["screenshot"] }], T0);
+    expect(authority.ok).toBe(true);
+    if (!authority.ok) return;
+    expect(authority.route.risk).toBe("routine");
+    expect(authority.route.evidence).toEqual(["screenshot"]);
+    expect(authority.route.legs.map(one => [one.phase, one.provider, one.model])).toEqual([["plan", "claude", "sonnet"], ["build", "claude", "sonnet"], ["repair", "claude", "haiku"], ["review", "claude", "sonnet"]]);
+    expect(authority.profile).toMatchObject({ provider: "claude", model: "sonnet", repairModel: "haiku" });
+    // A repair row on another provider cannot make a runnable route.
+    store.setPhaseConfig("/repo", "repair", "codex", "gpt-5", "alex", T0);
+    expect(resolveRoutineAuthority(store, "/repo", [], T0)).toMatchObject({ ok: false, problem: expect.stringContaining("cross-provider repair does not exist") });
   });
 
   test("the strong tier is only ever a configured EXACT row: project beats installation, review inherits the plan's; a null-model or unknown row refuses", () => {

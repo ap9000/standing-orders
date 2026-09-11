@@ -78,6 +78,20 @@ export function riskTitle(risk: RiskLevel): string {
   return risk === "high" ? "High risk" : risk === "elevated" ? "Elevated risk" : "Routine";
 }
 
+/**
+ * What declaring each risk level DOES, in one plain sentence — derived
+ * from the tiering table below, so the explanation a form or a chat gives
+ * can never drift from the policy that acts on it. The same words on
+ * every surface: the task page's risk control, the chat's answer, the CLI.
+ */
+export function riskConsequence(risk: RiskLevel): string {
+  if (risk === "high") return "every role — planner, builder, repair, and reviewer — uses the strongest agent you have configured";
+  if (risk === "elevated") return "the review runs on the strongest configured reviewer; planning and building keep the everyday agents";
+  return "every role uses the everyday configured agent unless the work itself asks for more (strict quality, screenshots, or a self-merging mode)";
+}
+
+export const RISK_CHOICES: readonly { risk: RiskLevel; title: string; consequence: string }[] = RISK_LEVELS.map(risk => ({ risk, title: riskTitle(risk), consequence: riskConsequence(risk) }));
+
 /** A runner's non-spending observation of one provider. `unknown` is a
  * real answer (claude has no login probe that does not spend) and is never
  * upgraded to ready. */
@@ -286,7 +300,7 @@ export function recommendRoute(input: RouteInput): PhaseRoute {
         tier: "routine",
         reasons: [
           ...demanded.reasons,
-          `no stronger ${PHASE_NOUN[phase]} is configured — \`config set ${phase} --tier strong --provider … --model …\` names one; using the configured default from ${candidates.routine.source}`,
+          `no stronger ${PHASE_NOUN[phase]} is configured — using the configured default from ${candidates.routine.source}`,
         ],
       };
     }
@@ -733,3 +747,29 @@ export const ROUTE_CHOSEN: readonly RouteChosen[] = ["recommended", "override", 
 /** One run's route provenance: the exact provider and model that ran,
  * under which route (or legacy profile) digest, as which leg. */
 export type RouteStamp = { routeDigest: string; phase: Phase; provider: string; model: string | null; chosen: RouteChosen };
+
+/** A run's role, as the route phase it spends as: a scout runs the build
+ * leg's agent (the same sealed profile a build proves against). */
+export function phaseOfRole(role: "builder" | "repair" | "planner" | "scout" | "reviewer"): Phase {
+  return role === "planner" ? "plan" : role === "repair" ? "repair" : role === "reviewer" ? "review" : "build";
+}
+
+/**
+ * Strict proof of a route stamp's SHAPE, before anything about it is
+ * believed: a known phase and provenance word, a known provider, a
+ * non-empty digest, and an exact model on every stamp except a legacy
+ * one (a pre-routing profile may carry no model). Anything else is the
+ * words for why — admission refuses on them, never coerces.
+ */
+export function routeStampProblem(stamp: unknown): string | null {
+  if (stamp === null || typeof stamp !== "object") return "the route stamp is not an object";
+  const s = stamp as Record<string, unknown>;
+  if (!str(s["routeDigest"])) return "the route stamp names no route digest";
+  if (!str(s["phase"]) || !PHASES.includes(s["phase"] as Phase)) return `the route stamp names an unknown phase ${JSON.stringify(s["phase"])}`;
+  if (!str(s["chosen"]) || !ROUTE_CHOSEN.includes(s["chosen"] as RouteChosen)) return `the route stamp names an unknown provenance ${JSON.stringify(s["chosen"])}`;
+  if (!str(s["provider"]) || !isProviderId(s["provider"])) return `the route stamp names an unknown provider ${JSON.stringify(s["provider"])}`;
+  const model = s["model"];
+  if (model !== null && !str(model)) return "the route stamp's model is neither an exact id nor null";
+  if (model === null && s["chosen"] !== "legacy") return `a ${String(s["chosen"])} leg names an exact model — the stamp carries none`;
+  return null;
+}

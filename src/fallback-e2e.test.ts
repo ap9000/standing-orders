@@ -62,15 +62,41 @@ describe("the fallback chain end-to-end (E3d)", () => {
     }
   };
 
+  /** Whether the gemini fallback's FIRST turn hands off a malformed
+   * conclusion, so the plane must run a bounded repair turn against it. */
+  let geminiFumblesFirst = false;
+
   /** ONE polyglot stub: the claude dialect answers EXHAUSTED; the gemini
-   * dialect (spotted by --approval-mode) does real work and succeeds. */
+   * dialect (spotted by --approval-mode) does real work and succeeds —
+   * or, when asked to fumble, hands off a malformed conclusion on its
+   * first turn and a valid one on the resumed repair turn. */
   const polyglot: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     if (args.includes("--approval-mode")) {
       providersRan.push("gemini");
-      const minted = args[args.indexOf("--session-id") + 1] ?? "never-minted";
+      const resumed = args.includes("--resume") ? args[args.indexOf("--resume") + 1] : null;
+      const minted = resumed ?? args[args.indexOf("--session-id") + 1] ?? "never-minted";
       await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
-      await concludeDone(cwd, args);
+      if (geminiFumblesFirst) {
+        // The fallback parks a decision: malformed on the first turn (the
+        // recommendation names no option), mended on the resumed repair
+        // turn — the bounded repair road, exercised on a fallback entry.
+        const prompt = args[args.indexOf("-p") + 1] ?? "";
+        const name = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+        const decision = {
+          urgency: "blocking",
+          recap: "The guard needs a policy call.",
+          question: "Fail open or fail closed?",
+          options: [
+            { id: "open", label: "Fail open", consequence: "Bad payouts slip through.", reversible: true },
+            { id: "closed", label: "Fail closed", consequence: "Payouts pause.", reversible: true },
+          ],
+          recommendation: resumed === null ? "ghost" : "closed",
+        };
+        if (name !== undefined) await writeFile(join(cwd, name), JSON.stringify(decision));
+      } else {
+        await concludeDone(cwd, args);
+      }
       return {
         ...OK,
         stdout: [
@@ -130,6 +156,7 @@ describe("the fallback chain end-to-end (E3d)", () => {
     // The pinned api-key entry REFUSES with no key at all (review finding
     // 1) — the stub never reads it, but the gateway must see one exist.
     process.env["GEMINI_API_KEY"] = "test-key-never-read";
+    geminiFumblesFirst = false;
     resetAttestationCache();
   });
 
@@ -216,6 +243,79 @@ describe("the fallback chain end-to-end (E3d)", () => {
     store.close();
     await run(["task", "show", "t-fb", "--json"]);
     expect(payload().task.state).toBe("done");
+  });
+
+  test("fallback-repair: a REAL approved non-primary fallback whose handoff needs mending is repaired under the same exact agent, chain entry, route digest, credential, and `fallback` provenance", async () => {
+    geminiFumblesFirst = true;
+    const runnerToken = "tok-builder-1";
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["task", "add", "the work", "--id", "t-fbr"]);
+    {
+      const store = openStore(db);
+      register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => runnerToken });
+      const ref = store.refFor("built-in", "t-fbr").id;
+      expect(store.placeTask(ref, repo)).toBe(true);
+      store.setFallbackConfig(repo, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
+      const terms: ModeTerms = { ...presetTerms("standard", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString()), allowPaidFallback: true, reviewAuto: false };
+      store.signMode(
+        { repo, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication },
+        T0,
+      );
+      store.close();
+    }
+    await run(["task", "scope", "t-fbr", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
+    await run(["task", "approve", "t-fbr", "--json"]);
+    const digest = payload().scope.digest as string;
+    await run(["task", "approve", "t-fbr", "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]);
+
+    await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"]);
+    const outcomes = payload().dispatched as { id: string; outcome: string; reason?: string }[];
+    // claude exhausted; gemini's first turn parked a malformed decision;
+    // gemini's REPAIR turn — the same session, resumed — mended it.
+    expect(providersRan).toEqual(["claude", "gemini", "gemini"]);
+    expect(outcomes.some(one => one.id === "t-fbr" && one.outcome === "parked")).toBe(true);
+
+    const store = openStore(db);
+    const { routeDigestOf } = await import("./phase-routing.js");
+    const sealed = store.approvedRouteOf("t-fbr");
+    expect(sealed).not.toBeNull();
+    const rows = store
+      .raw()
+      .prepare("SELECT id, role, provider, model, outcome, parent_run, auth_mode, chain_index, entry_digest, chain_cycle FROM run ORDER BY id")
+      .all() as Record<string, unknown>[];
+    expect(rows.map(one => [one["role"], one["provider"]])).toEqual([["builder", "claude"], ["builder", "gemini"], ["repair", "gemini"]]);
+    const fallback = rows[1]!;
+    const repair = rows[2]!;
+    // The fallback build: the approved entry at index 1, under its pinned api-key credential.
+    expect(fallback).toMatchObject({ provider: "gemini", model: "gemini-2.5-pro", auth_mode: "api-key", chain_index: 1 });
+    expect(fallback["entry_digest"]).not.toBeNull();
+    // Its repair: the SAME exact agent, the SAME chain entry (index, entry digest, cycle) and credential, parented to it.
+    expect(repair).toMatchObject({
+      provider: "gemini",
+      model: "gemini-2.5-pro",
+      parent_run: fallback["id"],
+      auth_mode: "api-key",
+      chain_index: 1,
+      entry_digest: fallback["entry_digest"],
+      chain_cycle: fallback["chain_cycle"],
+      outcome: "built",
+    });
+    expect(fallback["outcome"]).toBe("parked");
+    // Provenance: both spend as `fallback` under the sealed route's digest — the build as its leg, the repair as its repair leg.
+    const buildStamp = store.runRoute(Number(fallback["id"]));
+    const repairStamp = store.runRoute(Number(repair["id"]));
+    expect(buildStamp).toMatchObject({ phase: "build", provider: "gemini", model: "gemini-2.5-pro", chosen: "fallback", routeDigest: routeDigestOf(sealed!) });
+    expect(repairStamp).toMatchObject({ phase: "repair", provider: "gemini", model: "gemini-2.5-pro", chosen: "fallback", routeDigest: routeDigestOf(sealed!) });
+    expect(repairStamp?.routeDigest).toBe(buildStamp?.routeDigest);
+    // The parked fallback keeps the cycle's custody open at its entry — the
+    // decision it raised waits for a person, under exactly this lineage.
+    expect(store.raw().prepare("SELECT state, cursor, tail_run FROM fallback_cycle").get()).toMatchObject({ state: "open", cursor: 1, tail_run: fallback["id"] });
+    expect(store.listDecisions().filter(one => one.state === "open")).toHaveLength(1);
+    store.close();
   });
 
   test("WITHOUT the paid-fallback grant, the exhausted base never advances — the cycle ends clean, nothing else spends", async () => {

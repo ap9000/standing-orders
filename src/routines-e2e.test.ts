@@ -15,20 +15,13 @@ import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
 import { register } from "./runner.js";
 import { approveRoutine, routineDigestOf, type RoutineTerms } from "./routine.js";
+import { resolveRoutineAuthority } from "./agentconfig.js";
 import type { Runner } from "./builder.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const T0 = new Date("2026-08-13T22:00:00.000Z");
 const HOUR = 60 * 60_000;
 const SAID = JSON.stringify({ result: "done" });
-
-const V24_PROFILE = {
-  provider: "claude" as const,
-  model: "sonnet",
-  permissionArgv: "acceptEdits" as const,
-  maxTurns: 40, repairMaxTurns: 4, timeoutSeconds: 1800, repairTimeoutSeconds: 300,
-  repairModel: "inherit",
-};
 
 describe("routines, against real git", () => {
   let base: string;
@@ -115,17 +108,21 @@ describe("routines, against real git", () => {
     };
     const store = openStore(db);
     register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => "tok-builder-1" });
-    // v47: even a firing's pinned profile routes beside an exact planner and reviewer.
+    // v47/v48: a firing's approval freezes an exact four-role route, and
+    // the profile restates its build and repair legs.
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
     store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
     store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     const runnerToken = "tok-builder-1";
+    const authority = resolveRoutineAuthority(store, repo, terms.acceptance, T0);
+    if (!authority.ok) throw new Error(authority.problem);
     const created = store.createRoutine(
-      { name: "notes", ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE },
+      { name: "notes", ...terms, digest: routineDigestOf(terms, authority.profile, authority.route), profile: authority.profile, route: authority.route },
       T0,
     );
     expect(created.ok).toBe(true);
     if (!created.ok) return;
-    const approved = approveRoutine(store, created.id, "alex", T0, routineDigestOf(terms, V24_PROFILE), approverToken);
+    const approved = approveRoutine(store, created.id, "alex", T0, routineDigestOf(terms, authority.profile, authority.route), approverToken);
     expect(approved.ok).toBe(true);
     store.close();
 
@@ -188,16 +185,19 @@ describe("routines, against real git", () => {
     // The runner gate (MCP spec v6): builder-1 enrolls with the repo in its
     // registered repos list — the --repo flag no longer grants authority.
     register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => "tok-builder-1" });
-    // v47: even a firing's pinned profile routes beside an exact planner and reviewer.
+    // v47/v48: the approval freezes an exact four-role route.
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
     store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
     store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     const runnerToken = "tok-builder-1";
+    const authority = resolveRoutineAuthority(store, repo, terms.acceptance, T0);
+    if (!authority.ok) throw new Error(authority.problem);
     const created = store.createRoutine(
-      { name: "flaky", ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE },
+      { name: "flaky", ...terms, digest: routineDigestOf(terms, authority.profile, authority.route), profile: authority.profile, route: authority.route },
       T0,
     );
     if (!created.ok) throw new Error("setup");
-    approveRoutine(store, created.id, "alex", T0, routineDigestOf(terms, V24_PROFILE), approverToken);
+    approveRoutine(store, created.id, "alex", T0, routineDigestOf(terms, authority.profile, authority.route), approverToken);
     store.close();
 
     // A builder that always breaks: the instance fails and stays unfinished.

@@ -24,7 +24,8 @@ import { isProviderId, validateSpec, type AgentSpec, type Phase, type ProviderId
 import { contestantProfileOf, type Store, type TaskRef } from "./store.js";
 import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, chainFromJson, canonicalChainJson, type ChainEntry, type ExecutionProfile, type UnattendedPermissionMode } from "./scope.js";
 import { SUBSCRIPTION_CAPABLE } from "./keys.js";
-import { recommendRoute, routeFromJson, type ExactSpec, type PhaseRoute, type RouteCandidate, type RouteCandidates } from "./phase-routing.js";
+import { legOf, PHASES, recommendRoute, routeFromJson, routeProblems, sameSpec, type ExactSpec, type PhaseRoute, type RouteCandidate, type RouteCandidates, type RouteEvidenceKind } from "./phase-routing.js";
+import type { AcceptanceCriterion } from "./scope.js";
 
 export const INSTALLATION_SCOPE = "installation";
 
@@ -441,4 +442,97 @@ export function routeOfTask(store: Store, taskId: string, ref: TaskRef | null, n
     pins: { plan: planPin.pin, build: buildPin.pin },
   });
   return { kind: "route", route, source: "live" };
+}
+
+// ---- routine authority (v48) ---------------------------------------------
+
+/**
+ * THE ROUTINE'S FROZEN AUTHORITY, resolved once at filing: the four-role
+ * route a routine's firings will run under, and the execution profile that
+ * restates its build and repair legs exactly. Routine tasks declare routine
+ * risk; the rubric's evidence needs, the installation's quality default,
+ * and the repository's publication authority are the other signed inputs.
+ * A configuration that cannot make an exact, runnable route answers with
+ * the words — the routine files unresolved and cannot be approved until
+ * it is filed again under a configuration that can.
+ */
+export type RoutineAuthority =
+  | { ok: true; route: PhaseRoute; profile: ExecutionProfile }
+  | { ok: false; problem: string };
+
+export function resolveRoutineAuthority(store: Store, repo: string, acceptance: readonly AcceptanceCriterion[], now: Date): RoutineAuthority {
+  const candidates = resolveRouteCandidates(store, repo);
+  if (!candidates.ok) return { ok: false, problem: candidates.problem };
+  const route = recommendRoute({
+    risk: "routine",
+    qualityMode: store.qualityDefault().mode,
+    evidence: [...new Set(acceptance.flatMap(one => one.evidence))] as RouteEvidenceKind[],
+    publication: store.publicationAuthorityOf(repo, now),
+    candidates: candidates.candidates,
+    overrides: [],
+  });
+  const problems = routeProblems(route);
+  if (problems.length > 0) return { ok: false, problem: problems.join("; ") };
+  const build = legOf(route, "build");
+  const repair = legOf(route, "repair");
+  // The repair model rides as a flag only when the leg says more than
+  // "the build's own model" — an inheriting repair stays the stable
+  // literal "inherit" (= the exact build model), as saveScope files it.
+  const inheriting = candidates.candidates.repair.routine === null && repair.chosen === "recommended" && repair.tier === "routine" && repair.model === build.model;
+  const resolved = resolveScopeProfile(store, repo, undefined, { provider: build.provider, model: build.model, ...(inheriting ? {} : { repairModel: repair.model }) });
+  if (!resolved.ok) return { ok: false, problem: resolved.problem };
+  const repairModel = resolved.profile.repairModel === "inherit" ? resolved.profile.model : resolved.profile.repairModel;
+  if (!sameSpec(resolved.profile, build) || repairModel !== repair.model) {
+    return { ok: false, problem: `the agent profile (${resolved.profile.provider} · ${resolved.profile.model}, repair ${repairModel}) does not match the route (${build.provider} · ${build.model}, repair ${repair.model})` };
+  }
+  return { ok: true, route, profile: resolved.profile };
+}
+
+// ---- the operator's agent choices (v48) -----------------------------------
+
+/** One agent an operator may choose for one role: an exact configured pair
+ * and where it was configured, plus whether it is the role's current leg. */
+export type AgentChoice = ExactSpec & { source: string; current: boolean };
+
+/**
+ * THE CONFIGURED, ROLE-VALID CHOICES a surface may offer for each role:
+ * every exact pair the operator has configured anywhere — each phase's
+ * everyday agent and its strong agent, the repair row — de-duplicated,
+ * then filtered by what the role can actually run: gemini cannot review;
+ * the repair role runs only the build leg's provider (repairs resume the
+ * builder's session). Nothing is typed free-hand and nothing unconfigured
+ * is offered: an approval binds an exact agent the operator has named
+ * once, in configuration. Empty when the configuration cannot make exact
+ * candidates at all — the surface then says so instead of guessing.
+ */
+export function agentChoicesFor(store: Store, repo: string | null, route: PhaseRoute | null): Record<Phase, AgentChoice[]> {
+  const empty: Record<Phase, AgentChoice[]> = { plan: [], build: [], repair: [], review: [] };
+  const candidates = resolveRouteCandidates(store, repo);
+  if (!candidates.ok) return empty;
+  const pool: RouteCandidate[] = [];
+  const add = (one: RouteCandidate | null): void => {
+    if (one !== null && !pool.some(seen => sameSpec(seen, one))) pool.push(one);
+  };
+  for (const phase of PHASES) {
+    const tiers = candidates.candidates[phase];
+    add(tiers.routine);
+    add(tiers.strong);
+  }
+  const buildProvider = route === null ? null : legOf(route, "build").provider;
+  const out: Record<Phase, AgentChoice[]> = { plan: [], build: [], repair: [], review: [] };
+  for (const phase of PHASES) {
+    // The leg already on this role (an override typed on the CLI, a
+    // routine's pin) is offered for THIS role only, marked current — so the
+    // control can show what runs today without turning a one-task choice
+    // into a configured agent for every other role.
+    const current = route === null ? null : legOf(route, phase);
+    const offered: RouteCandidate[] = [...pool];
+    if (current !== null && !offered.some(one => sameSpec(one, current))) offered.push({ provider: current.provider, model: current.model, source: "this task's current agent" });
+    out[phase] = offered
+      .filter(one => (phase === "review" ? one.provider !== "gemini" : true))
+      .filter(one => (phase === "repair" && buildProvider !== null ? one.provider === buildProvider : true))
+      .filter(one => validateSpec({ provider: one.provider, model: one.model }).ok)
+      .map(one => ({ provider: one.provider, model: one.model, source: one.source, current: current !== null && sameSpec(current, one) }));
+  }
+  return out;
 }

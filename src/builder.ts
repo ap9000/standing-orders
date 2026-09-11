@@ -2512,7 +2512,11 @@ async function ingestPark(args: {
   // route, or an unreadable route on a routed row, refuses the repair in
   // words rather than mending under an agent nobody approved. Provenance
   // follows the parent: an approved fallback entry's repair stays
-  // `fallback`; a legacy parent's repair stays `legacy`.
+  // `fallback`; a legacy parent's repair stays `legacy`. Admission (v48)
+  // then proves the stamp again inside the run's own transaction — a
+  // fallback repair against the approved chain entry's exact repair model
+  // under the parent's route digest, the chain binding inherited verbatim
+  // below — so no repair turn can open under a lineage nobody approved.
   const parentRoute = store.runRoute(runId);
   const repairScope = store.getScope(request.taskId);
   const repairSealed = repairScope !== null && repairScope.routeEra != null ? store.sealedRouteOf(request.taskId) : null;

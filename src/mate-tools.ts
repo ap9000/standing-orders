@@ -17,6 +17,9 @@ import { hasDisguisedText, hasForbiddenControls } from "./decision.js";
 import { readVerifiedReport, scanForSecrets } from "./evidence.js";
 import { parseAcceptanceCriteria, ACCEPTANCE_LIMITS, EVIDENCE_KINDS, type AcceptanceCriterion } from "./scope.js";
 import { diagnoseTaskDispatch, withDispatchDiagnoses } from "./dispatch.js";
+import { agentChoicesFor, routeOfTask } from "./agentconfig.js";
+import { agentsSummary, chosenWords, isRiskLevel, PHASES, postureWords, RISK_CHOICES, riskConsequence, riskTitle, routeProblems, sameSpec, specWords, type PhaseRoute } from "./phase-routing.js";
+import type { Phase } from "./provider.js";
 
 export const MATE_MAX_PROPOSALS_PER_TURN = 5;
 
@@ -317,6 +320,53 @@ function scopeStandingOf(store: Store, taskId: string): "none" | "approved" | "r
   return scope.approvedAt !== null ? "rewritten since its approval" : "not approved";
 }
 
+const ROLE_WORD: Record<Phase, string> = { plan: "planner", build: "builder", repair: "repair", review: "reviewer" };
+const ROLE_OF_WORD: Record<string, Phase> = { planner: "plan", plan: "plan", builder: "build", build: "build", repair: "repair", reviewer: "review", review: "review" };
+
+/**
+ * THE AGENTS A TASK RUNS UNDER, as chat reads them (v48): the declared
+ * risk and what it means, the same one-line summary the task page and CLI
+ * print, each role's exact agent with its reasons, the standing of those
+ * agents (approved / awaiting approval / recommended), and — for a
+ * proposal — only the configured, role-valid choices an operator could
+ * pick. Nothing here is a term chat may bind on its own; every change goes
+ * through a confirmed card into the one authenticated edit transaction.
+ */
+export function agentsOver(store: Store, taskId: string, now: Date): Record<string, unknown> | null {
+  const ref = store.lookupRef(taskId);
+  if (ref === null) return null;
+  const routed = routeOfTask(store, taskId, ref, now);
+  const scope = store.getScope(taskId);
+  const risk = ref.riskLevel ?? scope?.riskLevel ?? "routine";
+  const editable = !store.hasLiveClaim(ref.id, now) && store.activeTournamentTerms(ref.id) === null;
+  const editableWhy = store.hasLiveClaim(ref.id, now) ? "this task is running — its agents cannot change under a live claim" : store.activeTournamentTerms(ref.id) !== null ? "tournament terms decide the agents while the contest is open" : null;
+  const base = {
+    task: taskId,
+    risk: { level: risk, title: riskTitle(risk), consequence: riskConsequence(risk) },
+    riskChoices: RISK_CHOICES.map(one => ({ risk: one.risk, title: one.title, consequence: one.consequence })),
+    editable,
+    editableWhy,
+    approval: scope === null ? "none" : scopeStandingOf(store, taskId),
+  };
+  if (routed === null) return { ...base, standing: "no agents yet", summary: null, agents: [], choices: {} };
+  if (routed.kind === "legacy") {
+    return { ...base, standing: routed.approved ? "approved before agent routing" : "not approved", summary: `${routed.profile.provider} · ${routed.profile.model} builds and repairs; the planner and reviewer come from configuration at run time`, agents: [], choices: {} };
+  }
+  if (routed.kind === "unreadable") return { ...base, standing: "cannot be read", summary: null, problem: routed.problem, agents: [], choices: {} };
+  const route: PhaseRoute = routed.route;
+  const choices = agentChoicesFor(store, ref.repo, route);
+  return {
+    ...base,
+    standing: routed.source === "approved" ? "approved" : routed.source === "proposed" ? "awaiting approval" : "recommended",
+    summary: agentsSummary(route),
+    posture: postureWords(route),
+    demands: route.demands,
+    agents: route.legs.map(leg => ({ role: ROLE_WORD[leg.phase], provider: leg.provider, model: leg.model, chosen: chosenWords(leg), reasons: leg.reasons, problem: leg.problem })),
+    problems: routeProblems(route),
+    choices: Object.fromEntries(PHASES.map(phase => [ROLE_WORD[phase], choices[phase].map(one => ({ provider: one.provider, model: one.model, current: one.current }))])),
+  };
+}
+
 export const MATE_TOOLS: MateTool[] = [
   {
     name: "recap",
@@ -391,6 +441,21 @@ export const MATE_TOOLS: MateTool[] = [
           decisionsOpen,
         },
       };
+    },
+  },
+  {
+    name: "get_agents",
+    description:
+      "Which agents plan, build, repair, and review one task, and why: the declared risk with what each risk level does, one plain summary, each role's exact agent (provider and model) with its reasons, whether those agents are approved, and — per role — the only configured agents the operator could switch to. Read this before propose_agents, and use it to answer any question about a task's agents or risk.",
+    inputSchema: schema({ task: TASK_ARG }, ["task"]),
+    handle: (ctx, args) => {
+      const taskId = taskIdOf(args);
+      if (taskId === null) return { ok: false, message: "task is an id, 1-64 characters" };
+      const ref = admittedRef(ctx, taskId);
+      if (ref === null) return notFound();
+      const view = agentsOver(ctx.store, taskId, ctx.now);
+      if (view === null) return notFound();
+      return { ok: true, body: { repo: ref.repoId, ...view } };
     },
   },
   {
@@ -624,6 +689,91 @@ export const MATE_TOOLS: MateTool[] = [
       const id = ctx.draft("scope", { task: taskId, repoId: ref.repoId, goal: args["goal"], not, touches, acceptance, sawDigest: scope?.digest ?? null });
       if (id === null) return tooMany();
       return { ok: true, body: { proposal: id, kind: "scope", task: taskId, awaiting: "the operator's confirmation, then a password to approve" } };
+    },
+  },
+  {
+    name: "propose_agents",
+    description:
+      "Propose changing a task's declared risk, or which configured agent runs one role (planner, builder, repair, or reviewer), or clearing an earlier per-role choice. Read get_agents first: `agent` must be one of that role's listed choices, exactly (provider and model) — nothing unconfigured can be proposed. The operator confirms the card; the change is then recorded under their name and any approval given under the earlier agents must be renewed. Never changes a running task.",
+    inputSchema: schema(
+      {
+        task: TASK_ARG,
+        risk: { type: "string", enum: ["routine", "elevated", "high"] },
+        role: { type: "string", enum: ["planner", "builder", "repair", "reviewer"] },
+        agent: schema({ provider: { type: "string", maxLength: 20 }, model: { type: "string", maxLength: 120 } }, ["provider", "model"]),
+        clear: { type: "boolean" },
+        why: { type: "string", maxLength: 400 },
+      },
+      ["task"],
+    ),
+    handle: (ctx, args) => {
+      const taskId = taskIdOf(args);
+      const ref = taskId === null ? null : admittedRef(ctx, taskId);
+      const task = taskId === null ? null : ctx.store.getTask(taskId);
+      if (taskId === null || ref === null || task === null) return notFound();
+      const risk = args["risk"];
+      if (risk !== undefined && !isRiskLevel(risk)) return { ok: false, message: "risk is routine, elevated, or high" };
+      const roleWord = args["role"];
+      const phase = roleWord === undefined ? null : typeof roleWord === "string" ? ROLE_OF_WORD[roleWord] ?? null : null;
+      if (roleWord !== undefined && phase === null) return { ok: false, message: "role is planner, builder, repair, or reviewer" };
+      const clear = args["clear"] === true;
+      const agent = args["agent"];
+      if (risk === undefined && phase === null) return { ok: false, message: "say what changes: a risk, or a role with an agent (or clear: true)" };
+      if (phase !== null && !clear && (agent === null || typeof agent !== "object")) return { ok: false, message: "a role change names an agent from get_agents, or clear: true" };
+      if (phase === null && (clear || agent !== undefined)) return { ok: false, message: "an agent or clear needs the role it applies to" };
+      if (args["why"] !== undefined && !honest(args["why"], 400)) return { ok: false, message: "why is plain text ≤400" };
+      if (ctx.store.hasLiveClaim(ref.id, ctx.now)) return { ok: false, message: "a worker is building that task right now — its agents cannot change under it" };
+      if (ctx.store.activeTournamentTerms(ref.id) !== null) return { ok: false, message: "tournament terms decide this task's agents while the contest is open" };
+      const view = agentsOver(ctx.store, taskId, ctx.now);
+      if (view === null) return notFound();
+      const scope = ctx.store.getScope(taskId);
+      const current = ctx.store.refForId(ref.id);
+      let chosen: { provider: string; model: string } | null = null;
+      if (phase !== null && !clear) {
+        const wanted = agent as Record<string, unknown>;
+        const offered = ((view["choices"] as Record<string, { provider: string; model: string }[]>)[ROLE_WORD[phase]] ?? []);
+        const match = offered.find(one => one.provider === wanted["provider"] && one.model === wanted["model"]);
+        if (match === undefined) {
+          return {
+            ok: false,
+            message: offered.length === 0
+              ? `no configured agent can run the ${ROLE_WORD[phase]} role for this task — the operator configures agents first`
+              : `agent must be one of the ${ROLE_WORD[phase]} choices from get_agents: ${offered.map(one => specWords(one)).join(", ")}`,
+          };
+        }
+        chosen = { provider: match.provider, model: match.model };
+        const currentLeg = (view["agents"] as { role: string; provider: string; model: string }[]).find(one => one.role === ROLE_WORD[phase]);
+        if (currentLeg !== undefined && sameSpec(currentLeg, chosen) && risk === undefined) return { ok: false, message: `${specWords(chosen)} already runs the ${ROLE_WORD[phase]} role` };
+      }
+      if (phase !== null && clear && !(current?.routeOverrides ?? []).some(one => one.phase === phase)) {
+        return { ok: false, message: `nobody chose a ${ROLE_WORD[phase]} for this task by hand — there is nothing to clear` };
+      }
+      if (risk !== undefined && phase === null && risk === (view["risk"] as { level: string }).level) return { ok: false, message: `this task is already declared ${riskTitle(risk).toLowerCase()}` };
+      const id = ctx.draft("agents", {
+        task: taskId,
+        taskTitle: task.title,
+        repoId: ref.repoId,
+        ...(risk === undefined ? {} : { risk, riskConsequence: riskConsequence(risk) }),
+        ...(phase === null ? {} : { phase, role: ROLE_WORD[phase] }),
+        ...(chosen === null ? {} : { provider: chosen.provider, model: chosen.model }),
+        ...(clear ? { clear: true } : {}),
+        ...(typeof args["why"] === "string" ? { why: args["why"] } : {}),
+        before: view["summary"] ?? null,
+        approval: view["approval"],
+        sawDigest: scope?.digest ?? null,
+      });
+      if (id === null) return tooMany();
+      return {
+        ok: true,
+        body: {
+          proposal: id,
+          kind: "agents",
+          task: taskId,
+          ...(risk === undefined ? {} : { risk }),
+          ...(phase === null ? {} : { role: ROLE_WORD[phase], ...(chosen === null ? { clear: true } : { agent: chosen }) }),
+          awaiting: view["approval"] === "approved" ? "the operator's confirmation — the current approval will then need renewing" : "the operator's confirmation",
+        },
+      };
     },
   },
   {
