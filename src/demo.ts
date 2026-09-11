@@ -36,7 +36,6 @@ import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 import { approveRoutine, fireRoutine } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
-import { ceilingDigestOf } from "./principal.js";
 import { storeEvidence, budgetedStatJson, imageDimensions, type DiffStat } from "./evidence.js";
 import { parseProof, adjudicate } from "./proof.js";
 import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
@@ -411,6 +410,9 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     repos.api,
     "Give outbound webhooks a bounded retry policy with dead-lettering.",
   );
+  // The build that parked this question ran under an approval (v48: a
+  // routed task opens no run without its sealed route).
+  approve(store, asking, "demo", hoursAgo(3), store.getScope(asking)?.digest ?? "", token);
   const askingRun = store.startRun({
     taskRef: store.refFor("built-in", asking).id,
     leaseId: "demo-lease-ask",
@@ -1082,57 +1084,6 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   // single-flight skip honestly (the first instance is still open).
   fireRoutine(store, routine.id, hoursAgo(45));
   fireRoutine(store, routine.id, hoursAgo(21));
-
-  // --- the unified chat, illustrated (v48) -------------------------------
-  // A seeded conversation on the task awaiting approval: the operator asks
-  // who reviews it, the mate answers from the task's own route, and
-  // proposes one confirmation-gated change — the card the console renders
-  // read-only here (no model is ever contacted in the sandbox).
-  {
-    const thread = store.openMateThread("demo", ceilingDigestOf(Object.values(repos).sort()), hoursAgo(1.2)).thread;
-    store.appendMateMessage({ thread: thread.id, turn: null, role: "operator", text: "Who reviews rotate-log-format, and should we use the stronger reviewer? It touches the collector everyone depends on." }, hoursAgo(1.2));
-    store.appendMateMessage(
-      {
-        thread: thread.id,
-        turn: 1,
-        role: "assistant",
-        text: [
-          "Right now rotate-log-format is declared elevated risk: claude · sonnet plans, builds, and repairs; claude · opus reviews (you chose that reviewer by hand; the recommendation was codex · gpt-5-codex).",
-          "Elevated risk means the review runs on the strongest configured reviewer while planning and building keep the everyday agents. Declaring it high risk would put every role on the strongest configured agent — the builder would move to claude · opus too.",
-          "Given that it touches the shared collector, I propose declaring it high risk and reviewing on codex · gpt-5-codex, the strongest configured reviewer. You confirm the card; the approval waiting on the task would then need renewing under those agents.",
-        ].join("\n\n"),
-        activity: "read the task's agents",
-      },
-      hoursAgo(1.19),
-    );
-    const plannedScope = store.getScope(planned);
-    const proposal = store.draftMateProposal(
-      {
-        thread: thread.id,
-        turn: 1,
-        kind: "agents",
-        payload: {
-          task: planned,
-          taskTitle: "Rotate the request-log format to JSON lines",
-          repoId: "r2",
-          risk: "high",
-          riskConsequence: "every role — planner, builder, repair, and reviewer — uses the strongest agent you have configured",
-          phase: "review",
-          role: "reviewer",
-          provider: "codex",
-          model: "gpt-5-codex",
-          why: "the collector is shared infrastructure — a second, stronger pair of eyes on the review is cheap insurance",
-          before: "claude · sonnet plans, builds, and repairs; claude · opus reviews",
-          approval: "not approved",
-          sawDigest: plannedScope?.digest ?? null,
-        },
-        ceilingDigest: thread.ceilingDigest,
-      },
-      hoursAgo(1.19),
-    );
-    // The turn that drafted it is long answered: the card waits, pending.
-    store.raw().prepare("UPDATE mate_proposal SET state = 'pending' WHERE id = ?").run(proposal);
-  }
 
   // --- the outer loop: an opened PR with observed checks ----------------
   const pub = store.createPublicationIntent(

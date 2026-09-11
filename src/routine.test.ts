@@ -17,7 +17,10 @@ import {
   instanceId,
   nextFireAt,
   parseSchedule,
+  refreshRoutineAgents,
+  routineAgentsState,
   routineDigestOf,
+  termsOf,
   validateRoutineTerms,
   type RoutineTerms,
 } from "./routine.js";
@@ -285,6 +288,137 @@ describe("firing, inside one proving transaction", () => {
     // Run-now refuses to the person's face in the same words, paging nobody more.
     expect(fireRoutine(store, legacy.id, later(3 * HOUR), { manual: true })).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("approve it again") });
     expect(pages().n).toBe(1);
+  });
+
+  test("routine-integrity: the firing re-hashes the APPROVED snapshot, holds the repair leg's provider to the profile, and rolls back whole when the instance cannot seal", () => {
+    approve(routineId);
+    const pages = () => (store.raw().prepare("SELECT COUNT(*) AS n FROM notification WHERE dedupe_key LIKE 'routine-route:%'").get() as { n: number }).n;
+    // A snapshot column rewritten after the yes: the terms still hash to
+    // the digest (working columns untouched), but the APPROVED route does
+    // not — nothing fires, nothing is written, the slot stays due.
+    const approvedJson = String((store.raw().prepare("SELECT approved_route_json AS j FROM routine WHERE id = ?").get(routineId) as { j: string }).j);
+    const rerouted = approvedJson.replace('"model":"sonnet","phase":"review"', '"model":"opus","phase":"review"');
+    expect(rerouted).not.toBe(approvedJson);
+    store.raw().prepare("UPDATE routine SET approved_route_json = ? WHERE id = ?").run(rerouted, routineId);
+    expect(fireRoutine(store, routineId, later(HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("do not hash to the approval") });
+    expect(store.listTasks()).toHaveLength(0);
+    expect(store.routineFires(routineId)).toHaveLength(0);
+    // A repair leg on another provider than the sealed profile: parity fails.
+    const otherRepair = approvedJson.replace('"phase":"repair","problem":null,"provider":"claude"', '"phase":"repair","problem":null,"provider":"codex"');
+    expect(otherRepair).not.toBe(approvedJson);
+    store.raw().prepare("UPDATE routine SET approved_route_json = ? WHERE id = ?").run(otherRepair, routineId);
+    const parity = fireRoutine(store, routineId, later(HOUR));
+    expect(parity.ok).toBe(false);
+    expect(store.listTasks()).toHaveLength(0);
+    // Corrupt snapshot bytes: fail closed in their own words, paged once.
+    store.raw().prepare("UPDATE routine SET approved_route_json = '{\"version\":1' WHERE id = ?").run(routineId);
+    expect(routineAgentsState(store.getRoutine(routineId)!)).toMatchObject({ state: "unreadable", approvable: false, refresh: true });
+    expect(fireRoutine(store, routineId, later(HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("cannot be read") });
+    expect(pages()).toBe(1);
+    // Restore the true snapshot; the firing seals, and the instance's
+    // sealed route IS the frozen one. Then prove the rollback road: a
+    // firing whose instance seal is refused leaves NO instance, NO ledger
+    // row, and the slot still due — the seal is proved, not assumed.
+    store.raw().prepare("UPDATE routine SET approved_route_json = ? WHERE id = ?").run(approvedJson, routineId);
+    const sealSpy = store.sealScopeApproval.bind(store);
+    (store as unknown as { sealScopeApproval: typeof store.sealScopeApproval }).sealScopeApproval = () => false;
+    const rolled = fireRoutine(store, routineId, later(HOUR));
+    expect(rolled).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("nothing fired") });
+    expect(store.listTasks()).toHaveLength(0);
+    expect(store.routineFires(routineId)).toHaveLength(0);
+    expect(store.getRoutine(routineId)?.nextFireAt).toBe(later(HOUR).toISOString());
+    (store as unknown as { sealScopeApproval: typeof store.sealScopeApproval }).sealScopeApproval = sealSpy;
+    const fired = fireRoutine(store, routineId, later(HOUR));
+    expect(fired.ok).toBe(true);
+    if (!fired.ok) return;
+    const sealed = store.sealedRouteOf(fired.taskId);
+    expect(sealed.ok).toBe(true);
+    if (sealed.ok) expect(routeDigestOf(sealed.route)).toBe(routeDigestOf(V48_ROUTE));
+    // Success resolves the route episode.
+    expect((store.raw().prepare("SELECT COUNT(*) AS n FROM notification WHERE dedupe_key LIKE 'routine-route:%' AND resolved_at IS NULL").get() as { n: number }).n).toBe(0);
+  });
+
+  test("migration-recovery: an AUTHENTIC v47 routine (approved with a profile, no route columns) survives the v48 upgrade with its data, fires nothing, and the plain refresh → approve → fire road seals the exact new snapshot with no auto-approval", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { SCHEMA_VERSION } = await import("./store.js");
+    const dir = mkdtempSync(join(tmpdir(), "standing-orders-v47-routine-"));
+    const db = join(dir, "orders.db");
+    try {
+      // Seed under today's store, then roll the file back to the v47 shape
+      // exactly as a v47 build left it: the digest binds terms + profile
+      // only, the approval stamp covers it, and no route column exists.
+      const v47 = openStore(db);
+      const alex = addApprover(v47, "alex", T0);
+      if (!alex.ok) throw new Error("approver");
+      const v47Digest = routineDigestOf(TERMS, V24_PROFILE);
+      const created = v47.createRoutine({ name: "nightly-deps", ...TERMS, digest: v47Digest, profile: V24_PROFILE }, T0);
+      if (!created.ok) throw new Error("setup");
+      v47.raw().prepare("UPDATE routine SET approved_at = ?, approved_by = 'alex', approved_digest = digest, approved_profile_json = profile_json, next_fire_at = ? WHERE id = ?").run(T0.toISOString(), later(HOUR).toISOString(), created.id);
+      v47.raw().exec("ALTER TABLE routine DROP COLUMN route_json");
+      v47.raw().exec("ALTER TABLE routine DROP COLUMN approved_route_json");
+      v47.raw().prepare("UPDATE schema_version SET version = 47").run();
+      v47.close();
+
+      // The upgrade: additive, data intact.
+      const up = openStore(db);
+      expect(up.raw().prepare("SELECT version FROM schema_version").get()).toMatchObject({ version: SCHEMA_VERSION });
+      const migrated = up.getRoutine(created.id)!;
+      expect(termsOf(migrated)).toEqual({ ...TERMS, budgetPerRunMicrousd: null });
+      expect(migrated).toMatchObject({ digest: v47Digest, approvedDigest: v47Digest, approvedBy: "alex", route: null, approvedRoute: null, routeUnreadable: false, approvedRouteUnreadable: false });
+      expect(migrated.approvedProfile).toMatchObject({ provider: "claude", model: "sonnet" });
+      expect(routineAgentsState(migrated)).toMatchObject({ state: "unfrozen", approvable: false, refresh: true });
+
+      // A legacy unfrozen firing is BLOCKED — paged once, slot still due, no instance.
+      expect(fireRoutine(up, created.id, later(2 * HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("refresh its agents") });
+      expect(up.listTasks()).toHaveLength(0);
+      expect(up.routineFires(created.id)).toHaveLength(0);
+      expect(up.getRoutine(created.id)?.nextFireAt).toBe(later(HOUR).toISOString());
+
+      // The recovery road, step 1: refresh. With no exact agents configured
+      // it says so and changes nothing.
+      expect(refreshRoutineAgents(up, created.id, later(2 * HOUR))).toMatchObject({ ok: false, reason: "unresolved" });
+      expect(up.getRoutine(created.id)?.digest).toBe(v47Digest);
+      up.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+      up.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+      up.setPhaseConfig("installation", "review", "claude", "opus", "alex", T0);
+      const refreshed = refreshRoutineAgents(up, created.id, later(2 * HOUR));
+      expect(refreshed).toMatchObject({ ok: true, changed: true });
+      if (!refreshed.ok) return;
+      // Refreshing approves NOTHING: the digest moved, the old yes is stale,
+      // and the old snapshot cannot fire.
+      const pending = up.getRoutine(created.id)!;
+      expect(pending.digest).not.toBe(v47Digest);
+      expect(pending.approvedDigest).toBe(v47Digest);
+      expect(pending.route).not.toBeNull();
+      expect(routineAgentsState(pending)).toMatchObject({ state: "pending", approvable: true, refresh: false });
+      expect(fireRoutine(up, created.id, later(2 * HOUR))).toMatchObject({ ok: false, reason: "not-approved" });
+      expect(up.listTasks()).toHaveLength(0);
+      // Refreshing again under the same configuration is a no-op.
+      expect(refreshRoutineAgents(up, created.id, later(2 * HOUR))).toMatchObject({ ok: true, changed: false });
+
+      // Step 2: approve, through the ceremony, against the digest read.
+      const yes = approveRoutine(up, created.id, "alex", later(2 * HOUR), pending.digest, alex.token);
+      expect(yes.ok).toBe(true);
+      const frozen = up.getRoutine(created.id)!;
+      expect(routineAgentsState(frozen)).toMatchObject({ state: "frozen" });
+      expect(frozen.approvedRoute!.legs.map(leg => [leg.phase, leg.provider, leg.model])).toEqual([
+        ["plan", "claude", "sonnet"], ["build", "claude", "sonnet"], ["repair", "claude", "sonnet"], ["review", "claude", "opus"],
+      ]);
+
+      // Step 3: fire — the instance seals the EXACT new snapshot.
+      const fired = fireRoutine(up, created.id, later(4 * HOUR));
+      expect(fired.ok).toBe(true);
+      if (!fired.ok) return;
+      const sealed = up.sealedRouteOf(fired.taskId);
+      expect(sealed.ok).toBe(true);
+      if (sealed.ok) expect(routeDigestOf(sealed.route)).toBe(routeDigestOf(frozen.approvedRoute!));
+      expect(up.getScope(fired.taskId)?.approvedProfile).toMatchObject({ provider: "claude", model: "sonnet" });
+      up.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("early is not due, and a recorded slot cannot fire twice", () => {

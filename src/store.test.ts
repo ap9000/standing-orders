@@ -2555,11 +2555,92 @@ describe("migration to v30 (fallback chains) from an AUTHENTIC v29 fixture", () 
   });
 });
 
+describe("malformed authority fails closed and never shrinks (v48)", () => {
+  let store: Store;
+  let token: string;
+  beforeEach(async () => {
+    const { addApprover } = await import("./scope.js");
+    store = openStore(":memory:");
+    for (const phase of ["plan", "build", "review"]) store.setPhaseConfig("installation", phase, "claude", "sonnet", "test", T0);
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("approver");
+    token = added.token;
+    store.createTask({ id: "t", title: "t" }, T0);
+    store.placeTask(store.refFor(BUILT_IN, "t").id, REPO);
+  });
+  afterEach(() => store.close());
+
+  test("a corrupt fallback configuration row files the scope UNRESOLVED in its words — never as a single-profile approval the operator did not configure", async () => {
+    const { propose, approve } = await import("./scope.js");
+    store.raw().prepare("INSERT INTO fallback_config (scope, phase, entries_json, updated_at, updated_by) VALUES (?, 'build', ?, ?, 'alex')").run(REPO, "[{\"provider\":\"codex\"", T0.toISOString());
+    expect(store.fallbackConfig(REPO)).toEqual([]);
+    expect(store.fallbackConfigProblem(REPO)).toContain("not valid JSON");
+    propose(store, { taskId: "t", goal: "guard", now: T0 });
+    const scope = store.getScope("t")!;
+    expect(scope.profileState).toBe("unresolved");
+    expect(scope.unresolvedReason).toContain("the configured fallback chain cannot file");
+    expect(scope.proposedChainJson).toBeNull();
+    expect(approve(store, "t", "alex", T0, scope.digest, token).ok).toBe(false);
+    // A well-formed list with a malformed entry reads the same way.
+    store.raw().prepare("UPDATE fallback_config SET entries_json = ? WHERE scope = ?").run(JSON.stringify([{ provider: "codex", model: "gpt-5-codex" }]), REPO);
+    expect(store.fallbackConfigProblem(REPO)).toContain("malformed");
+    propose(store, { taskId: "t", goal: "guard", now: T0 });
+    expect(store.getScope("t")?.profileState).toBe("unresolved");
+    // Repaired configuration: the chain files whole, and the approval binds it.
+    store.setFallbackConfig(REPO, [{ provider: "codex", model: "gpt-5-codex", authMode: "api-key" }], "alex", T0);
+    propose(store, { taskId: "t", goal: "guard", now: T0 });
+    const chained = store.getScope("t")!;
+    expect(chained.profileState).toBe("resolved");
+    expect(chained.proposedChainJson).not.toBeNull();
+    expect(approve(store, "t", "alex", T0, chained.digest, token).ok).toBe(true);
+    expect(store.approvedChainOf("t")).toHaveLength(2);
+  });
+
+  test("corrupt route, profile, or chain JSON on an approved scope reads as unreadable — no sealed route, no chain, no run, no nonce-worthy approval", async () => {
+    const { propose, approve } = await import("./scope.js");
+    const { routeOfTask } = await import("./agentconfig.js");
+    store.setFallbackConfig(REPO, [{ provider: "codex", model: "gpt-5-codex", authMode: "api-key" }], "alex", T0);
+    propose(store, { taskId: "t", goal: "guard", now: T0 });
+    expect(approve(store, "t", "alex", T0, store.getScope("t")!.digest, token).ok).toBe(true);
+    const taskRef = store.refFor(BUILT_IN, "t").id;
+    const admit = () => store.startRun({ taskRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    const snapshot = store.raw().prepare("SELECT approved_route_json AS r, approved_profile_json AS p, approved_chain_json AS c FROM task_scope WHERE task_id = 't'").get() as { r: string; p: string; c: string };
+    // Corrupt route bytes.
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = '{\"version\":1' WHERE task_id = 't'").run();
+    expect(store.sealedRouteOf("t")).toMatchObject({ ok: false, reason: "unreadable" });
+    expect(routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0)).toMatchObject({ kind: "unreadable" });
+    expect(() => admit()).toThrow(/cannot be read/);
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = ? WHERE task_id = 't'").run(snapshot.r);
+    // A model id that is not one, inside an otherwise well-formed route.
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = ? WHERE task_id = 't'").run(snapshot.r.replace('"model":"sonnet","phase":"review"', '"model":"--dangerously","phase":"review"'));
+    expect(store.sealedRouteOf("t")).toMatchObject({ ok: false, reason: "unreadable" });
+    expect(() => admit()).toThrow();
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = ? WHERE task_id = 't'").run(snapshot.r);
+    // Corrupt chain bytes: the chain approval has NO chain — it does not
+    // quietly become a single-profile approval.
+    store.raw().prepare("UPDATE task_scope SET approved_chain_json = '[{' WHERE task_id = 't'").run();
+    expect(store.approvedChainOf("t")).toBeNull();
+    expect(store.sealedRouteOf("t")).toMatchObject({ ok: false, reason: "unreadable" });
+    expect(() => admit()).toThrow(/sealed route/);
+    store.raw().prepare("UPDATE task_scope SET approved_chain_json = ? WHERE task_id = 't'").run(snapshot.c);
+    // Corrupt profile bytes.
+    store.raw().prepare("UPDATE task_scope SET approved_profile_json = 'nope' WHERE task_id = 't'").run();
+    expect(store.getScope("t")?.approvedProfile ?? null).toBeNull();
+    expect(store.sealedRouteOf("t")).toMatchObject({ ok: false, reason: "unreadable" });
+    store.raw().prepare("UPDATE task_scope SET approved_profile_json = ? WHERE task_id = 't'").run(snapshot.p);
+    // Restored: the authority stands again, whole.
+    expect(store.sealedRouteOf("t").ok).toBe(true);
+    expect(store.approvedChainOf("t")).toHaveLength(2);
+    expect(store.runsFor(taskRef)).toHaveLength(0);
+  });
+});
+
 describe("run admission proves route provenance before any row exists (v48)", () => {
   let store: Store;
   let sealed: import("./phase-routing.js").PhaseRoute;
   let taskRef: number;
   let digest: string;
+  let token: string;
 
   beforeEach(async () => {
     const { addApprover, approve, propose } = await import("./scope.js");
@@ -2571,6 +2652,7 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "test", T0);
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("approver");
+    token = added.token;
     store.createTask({ id: "t", title: "t" }, T0);
     taskRef = store.refFor(BUILT_IN, "t").id;
     store.placeTask(taskRef, REPO);
@@ -2623,13 +2705,93 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     expect(() => admit({ route: { ...good, model: 42 } })).toThrow(/neither an exact id nor null/);
     expect(() => admit({ route: "recommended" })).toThrow(/not an object/);
     expect(runs()).toBe(0);
-    // The late-stamp road refuses the same way, in words, and stamps nothing.
+  });
+
+  test("a routed task never opens an UNSTAMPED run: a run that presents no stamp gets the sealed leg — proved against its own agent — or no row at all", async () => {
+    // The dictated stamp: the sealed build leg, persisted with the row.
     const bare = admit({});
-    expect(store.stampRunRoute(bare, { routeDigest: digest, phase: "build", provider: "claude", model: "opus", chosen: "recommended" }, T0)).toMatchObject({ ok: false, conflict: expect.stringContaining("build leg is claude · sonnet") });
-    expect(store.stampRunRoute(bare, { routeDigest: digest, phase: "review", provider: "claude", model: "sonnet", chosen: "recommended" }, T0)).toMatchObject({ ok: false, conflict: expect.stringContaining("spends as the build leg") });
-    expect(store.runRoute(bare)).toBeNull();
-    expect(store.stampRunRoute(bare, { routeDigest: digest, phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" }, T0)).toEqual({ ok: true, first: true });
-    expect(store.getRun(bare)?.model).toBe("sonnet");
+    expect(store.getRun(bare)).toMatchObject({ provider: "claude", model: "sonnet" });
+    expect(store.runRoute(bare)).toMatchObject({ phase: "build", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: digest });
+    // The same stamp restated is idempotent; a different one is a conflict.
+    expect(store.stampRunRoute(bare, { routeDigest: digest, phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" }, T0)).toEqual({ ok: true, first: false });
+    expect(store.stampRunRoute(bare, { routeDigest: digest, phase: "build", provider: "claude", model: "opus", chosen: "recommended" }, T0)).toMatchObject({ ok: false, conflict: expect.stringContaining("already carries route provenance") });
+    // An agent the sealed leg does not name opens nothing, stamp or no stamp.
+    expect(() => admit({ model: "opus" })).toThrow(/names model sonnet but the run would spend as opus/);
+    expect(() => admit({ provider: "codex" })).toThrow(/names claude but the run would spend as codex/);
+    // A reviewer child gets the review leg (the strong codex reviewer).
+    const review = admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex" });
+    expect(store.runRoute(review)).toMatchObject({ phase: "review", provider: "codex", model: "gpt-5-codex", chosen: "recommended", routeDigest: digest });
+    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "claude", model: "sonnet" })).toThrow(/names codex but the run would spend as claude/);
+    expect(runs()).toBe(2);
+    // MISSING authority: with the seal gone, a builder, scout, reviewer, or
+    // repair presents nothing that could govern it — zero rows, in words.
+    const { propose } = await import("./scope.js");
+    propose(store, { taskId: "t", goal: "a wider guard", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], now: T0 });
+    for (const role of ["builder", "scout", "repair"] as const) {
+      expect(() => admit({ role, parentRun: bare })).toThrow(/nothing spends as its (build|repair) leg without a sealed route — the scope was approved and then changed/);
+    }
+    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex" })).toThrow(/nothing spends as its review leg without a sealed route/);
+    expect(runs()).toBe(2);
+    // A planner still opens before approval — under the working route's plan leg.
+    const { routeDigestOf, routeFromJson } = await import("./phase-routing.js");
+    const proposed = routeFromJson(store.getScope("t")!.proposedRouteJson ?? null)!;
+    const planner = admit({ role: "planner" });
+    expect(store.runRoute(planner)).toMatchObject({ phase: "plan", provider: "claude", model: "sonnet", routeDigest: routeDigestOf(proposed) });
+    // A pre-routing row and a task with no scope are not routed: they open
+    // unstamped and stamp when they spend, exactly as before.
+    store.createTask({ id: "bare-task", title: "no scope" }, T0);
+    const bareRef = store.refFor(BUILT_IN, "bare-task").id;
+    const unrouted = store.startRun({ taskRef: bareRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    expect(store.runRoute(unrouted)).toBeNull();
+  });
+
+  test("a fallback stamp binds the run to ONE exact chain entry: two entries sharing a provider and model but differing in auth mode or repair model are different authorities", async () => {
+    const { entryDigestOf, approve, chainDigestOf } = await import("./scope.js");
+    // Approve a chain whose two fallback entries are the same pair under
+    // different auth modes (api-key vs subscription) — legal, distinct.
+    store.setFallbackConfig(REPO, [
+      { provider: "codex", model: "gpt-5-codex", authMode: "api-key" },
+      { provider: "codex", model: "gpt-5-codex", authMode: "subscription" },
+    ], "alex", T0);
+    const { propose } = await import("./scope.js");
+    propose(store, { taskId: "t", goal: "guard", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], riskLevel: "elevated", now: T0 });
+    const added = store.getScope("t")!;
+    expect(added.proposedChainJson).not.toBeNull();
+    const yes = approve(store, "t", "alex", T0, added.digest, token);
+    expect(yes.ok).toBe(true);
+    const chain = store.approvedChainOf("t")!;
+    expect(chain).toHaveLength(3);
+    const sealedNow = store.approvedRouteOf("t")!;
+    const { routeDigestOf } = await import("./phase-routing.js");
+    const fallback = { routeDigest: routeDigestOf(sealedNow), phase: "build", provider: "codex", model: "gpt-5-codex", chosen: "fallback" } as const;
+    // Unbound, the pair is AMBIGUOUS between entries 1 and 2 — refused.
+    expect(() => admit({ provider: "codex", model: "gpt-5-codex", route: fallback })).toThrow(/names 2 entries of the approved fallback chain/);
+    expect(runs()).toBe(0);
+    // Bound to the exact entry at admission (the cycle's cursor + digest),
+    // the stamp proves; a forged entry digest, or the primary, opens nothing.
+    const base = admit({});
+    const opened = store.openFallbackCycle(taskRef, chainDigestOf(chain), base, T0);
+    if (!opened.ok) throw new Error("cycle");
+    store.beginFallbackSanitize(opened.id, 0, base, T0);
+    const adv = store.advanceFallbackFenced({ cycleId: opened.id, expectGeneration: 1, fromIndex: 0, chainLength: 3, predecessorRun: base, terminalClass: "usage-exhausted", evidence: { provider: "claude", version: "1.0.0", authMode: "subscription", fp: "" } }, T0);
+    if (!adv.ok) throw new Error("advance");
+    store.releaseFallbackToPending(opened.id, 2, T0);
+    const runArgs = { taskRef, leaseId: "lf", runner: "r", branch: "b", worktree: "/w", provider: "codex", model: "gpt-5-codex" };
+    const forged = store.admitFallback({ cycleId: opened.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: runArgs, entryDigest: entryDigestOf(chain[2]!), authMode: "subscription", route: fallback }, T0);
+    expect(forged).toMatchObject({ ok: false, problem: expect.stringContaining("bound to chain entry 1 under digest") });
+    const wrongPair = store.admitFallback({ cycleId: opened.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: { ...runArgs, model: "o3" }, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key", route: { ...fallback, model: "o3" } }, T0);
+    expect(wrongPair).toMatchObject({ ok: false, problem: expect.stringContaining("is codex · gpt-5-codex, not codex · o3") });
+    expect(runs()).toBe(1);
+    const admitted = store.admitFallback({ cycleId: opened.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: runArgs, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key", route: fallback }, T0);
+    expect(admitted.ok).toBe(true);
+    if (!admitted.ok) return;
+    expect(store.runRoute(admitted.runId)).toMatchObject({ chosen: "fallback", provider: "codex", model: "gpt-5-codex" });
+    expect(store.getRun(admitted.runId)).toMatchObject({ chainIndex: 1, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key" });
+    // A repair child of the bound run inherits the binding IN its admission
+    // and spends as the same entry's repair model — `fallback`, entry 1.
+    const repair = admit({ role: "repair", parentRun: admitted.runId, provider: "codex", model: "gpt-5-codex" });
+    expect(store.getRun(repair)).toMatchObject({ chainCycle: opened.id, chainIndex: 1, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key" });
+    expect(store.runRoute(repair)).toMatchObject({ phase: "repair", chosen: "fallback", provider: "codex", model: "gpt-5-codex" });
   });
 
   test("a stamp is proved against the authority the task holds NOW: a re-filed scope unseals the route, and the old digest no longer admits anything", async () => {

@@ -131,7 +131,16 @@ firing copies verbatim; task, chat, and triage approvals restate one concise
 line of exact agents before the password, with each risk level explained; the
 console offers only configured, role-valid agent choices; and chat reads the
 route and proposes confirmation-gated changes through the same authenticated
-edit. The learning half (project memory) is not started.
+edit. The remaining authority gaps closed on top of that: a routed task never
+opens an unstamped run (the governing authority dictates the stamp, or no row
+opens), fallback stamps bind to one exact chain entry, routine firings re-hash
+the approved snapshot and roll back unless the instance seals, malformed route,
+profile, chain, or fallback data fails closed without shrinking authority, a
+legacy routine or scope gets a plain refresh/re-file road instead of a
+password, agent choices are role-specific with stale agents display-only, and
+the chat change is re-proved inside the edit transaction — with the console
+flow proved on a real subscription-backed chat rather than seeded demo turns.
+The learning half (project memory) is not started.
 
 ## Current focus
 

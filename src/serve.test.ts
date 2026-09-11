@@ -24,6 +24,27 @@ import type { MateProviderAnswer } from "./converse.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
+/**
+ * v48: a routed task opens no run without a sealed route. Fixtures that
+ * need a run on a task seal its scope through the real ceremony first:
+ * exact agents configured once, the scope proposed (or re-filed under
+ * today's configuration), and approved by a bootstrap approver whose token
+ * is remembered per store. The task's own goal is kept when one is filed.
+ */
+function sealScopeFixture(store: Store, taskId: string, token: string, goal = "the work"): void {
+  for (const phase of ["plan", "build", "review"]) {
+    if (store.phaseConfig("installation", phase) === null) store.setPhaseConfig("installation", phase, "claude", "sonnet", "test", T0);
+  }
+  const existing = store.getScope(taskId);
+  if (existing === null) propose(store, { taskId, goal, now: T0 });
+  else if (existing.profileState !== "resolved" || existing.proposedRouteJson == null) store.refileScope(taskId, T0);
+  const scope = store.getScope(taskId);
+  if (scope === null) throw new Error("the fixture filed no scope");
+  if (scope.approvedAt !== null && scope.approvedDigest === scope.digest) return;
+  const approved = approve(store, taskId, "alex", T0, scope.digest, token);
+  if (!approved.ok) throw new Error(`the fixture approval of ${taskId} was refused: ${approved.reason}`);
+}
+
 describe("the web decision view", () => {
   let store: Store;
   let server: Server;
@@ -795,6 +816,7 @@ describe("the operations console", () => {
     store.createTask({ id: "t-lim", title: "bounded work" }, T0);
     const ref = store.refFor("built-in", "t-lim").id;
     propose(store, { taskId: "t-lim", goal: "fix the rounding", outOfScope: "authentication", touches: ["src/payments/"], acceptance: [{ id: "c1", statement: "The rounding is fixed.", evidence: ["check"] }], now: T0 });
+    sealScopeFixture(store, "t-lim", approverToken);
     const run = store.startRun({ taskRef: ref, leaseId: "l-lim", runner: "b-1", branch: "so/t-lim", worktree: "/w", now: T0 });
     store.finishRun(run, { outcome: "built", now: T0 });
     mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
@@ -1071,6 +1093,64 @@ describe("the operations console", () => {
     expect(edited.status).toBe(303);
     const after = await (await fetch(url("/t/t-s"), { headers: { cookie } })).text();
     expect(after).toContain("approved once, then rewritten");
+  });
+
+  test("consent-closed: an unreadable route, a route that cannot run, or a lapsed pre-routing approval mints no nonce and shows no password on the task page, the focused chat, or /next — recovery copy names the road", async () => {
+    store.createTask({ id: "t-c", title: "closed door" }, T0);
+    store.placeTask(store.refFor("built-in", "t-c").id, "/repo/main");
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    await post("/t/t-c/scope", cookie, { csrf, acceptance: "c1: ok | manual-review", sawDigest: "", goal: "the goal", not: "", touches: "" });
+    const digest = store.getScope("t-c")?.digest ?? "";
+    const surfaces = async () => ({
+      task: await (await fetch(url("/t/t-c"), { headers: { cookie } })).text(),
+      chat: await (await fetch(url("/chat?task=t-c"), { headers: { cookie } })).text(),
+      next: await (await fetch(url("/next"), { headers: { cookie } })).text(),
+    });
+    const nonceOf = (html: string) => /name="nonce" value="([0-9a-f]{32})"/.exec(html)?.[1] ?? null;
+    const closed = (html: string) => {
+      expect(nonceOf(html)).toBeNull();
+      expect(html).not.toContain('type="password"');
+      expect(html).not.toMatch(/approve (&amp; start|this scope)/i);
+      expect(html).toContain("consent-closed");
+    };
+    // Open first: the door mints on every surface.
+    let pages = await surfaces();
+    expect(nonceOf(pages.task)).not.toBeNull();
+    expect(nonceOf(pages.chat)).not.toBeNull();
+    expect(nonceOf(pages.next)).not.toBeNull();
+
+    // Unreadable route bytes: closed everywhere, in words, with the road.
+    store.raw().prepare("UPDATE task_scope SET proposed_route_json = '{\"version\":1' WHERE task_id = 't-c'").run();
+    pages = await surfaces();
+    for (const html of Object.values(pages)) {
+      closed(html);
+      expect(html).toContain("can’t be read");
+      expect(html).toContain("re-file the scope");
+    }
+    expect(pages.task).toContain('href="/t/t-c#scope"');
+    // The POST road is closed too: no nonce was rendered, so none is accepted;
+    // and the seal itself refuses an unreadable route.
+    const forced = await post("/t/t-c/approve", cookie, { csrf, nonce: "", digest, token: approverToken });
+    expect(forced.status).toBe(409);
+    expect(store.getScope("t-c")?.approvedAt ?? null).toBeNull();
+
+    // A lapsed pre-routing row (no route era, no standing approval): closed,
+    // and re-filing is the road. The primitive refuses a fresh seal on it.
+    store.raw().prepare("UPDATE task_scope SET proposed_route_json = NULL, route_era = NULL, approved_at = NULL, approved_by = NULL, approved_digest = NULL WHERE task_id = 't-c'").run();
+    pages = await surfaces();
+    for (const html of Object.values(pages)) {
+      closed(html);
+      expect(html).toContain("predates agent routing");
+    }
+    expect(store.sealScopeApproval("t-c", "alex", T0)).toBe(false);
+
+    // Re-filing routes it again: the door opens, the nonce is back.
+    await post("/t/t-c/scope", cookie, { csrf, acceptance: "c1: ok | manual-review", sawDigest: store.getScope("t-c")?.digest ?? "", goal: "the goal", not: "", touches: "" });
+    pages = await surfaces();
+    expect(nonceOf(pages.task)).not.toBeNull();
+    expect(pages.task).toContain('type="password"');
+    expect(nonceOf(pages.next)).not.toBeNull();
   });
 
   test("approval is step-up: the session alone never approves", async () => {
@@ -1748,17 +1828,14 @@ describe("the board — the pipeline as lanes, live in place", () => {
     // registered and repo-bound (the runner gate, MCP spec v6).
     store.placeTask(ref, "/repo/main");
     register(store, { name: "builder-1", host: "here", capacity: 2, repos: ["/repo/main"], now: T0, newToken: () => "tok-builder-1" });
-    store.saveScope({
-      taskId: "t-live", goal: "build it", outOfScope: null, touches: [], acceptance: [],
-      proposedAt: T0.toISOString(), digest: "d1",
-      approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "d1",
-    });
+    sealScopeFixture(store, "t-live", approverToken, "build it");
     const taken = acquire(store, ref, "builder-1", { token: "tok-builder-1", now: new Date(now.getTime() - 12 * 60_000), ttlMs: 60 * 60_000 });
     if (!taken.ok) throw new Error("claim refused");
     store.startRun({
       taskRef: ref, leaseId: taken.claim.leaseId, runner: "builder-1",
       branch: "standing-orders/t-live", worktree: "/pool/standing-orders-t-live-abc",
-      model: "claude", now: new Date(now.getTime() - 12 * 60_000),
+      // The sealed route's exact model — any other opens no run (v48).
+      model: "sonnet", now: new Date(now.getTime() - 12 * 60_000),
     });
     store.createTask({ id: "t-ready", title: "all set" }, T0);
     store.saveScope({
@@ -1782,7 +1859,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(card).not.toMatch(/\d+%/);
     expect(card).toContain('<span class="id">t-live</span><span class="t">');
     expect(card).toContain('<span class="fact"><span class="k">worker</span><span class="v">builder-1</span></span>');
-    expect(card).toContain('<span class="fact"><span class="k">model</span><span class="v">claude</span></span>');
+    expect(card).toContain('<span class="fact"><span class="k">model</span><span class="v">sonnet</span></span>');
     expect(card).toContain("standing-orders-t-live-abc");
     expect(board).toContain('<details class="lane lane-building" open><summary><h2>building');
     expect(board).toContain('<details class="lane lane-waiting"><summary><h2>waiting'); // empty: folded
@@ -2036,6 +2113,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     // A builder run files a bounded, evidence-linked, plan-only revision:
     // the repository showed the flag default was already flipped, so the
     // first milestone is unnecessary (c3, c4's plan-only path).
+    sealScopeFixture(store, "t-adapt", approverToken);
     const buildRun = store.startRun({
       taskRef: ref, leaseId: "build-lease-adapt", runner: "b", role: "builder",
       branch: "standing-orders/t-adapt", worktree: "/pool/build-adapt", now: T0,
@@ -2172,6 +2250,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     }, T0);
     store.finishRun(plannerRun, { outcome: "built", reason: "plan-drafted", now: T0 });
 
+    sealScopeFixture(store, "t-reject", approverToken);
     const buildRun = store.startRun({
       taskRef: ref, leaseId: "build-lease-reject", runner: "b", role: "builder",
       branch: "standing-orders/t-reject", worktree: "/pool/build-reject", now: T0,
@@ -2591,6 +2670,65 @@ describe("routines — standing orders on the console", () => {
     const screen = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
     expect(screen).toContain("firings");
     expect(screen).toContain("weekly-");
+  });
+
+  test("consent-closed (routines): a legacy unfrozen or unreadable order shows no password and mints no nonce — the refresh act is the road, and only the re-approval unlocks the password", async () => {
+    const cookie = await login();
+    const csrfOf = (html: string) => /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] ?? "";
+    const nonceOf = (html: string) => /name="nonce" value="([0-9a-f]*)"/.exec(html)?.[1] ?? null;
+    // An authentic pre-v48 approval: the columns say approved, no route was ever sealed.
+    const id = file("legacy");
+    store.raw().prepare("UPDATE routine SET route_json = NULL, digest = ?, approved_at = ?, approved_by = 'alex', approved_digest = ?, approved_profile_json = profile_json, next_fire_at = ? WHERE id = ?")
+      .run(routineDigestOf(TERMS, store.getRoutine(id)!.profile), T0.toISOString(), routineDigestOf(TERMS, store.getRoutine(id)!.profile), new Date(T0.getTime() + 3_600_000).toISOString(), id);
+    let page = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
+    expect(page).toContain("agents not frozen — refresh and approve again");
+    expect(page).toContain("approved before agents were frozen");
+    expect(page).toContain('id="agents-recovery"');
+    expect(page).toContain("Refresh agents");
+    expect(page).not.toContain('type="password"');
+    expect(nonceOf(page)).toBeNull();
+    // Firing it from the page refuses in words (no run-now form either).
+    expect(page).not.toContain("run now");
+    // Corrupt snapshot bytes read the same way: closed, with their own words.
+    store.raw().prepare("UPDATE routine SET approved_route_json = '{\"version\":1' WHERE id = ?").run(id);
+    page = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
+    expect(page).toContain("cannot be read");
+    expect(page).not.toContain('type="password"');
+    expect(nonceOf(page)).toBeNull();
+    // The refresh act: a session's own POST, nothing approved by it.
+    const refreshed = await fetch(url(`/routines/${id}/refresh`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf: csrfOf(page) }),
+      redirect: "manual",
+    });
+    expect(refreshed.status).toBe(303);
+    const after = store.getRoutine(id)!;
+    expect(after.route).not.toBeNull();
+    expect(after.approvedDigest).not.toBe(after.digest);
+    expect(fireRoutine(store, id, new Date(T0.getTime() + 2 * 3_600_000))).toMatchObject({ ok: false, reason: "not-approved" });
+    // Now the exact agents are restated above a password, under a fresh nonce.
+    page = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
+    expect(page).toContain("edited — approve again");
+    expect(page).toContain("claude · sonnet plans, builds, repairs, and reviews");
+    expect(page).toContain('type="password"');
+    expect(nonceOf(page)).toMatch(/^[0-9a-f]{32}$/);
+    expect(page).not.toContain('id="agents-recovery"');
+    const approved = await fetch(url(`/routines/${id}/approve`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf: csrfOf(page), nonce: nonceOf(page) as string, digest: after.digest, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(approved.status).toBe(303);
+    const frozen = store.getRoutine(id)!;
+    expect(frozen.approvedDigest).toBe(frozen.digest);
+    expect(frozen.approvedRoute).not.toBeNull();
+    // (The console approved under the wall clock, so the slot is not yet
+    // due — run-now proves the seal the same way.)
+    const fired = fireRoutine(store, id, new Date(), { manual: true });
+    expect(fired.ok).toBe(true);
+    if (fired.ok) expect(store.sealedRouteOf(fired.taskId).ok).toBe(true);
   });
 });
 
@@ -6089,6 +6227,7 @@ describe("the continuation ceremony (Phase 2E, A4)", () => {
     taskRef = ref.id;
     store.raw().prepare("UPDATE task_ref SET repo = '/repo' WHERE id = ?").run(ref.id);
     propose(store, { taskId: "t-fin", goal: "the finished goal", outOfScope: null, touches: [], now: T1 });
+    sealScopeFixture(store, "t-fin", approverToken);
     store.raw().prepare("UPDATE task SET state = 'done' WHERE id = 't-fin'").run();
     store
       .raw()
@@ -6895,10 +7034,14 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const agreed = approve(store, id, "alex", new Date(), store.getScope(id)?.digest as string, approverToken);
     if (!agreed.ok) throw new Error(`approval refused: ${agreed.reason}`);
   };
-  const seed = (id: string, title: string): number => {
+  const seed = (id: string, title: string, agent: { provider: string; model: string } | null = null): number => {
     store.createTask({ id, title }, T0);
     const ref = store.refFor("built-in", id, "ours").id;
     store.placeTask(ref, "/repo/main");
+    // A task built by another agent pins it BEFORE the scope files, so the
+    // sealed route names that exact pair (v48: a run spends only as the
+    // sealed build leg).
+    if (agent !== null) store.pinTaskAgent(ref, agent.provider, agent.model);
     store.saveScope({
       taskId: id, goal: `goal of ${id}`, outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
@@ -6908,11 +7051,11 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
   };
 
   /** A live attempt: a real claim under the runner's credential, and its run. */
-  const live = (id: string, ref: number, provider = "claude"): number => {
+  const live = (id: string, ref: number, provider = "claude", model?: string): number => {
     const taken = acquire(store, ref, "night-shift-1", { token: "tok-night-shift-1", now: new Date(), ttlMs: 3_600_000 });
     if (!taken.ok) throw new Error(`claim refused: ${taken.message}`);
     const run = store.startRun({
-      taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", provider,
+      taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", provider, ...(model === undefined ? {} : { model }),
       branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: new Date(Date.now() - 7 * 60_000),
     });
     store.setRunPhase(run, "agent-running");
@@ -7283,8 +7426,8 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
 
     // The Claude-only transcript limitation is kept: a codex build gets the
     // peek and the stated limit, not an empty transcript.
-    const ref2 = seed("t-codex", "built by codex");
-    const run2 = live("t-codex", ref2, "codex");
+    const ref2 = seed("t-codex", "built by codex", { provider: "codex", model: "gpt-5-codex" });
+    const run2 = live("t-codex", ref2, "codex", "gpt-5-codex");
     const codex = await (await fetch(url("/t/t-codex"), { headers: { cookie } })).text();
     expect(codex).toContain(`build #${run2} · night-shift-1 · running`);
     expect(codex).toContain("the live transcript needs the claude harness for now");
@@ -8123,7 +8266,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain("Agents change");
     expect(html).toContain("reviewer on <span class=\"mono\">codex · gpt-5-codex</span>");
     expect(html).toContain("<dt>agents now</dt><dd>claude · sonnet plans, builds, repairs, and reviews</dd>");
-    expect(html).toContain("Elevated risk: the review runs on the strongest configured reviewer; planning and building keep the everyday agents.");
+    expect(html).toContain("Elevated risk: the review runs on the strongest configured reviewer; planning and building keep the everyday agents unless the work itself asks for more (strict quality or screenshots).");
     expect(html).toContain("The current approval no longer covers the task afterwards — approve it again on the task.");
     expect(store.refFor("built-in", "a").routeOverrides).toEqual([]);
     expect(approvalOf(store.getScope("a"))).toMatchObject({ approved: true });
@@ -8432,6 +8575,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const { proposeAsCoordinator } = await import("./coordinator-proposals.js");
     const minted = mintCoordinator(store, { name: "planner-bot", repos: [repoDir], by: "alex", now: clockNow });
     if (!minted.ok) throw new Error("mint");
+    sealScopeFixture(store, "a", approverToken);
     const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: clockNow });
     store.saveDecision({ run, urgency: "blocking", recap: "RECAP-CANARY", question: "Ship it?", options: [{ id: "go", label: "Ship", consequence: "it ships", reversible: false }], recommendation: "go" }, clockNow);
     expect(proposeAsCoordinator(store, minted.token, "next", { ref: "b" }, clockNow)).toMatchObject({ ok: true, id: 1 });
@@ -8551,6 +8695,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     expect(page).toContain("approving sends a read-only session");
 
     // The report lands as evidence; the page renders it only once verified.
+    sealScopeFixture(store, taskId, approverToken);
     const run = store.startRun({ taskRef: ref.id, leaseId: "scout-lease", runner: "b", role: "scout", branch: "standing-orders-scout/x", worktree: "/pool/scout", now: new Date() });
     const report = { title: "The cookie races the assertion", summary: "The read wins under load.", report: "## Findings\nAsync cookie in src/session.ts.\n", followUps: [{ title: "Await the cookie", goal: "Wait for it before asserting." }] };
     const content = Buffer.from(JSON.stringify(report, null, 2), "utf8");
@@ -9688,6 +9833,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
   });
 
   test("evidence is labeled by source — machine re-run, agent checks, reviewer judgements and findings, screenshots, caveats — and says plainly what is missing", async () => {
+    // The project's reviewer is codex, so the sealed review leg — and the
+    // reviewer run below — is codex (v48: a run spends only as its leg).
+    store.setPhaseConfig("/repo/main", "review", "codex", "gpt-5-codex", "test", T0);
     const richRef = seed("t-rich", "everything on record", "/repo/main", {
       acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }],
     });
@@ -10108,23 +10256,29 @@ describe("the phase route on the console (v47): one projection on the task page,
     const noModel = await post(cookie, "/t/payouts/route", { csrf, sawDigest: first.digest, phase: "review", provider: "codex", model: "" });
     expect(noModel.status).toBe(400);
     // A form rendered against a digest that is no longer current is refused.
-    const stale = await post(cookie, "/t/payouts/route", { csrf, sawDigest: "0".repeat(32), phase: "review", provider: "claude", model: "opus" });
+    const stale = await post(cookie, "/t/payouts/route", { csrf, sawDigest: "0".repeat(32), phase: "review", provider: "claude", model: "sonnet" });
     expect(stale.status).toBe(409);
     expect(approvalOf(store.getScope("payouts")!).approved).toBe(true);
-    const changed = await post(cookie, "/t/payouts/route", { csrf, sawDigest: first.digest, phase: "review", provider: "claude", model: "opus" });
+    // A pair configured for another role (the strong BUILDER) is not a
+    // reviewer choice: refused inside the transaction, nothing moves.
+    const borrowed = await post(cookie, "/t/payouts/route", { csrf, sawDigest: first.digest, phase: "review", provider: "claude", model: "opus" });
+    expect(borrowed.status).toBe(400);
+    expect(await borrowed.text()).toContain("not one of the configured agents for the reviewer right now (claude · sonnet, codex · gpt-5-codex)");
+    expect(approvalOf(store.getScope("payouts")!).approved).toBe(true);
+    const changed = await post(cookie, "/t/payouts/route", { csrf, sawDigest: first.digest, phase: "review", provider: "claude", model: "sonnet" });
     expect(changed.status).toBe(303);
     expect(changed.headers.get("location")).toContain("/t/payouts");
     expect(decodeURIComponent(changed.headers.get("location") ?? "")).toContain("approve it again");
     expect(changed.headers.get("location")).toMatch(/#agents$/);
     const ref = store.refFor("built-in", "payouts");
-    expect(ref.routeOverrides).toEqual([expect.objectContaining({ phase: "review", provider: "claude", model: "opus", by: "alex" })]);
+    expect(ref.routeOverrides).toEqual([expect.objectContaining({ phase: "review", provider: "claude", model: "sonnet", by: "alex" })]);
     const after = store.getScope("payouts")!;
     expect(approvalOf(after)).toMatchObject({ approved: false, reason: "changed" });
     const html = await page(cookie, "/t/payouts");
     const card = agentsCardOf(html);
-    expect(card).toContain("<dt>Reviewer</dt><dd><span class=\"mono\">claude · opus</span> <span class=\"badge\">overridden</span>");
-    expect(card).toContain("overridden by alex to claude · opus (recommended codex · gpt-5-codex)");
-    expect(card).toContain("Reviewer → <span class=\"mono\">claude · opus</span>");
+    expect(card).toContain("<dt>Reviewer</dt><dd><span class=\"mono\">claude · sonnet</span> <span class=\"badge\">overridden</span>");
+    expect(card).toContain("overridden by alex to claude · sonnet (recommended codex · gpt-5-codex)");
+    expect(card).toContain("Reviewer → <span class=\"mono\">claude · sonnet</span>");
     expect(card).toContain('name="clear-phase" value="review"');
     // The risk moves too, through the same door, with the current digest.
     const risk = await post(cookie, "/t/payouts/route", { csrf: csrfOf(html), sawDigest: after.digest, risk: "elevated" });
@@ -10204,12 +10358,14 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(forms).toHaveLength(4);
     const optionsOf = (form: string): string[] => [...form.matchAll(/<option value="([^"]+)"/g)].map(one => one[1] ?? "");
     const byPhase = Object.fromEntries(forms.map(form => [/name="phase" value="([a-z]+)"/.exec(form)?.[1] ?? "", optionsOf(form)]));
-    // Configured pairs only: the everyday sonnet, the strong opus builder, the strong codex reviewer.
-    expect(byPhase["plan"]).toEqual(["claude|sonnet", "claude|opus", "codex|gpt-5-codex"]);
-    expect(byPhase["build"]).toEqual(["claude|sonnet", "claude|opus", "codex|gpt-5-codex"]);
+    // Each role's OWN configured pairs: the everyday sonnet everywhere, the
+    // strong opus builder only where it was configured (build, and repair
+    // on the build provider), the strong codex reviewer only for review.
+    expect(byPhase["plan"]).toEqual(["claude|sonnet"]);
+    expect(byPhase["build"]).toEqual(["claude|sonnet", "claude|opus"]);
     // Repairs stay on the build provider; gemini never reviews (and was never configured).
     expect(byPhase["repair"]).toEqual(["claude|sonnet", "claude|opus"]);
-    expect(byPhase["review"]).toEqual(["claude|sonnet", "claude|opus", "codex|gpt-5-codex"]);
+    expect(byPhase["review"]).toEqual(["claude|sonnet", "codex|gpt-5-codex"]);
     expect(change).not.toContain("gemini");
     // The current agent is marked, and selected.
     expect(forms.find(form => form.includes('value="build"'))).toContain('<option value="claude|opus" selected>claude · opus — current</option>');
@@ -10222,8 +10378,10 @@ describe("the phase route on the console (v47): one projection on the task page,
     const digest = store.getScope("payouts")!.digest;
     const unconfigured = await post(cookie, "/t/payouts/route", { csrf, sawDigest: digest, phase: "review", agent: "codex|gpt-5" });
     expect(unconfigured.status).toBe(400);
-    expect(await unconfigured.text()).toContain("choose one of the configured agents for the reviewer (claude · sonnet, claude · opus, codex · gpt-5-codex)");
+    expect(await unconfigured.text()).toContain("not one of the configured agents for the reviewer right now (claude · sonnet, codex · gpt-5-codex)");
     expect(store.refFor("built-in", "payouts").routeOverrides).toEqual([]);
+    // A strong planner configured later is offered for the planner — and only then.
+    store.setPhaseTierConfig("installation", "plan", "strong", "claude", "opus", "test", T0);
     // The select's own value lands as an exact, attributed choice.
     const chosen = await post(cookie, "/t/payouts/route", { csrf, sawDigest: digest, phase: "plan", agent: "claude|opus" });
     expect(chosen.status).toBe(303);
@@ -10259,12 +10417,12 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(approve(store, "payouts", "alex", T0, before.digest, approverToken).ok).toBe(true);
     expect((await page(cookie, "/next"))).toContain("Nothing needs you");
     const html = await page(cookie, "/t/payouts");
-    const changed = await post(cookie, "/t/payouts/route", { csrf: csrfOf(html), sawDigest: before.digest, phase: "review", agent: "claude|opus" });
+    const changed = await post(cookie, "/t/payouts/route", { csrf: csrfOf(html), sawDigest: before.digest, phase: "review", agent: "claude|sonnet" });
     expect(changed.status).toBe(303);
     expect(approvalOf(store.getScope("payouts")!)).toMatchObject({ approved: false, reason: "changed" });
     const again = await page(cookie, "/next");
     expect(again).toContain("the last thing waiting on you");
-    expect(ceremonyOf(again, "\\/t\\/payouts\\/approve")).toContain("claude · sonnet plans; claude · opus builds, repairs, and reviews");
+    expect(ceremonyOf(again, "\\/t\\/payouts\\/approve")).toContain("claude · sonnet plans and reviews; claude · opus builds and repairs");
   });
 
   test("a routed task whose approval lost its agents shows the closed door in words, and a proven pre-routing approval shows its profile", async () => {

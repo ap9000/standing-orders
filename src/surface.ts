@@ -253,6 +253,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("decide", "read and ANSWER parked decisions — answering is a person's act"),
   operator("routine add", "file a standing order"),
   operator("routine approve", "approve a standing order"),
+  operator("routine refresh", "re-resolve the agents a standing order freezes from today's configuration — approves nothing; approve it again afterwards"),
   operator("routine pause", "pause a standing order"),
   operator("routine resume", "resume a standing order"),
   operator("routine run-now", "run a standing order immediately"),

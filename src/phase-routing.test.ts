@@ -279,6 +279,19 @@ describe("canonical bytes and rehydration", () => {
     expect(routeFromJson(json.replace('"model":"haiku"', '"model":""'))).toBeNull();
     // A posture the legs do not support.
     expect(routeFromJson(json.replace('"posture":"economy"', '"posture":"strong"'))).toBeNull();
+    // A model id that is not one (argv-unsafe: a leading dash, whitespace,
+    // control bytes) is not an exact model — the snapshot fails closed.
+    expect(routeFromJson(json.replace('"model":"haiku"', '"model":"--dangerously"'))).toBeNull();
+    expect(routeFromJson(json.replace('"model":"haiku"', '"model":"son net"'))).toBeNull();
+    expect(routeFromJson(json.replace('"model":"haiku"', '"model":"a\\u0000b"'))).toBeNull();
+  });
+
+  test("the model-id shape is provider.ts's own, byte for byte, and the provider list too", async () => {
+    const provider = await import("./provider.js");
+    const routing = await import("./phase-routing.js");
+    expect(routing.MODEL_ID_SHAPE.source).toBe(provider.MODEL_ID.source);
+    expect(routing.MODEL_ID_SHAPE.flags).toBe(provider.MODEL_ID.flags);
+    expect([...routing.PROVIDER_ID_LIST]).toEqual([...provider.PROVIDER_IDS]);
   });
 
   test("the digest lives in its own domain and moves with every signed term", () => {
@@ -298,6 +311,7 @@ describe("canonical bytes and rehydration", () => {
     expect(overridesFromJson(json)?.map(one => one.phase)).toEqual(["plan", "review"]);
     expect(overridesFromJson(null)).toEqual([]);
     expect(overridesFromJson("[{\"phase\":\"build\"}]")).toBeNull();
+    expect(overridesFromJson(JSON.stringify([{ phase: "build", provider: "claude", model: "-rf", by: "alex", at: "2026-09-10T00:00:00.000Z" }]))).toBeNull();
     expect(overridesFromJson("not json")).toBeNull();
     expect(overridesFromJson("[{\"phase\":\"build\",\"provider\":\"claude\",\"model\":null,\"by\":\"a\",\"at\":\"t\"}]")).toBeNull();
     expect(overridesFromJson("[{\"phase\":\"build\",\"provider\":\"claude\",\"model\":\"opus\",\"by\":\"a\",\"at\":\"t\"},{\"phase\":\"build\",\"provider\":\"codex\",\"model\":\"gpt-5\",\"by\":\"a\",\"at\":\"t\"}]")).toBeNull();
@@ -347,6 +361,13 @@ describe("plain-English risk consequences and route stamp shape (v48)", () => {
     const elevated = recommendRoute({ ...base, risk: "elevated" });
     expect(elevated.legs.map(leg => leg.tier)).toEqual(["routine", "routine", "routine", "strong"]);
     expect(riskConsequence("elevated")).toContain("the review runs on the strongest configured reviewer");
+    // …and stays TRUE when the work itself asks for more: strict quality or
+    // screenshots strengthen the builder too, and the sentence says so.
+    const elevatedStrict = recommendRoute({ ...base, risk: "elevated", qualityMode: "strict" });
+    expect(elevatedStrict.legs.every(leg => leg.tier === "strong")).toBe(true);
+    const elevatedShots = recommendRoute({ ...base, risk: "elevated", evidence: ["screenshot"] });
+    expect(elevatedShots.legs.map(leg => leg.tier)).toEqual(["routine", "strong", "strong", "strong"]);
+    expect(riskConsequence("elevated")).toContain("unless the work itself asks for more (strict quality or screenshots)");
     const routine = recommendRoute({ ...base, risk: "routine" });
     expect(routine.legs.every(leg => leg.tier === "routine")).toBe(true);
     // The "no stronger agent configured" reason speaks plainly, no CLI quoted.
@@ -366,6 +387,7 @@ describe("plain-English risk consequences and route stamp shape (v48)", () => {
     expect(routeStampProblem({ ...good, provider: "gpt" })).toContain("unknown provider");
     expect(routeStampProblem({ ...good, model: null })).toContain("names an exact model — the stamp carries none");
     expect(routeStampProblem({ ...good, model: 7 })).toContain("neither an exact id nor null");
+    expect(routeStampProblem({ ...good, model: "--resume" })).toContain("is not a model id");
     expect(["builder", "repair", "planner", "reviewer", "scout"].map(role => phaseOfRole(role as "builder"))).toEqual(["build", "repair", "plan", "review", "build"]);
   });
 });

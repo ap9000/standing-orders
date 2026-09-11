@@ -162,6 +162,8 @@ import {
   approveRoutine,
   describeRoutine,
   fireRoutine,
+  refreshRoutineAgents,
+  routineAgentsState,
   routineDigestOf,
   validateRoutineTerms,
   ROUTINE_NAME,
@@ -379,6 +381,9 @@ Routines — standing orders that fire on a schedule, each instance isolated
                                         exactly the stated terms; editing any
                                         term voids the approval
   standing-orders routine list | show <name>
+  standing-orders routine refresh <name>    re-resolve the agents it freezes from
+                                        today's configuration; approve again
+                                        afterwards — nothing fires until then
   standing-orders routine pause|resume <name>
   standing-orders routine run-now <name> --as <you> --token <t>
 
@@ -517,7 +522,7 @@ export const TASK_ACTIONS = [
 export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
 export const APPROVER_ACTIONS = ["list", "add"] as const;
-export const ROUTINE_ACTIONS = ["list", "add", "show", "approve", "pause", "resume", "run-now"] as const;
+export const ROUTINE_ACTIONS = ["list", "add", "show", "approve", "refresh", "pause", "resume", "run-now"] as const;
 export const CONTEST_ACTIONS = ["show", "exclude"] as const;
 export const PEOPLE_ACTIONS = ["list", "invite", "revoke"] as const;
 export const KEYS_ACTIONS = ["status", "set", "clear", "verify", "auth"] as const;
@@ -6478,6 +6483,24 @@ async function routineCommand(
         `Pause it any time: standing-orders routine pause ${name}`,
       ]);
     }
+    case "refresh": {
+      // THE RECOVERY ROAD (v48): re-resolve the agents from today's
+      // configuration and file them as the order's working agents. Nothing
+      // is approved here — the refreshed order waits for the yes.
+      const before = routineAgentsState(routine);
+      const refreshed = refreshRoutineAgents(store, routine.id, clock());
+      if (!refreshed.ok) {
+        return fail(write, json, "routine refresh", refreshed.reason, `${name}: ${refreshed.problem}`, EXIT.refused);
+      }
+      return succeed(write, json, "routine refresh", { routine: refreshed.routine, changed: refreshed.changed, before: before.state }, () => [
+        refreshed.changed
+          ? `Refreshed ${name}'s agents from today's configuration. Nothing is approved yet — read them and agree:`
+          : `${name} already names exactly these agents; nothing changed.`,
+        ...describeRoutine(refreshed.routine),
+        "",
+        `  standing-orders routine approve ${name}`,
+      ]);
+    }
     case "pause":
     case "resume": {
       store.setRoutinePaused(routine.id, action === "pause", clock());
@@ -6505,7 +6528,7 @@ async function routineCommand(
       ]);
     }
     default:
-      return fail(write, json, "routine", "usage", "`standing-orders routine [add|list|show|approve|pause|resume|run-now]`", EXIT.usage);
+      return fail(write, json, "routine", "usage", "`standing-orders routine [add|list|show|approve|refresh|pause|resume|run-now]`", EXIT.usage);
   }
 }
 
@@ -10113,7 +10136,7 @@ async function routeTaskCommand(
     if (edited.reason === "unauthenticated") {
       return fail(write, json, "task route", edited.detail, describeApproveFailure(edited.detail as "no-approvers" | "not-an-approver", id), EXIT.refused);
     }
-    const code: Record<typeof edited.reason, string> = { "no-task": "unknown-task", "live-claim": "claimed", "contest-open": "contest-open", changed: "changed", nothing: "usage" };
+    const code: Record<typeof edited.reason, string> = { "no-task": "unknown-task", "live-claim": "claimed", "contest-open": "contest-open", changed: "changed", nothing: "usage", "not-configured": "not-configured" };
     return fail(write, json, "task route", code[edited.reason], `${id}: ${edited.detail}`, edited.reason === "nothing" ? EXIT.usage : EXIT.refused);
   }
   const code = show();
@@ -10265,7 +10288,8 @@ function describeApproveFailure(reason: string, id: string): string {
     return "nobody can approve anything yet — `standing-orders approver add <you>` mints the credential that lets a person say yes";
   }
   if (reason === "not-an-approver") return "that is not an approver, or the token does not match";
-  if (reason === "profile-unresolved") return `${id} cannot name an exact agent for every role — configure the project's agents (\`config set <phase> --provider … --model …\`) and file it again`;
+  if (reason === "unrouted") return `${id} was filed before agent routing and its old approval no longer stands — an approval now names exactly which agent plans, builds, repairs, and reviews: file the scope again (\`task scope ${id} …\`) so it is routed under today's agents, then approve it`;
+  if (reason === "profile-unresolved") return `${id} cannot name an exact agent for every role — configure the project's agents (\`config set <phase> --provider … --model …\`), then \`routine refresh ${id}\` and approve it again`;
   return `${id} has no scope to approve`;
 }
 

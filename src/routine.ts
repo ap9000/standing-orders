@@ -24,6 +24,7 @@ import { BUILT_IN, parseCapabilityKey, type Routine, type Store } from "./store.
 import { authenticateApprover, digestOf, profileDigestOf, parseAcceptanceCriteria, canonicalAcceptance, acceptanceWords, type ExecutionProfile, type AcceptanceCriterion } from "./scope.js";
 import { reportsCost } from "./provider.js";
 import { agentsSummary, legOf, postureWords, routeDigestOf, routeProblems, type PhaseRoute } from "./phase-routing.js";
+import { resolveRoutineAuthority } from "./agentconfig.js";
 
 export type Schedule =
   | { kind: "every"; minutes: number }
@@ -323,6 +324,15 @@ export type FireOutcome =
  * exactly those points: it refuses to the person's face, records nothing,
  * advances nothing, and pages nobody.
  */
+/** A firing that must not stand: thrown INSIDE the fire transaction so
+ * every row it wrote rolls back, caught at the edge and returned as the
+ * outcome it names. Nothing half-fired survives. */
+class FiringRolledBack extends Error {
+  constructor(readonly outcome: FireOutcome & { ok: false }, readonly page: { subject: string; body: string } | null) {
+    super(outcome.detail ?? outcome.reason);
+  }
+}
+
 export function fireRoutine(
   store: Store,
   routineId: number,
@@ -330,6 +340,26 @@ export function fireRoutine(
   options: { manual?: boolean } = {},
 ): FireOutcome {
   const manual = options.manual === true;
+  try {
+    return fireRoutineInTransaction(store, routineId, now, manual);
+  } catch (error) {
+    if (!(error instanceof FiringRolledBack)) throw error;
+    // The instance is gone with the transaction; the slot stays due. A
+    // scheduled firing pages once per blocking fact (its episode keys on
+    // the routine, so a later successful firing resolves it).
+    if (!manual && error.page !== null) {
+      store.enqueueRoutineEpisode(
+        `routine-route:${routineId}`,
+        { kind: "routine-blocked", pushClass: "attention", link: `/routines/${routineId}`, subject: error.page.subject, body: error.page.body },
+        now.toISOString(),
+        now,
+      );
+    }
+    return error.outcome;
+  }
+}
+
+function fireRoutineInTransaction(store: Store, routineId: number, now: Date, manual: boolean): FireOutcome {
   return store.transact(() => {
     const routine = store.getRoutine(routineId);
     if (routine === null) return { ok: false as const, reason: "no-such-routine" as const };
@@ -433,30 +463,52 @@ export function fireRoutine(
     // `config set` can reach a firing.
     const frozenRoute = routine.approvedRoute ?? null;
     const frozenProfile = routine.approvedProfile ?? null;
+    const unreadable = routine.approvedRouteUnreadable === true || routine.approvedProfileUnreadable === true;
     if (frozenRoute === null || frozenProfile === null) {
+      // Two different facts, said apart: a snapshot that was never taken
+      // (approved before routing froze) and one whose bytes cannot be read
+      // (corrupt). Both fail closed; the road is the same — file again.
+      const subject = unreadable
+        ? `${routine.name} needs filing again: its frozen agents cannot be read`
+        : `${routine.name} needs approving again: its agents were never frozen`;
+      const body = unreadable
+        ? `The agents this standing order's approval froze cannot be read back. Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`
+        : `This standing order was approved before Standing Orders froze which agents plan, build, repair, and review each firing. Open it, refresh its agents, read the agents it now names, and approve it again; until then its firings wait.`;
       if (!manual) {
         store.enqueueRoutineEpisode(
           `routine-route:${routineId}`,
-          {
-            kind: "routine-blocked",
-            pushClass: "attention",
-            link: `/routines/${routineId}`,
-            subject: `${routine.name} needs approving again: its agents were never frozen`,
-            body: `This standing order was approved before Standing Orders froze which agents plan, build, repair, and review each firing. Open it, read the agents it now names, and approve it again; until then its firings wait.`,
-          },
+          { kind: "routine-blocked", pushClass: "attention", link: `/routines/${routineId}`, subject, body },
           scheduledFor,
           now,
         );
       }
-      return { ok: false as const, reason: "route-unfrozen" as const, detail: "this standing order was approved before its agents were frozen — approve it again to fire it" };
+      return {
+        ok: false as const,
+        reason: "route-unfrozen" as const,
+        detail: unreadable
+          ? "the agents this standing order's approval froze cannot be read — refresh its agents and approve it again to fire it"
+          : "this standing order was approved before its agents were frozen — refresh its agents and approve it again to fire it",
+      };
     }
-    // The build leg is the pin and the profile is its exact restatement —
-    // proved here, inside the transaction, before anything is written.
+    // THE FROZEN SNAPSHOT IS RE-HASHED (v48): the approved profile and the
+    // approved four-role route must hash, with the stored terms, to the
+    // very digest the approver signed — a snapshot column rewritten after
+    // the yes fires nothing. Then the build leg must BE the profile's pair,
+    // the repair leg its provider and repair model, and no leg may carry a
+    // stated problem — proved here, inside the transaction, before
+    // anything is written.
+    if (routineDigestOf(termsOf(routine), frozenProfile, frozenRoute) !== routine.approvedDigest) {
+      return { ok: false as const, reason: "route-unfrozen" as const, detail: "the approved agents do not hash to the approval this standing order carries — file it again and approve it again" };
+    }
+    const frozenProblems = routeProblems(frozenRoute);
+    if (frozenProblems.length > 0) {
+      return { ok: false as const, reason: "route-unfrozen" as const, detail: `the approved route cannot run: ${frozenProblems.join("; ")} — file the standing order again` };
+    }
     const frozenBuild = legOf(frozenRoute, "build");
     const frozenRepair = legOf(frozenRoute, "repair");
     const frozenRepairModel = frozenProfile.repairModel === "inherit" ? frozenProfile.model : frozenProfile.repairModel;
-    if (frozenBuild.provider !== frozenProfile.provider || frozenBuild.model !== frozenProfile.model || frozenRepair.model !== frozenRepairModel) {
-      return { ok: false as const, reason: "route-unfrozen" as const, detail: `the approved agents (${frozenProfile.provider} · ${frozenProfile.model}, repair ${frozenRepairModel}) disagree with the approved route (${frozenBuild.provider} · ${frozenBuild.model}, repair ${frozenRepair.model}) — file the standing order again` };
+    if (frozenBuild.provider !== frozenProfile.provider || frozenBuild.model !== frozenProfile.model || frozenRepair.provider !== frozenProfile.provider || frozenRepair.model !== frozenRepairModel) {
+      return { ok: false as const, reason: "route-unfrozen" as const, detail: `the approved agents (${frozenProfile.provider} · ${frozenProfile.model}, repair ${frozenProfile.provider} · ${frozenRepairModel}) disagree with the approved route (${frozenBuild.provider} · ${frozenBuild.model}, repair ${frozenRepair.provider} · ${frozenRepair.model}) — file the standing order again` };
     }
     // The instance's agent IS the frozen build leg — never resolved from
     // flags or configuration at fire time (Codex provider review, critical
@@ -570,7 +622,21 @@ export function fireRoutine(
       {},
       { profile: instanceProfile, route: frozenRoute },
     );
-    store.sealScopeApproval(taskId, routine.approvedBy ?? "routine", now);
+    // THE SEAL, OR NOTHING (v48): the instance's approval is real only once
+    // the seal copies the frozen route and profile into the approved
+    // snapshot and that snapshot reads back as the sealed route. A seal the
+    // store refuses (an unreadable route, a profile that disagrees) rolls
+    // the whole firing back — no instance, no ledger row, no advanced slot
+    // — and says why.
+    const sealed = store.sealScopeApproval(taskId, routine.approvedBy ?? "routine", now);
+    const sealedRoute = sealed ? store.sealedRouteOf(taskId) : null;
+    if (!sealed || sealedRoute === null || !sealedRoute.ok || routeDigestOf(sealedRoute.route) !== routeDigestOf(frozenRoute)) {
+      const why = !sealed ? "the store refused to seal the instance's approval" : sealedRoute !== null && !sealedRoute.ok ? sealedRoute.detail : "the sealed route is not the frozen route";
+      throw new FiringRolledBack(
+        { ok: false, reason: "route-unfrozen", detail: `the instance could not be sealed under the frozen agents (${why}) — nothing fired; file the standing order again` },
+        { subject: `${routine.name} could not fire: its frozen agents did not seal`, body: `The firing was rolled back because ${why}. Open the standing order, refresh its agents, and approve it again; until then its firings wait.` },
+      );
+    }
 
     store.recordRoutineFire(
       { routineId, scheduledFor: slotKey, outcome: "fired", reason: manual ? "manual" : null, instanceTaskRef: ref.id },
@@ -583,6 +649,81 @@ export function fireRoutine(
     store.resolveRoutineEpisodes(routineId, now);
 
     return { ok: true as const, taskId, scheduledFor };
+  });
+}
+
+/**
+ * THE AGENTS A STANDING ORDER HOLDS (v48), as one honest word per state,
+ * read by every surface — the routine page, the CLI, the firing:
+ *
+ *   frozen      — approved, and the approval's snapshot reads back exact;
+ *   pending     — filed with an exact route, awaiting the yes (or the yes
+ *                 went stale on an edit);
+ *   unfrozen    — approved BEFORE agents were frozen: the approval stands
+ *                 on its terms but no firing can run until the agents are
+ *                 refreshed and the order approved again;
+ *   unreadable  — the row carries route or profile bytes that do not read
+ *                 back (corrupt): nothing approves or fires;
+ *   unresolved  — filed under a configuration that could not name an
+ *                 exact agent for every role (or whose route carries a
+ *                 stated problem): refresh once the agents are configured.
+ *
+ * `refresh` says whether the one recovery road — re-resolve the agents
+ * from today's configuration and approve again — applies.
+ */
+export type RoutineAgentsState = { state: "frozen" | "pending" | "unfrozen" | "unreadable" | "unresolved"; approvable: boolean; refresh: boolean; problem: string | null };
+
+export function routineAgentsState(routine: Pick<Routine, "route" | "approvedRoute" | "profile" | "approvedProfile" | "approvedAt" | "approvedDigest" | "digest" | "routeUnreadable" | "approvedRouteUnreadable" | "approvedProfileUnreadable">): RoutineAgentsState {
+  const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
+  if (approved) {
+    if (routine.approvedRouteUnreadable === true || routine.approvedProfileUnreadable === true) {
+      return { state: "unreadable", approvable: false, refresh: true, problem: "the agents this approval froze cannot be read back" };
+    }
+    const route = routine.approvedRoute ?? null;
+    const profile = routine.approvedProfile ?? null;
+    if (route === null || profile === null) return { state: "unfrozen", approvable: false, refresh: true, problem: "approved before agents were frozen" };
+    const problems = routeProblems(route);
+    if (problems.length > 0) return { state: "unresolved", approvable: false, refresh: true, problem: problems.join("; ") };
+    return { state: "frozen", approvable: false, refresh: false, problem: null };
+  }
+  if (routine.routeUnreadable === true) return { state: "unreadable", approvable: false, refresh: true, problem: "the filed agents cannot be read back" };
+  const route = routine.route ?? null;
+  const profile = routine.profile ?? null;
+  if (route === null || profile === null) return { state: "unresolved", approvable: false, refresh: true, problem: "this standing order does not name an exact agent for every role" };
+  const problems = routeProblems(route);
+  if (problems.length > 0) return { state: "unresolved", approvable: false, refresh: true, problem: problems.join("; ") };
+  return { state: "pending", approvable: true, refresh: false, problem: null };
+}
+
+export type RefreshRoutineResult =
+  | { ok: true; routine: Routine; changed: boolean }
+  | { ok: false; reason: "no-such-routine" | "unresolved"; problem: string };
+
+/**
+ * THE RECOVERY ROAD (v48): re-resolve a standing order's agents — the
+ * four-role route and the profile that restates its build and repair legs
+ * — from today's configuration, and file them as the order's WORKING
+ * agents under a digest that binds them. Nothing is approved here: a
+ * refreshed order reads "edited — approve again", the approver reads the
+ * exact agents it now names and agrees to them with the password, and
+ * only that yes freezes the snapshot a firing copies. A routine whose
+ * terms already bind these exact agents is left byte-for-byte alone.
+ * A configuration that still cannot name an exact, runnable agent for
+ * every role answers with the words and changes nothing.
+ */
+export function refreshRoutineAgents(store: Store, routineId: number, now: Date): RefreshRoutineResult {
+  return store.transact(() => {
+    const routine = store.getRoutine(routineId);
+    if (routine === null) return { ok: false as const, reason: "no-such-routine" as const, problem: "no such routine" };
+    const authority = resolveRoutineAuthority(store, routine.repo, routine.acceptance, now);
+    if (!authority.ok) return { ok: false as const, reason: "unresolved" as const, problem: authority.problem };
+    const terms = termsOf(routine);
+    const digest = routineDigestOf(terms, authority.profile, authority.route);
+    if (digest === routine.digest && routine.route != null && routine.profile != null) {
+      return { ok: true as const, routine, changed: false };
+    }
+    store.updateRoutineTerms(routineId, { ...terms, digest, profile: authority.profile, route: authority.route }, now);
+    return { ok: true as const, routine: store.getRoutine(routineId) as Routine, changed: true };
   });
 }
 
@@ -607,11 +748,15 @@ export function describeRoutine(routine: Routine): string[] {
 
 /** The agents a standing order's approval freezes, in the same words the
  * task page and chat use — or why it cannot say. */
-export function routineAgentsWords(routine: Pick<Routine, "route" | "approvedRoute" | "approvedAt" | "approvedDigest" | "digest">): string[] {
+export function routineAgentsWords(routine: Pick<Routine, "route" | "approvedRoute" | "profile" | "approvedProfile" | "approvedAt" | "approvedDigest" | "digest" | "routeUnreadable" | "approvedRouteUnreadable" | "approvedProfileUnreadable">): string[] {
   const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
+  const agents = routineAgentsState(routine);
   const route = approved ? routine.approvedRoute ?? null : routine.route ?? null;
-  if (route === null) {
-    return [`  agents       not frozen — ${approved ? "approved before agent routing; approve the standing order again" : "file the standing order again under a configuration that names an exact agent for every role"}`];
+  if (route === null || agents.state === "unreadable" || agents.state === "unresolved") {
+    return [
+      `  agents       ${agents.state === "unreadable" ? "cannot be read" : agents.state === "unfrozen" ? "not frozen" : "not resolved"} — ${agents.problem ?? "this standing order does not name an exact agent for every role"}`,
+      `               refresh them with \`routine refresh <name>\`, read the agents it then names, and approve it again`,
+    ];
   }
   return [
     `  agents       ${agentsSummary(route)} — ${postureWords(route)}`,

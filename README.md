@@ -477,33 +477,60 @@ Every run is stamped with its route and the actual provider and model at
 admission — set once; a run that would spend as anything else refuses.
 
 Admission proves that stamp before any run row exists: its shape (a known
-phase, provenance word, and provider; a digest; an exact model), its phase
-against the run's role, its provider and model against what the run would
-spend as, and its provenance against the authority the task actually holds —
-the sealed route's digest and that phase's exact leg, a non-primary entry of
-the approved fallback chain for a `fallback` run (and its repair model for a
-repair), or a proven pre-routing row for `legacy`. A stamp that cannot be
-proved opens no run; malformed authority data fails closed in words. An
-approved fallback's repair keeps the same exact agent, chain entry, route
-digest, credential mode, and `fallback` provenance as the run it mends.
+phase, provenance word, and provider; a digest; an exact, argv-safe model id),
+its phase against the run's role, its provider and model against what the run
+would spend as, and its provenance against the authority the task actually
+holds — the sealed route's digest and that phase's exact leg, the one approved
+fallback-chain entry the run is bound to for a `fallback` run (two entries
+that share a provider and model but differ in auth mode or repair model are
+different authorities, and an ambiguous pair proves nothing), or a proven
+pre-routing row for `legacy`. A task filed under routing never opens an
+unstamped run: a planner, builder, scout, reviewer, repair turn, or fallback
+that presents no stamp gets the one its governing authority dictates, proved
+against its own agent — or no row at all. The chain binding of a repair or
+correction child rides its own insert, so a stamp is held to exactly the
+entry the child spends under. A stamp that cannot be proved opens no run, and
+a run admitted under a route the scope has since re-sealed away refuses to
+spend. Malformed authority — corrupt route, profile, chain, or fallback JSON,
+a model id that is not one — fails closed in words and never shrinks: a
+fallback row that cannot be read files the scope unresolved rather than
+sealing a single profile nobody configured.
 
 A **routine** freezes its agents too. Filing a standing order resolves its
 four-role route from the configuration of that moment and binds it into the
-digest you sign; approval seals the snapshot, and every firing copies it onto
-the instance verbatim — a later `config set` cannot re-route a firing. A
-routine approved before agents were frozen fires nothing and pages once until
-you approve it again under the agents it now names.
+digest you sign; approval seals the snapshot, and every firing re-hashes that
+snapshot against the approval, holds the build and repair legs to the sealed
+profile's exact provider and model, copies it onto the instance verbatim, and
+rolls the whole firing back unless the instance seals under it — a later
+`config set` cannot re-route a firing. A routine approved before agents were
+frozen (an upgrade from before v48), or whose snapshot cannot be read, fires
+nothing and pages once; its page and `routine show` say so and offer the one
+road: `standing-orders routine refresh <name>` (or the page's **Refresh
+agents** button) re-resolves the agents from today's configuration and
+approves nothing — you read the exact agents it now names and approve it
+again with your password, and only that yes fires the new snapshot.
 
 Every approval surface — the task page, the focused chat, and `/next` — shows
 the same concise line of exact agents above the password, with the declared
 risk explained in plain words and the runtime limits one tap away; changing
-any agent invalidates the approval every surface signed under. The task
-page's controls offer only agents you have configured and only where they can
-run (gemini never reviews; repairs stay on the build provider), and each risk
-level says what it does. Chat reads the same route (`get_agents`) and proposes
-one confirmation-gated change (`propose_agents`) — a risk, one role switched
-to a listed agent, or a hand-picked role cleared — which lands, when you
-confirm the card, through the same authenticated route edit the page uses.
+any agent invalidates the approval every surface signed under. Where no yes
+could bind — an unreadable route, a route that cannot run, a standing order
+without frozen agents, or a pre-routing row whose old approval no longer
+stands — those surfaces mint no nonce and show no password or approve button,
+only the reason and the act that opens it (re-file the scope, change the
+agents, refresh the routine); an old approval already on a pre-routing row is
+grandfathered, but no new yes lands on it. The task page's controls offer,
+per role, only the agents you configured *for that role* (gemini never
+reviews; repairs stay on the build provider), a current agent the
+configuration no longer names is shown for what runs today and never offered
+again, and each risk level says what it does — truthfully under strict
+quality and screenshot proof too. Chat reads the same route (`get_agents`)
+and proposes one confirmation-gated change (`propose_agents`) — a risk, one
+role switched to a listed agent, or a hand-picked role cleared — which lands,
+when you confirm the card, through the same authenticated route edit the page
+uses; the chosen agent is re-proved against the role's configured choices
+*inside* that transaction, so a card drafted against yesterday's
+configuration changes nothing.
 
 ## The phone, both directions
 

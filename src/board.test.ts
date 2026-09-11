@@ -12,6 +12,7 @@ import { classify, attentionCardForUnverifiedDone, type BoardFacts } from "./boa
 import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
 import { acquire, release } from "./claim.js";
+import { addApprover, approve, propose } from "./scope.js";
 
 const T0 = new Date("2026-08-01T12:00:00Z");
 
@@ -228,19 +229,19 @@ describe("the lane classifier", () => {
 describe("boardScoped — one snapshot, all the facts", () => {
   let store: Store;
 
-  const approvedScope = (taskId: string) =>
-    store.saveScope({
-      taskId,
-      goal: "do the thing",
-      outOfScope: null,
-      touches: [],
-      acceptance: [],
-      proposedAt: T0.toISOString(),
-      digest: "d1",
-      approvedAt: T0.toISOString(),
-      approvedBy: "alex",
-      approvedDigest: "d1",
-    });
+  // v48: a routed task opens no run without a sealed route — the fixture
+  // approves through the real ceremony under exact configured agents.
+  const approvedScope = (taskId: string) => {
+    for (const phase of ["plan", "build", "review"]) {
+      if (store.phaseConfig("installation", phase) === null) store.setPhaseConfig("installation", phase, "claude", "sonnet", "test", T0);
+    }
+    const added = addApprover(store, "alex", T0);
+    if (added.ok) approverToken = added.token;
+    propose(store, { taskId, goal: "do the thing", now: T0 });
+    const approved = approve(store, taskId, "alex", T0, store.getScope(taskId)!.digest, approverToken);
+    if (!approved.ok) throw new Error(`the fixture approval was refused: ${approved.reason}`);
+  };
+  let approverToken = "";
 
   beforeEach(() => {
     store = openStore(":memory:");
@@ -270,7 +271,8 @@ describe("boardScoped — one snapshot, all the facts", () => {
       runner: "builder-1",
       branch: "standing-orders/t-run",
       worktree: "/pool/t-run",
-      model: "claude",
+      // The sealed route's exact build model — any other opens no run (v48).
+      model: "sonnet",
       now,
     });
     const bareTaken = acquire(store, bare, "builder-2", { token: tok("builder-2"), now, ttlMs: 60 * 60_000 });
@@ -280,7 +282,7 @@ describe("boardScoped — one snapshot, all the facts", () => {
     const one = board.tasks.find(row => row.taskId === "t-run");
     expect(one?.claim).toMatchObject({
       runner: "builder-1",
-      model: "claude",
+      model: "sonnet",
       branch: "standing-orders/t-run",
       worktree: "/pool/t-run",
     });

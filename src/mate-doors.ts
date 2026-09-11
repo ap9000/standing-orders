@@ -18,7 +18,6 @@ import type { VerifiedApprover } from "./principal.js";
 import { isVerifiedApprover, reproveApprover } from "./principal.js";
 import { fileTaskProposal } from "./proposal.js";
 import { proposeGuarded } from "./scope.js";
-import { agentChoicesFor, routeOfTask } from "./agentconfig.js";
 import { isRiskLevel, PHASES, riskTitle, specWords } from "./phase-routing.js";
 import { isProviderId } from "./provider.js";
 import type { Phase, ProviderId } from "./provider.js";
@@ -409,11 +408,6 @@ function executeProposal(
         override = { phase: phase as Phase, clear: true };
       } else {
         if (provider === null || model === null || !isProviderId(provider)) return refuse("refused", "this proposal names no exact agent");
-        const routed = routeOfTask(store, taskId, ref, now);
-        const choices = agentChoicesFor(store, ref.repo, routed !== null && routed.kind === "route" ? routed.route : null)[phase as Phase];
-        if (!choices.some(one => one.provider === provider && one.model === model)) {
-          return refuse("stale", `${specWords({ provider, model })} is no longer one of the configured agents for that role — look again`);
-        }
         override = { phase: phase as Phase, provider, model };
       }
     }
@@ -428,10 +422,15 @@ function executeProposal(
         ...(isRiskLevel(risk) ? { risk } : {}),
         ...(override === undefined ? {} : { override }),
         expectDigest: payloadString(payload, "sawDigest"),
+        // The pair is re-proved against the role's configured choices
+        // INSIDE the edit transaction — a card drafted against an earlier
+        // configuration mutates nothing.
+        configured: true,
       },
       now,
     );
     if (!edited.ok) {
+      if (edited.reason === "not-configured") return refuse("stale", `${specWords({ provider: provider as string, model: model as string })} is no longer one of the configured agents for that role — look again`);
       if (edited.reason === "changed") return refuse("stale", "the scope was rewritten since this was proposed — look again");
       if (edited.reason === "live-claim") return refuse("claimed", "this task is being built right now");
       if (edited.reason === "contest-open") return refuse("contest-open", "a tournament is running on this task — let it finish first");

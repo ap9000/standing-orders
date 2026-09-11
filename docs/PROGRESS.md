@@ -1,5 +1,51 @@
 # Progress
 
+**2026-09-11 — Routing authority is closed at the row, the firing, and the
+door.** A task filed under agent routing never opens an unstamped run: a
+planner, builder, scout, reviewer, repair turn, or fallback that presents no
+route provenance gets the stamp its governing authority dictates — the sealed
+route's leg for its phase, the working route's plan leg before approval, the
+bound fallback entry for a chain child — proved against the run's own
+provider and model exactly as a presented stamp would be, or no row opens;
+the chain binding of a repair or correction child rides its own insert, and
+a fallback stamp is held to exactly the entry the cycle admits (two entries
+sharing a provider and model under different auth modes or repair models are
+different authorities; an ambiguous pair proves nothing). A run admitted
+under a route the scope has since re-sealed away refuses to spend. Routine
+firings re-hash the approved profile and four-role route against the
+approval, hold the build and repair legs to the sealed profile's provider
+and model, refuse a route with a stated problem or unreadable snapshot
+bytes, and roll the whole firing back — no instance, no ledger row, no
+advanced slot — unless the instance seals under the frozen route. An
+authentic v47 routine survives the v48 upgrade with its data, fires nothing,
+and has one plain road: `routine refresh` (CLI) or **Refresh agents** (page)
+re-resolves the agents from today's configuration and approves nothing; the
+operator reads the exact agents and approves again, and only that yes fires
+the new snapshot. Malformed authority fails closed everywhere: model ids
+that are not ids never rehydrate, stamp, or override; corrupt route,
+profile, or chain JSON reads as unreadable on the seal (a chain seal also
+requires its profile mirror to read and agree); a fallback configuration
+row that cannot be read files the scope unresolved instead of quietly
+sealing a single profile. Task, chat, and `/next` share one consent door —
+an unreadable route, a route that cannot run, or a pre-routing row whose
+approval lapsed mints no nonce and shows no password or approve button,
+only the reason and the act that opens it; the seal primitive refuses a new
+yes on a pre-routing row (`unrouted`), while an old approval on one stays
+grandfathered; the routine page mints a nonce only for an approvable order.
+Agent choices are role-specific — each role offers the agents configured
+for it, repair follows the build provider, a current agent the
+configuration no longer names is display-only — and the chat's chosen agent
+is re-proved against those choices inside the authenticated edit
+transaction, so a stale card mutates nothing. The elevated-risk sentence now
+stays true under strict quality and screenshot proof; the chat summary is
+said once per screen; suggestion chips step aside on phones while a card is
+pending so the card and composer share one screen. The seeded demo
+conversation is gone; the evidence under
+`evidence/explainable-risk-aware-phase-routing-v1/` is a real
+subscription-backed chat on a scratch plane — `get_agents` then
+`propose_agents` from a typed message, the pending card with the composer,
+the confirmed result, and the task page — at 1400×900 and 390×844, DPR 1.
+
 **2026-09-11 — Routing authority is closed end to end, and chat can steer
 it.** Run admission now proves a run's route stamp before any row exists: a
 malformed stamp (unknown phase, provenance word, or provider; an empty digest;

@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
+import { addApprover, approve, propose } from "./scope.js";
 import {
   acquire,
   acquireFallback,
@@ -21,15 +22,27 @@ import {
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
-/** acquireIfReady now re-proves the approved scope for builder dispatches
- * (Codex planning review, finding 2) — these tests approve by hand. */
+/** acquireIfReady re-proves the approved scope for builder dispatches
+ * (Codex planning review, finding 2), and since v48 a routed task opens
+ * no run without a sealed route — so these tests approve through the
+ * real ceremony: exact agents configured once, then propose and approve. */
 function approveScopeFor(store: Store, taskId: string): void {
-  store.saveScope({
-    taskId, goal: "the work", outOfScope: null, touches: [], acceptance: [],
-    proposedAt: "2026-08-11T00:00:00.000Z", digest: `dg-${taskId}`,
-    approvedAt: "2026-08-11T00:00:00.000Z", approvedBy: "alex", approvedDigest: `dg-${taskId}`,
-  });
+  for (const phase of ["plan", "build", "review"]) {
+    if (store.phaseConfig("installation", phase) === null) store.setPhaseConfig("installation", phase, "claude", "sonnet", "test", T0);
+  }
+  const token = (() => {
+    const added = addApprover(store, "alex", T0);
+    if (added.ok) return added.token;
+    return approverTokens.get(store) as string;
+  })();
+  approverTokens.set(store, token);
+  propose(store, { taskId, goal: "the work", now: T0 });
+  const scope = store.getScope(taskId);
+  if (scope === null) throw new Error("propose filed nothing");
+  const approved = approve(store, taskId, "alex", T0, scope.digest, token);
+  if (!approved.ok) throw new Error(`the fixture approval was refused: ${approved.reason}`);
 }
+const approverTokens = new WeakMap<Store, string>();
 const later = (ms: number) => new Date(T0.getTime() + ms);
 
 /** Lease ids are opaque; naming them makes a fencing failure readable. */

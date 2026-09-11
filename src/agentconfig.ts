@@ -241,6 +241,8 @@ export function resolveScopeChain(
 ): ChainResolution {
   const base = resolveScopeProfile(store, repo, ref, flags);
   if (!base.ok) return { ok: false, reason: "base-unresolved", problem: base.problem };
+  const unreadable = repo === null ? null : store.fallbackConfigProblem(repo);
+  if (unreadable !== null) return { ok: false, reason: "bad-fallback", problem: unreadable };
   const fallbacks = repo === null ? [] : store.fallbackConfig(repo);
   if (fallbacks.length === 0) {
     // No fallbacks: a legacy single-profile approval, unchanged.
@@ -490,49 +492,60 @@ export function resolveRoutineAuthority(store: Store, repo: string, acceptance: 
 
 // ---- the operator's agent choices (v48) -----------------------------------
 
-/** One agent an operator may choose for one role: an exact configured pair
- * and where it was configured, plus whether it is the role's current leg. */
-export type AgentChoice = ExactSpec & { source: string; current: boolean };
+/** One agent a surface shows for one role: an exact pair, where it comes
+ * from, whether it is the role's current leg, and whether it can be
+ * CHOSEN — only a pair the active configuration names for this role is
+ * selectable; a current leg the configuration no longer names is shown
+ * for what runs today and nothing more. */
+export type AgentChoice = ExactSpec & { source: string; current: boolean; selectable: boolean };
 
 /**
- * THE CONFIGURED, ROLE-VALID CHOICES a surface may offer for each role:
- * every exact pair the operator has configured anywhere — each phase's
- * everyday agent and its strong agent, the repair row — de-duplicated,
- * then filtered by what the role can actually run: gemini cannot review;
- * the repair role runs only the build leg's provider (repairs resume the
- * builder's session). Nothing is typed free-hand and nothing unconfigured
- * is offered: an approval binds an exact agent the operator has named
- * once, in configuration. Empty when the configuration cannot make exact
- * candidates at all — the surface then says so instead of guessing.
+ * THE ROLE'S CONFIGURED CHOICES (v48), simple and role-specific: for each
+ * role, exactly the exact pairs the active configuration names FOR THAT
+ * ROLE — its everyday agent and its strong agent — and nothing borrowed
+ * from another role. Repair runs only the build leg's provider (repairs
+ * resume the builder's session): its choices are the configured repair
+ * rows on that provider plus the build role's own configured agents on
+ * it, so an operator can keep repairs on the builder without naming a
+ * repair row. Gemini never reviews. Nothing is typed free-hand and
+ * nothing unconfigured is selectable: an approval binds an exact agent
+ * the operator named once, in configuration.
+ *
+ * The role's CURRENT leg rides along marked `current`; when the
+ * configuration no longer names it (a stale override, a routine's pin)
+ * it is display-only — `selectable: false` — so a surface can say what
+ * runs today without offering to re-pick it. Empty when the
+ * configuration cannot make exact candidates at all; the surface then
+ * says so instead of guessing.
  */
 export function agentChoicesFor(store: Store, repo: string | null, route: PhaseRoute | null): Record<Phase, AgentChoice[]> {
   const empty: Record<Phase, AgentChoice[]> = { plan: [], build: [], repair: [], review: [] };
   const candidates = resolveRouteCandidates(store, repo);
   if (!candidates.ok) return empty;
-  const pool: RouteCandidate[] = [];
-  const add = (one: RouteCandidate | null): void => {
-    if (one !== null && !pool.some(seen => sameSpec(seen, one))) pool.push(one);
-  };
-  for (const phase of PHASES) {
+  const buildProvider = route === null ? candidates.candidates.build.routine.provider : legOf(route, "build").provider;
+  const configuredFor = (phase: Phase): RouteCandidate[] => {
     const tiers = candidates.candidates[phase];
-    add(tiers.routine);
-    add(tiers.strong);
-  }
-  const buildProvider = route === null ? null : legOf(route, "build").provider;
+    const own: (RouteCandidate | null)[] = phase === "repair"
+      ? [tiers.routine, tiers.strong, candidates.candidates.build.routine, candidates.candidates.build.strong]
+      : [tiers.routine, tiers.strong];
+    const out: RouteCandidate[] = [];
+    for (const one of own) {
+      if (one === null || out.some(seen => sameSpec(seen, one))) continue;
+      if (phase === "review" && one.provider === "gemini") continue;
+      if (phase === "repair" && one.provider !== buildProvider) continue;
+      if (!validateSpec({ provider: one.provider, model: one.model }).ok) continue;
+      out.push(one);
+    }
+    return out;
+  };
   const out: Record<Phase, AgentChoice[]> = { plan: [], build: [], repair: [], review: [] };
   for (const phase of PHASES) {
-    // The leg already on this role (an override typed on the CLI, a
-    // routine's pin) is offered for THIS role only, marked current — so the
-    // control can show what runs today without turning a one-task choice
-    // into a configured agent for every other role.
     const current = route === null ? null : legOf(route, phase);
-    const offered: RouteCandidate[] = [...pool];
-    if (current !== null && !offered.some(one => sameSpec(one, current))) offered.push({ provider: current.provider, model: current.model, source: "this task's current agent" });
-    out[phase] = offered
-      .filter(one => (phase === "review" ? one.provider !== "gemini" : true))
-      .filter(one => (phase === "repair" && buildProvider !== null ? one.provider === buildProvider : true))
-      .filter(one => validateSpec({ provider: one.provider, model: one.model }).ok)
-      .map(one => ({ provider: one.provider, model: one.model, source: one.source, current: current !== null && sameSpec(current, one) }));
+    const offered = configuredFor(phase).map(one => ({ provider: one.provider, model: one.model, source: one.source, current: current !== null && sameSpec(current, one), selectable: true }));
+    if (current !== null && !offered.some(one => sameSpec(one, current))) {
+      offered.push({ provider: current.provider, model: current.model, source: "this task's current agent — not in today's configuration", current: true, selectable: false });
+    }
+    out[phase] = offered;
   }
   return out;
 }

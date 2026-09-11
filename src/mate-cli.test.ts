@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import { openStore } from "./store.js";
-import { addApprover } from "./scope.js";
+import { addApprover, approve } from "./scope.js";
 import { runOperate } from "./operate.js";
 import type { MateProviderAnswer } from "./converse.js";
 
@@ -168,6 +168,12 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
 
   test("an irreversible answer takes `confirm N yes`", async () => {
     const store0 = openStore(db);
+    // v48: a routed task opens no run without a sealed route — name exact
+    // agents, re-file the scope under them, and approve it first.
+    for (const phase of ["plan", "build", "review"]) store0.setPhaseConfig("installation", phase, "claude", "sonnet", "alex", T0);
+    store0.refileScope("a", T0);
+    const sealed = approve(store0, "a", "alex", T0, store0.getScope("a")!.digest, token);
+    if (!sealed.ok) throw new Error(`the fixture approval was refused: ${sealed.reason}`);
     const runId = store0.startRun({ taskRef: store0.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0 });
     store0.saveDecision({ run: runId, urgency: "blocking", recap: "r", question: "Which?", options: [{ id: "y", label: "Y", consequence: "cy", reversible: false }], recommendation: "y" }, T0);
     store0.close();

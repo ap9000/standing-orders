@@ -54,9 +54,17 @@ import type { QualityMode } from "./quality.js";
 // in the module graph, and this policy is imported by scope.ts — a value
 // import would be a cycle at load time. The id list is restated here and
 // pinned to provider.ts's by the test suite.
-const PROVIDER_ID_LIST: readonly ProviderId[] = ["claude", "codex", "openrouter", "gemini"];
+export const PROVIDER_ID_LIST: readonly ProviderId[] = ["claude", "codex", "openrouter", "gemini"];
 function isProviderId(value: string): value is ProviderId {
   return (PROVIDER_ID_LIST as readonly string[]).includes(value);
+}
+/** provider.ts's MODEL_ID, restated for the same reason and pinned by the
+ * same test: an exact model id is argv-safe — no leading dash, no
+ * whitespace or control bytes — or it is not a model id this policy can
+ * seal, stamp, or rehydrate. */
+export const MODEL_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+function exactModel(v: unknown): v is string {
+  return typeof v === "string" && MODEL_ID_SHAPE.test(v);
 }
 
 export const ROUTE_VERSION = 1;
@@ -86,7 +94,7 @@ export function riskTitle(risk: RiskLevel): string {
  */
 export function riskConsequence(risk: RiskLevel): string {
   if (risk === "high") return "every role — planner, builder, repair, and reviewer — uses the strongest agent you have configured";
-  if (risk === "elevated") return "the review runs on the strongest configured reviewer; planning and building keep the everyday agents";
+  if (risk === "elevated") return "the review runs on the strongest configured reviewer; planning and building keep the everyday agents unless the work itself asks for more (strict quality or screenshots)";
   return "every role uses the everyday configured agent unless the work itself asks for more (strict quality, screenshots, or a self-merging mode)";
 }
 
@@ -543,14 +551,14 @@ export function routeFromJson(json: string | null): PhaseRoute | null {
     const leg = raw as Record<string, unknown>;
     if (leg["phase"] !== PHASES[index]) return null;
     if (!str(leg["provider"]) || !isProviderId(leg["provider"])) return null;
-    if (!str(leg["model"])) return null;
+    if (!exactModel(leg["model"])) return null;
     if (leg["tier"] !== "routine" && leg["tier"] !== "strong") return null;
     if (leg["chosen"] !== "recommended" && leg["chosen"] !== "override" && leg["chosen"] !== "pinned") return null;
     const rec = leg["recommended"];
     if (rec === null || typeof rec !== "object") return null;
     const recommended = rec as Record<string, unknown>;
     if (!str(recommended["provider"]) || !isProviderId(recommended["provider"])) return null;
-    if (!str(recommended["model"])) return null;
+    if (!exactModel(recommended["model"])) return null;
     if (recommended["tier"] !== "routine" && recommended["tier"] !== "strong") return null;
     if (!stringList(leg["reasons"])) return null;
     if (!strOrNull(leg["problem"])) return null;
@@ -596,7 +604,7 @@ export function parseOverrides(raw: unknown): RouteOverride[] | null {
     if (seen.has(o["phase"])) return null;
     seen.add(o["phase"]);
     if (!str(o["provider"]) || !isProviderId(o["provider"])) return null;
-    if (!str(o["model"])) return null;
+    if (!exactModel(o["model"])) return null;
     if (!str(o["by"]) || !str(o["at"])) return null;
     overrides.push({ phase: o["phase"] as Phase, provider: o["provider"], model: o["model"], by: o["by"], at: o["at"] });
   }
@@ -770,6 +778,7 @@ export function routeStampProblem(stamp: unknown): string | null {
   if (!str(s["provider"]) || !isProviderId(s["provider"])) return `the route stamp names an unknown provider ${JSON.stringify(s["provider"])}`;
   const model = s["model"];
   if (model !== null && !str(model)) return "the route stamp's model is neither an exact id nor null";
+  if (model !== null && !exactModel(model)) return `the route stamp's model ${JSON.stringify(model)} is not a model id (letters, digits, and . _ : / -, never leading with a dash)`;
   if (model === null && s["chosen"] !== "legacy") return `a ${String(s["chosen"])} leg names an exact model — the stamp carries none`;
   return null;
 }

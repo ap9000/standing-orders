@@ -910,6 +910,8 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
     let sessionId = result.sessionId ?? store.getRun(request.runId)?.sessionId ?? null;
     let repairParentRun = request.runId;
     if (auditOf(provider).resume !== "native" || sessionId === null) return malformedOutcome(lastMalformed);
+    const parentRoute = store.runRoute(request.runId);
+    const parentStamp = parentRoute === null ? null : { routeDigest: parentRoute.routeDigest, phase: parentRoute.phase, provider: parentRoute.provider, model: parentRoute.model, chosen: parentRoute.chosen };
 
     for (let correction = 0; correction < STRUCTURED_REPAIR_ATTEMPTS && sessionId !== null; correction += 1) {
       const beforeRepair = heartbeat(store, request.leaseId, clock());
@@ -932,6 +934,9 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
           parentRun: repairParentRun,
           sessionId,
           now: clock(),
+          // The correction presents its parent's route provenance (v48):
+          // the same plan leg, proved again inside this admission.
+          ...(parentStamp === null ? {} : { route: parentStamp }),
         });
         store.stampRun(repairRun, { baseRevision });
         store.inheritChainBinding(repairRun, request.runId);

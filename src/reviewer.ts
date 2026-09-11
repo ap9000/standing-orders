@@ -892,6 +892,10 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
 
       let parentRunId = request.reviewerRunId;
       let accepted: ParsedReview | null = null;
+      // The correction presents the root reviewer's route provenance
+      // (v48): the same review leg, proved again inside its admission.
+      const rootRoute = store.runRoute(request.reviewerRunId);
+      const rootStamp = rootRoute === null ? null : { routeDigest: rootRoute.routeDigest, phase: rootRoute.phase, provider: rootRoute.provider, model: rootRoute.model, chosen: rootRoute.chosen };
       for (let correction = 1; correction <= STRUCTURED_REPAIR_ATTEMPTS; correction += 1) {
         let childRunId: number;
         try {
@@ -905,6 +909,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
             ...(model === null ? {} : { model }),
             sessionId,
             now: clock(),
+            ...(rootStamp === null ? {} : { route: rootStamp }),
           });
         } catch (error) {
           return { ok: false, reason: "agent", message: error instanceof Error ? error.message : String(error) };

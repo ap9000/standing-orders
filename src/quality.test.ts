@@ -3,9 +3,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
-import { digestOf, propose } from "./scope.js";
+import { addApprover, approve, digestOf, propose } from "./scope.js";
 
 const T0 = new Date("2026-09-07T12:00:00.000Z");
+
+/** v48: a routed task opens no run without a sealed route — approve first. */
+function sealScope(store: Store, taskId: string): void {
+  const added = addApprover(store, "alex", T0);
+  if (!added.ok) throw new Error("bootstrap should never be refused");
+  const approved = approve(store, taskId, "alex", T0, store.getScope(taskId)!.digest, added.token);
+  if (!approved.ok) throw new Error(`the fixture approval was refused: ${approved.reason}`);
+}
 
 describe("two quality modes", () => {
   let store: Store;
@@ -33,6 +41,7 @@ describe("two quality modes", () => {
     const scope = propose(store, { taskId: "release", goal: "release it with proof", now: T0 });
     expect(scope.qualityMode).toBe("strict");
     expect(store.refFor("built-in", "release").qualityMode).toBeNull();
+    sealScope(store, "release");
 
     const run = store.startRun({
       taskRef: store.refFor("built-in", "release").id,
@@ -73,6 +82,7 @@ describe("two quality modes", () => {
       legacy.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
       legacy.createTask({ id: "old", title: "old task" }, T0);
       propose(legacy, { taskId: "old", goal: "keep the old workflow", now: T0 });
+      sealScope(legacy, "old");
       const ref = legacy.refFor("built-in", "old");
       legacy.startRun({ taskRef: ref.id, leaseId: "legacy", runner: "builder", branch: "old", worktree: "/old", now: T0 });
       // A v40 fixture predates v44's plan_revision/authority_digest columns

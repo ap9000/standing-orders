@@ -321,11 +321,17 @@ describe("v40: a drafted, unapproved repair moves the idle-spend invariant not a
     store.createTask({ id: "t-guard", title: "guard the thing" }, T0);
     const ref = store.refFor("built-in", "t-guard");
     store.placeTask(ref.id, repo);
-    const { propose } = await import("./scope.js");
+    const { propose, approve: approveScope } = await import("./scope.js");
     const { maybeTriggerRepair } = await import("./dispose.js");
     propose(store, { taskId: "t-guard", goal: "guard it", acceptance: [{ id: "c1", statement: "it is guarded", how: null, evidence: ["manual-review"] }], now: T0 });
+    // v48: the source attempt ran under a sealed route — approve before it opens.
+    const sealed = approveScope(store, "t-guard", "alex", T0, store.getScope("t-guard")!.digest, approverToken);
+    if (!sealed.ok) throw new Error(`the fixture approval was refused: ${sealed.reason}`);
     const sourceRun = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "builder-1", branch: "b", worktree: "/wt", now: T0 });
     store.finishRun(sourceRun, { outcome: "built", committed: true, now: T0 });
+    // The source task delivered (its short proof is what drafts the repair);
+    // only the DRAFT could dispatch on the next tick.
+    store.setTaskState("t-guard", "done", T0);
     store.saveProofVerdict(sourceRun, "short", ["needs a look"], T0, [
       { id: "c1", statement: "it is guarded", requiredEvidence: ["manual-review"], state: "missing", detail: ['criterion "c1" needs work'], answered: [], review: null },
     ]);

@@ -70,6 +70,10 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
     const taskRef = store.refFor(BUILT_IN, taskId).id;
     store.placeTask(taskRef, REPO);
     propose(store, { taskId, goal: `do ${taskId}`, acceptance: criteria, now: T0 });
+    // v48: a routed task opens no run without a sealed route — the root
+    // of every chain is approved before its first attempt, as it would be.
+    const approved = approve(store, taskId, "alex", T0, store.getScope(taskId)!.digest, alexToken);
+    if (!approved.ok) throw new Error(`the fixture approval was refused: ${approved.reason}`);
     return taskRef;
   };
 
@@ -78,6 +82,13 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
    * the chain's own happy-exit check, wired the same way. */
   const seedRun = (taskId: string, verdict: "short" | "refuted" | "verified" | "attested", matrix: CriterionMatrixRow[], reasons: string[] = ["needs a look"]) => {
     const taskRef = store.lookupRef(taskId)!.id;
+    // v48: an attempt runs under a sealed route — a drafted repair task
+    // that waits for a person is approved here before its attempt opens.
+    const scope = store.getScope(taskId);
+    if (scope !== null && !(scope.approvedAt !== null && scope.approvedDigest === scope.digest)) {
+      const approved = approve(store, taskId, "alex", T0, scope.digest, alexToken);
+      if (!approved.ok) throw new Error(`the fixture approval was refused: ${approved.reason}`);
+    }
     const runId = store.startRun({ taskRef, leaseId: `l-${taskId}-${Math.random().toString(16).slice(2, 8)}`, runner: "builder-1", branch: `b-${taskId}`, worktree: `/pool/${taskId}`, now: T0 });
     store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
     store.saveProofVerdict(runId, verdict, reasons, T0, matrix);

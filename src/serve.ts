@@ -151,7 +151,7 @@ import {
 import { tally, spendLine, runCostWords } from "./summary.js";
 import { classify, holdOwnerWords, attentionCardForUnverifiedDone } from "./board.js";
 import type { BoardCard } from "./board.js";
-import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
+import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, refreshRoutineAgents, routineAgentsState, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE, routeOfTask, agentChoicesFor, type AgentChoice } from "./agentconfig.js";
 import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, agentsSummary, postureWords, RISK_CHOICES, RISK_LEVELS, PHASES as ROUTE_PHASES, type PhaseRoute, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
@@ -1073,15 +1073,17 @@ export function createDecisionServer(options: ServeOptions): Server {
         const planView = ref !== null && ref.plan === "drafted" ? planViewOf(ref.id) : null;
         const raceTerms = ref === null ? null : store.activeTournamentTerms(ref.id);
         const approvalDigest = approvalFormDigest(item.approval.digest, raceTerms?.raceDigest ?? null, planView?.sha256 ?? null);
-        const nonce = who.via === "cookie" ? mintApprovalNonce(who.name, item.approval.taskId, approvalDigest) : "";
+        // The same agents block the task page and chat sign under (v48),
+        // and the same consent door: closed, it mints no nonce.
+        const route = routeViewOf(item.approval.taskId, ref, scope, now, who);
+        const nonce = who.via === "cookie" && consentDoorOf(scope, route).open ? mintApprovalNonce(who.name, item.approval.taskId, approvalDigest) : "";
         return sendScreen(response, 200, nextPage(chromeFor(project, "inbox"), {
           item, scope,
           planDocument: planView?.document ?? null,
           approvalDigest,
           raceTerms,
           deliverable: ref?.deliverable ?? "branch",
-          // The same agents block the task page and chat sign under (v48).
-          route: routeViewOf(item.approval.taskId, ref, scope, now, who),
+          route,
           csrf, nonce, remaining: remaining.length, skipped: [...skipped], now,
         }));
       }
@@ -2913,8 +2915,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       scope === null ? null : approvalFormDigest(scope.digest, raceTerms?.raceDigest ?? null, planView?.sha256 ?? null);
     // The nonce is minted at render, per viewer, bound to the digest being
     // shown — the browser approval flow starts here and nowhere else.
+    // …and only through an OPEN consent door (v48): an unreadable route,
+    // a route that cannot run, or a pre-routing row whose approval lapsed
+    // gets recovery copy, never a nonce.
+    const routeView = routeViewOf(taskId, ref, scope, now, who);
     const nonce =
-      who.via === "cookie" && scope !== null && approvalDigest !== null && !approvalOf(scope).approved && !revisionBroken && ref?.plan !== "requested"
+      who.via === "cookie" && scope !== null && approvalDigest !== null && !approvalOf(scope).approved && !revisionBroken && ref?.plan !== "requested" && consentDoorOf(scope, routeView).open
         ? mintApprovalNonce(who.name, taskId, approvalDigest)
         : "";
     const runs = ref === null ? [] : store.runsFor(ref.id);
@@ -3056,7 +3062,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         approvalDigest,
         // The phase route (v47): one projection for the card, the ceremony,
         // and the focused chat, with the readiness this task's runners report.
-        route: routeViewOf(taskId, ref, scope, now, who),
+        route: routeView,
         canEditRoute: who.role === "approver",
         spendDefaults: store.getSpendDefaults(),
         permissionDefault: store.permissionDefault().mode,
@@ -3271,11 +3277,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (routine === null || !visible(routine.repo)) {
       return refuse(response, who, 404, "no such routine", "/routines");
     }
-    const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
     // Same rule as scope approval: the nonce exists only where the exact
-    // terms are restated, bound to who saw which digest of which order.
+    // terms are restated, bound to who saw which digest of which order —
+    // and only where a yes could bind them (v48): an order whose agents
+    // are unresolved, unreadable, or never frozen gets the recovery road,
+    // never a password field.
     const nonce =
-      who.via === "cookie" && !approved
+      who.via === "cookie" && routineAgentsState(routine).approvable
         ? mintApprovalNonce(who.name, `routine:${routine.id}`, routine.digest)
         : "";
     const paneProject = who.via === "cookie" ? who.session.project : null;
@@ -3622,6 +3630,17 @@ export function createDecisionServer(options: ServeOptions): Server {
               ? "not approved: the routine cannot name an exact agent for every role — configure the project's agents, then file the standing order again"
               : `not approved: ${approved.reason}`;
           return routinePage(response, who, routineId, words, status);
+        }
+        return redirect(response, `/routines/${routineId}`);
+      }
+      case "refresh": {
+        // THE RECOVERY ROAD (v48): re-resolve the agents from today's
+        // configuration and file them as the order's working agents. This
+        // approves nothing — the page then shows the exact agents and asks
+        // for the password again.
+        const refreshed = refreshRoutineAgents(store, routineId, now);
+        if (!refreshed.ok) {
+          return routinePage(response, who, routineId, `agents not refreshed: ${refreshed.problem}`, 409);
         }
         return redirect(response, `/routines/${routineId}`);
       }
@@ -5085,7 +5104,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/routines/${created.id}`);
     }
 
-    const routineAct = /^\/routines\/([0-9]{1,15})\/(approve|pause|resume|run-now)$/.exec(url.pathname);
+    const routineAct = /^\/routines\/([0-9]{1,15})\/(approve|refresh|pause|resume|run-now)$/.exec(url.pathname);
     if (routineAct !== null) {
       return routineMutation(response, who, Number(routineAct[1]), routineAct[2] as string, body, now);
     }
@@ -6061,20 +6080,11 @@ export function createDecisionServer(options: ServeOptions): Server {
           const valid = validateSpec({ provider: providerGiven, model: modelGiven });
           if (!valid.ok) return taskScreen(response, who, taskId, `agents not changed: ${valid.problem}`, 400);
           if (phaseGiven === "review" && providerGiven === "gemini") return taskScreen(response, who, taskId, "gemini cannot review yet — choose claude or codex", 400);
-          const routed = routeOfTask(store, taskId, ref, now);
-          const offered = agentChoicesFor(store, ref.repo, routed !== null && routed.kind === "route" ? routed.route : null)[phaseGiven as Phase];
-          if (!offered.some(one => one.provider === providerGiven && one.model === modelGiven)) {
-            return taskScreen(
-              response,
-              who,
-              taskId,
-              offered.length === 0
-                ? `no configured agent can take the ${ROLE_NOUN[phaseGiven as Phase].toLowerCase()} role for this task — configure one first`
-                : `agents not changed: choose one of the configured agents for the ${ROLE_NOUN[phaseGiven as Phase].toLowerCase()} (${offered.map(one => `${one.provider} · ${one.model}`).join(", ")})`,
-              400,
-            );
-          }
         }
+        // The configured-choice proof lives INSIDE the edit transaction
+        // (`configured`): the pair is held to the role's choices under the
+        // configuration standing at that instant, and a stale choice
+        // mutates nothing.
         const edited = store.editTaskRoute(
           ref.id,
           {
@@ -6088,11 +6098,12 @@ export function createDecisionServer(options: ServeOptions): Server {
               ? {}
               : { override: phaseGiven !== null ? { phase: phase as RouteOverride["phase"], provider: providerGiven as ProviderId, model: modelGiven } : { phase: phase as RouteOverride["phase"], clear: true as const } }),
             ...(sawDigest === null ? {} : { expectDigest: sawDigest === "" ? null : sawDigest }),
+            configured: true,
           },
           now,
         );
         if (!edited.ok) {
-          return taskScreen(response, who, taskId, edited.detail, edited.reason === "unauthenticated" ? 403 : edited.reason === "nothing" ? 400 : 409);
+          return taskScreen(response, who, taskId, edited.reason === "not-configured" ? `agents not changed: ${edited.detail}` : edited.detail, edited.reason === "unauthenticated" ? 403 : edited.reason === "nothing" || edited.reason === "not-configured" ? 400 : 409);
         }
         const toChat = body.get("return") === "chat";
         const back = toChat ? taskChatHref(taskId) : taskHref(taskId);
@@ -6346,15 +6357,15 @@ export function createDecisionServer(options: ServeOptions): Server {
             return scopeApproved;
           });
           if (!both.ok) {
-            const status = both.reason === "changed" ? 409 : 403;
-            return approvalProblem(`not approved: ${both.reason}`, status);
+            const status = both.reason === "changed" || both.reason === "unrouted" ? 409 : 403;
+            return approvalProblem(approveRefusalWords(both.reason), status);
           }
           return redirect(response, approvalBack);
         }
         const approved = approveScope(store, taskId, who.name, now, scopeRow.digest, token);
         if (!approved.ok) {
-          const status = approved.reason === "changed" ? 409 : 403;
-          return approvalProblem(`not approved: ${approved.reason}`, status);
+          const status = approved.reason === "changed" || approved.reason === "unrouted" ? 409 : 403;
+          return approvalProblem(approveRefusalWords(approved.reason), status);
         }
         return redirect(response, approvalBack);
       }
@@ -7123,6 +7134,51 @@ function acceptanceCeremonyHtml(criteria: readonly AcceptanceCriterion[]): strin
   );
 }
 
+/**
+ * THE CONSENT DOOR (v48): whether a yes can be given on this scope right
+ * now — one answer for the task page, the focused chat, and /next, so no
+ * surface mints a nonce or shows a password the others would refuse.
+ * Closed when the scope cannot say exactly what would run: an unresolved
+ * profile, a routed row whose route cannot be read, a route with a stated
+ * problem, or a pre-routing row whose old approval no longer stands (its
+ * profile alone can no longer be agreed to — re-filing routes it). An
+ * approved legacy row never reaches here: its old yes is grandfathered.
+ * Every closed answer carries the words and the one road that opens it.
+ */
+type ConsentDoor = { open: true } | { open: false; title: string; why: string; road: "scope" | "agents" };
+
+function consentDoorOf(scope: Scope | null, route: RouteView | null | undefined): ConsentDoor {
+  if (scope === null) return { open: false, title: "There is no scope to approve yet", why: "write the scope first", road: "scope" };
+  if (scope.profileState === "unresolved") {
+    return { open: false, title: "The agent setup isn’t ready yet", why: scope.unresolvedReason ?? "the scope cannot say exactly what would run", road: "scope" };
+  }
+  if (route === null || route === undefined) return { open: true };
+  if (route.kind === "unreadable") {
+    return { open: false, title: "The agents on file can’t be read", why: `${route.problem} — re-file the scope (edit and save it) so it is routed again under today’s agents`, road: "scope" };
+  }
+  if (route.kind === "legacy") {
+    return { open: false, title: "This scope predates agent routing", why: "its approval no longer stands, and an approval now must name exactly which agent plans, builds, repairs, and reviews — re-file the scope (edit and save it) to route it under today’s agents, then approve it", road: "scope" };
+  }
+  if (route.projection !== null && route.projection.problems.length > 0) {
+    return { open: false, title: "The agents on file can’t run", why: `${route.projection.problems.join("; ")} — change the agents, then approve`, road: "agents" };
+  }
+  return { open: true };
+}
+
+/** The closed door, rendered: no nonce, no password, no approve button —
+ * the reason and the one act that opens it. */
+function consentClosedHtml(taskId: string, door: ConsentDoor & { open: false }, surface: "task" | "chat" | "next"): string {
+  const href = `${taskHref(taskId)}#${door.road === "agents" ? "agents" : "scope"}`;
+  const act = door.road === "agents" ? "Change the agents →" : "Edit and re-file the scope →";
+  if (surface === "chat") {
+    return `<section class="card chat-action-card consent-closed" id="task-chat-action"><span class="eyebrow">approval needs attention</span><h2>${escape(door.title)}</h2><p class="meta">${escape(door.why)}</p><a class="button-link" href="${href}">${act}</a></section>`;
+  }
+  if (surface === "next") {
+    return `<div class="card approve-form consent-closed"><p><strong>${escape(door.title)}: approval is closed.</strong></p><p class="meta">${escape(door.why)}</p><p class="ceremony-road"><a class="button-link" href="${href}">${act}</a></p></div>`;
+  }
+  return `<div class="card approve-form consent-closed" id="approve"><p><strong>This task is waiting on you: ${escape(door.title.toLowerCase())}.</strong></p><p class="meta">${escape(door.why)}</p><p class="ceremony-road"><a class="button-link" href="${href}">${act.toLowerCase()}</a></p></div>`;
+}
+
 function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolvedReason" | "digestVersion" | "proposedChainJson">): string {
   if (scope.profileState === "unresolved") {
     return `<p class="meta"><strong>filed but unapprovable</strong> — ${escape(scope.unresolvedReason ?? "the scope cannot say exactly what would run")}. Restate the scope to fix it.</p>`;
@@ -7286,9 +7342,18 @@ function agentsCeremonyHtml(view: RouteView | null | undefined): string {
  * shows — a firing can never be re-routed by a later configuration
  * change, and the page says so. */
 function routineAgentsHtml(routine: Routine, approved: boolean, ceremony = false): string {
+  const agents = routineAgentsState(routine);
   const route: PhaseRoute | null = (approved ? routine.approvedRoute : routine.route) ?? null;
-  if (route === null) {
-    return `<div class="agents-ceremony"><p class="approval-label">agents</p><p class="agents-summary">${escape(approved ? "approved before agents were frozen — approve this standing order again so every firing names its exact planner, builder, repair, and reviewer" : "not frozen yet — this standing order does not name an exact agent for every role; file it again once the project's agents are configured")}</p></div>`;
+  if (route === null || agents.state === "unreadable" || agents.state === "unresolved" || agents.state === "unfrozen") {
+    // The closed door, with its one road: no agents to restate means no
+    // yes to give — the words say which fact closed it and what opens it.
+    const words =
+      agents.state === "unreadable"
+        ? `the agents on file cannot be read back (${agents.problem ?? "corrupt snapshot"}) — refresh the agents from today's configuration, read them, and approve this standing order again; until then nothing fires`
+        : agents.state === "unfrozen"
+          ? "approved before agents were frozen — refresh the agents, read the exact planner, builder, repair, and reviewer it then names, and approve this standing order again; until then nothing fires"
+          : `not resolved — ${agents.problem ?? "this standing order does not name an exact agent for every role"}; configure the project's agents, then refresh and approve again`;
+    return `<div class="agents-ceremony agents-closed"><p class="approval-label">agents</p><p class="agents-summary">${escape(words)}</p></div>`;
   }
   const projection = projectRoute(route, () => null);
   return (
@@ -7337,16 +7402,21 @@ function agentsCardHtml(taskId: string, view: RouteView | null | undefined, csrf
   // reasons above already say why the current agents were chosen.
   const riskGuide = `<dl class="agents-risk-guide">${RISK_CHOICES.map(one => `<div><dt>${escape(one.title)}</dt><dd>${escape(one.consequence)}</dd></div>`).join("")}</dl>`;
   const roleForms = ROUTE_PHASES.map(phase => {
-    const options = view.choices[phase];
+    // Selectable choices are the role's own configured agents; a current
+    // agent the configuration no longer names is DISPLAY-ONLY — said
+    // beside the control, never an option the form could re-pick.
+    const options = view.choices[phase].filter(one => one.selectable);
+    const stale = view.choices[phase].find(one => one.current && !one.selectable) ?? null;
+    const staleNote = stale === null ? "" : `<p class="meta agents-stale">Runs today on <span class="mono">${escape(`${stale.provider} · ${stale.model}`)}</span>, which is no longer in your configuration — pick a configured agent to replace it.</p>`;
     if (options.length === 0) {
-      return `<div class="agents-role-row"><span class="agents-role-name">${escape(ROLE_NOUN[phase])}</span><p class="meta">No configured agent can take this role for this task.</p></div>`;
+      return `<div class="agents-role-row"><span class="agents-role-name">${escape(ROLE_NOUN[phase])}</span><p class="meta">No configured agent can take this role for this task.</p>${staleNote}</div>`;
     }
     return (
       `<form method="post" action="${taskHref(taskId)}/route" class="agents-form" aria-label="choose the ${escape(ROLE_NOUN[phase].toLowerCase())}">${hidden}` +
       `<input type="hidden" name="phase" value="${escape(phase)}">` +
       `<label>${escape(ROLE_NOUN[phase])}<select name="agent" aria-label="${escape(ROLE_NOUN[phase].toLowerCase())} agent">` +
       options.map(one => `<option value="${escape(`${one.provider}|${one.model}`)}"${one.current ? " selected" : ""}>${escape(`${one.provider} · ${one.model}`)}${one.current ? " — current" : ""}</option>`).join("") +
-      `</select></label><button type="submit" class="secondary">Use</button></form>`
+      `</select></label><button type="submit" class="secondary">Use</button></form>${staleNote}`
     );
   });
   const change = !canEdit
@@ -9137,6 +9207,10 @@ const STYLE = `
      * the operator to confirm. The #latest anchor still brings this form
      * into view after every turn without making it an overlay. */
     .chat-workspace .composer { position: static; width: 100%; box-shadow: var(--shadow); }
+    /* The agents summary is said ONCE per screen (v48): the context panel
+     * carries it on desktop, so the compact strip — the phone's copy —
+     * steps aside wherever that panel is visible. */
+    .task-chat-workspace .task-chat-agents { display: none; }
   }
   @media (min-width: 761px) and (max-width: 1199px) {
     .chat-workspace { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
@@ -9226,6 +9300,9 @@ const STYLE = `
        explanation or buttons on a short phone viewport. */
     .chat-main:has(.proposal.pending) { padding-bottom: 0; }
     .chat-main:has(.proposal.pending) .composer { position: static; width: 100%; margin-top: .5rem; }
+    /* …and the suggestion chips step aside for the same reason: on a phone
+       the card, its buttons, and the composer then share one screen. */
+    .chat-main:has(.proposal.pending) .chat-prompts { display: none; }
     /* First use is one cohesive intake card: prompt, suggestions, then the
        box. A fixed box belongs to an established thread; here it would sit
        above the very question it is asking the person to answer. */
@@ -10839,6 +10916,10 @@ function routineStatus(routine: Routine): { text: string; badge: string } {
       badge: "badge badge-failed",
     };
   }
+  // An approval that froze no readable agents is not live (v48): its
+  // firings wait until the agents are refreshed and approved again.
+  const agents = routineAgentsState(routine);
+  if (agents.state !== "frozen") return { text: "agents not frozen — refresh and approve again", badge: "badge badge-failed" };
   return { text: "live", badge: "badge badge-running" };
 }
 
@@ -10904,6 +10985,13 @@ type ChatProjectPulse = {
  * exact advisory plan revision and any race terms shown beside it. The scope
  * digest remains the durable authority; this composite makes a stale open
  * tab fail when somebody edits the plan before approval. */
+/** The approve POST's refusal, in words a person can act on. */
+function approveRefusalWords(reason: string): string {
+  if (reason === "unrouted") return "not approved: this scope predates agent routing and its old approval no longer stands — edit and re-file the scope so it is routed under today’s agents, then approve it";
+  if (reason === "profile-unresolved") return "not approved: the scope cannot name an exact agent for every role — fix the agent setup and re-file it";
+  return `not approved: ${reason}`;
+}
+
 function approvalFormDigest(scopeDigest: string, raceDigest: string | null, planSha: string | null): string {
   if (raceDigest === null && planSha === null) return scopeDigest;
   return createHash("sha256")
@@ -11029,7 +11117,9 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
   if (approval.revision !== null && "problem" in approval.revision) {
     return `<section class="card chat-action-card" id="task-chat-action"><span class="eyebrow">approval needs attention</span><h2>The revision brief can’t be verified</h2><p class="meta">${escape(approval.revision.problem)}</p><a class="button-link" href="${taskHref(focus.id)}#approve">Fix this on the task →</a></section>`;
   }
-  if (scope.profileState === "unresolved" || approval.nonce === "") {
+  const door = consentDoorOf(scope, focus.route);
+  if (!door.open) return consentClosedHtml(focus.id, door, "chat");
+  if (approval.nonce === "") {
     return `<section class="card chat-action-card" id="task-chat-action"><span class="eyebrow">approval needs attention</span><h2>The agent setup isn’t ready yet</h2>${profileWords(scope)}<a class="button-link" href="${taskHref(focus.id)}#scope">Fix the agent setup →</a></section>`;
   }
   const profile = scope.profile ?? null;
@@ -12096,9 +12186,32 @@ function routineScreenPage(chrome: Chrome, data: {
     `<p class="meta">one at a time — a firing skips while the previous instance is unfinished</p>` +
     `</div>`;
 
+  // THE CONSENT DOOR (v48): the password and the approve act exist only
+  // where an exact, readable route can be restated — never over agents
+  // that are unresolved, unreadable, or never frozen. Those states get the
+  // one recovery act instead: refresh the agents, then approve again.
+  const agents = routineAgentsState(routine);
+  const refreshForm =
+    `<form method="post" action="${routineHref(routine.id)}/refresh" class="card approve-form agents-recovery" id="agents-recovery">` +
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+    `<p><strong>${escape(
+      agents.state === "unfrozen"
+        ? "This standing order was approved before its agents were frozen — nothing fires until you approve it again."
+        : agents.state === "unreadable"
+          ? "The agents on file for this standing order cannot be read — nothing approves or fires until they are refreshed."
+          : "This standing order cannot be approved yet: it does not name an exact agent for every role.",
+    )}</strong></p>` +
+    `<p class="recap">${escape(
+      agents.state === "unresolved" && agents.problem !== null
+        ? `${agents.problem}. Configure the project's agents (config set <phase> --provider … --model …), then refresh.`
+        : "Refreshing reads today's configured agents into this order and shows you exactly who would plan, build, repair, and review each firing. Nothing is approved by refreshing — the password step comes after, on this page.",
+    )}</p>` +
+    `<button type="submit">Refresh agents</button></form>`;
   const approveForm = approved
-    ? ""
-    : [
+    ? agents.refresh ? refreshForm : ""
+    : !agents.approvable
+      ? refreshForm
+      : [
         `<form method="post" action="${routineHref(routine.id)}/approve" class="card approve-form">`,
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
         `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
@@ -12106,12 +12219,10 @@ function routineScreenPage(chrome: Chrome, data: {
         `<p><strong>approve this standing order:</strong></p>`,
         `<p class="recap">Each firing creates a task under exactly the terms above and BUILDS IT WITHOUT ASKING — ${escape(scheduleSaid)}, until you pause it. Questions and failures still reach you like any other work.</p>`,
         // The agents the yes freezes (v48): the same concise block every
-        // approval shows, before the password — or the closed door.
+        // approval shows, before the password.
         routineAgentsHtml(routine, false, true),
-        routine.route === null || routine.route === undefined
-          ? `<p class="meta"><strong>This standing order cannot be approved yet:</strong> it does not name an exact agent for every role. File it again once the project's agents are configured.</p>`
-          : `<label>your password, typed again — a signed-in session alone cannot agree to standing work<input type="password" name="token" autocomplete="current-password"></label>` +
-            `<button type="submit">approve this routine</button>`,
+        `<label>your password, typed again — a signed-in session alone cannot agree to standing work<input type="password" name="token" autocomplete="current-password"></label>` +
+          `<button type="submit">approve this routine</button>`,
         `</form>`,
       ].join("\n");
 
@@ -12121,7 +12232,7 @@ function routineScreenPage(chrome: Chrome, data: {
     `<button type="submit"${danger ? ' class="danger"' : ""}>${label}</button></form>`;
 
   const runNowForm =
-    approved && !routine.paused
+    approved && !routine.paused && agents.state === "frozen"
       ? `<form method="post" action="${routineHref(routine.id)}/run-now" class="inline">` +
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
         `<input type="password" name="token" class="inline" placeholder="your password" aria-label="password for run now" style="width:11rem"> ` +
@@ -14593,6 +14704,7 @@ function taskBody(data: {
         : approvalProfile.provider === "gemini"
           ? approvalProfile.approvalArgv === "yolo" ? "Full access" : "Auto permissions"
           : approvalProfile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
+  const consentDoor = consentDoorOf(scope, data.route);
   const approveForm =
     scope === null || approval.approved || data.plan === "requested"
       ? ""
@@ -14602,6 +14714,8 @@ function taskBody(data: {
           ? `<div class="card approve-form" id="approve"><p><strong>This task is waiting on you: its scope cannot be approved yet.</strong></p>` +
             profileWords(scope) +
             `<p class="ceremony-road"><a class="button-link" href="#scope">edit the scope to fix it →</a></p></div>`
+        : !consentDoor.open
+          ? consentClosedHtml(task.id, consentDoor, "task")
         : [
           `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form approval-card" id="approve">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
@@ -17496,6 +17610,13 @@ function nextPage(chrome: Chrome, data: {
       `<div class="recap">${escape(decision.recap)}</div>` +
       `<div class="question">${escape(decision.question)}</div>` +
       decisionOptionForms(decision, data.csrf, "next");
+  } else if (item.kind === "approval" && !consentDoorOf(data.scope, data.route).open) {
+    const door = consentDoorOf(data.scope, data.route) as ConsentDoor & { open: false };
+    card =
+      `<h1>${escape(item.approval.taskId)}</h1>` +
+      `<p>${escape(item.approval.title)}</p>` +
+      consentClosedHtml(item.approval.taskId, door, "next") +
+      `<p class="meta"><a href="${taskHref(item.approval.taskId)}">open the full task</a></p>`;
   } else if (item.kind === "approval") {
     const scope = data.scope;
     card =

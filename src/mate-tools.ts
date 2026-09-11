@@ -363,7 +363,10 @@ export function agentsOver(store: Store, taskId: string, now: Date): Record<stri
     demands: route.demands,
     agents: route.legs.map(leg => ({ role: ROLE_WORD[leg.phase], provider: leg.provider, model: leg.model, chosen: chosenWords(leg), reasons: leg.reasons, problem: leg.problem })),
     problems: routeProblems(route),
-    choices: Object.fromEntries(PHASES.map(phase => [ROLE_WORD[phase], choices[phase].map(one => ({ provider: one.provider, model: one.model, current: one.current }))])),
+    // Only SELECTABLE choices are offered to the mate: a current agent the
+    // configuration no longer names appears under `agents` (what runs
+    // today) and nowhere a proposal could pick it.
+    choices: Object.fromEntries(PHASES.map(phase => [ROLE_WORD[phase], choices[phase].filter(one => one.selectable).map(one => ({ provider: one.provider, model: one.model, current: one.current }))])),
   };
 }
 

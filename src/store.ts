@@ -33,7 +33,7 @@ import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
 import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, parseAcceptanceCriteria, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
-import { resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, exactPinOf, routeOfTask } from "./agentconfig.js";
+import { resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, exactPinOf, routeOfTask, agentChoicesFor } from "./agentconfig.js";
 import {
   canonicalOverridesJson,
   canonicalRouteJson,
@@ -458,6 +458,12 @@ export type Routine = {
    * carrying unreadable route bytes reads null too, and fails closed. */
   route?: PhaseRoute | null;
   approvedRoute?: PhaseRoute | null;
+  /** v48: true when the row CARRIES route or profile bytes that do not
+   * read back — a corrupt snapshot, as distinct from one never taken. Every
+   * surface says which, and both fail closed. */
+  routeUnreadable?: boolean;
+  approvedRouteUnreadable?: boolean;
+  approvedProfileUnreadable?: boolean;
 };
 
 /** One scheduled slot's outcome, fired or skipped — never silent. */
@@ -7178,7 +7184,15 @@ export class Store {
       if (options.profile === undefined && profile !== null) {
         const chainRef = this.lookupRef(scope.taskId);
         const chainRepo = chainRef?.repo ?? null;
-        if (chainRepo !== null && this.fallbackConfig(chainRepo).length > 0) {
+        // A fallback row that cannot be READ is a stated problem (v48):
+        // the scope files unresolved in its words rather than sealing a
+        // single profile as if nothing had been configured.
+        const fallbackProblem = chainRepo === null ? null : this.fallbackConfigProblem(chainRepo);
+        if (fallbackProblem !== null) {
+          profile = null;
+          unresolvedReason = `the configured fallback chain cannot file: ${fallbackProblem}`;
+          boundDigest = digestOf(digestInput, null, route);
+        } else if (chainRepo !== null && this.fallbackConfig(chainRepo).length > 0) {
           const chain = resolveScopeChain(
             this,
             chainRepo,
@@ -7316,7 +7330,13 @@ export class Store {
           .prepare("SELECT profile_json, proposed_route_json, route_era FROM task_scope WHERE task_id = ?")
           .get(taskId) as Record<string, unknown> | undefined;
         if (working === undefined) return false;
-        if (working["route_era"] !== null && working["route_era"] !== undefined) {
+        // A row that predates routing (no era) cannot take a NEW yes (v48):
+        // an approval now names exactly which agent plans, builds,
+        // repairs, and reviews, and this row names none — re-filing routes
+        // it. An old approval already on such a row is grandfathered;
+        // this only refuses to mint another.
+        if (working["route_era"] === null || working["route_era"] === undefined) return false;
+        {
           const route = routeFromJson(working["proposed_route_json"] === null || working["proposed_route_json"] === undefined ? null : String(working["proposed_route_json"]));
           const profile = profileFromJson(working["profile_json"] === null || working["profile_json"] === undefined ? null : String(working["profile_json"]));
           if (route === null || profile === null) return false;
@@ -9253,6 +9273,11 @@ export class Store {
         this.incidentFallback(c.id, c.transitionGeneration, "no-unconsumed-edge-at-admission", now);
         return { ok: false as const, reason: "no-edge" as const };
       }
+      // Route provenance (v47/v48), proved and written INSIDE the admission
+      // savepoint, before the row: an approved fallback entry spends as
+      // `fallback` — under the sealed route when one stands, else under
+      // the chain digest — bound to exactly this cursor's entry.
+      const sealed = this.sealedRouteOf(taskId);
       const admitted = this.admitFallback(
         {
           cycleId: c.id,
@@ -9270,20 +9295,14 @@ export class Store {
           },
           entryDigest: entryDigestOf(entry),
           authMode: entry.authMode,
+          route: { routeDigest: sealed.ok ? routeDigestOf(sealed.route) : `chain:${c.chainDigest}`, phase: "build", provider: entry.profile.provider, model: entry.profile.model, chosen: "fallback" },
         },
         now,
       );
-      if (!admitted.ok) return { ok: false as const, reason: "raced" as const };
-      // Route provenance (v47), in the same admission transaction: an
-      // approved fallback entry spends as `fallback` — under the sealed
-      // route when one stands, else under the chain digest.
-      const sealed = this.sealedRouteOf(taskId);
-      const stamped = this.stampRunRoute(
-        admitted.runId,
-        { routeDigest: sealed.ok ? routeDigestOf(sealed.route) : `chain:${c.chainDigest}`, phase: "build", provider: entry.profile.provider, model: entry.profile.model, chosen: "fallback" },
-        now,
-      );
-      if (!stamped.ok) throw new Error(stamped.conflict);
+      if (!admitted.ok) {
+        if (admitted.problem !== undefined) throw new Error(admitted.problem);
+        return { ok: false as const, reason: "raced" as const };
+      }
       return { ok: true as const, runId: admitted.runId, taskId, provider: entry.profile.provider, model: entry.profile.model };
     });
   }
@@ -9535,10 +9554,18 @@ export class Store {
       run: { taskRef: number; leaseId: string; runner: string; branch: string; worktree: string; provider: string; model?: string };
       entryDigest: string;
       authMode: "subscription" | "api-key";
+      /** v48: the run's `fallback` route provenance, proved against the
+       * exact entry this admission binds (cursor + entry digest) BEFORE
+       * the row exists and written beside it. Omitted, the task's own
+       * approved chain dictates it; a task under agent routing never opens
+       * an unstamped fallback run. */
+      route?: RouteStamp;
     },
     now: Date,
-  ): { ok: true; runId: number } | { ok: false } {
-    return this.savepoint(() => {
+  ): { ok: true; runId: number } | { ok: false; problem?: string } {
+    // The savepoint rides inside a (reentrant) transaction so the route
+    // stamp's own transact() nests instead of colliding with it.
+    return this.transact(() => this.savepoint(() => {
       // The pending edge must exist BEFORE anything is created: this cycle,
       // unconsumed, to_index === current cursor, and the cycle
       // pending-admission at the expected generation + cursor.
@@ -9550,6 +9577,21 @@ export class Store {
         )
         .get(args.transitionId, args.cycleId, args.expectGeneration, args.expectCursor);
       if (edge === undefined) return { ok: false as const };
+      // THE ADMISSION PROOF (v48), before the row: the stamp — presented,
+      // or dictated by the approved chain — must be `fallback` on exactly
+      // the entry this admission binds, as the pair the run will spend as.
+      // A stamp that cannot be proved opens nothing.
+      const bound = { index: args.expectCursor, entryDigest: args.entryDigest };
+      let stamp: RouteStamp | null = args.route ?? null;
+      if (stamp === null) {
+        const derived = this.governingStampFor(args.run.taskRef, "builder", bound);
+        if (derived !== null && !derived.ok) return { ok: false as const, problem: derived.problem };
+        stamp = derived === null ? null : derived.stamp;
+      }
+      if (stamp !== null) {
+        const problem = this.routeAdmissionProblem({ taskRef: args.run.taskRef, role: "builder", provider: args.run.provider, model: args.run.model ?? stamp.model, contestant: null, chain: bound }, stamp, now);
+        if (problem !== null) return { ok: false as const, problem: `fallback admission refused for task_ref ${args.run.taskRef}: ${problem}` };
+      }
       // Open the fallback run WITH its chain metadata, in the same body.
       const inserted = this.db
         .prepare(
@@ -9562,7 +9604,7 @@ export class Store {
           args.run.runner,
           args.run.branch,
           args.run.worktree,
-          args.run.model ?? null,
+          args.run.model ?? stamp?.model ?? null,
           args.run.provider,
           args.cycleId,
           args.expectCursor,
@@ -9571,6 +9613,10 @@ export class Store {
           now.toISOString(),
         );
       const runId = Number(inserted.lastInsertRowid);
+      if (stamp !== null) {
+        const stamped = this.stampRunRoute(runId, stamp, now);
+        if (!stamped.ok) throw new Error(stamped.conflict);
+      }
       // Consume the edge with the real run id — the WHERE re-proves it is
       // still the unconsumed edge at the current cursor (single-use).
       const consumed = this.db
@@ -9589,7 +9635,7 @@ export class Store {
         .run(runId, now.toISOString(), args.cycleId, args.expectGeneration, args.expectCursor);
       if (Number(moved.changes) === 0) throw new Error("admission raced the cycle state");
       return { ok: true as const, runId };
-    });
+    }));
   }
 
   /**
@@ -10957,14 +11003,45 @@ export class Store {
    * phase (v30). Each entry: {provider, model, authMode, repairModel?}.
    * Returns [] when none configured — a chain-of-one is the base alone. */
   fallbackConfig(scope: string): { provider: string; model: string; authMode: "subscription" | "api-key"; repairModel?: string }[] {
+    const read = this.readFallbackConfig(scope);
+    return read.ok ? read.entries : [];
+  }
+
+  /**
+   * The configured fallback entries, or the words for why the row on file
+   * cannot be read (v48): a row that EXISTS but is not a list of
+   * well-shaped entries — corrupt JSON, a non-list, an entry missing its
+   * provider, model, or auth mode — is a stated problem, never an empty
+   * list. Filing a scope under such a row refuses in these words rather
+   * than silently sealing a single-profile approval the operator did not
+   * configure; the chain the person believes they set never shrinks to
+   * nothing behind their back.
+   */
+  fallbackConfigProblem(scope: string): string | null {
+    const read = this.readFallbackConfig(scope);
+    return read.ok ? null : read.problem;
+  }
+
+  private readFallbackConfig(scope: string): { ok: true; entries: { provider: string; model: string; authMode: "subscription" | "api-key"; repairModel?: string }[] } | { ok: false; problem: string } {
     const row = this.db.prepare("SELECT entries_json FROM fallback_config WHERE scope = ? AND phase = 'build'").get(scope);
-    if (row === undefined) return [];
+    if (row === undefined) return { ok: true, entries: [] };
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(String(row["entries_json"]));
-      return Array.isArray(parsed) ? parsed : [];
+      parsed = JSON.parse(String(row["entries_json"]));
     } catch {
-      return [];
+      return { ok: false, problem: `the fallback configuration for ${scope} is not valid JSON — set it again with \`config set fallback\`, or clear it` };
     }
+    if (!Array.isArray(parsed)) return { ok: false, problem: `the fallback configuration for ${scope} is not a list of entries — set it again with \`config set fallback\`, or clear it` };
+    const entries: { provider: string; model: string; authMode: "subscription" | "api-key"; repairModel?: string }[] = [];
+    for (const [index, entry] of parsed.entries()) {
+      if (entry === null || typeof entry !== "object") return { ok: false, problem: `fallback entry ${index + 1} for ${scope} is not an object — set the chain again with \`config set fallback\`` };
+      const e = entry as Record<string, unknown>;
+      if (typeof e["provider"] !== "string" || typeof e["model"] !== "string" || (e["authMode"] !== "subscription" && e["authMode"] !== "api-key") || (e["repairModel"] !== undefined && typeof e["repairModel"] !== "string")) {
+        return { ok: false, problem: `fallback entry ${index + 1} for ${scope} is malformed (provider, model, and auth mode are required) — set the chain again with \`config set fallback\`` };
+      }
+      entries.push({ provider: e["provider"], model: e["model"], authMode: e["authMode"], ...(typeof e["repairModel"] === "string" ? { repairModel: e["repairModel"] } : {}) });
+    }
+    return { ok: true, entries };
   }
 
   setFallbackConfig(
@@ -11071,11 +11148,17 @@ export class Store {
       risk?: RiskLevel;
       override?: { phase: RouteOverride["phase"]; provider: ProviderId; model: string } | { phase: RouteOverride["phase"]; clear: true };
       expectDigest?: string | null;
+      /** v48: the agent must be one of the CONFIGURED, role-valid choices
+       * for that role RIGHT NOW — re-proved inside this transaction, so a
+       * choice drafted against yesterday's configuration (a card, a form
+       * left open) mutates nothing. The console and chat doors set this;
+       * the CLI's attributed override is the operator typing exactly. */
+      configured?: boolean;
     },
     now: Date,
   ):
     | { ok: true; scope: Scope | null; staled: boolean; replanned: boolean; overrides: RouteOverride[] }
-    | { ok: false; reason: "unauthenticated" | "no-task" | "live-claim" | "contest-open" | "changed" | "nothing"; detail: string } {
+    | { ok: false; reason: "unauthenticated" | "no-task" | "live-claim" | "contest-open" | "changed" | "nothing" | "not-configured"; detail: string; choices?: { provider: string; model: string }[] } {
     return this.transact(() => {
       const authenticated = edit.authenticate();
       if (!authenticated.ok) return { ok: false as const, reason: "unauthenticated" as const, detail: authenticated.reason };
@@ -11088,6 +11171,27 @@ export class Store {
       const currentDigest = before?.digest ?? null;
       if (edit.expectDigest !== undefined && edit.expectDigest !== currentDigest) {
         return { ok: false as const, reason: "changed" as const, detail: before === null ? "the scope was removed while you were editing — reload and try again" : "the scope changed while you were editing — reload, read it again, and try again" };
+      }
+      // THE CONFIGURED-CHOICE PROOF (v48), inside the transaction: the
+      // pair must be one of the role's configured choices under the
+      // configuration and route that stand at this instant — not the ones
+      // a card was drafted against. Nothing is written otherwise.
+      if (edit.configured === true && edit.override !== undefined && !("clear" in edit.override)) {
+        const routed = routeOfTask(this, ref.externalId, ref, now);
+        const offered = agentChoicesFor(this, ref.repo, routed !== null && routed.kind === "route" ? routed.route : null)[edit.override.phase].filter(one => one.selectable);
+        const wanted = edit.override;
+        if (!offered.some(one => one.provider === wanted.provider && one.model === wanted.model)) {
+          const noun = { plan: "planner", build: "builder", repair: "repair", review: "reviewer" }[wanted.phase];
+          return {
+            ok: false as const,
+            reason: "not-configured" as const,
+            detail:
+              offered.length === 0
+                ? `no configured agent can take the ${noun} role for this task right now — configure one first`
+                : `${wanted.provider} · ${wanted.model} is not one of the configured agents for the ${noun} right now (${offered.map(one => `${one.provider} · ${one.model}`).join(", ")}) — look again`,
+            choices: offered.map(one => ({ provider: one.provider, model: one.model })),
+          };
+        }
       }
       if (edit.risk !== undefined) {
         this.db.prepare("UPDATE task_ref SET risk_level = ? WHERE id = ?").run(edit.risk, taskRef);
@@ -11221,7 +11325,18 @@ export class Store {
    *     a tournament lane, or an attended session; never a routed row.
    */
   private routeAdmissionProblem(
-    run: { taskRef: number; role: Run["role"] | "scout"; provider: string; model: string | null; contestant: number | null },
+    run: {
+      taskRef: number;
+      role: Run["role"] | "scout";
+      provider: string;
+      model: string | null;
+      contestant: number | null;
+      /** The chain entry the run is bound to, when it is: a fallback stamp
+       * must name THIS entry's exact pair — never any entry that happens to
+       * share a provider and model under a different auth mode or repair
+       * model. */
+      chain?: { index: number; entryDigest: string } | null;
+    },
     stamp: unknown,
     now: Date,
   ): string | null {
@@ -11267,12 +11382,35 @@ export class Store {
       const expectedDigest = sealed.ok ? routeDigestOf(sealed.route) : `chain:${chainDigestOf(chain)}`;
       if (leg.routeDigest !== expectedDigest) return `the fallback stamp's route ${leg.routeDigest} is not the approved authority ${expectedDigest}`;
       if (phase !== "build" && phase !== "repair") return `an approved fallback entry builds and repairs — it does not ${phase}`;
-      const index = chain.findIndex(entry => {
-        const modelOf = phase === "repair" ? (entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel) : entry.profile.model;
-        return entry.profile.provider === leg.provider && modelOf === leg.model;
+      const pairOf = (entry: ChainEntry): { provider: string; model: string } => ({
+        provider: entry.profile.provider,
+        model: phase === "repair" ? (entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel) : entry.profile.model,
       });
-      if (index === -1) return `${leg.provider} · ${leg.model ?? "(none)"} is not an entry of the approved fallback chain`;
-      if (index === 0) return `${leg.provider} · ${leg.model ?? "(none)"} is the chain's primary entry — it spends as the sealed build leg, not as a fallback`;
+      // A run bound to a chain entry spends as THAT entry: the index must
+      // exist, its digest must be the bound one, and its pair must be the
+      // stamp's. Two entries that share a provider and model but differ in
+      // auth mode or repair model are different authorities — a stamp
+      // cannot borrow one's pair under the other's binding.
+      const bound = run.chain ?? null;
+      if (bound !== null) {
+        const entry = chain[bound.index];
+        if (entry === undefined) return `the run is bound to chain entry ${bound.index}, which the approved chain does not have`;
+        if (entryDigestOf(entry) !== bound.entryDigest) return `the run is bound to chain entry ${bound.index} under digest ${bound.entryDigest}, but the approved entry there is ${entryDigestOf(entry)}`;
+        if (bound.index === 0) return `${leg.provider} · ${leg.model ?? "(none)"} is the chain's primary entry — it spends as the sealed build leg, not as a fallback`;
+        const pair = pairOf(entry);
+        if (pair.provider !== leg.provider || pair.model !== leg.model) return `the bound chain entry ${bound.index} is ${pair.provider} · ${pair.model}, not ${leg.provider} · ${leg.model ?? "(none)"}`;
+        return null;
+      }
+      // Unbound: the pair must name exactly ONE non-primary entry — an
+      // ambiguous pair (duplicates differing in auth mode or repair model)
+      // proves nothing, because the stamp cannot say which one spends.
+      const matches = chain.map((entry, index) => ({ entry, index })).filter(({ entry }) => {
+        const pair = pairOf(entry);
+        return pair.provider === leg.provider && pair.model === leg.model;
+      });
+      if (matches.length === 0) return `${leg.provider} · ${leg.model ?? "(none)"} is not an entry of the approved fallback chain`;
+      if (matches.some(one => one.index === 0)) return `${leg.provider} · ${leg.model ?? "(none)"} is the chain's primary entry — it spends as the sealed build leg, not as a fallback`;
+      if (matches.length > 1) return `${leg.provider} · ${leg.model ?? "(none)"} names ${matches.length} entries of the approved fallback chain (they differ in auth mode or repair model) — a fallback run is bound to exactly one entry`;
       return null;
     }
     // legacy
@@ -11303,7 +11441,18 @@ export class Store {
           // model as its own (COALESCE below) — a row that names one must
           // agree with the stamp.
           const stampModel = typeof (leg as { model?: unknown }).model === "string" ? (leg as { model: string }).model : null;
-          const problem = this.routeAdmissionProblem({ taskRef: row.taskRef, role: row.role, provider: row.provider, model: row.model ?? stampModel, contestant: row.contestant ?? null }, leg, now);
+          const problem = this.routeAdmissionProblem(
+            {
+              taskRef: row.taskRef,
+              role: row.role,
+              provider: row.provider,
+              model: row.model ?? stampModel,
+              contestant: row.contestant ?? null,
+              chain: row.chainIndex != null && row.entryDigest != null ? { index: row.chainIndex, entryDigest: row.entryDigest } : null,
+            },
+            leg,
+            now,
+          );
           if (problem !== null) return { ok: false as const, conflict: `run #${run} cannot carry route provenance ${leg.phase} ${leg.provider} · ${leg.model ?? "(no model)"} [${leg.chosen}]: ${problem}` };
           if (row.model === null && stampModel !== null) this.db.prepare("UPDATE run SET model = COALESCE(model, ?) WHERE id = ?").run(stampModel, run);
         }
@@ -11374,6 +11523,13 @@ export class Store {
     }
     const sealedProfile = chain !== null ? chain[0]?.profile ?? null : scope.approvedProfile ?? null;
     if (sealedProfile === null) return { ok: false, reason: "unreadable", detail: "the approval sealed no agent profile — re-file the scope and approve it again" };
+    // The profile column mirrors the chain's base entry on a chain
+    // approval; a mirror that cannot be read or disagrees is a tampered
+    // seal, not a detail to overlook.
+    const mirrored = scope.approvedProfile ?? null;
+    if (mirrored === null || profileDigestOf(mirrored) !== profileDigestOf(sealedProfile)) {
+      return { ok: false, reason: "unreadable", detail: "the approval's sealed agent profile cannot be read or does not match its sealed chain — re-file the scope and approve it again" };
+    }
     const buildLeg = legOf(route, "build");
     const repairLeg = legOf(route, "repair");
     const repairModel = sealedProfile.repairModel === "inherit" ? sealedProfile.model : sealedProfile.repairModel;
@@ -12834,6 +12990,7 @@ export class Store {
       `routine-budget:${routineId}:`,
       `routine-unmeasured:${routineId}:`,
       `routine-singleflight:${routineId}:`,
+      `routine-route:${routineId}:`,
     ]) {
       this.db
         .prepare(
@@ -13031,24 +13188,62 @@ export class Store {
 
   private startRunInTransaction(run: Parameters<Store["startRun"]>[0]): number {
     const role = run.role ?? "builder";
-    // THE ADMISSION PROOF (v48): a run that names its route provenance is
-    // held to it BEFORE the row exists — the stamp's shape, its phase
-    // against the role, its exact provider and model against what the
-    // run will spend as, and its digest and leg against the authority the
-    // task actually holds (the sealed route, the approved chain entry, or
-    // a proven pre-routing row). A stamp that cannot be proved opens no
-    // run: nothing spends with provenance that disagrees with authority.
-    // The stamp is the authority for the provider and model columns when
-    // the caller left them unsaid; a caller who says otherwise is refused.
+    // THE ADMISSION PROOF (v48): a run's route provenance is held to the
+    // authority the task holds BEFORE the row exists — the stamp's shape,
+    // its phase against the role, its exact provider and model against
+    // what the run will spend as, and its digest and leg against the
+    // sealed route, the approved chain entry the run is bound to, or a
+    // proven pre-routing row. A stamp that cannot be proved opens no run:
+    // nothing spends with provenance that disagrees with authority. The
+    // stamp is the authority for the provider and model columns when the
+    // caller left them unsaid; a caller who says otherwise is refused.
+    //
+    // A ROUTED task never opens an unstamped run: a caller that presents
+    // no stamp on a task filed under agent routing gets the one the
+    // governing authority dictates — the sealed route's leg for the run's
+    // phase (a planner may run under the working proposed route before
+    // any approval), proved against the run's own provider and model
+    // exactly as a presented stamp would be — or no row at all. Contest
+    // lanes and attended sessions carry their own authority and stay
+    // unstamped until they spend.
     let provider = run.provider ?? null;
     let model = run.model ?? null;
+    // A child of a chain-bound parent (a repair turn, a structured
+    // correction) is bound to the parent's exact entry from the start —
+    // the binding rides the INSERT below, so the proof can hold the stamp
+    // to that entry and no later inheritance can change what spends.
+    const parent = run.parentRun === undefined ? null : this.getRun(run.parentRun);
+    const inheritedChain =
+      parent !== null && parent.chainCycle != null && parent.chainIndex != null && parent.entryDigest != null
+        ? { cycle: parent.chainCycle, index: parent.chainIndex, entryDigest: parent.entryDigest, authMode: parent.authMode ?? null }
+        : null;
+    let stamp: RouteStamp | null = null;
     if (run.route !== undefined) {
       const stampProvider = typeof (run.route as { provider?: unknown }).provider === "string" ? (run.route as { provider: string }).provider : null;
       const stampModel = (run.route as { model?: unknown }).model;
       provider = provider ?? stampProvider;
       model = model ?? (typeof stampModel === "string" ? stampModel : null);
-      const problem = this.routeAdmissionProblem({ taskRef: run.taskRef, role, provider: provider ?? "claude", model, contestant: run.contestant ?? null }, run.route, run.now);
+      const problem = this.routeAdmissionProblem(
+        { taskRef: run.taskRef, role, provider: provider ?? "claude", model, contestant: run.contestant ?? null, chain: inheritedChain === null ? null : { index: inheritedChain.index, entryDigest: inheritedChain.entryDigest } },
+        run.route,
+        run.now,
+      );
       if (problem !== null) throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): ${problem}`);
+      stamp = run.route;
+    } else if ((run.contestant ?? null) === null && this.openAuthorizationFor(run.taskRef) === null) {
+      const derived = this.governingStampFor(run.taskRef, role, inheritedChain === null ? null : { index: inheritedChain.index, entryDigest: inheritedChain.entryDigest });
+      if (derived !== null) {
+        if (!derived.ok) throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): ${derived.problem}`);
+        provider = provider ?? derived.stamp.provider;
+        model = model ?? derived.stamp.model;
+        const problem = this.routeAdmissionProblem(
+          { taskRef: run.taskRef, role, provider: provider ?? "claude", model, contestant: null, chain: inheritedChain === null ? null : { index: inheritedChain.index, entryDigest: inheritedChain.entryDigest } },
+          derived.stamp,
+          run.now,
+        );
+        if (problem !== null) throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): ${problem}`);
+        stamp = derived.stamp;
+      }
     }
     const qualityMode: QualityMode =
       role === "reviewer" && run.parentRun !== undefined
@@ -13065,8 +13260,9 @@ export class Store {
           })();
     const inserted = this.db
       .prepare(
-        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, parent_run, session_id, contestant, quality_mode, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, parent_run, session_id, contestant, quality_mode,
+                          chain_cycle, chain_index, entry_digest, auth_mode, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.taskRef,
@@ -13081,14 +13277,63 @@ export class Store {
         run.sessionId ?? null,
         run.contestant ?? null,
         qualityMode,
+        inheritedChain?.cycle ?? null,
+        inheritedChain?.index ?? null,
+        inheritedChain?.entryDigest ?? null,
+        inheritedChain?.authMode ?? null,
         run.now.toISOString(),
       );
     const id = Number(inserted.lastInsertRowid);
-    if (run.route !== undefined) {
-      const stamped = this.stampRunRoute(id, run.route, run.now);
+    if (stamp !== null) {
+      // The provenance row lands in the same transaction as the run row —
+      // proved above, written here; a run and its route are one fact.
+      const stamped = this.stampRunRoute(id, stamp, run.now);
       if (!stamped.ok) throw new Error(stamped.conflict);
     }
     return id;
+  }
+
+  /**
+   * The stamp a routed task DICTATES for a run that presents none (v48):
+   * null when the task is not filed under agent routing (a pre-routing
+   * row, a task with no scope — those roads stamp when they spend); the
+   * sealed route's leg for the run's phase when the approval stands; the
+   * working proposed route's plan leg for a planner before any approval;
+   * a repair or correction child of a chain-bound parent inherits the
+   * parent's fallback provenance for its own phase. Anything else is the
+   * words for why no row may open: a routed task without a sealed route
+   * has nothing a builder, reviewer, or repair could spend under.
+   */
+  private governingStampFor(taskRef: number, role: Run["role"] | "scout", bound: { index: number; entryDigest: string } | null): { ok: true; stamp: RouteStamp } | { ok: false; problem: string } | null {
+    const ref = this.refForId(taskRef);
+    if (ref === null) return null;
+    const scope = this.getScope(ref.externalId);
+    if (scope === null || scope.routeEra == null) return null;
+    const phase = phaseOfRole(role);
+    const sealed = this.sealedRouteOf(ref.externalId);
+    // A child bound to a NON-primary chain entry builds and repairs as that
+    // entry — `fallback` provenance, the entry's own exact pair (its repair
+    // model for a repair turn), under the sealed route's digest (or the
+    // chain's when no route is sealed). The proof below re-checks the
+    // binding's digest against the approved chain.
+    if (bound !== null && bound.index > 0 && (phase === "build" || phase === "repair")) {
+      const chain = this.approvedChainOf(ref.externalId);
+      const entry = chain === null ? undefined : chain[bound.index];
+      if (chain === null || entry === undefined) return { ok: false, problem: "the run is bound to a fallback chain entry the task's approved chain does not have" };
+      const model = phase === "repair" ? (entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel) : entry.profile.model;
+      return { ok: true, stamp: { routeDigest: sealed.ok ? routeDigestOf(sealed.route) : `chain:${chainDigestOf(chain)}`, phase, provider: entry.profile.provider, model, chosen: "fallback" } };
+    }
+    if (sealed.ok) {
+      const leg = legOf(sealed.route, phase);
+      return { ok: true, stamp: { routeDigest: routeDigestOf(sealed.route), phase, provider: leg.provider, model: leg.model, chosen: leg.chosen } };
+    }
+    if (phase === "plan") {
+      const proposed = routeFromJson(scope.proposedRouteJson ?? null);
+      if (proposed === null) return { ok: false, problem: sealed.reason === "unreadable" ? sealed.detail : (scope.unresolvedReason ?? "the task's filed route cannot be read — re-file the scope") };
+      const leg = legOf(proposed, "plan");
+      return { ok: true, stamp: { routeDigest: routeDigestOf(proposed), phase, provider: leg.provider, model: leg.model, chosen: leg.chosen } };
+    }
+    return { ok: false, problem: `this task is filed under agent routing and nothing spends as its ${phase} leg without a sealed route — ${sealed.detail}` };
   }
 
   /**
@@ -18550,6 +18795,9 @@ function readRoutine(row: Record<string, unknown>): Routine {
     ),
     route: routeFromJson(row["route_json"] === null || row["route_json"] === undefined ? null : String(row["route_json"])),
     approvedRoute: routeFromJson(row["approved_route_json"] === null || row["approved_route_json"] === undefined ? null : String(row["approved_route_json"])),
+    routeUnreadable: row["route_json"] != null && routeFromJson(String(row["route_json"])) === null,
+    approvedRouteUnreadable: row["approved_route_json"] != null && routeFromJson(String(row["approved_route_json"])) === null,
+    approvedProfileUnreadable: row["approved_profile_json"] != null && profileFromJson(String(row["approved_profile_json"])) === null,
   };
 }
 

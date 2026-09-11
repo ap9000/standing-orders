@@ -710,6 +710,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // legacy road) is stamped here from the proven profile, first write.
   {
     const existing = store.runRoute(request.runId);
+    const sealed = request.contestProfile !== undefined || attended !== undefined ? null : store.sealedRouteOf(taskId);
     if (existing !== null) {
       if (existing.provider !== provider || existing.model !== effective.model) {
         return {
@@ -718,8 +719,17 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
           message: `${taskId}: route provenance conflict — run #${request.runId} was admitted as ${existing.provider} · ${existing.model ?? "(no model)"} but would spend as ${provider} · ${effective.model}; refusing to run (stale-approval)`,
         };
       }
+      // The route the run was admitted under must still be the one that
+      // governs (v48): a scope re-sealed since admission is a different
+      // authority, and this attempt spends under none of it.
+      if (existing.chosen !== "legacy" && sealed !== null && sealed.ok && existing.routeDigest !== routeDigestOf(sealed.route)) {
+        return {
+          ok: false,
+          reason: "stale-approval",
+          message: `${taskId}: run #${request.runId} was admitted under route ${existing.routeDigest} but the sealed route is now ${routeDigestOf(sealed.route)} — a fresh attempt is admitted under the current approval (stale-approval)`,
+        };
+      }
     } else {
-      const sealed = request.contestProfile !== undefined || attended !== undefined ? null : store.sealedRouteOf(taskId);
       const stamped = store.stampRunRoute(
         request.runId,
         sealed !== null && sealed.ok

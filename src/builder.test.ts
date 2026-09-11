@@ -174,9 +174,12 @@ describe("the builder's gates", () => {
     // scope would walk straight through.
     claimIt();
     approveScope();
+    // The attempt was admitted under the approval; the rewrite lands after
+    // (v48: no attempt could even open once the seal is gone).
+    const admitted = request();
     propose(store, { taskId: "t-1", goal: "rewrite the billing model", now: T0 });
 
-    const result = await build(store, request());
+    const result = await build(store, admitted);
 
     expect(result).toMatchObject({ ok: false, reason: "scope-changed" });
     expect(agentCalls).toHaveLength(0);
@@ -2111,7 +2114,9 @@ describe("bounded repair", () => {
     // its repair names the same route's repair leg.
     const { agent } = staged([invalid, valid]);
     const sealed = store.approvedRouteOf("t-1")!;
-    expect(store.stampRunRoute(runId, { routeDigest: routeDigestOf(sealed), phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" }, T0)).toEqual({ ok: true, first: true });
+    // Admission already stamped the run from the sealed route (v48): the
+    // same stamp restated is idempotent, never a second provenance.
+    expect(store.stampRunRoute(runId, { routeDigest: routeDigestOf(sealed), phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" }, T0)).toEqual({ ok: true, first: false });
     const result = await build(store, request({ agent }));
     expect(result).toMatchObject({ ok: true });
     const repair = store.runsFor(taskRef).find(r => r.role === "repair")!;
@@ -2239,8 +2244,14 @@ describe("bounded repair", () => {
     const yes = approve(store, "t-1", "alex", T0, restated.digest, approverToken);
     expect(yes.ok).toBe(true);
 
+    // The attempt admitted under the EARLIER route cannot spend under the
+    // new one (v48): its provenance names a route that no longer governs.
     const { agent, calls } = staged([invalid, valid]);
-    await build(store, request({ agent }));
+    expect(await build(store, request({ agent }))).toMatchObject({ ok: false, reason: "stale-approval" });
+    expect(calls).toHaveLength(0);
+    // A fresh admission under the re-sealed route is the road.
+    const fresh = store.startRun({ taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0 });
+    await build(store, request({ agent, runId: fresh }));
     const main = calls[0] ?? [];
     const repair = calls[1] ?? [];
     expect(main[main.indexOf("--model") + 1]).toBe("sonnet");
@@ -2470,7 +2481,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     if (args.includes("symbolic-ref")) {
       return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
     }
-    if (args.includes("--numstat")) return { ...OK, stdout: "1\t0\tsrc/index.ts " };
+    if (args.includes("--numstat")) return { ...OK, stdout: "1\t0\tsrc/index.ts\0" };
     if (args.includes("status")) return { ...OK, stdout: " M src/index.ts\n" };
     return { ...OK };
   };

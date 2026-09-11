@@ -945,6 +945,51 @@ describe("routine — standing orders from the command line", () => {
     expect(out()).toContain("paused");
   });
 
+  test("migration-recovery (CLI): `routine refresh` re-resolves a legacy unfrozen order's agents, approves nothing, and `routine approve` then freezes exactly what was shown", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+    for (const phase of ["build", "plan", "review"]) {
+      await run(["config", "set", phase, "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"]);
+    }
+    await run(["routine", "add", "nightly-deps", "--repo", dir, "--goal", "Refresh the lockfile", "--acceptance", "It is fixed and verified.|manual-review", "--schedule", "daily:03:30"]);
+    // Roll the row back to a v47 approval: approved on terms + profile, no route.
+    const { openStore: open } = await import("./store.js");
+    const { routineDigestOf: digestOf, termsOf } = await import("./routine.js");
+    const legacy = open(db);
+    const row = legacy.routineByName("nightly-deps")!;
+    const v47Digest = digestOf(termsOf(row), row.profile);
+    legacy.raw().prepare("UPDATE routine SET route_json = NULL, digest = ?, approved_at = ?, approved_by = 'alex', approved_digest = ?, approved_profile_json = profile_json, next_fire_at = ? WHERE id = ?")
+      .run(v47Digest, T0.toISOString(), v47Digest, T0.toISOString(), row.id);
+    legacy.close();
+
+    // Shown honestly, and run-now refuses in words that name the road.
+    expect(await run(["routine", "show", "nightly-deps"])).toBe(EXIT.ok);
+    expect(out()).toContain("not frozen");
+    expect(out()).toContain("routine refresh");
+    expect(await run(["routine", "run-now", "nightly-deps", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ reason: "route-unfrozen" });
+
+    // Refresh: the working agents move, the approval goes stale, nothing fires.
+    expect(await run(["routine", "refresh", "nightly-deps", "--json"])).toBe(EXIT.ok);
+    expect(payload()).toMatchObject({ changed: true, before: "unfrozen" });
+    const refreshedDigest = payload().routine.digest as string;
+    expect(refreshedDigest).not.toBe(v47Digest);
+    expect(payload().routine.approvedDigest).toBe(v47Digest);
+    expect(await run(["routine", "run-now", "nightly-deps", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ reason: "not-approved" });
+    expect(await run(["routine", "refresh", "nightly-deps", "--json"])).toBe(EXIT.ok);
+    expect(payload()).toMatchObject({ changed: false });
+
+    // The yes, against the digest the refresh printed — then a firing seals it.
+    expect(await run(["routine", "approve", "nightly-deps", "--yes", "--digest", refreshedDigest, "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok);
+    expect(payload().routine.approvedRoute).not.toBeNull();
+    expect(await run(["routine", "run-now", "nightly-deps", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok);
+    const taskId = payload().taskId as string;
+    const check = open(db);
+    expect(check.sealedRouteOf(taskId).ok).toBe(true);
+    check.close();
+  });
+
   test("a bad definition names every problem at once and stores nothing", async () => {
     const bad = await run([
       "routine", "add", "bad-one",
@@ -1341,9 +1386,9 @@ describe("task repair: the first CLI road to a revision (v40, evidence-review-v1
 
   /** A short run against a rubric-bearing task, with a drafted repair —
    * exactly what a review pass's trigger leaves behind, seeded directly. */
-  const seedDraftedRepair = async (): Promise<{ runId: number; draftId: string }> => {
+  const seedDraftedRepair = async (): Promise<{ runId: number; draftId: string; token: string }> => {
     const { openStore: open } = await import("./store.js");
-    const { propose: proposeFn } = await import("./scope.js");
+    const { propose: proposeFn, approve: approveFn, addApprover: addApproverFn } = await import("./scope.js");
     const { maybeTriggerRepair } = await import("./dispose.js");
     const store = open(db);
     try {
@@ -1354,6 +1399,12 @@ describe("task repair: the first CLI road to a revision (v40, evidence-review-v1
       const ref = store.refFor("built-in", "t-1");
       store.placeTask(ref.id, "/repo");
       proposeFn(store, { taskId: "t-1", goal: "do the work", acceptance: [{ id: "c1", statement: "it works", how: null, evidence: ["manual-review"] }], now: T0 });
+      // v48: the source attempt ran under a sealed route — the bootstrap
+      // approver seals it, and the tests below act as that same person.
+      const seeded = addApproverFn(store, "alex", T0);
+      if (!seeded.ok) throw new Error("bootstrap");
+      const sealed = approveFn(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, seeded.token);
+      if (!sealed.ok) throw new Error(`the fixture approval was refused: ${sealed.reason}`);
       const runId = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "r-1", branch: "b", worktree: "/wt", now: T0 });
       store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
       store.saveProofVerdict(runId, "short", ["needs a look"], T0, [
@@ -1361,7 +1412,7 @@ describe("task repair: the first CLI road to a revision (v40, evidence-review-v1
       ]);
       const trigger = maybeTriggerRepair(store, "/repo", dir, runId, "short", T0);
       if (trigger.kind !== "drafted") throw new Error(`expected a draft, got ${trigger.kind}`);
-      return { runId, draftId: trigger.draftTaskId };
+      return { runId, draftId: trigger.draftTaskId, token: seeded.token };
     } finally {
       store.close();
     }
@@ -1381,9 +1432,7 @@ describe("task repair: the first CLI road to a revision (v40, evidence-review-v1
   });
 
   test("--yes with credentials approves the draft", async () => {
-    const { runId, draftId } = await seedDraftedRepair();
-    await run(["approver", "add", "alex", "--json"]);
-    const token = payload().token as string;
+    const { runId, draftId, token } = await seedDraftedRepair();
     const code = await run(["task", "repair", String(runId), "--yes", "--as", "alex", "--token", token, "--json"]);
     expect(code).toBe(EXIT.ok);
     expect(payload()).toMatchObject({ run: runId, draft: draftId, approvedBy: "alex" });

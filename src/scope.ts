@@ -911,7 +911,7 @@ export function addApprover(
 
 export type ApproveResult =
   | { ok: true; scope: Scope }
-  | { ok: false; reason: "no-scope" | "changed" | "no-approvers" | "not-an-approver" | "profile-unresolved" };
+  | { ok: false; reason: "no-scope" | "changed" | "no-approvers" | "not-an-approver" | "profile-unresolved" | "unrouted" };
 
 /**
  * Whether this name-and-token pair is a person the store knows. Shared by
@@ -1074,6 +1074,12 @@ export function approve(
     // agree to it (foundations finding 16) — restatement is the road.
     if (scope.profileState === "unresolved") {
       return { ok: false as const, reason: "profile-unresolved" as const };
+    }
+    // A row that predates agent routing cannot take a NEW yes (v48): an
+    // approval now names exactly which agent plans, builds, repairs, and
+    // reviews, and this row names none — re-filing routes it.
+    if (scope.routeEra == null) {
+      return { ok: false as const, reason: "unrouted" as const };
     }
 
     // SEAL, never re-resolve: the approval snapshots the stored working

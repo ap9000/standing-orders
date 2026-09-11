@@ -9,7 +9,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { openStore, type Store } from "./store.js";
-import { propose, approve, addApprover, chainFromJson, chainDigestOf } from "./scope.js";
+import { propose, approve, addApprover, chainFromJson, chainDigestOf, entryDigestOf } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
 
 // The production exhaustion module ships NO recognizer-mutation surface
@@ -324,8 +324,9 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     // The scope is rewritten WITHOUT reapproval — approved_digest !== digest.
     propose(store, { taskId: "t-stale", goal: "a wider guard", now: T0 });
     expect(store.approvedChainOf("t-stale")).toBeNull(); // authority withdrawn
-    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0 });
-    expect(store.openChainCycleForDispatch(ref, "t-stale", run, T0)).toBeNull();
+    // v48: with no sealed route, no run opens at all — zero rows, no cycle.
+    expect(() => store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0 })).toThrow(/approved and then changed/);
+    expect(Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run WHERE task_ref = ?").get(ref) as { n: number }).n)).toBe(0);
     expect(store.fallbackCycleFor(ref)).toBeNull();
   });
 });
@@ -472,8 +473,16 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     // Admit the fallback run (the last entry) at cursor 1.
     const cyc = store.fallbackCycleFor(ref)!;
     const txId = Number((store.raw().prepare("SELECT id FROM fallback_transition WHERE cycle = ? ORDER BY id DESC LIMIT 1").get(cyc.id) as { id: number }).id);
-    const admitted = store.admitFallback(
+    // The admission binds the approved chain's EXACT entry (v48): a made-up
+    // entry digest opens nothing.
+    const chain = store.approvedChainOf("t-end")!;
+    const forged = store.admitFallback(
       { cycleId: cyc.id, expectGeneration: cyc.transitionGeneration, expectCursor: 1, transitionId: txId, run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: "gemini", model: "gemini-2.5-pro" }, entryDigest: "e1", authMode: "api-key" },
+      T0,
+    );
+    expect(forged).toMatchObject({ ok: false, problem: expect.stringContaining("bound to chain entry 1 under digest e1") });
+    const admitted = store.admitFallback(
+      { cycleId: cyc.id, expectGeneration: cyc.transitionGeneration, expectCursor: 1, transitionId: txId, run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: "gemini", model: "gemini-2.5-pro" }, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key" },
       T0,
     );
     expect(admitted.ok).toBe(true);
