@@ -182,7 +182,7 @@ export function attentionCardForUnverifiedDone(facts: UnverifiedDoneFacts): Boar
     routineName: null,
     priority: 0,
     assignedRunner: null,
-    reason: (facts.proofVerdict === "refuted" ? "complete — proof refuted" : "complete — needs verification") + matrixWords + repairWords,
+    reason: (facts.proofVerdict === "refuted" ? "complete — conflicting evidence" : "complete — missing evidence") + matrixWords + repairWords,
   };
 }
 

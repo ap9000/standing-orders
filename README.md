@@ -171,17 +171,17 @@ for people splitting those parts across machines.
    criterion id, pass/missing/failed/manual-review, checks, screenshots
    for UI-facing work — and a closed verdict: *verified* when the repository's
    approved verification command passed, *attested* when none is
-   configured and nothing contradicts the proof, or *needs verification*
-   when the proof is missing, incomplete, or disagrees with what the
-   machine captured. The last of those never hides the work — the branch
-   and diff are exactly as reviewable, and you can accept it anyway with a
-   note. A scout's report lands on its task page with follow-ups you can
+   configured and nothing contradicts the proof, *missing evidence* when
+   a requirement lacks support, or *conflicting evidence* when an independent
+   check contradicts the result. Neither
+   state hides the work — the branch and diff stay reviewable, and you can
+   accept with a recorded exception after reviewing it. A scout's report lands on its task page with follow-ups you can
    file in one tap. Publishing to a branch and a pull request happens only
    under a publication grant whose terms you approved on the **system**
    page.
 7. **Review it without the transcript.** The **review** view of builds is a
    cockpit over completed work: a queue ranked by *review priority* (a
-   labeled, deterministic aid — refuted or incomplete proofs, reviewer
+   labeled, deterministic aid — conflicting or missing evidence, reviewer
    contradictions, and observed CI failures first; it never rewrites the
    stored verdict), and one selected result showing the approved goal and
    boundary, every signed criterion with its adjudicated state and the
@@ -191,8 +191,8 @@ for people splitting those parts across machines.
    fall outside the signed touches (matched gitignore-style, so `src/**`
    with `/*.ts` covers nested files), and what the publication watcher
    actually saw. The queue shows the newest 100 completions; an older
-   result still opens by its own link. The next act sits under the header: accept an incomplete
-   proof, annotate the diff and seal a revision, compare a tournament, or
+   result still opens by its own link. The next act sits under the header: review evidence,
+   annotate the diff and create a revision, compare a tournament, or
    open the pull request — each through the road that already owns it. A
    task marked done by hand, or built before proofs existed, says so
    plainly instead of pretending to a verdict.

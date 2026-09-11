@@ -1174,7 +1174,7 @@ describe("task show and task accept speak the machine's own proof verdict (Prior
 
     const prose = await run(["task", "show", "t-1"]);
     expect(prose).toBe(EXIT.ok);
-    expect(out()).toContain("proof refuted");
+    expect(out()).toContain("conflicting evidence");
     expect(out()).toContain("src/other.ts");
   });
 

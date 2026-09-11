@@ -802,9 +802,9 @@ export function verdictWords(verdict: ProofVerdict, reasons: readonly string[]):
     case "attested":
       return { word: "complete — evidence attested", detail };
     case "short":
-      return { word: "needs verification", detail };
+      return { word: "missing evidence", detail };
     case "refuted":
-      return { word: "proof refuted", detail };
+      return { word: "conflicting evidence", detail };
   }
 }
 

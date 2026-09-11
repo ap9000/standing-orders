@@ -47,15 +47,15 @@ function facts(overrides: Partial<BoardFacts> = {}): BoardFacts {
 }
 
 describe("attentionCardForUnverifiedDone (Priority 2)", () => {
-  test("a short verdict reads 'needs verification'; a refuted one names the refutation", () => {
+  test("a short verdict reads 'missing evidence'; a refuted one names the conflict", () => {
     const short = attentionCardForUnverifiedDone({
       taskId: "t-9", title: "the work", repo: "/repo/x", completedAt: T0.toISOString(), proofVerdict: "short",
     });
-    expect(short).toMatchObject({ lane: "attention", reason: "complete — needs verification", href: "/t/t-9" });
+    expect(short).toMatchObject({ lane: "attention", reason: "complete — missing evidence", href: "/t/t-9" });
     const refuted = attentionCardForUnverifiedDone({
       taskId: "t-9", title: "the work", repo: null, completedAt: T0.toISOString(), proofVerdict: "refuted",
     });
-    expect(refuted.reason).toBe("complete — proof refuted");
+    expect(refuted.reason).toBe("complete — conflicting evidence");
   });
 });
 

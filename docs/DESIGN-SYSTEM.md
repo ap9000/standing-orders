@@ -108,11 +108,10 @@ top-down and every long thing folds.
 1. **Eyebrow** — mono id · project · provenance.
 2. **Title** with its state chip. A done task's dispatch-status box
    beneath it speaks the machine's own proof verdict (Priority 2) —
-   *complete — verified*, *complete with evidence*, *needs verification*,
-   or *proof refuted* — never re-derived from the page; an accepted
-   short/refuted verdict keeps its word but reads `ok`, with an amber
-   "accept anyway" form (`.approve-form`, the same rule as approving a
-   scope) while it waits.
+   *verified*, *evidence captured*, *missing evidence*, or *conflicting
+   evidence* — never re-derived from the page. Accepting the latter two is
+   an explicit, neutral *accepted with exception* disclosure, not an amber
+   approval ceremony.
 3. **Acts bar** — every verb in one row; the act that resolves the task's
    state first and primary (retry on a stalled task, plan-first with no
    scope, build-next in the queue); hold with its reason beside it; unhold
@@ -156,17 +155,17 @@ top-down and every long thing folds.
 
 A master/detail over completed work, built from the same rows the done view
 and the run page read. Desktop: a sticky ranked queue (`minmax(15rem, 19rem)`)
-beside one detail column; at 980px and below the two stack, the queue first
-with a bounded scroll, so the phone reads queue → header → primary act →
-sections. The rules:
+beside one detail column; at 980px and below the two stack with the selected
+result first and the queue below it, so the phone reaches the result and its
+primary act before the backlog. The rules:
 
-- **Review priority is a chip, never a verdict.** Three words — *review
-  first* (`badge-failed`), *look closer* (`badge-manual-review`), *routine*
-  (`badge-done`) — and the reasons are always printed beside the chip, on the
-  row and under the header. The proof word beside it is the receipt's own
+- **Review priority is a chip, never a verdict.** Three words — *needs
+  action* (`badge-failed`), *review* (`badge-manual-review`), *no flags*
+  (`badge-done`) — with one short reason on the queue row. The selected
+  header keeps only the receipt's own
   `receipt-proof` chip from the same `proofStateWords` mapping, so the
   cockpit and the task page never disagree: the stored verdict decides the
-  word (a no-change run with a refuted proof still reads *Proof disagrees*),
+  word (a no-change run with a refuted proof still reads *Conflicting evidence*),
   and only a completion with no build at all wears *No build record*.
 - **The queue is a window, the link is stable.** The ranked queue lists at
   most the newest 100 completions and prints that cap in its hint when it
@@ -174,19 +173,18 @@ sections. The rules:
   with a muted `.cockpit-beyond` note ("opened directly … no row there"),
   never the "not in view" problem banner, which is reserved for tasks that
   are not done, not admitted, or do not exist.
-- **One primary act** (`.cockpit-next`), chosen from the state: accept a
-  short/refuted proof (the amber `.approve-form`, the same rule as approving
-  a scope), compare a tournament, draft a CI repair, seal ready annotations,
+- **One primary act** (`.cockpit-next`), chosen from the state: review
+  missing or conflicting evidence, compare a tournament, draft a CI repair, seal ready annotations,
   open the pull request, or plainly "nothing waits on you". Every other road
   stays in its own section. A bearer session sees the act named, never a form.
-- **Sections in one scan path**, each a `.cockpit-section` card with an
-  uppercase muted `h3`: approved intent → proof → what the agent said →
-  what changed → annotate and revise → publication → operator notes. Every
-  evidence row is labeled by source (`data-cockpit-source`: machine, agent,
-  reviewer, screenshots, caveats), and an absent source says "none", never
-  nothing.
+- **Sections in one scan path**, with approved scope, the evidence bundle,
+  the agent summary, and exception form progressively disclosed: approved
+  scope → evidence → changes → request changes → delivery → operator notes.
+  Every evidence row remains labeled by source (`data-cockpit-source`:
+  machine, agent, reviewer, screenshots, caveats), and an absent source says
+  so plainly. On a phone, the selected result comes before the queue.
 - **Changed files carry their own priority** (`.cockpit-files`): outside the
-  signed touches first (flagged `badge-failed`), then binary, dependency/CI/
+  approved paths first (flagged `badge-failed`), then binary, dependency/CI/
   schema/credential paths, uncited files, and large changes, then churn. Each
   row anchors to its file in the sealed patch (`diff-file-<sha256[0..16]>`),
   which keeps its sealed order beneath. Signed touches match gitignore-style

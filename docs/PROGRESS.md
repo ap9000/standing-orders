@@ -1,5 +1,15 @@
 # Progress
 
+**2026-09-10 — Review evidence is calm, plain, and progressively disclosed.**
+The opaque *Proof disagrees* state is now *Conflicting evidence* everywhere;
+incomplete results read *Missing evidence*, and manual sign-off reads
+*Accepted with exception*. The selected result names the specific cause plainly
+(including the important "required command wasn't available" case for exit
+127), keeps raw checks, screenshots, requirement details, agent notes, and the
+exception form behind deliberate disclosures, and removes the amber exception
+CTA. Mobile presents the selected result before the queue. Desktop and 390px
+browser checks have no horizontal overflow or console errors.
+
 **2026-09-10 — Review cockpit, revised from five review annotations.** A
 stable `?result=<task>` link now outlives the queue window: the ranked
 queue stays bounded to the newest 100 completions and says so, and a link
@@ -13,7 +23,7 @@ delimited name pieces only (`auth.ts`, `api-token.ts`, `secrets.json`,
 `.env.local`), so `author.ts`, `tokenizer.ts`, `permissions-ui.tsx`, and
 `.envelope.ts` read as ordinary files. The cockpit's proof-state chip is
 the completion receipt's own words and precedence — the stored verdict
-decides, so a no-change run with a refuted proof reads "Proof disagrees",
+decides, so a no-change run with a refuted proof reads "Conflicting evidence",
 never "No change needed". Small duplicated sources of truth are gone: the
 selected run is fetched once, annotation eligibility is one rule shared by
 the form, file buttons, and picker script, the phone-width cockpit rules
