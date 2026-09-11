@@ -6,6 +6,12 @@ the weakest link in that promise: execution first, proof second, breadth third.
 
 ## 1. Never Stuck
 
+The current reliability follow-up is the
+[Unattended work completion plan](UNATTENDED_PLAN.md). September 11 real runs
+exposed restart ownership, review recovery, runtime-readiness, and proof-handoff
+gaps beyond the earlier certification baseline. Close and recertify those
+before expanding the orchestration feature set.
+
 A filed and approved task either starts, names the exact gate preventing it, or
 fails with a repair path. “Queued” is not an explanation.
 
@@ -42,7 +48,7 @@ to the model as formatting work.
 
 ### Certification handoff
 
-The implementation and pre-Windows certification are complete. Real Claude
+The earlier implementation passed its pre-Windows certification baseline. Real Claude
 and Codex subscription canaries pass planning → approval → build → verified
 proof → duplicate-dispatch refusal on macOS; Windows CI passes the native
 Task Scheduler/link/dispatch seam and `cmd.exe` setup/verification on Node 22
@@ -154,9 +160,10 @@ started.
 
 ## Current focus
 
-Priority 3 is active. Priority 1 is implemented and has passed every
-pre-Windows gate; only the physical-machine and real account-exhaustion checks
-listed above remain. Its structured planner/reviewer recovery is also bounded:
+Priority 1 is active again under the [unattended completion plan](UNATTENDED_PLAN.md).
+The earlier pre-Windows gates passed, but subsequent real work exposed gaps
+that now need closure and broader certification. Physical-machine and real
+account-exhaustion checks also remain. Its structured planner/reviewer recovery is bounded:
 syntax-only normalization, no more than two same-session corrections, sealed
 attempt evidence, and fresh workspace or scratch proof after every reply.
 Priority 2's proof contract, independent review, concise
