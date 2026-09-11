@@ -6,8 +6,8 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, BUILT_IN, type Store } from "./store.js";
-import { addApprover } from "./scope.js";
-import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
+import { addApprover, approve, propose } from "./scope.js";
+import { resolvePhaseAgent, resolveRouteCandidates, routeOfTask, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { approveRoutine, fireRoutine, routineDigestOf, type RoutineTerms } from "./routine.js";
 import { resolveScopeProfile } from "./agentconfig.js";
 
@@ -205,5 +205,120 @@ describe("firing pins the agent and re-proves the ceiling against it", () => {
     expect(approveRoutine(store, id, "alex", new Date(T0.getTime() + 2 * HOUR), newDigest, token).ok).toBe(true);
     const fired = fireRoutine(store, id, new Date(T0.getTime() + 3 * HOUR));
     expect(fired.ok).toBe(true);
+  });
+});
+
+describe("route candidates and the task route (v47)", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+  });
+  afterEach(() => store.close());
+
+  const exactInstall = () => {
+    store.setPhaseConfig(INSTALLATION_SCOPE, "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig(INSTALLATION_SCOPE, "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig(INSTALLATION_SCOPE, "review", "claude", "sonnet", "test", T0);
+  };
+
+  test("every candidate is exact: a phase with no model id refuses with the words to fix it — nothing is inferred", () => {
+    // Only the build named a model: the planner cannot be a candidate.
+    store.setPhaseConfig(INSTALLATION_SCOPE, "build", "claude", "sonnet", "test", T0);
+    const bare = resolveRouteCandidates(store, "/repo");
+    expect(bare).toMatchObject({ ok: false, phase: "plan" });
+    if (bare.ok) return;
+    expect(bare.problem).toContain("config set plan --provider claude --model <model>");
+    exactInstall();
+    const exact = resolveRouteCandidates(store, "/repo");
+    expect(exact.ok).toBe(true);
+    if (!exact.ok) return;
+    expect(exact.candidates.build).toEqual({ routine: { provider: "claude", model: "sonnet", source: "installation" }, strong: null });
+    expect(exact.candidates.plan.routine).toEqual({ provider: "claude", model: "sonnet", source: "installation" });
+    // Repair with no row: null — the policy inherits the build leg.
+    expect(exact.candidates.repair).toEqual({ routine: null, strong: null });
+    expect(exact.candidates.review.strong).toBeNull();
+  });
+
+  test("the strong tier is only ever a configured EXACT row: project beats installation, review inherits the plan's; a null-model or unknown row refuses", () => {
+    exactInstall();
+    store.setPhaseTierConfig(INSTALLATION_SCOPE, "build", "strong", "claude", "opus", "alex", T0);
+    store.setPhaseTierConfig(INSTALLATION_SCOPE, "plan", "strong", "codex", "gpt-5", "alex", T0);
+    store.setPhaseTierConfig("/repo", "build", "strong", "codex", "gpt-5-codex", "alex", T0);
+    const configured = resolveRouteCandidates(store, "/repo");
+    if (!configured.ok) throw new Error("expected candidates");
+    expect(configured.candidates.build.strong).toEqual({ provider: "codex", model: "gpt-5-codex", source: "project (strong)" });
+    expect(configured.candidates.plan.strong).toEqual({ provider: "codex", model: "gpt-5", source: "installation (strong)" });
+    expect(configured.candidates.review.strong).toEqual({ provider: "codex", model: "gpt-5", source: "installation (strong, inherited from plan)" });
+    const other = resolveRouteCandidates(store, "/other");
+    if (!other.ok) throw new Error("expected candidates");
+    expect(other.candidates.build.strong).toEqual({ provider: "claude", model: "opus", source: "installation (strong)" });
+    // A configured strong row with no model is malformed — refused, never skipped.
+    store.setPhaseTierConfig(INSTALLATION_SCOPE, "repair", "strong", "claude", null, "alex", T0);
+    const nullModel = resolveRouteCandidates(store, "/other");
+    expect(nullModel).toMatchObject({ ok: false, phase: "repair" });
+    if (!nullModel.ok) expect(nullModel.problem).toContain("with no model");
+    store.clearPhaseTierConfig(INSTALLATION_SCOPE, "repair", "strong");
+    // A configured repair row must be exact too; a cross-provider one is
+    // stated by the policy (the leg's problem), not skipped.
+    store.setPhaseConfig(INSTALLATION_SCOPE, "repair", "codex", null, "test", T0);
+    expect(resolveRouteCandidates(store, "/other")).toMatchObject({ ok: false, phase: "repair" });
+    store.setPhaseConfig(INSTALLATION_SCOPE, "repair", "codex", "gpt-5-codex", "test", T0);
+    const crossed = resolveRouteCandidates(store, "/other");
+    if (!crossed.ok) throw new Error("expected candidates");
+    expect(crossed.candidates.repair.routine).toEqual({ provider: "codex", model: "gpt-5-codex", source: "installation" });
+  });
+
+  test("routeOfTask says which route governs: live before a scope, proposed after filing, approved after the seal — and FAILS CLOSED on a routed row whose route is gone", () => {
+    exactInstall();
+    const alex = addApprover(store, "alex", T0, undefined, () => "tok-alex");
+    if (!alex.ok) throw new Error("bootstrap");
+    store.createTask({ id: "t", title: "t" }, T0);
+    const ref = store.refFor(BUILT_IN, "t");
+    store.placeTask(ref.id, "/repo");
+    expect(store.editTaskRoute(ref.id, { by: "alex", authenticate: () => ({ ok: true }), risk: "high" }, T0).ok).toBe(true);
+    const live = routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0);
+    expect(live).toMatchObject({ kind: "route", source: "live" });
+    if (live?.kind === "route") expect(live.route.risk).toBe("high");
+
+    propose(store, { taskId: "t", goal: "g", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], now: T0 });
+    expect(routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0)).toMatchObject({ kind: "route", source: "proposed" });
+    const scope = store.getScope("t")!;
+    expect(scope.routeEra).toBe(1);
+    expect(approve(store, "t", "alex", T0, scope.digest, "tok-alex").ok).toBe(true);
+    const sealed = routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0);
+    expect(sealed).toMatchObject({ kind: "route", source: "approved" });
+    if (sealed?.kind === "route") expect(sealed.route.risk).toBe("high");
+
+    // Route data removed from a ROUTED row (the era is set): nothing
+    // downgrades to a legacy profile — the task is unreadable, in words.
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = NULL WHERE task_id = 't'").run();
+    const gone = routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0);
+    expect(gone).toMatchObject({ kind: "unreadable" });
+    if (gone?.kind === "unreadable") expect(gone.problem).toContain("sealed no agent route");
+    expect(store.sealedRouteOf("t")).toMatchObject({ ok: false, reason: "unreadable" });
+    // Malformed route data on a routed row: the same closed door.
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = '{\"version\":1}' WHERE task_id = 't'").run();
+    expect(routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0)).toMatchObject({ kind: "unreadable" });
+    // Only a row PROVEN to predate routing (no era) reads as legacy.
+    store.raw().prepare("UPDATE task_scope SET route_era = NULL, approved_route_json = NULL, proposed_route_json = NULL WHERE task_id = 't'").run();
+    const legacy = routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0);
+    expect(legacy).toMatchObject({ kind: "legacy", profile: { provider: "claude", model: "sonnet" } });
+    expect(store.sealedRouteOf("t")).toMatchObject({ ok: false, reason: "legacy" });
+  });
+
+  test("a plan pin with no model cannot route: the live recommendation says so instead of guessing", () => {
+    exactInstall();
+    store.createTask({ id: "p", title: "p" }, T0);
+    const ref = store.refFor(BUILT_IN, "p");
+    store.placeTask(ref.id, "/repo");
+    store.setPlanPins(ref.id, "claude", null, T0);
+    const routed = routeOfTask(store, "p", store.refFor(BUILT_IN, "p"), T0);
+    expect(routed).toMatchObject({ kind: "unreadable" });
+    if (routed?.kind === "unreadable") expect(routed.problem).toContain("task plan <id> --provider claude --model <model>");
+    store.setPlanPins(ref.id, "claude", "opus", T0);
+    const pinned = routeOfTask(store, "p", store.refFor(BUILT_IN, "p"), T0);
+    expect(pinned).toMatchObject({ kind: "route", source: "live" });
+    if (pinned?.kind === "route") expect(pinned.route.legs[0]).toMatchObject({ phase: "plan", provider: "claude", model: "opus", chosen: "pinned" });
   });
 });

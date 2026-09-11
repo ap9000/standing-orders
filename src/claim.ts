@@ -356,7 +356,7 @@ function latest(db: Store["handle"], taskRef: number): Record<string, unknown> |
  */
 export type NotReady = {
   ok: false;
-  reason: "not-ready" | "capability" | "attention-budget" | "capacity" | "quota";
+  reason: "not-ready" | "capability" | "attention-budget" | "capacity" | "quota" | "provider-unavailable";
   message: string;
 };
 
@@ -491,6 +491,18 @@ export function acquireIfReady(
         message: `${runner}'s provider quota is exhausted (${quota.reason})${quota.resetAt === null ? "" : ` until ${quota.resetAt}`} — a free slot against an exhausted quota is not capacity`,
       };
     }
+    // THE ROUTED PROVIDER'S READINESS (v47), re-read inside the same
+    // transaction: a provider THIS runner has reported unavailable never
+    // claims — no substitution, no second-best. Unknown passes; only a
+    // recorded unavailable refuses, and it says what was observed.
+    const readiness = store.runnerReadinessOf(runner, options.provider ?? "claude");
+    if (readiness !== null && readiness.state === "unavailable") {
+      return {
+        ok: false as const,
+        reason: "provider-unavailable" as const,
+        message: `${readiness.provider} is reported unavailable on ${runner} (${readiness.reason}; observed ${readiness.observedAt}) — nothing substitutes for a routed provider`,
+      };
+    }
     // The attention budget (§8, gate 6), proved where every other readiness
     // fact is proved. A phone with thirty open questions answers none of
     // them; above the budget, tasks with a *measured* habit of parking step
@@ -608,6 +620,17 @@ export function acquireFallback(
     }
     const gap = missingCapability(store, taskRef, options.repo ?? null, options.now);
     if (gap !== null) return { ok: false as const, reason: "capability" as const, message: gap };
+    // The pinned entry's provider must not be one this runner reports
+    // unavailable (v47): the approved chain is the ONLY substitution road,
+    // and it still never dispatches onto a provider known to be missing.
+    const entryReadiness = store.runnerReadinessOf(runner, options.provider);
+    if (entryReadiness !== null && entryReadiness.state === "unavailable") {
+      return {
+        ok: false as const,
+        reason: "provider-unavailable" as const,
+        message: `${entryReadiness.provider} is reported unavailable on ${runner} (${entryReadiness.reason}; observed ${entryReadiness.observedAt}) — the fallback entry cannot run here`,
+      };
+    }
     const registered = store.getRunner(runner);
     if (registered !== null) {
       const held = store.liveClaimCount(runner, options.now);

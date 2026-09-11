@@ -32,6 +32,10 @@ describe("the coordinator credential", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    // v47: a routed scope seals only when every phase names an exact agent.
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
   });
   afterEach(() => store.close());
 
@@ -170,6 +174,10 @@ describe("the coordinator quarantine", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    // v47: a routed scope seals only when every phase names an exact agent.
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     const made = mintCoordinator(store, { name: "planner-bot", repos: [REPO], by: "alex", now: T0 });
     if (!made.ok) throw new Error("mint failed");
     cid = made.cid;
@@ -280,6 +288,8 @@ describe("the coordinator quarantine", () => {
     const alex = addApprover(store, "alex", T0);
     if (!alex.ok) throw new Error("bootstrap failed");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     const terms = { ...presetTerms("standard", later(24 * 3_600_000).toISOString()), autoApproveFiling: true };
     store.signMode(
       {
@@ -392,6 +402,10 @@ describe("the outstanding caps and credential-scoped reads", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    // v47: a routed scope seals only when every phase names an exact agent.
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
   });
   afterEach(() => store.close());
 

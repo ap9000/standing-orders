@@ -54,6 +54,8 @@ describe("Never Stuck dispatch diagnosis", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     const added = addApprover(store, "operator", T0);
     if (!added.ok) throw new Error("approver bootstrap refused");
     approverToken = added.token;

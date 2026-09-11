@@ -147,6 +147,8 @@ describe("the fallback chain end-to-end (E3d)", () => {
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
 
     // The task exists, PLACED first (placement is immutable once scoped),
     // then the repo gains its fallback config and a mode GRANTING the paid
@@ -223,6 +225,8 @@ describe("the fallback chain end-to-end (E3d)", () => {
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-nogrant"]);
     {
       const store = openStore(db);

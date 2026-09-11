@@ -55,6 +55,8 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
     // without one, every scope (original and draft alike) is unapprovable
     // for a reason that has nothing to do with the repair loop itself.
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
   });
 
   afterEach(() => {

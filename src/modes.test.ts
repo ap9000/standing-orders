@@ -92,6 +92,10 @@ describe("mode terms: digest, rehydration, words", () => {
 describe("the mode store roads: sign, active, revoke, renew, rails", () => {
   const seed = () => {
     const store = openStore(":memory:");
+    // v47: a routed scope seals only when every phase names an exact agent.
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     const alex = addApprover(store, "alex", T0);
     if (!alex.ok) throw new Error("bootstrap");
     return { store, alexToken: alex.token };

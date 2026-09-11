@@ -31,6 +31,7 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { openStore, type Store } from "./store.js";
 import { addApprover, propose, approve, type AcceptanceCriterion } from "./scope.js";
+import { legOf, routeDigestOf } from "./phase-routing.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 import { approveRoutine, fireRoutine } from "./routine.js";
@@ -320,6 +321,14 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   // run does. Every seeded scope can then be approved from the demo instead
   // of inheriting an artificial "model not set" blocker.
   store.setPhaseConfig("installation", "build", "claude", "sonnet", "demo", now);
+  // Approvals bind EXACT routing for every phase (v47): the planner and
+  // reviewer name their models too, or no scope could file.
+  store.setPhaseConfig("installation", "plan", "claude", "sonnet", "demo", now);
+  store.setPhaseConfig("installation", "review", "claude", "sonnet", "demo", now);
+  // The strong tier (v47): the named agents high-risk, strict, screenshot-
+  // proof, and automerge routes reach for — configured, never inferred.
+  store.setPhaseTierConfig("installation", "build", "strong", "claude", "opus", "demo", now);
+  store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "demo", now);
 
   // The demo's builder goes through the REAL claim machinery, and the claim
   // primitive proves identity and repo binding in-transaction — so the demo
@@ -331,6 +340,19 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     repos: [repos.api, repos.web],
     now: hoursAgo(30),
   });
+  // What the demo machine observed about each provider without spending
+  // (v47): claude installed but unproven (no non-spending login check),
+  // codex logged in, openrouter without a key, gemini not installed.
+  store.recordProviderReadiness(
+    "night-shift-1",
+    [
+      { provider: "claude", state: "unknown", reason: "installed (claude 2.1.0); no non-spending login check exists — a real run is the proof", probe: "version" },
+      { provider: "codex", state: "ready", reason: "installed (codex 0.62.0); logged in as demo@standing-orders.dev", probe: "identity" },
+      { provider: "openrouter", state: "unavailable", reason: "OPENROUTER_API_KEY is absent from this runner's environment", probe: "key" },
+      { provider: "gemini", state: "unavailable", reason: "`gemini` is not installed on this runner's PATH", probe: "version" },
+    ],
+    hoursAgo(0.2),
+  );
 
   const genericAcceptance: AcceptanceCriterion[] = [
     { id: "c1", statement: "The described change is made and verified.", how: null, evidence: ["manual-review"] },
@@ -353,6 +375,12 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     "Switch the request logger to JSON lines so the collector stops parsing free text. Keep the human console formatter for local dev. Migrate the two dashboards that grep the old format.",
   );
   const plannedRef = store.refFor("built-in", planned).id;
+  // An explainable route (v47): the operator declared elevated risk and
+  // overrode the reviewer, so the ceremony shows a recommended leg, a
+  // strong-tier leg, and an overridden leg side by side, with the runner's
+  // readiness per provider.
+  store.editTaskRoute(plannedRef, { by: "demo", authenticate: () => ({ ok: true }), risk: "elevated" }, hoursAgo(3.5));
+  store.editTaskRoute(plannedRef, { by: "demo", authenticate: () => ({ ok: true }), override: { phase: "review", provider: "claude", model: "opus" } }, hoursAgo(3.2));
   store.setPlanState(plannedRef, "drafted");
   const plannerRun = store.startRun({
     taskRef: plannedRef,
@@ -565,6 +593,10 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     now: hoursAgo(27),
   });
   approve(store, done, "demo", hoursAgo(26), doneProposed.digest, token);
+  // Route provenance (v47): the demo's finished build names the exact
+  // agent it spent as, under the route its approval sealed — the same
+  // stamp a real admission writes.
+  const doneRoute = store.approvedRouteOf(done);
   const doneRun = store.startRun({
     taskRef: store.refFor("built-in", done).id,
     leaseId: "demo-lease-done",
@@ -572,6 +604,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     branch: `standing-orders/${done}`,
     worktree: join(repos.api, ".demo-worktree-3"),
     now: hoursAgo(9),
+    ...(doneRoute === null ? {} : { route: { routeDigest: routeDigestOf(doneRoute), phase: "build" as const, provider: legOf(doneRoute, "build").provider, model: legOf(doneRoute, "build").model, chosen: legOf(doneRoute, "build").chosen } }),
   });
   store.stampRun(doneRun, { baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
   storeEvidence(

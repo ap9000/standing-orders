@@ -1,5 +1,33 @@
 # Progress
 
+**2026-09-11 — Which agent runs each phase is decided once, explained, and
+sealed.** Every task now carries an explainable route: one pure policy
+(`src/phase-routing.ts`) recommends the plan, build, repair, and review agents
+from the declared risk (routine, elevated, high), the quality mode, what the
+acceptance rubric demands, the repository's publication authority, and the
+operator's configured routine and strong tiers (`config set <phase> --tier
+strong …`; strength is never inferred from a model's name). Each leg says why
+in plain English, whether it was recommended, overridden, or pinned, and what
+its runners reported about the provider — ready, unavailable with the runner's
+own words, or unknown, which is stated and never upgraded. Approvers declare
+risk and override phases with attribution (`task route`, the task page); every
+edit re-files the scope, so a sealed approval reads stale, while a global
+configuration change can never rewrite a sealed route. Repairs stay on the
+build provider. A provider a runner reports unavailable halts before any
+claim or spend and is never substituted; only the explicitly approved fallback
+chain may switch — an unavailable primary moves to the exact approved next
+entry, only under a live paid-fallback grant. Dispatch, the reviewer, and
+review requests bind to the sealed route; every leg, candidate, and override
+is an exact provider and model id, and a configuration that cannot make one
+files the scope unresolved in words. Each run is stamped with its route and
+actual agent inside the admission transaction, set once; the sealed handoff
+carries the same. Schema v47 is additive with a durable route era: rows proven
+to predate routing keep their digest and are governed by their sealed profile
+alone; a routed row whose route is missing or corrupt fails closed. The console
+shows a compact plain-English Agents summary — who plans, builds, repairs, and
+reviews — with reasons and change controls closed until asked for, and
+availability kept beside the agents rather than inside the approval's terms.
+
 **2026-09-10 — Planner and reviewer handoffs can correct their own shape
 without rewriting the work.** Standing Orders first applies only conservative,
 syntax-level normalization to a structured reply. If strict validation still

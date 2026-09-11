@@ -425,6 +425,57 @@ The same selector appears when a task is created and while its scope is still
 editable. The concrete choice is stamped on every run, survives global setting
 changes, and is visible on the task, approval, run-list, and run-detail views.
 
+### Explainable phase routing
+
+Which agent plans, builds, repairs, and reviews a task is decided once, from
+signed facts, and written down with its reasons. The route reads the task's
+declared **risk** (routine, elevated, high), its quality mode, what the
+acceptance rubric demands (screenshots, manual review), how far a live
+operating mode may carry the result unattended (an automerge mode strengthens
+the reviewer), and the agents you configured for each phase. Strength is never
+inferred from a model's name: the ordinary phase row is the routine tier, and
+`config set <phase> --tier strong --provider <p> --model <m>` names the agent
+high-risk, strict, screenshot-proof, and automerge routes reach for. With no
+strong row, a demanding task keeps the default and says so.
+
+```
+standing-orders task scope <id> --goal … --acceptance … --risk high
+standing-orders task route <id>                     # every leg, its reason, its readiness
+standing-orders task route <id> --phase review --provider codex --model gpt-5-codex --as you --token <t>
+standing-orders task route <id> --clear-phase review --as you --token <t>
+standing-orders providers --report --runner <name> --token <t>   # this machine's readiness
+```
+
+Every leg is **exact**: approvals bind a provider *and* a model id for the
+planner, builder, repair, and reviewer alike, so each phase names its model
+once (`config set plan --provider claude --model <m>`, and the same for
+`build` and `review`; repair inherits the build's model unless a same-provider
+repair row names another). A phase without an exact model, a repair row on
+another provider, or an unknown provider files the scope **unresolved** with
+the words to fix it — nothing is guessed or substituted. Every override names
+an exact model too, and a plan override becomes the planner pin.
+
+Every override is recorded under the approver's name, in one transaction that
+checks the scope you were reading is still the one on file (`--digest`, or the
+form's own field). Approval seals the route — routine-shaped routes included —
+together with any configured fallback chain, exactly as it seals the execution
+profile; a later risk change or override re-files the scope and the old
+approval reads stale, while a global configuration change can never rewrite a
+sealed route. A row filed before routing existed is recognised by a durable
+marker and stays governed by its sealed profile; a routed row whose route data
+is missing or unreadable is refused everywhere until re-filed and approved
+again. Repairs always stay on the build provider. Runners report provider
+readiness without spending — at startup and with `providers --report`, never
+on a timer — and the task page, the chat, and `task show` say **ready**,
+**unavailable** (with the runner's own words), or **unknown** beside the
+agents, outside what the approval signs; an unavailable provider halts before
+any claim and is never substituted, except that an unavailable primary under
+an approved fallback chain moves to the exact approved next entry (and only
+under a live mode that allows paid fallback). Reviewer admission and fallback
+admission re-check readiness and the exact leg inside their transactions.
+Every run is stamped with its route and the actual provider and model at
+admission — set once; a run that would spend as anything else refuses.
+
 ## The phone, both directions
 
 The Telegram bridge closes the loop without a terminal: a parked decision

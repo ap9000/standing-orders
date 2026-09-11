@@ -24,6 +24,9 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { resolve } from "node:path";
 import { canonicalProject } from "./project.js";
 import type { Store, Mutation } from "./store.js";
+import { ALL_CREDENTIAL_ENV, PROVIDER_IDS, inspectionOf, type ProviderId } from "./provider.js";
+import { attestationOf, versionInRange } from "./attest.js";
+import type { ReadinessObservation } from "./phase-routing.js";
 
 /** A runner's repo binding, in the same canonical form task filing uses —
  * the claim gate compares these by equality, so both sides must resolve
@@ -408,4 +411,88 @@ function sameDigest(left: string, right: string): boolean {
   // sorts; equal-length hex digests make that unreachable in practice, and the
   // guard keeps it from throwing if one is ever malformed.
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// ---- provider readiness (v47, phase routing) ------------------------------
+
+/**
+ * What ONE machine can say about a provider without spending a token:
+ * the binary answers `--version`; where a cheap identity probe exists
+ * (codex, openrouter: `login status`) whether it is logged in; where a key
+ * env var is required (openrouter) whether it is present; and, for an
+ * attested provider (gemini), whether the installed version is inside the
+ * range this build proved. Claude has no non-spending login check, so an
+ * installed claude is UNKNOWN — stated, never upgraded to ready.
+ *
+ * Every answer carries the probe's own words. The observation is the
+ * runner's and is recorded under its name only through the authenticated
+ * road below; a runner never reports for another machine.
+ */
+export type ReadinessProbe = (
+  file: string,
+  args: readonly string[],
+  options?: { timeoutMs?: number; omitEnv?: readonly string[] },
+) => Promise<{ code: number; stdout: string; stderr: string; notFound: boolean; timedOut: boolean }>;
+
+const READINESS_PROBE_TIMEOUT_MS = 5_000;
+
+export async function observeProviderReadiness(
+  probe: ReadinessProbe,
+  env: Record<string, string | undefined> = process.env,
+  providers: readonly ProviderId[] = PROVIDER_IDS,
+): Promise<Omit<ReadinessObservation, "runner" | "observedAt">[]> {
+  return Promise.all(
+    providers.map(async provider => {
+      const facts = inspectionOf(provider);
+      const version = await probe(facts.binary, ["--version"], { timeoutMs: READINESS_PROBE_TIMEOUT_MS, omitEnv: ALL_CREDENTIAL_ENV });
+      if (version.notFound) {
+        return { provider, state: "unavailable" as const, reason: `\`${facts.binary}\` is not installed on this runner's PATH`, probe: "version" };
+      }
+      if (version.timedOut || version.code !== 0) {
+        return { provider, state: "unavailable" as const, reason: `\`${facts.binary} --version\` ${version.timedOut ? "timed out" : `exited ${version.code}`}`, probe: "version" };
+      }
+      const installed = version.stdout.trim().split("\n")[0] ?? "";
+      const range = attestationOf(provider);
+      if (range !== null && !versionInRange(installed, range)) {
+        return { provider, state: "unavailable" as const, reason: `installed ${facts.binary} ${installed || "(unversioned)"} is outside this build's attested range ${range.floor}–${range.ceiling}`, probe: "version" };
+      }
+      if (facts.requiresEnv !== null && (env[facts.requiresEnv] ?? "") === "") {
+        return { provider, state: "unavailable" as const, reason: `${facts.requiresEnv} is absent from this runner's environment`, probe: "key" };
+      }
+      // A key-driven provider (openrouter rides the codex harness on an API
+      // key) is ready on key PRESENCE — presence, never authorization — and
+      // needs no harness login. A login-driven one asks the harness.
+      if (facts.requiresEnv !== null) {
+        return { provider, state: "ready" as const, reason: `installed (${installed}); ${facts.requiresEnv} present (presence, not authorization)`, probe: "key" };
+      }
+      if (facts.identityProbe !== null) {
+        const identity = await probe(facts.binary, [...facts.identityProbe], { timeoutMs: READINESS_PROBE_TIMEOUT_MS, omitEnv: ALL_CREDENTIAL_ENV });
+        if (identity.code !== 0) {
+          return { provider, state: "unavailable" as const, reason: `\`${facts.binary} ${facts.identityProbe.join(" ")}\` says not logged in`, probe: "identity" };
+        }
+        const who = identity.stdout.trim().split("\n")[0] ?? "";
+        return { provider, state: "ready" as const, reason: `installed (${installed}); ${who === "" ? "logged in" : who}`, probe: "identity" };
+      }
+      return { provider, state: "unknown" as const, reason: `installed (${installed}); no non-spending login check exists — a real run is the proof`, probe: "version" };
+    }),
+  );
+}
+
+/**
+ * Record a runner's observations under its OWN authenticated name: the
+ * credential is verified and the rows written in one transaction, so a
+ * replaced incarnation cannot report for its successor, and no caller can
+ * report for a machine it does not hold the token of.
+ */
+export function reportProviderReadinessAuthed(
+  store: Store,
+  args: { name: string; token: string; observations: readonly Omit<ReadinessObservation, "runner" | "observedAt">[] },
+  now: Date,
+): AuthResult {
+  return store.transact(() => {
+    const auth = authenticate(store, args.name, args.token);
+    if (!auth.ok) return auth;
+    store.recordProviderReadiness(args.name, args.observations, now);
+    return auth;
+  });
 }

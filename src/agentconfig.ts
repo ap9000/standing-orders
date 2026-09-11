@@ -24,6 +24,7 @@ import { isProviderId, validateSpec, type AgentSpec, type Phase, type ProviderId
 import { contestantProfileOf, type Store, type TaskRef } from "./store.js";
 import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, chainFromJson, canonicalChainJson, type ChainEntry, type ExecutionProfile, type UnattendedPermissionMode } from "./scope.js";
 import { SUBSCRIPTION_CAPABLE } from "./keys.js";
+import { recommendRoute, routeFromJson, type ExactSpec, type PhaseRoute, type RouteCandidate, type RouteCandidates } from "./phase-routing.js";
 
 export const INSTALLATION_SCOPE = "installation";
 
@@ -275,4 +276,169 @@ export function resolveScopeChain(
     return { ok: false, reason: "duplicate", problem: "the fallback chain has a duplicate entry (same profile and auth mode) or is malformed" };
   }
   return { ok: true, chain: proven, kind: "chain" };
+}
+
+// ---- route candidates (v47, phase routing) --------------------------------
+
+/**
+ * The two candidate tiers the routing policy chooses between, per phase,
+ * read from configuration ONLY — never inferred from a model's name:
+ *
+ *   routine — the ordinary resolution above (project > installation,
+ *             review inheriting the planner's pair), i.e. exactly the
+ *             agent every pre-v47 scope resolved to — but EXACT: a phase
+ *             whose resolution has no model id cannot be a candidate,
+ *             because an approval binds exact routing. Repair is the one
+ *             phase with no routine candidate of its own when nothing is
+ *             configured: it inherits the build leg (repairs resume the
+ *             builder's session), and the policy says so.
+ *   strong  — the operator's named strong row (`config set <phase> --tier
+ *             strong …`), project over installation, review inheriting the
+ *             plan's strong row when it has none of its own; null when
+ *             nothing is configured, and the route then SAYS so.
+ *
+ * A misconfigured row — unknown provider, missing model, argv-unsafe
+ * model — REFUSES with the words to fix it; the caller files the scope
+ * unresolved with them. Nothing is skipped or guessed.
+ */
+export type CandidatesResolution =
+  | { ok: true; candidates: RouteCandidates }
+  | { ok: false; phase: Phase; problem: string };
+
+const PHASE_NOUN: Record<Phase, string> = { plan: "planner", build: "builder", repair: "repair", review: "reviewer" };
+
+export function resolveRouteCandidates(store: Store, repo: string | null, pins: { plan?: ExactSpec | null; build?: ExactSpec | null } = {}): CandidatesResolution {
+  const strongOf = (phase: Phase): { ok: true; strong: RouteCandidate | null } | { ok: false; problem: string } => {
+    const strongProject = repo === null ? null : store.phaseTierConfig(repo, phase, "strong");
+    const strongInstallation = store.phaseTierConfig(INSTALLATION_SCOPE, phase, "strong");
+    const inheritedProject = phase === "review" && strongProject === null && strongInstallation === null && repo !== null ? store.phaseTierConfig(repo, "plan", "strong") : null;
+    const inheritedInstallation = phase === "review" && strongProject === null && strongInstallation === null ? store.phaseTierConfig(INSTALLATION_SCOPE, "plan", "strong") : null;
+    const row = strongProject ?? inheritedProject ?? strongInstallation ?? inheritedInstallation;
+    const source =
+      strongProject !== null ? "project (strong)" : inheritedProject !== null ? "project (strong, inherited from plan)" : strongInstallation !== null ? "installation (strong)" : inheritedInstallation !== null ? "installation (strong, inherited from plan)" : null;
+    if (row === null || source === null) return { ok: true, strong: null };
+    if (!isProviderId(row.provider) || row.model === null || row.model === "") {
+      return { ok: false, problem: `the ${source} ${PHASE_NOUN[phase]} names ${row.provider}${row.model === null || row.model === "" ? " with no model" : ` · ${row.model}`} — a strong agent is an exact pair: \`config set ${phase} --tier strong --provider … --model …\`, or \`--clear\` it` };
+    }
+    const valid = validateSpec({ provider: row.provider, model: row.model });
+    if (!valid.ok) return { ok: false, problem: `the ${source} ${PHASE_NOUN[phase]}: ${valid.problem}` };
+    return { ok: true, strong: { provider: row.provider, model: row.model, source } };
+  };
+
+  const exact = (phase: "plan" | "build" | "review"): { ok: true; routine: RouteCandidate } | { ok: false; problem: string } => {
+    const routine = resolvePhaseAgent(store, phase, repo, {});
+    if (!routine.ok) return { ok: false, problem: routine.problem };
+    if (routine.spec.model === null || routine.spec.model === "") {
+      // A PINNED exact pair (a routine firing's approved profile, a plan
+      // request's pin) is the phase's agent whatever the configuration
+      // says — it stands in as the candidate when nothing exact is
+      // configured, so a firing never depends on today's config.
+      const pin = phase === "plan" ? pins.plan ?? null : phase === "build" ? pins.build ?? null : null;
+      if (pin !== null) return { ok: true, routine: { provider: pin.provider, model: pin.model, source: "the pinned agent" } };
+      return {
+        ok: false,
+        problem: `approvals bind exact routing — the ${PHASE_NOUN[phase]} (${routine.spec.provider}) has no exact model: set one once with \`config set ${phase} --provider ${routine.spec.provider} --model <model>\``,
+      };
+    }
+    return { ok: true, routine: { provider: routine.spec.provider, model: routine.spec.model, source: routine.source === "default" ? "the built-in default" : routine.source } };
+  };
+
+  const out: Partial<RouteCandidates> = {};
+  for (const phase of ["plan", "build", "review"] as const) {
+    const routine = exact(phase);
+    if (!routine.ok) return { ok: false, phase, problem: routine.problem };
+    const strong = strongOf(phase);
+    if (!strong.ok) return { ok: false, phase, problem: strong.problem };
+    out[phase] = { routine: routine.routine, strong: strong.strong };
+  }
+  // Repair: the configured row is optional (inherit is the law when none
+  // exists), but a row that EXISTS must be exact — a provider the policy
+  // can hold against the build's, and a model id.
+  const repairProject = repo === null ? null : store.phaseConfig(repo, "repair");
+  const repairRow = repairProject ?? store.phaseConfig(INSTALLATION_SCOPE, "repair");
+  const repairSource = repairProject !== null ? "project" : "installation";
+  let repairRoutine: RouteCandidate | null = null;
+  if (repairRow !== null) {
+    if (!isProviderId(repairRow.provider) || repairRow.model === null || repairRow.model === "") {
+      return { ok: false, phase: "repair", problem: `the ${repairSource} repair configuration names ${repairRow.provider}${repairRow.model === null || repairRow.model === "" ? " with no model" : ` · ${repairRow.model}`} — approvals bind exact routing: \`config set repair --provider … --model …\` names an exact pair, or clear it so repairs inherit the build agent` };
+    }
+    const valid = validateSpec({ provider: repairRow.provider, model: repairRow.model });
+    if (!valid.ok) return { ok: false, phase: "repair", problem: `the ${repairSource} repair configuration: ${valid.problem}` };
+    repairRoutine = { provider: repairRow.provider, model: repairRow.model, source: repairSource };
+  }
+  const repairStrong = strongOf("repair");
+  if (!repairStrong.ok) return { ok: false, phase: "repair", problem: repairStrong.problem };
+  out.repair = { routine: repairRoutine, strong: repairStrong.strong };
+  return { ok: true, candidates: out as RouteCandidates };
+}
+
+/** A task's pinned pair as an EXACT spec, or the words for why it cannot
+ * route: a pin with no model id binds nothing exact. */
+export function exactPinOf(provider: string | null, model: string | null, phase: "plan" | "build"): { ok: true; pin: ExactSpec | null } | { ok: false; problem: string } {
+  if (provider === null) return { ok: true, pin: null };
+  if (!isProviderId(provider)) return { ok: false, problem: `the task's ${phase} pin names unknown provider \`${provider}\`` };
+  if (model === null || model === "") {
+    return { ok: false, problem: phase === "plan" ? `the plan pin names ${provider} with no exact model — \`task plan <id> --provider ${provider} --model <model>\` names one` : `the task's build pin names ${provider} with no exact model — approvals bind exact routing` };
+  }
+  return { ok: true, pin: { provider, model } };
+}
+
+/**
+ * THE ROUTE A TASK RUNS UNDER, for dispatch and every surface:
+ *
+ *   approved   — the sealed route when the approval stands (authoritative;
+ *                mutable configuration never rewrites it);
+ *   proposed   — the WORKING proposed route the next approval would seal;
+ *   live       — no scope yet (a plan request): a live recommendation from
+ *                the task's own risk, overrides, and pins over today's
+ *                configuration;
+ *   legacy     — a row PROVEN to predate v47 (no route era): its sealed
+ *                profile alone governs the build; plan and review resolve
+ *                from configuration at run time, and the surfaces say so;
+ *   unreadable — a routed row whose route data is missing, malformed, or
+ *                does not verify against its approval, or a task whose
+ *                configuration cannot make an exact route: FAIL CLOSED,
+ *                with the words. Nothing dispatches on it.
+ *
+ * `source` says which, so a surface never presents a live recommendation
+ * as a sealed term and a runner never runs a legacy road on a routed row.
+ */
+export type TaskRoute =
+  | { kind: "route"; route: PhaseRoute; source: "approved" | "proposed" | "live" }
+  | { kind: "legacy"; profile: ExecutionProfile; approved: boolean }
+  | { kind: "unreadable"; problem: string };
+
+export function routeOfTask(store: Store, taskId: string, ref: TaskRef | null, now: Date): TaskRoute | null {
+  const sealed = store.sealedRouteOf(taskId);
+  if (sealed.ok) return { kind: "route", route: sealed.route, source: "approved" };
+  const scope = store.getScope(taskId);
+  if (scope !== null) {
+    if (scope.routeEra == null) {
+      const profile = scope.approvedProfile ?? scope.profile ?? null;
+      return profile === null ? null : { kind: "legacy", profile, approved: sealed.reason !== "unapproved" && scope.approvedAt !== null && scope.approvedDigest === scope.digest };
+    }
+    if (sealed.reason === "unreadable") return { kind: "unreadable", problem: sealed.detail };
+    const proposed = routeFromJson(scope.proposedRouteJson ?? null);
+    if (proposed !== null) return { kind: "route", route: proposed, source: "proposed" };
+    return { kind: "unreadable", problem: scope.unresolvedReason ?? "the filed route cannot be read — re-file the scope" };
+  }
+  const repo = ref?.repo ?? null;
+  const overrides = ref === null || ref.routeOverrides === undefined ? [] : ref.routeOverrides;
+  if (overrides === null) return { kind: "unreadable", problem: "the task's recorded route overrides cannot be read — clear or re-record them with `task route`" };
+  const planPin = exactPinOf(ref?.planProvider ?? null, ref?.planModel ?? null, "plan");
+  if (!planPin.ok) return { kind: "unreadable", problem: planPin.problem };
+  const buildPin = exactPinOf(ref?.agentProvider ?? null, ref?.agentModel ?? null, "build");
+  if (!buildPin.ok) return { kind: "unreadable", problem: buildPin.problem };
+  const candidates = resolveRouteCandidates(store, repo, { plan: planPin.pin, build: buildPin.pin });
+  if (!candidates.ok) return { kind: "unreadable", problem: candidates.problem };
+  const route = recommendRoute({
+    risk: ref?.riskLevel ?? "routine",
+    qualityMode: ref?.qualityMode ?? store.qualityDefault().mode,
+    evidence: [],
+    publication: store.publicationAuthorityOf(repo, now),
+    candidates: candidates.candidates,
+    overrides,
+    pins: { plan: planPin.pin, build: buildPin.pin },
+  });
+  return { kind: "route", route, source: "live" };
 }

@@ -548,6 +548,10 @@ describe("the mate's turn", () => {
   });
 
   test("a mate-written scope never seals under mode coverage; a human rewrite clears the mark; filing carries it", () => {
+    // v47: a routed scope seals only when every phase names an exact agent.
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     propose(store, { taskId: "in-2", goal: "the mate's goal", now: T0, proposedVia: "mate" });
     expect(store.sealScopeApproval("in-2", "alex", T0, {}, { kind: "mode", modeDigest: "m".repeat(32) })).toBe(false);
     propose(store, { taskId: "in-2", goal: "the operator's goal", now: T0 });

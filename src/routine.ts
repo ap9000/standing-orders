@@ -505,8 +505,11 @@ export function fireRoutine(
     store.placeTask(ref.id, routine.repo);
     store.linkRoutineInstance(ref.id, routine.id);
     // The pin: this instance builds on exactly this agent, whatever flags a
-    // later pass carries.
-    store.pinTaskAgent(ref.id, agent.spec.provider, agent.spec.model);
+    // later pass carries — the routine's APPROVED profile when one was
+    // sealed (v47: the pin and the profile are one exact authority), else
+    // the resolved agent.
+    const pinnedAgent = routine.approvedProfile === null || routine.approvedProfile === undefined ? agent.spec : { provider: routine.approvedProfile.provider, model: routine.approvedProfile.model };
+    store.pinTaskAgent(ref.id, pinnedAgent.provider, pinnedAgent.model);
     if (routine.requirements.length > 0) {
       store.setRequirements(ref.id, routine.requirements);
     }

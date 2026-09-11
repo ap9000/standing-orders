@@ -1,0 +1,735 @@
+/**
+ * Explainable, risk-aware phase routing (v47).
+ *
+ * WHICH agent plans, builds, repairs, and reviews a task is decided here,
+ * once, from signed facts — never guessed from a model's name and never
+ * re-decided behind an approval's back. The policy is a small table over
+ * explicit inputs:
+ *
+ *   risk         — the task's declared risk (routine / elevated / high)
+ *   quality      — the evidence policy the scope signs (default / strict)
+ *   evidence     — what the acceptance rubric demands (screenshots, …)
+ *   publication  — how far the plane may carry the result unattended
+ *   candidates   — the operator's CONFIGURED routine and strong agents
+ *   overrides    — an approver's explicit per-phase choice, recorded
+ *   pins         — a routine firing's or plan request's pinned pair
+ *
+ * and its output is one canonical ROUTE: four legs, each with an exact
+ * provider AND an exact model id, which tier it came from, whether a
+ * person overrode it, and plain-English reasons. The same inputs always
+ * yield the same route and the same words — `recommendRoute` is pure, so
+ * the surfaces (CLI, task page, chat) render one projection rather than
+ * three.
+ *
+ * EXACTNESS is the law of this module: a candidate, an override, a pin,
+ * and every frozen leg name an exact model id — "the harness default"
+ * is not a term an approval can bind. A configuration that cannot make a
+ * leg exact (no model configured, a cross-provider repair row, gemini on
+ * the review phase) becomes a stated PROBLEM on that leg, and the scope
+ * files unresolved with those words; nothing is guessed or substituted.
+ *
+ * Strength is never inferred: "strong" means the operator named a strong
+ * candidate for that phase (`config set <phase> --tier strong …`). With
+ * none configured, a demanding task still routes to the configured
+ * default and SAYS so — and its posture reads as economical, because that
+ * is what actually runs. Provider readiness is a runner's observation,
+ * not a term — it rides beside the route (ready / unavailable / unknown),
+ * it is stated wherever the route is shown, and an unavailable provider
+ * is never substituted: admission halts with the reason, and only an
+ * already-approved explicit fallback entry may ever run instead.
+ *
+ * Approval seals the route (`approvedRouteJson`); its digest folds into
+ * the scope digest of EVERY route filed since v47 — routine-shaped routes
+ * included — so a task-level route edit stales the approval exactly as a
+ * goal edit does, while a global configuration change can never rewrite a
+ * sealed route. Only a row proven to predate v47 (no route era) reads as
+ * a legacy approval governed by its sealed profile alone.
+ */
+
+import { createHash } from "node:crypto";
+import type { Phase, ProviderId } from "./provider.js";
+import type { QualityMode } from "./quality.js";
+
+// Type-only imports above: provider.ts sits under evidence.ts and scope.ts
+// in the module graph, and this policy is imported by scope.ts — a value
+// import would be a cycle at load time. The id list is restated here and
+// pinned to provider.ts's by the test suite.
+const PROVIDER_ID_LIST: readonly ProviderId[] = ["claude", "codex", "openrouter", "gemini"];
+function isProviderId(value: string): value is ProviderId {
+  return (PROVIDER_ID_LIST as readonly string[]).includes(value);
+}
+
+export const ROUTE_VERSION = 1;
+/** The durable route ERA a scope row carries once it was filed under this
+ * policy: NULL on a row proven to predate v47 (legacy — the sealed profile
+ * alone governs), this value on every row filed since. A row with an era
+ * and no readable route is corrupt and fails closed. */
+export const ROUTE_ERA = ROUTE_VERSION;
+export const PHASES: readonly Phase[] = ["plan", "build", "repair", "review"];
+
+export type RiskLevel = "routine" | "elevated" | "high";
+export const RISK_LEVELS: readonly RiskLevel[] = ["routine", "elevated", "high"];
+
+export function isRiskLevel(value: unknown): value is RiskLevel {
+  return value === "routine" || value === "elevated" || value === "high";
+}
+
+export function riskTitle(risk: RiskLevel): string {
+  return risk === "high" ? "High risk" : risk === "elevated" ? "Elevated risk" : "Routine";
+}
+
+/** A runner's non-spending observation of one provider. `unknown` is a
+ * real answer (claude has no login probe that does not spend) and is never
+ * upgraded to ready. */
+export type ReadinessState = "ready" | "unavailable" | "unknown";
+
+export type ReadinessObservation = {
+  provider: ProviderId;
+  state: ReadinessState;
+  /** The probe's own words: "not logged in", "`codex` is not installed"… */
+  reason: string;
+  /** Which non-spending check produced this: version, identity, key, none. */
+  probe: string;
+  observedAt: string;
+  runner: string;
+};
+
+export type CandidateTier = "routine" | "strong";
+
+/** An exact agent: provider and model id, both required. */
+export type ExactSpec = { provider: ProviderId; model: string };
+
+export type RouteCandidate = ExactSpec & {
+  /** Where the candidate was read from — provenance words, never a term. */
+  source: string;
+};
+
+export type PhaseCandidates = {
+  routine: RouteCandidate;
+  /** The operator's named strong agent for this phase, or null when none
+   * is configured. Never inferred. */
+  strong: RouteCandidate | null;
+};
+
+/** The repair phase's candidates: with no repair row configured the
+ * routine candidate is null and the leg INHERITS the build leg's exact
+ * pair (repairs resume the builder's session). */
+export type RepairCandidates = {
+  routine: RouteCandidate | null;
+  strong: RouteCandidate | null;
+};
+
+export type RouteCandidates = {
+  plan: PhaseCandidates;
+  build: PhaseCandidates;
+  repair: RepairCandidates;
+  review: PhaseCandidates;
+};
+
+/** An approver's explicit per-phase choice, recorded with attribution.
+ * Always an exact pair. */
+export type RouteOverride = ExactSpec & {
+  phase: Phase;
+  by: string;
+  at: string;
+};
+
+/** The evidence kinds an acceptance rubric demands — `scope.ts` owns the
+ * full type; the policy only needs the names. */
+export type RouteEvidenceKind = "check" | "screenshot" | "changed-path" | "manual-review";
+
+/** How far the plane may carry a result without a person: no publication
+ * grant at all, a grant whose merges wait for a human (notify), or a live
+ * mode that merges by itself (automerge). */
+export type PublicationAuthority = "none" | "notify" | "automerge";
+
+export type RouteInput = {
+  risk: RiskLevel;
+  qualityMode: QualityMode;
+  evidence: readonly RouteEvidenceKind[];
+  publication: PublicationAuthority;
+  candidates: RouteCandidates;
+  overrides: readonly RouteOverride[];
+  /** Pinned exact pairs beat everything: a routine firing's build pin, a
+   * plan request's plan pin, and — when an explicit approved profile files
+   * the scope — its repair model on the build provider. */
+  pins?: { plan?: ExactSpec | null; build?: ExactSpec | null; repair?: ExactSpec | null };
+};
+
+export type RouteLeg = {
+  phase: Phase;
+  provider: ProviderId;
+  /** The exact model id this leg runs — never null on a frozen route. */
+  model: string;
+  /** The tier the recommendation drew from; an override or pin still
+   * records what tier the policy would have used. */
+  tier: CandidateTier;
+  chosen: "recommended" | "override" | "pinned";
+  /** What the policy recommended before any override or pin — shown so an
+   * overridden leg can say what it replaced. */
+  recommended: { provider: ProviderId; model: string; tier: CandidateTier };
+  /** Plain-English, ordered, deterministic. */
+  reasons: string[];
+  /** A configuration that cannot run this leg at all (gemini on review,
+   * cross-provider repair) — stated, never repaired by substitution; a
+   * route with any problem files its scope unresolved. */
+  problem: string | null;
+};
+
+export type PhaseRoute = {
+  version: typeof ROUTE_VERSION;
+  risk: RiskLevel;
+  qualityMode: QualityMode;
+  publication: PublicationAuthority;
+  evidence: RouteEvidenceKind[];
+  /** The posture the route ACTUALLY runs under: "strong" only when at
+   * least one leg draws from a configured strong agent; "economy" when
+   * every selected agent is the routine one — however demanding the task,
+   * a route that keeps every default never claims stronger agents. */
+  posture: "economy" | "strong";
+  /** Why a stronger tier was wanted, in order (empty for a routine task). */
+  demands: string[];
+  legs: RouteLeg[];
+  overrides: RouteOverride[];
+};
+
+const PHASE_NOUN: Record<Phase, string> = { plan: "planner", build: "builder", repair: "repair", review: "reviewer" };
+const PHASE_VERB: Record<Phase, string> = { plan: "plans", build: "builds", repair: "repairs", review: "reviews" };
+
+export function specWords(spec: { provider: string; model: string }): string {
+  return `${spec.provider} · ${spec.model}`;
+}
+
+/**
+ * THE TIERING TABLE. Each row is one signed fact and the phases it pushes
+ * to the strong tier, with the sentence the route says for it. Order is
+ * the order the reasons print in — stable by construction.
+ */
+type Demand = { when: (input: RouteInput) => boolean; phases: readonly Phase[]; reason: string };
+
+const DEMANDS: readonly Demand[] = [
+  {
+    when: input => input.risk === "high",
+    phases: ["plan", "build", "repair", "review"],
+    reason: "risk is high — every role uses the strongest configured agent",
+  },
+  {
+    when: input => input.risk === "elevated",
+    phases: ["review"],
+    reason: "risk is elevated — the review runs on the strongest configured reviewer",
+  },
+  {
+    when: input => input.qualityMode === "strict",
+    phases: ["plan", "build", "repair", "review"],
+    reason: "quality is strict / release — every role uses the strongest configured agent",
+  },
+  {
+    when: input => input.evidence.includes("screenshot"),
+    phases: ["build", "repair", "review"],
+    reason: "acceptance requires screenshots — visual proof gets the strongest configured builder and reviewer",
+  },
+  {
+    when: input => input.evidence.includes("manual-review"),
+    phases: ["review"],
+    reason: "acceptance asks for manual review — the strongest configured reviewer prepares it",
+  },
+  {
+    when: input => input.publication === "automerge",
+    phases: ["review"],
+    reason: "a live mode merges by itself — the review is the last gate, so it runs on the strongest configured reviewer",
+  },
+];
+
+function demandedTier(input: RouteInput, phase: Phase): { tier: CandidateTier; reasons: string[] } {
+  const reasons = DEMANDS.filter(one => one.when(input) && one.phases.includes(phase)).map(one => one.reason);
+  return reasons.length === 0 ? { tier: "routine", reasons: [] } : { tier: "strong", reasons };
+}
+
+function economyReason(input: RouteInput, phase: Phase): string {
+  const facts = [
+    `risk is ${input.risk}`,
+    `quality is ${input.qualityMode === "strict" ? "strict" : "default"}`,
+    ...(input.publication === "notify" ? ["publication waits for a person"] : []),
+  ];
+  return `${facts.join(", ")} — the configured ${PHASE_NOUN[phase]} is economical enough`;
+}
+
+function reviewProblem(spec: { provider: string }): string | null {
+  return spec.provider === "gemini"
+    ? "gemini has no isolation posture for the review phase yet — configure or override the reviewer to claude or codex"
+    : null;
+}
+
+/**
+ * The recommendation: pure, deterministic, table-driven. Same inputs,
+ * same route, same words. Every leg it returns is exact; a leg the
+ * configuration cannot make runnable carries a `problem` instead of a
+ * guess.
+ */
+export function recommendRoute(input: RouteInput): PhaseRoute {
+  const demands = DEMANDS.filter(one => one.when(input)).map(one => one.reason);
+  const overrides = [...input.overrides]
+    .filter(one => PHASES.includes(one.phase))
+    .sort((a, b) => PHASES.indexOf(a.phase) - PHASES.indexOf(b.phase));
+  const overrideFor = (phase: Phase): RouteOverride | null => overrides.find(one => one.phase === phase) ?? null;
+
+  const legs: RouteLeg[] = [];
+  const pick = (phase: "plan" | "build" | "review"): { spec: RouteCandidate; tier: CandidateTier; reasons: string[] } => {
+    const demanded = demandedTier(input, phase);
+    const candidates = input.candidates[phase];
+    if (demanded.tier === "strong") {
+      if (candidates.strong !== null) {
+        return { spec: candidates.strong, tier: "strong", reasons: [...demanded.reasons, `strong ${PHASE_NOUN[phase]} from ${candidates.strong.source}`] };
+      }
+      return {
+        spec: candidates.routine,
+        tier: "routine",
+        reasons: [
+          ...demanded.reasons,
+          `no stronger ${PHASE_NOUN[phase]} is configured — \`config set ${phase} --tier strong --provider … --model …\` names one; using the configured default from ${candidates.routine.source}`,
+        ],
+      };
+    }
+    return { spec: candidates.routine, tier: "routine", reasons: [economyReason(input, phase), `configured ${PHASE_NOUN[phase]} from ${candidates.routine.source}`] };
+  };
+
+  // plan — pin > override > recommendation.
+  {
+    const rec = pick("plan");
+    const pin = input.pins?.plan ?? null;
+    const override = overrideFor("plan");
+    const recommended = { provider: rec.spec.provider, model: rec.spec.model, tier: rec.tier };
+    if (pin !== null) {
+      legs.push({ phase: "plan", provider: pin.provider, model: pin.model, tier: rec.tier, chosen: "pinned", recommended, reasons: [`pinned to ${specWords(pin)} by the plan request — nothing overrides a pin`], problem: null });
+    } else if (override !== null) {
+      legs.push({ phase: "plan", provider: override.provider, model: override.model, tier: rec.tier, chosen: "override", recommended, reasons: [`overridden by ${override.by} to ${specWords(override)} (recommended ${specWords(rec.spec)})`], problem: null });
+    } else {
+      legs.push({ phase: "plan", provider: rec.spec.provider, model: rec.spec.model, tier: rec.tier, chosen: "recommended", recommended, reasons: rec.reasons, problem: null });
+    }
+  }
+
+  // build — pin > override > recommendation.
+  const build = (() => {
+    const rec = pick("build");
+    const pin = input.pins?.build ?? null;
+    const override = overrideFor("build");
+    const recommended = { provider: rec.spec.provider, model: rec.spec.model, tier: rec.tier };
+    const leg: RouteLeg =
+      pin !== null
+        ? { phase: "build", provider: pin.provider, model: pin.model, tier: rec.tier, chosen: "pinned", recommended, reasons: [`pinned to ${specWords(pin)} by the firing that filed this task — nothing overrides a pin`], problem: null }
+        : override !== null
+          ? { phase: "build", provider: override.provider, model: override.model, tier: rec.tier, chosen: "override", recommended, reasons: [`overridden by ${override.by} to ${specWords(override)} (recommended ${specWords(rec.spec)})`], problem: null }
+          : { phase: "build", provider: rec.spec.provider, model: rec.spec.model, tier: rec.tier, chosen: "recommended", recommended, reasons: rec.reasons, problem: null };
+    legs.push(leg);
+    return leg;
+  })();
+
+  // repair — ALWAYS the build provider (repair resumes the builder's
+  // session; cross-provider repair does not exist). Only the model routes:
+  // the same-provider strong row when demanded, else the same-provider
+  // configured row, else the build's own exact model (inherit). A
+  // configured row on ANOTHER provider is a stated problem, never skipped.
+  {
+    const demanded = demandedTier(input, "repair");
+    const candidates = input.candidates.repair;
+    const override = overrideFor("repair");
+    let model: string;
+    let tier: CandidateTier;
+    let reasons: string[];
+    let problem: string | null = null;
+    if (demanded.tier === "strong" && candidates.strong !== null) {
+      if (candidates.strong.provider === build.provider) {
+        model = candidates.strong.model;
+        tier = "strong";
+        reasons = [...demanded.reasons, `strong repair model from ${candidates.strong.source}`];
+      } else {
+        model = build.model;
+        tier = "routine";
+        reasons = [...demanded.reasons, `the strong repair agent runs ${candidates.strong.provider}, not the build's ${build.provider}`];
+        problem = `the strong repair agent runs ${candidates.strong.provider} but the build runs ${build.provider} — cross-provider repair does not exist; override the repair phase on ${build.provider} or fix \`config set repair --tier strong\``;
+      }
+    } else if (candidates.routine !== null) {
+      if (candidates.routine.provider === build.provider) {
+        model = candidates.routine.model;
+        tier = "routine";
+        reasons =
+          demanded.tier === "strong"
+            ? [...demanded.reasons, `no stronger repair model is configured — using the configured repair model from ${candidates.routine.source}`]
+            : [economyReason(input, "repair"), `configured repair model from ${candidates.routine.source}`];
+      } else {
+        model = build.model;
+        tier = "routine";
+        reasons = [...(demanded.tier === "strong" ? demanded.reasons : [economyReason(input, "repair")]), `the configured repair agent runs ${candidates.routine.provider}, not the build's ${build.provider}`];
+        problem = `the repair configuration names ${candidates.routine.provider} but the build runs ${build.provider} — cross-provider repair does not exist; fix \`config set repair\` or override the repair phase on ${build.provider}`;
+      }
+    } else {
+      model = build.model;
+      tier = "routine";
+      reasons = [
+        ...(demanded.tier === "strong" ? [...demanded.reasons, "no stronger repair model is configured"] : [economyReason(input, "repair")]),
+        `no repair model is configured — repairs resume the builder's session on ${build.provider} with the build model (${build.model})`,
+      ];
+    }
+    const recommended = { provider: build.provider, model, tier };
+    const repairPin = input.pins?.repair ?? null;
+    if (repairPin !== null) {
+      legs.push({
+        phase: "repair",
+        provider: build.provider,
+        model: repairPin.model,
+        tier,
+        chosen: "pinned",
+        recommended,
+        reasons: [`pinned to ${specWords({ provider: build.provider, model: repairPin.model })} by the approved profile that filed this task — same provider as the build`],
+        problem: repairPin.provider === build.provider ? null : `the pinned repair agent runs ${repairPin.provider} but the build runs ${build.provider} — cross-provider repair does not exist`,
+      });
+    } else if (override !== null && override.provider === build.provider) {
+      legs.push({ phase: "repair", provider: build.provider, model: override.model, tier, chosen: "override", recommended, reasons: [`overridden by ${override.by} to ${specWords(override)} (recommended ${specWords({ provider: build.provider, model })})`], problem: null });
+    } else if (override !== null) {
+      legs.push({ phase: "repair", provider: build.provider, model, tier, chosen: "recommended", recommended, reasons: [...reasons, `the repair override to ${override.provider} cannot apply — repairs stay on the build provider (${build.provider})`], problem: `the repair override names ${override.provider} but the build runs ${build.provider} — cross-provider repair does not exist; clear or change the override` });
+    } else {
+      legs.push({ phase: "repair", provider: build.provider, model, tier, chosen: "recommended", recommended, reasons: [...reasons, `same provider as the build (${build.provider}) — repairs resume the builder's session`], problem });
+    }
+  }
+
+  // review — override > recommendation; gemini cannot run it at all.
+  {
+    const rec = pick("review");
+    const override = overrideFor("review");
+    const recommended = { provider: rec.spec.provider, model: rec.spec.model, tier: rec.tier };
+    if (override !== null) {
+      legs.push({ phase: "review", provider: override.provider, model: override.model, tier: rec.tier, chosen: "override", recommended, reasons: [`overridden by ${override.by} to ${specWords(override)} (recommended ${specWords(rec.spec)})`], problem: reviewProblem(override) });
+    } else {
+      legs.push({ phase: "review", provider: rec.spec.provider, model: rec.spec.model, tier: rec.tier, chosen: "recommended", recommended, reasons: rec.reasons, problem: reviewProblem(rec.spec) });
+    }
+  }
+
+  return {
+    version: ROUTE_VERSION,
+    risk: input.risk,
+    qualityMode: input.qualityMode,
+    publication: input.publication,
+    evidence: [...new Set(input.evidence)].sort(),
+    // The posture is what RUNS, not what was wanted: only a leg that
+    // actually draws from a configured strong agent makes the route strong
+    // — an overridden or pinned leg runs the person's choice, not a tier.
+    posture: drawsStrong(legs) ? "strong" : "economy",
+    demands,
+    legs,
+    overrides,
+  };
+}
+
+/** Whether any leg actually runs a configured strong agent. */
+function drawsStrong(legs: readonly RouteLeg[]): boolean {
+  return legs.some(leg => leg.chosen === "recommended" && leg.tier === "strong");
+}
+
+export function legOf(route: PhaseRoute, phase: Phase): RouteLeg {
+  const leg = route.legs.find(one => one.phase === phase);
+  if (leg === undefined) throw new Error(`route has no ${phase} leg`);
+  return leg;
+}
+
+/** Every stated problem on the route, in phase order — a non-empty list
+ * means the scope files unresolved with these words. */
+export function routeProblems(route: PhaseRoute): string[] {
+  return route.legs.flatMap(leg => (leg.problem === null ? [] : [`${leg.phase}: ${leg.problem}`]));
+}
+
+/** Whether two exact pairs are the same agent. */
+export function sameSpec(a: { provider: string; model: string | null }, b: { provider: string; model: string | null }): boolean {
+  return a.provider === b.provider && a.model === b.model;
+}
+
+// ---- canonical bytes, digest, strict rehydration ---------------------------
+
+/** Deterministic JSON: object keys sorted recursively, arrays in order. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** The stored snapshot bytes: the version rides IN the snapshot. */
+export function canonicalRouteJson(route: PhaseRoute): string {
+  return canonicalJson({
+    version: route.version,
+    risk: route.risk,
+    qualityMode: route.qualityMode,
+    publication: route.publication,
+    evidence: [...route.evidence].sort(),
+    posture: route.posture,
+    demands: route.demands,
+    legs: route.legs.map(leg => ({
+      phase: leg.phase,
+      provider: leg.provider,
+      model: leg.model,
+      tier: leg.tier,
+      chosen: leg.chosen,
+      recommended: leg.recommended,
+      reasons: leg.reasons,
+      problem: leg.problem,
+    })),
+    overrides: route.overrides.map(one => ({ phase: one.phase, provider: one.provider, model: one.model, by: one.by, at: one.at })),
+  });
+}
+
+/** sha256 over a domain-separated canonical encoding, truncated to the
+ * same 128 bits every other safety digest here uses. Its own domain, so a
+ * route digest can never collide with a profile or chain digest. */
+export function routeDigestOf(route: PhaseRoute): string {
+  return createHash("sha256")
+    .update(`standing-orders:route:v${ROUTE_VERSION}:${canonicalRouteJson(route)}`, "utf8")
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function str(v: unknown): v is string {
+  return typeof v === "string" && v !== "";
+}
+function strOrNull(v: unknown): v is string | null {
+  return v === null || str(v);
+}
+function stringList(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every(one => typeof one === "string");
+}
+
+/** Strict rehydration of a stored route — every field type-proved, every
+ * model an exact non-empty string; anything unexpected is null, never a
+ * guess. A null from a row that carries a route era is a corrupt seal. */
+export function routeFromJson(json: string | null): PhaseRoute | null {
+  if (json === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object") return null;
+  const r = parsed as Record<string, unknown>;
+  if (r["version"] !== ROUTE_VERSION) return null;
+  if (!isRiskLevel(r["risk"])) return null;
+  if (r["qualityMode"] !== "default" && r["qualityMode"] !== "strict") return null;
+  if (r["publication"] !== "none" && r["publication"] !== "notify" && r["publication"] !== "automerge") return null;
+  if (r["posture"] !== "economy" && r["posture"] !== "strong") return null;
+  if (!stringList(r["demands"])) return null;
+  const evidence = r["evidence"];
+  if (!Array.isArray(evidence) || !evidence.every(one => one === "check" || one === "screenshot" || one === "changed-path" || one === "manual-review")) return null;
+  if (!Array.isArray(r["legs"]) || r["legs"].length !== PHASES.length) return null;
+  const legs: RouteLeg[] = [];
+  for (const [index, raw] of (r["legs"] as unknown[]).entries()) {
+    if (raw === null || typeof raw !== "object") return null;
+    const leg = raw as Record<string, unknown>;
+    if (leg["phase"] !== PHASES[index]) return null;
+    if (!str(leg["provider"]) || !isProviderId(leg["provider"])) return null;
+    if (!str(leg["model"])) return null;
+    if (leg["tier"] !== "routine" && leg["tier"] !== "strong") return null;
+    if (leg["chosen"] !== "recommended" && leg["chosen"] !== "override" && leg["chosen"] !== "pinned") return null;
+    const rec = leg["recommended"];
+    if (rec === null || typeof rec !== "object") return null;
+    const recommended = rec as Record<string, unknown>;
+    if (!str(recommended["provider"]) || !isProviderId(recommended["provider"])) return null;
+    if (!str(recommended["model"])) return null;
+    if (recommended["tier"] !== "routine" && recommended["tier"] !== "strong") return null;
+    if (!stringList(leg["reasons"])) return null;
+    if (!strOrNull(leg["problem"])) return null;
+    legs.push({
+      phase: PHASES[index] as Phase,
+      provider: leg["provider"],
+      model: leg["model"],
+      tier: leg["tier"],
+      chosen: leg["chosen"],
+      recommended: { provider: recommended["provider"], model: recommended["model"], tier: recommended["tier"] },
+      reasons: [...leg["reasons"]],
+      problem: leg["problem"],
+    });
+  }
+  // The posture must be what the legs say — a snapshot claiming a strong
+  // posture over routine legs (or the reverse) is not one this policy wrote.
+  if ((drawsStrong(legs) ? "strong" : "economy") !== r["posture"]) return null;
+  const overrides = parseOverrides(r["overrides"]);
+  if (overrides === null) return null;
+  return {
+    version: ROUTE_VERSION,
+    risk: r["risk"],
+    qualityMode: r["qualityMode"],
+    publication: r["publication"],
+    evidence: [...(evidence as RouteEvidenceKind[])].sort(),
+    posture: r["posture"],
+    demands: [...r["demands"]],
+    legs,
+    overrides,
+  };
+}
+
+/** Strict parse of an override list: one per phase, every field proved,
+ * every model exact. */
+export function parseOverrides(raw: unknown): RouteOverride[] | null {
+  if (!Array.isArray(raw)) return null;
+  const overrides: RouteOverride[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== "object") return null;
+    const o = entry as Record<string, unknown>;
+    if (!str(o["phase"]) || !PHASES.includes(o["phase"] as Phase)) return null;
+    if (seen.has(o["phase"])) return null;
+    seen.add(o["phase"]);
+    if (!str(o["provider"]) || !isProviderId(o["provider"])) return null;
+    if (!str(o["model"])) return null;
+    if (!str(o["by"]) || !str(o["at"])) return null;
+    overrides.push({ phase: o["phase"] as Phase, provider: o["provider"], model: o["model"], by: o["by"], at: o["at"] });
+  }
+  return overrides.sort((a, b) => PHASES.indexOf(a.phase) - PHASES.indexOf(b.phase));
+}
+
+/** The stored override list (a task-level column). Malformed reads as
+ * null — the caller files the scope unresolved rather than routing as if
+ * nobody had overridden anything. */
+export function overridesFromJson(json: string | null): RouteOverride[] | null {
+  if (json === null) return [];
+  try {
+    return parseOverrides(JSON.parse(json));
+  } catch {
+    return null;
+  }
+}
+
+export function canonicalOverridesJson(overrides: readonly RouteOverride[]): string | null {
+  if (overrides.length === 0) return null;
+  return canonicalJson(
+    [...overrides]
+      .sort((a, b) => PHASES.indexOf(a.phase) - PHASES.indexOf(b.phase))
+      .map(one => ({ phase: one.phase, provider: one.provider, model: one.model, by: one.by, at: one.at })),
+  );
+}
+
+// ---- the shared projection -----------------------------------------------
+
+export type ReadinessLookup = (provider: ProviderId) => Pick<ReadinessObservation, "state" | "reason" | "runner" | "observedAt"> | null;
+
+export type RouteLegProjection = RouteLeg & {
+  readiness: ReadinessState;
+  readinessReason: string | null;
+  readinessRunner: string | null;
+  observedAt: string | null;
+  /** One line every surface prints for this leg. */
+  words: string;
+};
+
+export type RouteProjection = {
+  digest: string;
+  risk: RiskLevel;
+  riskTitle: string;
+  posture: PhaseRoute["posture"];
+  postureWords: string;
+  demands: string[];
+  legs: RouteLegProjection[];
+  /** The compact plain-English line: who does what, and whether any of
+   * them is a stronger-than-default agent. */
+  summary: string;
+  /** True when any leg is known-unavailable — admission halts, nothing
+   * substitutes. */
+  halted: boolean;
+  /** Every stated leg problem, phase-prefixed. */
+  problems: string[];
+};
+
+/** What actually runs: stronger agents only when a leg draws from one. */
+export function postureWords(route: Pick<PhaseRoute, "legs">): string {
+  return drawsStrong(route.legs) ? "stronger configured agents" : "everyday configured agents";
+}
+
+export function readinessWords(state: ReadinessState, reason: string | null): string {
+  if (state === "ready") return "ready";
+  if (state === "unavailable") return `UNAVAILABLE${reason === null ? "" : ` — ${reason}`}`;
+  return `readiness unknown${reason === null ? "" : ` — ${reason}`}`;
+}
+
+export function chosenWords(leg: Pick<RouteLeg, "chosen" | "tier">): string {
+  return leg.chosen === "override" ? "overridden" : leg.chosen === "pinned" ? "pinned" : leg.tier === "strong" ? "recommended · strong" : "recommended";
+}
+
+/**
+ * The one-line Agents summary every surface can show above the details:
+ * agents grouped by identical pair, in phase order — "claude · sonnet
+ * plans, builds, and repairs; claude · opus reviews" — with the posture
+ * said honestly (stronger agents only when one is actually selected).
+ */
+export function agentsSummary(route: Pick<PhaseRoute, "legs">): string {
+  const groups: { spec: string; verbs: string[] }[] = [];
+  for (const leg of route.legs) {
+    const spec = specWords(leg);
+    const group = groups.find(one => one.spec === spec);
+    if (group === undefined) groups.push({ spec, verbs: [PHASE_VERB[leg.phase]] });
+    else group.verbs.push(PHASE_VERB[leg.phase]);
+  }
+  const list = (verbs: string[]): string => (verbs.length <= 1 ? verbs.join("") : verbs.length === 2 ? `${verbs[0]} and ${verbs[1]}` : `${verbs.slice(0, -1).join(", ")}, and ${verbs.at(-1)}`);
+  return groups.map(one => `${one.spec} ${list(one.verbs)}`).join("; ");
+}
+
+export function legLine(leg: RouteLegProjection): string {
+  return `${leg.phase.padEnd(7)}${specWords(leg)}  [${chosenWords(leg)}] — ${readinessWords(leg.readiness, leg.readinessReason)}${leg.problem === null ? "" : ` — ${leg.problem}`}`;
+}
+
+/** The one projection CLI, task page, and chat all render from. */
+export function projectRoute(route: PhaseRoute, readiness: ReadinessLookup): RouteProjection {
+  const legs = route.legs.map(leg => {
+    const seen = readiness(leg.provider);
+    const state: ReadinessState = seen === null ? "unknown" : seen.state;
+    const projected: RouteLegProjection = {
+      ...leg,
+      readiness: state,
+      readinessReason: seen === null ? "no runner has reported this provider yet" : seen.reason,
+      readinessRunner: seen === null ? null : seen.runner,
+      observedAt: seen === null ? null : seen.observedAt,
+      words: "",
+    };
+    projected.words = legLine(projected);
+    return projected;
+  });
+  return {
+    digest: routeDigestOf(route),
+    risk: route.risk,
+    riskTitle: riskTitle(route.risk),
+    posture: route.posture,
+    postureWords: postureWords(route),
+    demands: route.demands,
+    legs,
+    summary: agentsSummary(route),
+    halted: legs.some(leg => leg.readiness === "unavailable"),
+    problems: routeProblems(route),
+  };
+}
+
+/** The approval-card lines: one route header, one line per leg, then the
+ * reasons indented — identical bytes on every text surface. */
+export function routeWords(projection: RouteProjection, indent = "  "): string[] {
+  const pad = `${indent}             `;
+  return [
+    `${indent}route        ${projection.riskTitle.toLowerCase()} · ${projection.postureWords} · ${projection.digest}`,
+    `${pad}${projection.summary}`,
+    ...projection.legs.flatMap(leg => [`${pad}${leg.words}`, ...leg.reasons.map(reason => `${pad}    ${reason}`)]),
+    ...(projection.halted ? [`${pad}HALTED: a provider on this route is reported unavailable — nothing substitutes; override the phase or restore the provider`] : []),
+  ];
+}
+
+/** The empty readiness lookup: every provider unknown. */
+export const NO_READINESS: ReadinessLookup = () => null;
+
+/** How a run's provenance names the leg it spent as: the frozen leg's own
+ * word, `legacy` for a run governed by a pre-routing approval, a contest
+ * lane, or an attended session, and `fallback` for an approved fallback
+ * entry (and every repair of one). */
+export type RouteChosen = RouteLeg["chosen"] | "legacy" | "fallback";
+export const ROUTE_CHOSEN: readonly RouteChosen[] = ["recommended", "override", "pinned", "legacy", "fallback"];
+
+/** One run's route provenance: the exact provider and model that ran,
+ * under which route (or legacy profile) digest, as which leg. */
+export type RouteStamp = { routeDigest: string; phase: Phase; provider: string; model: string | null; chosen: RouteChosen };

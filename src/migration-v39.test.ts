@@ -12,6 +12,7 @@ import { describe, test, expect, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { routeFromJson } from "./phase-routing.js";
 import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
 import { propose, approve, addApprover, digestOf } from "./scope.js";
 
@@ -39,6 +40,8 @@ describe("schema v39: acceptance_json is additive, and a v38 approval survives b
     // ever widens a CHECK or rebuilds a table.
     let seeded = openStore(file);
     seeded.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    seeded.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    seeded.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     seeded.createTask({ id: "t-legacy", title: "legacy task" }, T0);
     const added = addApprover(seeded, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -74,11 +77,12 @@ describe("schema v39: acceptance_json is additive, and a v38 approval survives b
     expect(raw?.["acceptance_json"]).toBeNull();
 
     // The digest computation itself is the same function, unconditionally
-    // re-derivable from the row (fields plus the resolved profile it bound)
-    // — proving the migration did not silently fold anything new into what
+    // re-derivable from the row (fields plus the resolved profile it bound,
+    // plus — since v47 — the exact agent route every fresh row binds) —
+    // proving the migration did not silently fold anything new into what
     // was signed.
     expect(
-      digestOf({ goal: scope!.goal, outOfScope: scope!.outOfScope, touches: scope!.touches }, scope!.profile ?? null),
+      digestOf({ goal: scope!.goal, outOfScope: scope!.outOfScope, touches: scope!.touches }, scope!.profile ?? null, routeFromJson(scope!.proposedRouteJson ?? null)),
     ).toBe(beforeDigest);
   });
 

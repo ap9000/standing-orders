@@ -28,6 +28,17 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypt
 import { hasForbiddenControls } from "./decision.js";
 import type { Store, Mutation } from "./store.js";
 import type { QualityMode } from "./quality.js";
+import {
+  NO_READINESS,
+  isRiskLevel,
+  projectRoute,
+  routeDigestOf,
+  routeFromJson,
+  routeWords,
+  type PhaseRoute,
+  type ReadinessLookup,
+  type RiskLevel,
+} from "./phase-routing.js";
 
 /** Same shape as a runner's credential, for the same reasons. */
 function mintToken(): string {
@@ -607,6 +618,16 @@ export type Scope = {
   proposedChainJson?: string | null;
   approvedChainJson?: string | null;
   approvalKind?: "profile" | "chain";
+  /** v47 phase routing: the signed risk level, the WORKING canonical route
+   * the digest bound, and the immutable snapshot the seal COPIED from it.
+   * `routeEra` is the durable marker: null on a row PROVEN to predate v47
+   * (legacy — its sealed profile alone governs), the route version on every
+   * row filed since — for those, a missing or unreadable route is corrupt
+   * and fails closed everywhere. */
+  riskLevel?: RiskLevel;
+  proposedRouteJson?: string | null;
+  approvedRouteJson?: string | null;
+  routeEra?: number | null;
 };
 
 export type Approval =
@@ -627,6 +648,9 @@ export type ScopeInput = {
   /** Concrete task quality choice. When absent, the task override and then
    * the installation default are resolved by the store. */
   qualityMode?: QualityMode;
+  /** v47: the task's declared risk. When absent, the task's stored choice
+   * (if any), else routine. A durable TASK choice, like qualityMode. */
+  riskLevel?: RiskLevel;
   /** Integer micro-dollars per build attempt; digest-bound when present. */
   budgetMicrousd?: number | null;
   /** The mode road's escalated filing default (C7): the resolved profile
@@ -669,6 +693,11 @@ export function digestOf(
   // still an EXPLICIT chain and uses the chain digest, distinct from the
   // single-profile digest by design.
   target?: ExecutionProfile | null | { chain: readonly ChainEntry[] },
+  // v47: the phase route. EVERY route filed since v47 folds in — routine
+  // shaped ones included — so the approval binds exactly which agent runs
+  // each phase. Absent (null) only for a row proven to predate v47, whose
+  // digest bytes are therefore untouched.
+  route?: PhaseRoute | null,
 ): string {
   const innerDigest =
     target == null
@@ -699,6 +728,9 @@ export function digestOf(
         // a legacy profile => its exact profileDigestOf; an explicit chain
         // => its chainDigestOf. Same key, discriminated value.
         ...(innerDigest == null ? {} : { profileDigest: innerDigest }),
+        // The route's own domain-separated digest, under its own key —
+        // absent only for a pre-v47 row.
+        ...(route == null ? {} : { route: routeDigestOf(route) }),
       }),
       "utf8",
     )
@@ -711,7 +743,7 @@ export function digestOf(
 }
 
 export function propose(store: Store, input: ScopeInput): Scope {
-  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, acceptance = [], qualityMode = "default", now, mutation = {}, profile, permissionMode, posture, proposedVia = null } = input;
+  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, acceptance = [], qualityMode = "default", now, mutation = {}, profile, permissionMode, posture, proposedVia = null, riskLevel } = input;
 
   const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd, acceptance: [...acceptance], qualityMode };
   const previous = store.getScope(taskId);
@@ -735,6 +767,7 @@ export function propose(store: Store, input: ScopeInput): Scope {
     ...(profile === undefined ? {} : { profile }),
     ...(permissionMode === undefined ? {} : { permissionMode }),
     ...(input.qualityMode === undefined ? {} : { qualityMode: input.qualityMode }),
+    ...(riskLevel === undefined || !isRiskLevel(riskLevel) ? {} : { riskLevel }),
     ...(posture === undefined ? {} : { posture }),
     proposedVia,
   });
@@ -968,7 +1001,7 @@ export function modeFilingCoverage(
 export function fileAndSealUnderMode(
   store: Store,
   input: ScopeInput & { repo: string | null; actor: string },
-): { ok: true; scope: Scope; basis: "mode" } | { ok: false; reason: "no-mode" | "not-signer" | "not-covered" | "coordinator-filed" | "acceptance-required" } {
+): { ok: true; scope: Scope; basis: "mode" } | { ok: false; reason: "no-mode" | "not-signer" | "not-covered" | "coordinator-filed" | "acceptance-required" | "profile-unresolved"; detail?: string } {
   return store.transact(() => {
     const mode = input.repo === null ? null : store.activeMode(input.repo, input.now);
     if (mode === null) return { ok: false as const, reason: "no-mode" as const };
@@ -996,6 +1029,11 @@ export function fileAndSealUnderMode(
       ...(input.budgetMicrousd == null && defaultBudget !== null ? { budgetMicrousd: defaultBudget } : {}),
       ...(escalated ? { posture: "escalated" as const } : {}),
     });
+    // A scope that cannot say exactly which agents run (v47: every phase
+    // exact, the route readable) is never auto-sealed — the words say why.
+    if (scope.profileState === "unresolved") {
+      return { ok: false as const, reason: "profile-unresolved" as const, ...(scope.unresolvedReason == null ? {} : { detail: scope.unresolvedReason }) };
+    }
     const sealed = store.sealScopeApproval(input.taskId, input.actor, input.now, input.mutation ?? {}, { kind: "mode", modeDigest: mode.digest });
     // The quarantine speaks through every caller (review finding 7): a
     // coordinator-filed task is never mode-admitted, and pretending the
@@ -1079,8 +1117,16 @@ export function acceptanceWords(criteria: readonly AcceptanceCriterion[]): strin
   ];
 }
 
+/** The route's approval-card lines (v47): the WORKING route the digest
+ * bound, projected with whatever readiness the caller can see — the same
+ * bytes the task page and chat render. Empty on a scope with no route. */
+export function scopeRouteWords(scope: Pick<Scope, "proposedRouteJson">, readiness: ReadinessLookup = NO_READINESS): string[] {
+  const route = routeFromJson(scope.proposedRouteJson ?? null);
+  return route === null ? [] : routeWords(projectRoute(route, readiness));
+}
+
 /** The scope, in the words an operator has to be able to agree or disagree with. */
-export function describeScope(scope: Scope): string[] {
+export function describeScope(scope: Scope, readiness: ReadinessLookup = NO_READINESS): string[] {
   const approval = approvalOf(scope);
   return [
     `  goal         ${scope.goal}`,
@@ -1095,6 +1141,10 @@ export function describeScope(scope: Scope): string[] {
     // the WHOLE ordered chain — so the card says every entry, credential
     // included, before anyone signs.
     ...chainWords(chainFromJson(scope.proposedChainJson ?? null)),
+    // The ROUTE, in the words the yes agrees to (v47): risk, posture, and
+    // every leg with its reason and readiness — before anyone signs.
+    ...(scope.riskLevel === undefined || scope.riskLevel === "routine" ? [] : [`  risk         ${scope.riskLevel}`]),
+    ...scopeRouteWords(scope, readiness),
     `  reference    ${scope.digest}`,
     `  approved     ${describeApproval(approval)}`,
   ];

@@ -151,7 +151,8 @@ describe("the night: twelve tasks, one fake clock", () => {
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"], T0);
-
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"], T0); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"], T0);
     for (const id of TASKS) {
       await run(["task", "add", `night work ${id}`, "--id", id, "--repo", repo], T0);
       await run(["task", "scope", id, "--goal", `do exactly ${id}`, "--acceptance", "It is fixed and verified.|manual-review"], T0);
@@ -204,6 +205,8 @@ describe("the night: twelve tasks, one fake clock", () => {
     // -- Morning. Every task finished; the ledger can say how.
     const store = openStore(db);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     try {
       for (const id of TASKS) {
         expect(store.getTask(id)?.state, id).toBe("done");
@@ -309,7 +312,8 @@ describe("v40: a drafted, unapproved repair moves the idle-spend invariant not a
     await run(["approver", "add", "alex", "--json"], T0);
     const approverToken = payload().token as string;
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"], T0);
-
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"], T0); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"], T0);
     // Seed a short-verdict run and let the REAL trigger draft a repair —
     // the same function a review pass calls, exercised directly here so
     // the test stays about the tick's spend, not about faking a reviewer.

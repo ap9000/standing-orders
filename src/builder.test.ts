@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { agentExitWords, build, PROTECTED, verificationExecutableMissing, type Runner } from "./builder.js";
+import { agentExitWords, build, PROTECTED, proveApprovedProfile, verificationExecutableMissing, type Runner } from "./builder.js";
+import { routeDigestOf } from "./phase-routing.js";
 import { openStore, type Store } from "./store.js";
 import { register, retireRunnerIfCurrent } from "./runner.js";
 import { acquire, currentClaim, reap } from "./claim.js";
@@ -122,6 +123,8 @@ describe("the builder's gates", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -401,6 +404,35 @@ describe("the builder's gates", () => {
     expect(handoff?.capture).toContain("machine-authored");
   });
 
+  test("route provenance (v47): the run and its sealed handoff name the route digest and the actual provider and model; a sealed route that disagrees with the sealed profile refuses", async () => {
+    store.setPhaseTierConfig("installation", "build", "strong", "claude", "opus", "test", T0);
+    claimIt();
+    propose(store, { taskId: "t-1", goal: "add a guard on the payout path", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], riskLevel: "high", now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    const sealedRoute = store.approvedRouteOf("t-1")!;
+    expect(sealedRoute.legs.find(one => one.phase === "build")).toMatchObject({ provider: "claude", model: "opus", tier: "strong" });
+    // Asking for the routine model is a re-route the approval never signed.
+    const rerouted = await build(store, request({ model: "sonnet" }));
+    expect(rerouted).toMatchObject({ ok: false, reason: "stale-approval" });
+    expect(agentCalls).toHaveLength(0);
+    // The sealed leg runs, and every record says so.
+    const req = request({ model: "opus" });
+    const result = await build(store, req);
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(agentCalls[0]?.[agentCalls[0].indexOf("--model") + 1]).toBe("opus");
+    expect(store.runRoute(req.runId as number)).toMatchObject({ routeDigest: routeDigestOf(sealedRoute), phase: "build", provider: "claude", model: "opus", chosen: "recommended" });
+    const handoff = store.artifactsFor(req.runId as number).find(one => one.kind === "handoff")!;
+    const sealed = readVerifiedArtifact(req.evidenceRoot as string, handoff);
+    if (!sealed.ok) throw new Error("handoff unreadable");
+    const payload = JSON.parse(sealed.content.toString("utf8")) as { provider: string; model?: string; route?: { digest: string; phase: string; provider: string; model: string | null; chosen: string } };
+    expect(payload.provider).toBe("claude");
+    expect(payload.model).toBe("opus");
+    expect(payload.route).toEqual({ digest: routeDigestOf(sealedRoute), phase: "build", provider: "claude", model: "opus", chosen: "recommended" });
+    // A sealed route that no longer agrees with the sealed profile is a stale seal, never a pass.
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = REPLACE(approved_route_json, '\"model\":\"opus\"', '\"model\":\"haiku\"') WHERE task_id = 't-1'").run();
+    expect(proveApprovedProfile(store.getScope("t-1"), null, { provider: "claude", model: "opus", maxTurns: undefined, timeoutMs: undefined, skipPermissions: false })).toMatchObject({ ok: false });
+  });
+
   test("a resumed attempt seals the CUMULATIVE terminal diff, pinned to the branch's first builder base (run 1461)", async () => {
     // A branch reused across two builder attempts: the first commits and
     // advances HEAD, the second starts from there. The second attempt's
@@ -659,6 +691,8 @@ describe("what the builder tells the agent", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -868,6 +902,8 @@ describe("what the builder tells the agent", () => {
 
   test("a Codex Full access scope reaches the combined approval and sandbox bypass argv", async () => {
     store.setPhaseConfig("installation", "build", "codex", "gpt-5-codex", "alex", T0);
+    store.setPhaseConfig("installation", "plan", "codex", "gpt-5-codex", "alex", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "codex", "gpt-5-codex", "alex", T0);
     store.setPermissionDefault("bypassPermissions", "alex", T0);
     const scope = propose(store, {
       taskId: "t-1",
@@ -973,6 +1009,8 @@ describe("what the builder does afterwards", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1171,6 +1209,8 @@ describe("the gates cannot be talked around", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1273,6 +1313,8 @@ describe("scope text is data, not instructions", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1345,6 +1387,8 @@ describe("the lease marker never reaches a commit", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1423,6 +1467,8 @@ describe("the commit message", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1545,6 +1591,8 @@ describe("the pulse", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1769,6 +1817,8 @@ describe("the park", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1988,6 +2038,8 @@ describe("bounded repair", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -2052,6 +2104,61 @@ describe("bounded repair", () => {
     // Both payloads survive as evidence: the broken one and the mended one.
     const payloads = store.artifactsFor(runId).filter(a => a.kind === "park-payload");
     expect(payloads).toHaveLength(2);
+  });
+
+  test("route provenance (v47): the repair carries the sealed repair leg; a fallback parent's repair stays `fallback`; a route that vanishes mid-build refuses the repair in words", async () => {
+    // The ordinary road: the build was admitted under the sealed route and
+    // its repair names the same route's repair leg.
+    const { agent } = staged([invalid, valid]);
+    const sealed = store.approvedRouteOf("t-1")!;
+    expect(store.stampRunRoute(runId, { routeDigest: routeDigestOf(sealed), phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" }, T0)).toEqual({ ok: true, first: true });
+    const result = await build(store, request({ agent }));
+    expect(result).toMatchObject({ ok: true });
+    const repair = store.runsFor(taskRef).find(r => r.role === "repair")!;
+    expect(store.runRoute(repair.id)).toMatchObject({ phase: "repair", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: routeDigestOf(sealed) });
+
+    // A fallback parent: the repair's provenance stays `fallback`.
+    const fallbackRun = store.startRun({
+      taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0,
+      route: { routeDigest: routeDigestOf(sealed), phase: "build", provider: "claude", model: "sonnet", chosen: "fallback" },
+    });
+    const second = staged([invalid, valid], ["sess-2"]);
+    expect(await build(store, request({ agent: second.agent, runId: fallbackRun }))).toMatchObject({ ok: true });
+    const fallbackRepair = store.runsFor(taskRef).filter(r => r.role === "repair" && r.parentRun === fallbackRun)[0]!;
+    expect(store.runRoute(fallbackRepair.id)).toMatchObject({ phase: "repair", chosen: "fallback", provider: "claude", model: "sonnet" });
+
+    // The route removed from the routed row while the build runs: the
+    // repair refuses — no mending under agents nobody can read.
+    const third = store.startRun({ taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0 });
+    const vanishing = staged([invalid, valid], ["sess-3"]);
+    const wrapped: Runner = async (file, args, options) => {
+      const spoken = await vanishing.agent(file, args, options);
+      store.raw().prepare("UPDATE task_scope SET approved_route_json = NULL WHERE task_id = 't-1'").run();
+      return spoken;
+    };
+    const refused = await build(store, request({ agent: wrapped, runId: third }));
+    expect(refused).toMatchObject({ ok: false, reason: "malformed-decision" });
+    if (refused.ok) throw new Error("expected a refusal");
+    expect(refused.problems?.map(problem => problem.reason)).toEqual(["route-unreadable"]);
+    expect(refused.problems?.[0]?.message).toContain("sealed no agent route");
+    expect(vanishing.calls).toHaveLength(1);
+    expect(store.runsFor(taskRef).filter(r => r.role === "repair" && r.parentRun === third)).toHaveLength(0);
+  });
+
+  test("set-once provenance (v47): a run admitted as one agent refuses to spend as another", async () => {
+    const sealed = store.approvedRouteOf("t-1")!;
+    const admittedAsCodex = store.startRun({
+      taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0,
+      route: { routeDigest: routeDigestOf(sealed), phase: "build", provider: "codex", model: "gpt-5", chosen: "override" },
+    });
+    const { agent, calls } = staged([valid]);
+    const refused = await build(store, request({ agent, runId: admittedAsCodex }));
+    expect(refused).toMatchObject({ ok: false, reason: "stale-approval" });
+    if (refused.ok) throw new Error("expected a refusal");
+    expect(refused.message).toContain("route provenance conflict");
+    expect(calls).toHaveLength(0);
+    // The stamp itself never moved.
+    expect(store.runRoute(admittedAsCodex)).toMatchObject({ provider: "codex", model: "gpt-5", chosen: "override" });
   });
 
   test("two failed repairs exhaust the bound, and the last problems are the answer", async () => {
@@ -2218,6 +2325,8 @@ describe("the gemini repair road: native resume since S1 (Phase 3 A8/B8/C4, upda
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "gemini", "gemini-2.5-pro", "test", T0);
+    store.setPhaseConfig("installation", "plan", "gemini", "gemini-2.5-pro", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     const approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-g", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-g").id;
@@ -2370,6 +2479,8 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -3108,6 +3219,8 @@ describe("adaptive execution plans", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -3343,6 +3456,8 @@ describe("adaptive execution plans", () => {
     const bare = openStore(":memory:");
     try {
       bare.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+      bare.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+      bare.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
       const token = bootstrapApprover(bare);
       bare.createTask({ id: "t-1", title: "the work" }, T0);
       const ref = bare.refFor("built-in", "t-1").id;

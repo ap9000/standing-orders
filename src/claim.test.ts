@@ -3,6 +3,7 @@ import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
 import {
   acquire,
+  acquireFallback,
   acquireIfReady,
   completeFenced,
   finalizeFailureFenced,
@@ -1647,5 +1648,56 @@ describe("sealing a plan revision", () => {
       }),
     ).toThrow(/only builder runs/);
     expect(store.listPlanRevisions(task)).toHaveLength(0);
+  });
+});
+
+describe("provider readiness, at the claim (v47): an unavailable provider never claims, nothing substitutes", () => {
+  let store: Store;
+  let a: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    enrollRunners(store);
+    store.createTask({ id: "t-a", title: "a" }, T0);
+    placeAll(store, "t-a");
+    approveScopeFor(store, "t-a");
+    a = store.refFor("built-in", "t-a").id;
+  });
+
+  afterEach(() => store.close());
+
+  test("a runner that reported the routed provider unavailable is refused before any claim exists, with the observation in words", () => {
+    store.recordProviderReadiness("runner-a", [{ provider: "codex", state: "unavailable", reason: "`codex login status` says not logged in", probe: "identity" }], T0);
+    const refused = acquireIfReady(store, a, "runner-a", { token: tok("runner-a"), now: later(1_000), provider: "codex", model: "gpt-5" });
+    expect(refused).toMatchObject({ ok: false, reason: "provider-unavailable" });
+    if (refused.ok === false && refused.reason === "provider-unavailable") {
+      expect(refused.message).toContain("codex is reported unavailable on runner-a");
+      expect(refused.message).toContain("not logged in");
+      expect(refused.message).toContain("nothing substitutes");
+    }
+    expect(currentClaim(store, a, later(1_000))).toBeNull();
+    // The SAME task claims on the other provider, and on a runner that never
+    // reported codex (unknown is not unavailable).
+    expect(acquireIfReady(store, a, "runner-a", { token: tok("runner-a"), now: later(2_000), provider: "claude", model: "sonnet" })).toMatchObject({ ok: true });
+    release(store, currentClaim(store, a, later(2_000))!.leaseId, later(3_000));
+    expect(acquireIfReady(store, a, "runner-b", { token: tok("runner-b"), now: later(4_000), provider: "codex", model: "gpt-5" })).toMatchObject({ ok: true });
+  });
+
+  test("a fresh READY observation lifts the refusal; unknown never counts as ready but never refuses either", () => {
+    store.recordProviderReadiness("runner-a", [{ provider: "claude", state: "unavailable", reason: "`claude` is not installed on this runner's PATH", probe: "version" }], T0);
+    expect(acquireIfReady(store, a, "runner-a", { token: tok("runner-a"), now: later(1_000), provider: "claude" })).toMatchObject({ ok: false, reason: "provider-unavailable" });
+    store.recordProviderReadiness("runner-a", [{ provider: "claude", state: "unknown", reason: "installed; no non-spending login check exists", probe: "version" }], later(2_000));
+    expect(store.runnerReadinessOf("runner-a", "claude")?.state).toBe("unknown");
+    expect(acquireIfReady(store, a, "runner-a", { token: tok("runner-a"), now: later(3_000), provider: "claude" })).toMatchObject({ ok: true });
+  });
+
+  test("the fallback-admission claim refuses a pinned entry whose provider this runner reports unavailable", () => {
+    store.recordProviderReadiness("runner-a", [{ provider: "gemini", state: "unavailable", reason: "installed gemini 0.40.0 is outside this build's attested range", probe: "version" }], T0);
+    const refused = acquireFallback(store, a, "runner-a", { token: tok("runner-a"), now: later(1_000), provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" });
+    expect(refused).toMatchObject({ ok: false, reason: "provider-unavailable" });
+    if (refused.ok === false && refused.reason === "provider-unavailable") {
+      expect(refused.message).toContain("the fallback entry cannot run here");
+    }
+    expect(currentClaim(store, a, later(1_000))).toBeNull();
   });
 });

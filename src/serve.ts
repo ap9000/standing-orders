@@ -153,12 +153,13 @@ import { classify, holdOwnerWords, attentionCardForUnverifiedDone } from "./boar
 import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
-import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import { isProviderId, reportsCost, PROVIDER_IDS, validModelId } from "./provider.js";
+import { resolvePhaseAgent, INSTALLATION_SCOPE, routeOfTask } from "./agentconfig.js";
+import { isRiskLevel, projectRoute, riskTitle, chosenWords, RISK_LEVELS, PHASES as ROUTE_PHASES, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
+import { isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type ProviderId } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
-import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow } from "./store.js";
+import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
@@ -1811,7 +1812,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         // The facts region alone — same auth and ceiling as the page; a
         // finished or no-longer-live run says so rather than growing forms
         // (finding 5; round-4 finding 15).
-        return respond(response, 200, "text/html; charset=utf-8", runFactsFragment(found, taskId, running));
+        return respond(response, 200, "text/html; charset=utf-8", runFactsFragment(found, taskId, running, store.runRoute(found.id)));
       }
       if (url.searchParams.get("fragment") === "peek") {
         // The live peek: cookie sessions only (v2 §3), never stored, never
@@ -1939,6 +1940,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             : null,
           structuredHandoffView(artifacts, evidenceRoot),
           proofBundleView(store, found, artifacts, evidenceRoot),
+          store.runRoute(found.id),
         ),
       );
     }
@@ -3042,6 +3044,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         scope,
         raceTerms,
         approvalDigest,
+        // The phase route (v47): one projection for the card, the ceremony,
+        // and the focused chat, with the readiness this task's runners report.
+        route: routeViewOf(taskId, ref, scope, now, who),
+        canEditRoute: who.role === "approver",
         spendDefaults: store.getSpendDefaults(),
         permissionDefault: store.permissionDefault().mode,
         permissionMode: ref?.permissionMode ?? null,
@@ -3130,6 +3136,35 @@ export function createDecisionServer(options: ServeOptions): Server {
       };
   }
 
+  /** The Agents view (v47): the task's route from the ONE resolver dispatch
+   * uses — sealed, proposed, live, a proven pre-routing profile, or
+   * unreadable — projected with the readiness its runners have reported,
+   * and the edit posture an approver's controls need. The scope digest
+   * rides along so every change form can CAS against exactly what was
+   * rendered (an empty value means "I saw no scope"). */
+  function routeViewOf(taskId: string, ref: TaskRef | null, scope: Scope | null, now: Date, who: Who): RouteView | null {
+    if (ref === null) return null;
+    const routed = routeOfTask(store, taskId, ref, now);
+    if (routed === null) return null;
+    const live = store.hasLiveClaim(ref.id, now);
+    const raced = store.activeTournamentTerms(ref.id) !== null;
+    const shared = {
+      riskLevel: ref.riskLevel ?? scope?.riskLevel ?? "routine",
+      overrides: ref.routeOverrides ?? [],
+      editable: who.role === "approver" && !live && !raced,
+      editableWhy: who.role !== "approver" ? "your login can watch — choosing agents is an approver's act" : live ? "this task is running — its agents cannot change under a live claim" : raced ? "tournament terms are on file — its lanes decide the agents" : null,
+      replanOnPlanChange: ref.plan === "drafted" && scope !== null && !approvalOf(scope).approved,
+      digest: scope?.digest ?? null,
+    } as const;
+    if (routed.kind === "route") {
+      return { kind: "route", source: routed.source, projection: projectRoute(routed.route, store.readinessLookupFor(ref.repo, ref.assignedRunner, now)), legacy: null, problem: null, ...shared };
+    }
+    if (routed.kind === "legacy") {
+      return { kind: "legacy", source: null, projection: null, legacy: { provider: routed.profile.provider, model: routed.profile.model, repairModel: routed.profile.repairModel === "inherit" ? routed.profile.model : routed.profile.repairModel, approved: routed.approved }, problem: null, ...shared };
+    }
+    return { kind: "unreadable", source: null, projection: null, legacy: null, problem: routed.problem, ...shared };
+  }
+
   /** Resolve a task-scoped chat lens without trusting its query string.
    * Only an admitted task becomes model context or visible page copy. */
   function taskChatFocus(taskId: string | null, now: Date, who?: Who): TaskChatFocus | null {
@@ -3164,6 +3199,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       milestoneProgress: view?.milestoneProgress ?? progressOf(ref.id, planRevisions?.current?.document ?? null),
       claimed: view?.claimed ?? store.hasLiveClaim(ref.id, now),
       liveRun: live === null ? null : { id: live.id, runner: live.runner, startedAt: live.startedAt, phase: live.phase },
+      route: view?.route ?? null,
       approval:
         view === null || who?.role !== "approver" || scope === null || approval.approved
           ? null
@@ -4438,7 +4474,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -5983,6 +6019,61 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return redirect(response, taskHref(taskId));
       }
+      case "route": {
+        // THE AGENTS EDIT (v47): an approver's session declares the risk,
+        // overrides one role to an exact agent, or clears an override — ONE
+        // authenticated transaction in the store that CAS-checks the scope
+        // digest the form rendered (empty = "I saw no scope"), records the
+        // change under this name, reconciles the planner pin, re-files the
+        // scope so a sealed route goes visibly stale, and re-requests a
+        // drafted plan when the planner changed. The viewer gate above
+        // already refused a watcher; a live claim or a tournament refuses
+        // inside the transaction.
+        const riskGiven = body.get("risk");
+        const phaseGiven = body.get("phase");
+        const clearGiven = body.get("clear-phase");
+        const providerGiven = body.get("provider");
+        const modelGiven = (body.get("model") ?? "").trim();
+        const sawDigest = body.get("sawDigest");
+        if (riskGiven !== null && !isRiskLevel(riskGiven)) return taskScreen(response, who, taskId, "risk is routine, elevated, or high", 400);
+        const phase = phaseGiven ?? clearGiven;
+        if (phase !== null && !(ROUTE_PHASES as readonly string[]).includes(phase)) return taskScreen(response, who, taskId, "the role is planner, builder, repair, or reviewer", 400);
+        if (riskGiven === null && phase === null) return taskScreen(response, who, taskId, "nothing to change about the agents", 400);
+        if (phaseGiven !== null) {
+          if (providerGiven === null || !isProviderId(providerGiven)) return taskScreen(response, who, taskId, "provider is claude, codex, openrouter, or gemini", 400);
+          if (modelGiven === "") return taskScreen(response, who, taskId, "name the exact model id — approvals bind exact agents", 400);
+          const valid = validateSpec({ provider: providerGiven, model: modelGiven });
+          if (!valid.ok) return taskScreen(response, who, taskId, `agents not changed: ${valid.problem}`, 400);
+          if (phaseGiven === "review" && providerGiven === "gemini") return taskScreen(response, who, taskId, "gemini cannot review yet — choose claude or codex", 400);
+        }
+        const edited = store.editTaskRoute(
+          ref.id,
+          {
+            by: who.name,
+            authenticate: () => {
+              const account = store.accountOf(who.name);
+              return account !== null && account.revokedAt === null && account.role === "approver" ? { ok: true } : { ok: false, reason: "your login is no longer an approver" };
+            },
+            ...(riskGiven === null ? {} : { risk: riskGiven as RiskLevel }),
+            ...(phase === null
+              ? {}
+              : { override: phaseGiven !== null ? { phase: phase as RouteOverride["phase"], provider: providerGiven as ProviderId, model: modelGiven } : { phase: phase as RouteOverride["phase"], clear: true as const } }),
+            ...(sawDigest === null ? {} : { expectDigest: sawDigest === "" ? null : sawDigest }),
+          },
+          now,
+        );
+        if (!edited.ok) {
+          return taskScreen(response, who, taskId, edited.detail, edited.reason === "unauthenticated" ? 403 : edited.reason === "nothing" ? 400 : 409);
+        }
+        const toChat = body.get("return") === "chat";
+        const back = toChat ? taskChatHref(taskId) : taskHref(taskId);
+        const said = [
+          ...(edited.staled ? ["agents changed — the earlier approval no longer covers this task; approve it again"] : []),
+          ...(edited.replanned ? ["the planner changed after a draft landed — a new plan was requested"] : []),
+        ];
+        const target = said.length === 0 ? back : chatReturnWithSaid(back, said.join("; "));
+        return redirect(response, toChat ? target : `${target}#agents`);
+      }
       case "scope": {
         const sawDigest = body.get("sawDigest");
         const permissionGiven = body.get("permission-mode");
@@ -7045,6 +7136,167 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
   return base + chainLine;
 }
 
+/** The Agents view every console surface renders (v47): the SAME
+ * projection the CLI prints — who plans, builds, repairs, and reviews,
+ * whether each was recommended, overridden, or pinned, its reasons, and
+ * the readiness the task's runners have reported (ready / unavailable /
+ * unknown — an unknown is said, never upgraded). Readiness is volatile and
+ * never part of what an approval signs, so the ceremony shows the agents
+ * and their reasons only. */
+export type RouteView = {
+  kind: "route" | "legacy" | "unreadable";
+  source: "approved" | "proposed" | "live" | null;
+  projection: RouteProjection | null;
+  /** A proven pre-routing row: its approved agent profile, nothing more. */
+  legacy: { provider: string; model: string; repairModel: string; approved: boolean } | null;
+  /** A routed row whose agents cannot be read — fail closed, in words. */
+  problem: string | null;
+  riskLevel: RiskLevel;
+  overrides: RouteOverride[];
+  /** An approver may edit: a live claim, a tournament, or a viewer session refuses. */
+  editable: boolean;
+  editableWhy: string | null;
+  /** A planner change after a draft landed asks for a real re-plan. */
+  replanOnPlanChange: boolean;
+  /** The scope digest the change forms CAS against; null = no scope yet. */
+  digest: string | null;
+};
+
+const ROLE_NOUN: Record<RouteProjection["legs"][number]["phase"], string> = { plan: "Planner", build: "Builder", repair: "Repair", review: "Reviewer" };
+
+function agentsStandingWords(view: RouteView): string {
+  return view.kind === "legacy"
+    ? view.legacy?.approved === true ? "approved earlier" : "not approved"
+    : view.kind === "unreadable"
+      ? "cannot be read"
+      : view.source === "approved"
+        ? "approved"
+        : view.source === "proposed"
+          ? "awaiting approval"
+          : "recommended";
+}
+
+/** The one plain-English line: who does what. */
+function agentsSummaryWords(view: RouteView): string {
+  if (view.projection !== null) return view.projection.summary;
+  if (view.legacy !== null) return `${view.legacy.provider} · ${view.legacy.model} builds and repairs (repair model ${view.legacy.repairModel}); the planner and reviewer come from configuration at run time`;
+  return view.problem ?? "the agents cannot be read";
+}
+
+/** Neutral metadata badges: risk, posture, and standing. */
+function agentsBadgesHtml(view: RouteView): string {
+  const p = view.projection;
+  return (
+    `<span class="badge">${escape(riskTitle(view.riskLevel))}</span>` +
+    (p === null ? "" : `<span class="badge">${escape(p.postureWords)}</span>`) +
+    `<span class="badge">${escape(agentsStandingWords(view))}</span>`
+  );
+}
+
+/** Volatile availability, per provider on the route — shown beside the
+ * agents, never inside the approval's terms. */
+function agentsAvailabilityHtml(projection: RouteProjection): string {
+  const seen = new Map<string, RouteProjection["legs"][number]>();
+  for (const leg of projection.legs) if (!seen.has(leg.provider)) seen.set(leg.provider, leg);
+  const items = [...seen.values()].map(leg => {
+    const state = leg.readiness === "ready" ? "ready" : leg.readiness === "unavailable" ? "unavailable" : "not yet checked";
+    const detail = leg.readiness === "unavailable" && leg.readinessReason !== null ? ` (${escape(leg.readinessReason)})` : "";
+    return `<li class="agents-availability-${escape(leg.readiness)}"><span class="mono">${escape(leg.provider)}</span> ${state}${detail}${leg.readinessRunner === null ? "" : ` <span class="meta">— ${escape(leg.readinessRunner)}${leg.observedAt === null ? "" : `, ${escape(when(leg.observedAt))}`}</span>`}</li>`;
+  });
+  return `<p class="meta agents-availability-label">Availability right now</p><ul class="agents-availability">${items.join("")}</ul>`;
+}
+
+/** The closed details: one row per role, with the reasons. */
+function agentsWhyHtml(projection: RouteProjection, summaryLabel = "Why these agents"): string {
+  return (
+    `<details class="agents-why"><summary>${escape(summaryLabel)}</summary>` +
+    (projection.demands.length === 0 ? "" : `<ul class="agents-demands">${projection.demands.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`) +
+    `<dl class="agents-roles">` +
+    projection.legs
+      .map(leg => {
+        const chosen = chosenWords(leg);
+        return (
+          `<dt>${escape(ROLE_NOUN[leg.phase])}</dt>` +
+          `<dd><span class="mono">${escape(leg.provider)} · ${escape(leg.model)}</span> <span class="badge">${escape(chosen)}</span>` +
+          `<ul class="agents-reasons">${leg.reasons.map(reason => `<li>${escape(reason)}</li>`).join("")}${leg.problem === null ? "" : `<li><strong>${escape(leg.problem)}</strong></li>`}</ul></dd>`
+        );
+      })
+      .join("") +
+    `</dl></details>`
+  );
+}
+
+/** The ceremony's agents block: what the yes agrees to — the agents and
+ * their reasons. Availability is volatile and deliberately absent here. */
+function agentsCeremonyHtml(view: RouteView | null | undefined): string {
+  if (view === null || view === undefined || view.projection === null) return "";
+  return (
+    `<div class="agents-ceremony"><p class="approval-label">agents</p>` +
+    `<p class="agents-summary">${escape(view.projection.summary)}</p>` +
+    `<div class="agents-badges"><span class="badge">${escape(riskTitle(view.riskLevel))}</span><span class="badge">${escape(view.projection.postureWords)}</span></div>` +
+    agentsWhyHtml(view.projection) +
+    `<p class="meta">These agents are part of what you approve; changing them later asks for a fresh approval.</p></div>`
+  );
+}
+
+/** The task page's Agents card: the summary, availability, closed reasons,
+ * and — for an approver — closed change controls. Every change re-files
+ * the scope; an approval given under the earlier agents needs renewing. */
+function agentsCardHtml(taskId: string, view: RouteView | null | undefined, csrf: string, canEdit: boolean): string {
+  if (view === null || view === undefined) return "";
+  const p = view.projection;
+  const sawDigest = view.digest ?? "";
+  const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="sawDigest" value="${escape(sawDigest)}">`;
+  const overrides =
+    view.overrides.length === 0
+      ? ""
+      : `<ul class="agents-overrides">${view.overrides
+          .map(
+            one =>
+              `<li><span>${escape(ROLE_NOUN[one.phase])} → <span class="mono">${escape(one.provider)} · ${escape(one.model)}</span> <span class="meta">by ${escape(one.by)} ${escape(when(one.at))}</span></span>` +
+              (canEdit && view.editable ? `<form method="post" action="${taskHref(taskId)}/route" class="agents-clear">${hidden}<input type="hidden" name="clear-phase" value="${escape(one.phase)}"><button type="submit" class="secondary" aria-label="clear the ${escape(ROLE_NOUN[one.phase].toLowerCase())} choice">clear</button></form>` : "") +
+              `</li>`,
+          )
+          .join("")}</ul>`;
+  const change = !canEdit
+    ? ""
+    : !view.editable
+      ? `<p class="meta">${escape(view.editableWhy ?? "the agents cannot change right now")}</p>`
+      : `<details class="agents-change"><summary>Change agents</summary>` +
+        `<form method="post" action="${taskHref(taskId)}/route" class="agents-form-risk">${hidden}` +
+        `<label>risk<select name="risk" aria-label="declared risk">${RISK_LEVELS.map(one => `<option value="${one}"${one === view.riskLevel ? " selected" : ""}>${escape(riskTitle(one))}</option>`).join("")}</select></label>` +
+        `<button type="submit" class="secondary">Set risk</button></form>` +
+        `<form method="post" action="${taskHref(taskId)}/route" class="agents-form" aria-label="choose an agent for one role">${hidden}` +
+        `<label>role<select name="phase">${ROUTE_PHASES.map(one => `<option value="${one}">${escape(ROLE_NOUN[one])}</option>`).join("")}</select></label>` +
+        `<label>provider<select name="provider"><option value="claude">claude</option><option value="codex">codex</option><option value="openrouter">openrouter</option><option value="gemini">gemini</option></select></label>` +
+        `<label>model<input name="model" placeholder="exact model id" required></label>` +
+        `<button type="submit">Use this agent</button></form>` +
+        `<p class="meta">Recorded as you. ${view.replanOnPlanChange ? "Changing the planner asks for a new plan — the drafted one is not relabeled. " : ""}An approval given under the earlier agents needs renewing.</p>` +
+        overrides +
+        `</details>`;
+  return (
+    `<section class="card agents-card" id="agents" aria-label="agents">` +
+    `<div class="agents-head"><h3>Agents</h3><div class="agents-badges">${agentsBadgesHtml(view)}</div></div>` +
+    `<p class="agents-summary">${escape(agentsSummaryWords(view))}</p>` +
+    (p === null
+      ? view.kind === "unreadable"
+        ? `<p class="agents-halted">Nothing runs for this task until its scope is filed again and approved.</p>`
+        : ""
+      : (p.halted ? `<p class="agents-halted">Paused: a provider these agents need is reported unavailable. Nothing else is used in its place — choose another agent below, or restore the provider and report readiness again.</p>` : "") +
+        (p.problems.length === 0 ? "" : `<ul class="agents-problems">${p.problems.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`) +
+        agentsAvailabilityHtml(p) +
+        agentsWhyHtml(p)) +
+    (canEdit || overrides === "" ? change : overrides) +
+    `</section>`
+  );
+}
+
+/** The chat's always-visible strip: the summary and a way to the details. */
+function agentsStripHtml(view: RouteView | null, taskId: string): string {
+  if (view === null) return "";
+  return `<p class="task-chat-agents"><span class="eyebrow">agents</span> <span>${escape(agentsSummaryWords(view))}</span> <a href="${taskHref(taskId)}#agents">details →</a></p>`;
+}
+
 /** Every character that could open a tag or an attribute, dead at the sink. */
 function escape(text: string): string {
   return text
@@ -8094,6 +8346,46 @@ const STYLE = `
   .approval-boundary .approval-label { margin: 0 0 .2rem; }
   .approval-boundary p { margin: 0; color: var(--muted-foreground); font-size: .8rem; overflow-wrap: anywhere; }
   .approval-chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .8rem 0 .3rem; }
+  /* The agents (v47): one compact summary, rendered identically on the task
+     page, in the approval ceremony, and in the focused chat; reasons and
+     change controls stay closed until asked for. */
+  .agents-card { margin-top: .75rem; }
+  .agents-head { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .6rem; }
+  .agents-head h3 { margin: 0; font-size: .95rem; letter-spacing: -.02em; }
+  .agents-badges { display: flex; flex-wrap: wrap; gap: .3rem; }
+  .agents-summary { margin: .55rem 0 0; font-size: .86rem; line-height: 1.5; overflow-wrap: anywhere; }
+  .agents-availability-label { margin: .6rem 0 .15rem; }
+  .agents-availability { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .25rem .9rem; font-size: .74rem; }
+  .agents-availability li { overflow-wrap: anywhere; }
+  .agents-availability-unavailable { color: var(--destructive); font-weight: 600; }
+  .agents-availability-ready { color: var(--success); }
+  .agents-availability-unknown { color: var(--muted-foreground); }
+  .agents-halted { margin: .6rem 0 0; padding: .55rem .7rem; border: 1px solid color-mix(in srgb, var(--destructive) 40%, var(--border)); border-radius: calc(var(--radius) - 3px); background: var(--destructive-soft); font-size: .8rem; }
+  .agents-problems { margin: .5rem 0 0; padding-left: 1.1rem; color: var(--destructive); font-size: .78rem; }
+  .agents-why, .agents-change { margin-top: .65rem; }
+  .agents-why > summary, .agents-change > summary { display: flex; align-items: center; min-height: 2.75rem; padding: .35rem .2rem; cursor: pointer; font-size: .8rem; font-weight: 600; }
+  .agents-demands { margin: .35rem 0 0; padding-left: 1.1rem; color: var(--muted-foreground); font-size: .76rem; line-height: 1.45; }
+  .agents-roles { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: .45rem .6rem; margin: .5rem 0 0; }
+  .agents-roles dt { color: var(--muted-foreground); font: 500 .66rem/1.8 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+  .agents-roles dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .agents-roles .agents-reasons { margin: .2rem 0 0; padding-left: 1rem; color: var(--muted-foreground); font-size: .74rem; line-height: 1.45; }
+  .agents-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: .5rem; align-items: end; margin-top: .6rem; }
+  .agents-form label, .agents-form-risk label { display: grid; gap: .2rem; margin: 0; min-width: 0; font-size: .74rem; }
+  .agents-form input, .agents-form select, .agents-form-risk select { width: 100%; min-width: 0; min-height: 2.75rem; }
+  .agents-form button, .agents-form-risk button, .agents-clear button { min-height: 2.75rem; }
+  .agents-form-risk { display: flex; flex-wrap: wrap; align-items: end; gap: .5rem; margin-top: .5rem; }
+  .agents-overrides { list-style: none; margin: .5rem 0 0; padding: 0; display: grid; gap: .35rem; font-size: .78rem; }
+  .agents-overrides li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem .6rem; }
+  .agents-clear { margin: 0; }
+  .agents-clear button { padding-inline: .8rem; font-size: .72rem; }
+  .agents-ceremony { margin: .5rem 0 0; }
+  .agents-ceremony .agents-badges { margin-top: .35rem; }
+  .task-chat-agents { display: flex; flex-wrap: wrap; align-items: baseline; gap: .3rem .55rem; margin: .1rem 0 .2rem; padding: .55rem .75rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--muted) 45%, transparent); font-size: .78rem; line-height: 1.45; overflow-wrap: anywhere; }
+  .task-chat-agents a { white-space: nowrap; }
+  .task-chat-agents-aside { margin-top: .85rem; }
+  .task-chat-agents-aside .agents-summary { font-size: .74rem; }
+  .task-chat-agents-aside .agents-badges { margin-top: .35rem; }
+  .task-chat-agents-aside .agents-roles { grid-template-columns: 1fr; }
   .approval-chip { padding: .25rem .6rem; border: 1px solid var(--glass-border); border-radius: 999px; color: var(--muted-foreground); background: var(--glass); font-size: .7rem; }
   .approval-confirm { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; align-items: end; margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--glass-border); }
   .approval-confirm label { margin: 0; }
@@ -8935,9 +9227,14 @@ const STYLE = `
     .task-options { order: 4; }
     .task-options-grid { grid-template-columns: 1fr; }
     .task-options-grid .wide, .task-options-grid .permission-field { grid-column: auto; }
+    .agents-form { grid-template-columns: 1fr; }
+    .agents-roles { grid-template-columns: 1fr; }
     .approval-card { padding: 1rem; }
     .approval-boundaries, .approval-confirm { grid-template-columns: 1fr; }
-    .approval-confirm .sticky-actions { margin-top: 0; }
+    /* The approval stays IN FLOW on phones: the password field comes
+       first and the button follows it — never a sticky control floating
+       over the field it confirms. */
+    .approval-confirm .sticky-actions { position: static; margin-top: 0; padding: 0; border-top: 0; }
   }
 
   /* Runner lanes (queue + fleet): one column per worker. */
@@ -10537,6 +10834,9 @@ type TaskChatFocus = {
   milestoneProgress: MilestoneProgressView[] | null;
   claimed: boolean;
   liveRun: { id: number; runner: string; startedAt: string; phase: string | null } | null;
+  /** The phase route (v47): the task page's exact projection, so chat and
+   * page can never disagree about which agent runs which phase. */
+  route: RouteView | null;
   /** Approval uses the task page's exact nonce and joint digest. */
   approval: {
     scope: Scope;
@@ -10605,6 +10905,14 @@ function taskChatContext(focus: TaskChatFocus): string {
     `<div class="task-chat-context-head"><span class="eyebrow">current task</span></div>` +
     `<h2>${escape(focus.title)}</h2>` +
     `<p class="meta mono">${escape(focus.id)}${focus.project === null ? "" : ` · ${escape(focus.project)}`}</p>` +
+    // The agents in chat (v47): the same summary the task page and CLI
+    // print — who does what — with the reasons one tap away, so a
+    // conversation never hides which agent runs.
+    (focus.route === null
+      ? ""
+      : `<div class="task-chat-agents-aside"><span class="eyebrow">agents</span><p class="agents-summary">${escape(agentsSummaryWords(focus.route))}</p><div class="agents-badges">${agentsBadgesHtml(focus.route)}</div>` +
+        (focus.route.projection === null ? "" : agentsAvailabilityHtml(focus.route.projection) + agentsWhyHtml(focus.route.projection)) +
+        `<p class="meta"><a href="${taskHref(focus.id)}#agents">Change agents on the task →</a></p></div>`) +
     `<div class="task-chat-overview-actions">` +
     `<a class="task-chat-overview-link" href="${taskHref(focus.id)}">Open full overview →</a></div>` +
     `</aside>`
@@ -10665,7 +10973,9 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
     (profile === null ? "" : `<span class="approval-chip">${escape(profile.provider)} · ${escape(profile.model)}</span>`) +
     (permission === null ? "" : `<span class="approval-chip">${escape(permission)}</span>`) +
     (scope.budgetMicrousd === null ? "" : `<span class="approval-chip">$${(scope.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap</span>`) +
+    (focus.route === null || focus.route.projection === null ? "" : `<span class="approval-chip">${escape(riskTitle(focus.route.riskLevel))} · ${escape(focus.route.projection.postureWords)}</span>`) +
     `</div><details class="chat-run-details"><summary>Agent and fallback details</summary>${profileWords(scope)}</details>` +
+    agentsCeremonyHtml(focus.route) +
     `<div class="approval-confirm"><label>Your password <span class="meta">— confirms this exact scope</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>` +
     `<button type="submit">Approve & start</button></div></form></details>`
   );
@@ -10697,6 +11007,9 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     (focus.liveRun === null ? "" : `<p class="task-live-build"><span class="live-dot" aria-hidden="true"></span><strong>Build #${focus.liveRun.id}</strong> · ${escape(focus.liveRun.runner)} · <time data-elapsed-since="${escape(focus.liveRun.startedAt)}"></time> <a href="/r/${focus.liveRun.id}">watch details →</a></p>`) +
     (fallback === null ? "" : `<a class="button-link task-journey-action" href="${fallback}">Open the next step →</a>`) +
     `</section>` +
+    // The compact agents strip (v47): always visible, phones included,
+    // where the desktop context panel is hidden.
+    agentsStripHtml(focus.route, focus.id) +
     milestoneProgressHtml(focus.milestoneProgress) +
     planRevisionLedgerHtml(focus.planRevisions, focus.id, csrf) +
     (inert && focus.approval !== null && focus.plan !== "requested"
@@ -13630,6 +13943,9 @@ function taskBody(data: {
   /** Installation starting value and this task's explicit evidence depth. */
   qualityDefault?: QualityMode;
   qualityMode?: QualityMode | null;
+  /** The phase route (v47) and whether this session may edit it. */
+  route?: RouteView | null;
+  canEditRoute?: boolean;
   runs: Run[];
   /** Proof produced by the newest finished attempt. The two booleans are
    * machine facts about immutable, hash-addressed artifacts — never inferred
@@ -14159,6 +14475,10 @@ function taskBody(data: {
             (approvalPermission === null ? "" : `<span class="approval-chip">${escape(approvalPermission)}</span>`) +
             `</div>`,
           profileWords(scope),
+          // The AGENTS inside the ceremony (v47): who plans, builds, repairs,
+          // and reviews, and why — said where the yes is given. Availability
+          // is volatile and stays outside these terms.
+          agentsCeremonyHtml(data.route),
           scope.budgetMicrousd === null
             ? ""
             : `<p class="meta">each build attempt has a $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} agent-reported usage cap — on a subscription this is a work limiter, not an API charge</p>`,
@@ -14757,7 +15077,7 @@ function taskBody(data: {
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
     section(
       "scope",
-      ["<h2>scope</h2>", scopeCard, revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
+      ["<h2>scope</h2>", scopeCard, agentsCardHtml(task.id, data.route, data.csrf, data.canEditRoute === true), revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
       data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan),
     ),
     dependencyChoiceNeeded ? "" : section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
@@ -16314,10 +16634,29 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
 
 /** The run's facts as rows — one renderer for the page and its live
  * fragment (A4). Elapsed ticks client-side while the run is open. */
-function runFactsRows(run: Run, taskId: string, live: boolean): string {
+/** The run's route provenance in plain words (v47): the exact agent it
+ * spent as, in which role, and how that agent was chosen. */
+function runAgentWords(route: RouteStamp | null | undefined): string | null {
+  if (route === null || route === undefined) return null;
+  const role = route.phase === "plan" ? "planner" : route.phase === "build" ? "builder" : route.phase === "repair" ? "repair" : "reviewer";
+  const how =
+    route.chosen === "fallback"
+      ? "the approved fallback"
+      : route.chosen === "override"
+        ? "chosen by an approver"
+        : route.chosen === "pinned"
+          ? "pinned"
+          : route.chosen === "legacy"
+            ? "from the approved profile"
+            : "recommended";
+  return `${route.provider}${route.model === null ? "" : ` · ${route.model}`} as the ${role} — ${how}`;
+}
+
+function runFactsRows(run: Run, taskId: string, live: boolean, route: RouteStamp | null = null): string {
   const facts: [string, string | null, boolean?][] = [
     ["task", taskId, true],
     ["role", run.role],
+    ["agent", runAgentWords(route)],
     ["quality", qualityModeTitle(run.qualityMode ?? "default")],
     ["outcome", live ? "running" : (run.outcome ?? "never finished")],
     ["phase", live && run.phase !== null ? phaseWords(run.phase) : null],
@@ -16376,8 +16715,9 @@ function runPage(
   continueOffer: { taskId: string } | null = null,
   structuredHandoff: StructuredHandoffView | null = null,
   proofBundle: ProofBundleView | null = null,
+  route: RouteStamp | null = null,
 ): Screen {
-  const rows = runFactsRows(run, taskId, running);
+  const rows = runFactsRows(run, taskId, running, route);
   // The conversation (Phase 2E, v2 S1g): every stdin injection as the
   // ledger records it — author named for operator turns, machine turns
   // say so — and the TURN BOX while the session is held. An unconfirmed
@@ -16644,14 +16984,14 @@ function reviewEvidenceScript(): string {
  * that stopped being the task's live claim says so too — both carry the
  * stop marker, so an open tab quits refetching a dead build (round-4
  * finding 15). */
-export function runFactsFragment(run: Run, taskId: string, live: boolean): string {
+export function runFactsFragment(run: Run, taskId: string, live: boolean, route: RouteStamp | null = null): string {
   if (run.outcome !== null) {
     return `<p class="meta" data-region-stop>finished — <a href="/r/${run.id}">reload for the final record</a></p>`;
   }
   if (!live) {
     return `<p class="meta" data-region-stop>this build stopped without finishing — <a href="/r/${run.id}">reload for the record</a></p>`;
   }
-  return runFactsRows(run, taskId, live);
+  return runFactsRows(run, taskId, live, route);
 }
 
 /** One accessible two-choice control everywhere permissions are selected.

@@ -72,6 +72,8 @@ describe("the fault matrix (G)", () => {
     store = openStore(":memory:");
     register(store, { name: "b-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => TOKEN });
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     alexToken = added.token;
@@ -274,6 +276,8 @@ describe("the operator surfaces (Layer F): configuring and granting in words", (
     // A chain the CURRENT base cannot file refuses AT SET TIME (finding 4):
     // with claude/sonnet configured, the same entry as a fallback dupes.
     expect(await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok);
+    expect(await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok); // v47: every phase names an exact model
+    expect(await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok);
     expect(await run(["config", "set", "fallback", "--repo", REPO, "--entries", "claude:sonnet:subscription", "--as", "alex", "--token", token])).toBe(EXIT.usage);
     // The refusal RESTORED the previous (valid) config.
     expect(await run(["config", "show", "--repo", REPO, "--json"])).toBe(EXIT.ok);

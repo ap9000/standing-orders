@@ -35,6 +35,7 @@ import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Decision, SteerNote, Store } from "./store.js";
 import { approvalOf, digestOf, profileDigestOf, chainDigestOf, entryDigestOf, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
+import { legOf, routeDigestOf, routeFromJson, type RouteStamp } from "./phase-routing.js";
 import { execFileSync } from "node:child_process";
 import { currentClaim, finalizeRevisionFenced, heartbeat, SYNC_MAX_AGE_MS } from "./claim.js";
 import { missingCapability } from "./dispatch.js";
@@ -53,6 +54,7 @@ import {
   evidenceRoot,
   handoffName,
   storeHandoffArtifact,
+  type HandoffArtifact,
   looksLikeProtocolFile,
   mailboxName,
   progressFileName,
@@ -458,10 +460,35 @@ export function proveApprovedProfile(
               qualityMode: scope.qualityMode ?? "default",
             },
             snapshot,
+            // v47: the SEALED route is part of the signed bytes whenever it
+            // says more than the legacy resolution — re-derived here from
+            // the seal's own snapshot, never from mutable configuration.
+            routeFromJson(scope.approvedRouteJson ?? null),
           )
         : digestOf({ goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance });
     if (rederived !== scope.approvedDigest) {
       return { ok: false, message: "the approval record does not verify against the stored terms — re-approve (stale-approval)" };
+    }
+    // THE ROUTE PROOF (v47): a routed row (route era set) must carry a
+    // readable sealed route whose build leg NAMES this exact provider and
+    // model, and whose repair leg is the profile's exact repair model — a
+    // sealed route and a sealed profile can never disagree, and a snapshot
+    // that fails to rehydrate is a stale seal, not a pass. Only a row
+    // proven to predate routing (no era) is governed by its profile alone.
+    if (scope.routeEra != null) {
+      const route = routeFromJson(scope.approvedRouteJson ?? null);
+      if (route === null) {
+        return { ok: false, message: "the approval's sealed agent route cannot be read — re-file and approve again (stale-approval)" };
+      }
+      const leg = legOf(route, "build");
+      if (leg.provider !== snapshot.provider || leg.model !== snapshot.model) {
+        return { ok: false, message: `the sealed route builds on ${leg.provider} · ${leg.model} but the sealed profile says ${snapshot.provider} · ${snapshot.model} — re-file and approve again (stale-approval)` };
+      }
+      const repairLeg = legOf(route, "repair");
+      const repairModel = snapshot.repairModel === "inherit" ? snapshot.model : snapshot.repairModel;
+      if (repairLeg.provider !== snapshot.provider || repairLeg.model !== repairModel) {
+        return { ok: false, message: `the sealed route repairs on ${repairLeg.provider} · ${repairLeg.model} but the sealed profile says ${snapshot.provider} · ${repairModel} — re-file and approve again (stale-approval)` };
+      }
     }
   }
   if (given.provider !== snapshot.provider) {
@@ -675,6 +702,34 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       ? { providerVersion: providerVersionOf(provider) as string }
       : {}),
   });
+  // ROUTE PROVENANCE (v47), set-once: admission already stamped the run
+  // with the route and leg it was opened under (dispatch, fallback
+  // admission); what is about to spend must BE that stamp — the same
+  // provider and exact model — or execution is refused before any spawn.
+  // A run admission left unstamped (a contest lane, an attended session, a
+  // legacy road) is stamped here from the proven profile, first write.
+  {
+    const existing = store.runRoute(request.runId);
+    if (existing !== null) {
+      if (existing.provider !== provider || existing.model !== effective.model) {
+        return {
+          ok: false,
+          reason: "stale-approval",
+          message: `${taskId}: route provenance conflict — run #${request.runId} was admitted as ${existing.provider} · ${existing.model ?? "(no model)"} but would spend as ${provider} · ${effective.model}; refusing to run (stale-approval)`,
+        };
+      }
+    } else {
+      const sealed = request.contestProfile !== undefined || attended !== undefined ? null : store.sealedRouteOf(taskId);
+      const stamped = store.stampRunRoute(
+        request.runId,
+        sealed !== null && sealed.ok
+          ? { routeDigest: routeDigestOf(sealed.route), phase: "build", provider, model: effective.model, chosen: legOf(sealed.route, "build").chosen }
+          : { routeDigest: `profile:${provenProfileDigest}`, phase: "build", provider, model: effective.model, chosen: "legacy" },
+        now,
+      );
+      if (!stamped.ok) return { ok: false, reason: "stale-approval", message: `${taskId}: ${stamped.conflict} (stale-approval)` };
+    }
+  }
 
   // The external-mirror re-proof, pre-spawn (dispatch v3 §2): admission
   // already refused stale/closed/revoked/blocked mirrors, but a latch can
@@ -1500,6 +1555,13 @@ function ingestProgress(store: Store, state: ProgressIngestState, now: Date): vo
  * when the stream reaches a terminal handoff. Only this pair of callers:
  * a run completes through THIS function or not at all.
  */
+/** The handoff's route line (v47): the run's stamped provenance, or nothing
+ * for a run that opened before routes existed. */
+function routeProvenanceOf(store: Store, runId: number): { route: NonNullable<HandoffArtifact["route"]> } | Record<string, never> {
+  const stamped = store.runRoute(runId);
+  return stamped === null ? {} : { route: { digest: stamped.routeDigest, phase: stamped.phase, provider: stamped.provider, model: stamped.model, chosen: stamped.chosen } };
+}
+
 export async function settleProviderOutcome(captured: CapturedBuild, result: AgentOutcome): Promise<BuildResult> {
   const { store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef, runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof, clock } = captured;
   if (result.timedOut) {
@@ -1732,6 +1794,8 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       taskId,
       runId: request.runId,
       provider,
+      model: effective.model,
+      ...routeProvenanceOf(store, request.runId),
       sessionId: result.sessionId,
       branch,
       worktree,
@@ -1790,6 +1854,8 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
         taskId,
         runId: request.runId,
         provider,
+        model: effective.model,
+        ...routeProvenanceOf(store, request.runId),
         sessionId: result.sessionId,
         branch,
         worktree,
@@ -2439,6 +2505,29 @@ async function ingestPark(args: {
   const repairProvider = request.provider ?? "claude";
   const repairAudit = auditOf(repairProvider);
   const resumableRepair = repairAudit.resume === "native";
+  // THE REPAIR LEG (v47): a routed task repairs on exactly the sealed
+  // route's repair leg — same provider as the build, the exact model the
+  // approval froze. The repair model comes from the sealed profile
+  // ("inherit" = the build's exact model); a disagreement with the sealed
+  // route, or an unreadable route on a routed row, refuses the repair in
+  // words rather than mending under an agent nobody approved. Provenance
+  // follows the parent: an approved fallback entry's repair stays
+  // `fallback`; a legacy parent's repair stays `legacy`.
+  const parentRoute = store.runRoute(runId);
+  const repairScope = store.getScope(request.taskId);
+  const repairSealed = repairScope !== null && repairScope.routeEra != null ? store.sealedRouteOf(request.taskId) : null;
+  const repairModel = repairModelOf(args.profile, request);
+  let repairChosen: RouteStamp["chosen"] = parentRoute?.chosen === "fallback" ? "fallback" : "legacy";
+  if (repairSealed !== null && parentRoute?.chosen !== "fallback") {
+    if (!repairSealed.ok) {
+      return { ok: false, problems: [{ reason: "route-unreadable", message: `the repair cannot run: ${repairSealed.detail}` }] };
+    }
+    const leg = legOf(repairSealed.route, "repair");
+    if (leg.provider !== repairProvider || repairModel !== leg.model) {
+      return { ok: false, problems: [{ reason: "route-mismatch", message: `the approved route repairs on ${leg.provider} · ${leg.model} but this repair would run ${repairProvider} · ${repairModel ?? "(no model)"} — nothing substitutes; re-file and approve again` }] };
+    }
+    repairChosen = leg.chosen;
+  }
   for (let turn = 0; turn < REPAIR_TURNS && (resumableRepair ? sessionId !== undefined : true); turn++) {
     // The lease is re-proved around every repair turn: extended going in,
     // proved again coming out. A repair racing a reclaim must lose.
@@ -2453,9 +2542,7 @@ async function ingestPark(args: {
       runner: request.runner,
       branch: request.branch,
       worktree,
-      ...((repairModelOf(args.profile, request) ?? undefined) === undefined
-        ? {}
-        : { model: repairModelOf(args.profile, request) as string }),
+      ...(repairModel === null ? {} : { model: repairModel }),
       role: "repair",
       // Repair inherits the parent's provider, structurally: the session
       // id it resumes has no meaning anywhere else (Codex review, Q3).
@@ -2466,6 +2553,14 @@ async function ingestPark(args: {
       // stale parent id on the row would win the first-write race.
       ...(resumableRepair && sessionId !== undefined ? { sessionId } : {}),
       now: clock(),
+      // Route provenance for the repair leg, in the admission transaction.
+      route: {
+        routeDigest: parentRoute?.routeDigest ?? (args.profile === undefined ? "legacy" : `profile:${profileDigestOf(args.profile)}`),
+        phase: "repair",
+        provider: repairProvider,
+        model: repairModel,
+        chosen: repairChosen,
+      },
     });
     // A repair turn inherits its parent's chain binding VERBATIM (Codex E3d
     // review, finding 2): the pinned entry — auth mode included — follows
@@ -2476,7 +2571,7 @@ async function ingestPark(args: {
     const spoken = await invokeAgent(
       store,
       repairRun,
-      { provider: request.provider ?? "claude", model: repairModelOf(args.profile, request) },
+      { provider: repairProvider, model: repairModel },
       {
         phase: "repair",
         brief: resumableRepair

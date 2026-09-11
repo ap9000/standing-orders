@@ -335,6 +335,10 @@ describe("the MCP stdio server", () => {
 
     // Quarantined until the password seal — then ordinary.
     expect(acquire(store, taskRef, "b-1", { now: T0, token: "tok-b-1" })).toMatchObject({ ok: false, reason: "coordinator-filed" });
+    // v47: a routed scope seals only when every phase names an exact agent.
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     store.saveScope({
       taskId, goal: "e2e work", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: `dg-${taskId}`,

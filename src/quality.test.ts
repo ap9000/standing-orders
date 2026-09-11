@@ -13,6 +13,8 @@ describe("two quality modes", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
   });
 
   afterEach(() => store.close());
@@ -67,6 +69,8 @@ describe("two quality modes", () => {
     try {
       legacy = openStore(file);
       legacy.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+      legacy.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+      legacy.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
       legacy.createTask({ id: "old", title: "old task" }, T0);
       propose(legacy, { taskId: "old", goal: "keep the old workflow", now: T0 });
       const ref = legacy.refFor("built-in", "old");

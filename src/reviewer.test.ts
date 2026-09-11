@@ -16,6 +16,7 @@ import { storeEvidence } from "./evidence.js";
 import { register } from "./runner.js";
 import { acquire } from "./claim.js";
 import { addApprover, approve, propose } from "./scope.js";
+import { routeDigestOf } from "./phase-routing.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { maybeRequestAutoReview } from "./dispose.js";
 import {
@@ -757,6 +758,132 @@ describe("the reviewer role in the store", () => {
     const passOnce = (agent: Runner) =>
       reviewPass(store, { runner: "builder-1", token: "tok-builder-1", now: T0, evidenceRoot, scratchRoot, agent });
 
+    test("the sealed route's review leg governs the reviewer — never today's configuration — and the run names its route (v47)", async () => {
+      // The task's scope seals an overridden reviewer; the installation's
+      // review row says something else and later changes again.
+      store.setPhaseConfig("installation", "build", "claude", "claude-sonnet-4", "alex", T0);
+      store.setPhaseConfig("installation", "plan", "claude", "claude-sonnet-4", "alex", T0); // v47: every phase names an exact model
+      store.setPhaseConfig("installation", "review", "claude", "claude-sonnet-4", "alex", T0);
+      store.setPhaseConfig("installation", "review", "claude", "claude-haiku", "alex", T0);
+      propose(store, { taskId: "t-1", goal: "guard the payouts", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], now: T0 });
+      const edited = store.editTaskRoute(taskRef, { by: "alex", authenticate: () => ({ ok: true }), override: { phase: "review", provider: "claude", model: "claude-opus-4-1" } }, T0);
+      if (!edited.ok) throw new Error(edited.detail);
+      const refiled = edited.scope!;
+      expect(approve(store, "t-1", "alex", T0, refiled.digest, approverToken).ok).toBe(true);
+      store.setPhaseConfig("installation", "review", "claude", "claude-sonnet-4", "alex", T0);
+
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("request failed");
+      expect(store.raw().prepare("SELECT route_digest FROM review_request WHERE id = ?").get(asked.id)?.["route_digest"]).toBe(routeDigestOf(store.approvedRouteOf("t-1")!));
+      const seen: string[][] = [];
+      const reports = await passOnce(async (_file, args, options) => {
+        seen.push([...args]);
+        return reviewingAgent({ version: 1, comments: [] })(_file, args, options);
+      });
+      expect(reports[0]).toMatchObject({ outcome: "reviewed" });
+      expect(seen[0]).toContain("--model");
+      expect(seen[0]?.[seen[0].indexOf("--model") + 1]).toBe("claude-opus-4-1");
+      const reviewer = store.runsFor(taskRef).find(run => run.role === "reviewer")!;
+      expect(reviewer.model).toBe("claude-opus-4-1");
+      expect(store.runRoute(reviewer.id)).toMatchObject({ phase: "review", provider: "claude", model: "claude-opus-4-1", chosen: "override", routeDigest: routeDigestOf(store.approvedRouteOf("t-1")!) });
+    });
+
+    test("a reviewer this runner reports unavailable is never substituted: the request stays open, the pass says why (v47)", async () => {
+      store.setPhaseConfig("installation", "review", "codex", "gpt-5-codex", "alex", T0);
+      store.recordProviderReadiness("builder-1", [{ provider: "codex", state: "unavailable", reason: "`codex login status` says not logged in", probe: "identity" }], T0);
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("request failed");
+      let calls = 0;
+      const reports = await passOnce(async () => {
+        calls += 1;
+        return { ...OK, stdout: SAID };
+      });
+      expect(calls).toBe(0);
+      expect(reports[0]).toMatchObject({ outcome: "skipped" });
+      expect(reports[0]?.detail).toContain("codex is reported unavailable on builder-1");
+      expect(reports[0]?.detail).toContain("nothing substitutes");
+      expect(store.openReviewRequests()).toHaveLength(1);
+      expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(0);
+      // Another runner that never reported codex admits it (unknown is not
+      // unavailable) and spends the attempt on the routed provider.
+      let otherCalls = 0;
+      const other = await reviewPass(store, { runner: "builder-2", token: "tok-builder-2", now: T0, evidenceRoot, scratchRoot, agent: async () => { otherCalls += 1; return { ...OK, stdout: SAID }; } });
+      expect(other[0]?.outcome).not.toBe("skipped");
+      expect(otherCalls).toBe(1);
+      expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(1);
+      expect(store.runsFor(taskRef).find(run => run.role === "reviewer")?.provider).toBe("codex");
+    });
+
+    test("admission re-proves the review leg INSIDE its transaction: a provider/model mismatch, a null model, an unavailable provider, and an unreadable route all refuse before any run exists (v47)", async () => {
+      store.setPhaseConfig("installation", "build", "claude", "claude-sonnet-4", "alex", T0);
+      store.setPhaseConfig("installation", "plan", "claude", "claude-sonnet-4", "alex", T0);
+      store.setPhaseConfig("installation", "review", "claude", "claude-sonnet-4", "alex", T0);
+      propose(store, { taskId: "t-1", goal: "guard the payouts", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], now: T0 });
+      expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("request failed");
+      const admit = (spec: { provider: string; model: string | null }, runner = "builder-1", token = "tok-builder-1") =>
+        store.admitReview(asked.id, { runner, token, ...spec }, T0);
+      // Another provider, another model, no model: refused, request still open.
+      expect(admit({ provider: "codex", model: "gpt-5-codex" })).toMatchObject({ ok: false, reason: "route-mismatch" });
+      expect(admit({ provider: "claude", model: "claude-opus-4-1" })).toMatchObject({ ok: false, reason: "route-mismatch" });
+      const nullModel = admit({ provider: "claude", model: null });
+      expect(nullModel).toMatchObject({ ok: false, reason: "route-mismatch" });
+      if (!nullModel.ok) expect(nullModel.detail).toContain("with no model");
+      expect(store.openReviewRequests()).toHaveLength(1);
+      expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(0);
+      // The exact leg, but the provider is reported unavailable on this runner.
+      store.recordProviderReadiness("builder-1", [{ provider: "claude", state: "unavailable", reason: "not installed", probe: "version" }], T0);
+      expect(admit({ provider: "claude", model: "claude-sonnet-4" })).toMatchObject({ ok: false, reason: "provider-unavailable" });
+      expect(store.openReviewRequests()).toHaveLength(1);
+      // Route data removed from the routed row: the request is spent, unrun, in words.
+      const kept = store.getScope("t-1")!.approvedRouteJson;
+      store.raw().prepare("UPDATE task_scope SET approved_route_json = NULL WHERE task_id = 't-1'").run();
+      expect(store.requestReview(builtRun, "alex", T0)).toMatchObject({ ok: false, reason: "route-unreadable" });
+      const unreadable = admit({ provider: "claude", model: "claude-sonnet-4" }, "builder-2", "tok-builder-2");
+      expect(unreadable).toMatchObject({ ok: false, reason: "route-changed" });
+      if (!unreadable.ok) expect(unreadable.detail).toContain("sealed no agent route");
+      expect(store.openReviewRequests()).toHaveLength(0);
+      expect(store.requestReview(builtRun, "alex", T0)).toMatchObject({ ok: false, reason: "route-unreadable" });
+      // Restored: the exact leg admits, and the run carries its provenance.
+      store.raw().prepare("UPDATE task_scope SET approved_route_json = ? WHERE task_id = 't-1'").run(kept);
+      const again = store.requestReview(builtRun, "alex", new Date(T0.getTime() + 1_000));
+      if (!again.ok) throw new Error("request failed");
+      const admitted = store.admitReview(again.id, { runner: "builder-2", token: "tok-builder-2", provider: "claude", model: "claude-sonnet-4" }, T0);
+      expect(admitted.ok).toBe(true);
+      if (!admitted.ok) return;
+      expect(store.runRoute(admitted.reviewerRunId)).toMatchObject({ phase: "review", provider: "claude", model: "claude-sonnet-4", chosen: "recommended", routeDigest: routeDigestOf(store.approvedRouteOf("t-1")!) });
+    });
+
+    test("a request queued under one sealed route is spent unrun when the task is re-approved under another (v47)", async () => {
+      store.setPhaseConfig("installation", "build", "claude", "claude-sonnet-4", "alex", T0);
+      store.setPhaseConfig("installation", "plan", "claude", "claude-sonnet-4", "alex", T0); // v47: every phase names an exact model
+      store.setPhaseConfig("installation", "review", "claude", "claude-sonnet-4", "alex", T0);
+      propose(store, { taskId: "t-1", goal: "guard the payouts", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], now: T0, riskLevel: "high" });
+      const first = store.getScope("t-1")!;
+      expect(approve(store, "t-1", "alex", T0, first.digest, approverToken).ok).toBe(true);
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("request failed");
+      // The route changes and is re-approved: the old request no longer
+      // names the sealed route.
+      const edited = store.editTaskRoute(taskRef, { by: "alex", authenticate: () => ({ ok: true }), override: { phase: "review", provider: "claude", model: "claude-opus-4-1" } }, T0);
+      if (!edited.ok) throw new Error(edited.detail);
+      expect(approve(store, "t-1", "alex", T0, edited.scope!.digest, approverToken).ok).toBe(true);
+      let calls = 0;
+      const reports = await passOnce(async () => {
+        calls += 1;
+        return { ...OK, stdout: SAID };
+      });
+      expect(calls).toBe(0);
+      expect(reports).toEqual([{ requestId: asked.id, run: builtRun, outcome: "skipped", detail: "route-changed: the task was approved again under a different route" }]);
+      expect(store.openReviewRequests()).toHaveLength(0);
+      expect(store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(asked.id)?.["consumed_reason"]).toBe("route-changed");
+      // A fresh request under the new seal reviews normally.
+      expect(store.requestReview(builtRun, "alex", new Date(T0.getTime() + 1_000)).ok).toBe(true);
+      const again = await passOnce(reviewingAgent({ version: 1, comments: [] }));
+      expect(again[0]).toMatchObject({ outcome: "reviewed" });
+    });
+
     test("manual road end to end: request → pass → comments land, run closes, request consumed", async () => {
       const asked = store.requestReview(builtRun, "alex", T0);
       expect(asked.ok).toBe(true);
@@ -1367,9 +1494,16 @@ describe("the reviewer role in the store", () => {
     });
 
     const CRITERION = { id: "c1", statement: "The payout guard is wired in.", how: null, evidence: ["manual-review"] as const };
+    // v47: a routed scope reviews only under a STANDING approval — the
+    // rubric fixture files exact agents and approves, as a real task would.
     const seedRubric = () => {
+      store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+      store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+      store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
       const scope = propose(store, { taskId: "t-1", goal: "wire the payout guard", acceptance: [CRITERION], now: T0 });
-      store.stampRun(builtRun, { scopeDigest: scope.digest });
+      const sealed = approve(store, "t-1", "alex", T0, scope.digest, approverToken);
+      if (!sealed.ok) throw new Error(`seedRubric: ${sealed.reason}`);
+      store.stampRun(builtRun, { scopeDigest: sealed.scope.digest });
     };
     const seedProofArtifact = (runId: number) => {
       const proof = {
@@ -1456,22 +1590,31 @@ describe("the reviewer role in the store", () => {
     test("a result built under an earlier scope is refused before the reviewer runs", async () => {
       seedRubric();
       seedVerdict(builtRun, "short");
+      // A review asked for under a scope that is then rewritten (v47): the
+      // request cannot even be filed once the approval no longer stands…
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("request failed");
       propose(store, {
         taskId: "t-1",
         goal: "wire and alarm the payout guard",
         acceptance: [{ ...CRITERION, id: "new", statement: "The payout guard is wired in and alarmed." }],
         now: new Date(T0.getTime() + 1_000),
       });
-      store.requestReview(builtRun, "alex", T0);
+      expect(store.requestReview(builtRun, "alex", T0)).toMatchObject({ ok: false, reason: "route-unapproved" });
       let calls = 0;
 
+      // …and the queued one is skipped in words, unspent, until a person
+      // approves the current scope — nothing reviews under agents nobody
+      // approved.
       const reports = await passOnce(async () => {
         calls += 1;
         return { ...OK, stdout: spoken({ version: 1, comments: [] }) };
       });
 
-      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "scope-changed" });
+      expect(reports[0]).toMatchObject({ outcome: "skipped" });
+      expect(reports[0]?.detail).toContain("approved and then changed");
       expect(calls).toBe(0);
+      expect(store.openReviewRequests()).toHaveLength(1);
       expect(store.criterionReviewsFor(builtRun)).toEqual([]);
       expect(store.proofVerdictFor(builtRun)?.verdict).toBe("short");
     });
@@ -1531,7 +1674,7 @@ describe("the reviewer role in the store", () => {
       expect(row?.review).toMatchObject({ judgement: "contradicts", note: "never actually wired in" });
       const saved = store.criterionReviewsFor(builtRun);
       expect(saved).toHaveLength(1);
-      expect(saved[0]).toMatchObject({ criterionId: "c1", judgement: "contradicts", author: "reviewer:claude" });
+      expect(saved[0]).toMatchObject({ criterionId: "c1", judgement: "contradicts", author: "reviewer:claude·sonnet" });
     });
 
     test("cannot-tell changes nothing: the verdict stays short, and the judgement is recorded", async () => {
@@ -1897,6 +2040,8 @@ describe("the reviewer role in the store", () => {
     expect(store.openReviewRequests()).toHaveLength(0);
 
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
     store.createTask({ id: "t-strict", title: "release the payout guard" }, T0);
     const strictRef = store.refFor("built-in", "t-strict");
     store.placeTask(strictRef.id, REPO);

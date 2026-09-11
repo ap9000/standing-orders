@@ -115,6 +115,9 @@ describe("routines, against real git", () => {
     };
     const store = openStore(db);
     register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => "tok-builder-1" });
+    // v47: even a firing's pinned profile routes beside an exact planner and reviewer.
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     const runnerToken = "tok-builder-1";
     const created = store.createRoutine(
       { name: "notes", ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE },
@@ -185,6 +188,9 @@ describe("routines, against real git", () => {
     // The runner gate (MCP spec v6): builder-1 enrolls with the repo in its
     // registered repos list — the --repo flag no longer grants authority.
     register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => "tok-builder-1" });
+    // v47: even a firing's pinned profile routes beside an exact planner and reviewer.
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     const runnerToken = "tok-builder-1";
     const created = store.createRoutine(
       { name: "flaky", ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE },

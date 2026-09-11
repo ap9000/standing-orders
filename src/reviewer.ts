@@ -40,6 +40,7 @@ import { auditOf, isProviderId, safeDiagnostic, type ProviderId } from "./provid
 import type { Store } from "./store.js";
 import { invokeAgent } from "./invoke.js";
 import { resolvePhaseAgent } from "./agentconfig.js";
+import { legOf } from "./phase-routing.js";
 import { maybeTriggerRepair } from "./dispose.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import { evidenceRoot, readMailbox, readVerifiedArtifact, sniffImageKind } from "./evidence.js";
@@ -1142,7 +1143,33 @@ export async function reviewPass(
   const clock = options.clock ?? (() => options.now);
   const reports: ReviewPassReport[] = [];
   for (const request of store.openReviewRequests()) {
-    const resolution = resolvePhaseAgent(store, "review", request.repo, {});
+    // THE REVIEW LEG (v47): a task whose approval sealed a route reviews
+    // on that route's exact review leg — never on whatever the configuration
+    // says today. A row proven to predate routing (no route era), or a task
+    // with no scope at all, resolves as it always has. A routed task whose
+    // approval no longer stands, whose route cannot be read, or whose leg
+    // the policy flagged as unrunnable (gemini) is a stated problem: the
+    // request stays open, in words, and nothing substitutes. Admission
+    // below re-proves the leg INSIDE its transaction and refuses any
+    // provider/model mismatch.
+    const reviewScope = store.getScope(request.taskId);
+    let reviewLeg: ReturnType<typeof legOf> | null = null;
+    if (reviewScope !== null && reviewScope.routeEra != null) {
+      const sealed = store.sealedRouteOf(request.taskId);
+      if (!sealed.ok) {
+        reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: sealed.reason === "unapproved" ? `${sealed.detail} — the approval seals which reviewer runs` : sealed.detail });
+        continue;
+      }
+      reviewLeg = legOf(sealed.route, "review");
+      if (reviewLeg.problem !== null) {
+        reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: reviewLeg.problem });
+        continue;
+      }
+    }
+    const resolution =
+      reviewLeg !== null
+        ? resolvePhaseAgent(store, "review", request.repo, { provider: reviewLeg.provider, model: reviewLeg.model })
+        : resolvePhaseAgent(store, "review", request.repo, {});
     if (!resolution.ok) {
       // A configuration problem is the operator's to fix — the request
       // stays open rather than being spent on a misroute.
@@ -1158,11 +1185,13 @@ export async function reviewPass(
       if (admitted.reason === "railed") {
         reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: admitted.rail ?? "railed" });
       } else if (admitted.reason !== "gone") {
-        reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: admitted.reason });
+        reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: admitted.detail === undefined ? admitted.reason : `${admitted.reason}: ${admitted.detail}` });
       }
       continue;
     }
     const task = store.getTask(admitted.taskId);
+    // Route provenance (v47) was stamped by the admission transaction
+    // itself — the reviewer run names the route and the exact leg.
     const result = await review(store, {
       sourceRunId: admitted.sourceRun,
       reviewerRunId: admitted.reviewerRunId,

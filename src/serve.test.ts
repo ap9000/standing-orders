@@ -18,7 +18,8 @@ import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
 import { createDecisionServer, SENSITIVE_INPUT, reviewPriorityOf, rankReviewQueue, withinSignedTouches, diffFileAnchor, reviewFilePriority, orderChangedFiles, type ReviewQueueFacts, type ReviewFileRow } from "./serve.js";
 import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
-import { resolveScopeProfile } from "./agentconfig.js";
+import { resolveScopeProfile, routeOfTask } from "./agentconfig.js";
+import { projectRoute, readinessWords } from "./phase-routing.js";
 import type { MateProviderAnswer } from "./converse.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
@@ -56,6 +57,8 @@ describe("the web decision view", () => {
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-serve-ev-"));
 
     const added = addApprover(store, "alex", T0);
@@ -430,6 +433,8 @@ describe("the settings card", () => {
     const { mkdtempSync } = await import("node:fs");
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     dir = mkdtempSync(join(tmpdir(), "standing-orders-serve-settings-"));
     evidenceRoot = join(dir, "evidence");
     mkdirSync(evidenceRoot, { recursive: true });
@@ -676,6 +681,8 @@ describe("the operations console", () => {
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-console-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -1495,6 +1502,8 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-v2-ev-"));
     // Two real directories: A is inside the ceiling, B is not.
     repoA = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-v2-repoA-")));
@@ -1712,6 +1721,8 @@ describe("the board — the pipeline as lanes, live in place", () => {
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-board-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -2367,6 +2378,8 @@ describe("routines — standing orders on the console", () => {
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-routine-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -2572,10 +2585,14 @@ describe("the agents card — configuration, readable at a glance", () => {
   test("says what each phase runs on, who chose it, and that the browser cannot change it", async () => {
     const store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-agents-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     store.setPhaseConfig("installation", "build", "codex", "gpt-5-codex", "alex", T0);
+    store.setPhaseConfig("installation", "plan", "codex", "gpt-5-codex", "alex", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "codex", "gpt-5-codex", "alex", T0);
     store.setPhaseConfig("/repo/main", "plan", "claude", "opus", "alex", T0);
     const server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -2612,6 +2629,8 @@ describe("mutations from browsers that omit Origin", () => {
   test("absent Origin + valid CSRF proceeds; a present wrong Origin still refuses", async () => {
     const store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-origin-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
@@ -2677,6 +2696,8 @@ describe("/next — clearing the queue one thing at a time", () => {
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-next-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -2790,6 +2811,8 @@ describe("since you last looked", () => {
   test("a return visit says what concluded in between; fragment polls never move the anchor", async () => {
     const store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-delta-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
@@ -2834,6 +2857,8 @@ describe("quick capture — from thought to the approve card in two steps", () =
   test("title + goal on the inbox lands on the task screen with the step-up ready", async () => {
     const store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-capture-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
@@ -2880,6 +2905,8 @@ describe("the roll-up inbox — every project, one ceiling, links only", () => {
   test("a projectless session sees admitted rows with chips; foreign repos neither render nor count", async () => {
     const store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-rollup-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
@@ -3138,6 +3165,8 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-chat-ev-"));
     repoDir = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-chat-repo-")));
     clockNow = T0;
@@ -3533,6 +3562,8 @@ describe("the filesystem browser — confined to what opening allows", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-browse-ev-"));
     root = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-browse-root-")));
     mkdirSync(join(root, "payments-api", ".git"), { recursive: true });
@@ -3616,6 +3647,8 @@ describe("the fleet — runner lanes as the agents × projects surface", () => {
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-fleet-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -3805,6 +3838,8 @@ describe("the workbench (attended A1) and the live substrate", () => {
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-wb-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -3929,6 +3964,8 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-live-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -4281,6 +4318,8 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-contest-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -4514,6 +4553,8 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     const { mkdirSync } = await import("node:fs");
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = realpathSync(mkdtempSync(join(tmpdir(), "peek-serve-ev-")));
     poolRoot = realpathSync(mkdtempSync(join(tmpdir(), "peek-serve-pool-")));
     worktree = join(poolRoot, "wt-1");
@@ -4811,6 +4852,8 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     dir = mkdtempSync(join(tmpdir(), "standing-orders-arc4-"));
     evidenceRoot = join(dir, "evidence");
     mkdirSync(evidenceRoot, { recursive: true });
@@ -5168,6 +5211,8 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
     beforeEach(async () => {
       store = openStore(":memory:");
       store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+      store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+      store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
       evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-arc6-ev-"));
       const added = addApprover(store, "alex", T0);
       if (!added.ok) throw new Error("bootstrap failed");
@@ -5354,6 +5399,8 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-onb-ev-"));
     root = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-onb-root-")));
     const added = addApprover(store, "alex", T0);
@@ -5637,6 +5684,8 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     store.close();
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const again = addApprover(store, "alex", T0);
     if (!again.ok) throw new Error("bootstrap failed");
     approverToken = again.token;
@@ -5786,6 +5835,8 @@ describe("the attended authorization ceremony (Phase 2E)", () => {
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T1);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T1); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T1);
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-att-ev-"));
     const added = addApprover(store, "alex", T1);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -6014,6 +6065,8 @@ describe("the continuation ceremony (Phase 2E, A4)", () => {
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T1);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T1); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T1);
     evidenceRoot = mkdtempSync(join(tmpdir(), "so-cont-ev-"));
     const added = addApprover(store, "alex", T1);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -6306,6 +6359,8 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-portfolio-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -6636,6 +6691,8 @@ describe("the queue (portfolio arc, slice 1b): move-to-front resolved server-sid
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-queue-1b-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -6871,6 +6928,8 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-task-1c-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -7446,6 +7505,8 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-phone-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -7570,6 +7631,8 @@ describe("the project switcher (board pass): one tap from any screen, forms with
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-switcher-"));
     const root = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-switcher-repos-")));
     repoA = join(root, "alpha");
@@ -7754,7 +7817,11 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(page.slice(bar, page.indexOf("</div>", bar))).not.toContain('class="primary"');
     expect(page).not.toContain("its scope needs your approval");
     // The scope section still holds the goal card and the edit road, not the ceremony.
-    const scopeSection = page.slice(page.indexOf('<details class="section" id="scope"'), page.indexOf("</details>", page.indexOf('<details class="section" id="scope"')));
+    // (The section holds nested details — the agents card's closed
+    // reasons — so it ends at the NEXT section, not the first `</details>`.)
+    const scopeStart = page.indexOf('<details class="section" id="scope"');
+    const nextSection = page.indexOf('<details class="section"', scopeStart + 1);
+    const scopeSection = page.slice(scopeStart, nextSection === -1 ? page.length : nextSection);
     expect(scopeSection).not.toContain('action="/t/t-yes/approve"');
     expect(scopeSection).toContain("edit the scope");
 
@@ -7847,6 +7914,8 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-mate-ev-"));
     repoDir = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-mate-repo-")));
     clockNow = T0;
@@ -8378,6 +8447,8 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     const { mkdtempSync, writeFileSync } = await import("node:fs");
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     dir = mkdtempSync(join(tmpdir(), "standing-orders-serve-scout-"));
     evidenceRoot = join(dir, "evidence");
     mkdirSync(evidenceRoot, { recursive: true });
@@ -8566,6 +8637,8 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     // starting value changes later; editing unrelated scope text must not
     // silently re-sandbox it.
     store.setPhaseConfig("installation", "build", "codex", "gpt-5-codex", "alex", T0);
+    store.setPhaseConfig("installation", "plan", "codex", "gpt-5-codex", "alex", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "codex", "gpt-5-codex", "alex", T0);
     store.createTask({ id: "existing-codex-full", title: "existing Codex full task" }, T0);
     propose(store, {
       taskId: "existing-codex-full",
@@ -8919,6 +8992,8 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-reduction-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -9197,6 +9272,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
   beforeEach(async () => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-cockpit-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -9832,5 +9909,230 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const cockpit = await (await fetch(url("/review?result=t-link"), { headers: { cookie } })).text();
     expect(cockpit).toContain(`<a href="/r/${run}">Full build history and evidence →</a>`);
     expect(cockpit).toContain('href="/t/t-link"');
+  });
+});
+
+describe("the phase route on the console (v47): one projection on the task page, in the ceremony, and in the focused chat", () => {
+  let store: Store;
+  let server: Server | null = null;
+  let base: string;
+  let approverToken: string;
+  let viewerToken: string;
+  let evidenceRoot: string;
+
+  const T0 = new Date("2026-09-10T00:00:00.000Z");
+  const url = (path: string) => `${base}${path}`;
+
+  const loginAs = async (name: string, token: string): Promise<string> => {
+    const response = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name, token }), redirect: "manual" });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+  const csrfOf = (html: string): string => {
+    const match = /name="csrf" value="([0-9a-f]{64})"/.exec(html);
+    if (match === null) throw new Error("no csrf on the page");
+    return match[1] as string;
+  };
+  const page = async (cookie: string, path: string): Promise<string> => (await fetch(url(path), { headers: { cookie } })).text();
+  const post = (cookie: string, path: string, fields: Record<string, string>) =>
+    fetch(url(path), { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields), redirect: "manual" });
+  const agentsCardOf = (html: string): string => /<section class="card agents-card" id="agents"[^>]*>(.*?)<\/section>/s.exec(html)?.[1] ?? "";
+  const JARGON = /\b(route|phase|sealed|stales?|harness default)\b/i;
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-route-"));
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
+    store.setPhaseTierConfig("installation", "build", "strong", "claude", "opus", "test", T0);
+    store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "test", T0);
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    const viewer = addApprover(store, "vera", T0, { name: "alex", token: approverToken });
+    if (!viewer.ok) throw new Error("viewer add");
+    store.raw().prepare("UPDATE approver SET role = 'viewer' WHERE name = 'vera'").run();
+    viewerToken = viewer.token;
+    register(store, { name: "mac-mini", host: "here", capacity: 4, repos: ["/repo/main"], now: T0, newToken: () => "tok-mac-mini" });
+    store.createTask({ id: "payouts", title: "Harden payouts" }, T0);
+    const ref = store.refFor("built-in", "payouts").id;
+    store.placeTask(ref, "/repo/main");
+    propose(store, {
+      taskId: "payouts",
+      goal: "Harden the payouts flow",
+      acceptance: [{ id: "pay", statement: "Payouts never double-send", how: null, evidence: ["check", "screenshot"] }],
+      riskLevel: "high",
+      now: T0,
+    });
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(T0.getTime() + 60_000), repo: "/repo/main" });
+    await new Promise<void>(resolve => (server as Server).listen(0, "127.0.0.1", resolve));
+    const address = (server as Server).address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    if (server !== null) await new Promise<void>(resolve => (server as Server).close(() => resolve()));
+    server = null;
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the task page leads with a compact plain-English Agents summary; reasons and availability are one tap away; the ceremony restates the agents without availability; the CLI projection is the same words", async () => {
+    store.recordProviderReadiness("mac-mini", [{ provider: "codex", state: "unavailable", reason: "`codex login status` says not logged in", probe: "identity" }], T0);
+    const cookie = await loginAs("alex", approverToken);
+    const html = await page(cookie, "/t/payouts");
+    const card = agentsCardOf(html);
+    expect(card).toContain("<h3>Agents</h3>");
+    expect(card).toContain('<span class="badge">High risk</span>');
+    expect(card).toContain('<span class="badge">stronger configured agents</span>');
+    expect(card).toContain('<span class="badge">awaiting approval</span>');
+    expect(card).toContain('<p class="agents-summary">claude · sonnet plans; claude · opus builds and repairs; codex · gpt-5-codex reviews</p>');
+    // Reasons and change controls are CLOSED details, not always-open rows.
+    expect(card).toContain('<details class="agents-why"><summary>Why these agents</summary>');
+    expect(card).toContain('<details class="agents-change"><summary>Change agents</summary>');
+    expect(card).not.toContain("<details open");
+    expect(card).toContain("risk is high — every role uses the strongest configured agent");
+    expect(card).toContain("acceptance requires screenshots");
+    expect(card).toContain("<dt>Builder</dt><dd><span class=\"mono\">claude · opus</span> <span class=\"badge\">recommended · strong</span>");
+    // Availability is volatile metadata beside the agents.
+    expect(card).toContain('<li class="agents-availability-unavailable"><span class="mono">codex</span> unavailable (`codex login status` says not logged in)');
+    expect(card).toContain('<span class="mono">claude</span> not yet checked');
+    expect(card).toContain("Paused: a provider these agents need is reported unavailable. Nothing else is used in its place");
+    expect(card).toContain('name="risk"');
+    expect(card).toContain('name="phase"');
+    // Valid forms: each form is its own element, never nested, and every
+    // control is at least 44px tall.
+    expect(card).not.toMatch(/<form[^>]*>(?:(?!<\/form>).)*<form/s);
+    expect(card).toMatch(/<form method="post" action="\/t\/payouts\/route" class="agents-form-risk">/);
+    expect(html).toContain(".agents-form input, .agents-form select, .agents-form-risk select { width: 100%; min-width: 0; min-height: 2.75rem; }");
+    // No jargon in the visible words (form attribute names aside).
+    const visible = card.replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'");
+    expect(visible).not.toMatch(JARGON);
+    // The ceremony restates the agents where the yes is given — and never
+    // the volatile availability.
+    const ceremony = /<form method="post" action="\/t\/payouts\/approve"(.*?)<\/form>/s.exec(html)?.[1] ?? "";
+    expect(ceremony).toContain('<p class="approval-label">agents</p>');
+    expect(ceremony).toContain("claude · sonnet plans; claude · opus builds and repairs; codex · gpt-5-codex reviews");
+    expect(ceremony).toContain("These agents are part of what you approve");
+    expect(ceremony).not.toContain("unavailable");
+    expect(ceremony).not.toContain("not yet checked");
+    expect(ceremony.replace(/<[^>]+>/g, " ")).not.toMatch(JARGON);
+    // The same projection the CLI prints — one function, one set of words.
+    const ref = store.refFor("built-in", "payouts");
+    const routed = routeOfTask(store, "payouts", ref, new Date(T0.getTime() + 60_000))!;
+    if (routed.kind !== "route") throw new Error("expected a route");
+    const projection = projectRoute(routed.route, store.readinessLookupFor("/repo/main", null, new Date(T0.getTime() + 60_000)));
+    expect(card).toContain(projection.summary);
+    for (const leg of projection.legs) {
+      for (const reason of leg.reasons) expect(card).toContain(reason.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"));
+    }
+  });
+
+  test("an approver changes an agent from the page in one transaction: recorded with attribution, the approval needs renewing, the CAS refuses a stale form, and clearing re-files again", async () => {
+    const cookie = await loginAs("alex", approverToken);
+    const first = store.getScope("payouts")!;
+    expect(approve(store, "payouts", "alex", T0, first.digest, approverToken).ok).toBe(true);
+    const before = await page(cookie, "/t/payouts");
+    expect(agentsCardOf(before)).toContain('<span class="badge">approved</span>');
+    expect(agentsCardOf(before)).toContain(`name="sawDigest" value="${first.digest}"`);
+    const csrf = csrfOf(before);
+    const bad = await post(cookie, "/t/payouts/route", { csrf, sawDigest: first.digest, phase: "review", provider: "gemini", model: "gemini-2.5-pro" });
+    expect(bad.status).toBe(400);
+    const noModel = await post(cookie, "/t/payouts/route", { csrf, sawDigest: first.digest, phase: "review", provider: "codex", model: "" });
+    expect(noModel.status).toBe(400);
+    // A form rendered against a digest that is no longer current is refused.
+    const stale = await post(cookie, "/t/payouts/route", { csrf, sawDigest: "0".repeat(32), phase: "review", provider: "claude", model: "opus" });
+    expect(stale.status).toBe(409);
+    expect(approvalOf(store.getScope("payouts")!).approved).toBe(true);
+    const changed = await post(cookie, "/t/payouts/route", { csrf, sawDigest: first.digest, phase: "review", provider: "claude", model: "opus" });
+    expect(changed.status).toBe(303);
+    expect(changed.headers.get("location")).toContain("/t/payouts");
+    expect(decodeURIComponent(changed.headers.get("location") ?? "")).toContain("approve it again");
+    expect(changed.headers.get("location")).toMatch(/#agents$/);
+    const ref = store.refFor("built-in", "payouts");
+    expect(ref.routeOverrides).toEqual([expect.objectContaining({ phase: "review", provider: "claude", model: "opus", by: "alex" })]);
+    const after = store.getScope("payouts")!;
+    expect(approvalOf(after)).toMatchObject({ approved: false, reason: "changed" });
+    const html = await page(cookie, "/t/payouts");
+    const card = agentsCardOf(html);
+    expect(card).toContain("<dt>Reviewer</dt><dd><span class=\"mono\">claude · opus</span> <span class=\"badge\">overridden</span>");
+    expect(card).toContain("overridden by alex to claude · opus (recommended codex · gpt-5-codex)");
+    expect(card).toContain("Reviewer → <span class=\"mono\">claude · opus</span>");
+    expect(card).toContain('name="clear-phase" value="review"');
+    // The risk moves too, through the same door, with the current digest.
+    const risk = await post(cookie, "/t/payouts/route", { csrf: csrfOf(html), sawDigest: after.digest, risk: "elevated" });
+    expect(risk.status).toBe(303);
+    expect(store.getScope("payouts")!.riskLevel).toBe("elevated");
+    expect(agentsCardOf(await page(cookie, "/t/payouts"))).toContain("Elevated risk");
+    // Clearing the override restores the recommendation.
+    const cleared = await post(cookie, "/t/payouts/route", { csrf, sawDigest: store.getScope("payouts")!.digest, "clear-phase": "review" });
+    expect(cleared.status).toBe(303);
+    expect(store.refFor("built-in", "payouts").routeOverrides).toEqual([]);
+    expect(agentsCardOf(await page(cookie, "/t/payouts"))).toContain("<dt>Reviewer</dt><dd><span class=\"mono\">codex · gpt-5-codex</span>");
+  });
+
+  test("a viewer reads the agents but cannot change them; a live claim refuses the edit", async () => {
+    const viewer = await loginAs("vera", viewerToken);
+    const html = await page(viewer, "/t/payouts");
+    const card = agentsCardOf(html);
+    expect(card).toContain("claude · opus");
+    expect(card).not.toContain('name="phase"');
+    const refused = await post(viewer, "/t/payouts/route", { csrf: csrfOf(html), risk: "routine" });
+    expect(refused.status).toBe(403);
+    expect(store.getScope("payouts")!.riskLevel).toBe("high");
+    // Under a live claim the approver's edit is refused too.
+    const cookie = await loginAs("alex", approverToken);
+    const scope = store.getScope("payouts")!;
+    expect(approve(store, "payouts", "alex", T0, scope.digest, approverToken).ok).toBe(true);
+    const ref = store.refFor("built-in", "payouts").id;
+    const taken = acquire(store, ref, "mac-mini", { token: "tok-mac-mini", now: new Date(T0.getTime() + 60_000) });
+    expect(taken.ok).toBe(true);
+    const running = await page(cookie, "/t/payouts");
+    expect(agentsCardOf(running)).toContain("this task is running — its agents cannot change under a live claim");
+    const blocked = await post(cookie, "/t/payouts/route", { csrf: csrfOf(running), risk: "routine" });
+    expect(blocked.status).toBe(409);
+    expect(approvalOf(store.getScope("payouts")!).approved).toBe(true);
+  });
+
+  test("the focused chat shows the same agents beside the conversation, in an always-visible strip, and inside its approval card", async () => {
+    store.recordProviderReadiness("mac-mini", [{ provider: "claude", state: "unknown", reason: "installed (claude 1.2.3); no non-spending login check exists", probe: "version" }], T0);
+    const cookie = await loginAs("alex", approverToken);
+    const chat = await page(cookie, "/chat?task=payouts");
+    const aside = /<div class="task-chat-agents-aside">(.*?)<p class="meta"><a href="\/t\/payouts#agents">Change agents on the task/s.exec(chat)?.[1] ?? "";
+    expect(aside).toContain('<p class="agents-summary">claude · sonnet plans; claude · opus builds and repairs; codex · gpt-5-codex reviews</p>');
+    expect(aside).toContain('<span class="badge">High risk</span>');
+    expect(aside).toContain('<span class="badge">awaiting approval</span>');
+    expect(aside).toContain('<details class="agents-why"><summary>Why these agents</summary>');
+    expect(aside).toContain('<span class="mono">claude</span> not yet checked');
+    // The compact strip lives in the live region, which phones keep even
+    // when the desktop context panel is hidden.
+    const strip = /<p class="task-chat-agents">(.*?)<\/p>/s.exec(chat)?.[1] ?? "";
+    expect(strip).toContain('<span class="eyebrow">agents</span>');
+    expect(strip).toContain("claude · sonnet plans; claude · opus builds and repairs; codex · gpt-5-codex reviews");
+    expect(strip).toContain('href="/t/payouts#agents"');
+    expect(chat).toContain(".task-chat-workspace .task-chat-context { display: none; }");
+    expect(chat).toContain(".task-chat-agents {");
+    expect(strip.replace(/<[^>]+>/g, " ")).not.toMatch(JARGON);
+    const approvalCard = /<details class="card chat-action-card chat-approval" id="task-chat-action">(.*?)<\/details>\s*<\/section>|<details class="card chat-action-card chat-approval" id="task-chat-action">(.*)/s.exec(chat)?.[0] ?? "";
+    expect(approvalCard).toContain("High risk · stronger configured agents");
+    expect(approvalCard).toContain('<p class="approval-label">agents</p>');
+    expect(approvalCard).toContain("codex · gpt-5-codex");
+    expect(approvalCard).not.toContain("not yet checked");
+  });
+
+  test("a routed task whose approval lost its agents shows the closed door in words, and a proven pre-routing approval shows its profile", async () => {
+    const cookie = await loginAs("alex", approverToken);
+    const scope = store.getScope("payouts")!;
+    expect(approve(store, "payouts", "alex", T0, scope.digest, approverToken).ok).toBe(true);
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = NULL WHERE task_id = 'payouts'").run();
+    const gone = agentsCardOf(await page(cookie, "/t/payouts"));
+    expect(gone).toContain('<span class="badge">cannot be read</span>');
+    expect(gone).toContain("the approval sealed no agent route");
+    expect(gone).toContain("Nothing runs for this task until its scope is filed again and approved.");
+    store.raw().prepare("UPDATE task_scope SET route_era = NULL, proposed_route_json = NULL WHERE task_id = 'payouts'").run();
+    const legacy = agentsCardOf(await page(cookie, "/t/payouts"));
+    expect(legacy).toContain("claude · opus builds and repairs (repair model opus); the planner and reviewer come from configuration at run time");
   });
 });

@@ -154,6 +154,8 @@ describe("tick, against real git", () => {
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     return { runnerToken, approverToken };
   };
 
@@ -198,6 +200,8 @@ describe("tick, against real git", () => {
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     await run(["config", "set", "build", "--provider", "gemini", "--model", "gemini-2.5-pro", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "gemini", "--model", "gemini-2.5-pro", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     return { runnerToken, approverToken };
   };
 
@@ -729,6 +733,8 @@ describe("reconcile, against real git", () => {
     // fixture only needs the runner ROW (reconcile never claims).
     register(store, { name: "builder-1", host: "test", repos: [repo], now: new Date("2026-08-11T00:00:00.000Z"), newToken: () => "tok-builder-1" });
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const wt = join(pool, "repo", "gone");
     await exec("git", ["worktree", "add", "-b", "standing-orders/gone", wt], { cwd: repo });
     store.saveWorktree({
@@ -767,6 +773,8 @@ describe("reconcile, against real git", () => {
     // until something looks.
     const store = openStore(db);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const row = store.getWorktree(wt);
     store.close();
     expect(row).toMatchObject({ verified: false });
@@ -831,6 +839,8 @@ describe("fill one gap, three tasks start — the M2 sentence, executable", () =
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
 
     // The probe is written once and never edited again: supplying the
     // capability, not redefining it, is what must open the gate.
@@ -935,6 +945,8 @@ describe("gaps", () => {
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["cap", "add", "ALPHA", "--repo", repo]);
     await run(["cap", "add", "BETA", "--repo", repo]);
 
@@ -962,6 +974,8 @@ describe("gaps", () => {
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await approvedTask("t-1", approverToken, "mcp:supabase");
 
     await run(["gaps", "--repo", repo, "--json"]);
@@ -1009,6 +1023,8 @@ describe("the outbox", () => {
   test("a gap nags once per episode, and again after it recurs", async () => {
     const store = openStore(db);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const enqueue = () =>
       store.enqueueNotification(
         { dedupeKey: `gap:${repo}:env:KEY`, kind: "gap", subject: "env:KEY blocks work", body: "…" },
@@ -1034,6 +1050,8 @@ describe("the outbox", () => {
   test("deliver hands the text over as environment, records a receipt, and keeps failures pending", async () => {
     const store = openStore(db);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     store.enqueueNotification(
       { dedupeKey: "n-1", kind: "build-failed", subject: 'subject with "quotes" and $DOLLARS', body: "line one\nline two" },
       T0,
@@ -1091,6 +1109,8 @@ describe("the outbox", () => {
     const approver = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await runWith(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approver, "--json"]);
+    await runWith(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approver, "--json"]); // v47: every phase names an exact model
+    await runWith(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approver, "--json"]);
     await runWith(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await runWith(["task", "scope", "t-1", "--goal", "add a guard", "--acceptance", "It is fixed and verified.|manual-review"]);
     await runWith(["task", "approve", "t-1", "--json"]);
@@ -1158,6 +1178,8 @@ describe("the morning briefing", () => {
     const approver = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approver, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approver, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approver, "--json"]);
     return { token, approver };
   };
 
@@ -1289,6 +1311,8 @@ describe("the park, end to end — a judgement call survives the night", () => {
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", "t-1", "--json"]);
@@ -1322,6 +1346,8 @@ describe("the park, end to end — a judgement call survives the night", () => {
     // The decision is real, open, and carries the machine's own evidence.
     const store = openStore(db);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     try {
       const decision = store.getDecision(1);
       expect(decision).toMatchObject({ state: "open", recommendation: "closed" });
@@ -1354,6 +1380,8 @@ describe("the park, end to end — a judgement call survives the night", () => {
     const store = openStore(db);
 
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const worktree = store.getRun(1)?.worktree;
     store.close();
     expect(worktree).toBeDefined();
@@ -1376,6 +1404,8 @@ describe("the park, end to end — a judgement call survives the night", () => {
     const store = openStore(db);
 
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     try {
       expect(store.listDecisions("all")).toHaveLength(1);
     } finally {
@@ -1397,6 +1427,8 @@ describe("the park, end to end — a judgement call survives the night", () => {
     const store = openStore(db);
 
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     try {
       // No decision — an incident, held by it, paged once.
       expect(store.listDecisions("all")).toHaveLength(0);
@@ -1488,6 +1520,8 @@ describe("decide, end to end — the morning answers and the machine hears it", 
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", "t-1", "--json"]);
@@ -1574,6 +1608,8 @@ describe("decide, end to end — the morning answers and the machine hears it", 
     // The causal record: the resume run was given exactly this answer.
     const store = openStore(db);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     try {
       expect(store.answersFor(2)).toMatchObject([{ choice: "closed", note: "pause is fine, retry hourly" }]);
     } finally {
@@ -1722,6 +1758,8 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", "t-1", "--json"]);
@@ -1775,6 +1813,8 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     // The tap, from the paired person, on the message the keyboard rode.
     const store = openStore(db);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const placedOn = store.getTelegramAction(closed!.callback_data)?.messageId;
     store.close();
     script.updates.push([
@@ -1820,6 +1860,8 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", "t-1", "--json"]);
@@ -1933,6 +1975,8 @@ describe("watch — the loop, zero tokens idle", () => {
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+    await run(["config", "set", "plan", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]); // v47: every phase names an exact model
+    await run(["config", "set", "review", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     return { runnerToken, approverToken };
   };
 
@@ -1983,6 +2027,8 @@ describe("watch — the loop, zero tokens idle", () => {
     const store = openStore(db);
 
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const episode = store.latestWatchEpisode(realpathSync(repo));
     store.close();
     expect(episode).not.toBeNull();
@@ -2002,6 +2048,8 @@ describe("watch — the loop, zero tokens idle", () => {
     const { runnerToken } = await setup();
     const store = openStore(db);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     store.acquireWatchLease("builder-1", realpathSync(repo), "someone-else", 60_000, new Date());
     store.close();
 
@@ -2024,6 +2072,8 @@ describe("watch — the loop, zero tokens idle", () => {
     // the runner name will be back and heartbeating immediately.
     const store = openStore(db);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const ref = store.refFor("built-in", "t-1").id;
     const past = new Date(Date.now() - 10 * 60_000);
     store.acquireWatchLease("builder-1", realpathSync(repo), "inc-dead", 1_000, past);

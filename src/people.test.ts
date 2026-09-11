@@ -226,6 +226,8 @@ describe("the round-1 closures: escalation, mode-derived approvals, the join rac
   beforeEach(() => {
     store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     const alex = addApprover(store, "alex", T0);
     if (!alex.ok) throw new Error("bootstrap");
     // The runner gate (MCP spec v6): claims authenticate and bind to a repo.
@@ -514,6 +516,8 @@ describe("the join road and the People screen, over HTTP", () => {
 
   test("a bearer credential never spends the signer's mode: the filing lands unapproved (surfaces round 1, finding 1)", async () => {
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
     store.createTask({ id: "t-bearer", title: "the work" }, T0);
     store.placeTask(store.refFor("built-in", "t-bearer").id, REPO);
     const terms = { ...presetTerms("hands-off", later(24).toISOString()) };

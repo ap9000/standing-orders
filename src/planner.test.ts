@@ -8,6 +8,7 @@
  * tree gets nothing ingested, question included.
  */
 
+import { routeDigestOf } from "./phase-routing.js";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
@@ -184,6 +185,10 @@ describe("planning mode, against real git", () => {
     {
       const store = openStore(db);
       register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => runnerToken });
+      // v47: every phase names an exact model — the planner included.
+      store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+      store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+      store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
       store.close();
     }
     await run(["approver", "add", "alex", "--json"], planningAgent);
@@ -214,6 +219,8 @@ describe("planning mode, against real git", () => {
     const store = openStore(db);
 
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const decision = store.listDecisions("unanswered")[0];
     expect(decision).toBeDefined();
     expect(decision?.question).toBe("Per-user or per-tenant?");
@@ -277,6 +284,56 @@ describe("planning mode, against real git", () => {
     // not an ancestor and the smoke-test file never existed there.
     const log = await git(["log", "--oneline", "standing-orders/limiter"]);
     expect(log.stdout).toContain("limiter");
+
+    // Route provenance (v47): every phase's run names the route it spent
+    // under and the actual provider and model — the planner under the live
+    // recommendation it ran before any scope existed, the builder under
+    // the sealed route the approval copied.
+    const proved = openStore(db);
+    const provedRef = proved.refFor("built-in", "limiter");
+    const runs = proved.runsFor(provedRef.id);
+    const plannerRuns = runs.filter(one => one.role === "planner");
+    expect(plannerRuns.length).toBeGreaterThan(0);
+    for (const plannerRun of plannerRuns) {
+      expect(proved.runRoute(plannerRun.id)).toMatchObject({ phase: "plan", provider: "claude", chosen: "recommended" });
+    }
+    const builderRun = runs.find(one => one.role === "builder")!;
+    expect(proved.runRoute(builderRun.id)).toMatchObject({ phase: "build", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: routeDigestOf(proved.approvedRouteOf("limiter")!) });
+    proved.close();
+  });
+
+  test("pass flags cannot reroute the planner (v47): a flag that contradicts the task's plan leg is refused in words; one that restates it runs; a plan pin needs an exact model", async () => {
+    const { runnerToken, approverToken } = await setup();
+    // A plan pin with no model binds nothing exact.
+    expect(await run(["task", "plan", "limiter", "--provider", "codex", "--as", "alex", "--token", approverToken, "--json"], planningAgent)).toBe(EXIT.usage);
+    await run(["task", "plan", "limiter", "--as", "alex", "--token", approverToken, "--json"], planningAgent);
+    expect(payload().ok).toBe(true);
+    // The pass names another model for the planner: refused, nothing spends.
+    const contradicted = await run(
+      ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--plan-model", "opus", "--json"],
+      askingAgent,
+    );
+    expect(contradicted).toBe(EXIT.refused);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "limiter", outcome: "skipped", reason: "agent-config" }));
+    expect(String(payload().dispatched[0]?.detail)).toContain("flags cannot reroute a task");
+    {
+      const store = openStore(db);
+      expect(store.runsFor(store.refFor("built-in", "limiter").id)).toHaveLength(0);
+      store.close();
+    }
+    // A flag that restates the leg exactly is fine, and the planner run
+    // names its route: the plan leg, recommended, under the live route.
+    const restated = await run(
+      ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--plan-provider", "claude", "--plan-model", "sonnet", "--json"],
+      askingAgent,
+    );
+    expect(restated).toBe(EXIT.ok);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "limiter", outcome: "parked" }));
+    const store = openStore(db);
+    const planner = store.runsFor(store.refFor("built-in", "limiter").id).find(one => one.role === "planner")!;
+    expect(planner).toMatchObject({ provider: "claude", model: "sonnet" });
+    expect(store.runRoute(planner.id)).toMatchObject({ phase: "plan", provider: "claude", model: "sonnet", chosen: "recommended" });
+    store.close();
   });
 
   test("a planner that touches the tree gets nothing ingested — question included", async () => {
@@ -292,6 +349,8 @@ describe("planning mode, against real git", () => {
     const store = openStore(db);
 
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     // No decision was ingested from the dirty workspace.
     expect(store.listDecisions("unanswered")).toHaveLength(0);
     // The failure took a PLANNING strike and left a backoff hold — never a
@@ -831,6 +890,8 @@ describe("planning mode, against real git", () => {
     const store = openStore(db);
 
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
     const incidents = store.openIncidents();
     expect(incidents.some(one => one.kind === "malformed-plan")).toBe(true);
     // The incident's hold blocks redispatch until a person resolves it —

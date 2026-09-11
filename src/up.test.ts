@@ -207,6 +207,8 @@ describe("standing-orders up", () => {
     expect(await runOperate("task", ["add", "remembered work", "--id", "t-remembered", "--repo", repo, "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
     const configured = openStore(db);
     configured.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date());
+    configured.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date()); // v47: every phase names an exact model
+    configured.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date());
     configured.close();
     lines = [];
     expect(await runOperate("task", ["scope", "t-remembered", "--goal", "a goal", "--acceptance", "It is fixed and verified.|manual-review", "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);

@@ -1678,6 +1678,8 @@ describe("the v24 migration (Parity II foundations, rulings 10/11)", () => {
   test("an approved scope is PINNED and grandfathered: signed bytes untouched, snapshot resolved from the config of the day", () => {
     const file = legacyDb(db => {
       db.setPhaseConfig("installation", "build", "claude", "sonnet", "old", T0);
+      db.setPhaseConfig("installation", "plan", "claude", "sonnet", "old", T0); // v47: every phase names an exact model
+      db.setPhaseConfig("installation", "review", "claude", "sonnet", "old", T0);
       db.createTask({ id: "t-old", title: "approved long ago" }, T0);
       db.refFor("built-in", "t-old");
       db.raw()
@@ -2322,6 +2324,8 @@ describe("the v26 attested runtime: phase_config admits gemini", () => {
   test("a fresh database files and reads gemini rows outright", () => {
     const store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "gemini", "gemini-2.5-flash", "alex", T0);
+    store.setPhaseConfig("installation", "plan", "gemini", "gemini-2.5-flash", "alex", T0); // v47: every phase names an exact model
+    store.setPhaseConfig("installation", "review", "gemini", "gemini-2.5-flash", "alex", T0);
     expect(store.phaseConfig("installation", "build")).toMatchObject({ provider: "gemini", model: "gemini-2.5-flash" });
     store.close();
   });

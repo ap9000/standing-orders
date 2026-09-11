@@ -9,7 +9,10 @@ import {
   recoverDead,
   hashToken,
   addRunnerReposAuthed,
+  observeProviderReadiness,
+  reportProviderReadinessAuthed,
   DEFAULT_LIVENESS_MS,
+  type ReadinessProbe,
 } from "./runner.js";
 import { acquire, currentClaim } from "./claim.js";
 
@@ -364,5 +367,67 @@ describe("recovery stays inside its own backend", () => {
     recoverDead(store, later(DEFAULT_LIVENESS_MS + 1_000));
 
     expect(store.getTask("17")?.state).toBe("queued");
+  });
+});
+
+describe("provider readiness observations (v47)", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = openStore(":memory:");
+  });
+  afterEach(() => store.close());
+
+  const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+  /** A fake machine: claude installed, codex installed but logged out,
+   * openrouter installed with no key, gemini missing entirely. */
+  const machine: ReadinessProbe = async (file, args) => {
+    if (file === "gemini") return { ...OK, code: 127, notFound: true };
+    if (args[0] === "--version") return { ...OK, stdout: `${file} 9.9.9\n` };
+    if (file === "codex" && args[0] === "login") return { ...OK, code: 1, stderr: "Not logged in" };
+    return OK;
+  };
+
+  test("each provider's state is the probe's own answer, and claude is UNKNOWN — never upgraded to ready", async () => {
+    const observed = await observeProviderReadiness(machine, { OPENROUTER_API_KEY: "" });
+    const byProvider = Object.fromEntries(observed.map(one => [one.provider, one]));
+    expect(byProvider["claude"]).toMatchObject({ state: "unknown", probe: "version" });
+    expect(byProvider["claude"]?.reason).toContain("no non-spending login check exists");
+    expect(byProvider["codex"]).toMatchObject({ state: "unavailable", probe: "identity" });
+    expect(byProvider["codex"]?.reason).toContain("not logged in");
+    expect(byProvider["openrouter"]).toMatchObject({ state: "unavailable", probe: "key" });
+    expect(byProvider["openrouter"]?.reason).toContain("OPENROUTER_API_KEY is absent");
+    expect(byProvider["gemini"]).toMatchObject({ state: "unavailable", probe: "version" });
+    expect(byProvider["gemini"]?.reason).toContain("not installed");
+    // With the key present, openrouter is ready on presence alone — it
+    // rides the codex harness on the key, not on a harness login.
+    const keyed = await observeProviderReadiness(machine, { OPENROUTER_API_KEY: "sk-or-test" });
+    expect(keyed.find(one => one.provider === "openrouter")).toMatchObject({ state: "ready", probe: "key" });
+  });
+
+  test("an attested provider outside its range is unavailable, and one inside it is not", async () => {
+    const versioned = (version: string): ReadinessProbe => async (file, args) =>
+      args[0] === "--version" ? { ...OK, stdout: file === "gemini" ? `${version}\n` : "1.0.0\n" } : OK;
+    const old = await observeProviderReadiness(versioned("0.40.0"), {}, ["gemini"]);
+    expect(old[0]).toMatchObject({ state: "unavailable" });
+    expect(old[0]?.reason).toContain("outside this build's attested range");
+    const current = await observeProviderReadiness(versioned("0.57.0"), {}, ["gemini"]);
+    expect(current[0]?.state).not.toBe("unavailable");
+  });
+
+  test("only the runner's own credential records under its name; the store keeps the newest observation per provider", async () => {
+    register(store, { name: "mac-mini", host: "h", repos: [REPO], now: T0, newToken: () => "tok-mini" });
+    const observed = await observeProviderReadiness(machine, {});
+    expect(reportProviderReadinessAuthed(store, { name: "mac-mini", token: "wrong", observations: observed }, T0)).toMatchObject({ ok: false, reason: "bad-token" });
+    expect(store.providerReadiness("mac-mini")).toHaveLength(0);
+    expect(reportProviderReadinessAuthed(store, { name: "ghost", token: "tok-mini", observations: observed }, T0)).toMatchObject({ ok: false, reason: "unknown" });
+    expect(reportProviderReadinessAuthed(store, { name: "mac-mini", token: "tok-mini", observations: observed }, T0)).toMatchObject({ ok: true });
+    expect(store.providerReadiness("mac-mini")).toHaveLength(4);
+    expect(store.runnerReadinessOf("mac-mini", "codex")).toMatchObject({ state: "unavailable", observedAt: T0.toISOString(), runner: "mac-mini" });
+    // A later, different answer replaces it — with its own time.
+    expect(reportProviderReadinessAuthed(store, { name: "mac-mini", token: "tok-mini", observations: [{ provider: "codex", state: "ready", reason: "logged in as ops", probe: "identity" }] }, later(60_000)).ok).toBe(true);
+    expect(store.runnerReadinessOf("mac-mini", "codex")).toMatchObject({ state: "ready", observedAt: later(60_000).toISOString() });
+    // A retired-and-replaced incarnation cannot report with the old token.
+    register(store, { name: "mac-mini", host: "h", repos: [REPO], now: later(120_000), newToken: () => "tok-mini-2" });
+    expect(reportProviderReadinessAuthed(store, { name: "mac-mini", token: "tok-mini", observations: observed }, later(130_000)).ok).toBe(false);
   });
 });
