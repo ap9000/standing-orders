@@ -349,9 +349,11 @@ export type ParsedHandoff = {
 
 export const HANDOFF_VERSION = 2;
 export const HANDOFF_CONCLUSION_CAP = 600;
-const HANDOFF_PAYLOAD_CAP = 16 * 1024;
-const HANDOFF_LIST_CAP = 8;
-const HANDOFF_ITEM_CAP = 240;
+/** The handoff's whole-file and list caps, exported so the brief states
+ * exactly what the parser holds it to (raw authority repair). */
+export const HANDOFF_PAYLOAD_CAP = 16 * 1024;
+export const HANDOFF_LIST_CAP = 8;
+export const HANDOFF_ITEM_CAP = 240;
 
 /** Agent prose is display material, not authority. Once the structural
  * outcome is valid, excess verbosity is compacted deterministically rather

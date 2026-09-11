@@ -32,11 +32,12 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
-import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, scopeAuthorityOf, parseAcceptanceCriteria, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
+import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, scopeAuthorityOf, parseAcceptanceCriteria, exactAcceptance, exactStringList, exactSafeIntegerOrNull, exactKeys, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, exactPinOf, routeOfTask, agentChoicesFor } from "./agentconfig.js";
 import {
   canonicalOverridesJson,
   canonicalRouteJson,
+  exactModelId,
   isRiskLevel,
   legOf,
   overridesFromJson,
@@ -59,7 +60,7 @@ import {
   type RouteEvidenceKind,
   type RouteOverride,
 } from "./phase-routing.js";
-import { readAuthMode } from "./keys.js";
+import { readAuthModeStrict } from "./keys.js";
 import { isFallbackEligible, recognizesEligible, classMatchesAuthMode, type TerminalClass } from "./exhaustion.js";
 import { modeTermsFromJson } from "./modes.js";
 import { isProviderId, type ProviderId } from "./provider.js";
@@ -464,6 +465,15 @@ export type Routine = {
   routeUnreadable?: boolean;
   approvedRouteUnreadable?: boolean;
   approvedProfileUnreadable?: boolean;
+  /** THE RAW TERMS VERDICT (raw authority repair): null when every stored
+   * term the digest binds read back EXACTLY — touches and requirements as
+   * JSON lists of strings, the rubric as whole criteria with no unknown
+   * key, the flags as 0/1, the ceilings as numbers or null — and the words
+   * when one did not. The integrity projection reads it FIRST: a row whose
+   * terms cannot be read exactly is not approved, not live, not approvable,
+   * and not refreshable, so the lenient fields above can never become a
+   * firing's authority. Undefined on a hand-built routine. */
+  termsProblem?: string | null;
 };
 
 /** One scheduled slot's outcome, fired or skipped — never silent. */
@@ -3146,9 +3156,19 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
   // with the file untouched, rather than running this build's DDL over a
   // shape it cannot name.
   const preflight = schemaVersionPreflight(db, file);
-  if (preflight !== null && preflight > 0 && preflight < SCHEMA_VERSION) db.prepare("UPDATE schema_version SET version = ?").run(-preflight);
+  // THE SENTINEL IS A CHECKED COMPARE-AND-SET (raw authority repair): the
+  // row moves from exactly the version the preflight read to its negative,
+  // or this open refuses — a second migrator that raced this one between
+  // the preflight and here has already moved the row, and nothing alters a
+  // file whose version it did not read.
+  if (preflight !== null && preflight > 0 && preflight < SCHEMA_VERSION) {
+    const stamped = db.prepare("UPDATE schema_version SET version = ? WHERE version = ?").run(-preflight, preflight);
+    if (Number(stamped.changes) !== 1) {
+      throw new Error(`${file}: refusing to open — the schema version moved from v${preflight} between the preflight and the epoch stamp (another process is migrating it); this build speaks schema v${SCHEMA_VERSION} and alters nothing it cannot name`);
+    }
+  }
   db.exec(SCHEMA);
-  migrate(db);
+  migrate(db, preflight === null ? null : Math.abs(preflight));
   // Attention/history indexes come AFTER migration: on a database whose
   // constrained tables still carry a pre-rebuild shape, creating a partial
   // index first would fail with a raw SQL error instead of the migration's
@@ -3221,36 +3241,61 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_blocked_revision_per_task
 CREATE INDEX IF NOT EXISTS run_checkpoint_by_run ON run_checkpoint (run, id);
 CREATE INDEX IF NOT EXISTS run_checkpoint_by_task ON run_checkpoint (task_ref, id);`);
 
-  const version = db.prepare("SELECT version FROM schema_version").get();
-  if (version === undefined) {
-    db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(SCHEMA_VERSION);
-  } else if (Number(version["version"]) < SCHEMA_VERSION) {
-    // migrate() has already done the work by the time this runs; the row is
-    // bookkeeping about it, not the trigger for it.
-    db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION);
+  // THE BOOKKEEPING WRITE, checked (raw authority repair): migrate() has
+  // already done the work by the time this runs; the row is bookkeeping
+  // about it, not the trigger for it — and it is written ONLY from the
+  // exact marker this open stamped or resumed. A fresh file gains its one
+  // row; an upgrade clears exactly its own sentinel (−from); a resumed
+  // epoch clears exactly the sentinel the preflight read; a current file
+  // is left alone. A row that is not what this open expects was moved by
+  // another process, and this open refuses rather than overwriting it.
+  const expectedMarker = preflight === null ? null : preflight === SCHEMA_VERSION ? null : preflight < 0 ? preflight : -preflight;
+  if (preflight === null) {
+    const inserted = db.prepare("INSERT INTO schema_version (version) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM schema_version)").run(SCHEMA_VERSION);
+    if (Number(inserted.changes) !== 1) {
+      throw new Error(`${file}: refusing to open — a schema version appeared under this fresh open (another process is creating it); this build speaks schema v${SCHEMA_VERSION} and alters nothing it cannot name`);
+    }
+  } else if (expectedMarker !== null) {
+    const cleared = db.prepare("UPDATE schema_version SET version = ? WHERE version = ?").run(SCHEMA_VERSION, expectedMarker);
+    if (Number(cleared.changes) !== 1) {
+      throw new Error(`${file}: refusing to open — the epoch sentinel ${expectedMarker} moved under this migration (another process is migrating it); this build speaks schema v${SCHEMA_VERSION} and alters nothing it cannot name`);
+    }
   }
 
   return new Store(db);
 }
 
 /**
- * The stored schema version as exactly one safe, supported integer — or
- * null for a file with no version table (fresh), or a thrown refusal
- * naming what is wrong (v48 integrity). Runs BEFORE any DDL so a shape
- * this build cannot name is never altered: a newer build's database, a
- * version row that is not an integer, a table with two rows, a zero.
- * A negative version within the supported range is a migration that
- * died mid-flight; the idempotent migrator resumes it.
+ * THE ONE STRICT VERSION READER (raw authority repair): every door — the
+ * migrating open, the non-migrating door, the per-unit-of-work live check
+ * — reads the stored schema version through this, BEFORE any DDL, as
+ * exactly one safe, supported integer, or learns in words what is wrong.
+ *
+ *   `{ ok: true, version: null }` — a genuinely FRESH file: no
+ *     schema_version table and NOTHING ELSE in it. A file that carries
+ *     tables but no version table is not fresh; it is a database some
+ *     other program (or a half-written one) shaped, and it refuses.
+ *   `{ ok: true, version: n }` — one integer row: a positive supported
+ *     version (1 … this build's), or a mid-flight epoch sentinel (−from,
+ *     with from strictly BELOW this build's version — an upgrade never
+ *     begins at the version it is upgrading to, so −SCHEMA_VERSION is an
+ *     impossible marker no build ever wrote, and refuses).
+ *   `{ ok: false, problem }` — no row, two rows, a text or fractional or
+ *     unsafe value, zero, a newer build's version or sentinel, or the
+ *     impossible negative of this build's own version.
+ *
+ * Proved by name and by storage class, never by catching an error: an
+ * error while READING the version must refuse, not read as "fresh".
  */
-export function schemaVersionPreflight(db: Database, file: string): number | null {
-  // No schema_version table: a fresh file — nothing to fence. Proved by
-  // name, never by catching an error (an error while READING the version
-  // must refuse, not read as "fresh").
+export function readSchemaVersion(db: Database): { ok: true; version: number | null } | { ok: false; problem: string } {
+  const refuse = (problem: string): { ok: false; problem: string } => ({ ok: false, problem });
   const table = db.prepare("SELECT 1 AS hit FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").get();
-  if (table === undefined) return null;
-  const refuse = (what: string): never => {
-    throw new Error(`${file}: refusing to open — ${what}; this build speaks schema v${SCHEMA_VERSION} and alters nothing it cannot name`);
-  };
+  if (table === undefined) {
+    // No version table: fresh ONLY when the file holds nothing at all.
+    const anything = db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get() as { n?: unknown } | undefined;
+    if (Number(anything?.n ?? 0) > 0) return refuse("the file carries tables but no schema_version table — it is not a fresh database, and not one this build shaped");
+    return { ok: true, version: null };
+  }
   // The value is read as its storage class and its decimal text, so a
   // 64-bit integer past the safe range is judged as text rather than
   // thrown (or rounded) by the binding on the way out.
@@ -3263,7 +3308,21 @@ export function schemaVersionPreflight(db: Database, file: string): number | nul
   const magnitude = Math.abs(version);
   if (magnitude === 0) return refuse("schema_version is 0, which no build ever wrote");
   if (magnitude > SCHEMA_VERSION) return refuse(`it is schema v${magnitude}, written by a newer build`);
-  return version;
+  if (version === -SCHEMA_VERSION) return refuse(`schema_version is ${version}, a mid-flight marker no build ever wrote (an upgrade never begins at v${SCHEMA_VERSION}, the version it upgrades to)`);
+  return { ok: true, version };
+}
+
+/**
+ * The stored schema version as exactly one safe, supported integer — or
+ * null for a genuinely fresh file, or a thrown refusal naming what is
+ * wrong (v48 integrity). Runs BEFORE any DDL so a shape this build cannot
+ * name is never altered. A negative version within the supported range is
+ * a migration that died mid-flight; the idempotent migrator resumes it.
+ */
+export function schemaVersionPreflight(db: Database, file: string): number | null {
+  const read = readSchemaVersion(db);
+  if (!read.ok) throw new Error(`${file}: refusing to open — ${read.problem}; this build speaks schema v${SCHEMA_VERSION} and alters nothing it cannot name`);
+  return read.version;
 }
 
 /**
@@ -3288,13 +3347,22 @@ export function openStoreNoMigrate(
   // The same referential law every migrating connection gets from SCHEMA —
   // this door never execs SCHEMA, so the pragma is explicit (review f9).
   db.exec("PRAGMA foreign_keys = ON");
-  let seen: number | null = null;
+  // The SAME strict reader the migrating door uses (raw authority repair):
+  // a file this build cannot name refuses in its words, never as "no
+  // version" and never as a version some lenient read coerced.
+  let read: ReturnType<typeof readSchemaVersion>;
   try {
-    const row = db.prepare("SELECT version FROM schema_version").get();
-    seen = row === undefined ? null : Number(row["version"]);
-  } catch {
-    seen = null;
+    read = readSchemaVersion(db);
+  } catch (error) {
+    // A file SQLite itself cannot read is refused in words too — never as
+    // "no version", never by letting the error stand in for an answer.
+    read = { ok: false, problem: `the schema version cannot be read (${error instanceof Error ? error.message : String(error)})` };
   }
+  if (!read.ok) {
+    db.close();
+    return { ok: false, reason: "version", message: `${file}: ${read.problem} — open it with the CLI or console first` };
+  }
+  const seen = read.version;
   if (seen === null) {
     // A file deleted between the existence check and the connect makes
     // SQLite create an EMPTY one — refuse, and take the empty residue
@@ -3345,7 +3413,7 @@ export function openStoreNoMigrate(
  * Additive only, and idempotent: each column is added if it is missing and
  * skipped if it is not. Nothing here rewrites or drops anything.
  */
-function migrate(db: Database): void {
+function migrate(db: Database, origin: number | null): void {
   // THE MIGRATION EPOCH (MCP gateway spec v6, Codex rounds 3/5). This
   // migrator alters schema first and bumps schema_version last, so a
   // reader re-checking the version can pass MID-DDL. The fix is a
@@ -3868,8 +3936,8 @@ function migrate(db: Database): void {
   // after a crash is negative too — so the ORIGIN is the magnitude, never
   // the sign. Read as a plain comparison, −47 < 24 re-ran the v24 data
   // pass on every upgrade from v24 onward and on every resumed epoch.
-  const stored = db.prepare("SELECT version FROM schema_version").get() as { version?: number } | undefined;
-  const origin = stored === undefined ? null : Math.abs(Number(stored.version));
+  // The origin arrives from the one strict preflight reader (raw
+  // authority repair) — never re-read leniently here, mid-DDL.
   if (origin !== null && origin < 24) migrateToV24(db);
 
   // v25 (attended core): two shape rebuilds, each recognized exactly and
@@ -7232,13 +7300,21 @@ export class Store {
           unresolvedReason = `the configured fallback chain cannot file: ${fallbackProblem}`;
           boundDigest = digestOf(digestInput, null, route);
         } else if (chainRepo !== null && this.fallbackConfig(chainRepo).length > 0) {
-          const chain = resolveScopeChain(
-            this,
-            chainRepo,
-            chainRef === null ? undefined : { agentProvider: chainRef.agentProvider, agentModel: chainRef.agentModel },
-            { permissionMode, provider: profile.provider, model: profile.model, repairModel: profile.repairModel },
-            readAuthMode(profile.provider),
-          );
+          // The base entry's auth mode is read STRICTLY (raw authority
+          // repair): a stored auth-mode file that says neither word is a
+          // stated problem, never the subscription default — the scope
+          // files unresolved in its words rather than sealing a credential
+          // the operator never chose.
+          const baseAuth = readAuthModeStrict(profile.provider);
+          const chain = baseAuth.ok
+            ? resolveScopeChain(
+                this,
+                chainRepo,
+                chainRef === null ? undefined : { agentProvider: chainRef.agentProvider, agentModel: chainRef.agentModel },
+                { permissionMode, provider: profile.provider, model: profile.model, repairModel: profile.repairModel },
+                baseAuth.mode,
+              )
+            : { ok: false as const, reason: "bad-auth-mode" as const, problem: baseAuth.problem };
           if (chain.ok && chain.kind === "chain") {
             proposedChainJson = canonicalChainJson(chain.chain);
             boundDigest = digestOf(
@@ -8943,7 +9019,7 @@ export class Store {
    */
   approvedChainOf(taskId: string): ChainEntry[] | null {
     const scope = this.getScope(taskId);
-    if (scope === null || scope.approvalKind !== "chain" || scope.approvedChainJson == null) return null;
+    if (scope === null || scope.termsProblem != null || scope.approvalKind !== "chain" || scope.approvedChainJson == null) return null;
     // The approval must still STAND (Codex E2/E3 review, finding 2): a scope
     // rewritten without reapproval has withdrawn its authority — chain
     // snapshot included — so a stale approved_chain_json can never remain
@@ -9202,7 +9278,7 @@ export class Store {
    */
   admitNextChainEntry(
     cycleId: number,
-    run: { leaseId: string; runner: string; branch: string; worktree: string },
+    run: { leaseId: string; runner: string; branch: string; worktree: string; recoveredFrom?: number },
     now: Date,
   ):
     | { ok: true; runId: number; taskId: string; provider: string; model: string }
@@ -9262,13 +9338,24 @@ export class Store {
       }
       // Route provenance (v47/v48), proved and written INSIDE the admission
       // savepoint, before the row: an approved fallback entry spends as
-      // `fallback` — under the sealed route when one stands, else under
-      // the chain digest — bound to exactly this cursor's entry.
+      // `fallback` under the SEALED route, bound to exactly this cursor's
+      // entry. There is no chain-only digest (raw authority repair): a
+      // chain approval whose raw profile mirror, chain, and route do not
+      // form one strict parity-valid sealed authority — a pre-routing chain,
+      // a mirror that does not read or match, a route whose build and
+      // repair legs are not the sealed profile's pairs — admits nothing.
+      // The refusal is words alone: no run, no consumed edge, and no cycle
+      // transition — the cycle stays exactly as it was.
       const sealed = this.sealedRouteOf(taskId);
       const mirror = this.getScope(taskId)?.approvedProfile ?? null;
-      if (mirror === null) {
-        this.incidentFallback(c.id, c.transitionGeneration, "approved-profile-mirror-invalid-at-admission", now);
-        return { ok: false as const, reason: "stale-approval" as const };
+      if (!sealed.ok || mirror === null) {
+        return {
+          ok: false as const,
+          reason: "stale-approval" as const,
+          detail: !sealed.ok
+            ? `the chain approval's sealed agent route does not stand (${sealed.detail}) — nothing spends as a fallback under a chain-only digest; re-file the scope and approve it again`
+            : "the approval's sealed agent profile mirror cannot be read — re-file the scope and approve it again",
+        };
       }
       const admitted = this.admitFallback(
         {
@@ -9286,12 +9373,13 @@ export class Store {
             worktree: run.worktree,
             provider: entry.profile.provider,
             model: entry.profile.model,
+            ...(run.recoveredFrom === undefined ? {} : { recoveredFrom: run.recoveredFrom }),
           },
           entryDigest: entryDigestOf(entry),
           authMode: entry.authMode,
           repairModel: entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel,
           approved: { chainDigest: chainDigestOf(chain), profile: mirror },
-          route: { routeDigest: sealed.ok ? routeDigestOf(sealed.route) : `chain:${c.chainDigest}`, phase: "build", provider: entry.profile.provider, model: entry.profile.model, chosen: "fallback" },
+          route: { routeDigest: routeDigestOf(sealed.route), phase: "build", provider: entry.profile.provider, model: entry.profile.model, chosen: "fallback" },
         },
         now,
       );
@@ -9505,7 +9593,21 @@ export class Store {
    */
   admitFallback(
     args: {
-      run: { taskRef: number; leaseId: string; runner: string; branch: string; worktree: string; provider: string; model: string; sessionId?: string };
+      run: {
+        taskRef: number;
+        leaseId: string;
+        runner: string;
+        branch: string;
+        worktree: string;
+        provider: string;
+        model: string;
+        sessionId?: string;
+        /** The interrupted attempt whose draft this entry or resume
+         * recovers (raw authority repair): proved this task's own run and
+         * written as the row's parent in this same insert — never stamped
+         * later. A repair turn's parent is its live tail; it recovers none. */
+        recoveredFrom?: number;
+      };
       cycleId: number;
       /** The cursor the caller understands the cycle to stand at — the
        * entry index this run binds to. */
@@ -9558,6 +9660,14 @@ export class Store {
       const base = chain[0];
       const mirror = scope?.approvedProfile ?? null;
       if (base === undefined || mirror === null || profileDigestOf(mirror) !== profileDigestOf(base.profile)) return refuse("the approval's sealed profile does not mirror the chain's base entry");
+      // ONE sealed authority (raw authority repair): the raw profile
+      // mirror, the chain, and the route must verify together as the
+      // sealed route — a chain approval with no sealed route (pre-routing),
+      // or whose route's build and repair legs are not the sealed
+      // profile's exact pairs, admits nothing. There is no chain-only
+      // route digest to fall back to.
+      const sealed = this.sealedRouteOf(owner.externalId);
+      if (!sealed.ok) return refuse(`the chain approval's sealed agent route does not stand (${sealed.detail}) — nothing spends as a fallback under a chain-only digest`);
       if (profileDigestOf(args.approved.profile) !== profileDigestOf(mirror)) return refuse(`the caller's sealed-profile mirror (${args.approved.profile.provider} · ${args.approved.profile.model}) is not the approval's (${mirror.provider} · ${mirror.model})`);
       if (cycle.cursor !== args.expectCursor) return refuse(`the cycle stands at entry ${cycle.cursor}, not ${args.expectCursor}`);
       if (cycle.tailRun !== args.expectTail) return refuse(`the cycle's tail is ${cycle.tailRun ?? "none"}, not ${args.expectTail ?? "none"}`);
@@ -9583,6 +9693,12 @@ export class Store {
       if (problem !== null) return refuse(problem);
       // The kind-specific custody fact, proved before the row.
       let parentRun: number | null = null;
+      if (args.run.recoveredFrom !== undefined) {
+        if (args.kind === "repair") return refuse("a repair turn mends its live tail — it recovers no interrupted attempt");
+        const recovered = this.getRun(args.run.recoveredFrom);
+        if (recovered === null || recovered.taskRef !== args.run.taskRef) return refuse(`run #${args.run.recoveredFrom} is not one of this task's attempts — nothing recovers its draft`);
+        parentRun = recovered.id;
+      }
       if (args.kind === "entry") {
         if (args.expectTail !== null) return refuse("an entry admitted from a pending edge follows no tail — the cycle's tail is cleared by the advance");
         const edge = this.db
@@ -10037,18 +10153,20 @@ export class Store {
       // forced strictly past both and therefore fences it.
       const registeredMs = Date.parse(identity.runner.registeredAt);
       const admittedAt = new Date(Math.max(now.getTime(), registeredMs));
+      // The request is consumed INSIDE the run's own admission (raw
+      // authority repair): the row that answers it spends it, or no row.
       const reviewerRunId = this.startRun({
         taskRef: Number(row["taskRef"]),
         leaseId: `review:${requestId}:${now.getTime().toString(36)}`,
         runner: spec.runner,
         role: "reviewer",
         parentRun: sourceRun,
+        request: requestId,
         provider: spec.provider,
         ...(spec.model === null ? {} : { model: spec.model }),
         now: admittedAt,
         route: stamp,
       });
-      this.consumeReviewRequest(requestId, "dispatched", now);
       return {
         ok: true as const,
         reviewerRunId,
@@ -10507,9 +10625,12 @@ export class Store {
    * sentinel) or any other version answers false.
    */
   schemaCurrent(): boolean {
+    // The one strict reader (raw authority repair): anything it cannot
+    // name — including a table that vanished — answers false, never a
+    // coerced number that happens to compare equal.
     try {
-      const row = this.db.prepare("SELECT version FROM schema_version").get();
-      return row !== undefined && Number(row["version"]) === SCHEMA_VERSION;
+      const read = readSchemaVersion(this.db);
+      return read.ok && read.version === SCHEMA_VERSION;
     } catch {
       return false;
     }
@@ -11059,12 +11180,29 @@ export class Store {
     if (!Array.isArray(parsed)) return { ok: false, problem: `the fallback configuration for ${scope} is not a list of entries — set it again with \`config set fallback\`, or clear it` };
     const entries: { provider: string; model: string; authMode: "subscription" | "api-key"; repairModel?: string }[] = [];
     for (const [index, entry] of parsed.entries()) {
-      if (entry === null || typeof entry !== "object") return { ok: false, problem: `fallback entry ${index + 1} for ${scope} is not an object — set the chain again with \`config set fallback\`` };
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return { ok: false, problem: `fallback entry ${index + 1} for ${scope} is not an object — set the chain again with \`config set fallback\`` };
       const e = entry as Record<string, unknown>;
-      if (typeof e["provider"] !== "string" || typeof e["model"] !== "string" || (e["authMode"] !== "subscription" && e["authMode"] !== "api-key") || (e["repairModel"] !== undefined && typeof e["repairModel"] !== "string")) {
+      // EXACT (raw authority repair): exactly the keys this code writes, a
+      // provider this build knows, an exact model id (the shape every
+      // argv accepts), an optional exact repair model id, and one of the
+      // two auth modes — a row carrying anything else is a stated problem,
+      // never the known part of itself.
+      if (["provider", "model", "authMode"].some(key => !(key in e))) {
         return { ok: false, problem: `fallback entry ${index + 1} for ${scope} is malformed (provider, model, and auth mode are required) — set the chain again with \`config set fallback\`` };
       }
-      entries.push({ provider: e["provider"], model: e["model"], authMode: e["authMode"], ...(typeof e["repairModel"] === "string" ? { repairModel: e["repairModel"] } : {}) });
+      if (!exactKeys(e, ["provider", "model", "authMode"], ["repairModel"])) {
+        return { ok: false, problem: `fallback entry ${index + 1} for ${scope} carries a key this code never writes — set the chain again with \`config set fallback\`` };
+      }
+      if (typeof e["provider"] !== "string" || !isProviderId(e["provider"])) {
+        return { ok: false, problem: `fallback entry ${index + 1} for ${scope} names an unknown provider — set the chain again with \`config set fallback\`` };
+      }
+      if (!exactModelId(e["model"]) || (e["repairModel"] !== undefined && !exactModelId(e["repairModel"]))) {
+        return { ok: false, problem: `fallback entry ${index + 1} for ${scope} names a model that is not an exact model id — set the chain again with \`config set fallback\`` };
+      }
+      if (e["authMode"] !== "subscription" && e["authMode"] !== "api-key") {
+        return { ok: false, problem: `fallback entry ${index + 1} for ${scope} is malformed (provider, model, and auth mode are required) — set the chain again with \`config set fallback\`` };
+      }
+      entries.push({ provider: e["provider"], model: e["model"], authMode: e["authMode"], ...(e["repairModel"] !== undefined ? { repairModel: e["repairModel"] } : {}) });
     }
     return { ok: true, entries };
   }
@@ -11404,7 +11542,10 @@ export class Store {
     if (leg.chosen === "fallback") {
       const chain = this.approvedChainOf(taskId);
       if (chain === null) return "no approved fallback chain stands for this task — nothing spends as a fallback";
-      const expectedDigest = sealed.ok ? routeDigestOf(sealed.route) : `chain:${chainDigestOf(chain)}`;
+      // No chain-only digest (raw authority repair): a fallback spends
+      // under the SEALED route or not at all.
+      if (!sealed.ok) return `the chain approval's sealed agent route does not stand (${sealed.detail}) — nothing spends as a fallback under a chain-only digest`;
+      const expectedDigest = routeDigestOf(sealed.route);
       if (leg.routeDigest !== expectedDigest) return `the fallback stamp's route ${leg.routeDigest} is not the approved authority ${expectedDigest}`;
       if (phase !== "build" && phase !== "repair") return `an approved fallback entry builds and repairs — it does not ${phase}`;
       const pairOf = (entry: ChainEntry): { provider: string; model: string } => ({
@@ -11493,7 +11634,10 @@ export class Store {
     if (run.chain != null && (chain === null || boundEntry === undefined || entryDigestOf(boundEntry) !== run.chain.entryDigest)) {
       return `the run is bound to chain entry ${run.chain.index}, which the approved chain does not carry under that digest`;
     }
-    const approved = scope.approvedAt !== null && scope.approvedDigest !== null && scope.approvedDigest === scope.digest;
+    if (run.chain != null && run.chain.index > 0) {
+      return "this pre-routing chain approval seals no agent route — nothing spends as a fallback under a chain-only digest; re-file the scope and approve it again";
+    }
+    const approved = scope.termsProblem == null && scope.approvedAt !== null && scope.approvedDigest !== null && scope.approvedDigest === scope.digest;
     const governing = boundEntry !== undefined ? boundEntry.profile : approved ? (scope.approvedProfile ?? null) : null;
     if (governing === null) return "no sealed profile governs this pre-routing row — nothing spends as legacy on it";
     const expected = `profile:${profileDigestOf(governing)}`;
@@ -11554,6 +11698,9 @@ export class Store {
   sealedRouteOf(taskId: string): { ok: true; route: PhaseRoute } | { ok: false; reason: "no-scope" | "unapproved" | "legacy" | "unreadable"; detail: string } {
     const scope = this.getScope(taskId);
     if (scope === null) return { ok: false, reason: "no-scope", detail: "the task has no scope" };
+    // The raw terms first (raw authority repair): a seal over terms that do
+    // not read back exactly is no seal — nothing dispatches on it.
+    if (scope.termsProblem != null) return { ok: false, reason: "unreadable", detail: `the scope's stored terms cannot be read exactly (${scope.termsProblem}) — re-file the scope and approve it again` };
     if (scope.approvedAt === null || scope.approvedDigest === null || scope.approvedDigest !== scope.digest) {
       return { ok: false, reason: "unapproved", detail: scope.approvedAt === null ? "the scope is not approved" : "the scope was approved and then changed — approve it again" };
     }
@@ -11994,15 +12141,23 @@ export class Store {
     return Number(changed.changes) === 1;
   }
 
-  /** Exactly one live run per agent (finding 22): claiming the pointer
-   * requires it empty; a second claimant loses cleanly. */
-  claimContestantRun(id: number, runId: number, expectedGeneration: number): boolean {
-    const changed = this.db
-      .prepare(
-        "UPDATE contestant SET active_run = ?, generation = generation + 1 WHERE id = ? AND generation = ? AND active_run IS NULL",
-      )
-      .run(runId, id, expectedGeneration);
-    return Number(changed.changes) === 1;
+  // Exactly one live run per agent (finding 22): the lane's pointer is
+  // bound by `startRun` alone (raw authority repair) — a run admitted with
+  // `contestant` takes the lane inside its own insert, a held lane admits
+  // no second run, and there is no post-insert claim road.
+
+  /**
+   * The exact authority a contest lane PRESENTS at admission (raw
+   * authority repair): its race-approved profile's digest as a `legacy`
+   * stamp, with the pair the lane spends as for the phase — the same
+   * facts `startRun` re-proves against the lane before the row exists.
+   * Null for no such lane.
+   */
+  laneAuthorityFor(contestantId: number, phase: "build" | "repair" = "build"): RouteStamp | null {
+    const lane = this.getContestant(contestantId);
+    if (lane === null) return null;
+    const profile = lane.profile ?? contestantProfileOf(lane.provider, lane.model, lane.repairModel);
+    return { routeDigest: `profile:${profileDigestOf(profile)}`, phase, provider: lane.provider, model: phase === "repair" ? lane.repairModel : lane.model, chosen: "legacy" };
   }
 
   releaseContestantRun(id: number, runId: number): void {
@@ -13262,7 +13417,18 @@ export class Store {
       // No branch, no worktree — the CHECK enforces the exclusive shape,
       // and the discriminated arm makes a workspace unrepresentable rather
       // than optional. The parent is mandatory: a review reviews a run.
-      | { role: "reviewer"; parentRun: number; branch?: undefined; worktree?: undefined }
+      | {
+          role: "reviewer";
+          parentRun: number;
+          branch?: undefined;
+          worktree?: undefined;
+          /** The LIVE review request this root reviewer answers (raw
+           * authority repair): proved open for exactly the parent run and
+           * consumed as `dispatched` inside this same admission. A
+           * correction child (its parent is itself a reviewer) presents
+           * none — it continues a live root. */
+          request?: number;
+        }
     ),
   ): number {
     return this.transact(() => this.startRunInTransaction(run));
@@ -13302,7 +13468,8 @@ export class Store {
     const taskId = ref.externalId;
     const scope = this.getScope(taskId);
     const contestant = run.contestant ?? null;
-    const attended = contestant === null && this.openAuthorizationFor(run.taskRef) !== null;
+    const authorization = contestant === null ? this.openAuthorizationFor(run.taskRef) : null;
+    const attended = authorization !== null;
     if (run.route !== undefined && (run.route as { chosen?: unknown }).chosen === "fallback") {
       refuse("an approved fallback entry is admitted only through admitFallback — the generic admission opens nothing as `fallback`");
     }
@@ -13311,6 +13478,93 @@ export class Store {
     if (custody !== null && (contestant !== null || attended)) refuse("a contest lane or attended session spends under its own authority — it takes no chain custody");
     const parent = run.parentRun === undefined ? null : this.getRun(run.parentRun);
     if (run.parentRun !== undefined && parent === null) refuse(`run #${run.parentRun} does not exist — nothing continues it`);
+    // A parent is this task's own (raw authority repair): a builder that
+    // recovers an interrupted attempt's draft, a repair turn, a reviewer,
+    // a correction child — every lineage is proved here, in the insert,
+    // and no later stamp can bind one.
+    if (parent !== null && parent.taskRef !== run.taskRef && role !== "repair") {
+      refuse(`run #${parent.id} belongs to task_ref ${parent.taskRef} — a ${role} run continues its own task's run only`);
+    }
+    // THE LIVE REVIEW REQUEST (raw authority repair): a root reviewer
+    // answers exactly one OPEN request for its parent run, consumed as
+    // `dispatched` in this same transaction below; a correction child —
+    // its parent is itself a reviewer — continues a LIVE root and answers
+    // no request of its own. Nothing else opens as a reviewer.
+    let requestToConsume: number | null = null;
+    if (role === "reviewer") {
+      if (parent === null) refuse("a review reviews a run — none was named");
+      const request = (run as { request?: number }).request;
+      if (parent.role === "reviewer") {
+        if (request !== undefined) refuse(`reviewer run #${parent.id} is a review already — a correction child continues it and answers no request of its own`);
+        // The lineage is linear — each correction continues the previous
+        // (already-ended) one — and it is live only while its ROOT
+        // reviewer, the run that spent the request, is still open.
+        let root: Run = parent;
+        const seen = new Set<number>([parent.id]);
+        while (root.role === "reviewer" && root.parentRun !== null) {
+          const above = this.getRun(root.parentRun);
+          if (above === null || above.role !== "reviewer") break;
+          if (seen.has(above.id)) refuse(`reviewer run #${parent.id}'s lineage loops — nothing continues it`);
+          seen.add(above.id);
+          root = above;
+        }
+        if (root.taskRef !== run.taskRef) refuse(`reviewer run #${root.id} belongs to task_ref ${root.taskRef} — a correction continues its own task's review only`);
+        if (root.outcome !== null) refuse(`the root reviewer run #${root.id} has ended — a correction child continues a live review only`);
+      } else {
+        if (request === undefined) refuse(`run #${parent.id} is reviewed only through its open review request — none was presented`);
+        const open = this.db.prepare("SELECT 1 AS hit FROM review_request WHERE id = ? AND run = ? AND consumed_at IS NULL").get(request, parent.id);
+        if (open === undefined) refuse(`review request #${request} is not run #${parent.id}'s open request — nothing reviews without one`);
+        requestToConsume = request;
+      }
+    } else if ((run as { request?: number }).request !== undefined) {
+      refuse(`a ${role} run answers no review request`);
+    }
+    // THE LIVE AUTHORIZATION (raw authority repair): a build or repair on a
+    // task with an open attended authorization spends under it, and the
+    // authorization must be LIVE here — unexpired by its own clock, its
+    // one attempt unspent (or spent on exactly the parent this repair turn
+    // mends), its pinned profile readable — and the run presents that
+    // profile as its `legacy` authority, never the sealed route's leg.
+    if (attended && (role === "builder" || role === "repair")) {
+      const live = authorization as AttendedAuthorization;
+      if (Date.parse(live.absoluteExpiry) <= run.now.getTime()) refuse(`the attended authorization ${live.id} expired at ${live.absoluteExpiry} — nothing spends under it`);
+      if (live.attemptRun !== null && !(role === "repair" && parent !== null && live.attemptRun === parent.id)) {
+        refuse(`the attended authorization ${live.id} already spent its one attempt on run #${live.attemptRun} — nothing else opens under it`);
+      }
+      let pinned: ExecutionProfile | null = null;
+      try {
+        const terms = JSON.parse(live.termsJson) as { profileJson?: unknown };
+        pinned = profileFromJson(typeof terms.profileJson === "string" ? terms.profileJson : null);
+      } catch {
+        pinned = null;
+      }
+      // An authorization that pins no readable profile admits a row under
+      // the ordinary rules and spends nothing (the dispatch proof refuses
+      // it); one that pins a profile is presented as exactly that.
+      if (pinned !== null) {
+        if (run.route === undefined) refuse(`an attended ${role} presents the authorization's pinned profile profile:${profileDigestOf(pinned)} as its authority — none was presented`);
+        if ((run.route as { chosen?: unknown }).chosen !== "legacy") refuse(`an attended ${role} spends under the authorization's pinned profile (a legacy stamp), not as a ${String((run.route as { chosen?: unknown }).chosen)} leg`);
+      }
+    }
+    // THE LANE (raw authority repair): a contest lane's run is one of THIS
+    // task's racing agents, in a contest still dispatching or racing, on a
+    // lane whose custody is free — or held by exactly the parked attempt
+    // this run resumes — and it presents the lane's race-approved profile
+    // as its `legacy` authority. The lane's pointer moves to the row in
+    // this same transaction, below; no later claim binds one.
+    let lane: Contestant | null = null;
+    if (contestant !== null) {
+      lane = this.getContestant(contestant);
+      const contest = lane === null ? null : this.getContest(lane.contest);
+      if (lane === null || contest === null || contest.taskRef !== run.taskRef) refuse(`contestant ${contestant} is not one of this task's racing agents`);
+      if (role !== "builder" && role !== "repair") refuse(`a ${role} run is no racing agent's — a lane builds and repairs`);
+      if (contest.state !== "dispatching" && contest.state !== "racing") refuse(`the contest is ${contest.state} — its lanes admit nothing`);
+      if (lane.activeRun !== null && !(parent !== null && lane.activeRun === parent.id && parent.outcome === "parked")) {
+        refuse(`contestant ${contestant} already holds run #${lane.activeRun} — one live run per racing agent`);
+      }
+      if (run.route === undefined) refuse(`a contest lane presents its race-approved profile as its authority — none was presented`);
+      if ((run.route as { chosen?: unknown }).chosen !== "legacy") refuse(`a contest lane spends under its race-approved profile (a legacy stamp), not as a ${String((run.route as { chosen?: unknown }).chosen)} leg`);
+    }
     // CHAIN CUSTODY, decided before the row (v48 authority repair): a repair turn inherits
     // exactly its SAME-TASK parent's binding — a parent on another task is
     // a caller bug, refused — and only while that parent IS the live tail
@@ -13445,6 +13699,24 @@ export class Store {
       // proved above, written here; a run and its route are one fact.
       this.writeRunRoute(id, stamp, run.now);
     }
+    if (requestToConsume !== null) {
+      // The request is spent by the very row that answers it — a CAS on the
+      // open request proved above; a request consumed under us rolls the
+      // row back.
+      const consumed = this.db
+        .prepare("UPDATE review_request SET consumed_at = ?, consumed_reason = 'dispatched' WHERE id = ? AND run = ? AND consumed_at IS NULL")
+        .run(run.now.toISOString(), requestToConsume, run.parentRun ?? null);
+      if (Number(consumed.changes) !== 1) refuse(`review request #${requestToConsume} was consumed under this admission — nothing reviews without it`);
+    }
+    if (lane !== null) {
+      // The lane's pointer moves to this row — from free, or from the parked
+      // attempt this run resumes — through a CAS on the generation proved
+      // above; a lane that moved under us rolls the row back.
+      const claimed = this.db
+        .prepare("UPDATE contestant SET active_run = ?, generation = generation + 1 WHERE id = ? AND generation = ? AND (active_run IS NULL OR active_run = ?)")
+        .run(id, lane.id, lane.generation, lane.activeRun);
+      if (Number(claimed.changes) !== 1) refuse(`contestant ${lane.id} moved under this admission — its lane did not bind`);
+    }
     if (custody !== null && custody.kind === "base" && cycleId !== null) {
       const tailed = this.db
         .prepare("UPDATE fallback_cycle SET tail_run = ?, updated_at = ? WHERE id = ? AND state = 'open' AND tail_run IS NULL AND cursor = 0")
@@ -13523,11 +13795,18 @@ export class Store {
       // profile for a chain-bound run, else the approved snapshot while
       // the approval stands. Nothing governs an unapproved pre-routing
       // row; re-filing routes it.
-      const approved = scope.approvedAt !== null && scope.approvedDigest !== null && scope.approvedDigest === scope.digest;
+      const approved = scope.termsProblem == null && scope.approvedAt !== null && scope.approvedDigest !== null && scope.approvedDigest === scope.digest;
       const chain = this.approvedChainOf(ref.externalId);
       const boundEntry = bound !== null && chain !== null ? chain[bound.index] : undefined;
       if (bound !== null && (boundEntry === undefined || entryDigestOf(boundEntry) !== bound.entryDigest)) {
         return { ok: false, problem: `the run is bound to chain entry ${bound.index}, which the approved chain does not carry under that digest` };
+      }
+      // A NON-primary entry of a pre-routing chain has no sealed route to
+      // spend under and no chain-only digest to borrow (raw authority
+      // repair): nothing governs it until the scope is re-filed and
+      // approved under a route.
+      if (bound !== null && bound.index > 0) {
+        return { ok: false, problem: "this pre-routing chain approval seals no agent route — nothing spends as a fallback under a chain-only digest; re-file the scope and approve it again" };
       }
       const governing = boundEntry !== undefined ? boundEntry.profile : approved ? (scope.approvedProfile ?? null) : null;
       if (governing === null) return { ok: false, problem: "no sealed profile governs this pre-routing row — nothing spends as legacy on it; re-file the scope to route it" };
@@ -13546,7 +13825,8 @@ export class Store {
       if (chain === null || entry === undefined) return { ok: false, problem: "the run is bound to a fallback chain entry the task's approved chain does not have" };
       if (entryDigestOf(entry) !== bound.entryDigest) return { ok: false, problem: `the run is bound to chain entry ${bound.index} under digest ${bound.entryDigest}, but the approved entry there is ${entryDigestOf(entry)}` };
       const model = phase === "repair" ? (entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel) : entry.profile.model;
-      return { ok: true, stamp: { routeDigest: sealed.ok ? routeDigestOf(sealed.route) : `chain:${chainDigestOf(chain)}`, phase, provider: entry.profile.provider, model, chosen: "fallback" } };
+      if (!sealed.ok) return { ok: false, problem: `the chain approval's sealed agent route does not stand (${sealed.detail}) — nothing spends as a fallback under a chain-only digest` };
+      return { ok: true, stamp: { routeDigest: routeDigestOf(sealed.route), phase, provider: entry.profile.provider, model, chosen: "fallback" } };
     }
     if (sealed.ok) {
       const leg = legOf(sealed.route, phase);
@@ -13572,18 +13852,18 @@ export class Store {
     facts: {
       baseRevision?: string;
       sessionId?: string;
-      parentRun?: number;
       /** v24 dispatch stamps: what this invocation was PROVED against. */
       scopeDigest?: string;
       profileDigest?: string;
       providerVersion?: string;
     },
   ): void {
+    // Lineage is NOT a late fact (raw authority repair): a parent is proved
+    // and written by the admission alone, so there is no parent stamp here.
     this.db
       .prepare(
         `UPDATE run SET base_revision = COALESCE(base_revision, ?),
                         session_id = COALESCE(session_id, ?),
-                        parent_run = COALESCE(parent_run, ?),
                         scope_digest = COALESCE(scope_digest, ?),
                         profile_digest = COALESCE(profile_digest, ?),
                         provider_version = COALESCE(provider_version, ?)
@@ -13592,12 +13872,39 @@ export class Store {
       .run(
         facts.baseRevision ?? null,
         facts.sessionId ?? null,
-        facts.parentRun ?? null,
         facts.scopeDigest ?? null,
         facts.profileDigest ?? null,
         facts.providerVersion ?? null,
         id,
       );
+  }
+
+  /**
+   * THE ONE WARM-RESUME BINDING (raw authority repair): an OPEN builder
+   * attempt takes a parked run's session forward, and the record says so
+   * — parent and session identity in one transaction, each fact re-proved
+   * from durable state here rather than stamped as a late COALESCE: the
+   * attempt is open, a builder, and unparented; the park is this task's
+   * own parked builder run carrying exactly that session; and no earlier
+   * attempt has already carried it (one warm try per park). Anything else
+   * binds nothing and says why; the caller goes cold.
+   */
+  bindWarmResume(runId: number, parkedRunId: number, sessionId: string): { ok: true } | { ok: false; problem: string } {
+    return this.transact(() => {
+      const attempt = this.getRun(runId);
+      const parked = this.getRun(parkedRunId);
+      if (attempt === null || attempt.outcome !== null || attempt.role !== "builder") return { ok: false as const, problem: `run #${runId} is not an open builder attempt` };
+      if (attempt.parentRun !== null) return { ok: false as const, problem: `run #${runId} already continues run #${attempt.parentRun}` };
+      if (parked === null || parked.taskRef !== attempt.taskRef || parked.role !== "builder" || parked.outcome !== "parked") return { ok: false as const, problem: `run #${parkedRunId} is not this task's parked builder attempt` };
+      if (parked.sessionId === null || parked.sessionId !== sessionId) return { ok: false as const, problem: `run #${parkedRunId} does not carry session ${sessionId}` };
+      const tried = this.db.prepare("SELECT 1 AS hit FROM run WHERE parent_run = ? AND role = 'builder' AND id <> ? LIMIT 1").get(parkedRunId, runId);
+      if (tried !== undefined) return { ok: false as const, problem: `run #${parkedRunId} was already resumed once — the second attempt goes cold` };
+      const bound = this.db
+        .prepare("UPDATE run SET parent_run = ?, session_id = COALESCE(session_id, ?) WHERE id = ? AND parent_run IS NULL AND outcome IS NULL")
+        .run(parkedRunId, sessionId, runId);
+      if (Number(bound.changes) !== 1) return { ok: false as const, problem: `run #${runId} moved under the binding` };
+      return { ok: true as const };
+    });
   }
 
   /**
@@ -18997,8 +19304,37 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
   };
 }
 
+/**
+ * The raw terms verdict for one stored routine row (raw authority repair):
+ * every term the digest binds, proved exactly — or the words. See
+ * `Routine.termsProblem`.
+ */
+function routineTermsProblem(row: Record<string, unknown>): string | null {
+  const touches = exactStringList(row["touches"], "touches");
+  if (!touches.ok) return touches.problem;
+  const requirements = exactStringList(row["requirements"], "requirements");
+  if (!requirements.ok) return requirements.problem;
+  const acceptance = exactAcceptance(row["acceptance_json"]);
+  if (!acceptance.ok) return acceptance.problem;
+  for (const column of ["name", "repo", "goal", "schedule", "digest", "created_at", "updated_at"]) {
+    if (typeof row[column] !== "string") return `${column.replace(/_/g, " ")} is not stored as text`;
+  }
+  if (row["out_of_scope"] !== null && typeof row["out_of_scope"] !== "string") return "the out-of-scope text is not stored as text";
+  if (row["single_flight"] !== 0 && row["single_flight"] !== 1) return "the single-flight flag is not 0 or 1";
+  if (row["paused"] !== 0 && row["paused"] !== 1) return "the paused flag is not 0 or 1";
+  if (row["cost_ceiling_usd"] !== null && (typeof row["cost_ceiling_usd"] !== "number" || !Number.isFinite(row["cost_ceiling_usd"]))) return "the cost ceiling is not a number";
+  const budget = exactSafeIntegerOrNull(row["budget_per_run_microusd"], "the per-run budget");
+  if (budget !== null) return budget;
+  if (row["digest_version"] !== 1 && row["digest_version"] !== 2) return "the digest version is not one this code writes";
+  for (const column of ["approved_at", "approved_by", "approved_digest", "next_fire_at", "filed_via", "profile_json", "approved_profile_json", "route_json", "approved_route_json"]) {
+    if (row[column] !== null && row[column] !== undefined && typeof row[column] !== "string") return `${column.replace(/_/g, " ")} is not stored as text`;
+  }
+  return null;
+}
+
 function readRoutine(row: Record<string, unknown>): Routine {
   return {
+    termsProblem: routineTermsProblem(row),
     id: Number(row["id"]),
     name: String(row["name"]),
     repo: String(row["repo"]),
@@ -19611,8 +19947,39 @@ function readAcceptance(value: unknown): AcceptanceCriterion[] {
   }
 }
 
+/**
+ * The raw terms verdict for one stored scope row (raw authority repair):
+ * every term the digest binds and every metadata word an authority reads,
+ * proved exactly — or the words. See `Scope.termsProblem`.
+ */
+function scopeTermsProblem(row: Record<string, unknown>): string | null {
+  const touches = exactStringList(row["touches"], "touches");
+  if (!touches.ok) return touches.problem;
+  const acceptance = exactAcceptance(row["acceptance_json"]);
+  if (!acceptance.ok) return acceptance.problem;
+  const budget = exactSafeIntegerOrNull(row["budget_microusd"], "the budget");
+  if (budget !== null) return budget;
+  if (typeof row["goal"] !== "string") return "the goal is not stored as text";
+  if (row["out_of_scope"] !== null && typeof row["out_of_scope"] !== "string") return "the out-of-scope text is not stored as text";
+  if (row["quality_mode"] !== "default" && row["quality_mode"] !== "strict") return "the quality mode is not one this code writes";
+  if (!isRiskLevel(row["risk_level"])) return "the risk level is not one this code writes";
+  if (row["approval_kind"] !== "profile" && row["approval_kind"] !== "chain") return "the approval kind is not one this code writes";
+  if (row["profile_state"] !== "resolved" && row["profile_state"] !== "unresolved") return "the profile state is not one this code writes";
+  if (row["digest_version"] !== 1 && row["digest_version"] !== 2) return "the digest version is not one this code writes";
+  const era = row["route_era"];
+  if (era !== null && era !== undefined && (typeof era !== "number" || !Number.isSafeInteger(era) || era < 1 || era > ROUTE_ERA)) return "the route era is not one this code writes";
+  for (const column of ["digest", "proposed_at"]) {
+    if (typeof row[column] !== "string") return `${column.replace("_", " ")} is not stored as text`;
+  }
+  for (const column of ["approved_at", "approved_by", "approved_digest", "profile_json", "approved_profile_json", "proposed_chain_json", "approved_chain_json", "proposed_route_json", "approved_route_json", "unresolved_reason"]) {
+    if (row[column] !== null && row[column] !== undefined && typeof row[column] !== "string") return `${column.replace(/_/g, " ")} is not stored as text`;
+  }
+  return null;
+}
+
 function readScope(row: Record<string, unknown>): Scope {
   return {
+    termsProblem: scopeTermsProblem(row),
     taskId: String(row["task_id"]),
     goal: String(row["goal"]),
     outOfScope: row["out_of_scope"] === null ? null : String(row["out_of_scope"]),

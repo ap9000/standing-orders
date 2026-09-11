@@ -41,7 +41,7 @@ import { currentClaim, finalizeRevisionFenced, heartbeat, SYNC_MAX_AGE_MS } from
 import { missingCapability } from "./dispatch.js";
 import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
-import { parseDecision, parseHandoff, repairPrompt, type ParsedDecision, type Problem } from "./decision.js";
+import { parseDecision, parseHandoff, repairPrompt, HANDOFF_CONCLUSION_CAP, HANDOFF_ITEM_CAP, HANDOFF_LIST_CAP, HANDOFF_PAYLOAD_CAP, type ParsedDecision, type Problem } from "./decision.js";
 import { createHash, randomUUID } from "node:crypto";
 import { invokeAgent, type AgentOutcome, type InvokeResult } from "./invoke.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
@@ -435,6 +435,11 @@ export function proveApprovedProfile(
 ):
   | { ok: true; effective: { model: string; maxTurns: number | undefined; timeoutMs: number; skipPermissions: boolean; profile: ExecutionProfile } }
   | { ok: false; message: string } {
+  // The raw terms first (raw authority repair): a scope whose stored terms
+  // do not read back exactly proves nothing — not the filtered reading.
+  if (contestProfile === null && scope !== null && scope.termsProblem != null) {
+    return { ok: false, message: `the scope's stored terms cannot be read exactly (${scope.termsProblem}) — re-file the scope and approve it again (stale-approval)` };
+  }
   const snapshot = contestProfile ?? scope?.approvedProfile ?? null;
   if (snapshot === null) {
     return {
@@ -993,16 +998,15 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       candidate.run.scopeDigest === provenScopeDigest &&
       candidate.run.profileDigest === provenProfileDigest
     ) {
-      resumeSession = candidate.run.sessionId;
-      // Causal parentage, stamped before the spawn: whatever happens next,
-      // the record says which park this attempt tried to carry forward.
-      store.stampRun(request.runId, {
-        parentRun: candidate.run.id,
-        // The gateway will only put --resume on a process whose run already
-        // carries this exact identity. Record the warm handoff and its causal
-        // parent together, before any provider process can start.
-        sessionId: candidate.run.sessionId,
-      });
+      // Causal parentage, PROVED and bound before the spawn (raw authority
+      // repair): the one warm-resume road binds this open attempt to the
+      // parked run it carries forward — same task, a genuine park, a first
+      // try — and records the warm handoff's session identity in the same
+      // transaction, so the gateway only ever puts --resume on a process
+      // whose run already carries this exact identity. A binding that
+      // cannot be proved goes cold, which is honest.
+      const bound = store.bindWarmResume(request.runId, candidate.run.id, candidate.run.sessionId);
+      if (bound.ok) resumeSession = candidate.run.sessionId;
     }
   }
 
@@ -2959,13 +2963,16 @@ function brief(
     "- When you finish — and you must always end explicitly, unless you",
     `  parked — write ONE file named exactly ${done} in the worktree root:`,
     '    { "version": 2, "status": "completed" | "no-change" | "failed",',
-    '      "conclusion": "<outcome first, plain language, at most 600 characters>",',
-    '      "changes": ["<specific change, at most 240 characters>"],',
-    '      "verification": ["<check and result, at most 240 characters>"],',
+    `      "conclusion": "<outcome first, plain language, at most ${HANDOFF_CONCLUSION_CAP} characters>",`,
+    `      "changes": ["<specific change, at most ${HANDOFF_ITEM_CAP} characters>"],`,
+    `      "verification": ["<check and result, at most ${HANDOFF_ITEM_CAP} characters>"],`,
     '      "followUps": ["<remaining concern, only when one exists>"] }',
-    "  Keep each list to at most 8 items. The conclusion is the operator's",
+    `  Keep each list to at most ${HANDOFF_LIST_CAP} items. The conclusion is the operator's`,
     "  compact result, not a transcript: never include a preamble, file dump,",
     "  or repeated explanation. The machine stores full diffs separately.",
+    `  The whole file must be under ${HANDOFF_PAYLOAD_CAP} bytes, and the conclusion and every`,
+    "  list item is ONE line of plain text — a newline or other control",
+    "  character in any of them refuses the whole file, not just that field.",
     "  completed = you made the changes; no-change = the goal needs no change",
     "  and the conclusion says why; failed = you could not do it. Write to a",
     "  temporary name first, then rename it into place.",
@@ -3032,6 +3039,28 @@ function brief(
     "  approved verification command, if one is configured, is re-run by the",
     "  machine itself — never by you. Write it to a temporary name first,",
     "  then rename it into place.",
+    // EVERY remaining cap the parser holds the proof to (raw authority
+    // repair): a proof refused for a limit the brief never named is a
+    // machine that lied about its contract.
+    `  The remaining hard caps, every one of which refuses the ENTIRE proof:`,
+    `  the whole file under ${PROOF_LIMITS.payload} bytes; at most ${PROOF_LIMITS.criteria} criteria, ${PROOF_LIMITS.checks} checks, ${PROOF_LIMITS.changed} changed`,
+    `  paths, ${PROOF_LIMITS.caveats} caveats, and ${PROOF_LIMITS.screenshots} screenshots; each criterion id at most ${PROOF_LIMITS.criterionId} bytes`,
+    `  UTF-8 and each statement at most ${PROOF_LIMITS.criterionStatement}; each evidence ref, check command,`,
+    `  check summary, changed path, screenshot path, and screenshot caption at`,
+    `  most ${PROOF_LIMITS.evidenceRef} bytes UTF-8; every string ONE line of plain text with no control`,
+    "  characters; every path repository-relative — no leading slash, drive",
+    "  letter, backslash, or `.`/`..` segment; and every field that says",
+    "  \"required\" above present and non-empty.",
+    "- Preflight every protocol file before you exit. After you write the",
+    "  handoff, the proof, or a park file: re-read it from disk, parse it as",
+    "  JSON, and measure every capped string's UTF-8 byte length (for",
+    "  example with `node -e` and `Buffer.byteLength`) against the caps",
+    "  above; count the list lengths; confirm every evidence ref resolves to",
+    "  an exact entry in checks, changed, or screenshots; and confirm every",
+    "  signed criterion is answered by its exact id with its statement",
+    "  verbatim. Fix anything short, rewrite through a temporary name, and",
+    "  only then end. A file that does not parse, or that breaks one cap, is",
+    "  refused whole — the machine never repairs it for you.",
     // The two adaptive-execution-plan files. Both are optional to the
     // machine and neither can widen anything: one reports where the work
     // has got to, the other says the road itself was wrong.

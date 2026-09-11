@@ -2050,8 +2050,16 @@ async function tickCommand(
       const parkedRun = racer.activeRun;
       // A contest lane spends under its race-approved profile and says so
       // at insert (v48 integrity): the lane's proven profile digest, the
-      // exact pair it will spend as.
-      const laneStamp: RouteStamp = { routeDigest: `profile:${profileDigestOf(racer.profile ?? contestantProfileOf(racer.provider, racer.model, racer.repairModel))}`, phase: "build", provider: racer.provider, model: racer.model, chosen: "legacy" };
+      // exact pair it will spend as — the store's own answer, re-proved
+      // and bound to the lane inside the admission.
+      const laneStamp = store.laneAuthorityFor(racer.id);
+      if (laneStamp === null) {
+        await worktrees.release(leased.worktree.path, clock());
+        release(store, reclaimed.claim.leaseId, clock());
+        backToParked();
+        resumed.push({ id: taskId, outcome: "failed", reason: "admission-refused", detail: `contestant ${racer.id} is gone` });
+        continue;
+      }
       let resumeRun: number;
       try {
         resumeRun = store.startRun({
@@ -2074,14 +2082,9 @@ async function tickCommand(
         resumed.push({ id: taskId, outcome: "failed", reason: "admission-refused", detail: error instanceof Error ? error.message : String(error) });
         continue;
       }
-      if (parkedRun !== null) store.releaseContestantRun(racer.id, parkedRun);
-      const beforeBuild = store.getContestant(racer.id);
-      if (beforeBuild === null || !store.claimContestantRun(racer.id, resumeRun, beforeBuild.generation)) {
-        await worktrees.release(leased.worktree.path, clock());
-        release(store, reclaimed.claim.leaseId, clock());
-        backToParked();
-        continue;
-      }
+      // The lane's pointer moved to the resume INSIDE its admission (raw
+      // authority repair): from the parked attempt it continues, proved
+      // there — no release-then-claim window exists any more.
       const afterClaim = store.getContestant(racer.id);
       if (afterClaim !== null) store.casContestantState(racer.id, ["ready"], "building", afterClaim.generation);
       const resumeResult = await build(store, {
@@ -2450,8 +2453,9 @@ async function tickCommand(
     // Route provenance for the run this pass opens (v47): PRESENTED to the
     // admission transaction, from the leg that governs it — the store
     // dictates nothing (v48 authority repair). A parked fallback entry's successor presents
-    // `fallback` under the sealed route (or the chain digest when no route
-    // is sealed, the pre-routing chain road).
+    // `fallback` under the sealed route — there is no chain-only digest
+    // (raw authority repair): with no sealed route it presents nothing,
+    // and the admission refuses in words.
     // Every road presents at insert (v48 integrity): an attended session
     // its pinned profile; a pre-routing row its sealed profile (or the
     // bare word on a task with no scope) — the store's own answer, so the
@@ -2465,9 +2469,7 @@ async function tickCommand(
         return legacy !== null && legacy.ok ? legacy.stamp : null;
       }
       if (parkedEntry !== null && phase === "build") {
-        const chain = store.approvedChainOf(id);
-        const digest = route !== null ? routeDigestOf(route.route) : chain === null ? null : `chain:${chainDigestOf(chain)}`;
-        return digest === null ? null : { routeDigest: digest, phase, provider: spec.provider, model: spec.model, chosen: "fallback" };
+        return { routeDigest: routeDigestOf(route.route), phase, provider: spec.provider, model: spec.model, chosen: "fallback" };
       }
       return { routeDigest: routeDigestOf(route.route), phase, provider: spec.provider, model: spec.model, chosen: governingLeg.chosen };
     };
@@ -2692,7 +2694,9 @@ async function tickCommand(
         }
         store.setContestantWorktree(agent.id, leased.worktree.path);
         // The lane's provenance rides its insert (v48 integrity): the
-        // race-approved profile it will be proved against, exactly.
+        // race-approved profile it will be proved against, exactly — the
+        // store's own answer, re-proved and bound to the lane there.
+        const laneStamp = store.laneAuthorityFor(agent.id);
         let contestantRun: number;
         try {
           contestantRun = store.startRun({
@@ -2705,17 +2709,14 @@ async function tickCommand(
             model: agent.model,
             contestant: agent.id,
             now: clock(),
-            route: { routeDigest: `profile:${profileDigestOf(contestantProfileOf(agent.provider, agent.model, agent.repairModel))}`, phase: "build", provider: agent.provider, model: agent.model, chosen: "legacy" },
+            ...(laneStamp === null ? {} : { route: laneStamp }),
           });
         } catch {
           prepFailed = true;
           break;
         }
-        const freshAgent = store.getContestant(agent.id);
-        if (freshAgent === null || !store.claimContestantRun(agent.id, contestantRun, freshAgent.generation)) {
-          prepFailed = true;
-          break;
-        }
+        // The lane's pointer was bound inside the insert above (raw
+        // authority repair); nothing claims it after the fact.
         prepared.push({
           contestantId: agent.id,
           slotId: admitted.slotIds[index] ?? -1,
@@ -3181,7 +3182,12 @@ async function tickCommand(
             authMode: parkedChainTail.authMode,
             repairModel: entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel,
             approved: { chainDigest: chainDigestOf(chain), profile: mirror },
-            run: { taskRef: ref.id, leaseId: lease, runner, branch, worktree: leased.worktree.path, provider: spec.provider, model: spec.model },
+            run: {
+              taskRef: ref.id, leaseId: lease, runner, branch, worktree: leased.worktree.path, provider: spec.provider, model: spec.model,
+              // The recovered draft's lineage rides the insert (raw
+              // authority repair) — never a later stamp.
+              ...(leased.resumedFromRun === undefined ? {} : { recoveredFrom: leased.resumedFromRun }),
+            },
             route: buildStamp,
           },
           clock(),
@@ -3197,6 +3203,9 @@ async function tickCommand(
           worktree: leased.worktree.path,
           provider: spec.provider,
           ...(spec.model === null ? {} : { model: spec.model }),
+          // The recovered draft's lineage rides the insert (raw authority
+          // repair) — proved this task's own run there, never stamped later.
+          ...(leased.resumedFromRun === undefined ? {} : { parentRun: leased.resumedFromRun }),
           now: clock(),
           ...(buildStamp === null ? {} : { route: buildStamp }),
           ...(attendedSpec !== null
@@ -3211,7 +3220,6 @@ async function tickCommand(
       continue;
     }
     if (leased.resumedFromRun !== undefined) {
-      store.stampRun(runId, { parentRun: leased.resumedFromRun });
       store.addRunNote(
         runId,
         "Standing Orders",
@@ -3461,17 +3469,16 @@ async function tickCommand(
     }
     const admitted = store.admitNextChainEntry(
       pending.cycleId,
-      { leaseId: lease, runner, branch, worktree: leased.worktree.path },
+      { leaseId: lease, runner, branch, worktree: leased.worktree.path, ...(leased.resumedFromRun === undefined ? {} : { recoveredFrom: leased.resumedFromRun }) },
       clock(),
     );
     if (!admitted.ok) {
       await worktrees.release(leased.worktree.path, clock());
       release(store, lease, clock());
-      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: `fallback-${admitted.reason}` });
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: `fallback-${admitted.reason}`, ...(admitted.detail === undefined ? {} : { detail: admitted.detail }) });
       continue;
     }
     if (leased.resumedFromRun !== undefined) {
-      store.stampRun(admitted.runId, { parentRun: leased.resumedFromRun });
       store.addRunNote(
         admitted.runId,
         "Standing Orders",

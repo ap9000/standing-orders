@@ -924,6 +924,9 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     Buffer.from(DEMO_REPAIR_PATCH, "utf8"),
     "git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [demo: synthetic]",
     hoursAgo(4.6),
+    // The seeded capture says its exit 0 in a typed verdict too: the real
+    // review door reads THIS, and it refuses a diff with no verdict.
+    { captureStatus: "ok" },
   );
   const reviewedStat: DiffStat = {
     schema: 1,
@@ -1010,12 +1013,19 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   // reviewPass itself calls (ingestReview) — the fold is the real
   // foldReview, never a hand-authored verdict, and the bindings are the
   // real scope digest and proof artifact this run actually carries.
+  // The review is asked for through the real door and answered through
+  // the real admission (raw authority repair): the reviewer run consumes
+  // the open request inside its own insert, exactly as the review pass
+  // does — a reviewer row opens no other way.
+  const reviewAsked = store.requestReview(reviewedRun, "alex", hoursAgo(3.95));
+  if (!reviewAsked.ok) throw new Error(`demo: the seeded review could not be requested (${reviewAsked.reason})`);
   const reviewerRun = store.startRun({
     taskRef: store.refFor("built-in", reviewed).id,
     leaseId: "demo-lease-reviewer",
     runner: "night-shift-1",
     role: "reviewer",
     parentRun: reviewedRun,
+    request: reviewAsked.id,
     provider: "codex",
     now: hoursAgo(3.9),
     ...presentedRoute(store, store.refFor("built-in", reviewed).id, "reviewer"),

@@ -586,6 +586,60 @@ describe("firing, inside one proving transaction", () => {
     expect(approveRoutine(store, routineId, "alex", later(3 * HOUR), store.getRoutine(routineId)!.digest, token).ok).toBe(false);
   });
 
+  test("routine-terms (raw authority repair): stored terms that do not read back exactly are not approved — no consent, no yes, no refresh, no firing, and NOTHING written: not the row, a slot, the ledger, a task, a notification, or the next-fire time", () => {
+    approve(routineId);
+    const first = fireRoutine(store, routineId, later(HOUR));
+    expect(first.ok).toBe(true);
+    const raw = store.raw();
+    const sound = raw.prepare("SELECT touches, requirements, acceptance_json, single_flight, cost_ceiling_usd, budget_per_run_microusd, digest_version FROM routine WHERE id = ?").get(routineId) as Record<string, unknown>;
+    const restore = () =>
+      raw.prepare("UPDATE routine SET touches = ?, requirements = ?, acceptance_json = ?, single_flight = ?, cost_ceiling_usd = ?, budget_per_run_microusd = ?, digest_version = ? WHERE id = ?")
+        .run(sound["touches"], sound["requirements"], sound["acceptance_json"], sound["single_flight"], sound["cost_ceiling_usd"], sound["budget_per_run_microusd"], sound["digest_version"], routineId);
+    const acceptance = JSON.parse(String(sound["acceptance_json"])) as Record<string, unknown>[];
+    // Each corruption is one the LENIENT readers filter, default, or
+    // coerce into the very same digest the approver signed.
+    const cases: [string, string, RegExp][] = [
+      ["a touch entry that is not a string", `UPDATE routine SET touches = '${JSON.stringify([...(JSON.parse(String(sound["touches"])) as string[]), 7])}' WHERE id = ${routineId}`, /touches carries an entry that is not a string/],
+      ["a requirement that is not a string", `UPDATE routine SET requirements = '[null]' WHERE id = ${routineId}`, /requirements carries an entry that is not a string/],
+      ["touches that are not JSON", `UPDATE routine SET touches = '[' WHERE id = ${routineId}`, /touches is not valid JSON/],
+      ["a rubric entry with an unknown key", `UPDATE routine SET acceptance_json = '${JSON.stringify(acceptance.map((one, i) => (i === 0 ? { ...one, extra: 1 } : one)))}' WHERE id = ${routineId}`, /carries a key this code never writes/],
+      ["a rubric entry that does not parse", `UPDATE routine SET acceptance_json = '${JSON.stringify([...acceptance, { id: 9, statement: "", how: null, evidence: [] }])}' WHERE id = ${routineId}`, /does not parse/],
+      ["a single-flight flag that is not 0 or 1", `UPDATE routine SET single_flight = 2 WHERE id = ${routineId}`, /single-flight flag is not 0 or 1/],
+      ["a text cost ceiling", `UPDATE routine SET cost_ceiling_usd = 'lots' WHERE id = ${routineId}`, /cost ceiling is not a number/],
+      ["a fractional per-run budget", `UPDATE routine SET budget_per_run_microusd = 1.5 WHERE id = ${routineId}`, /per-run budget is not a safe integer/],
+      ["a digest version no build writes", `UPDATE routine SET digest_version = 7 WHERE id = ${routineId}`, /digest version is not one this code writes/],
+    ];
+    for (const [label, sql, words] of cases) {
+      restore();
+      raw.exec(sql);
+      const before = {
+        row: raw.prepare("SELECT * FROM routine WHERE id = ?").get(routineId),
+        fires: store.routineFires(routineId),
+        tasks: store.listTasks().map(one => one.id),
+        notifications: store.listNotifications("all").length,
+      };
+      const integrity = routineIntegrity(store.getRoutine(routineId)!);
+      expect(integrity, label).toMatchObject({ approved: false, live: false, agents: { state: "unverified", approvable: false, refresh: false } });
+      expect(integrity.agents.problem, label).toMatch(words);
+      expect(routineAgentsState(store.getRoutine(routineId)!).approvable, label).toBe(false);
+      // Scheduled and manual firings alike: refused as not approved, in
+      // the terms' own words, with NOTHING written.
+      for (const manual of [false, true]) {
+        const refused = fireRoutine(store, routineId, later(3 * HOUR), { manual });
+        expect(refused, label).toMatchObject({ ok: false, reason: "not-approved", detail: expect.stringContaining("cannot be read exactly") });
+      }
+      expect(approveRoutine(store, routineId, "alex", later(3 * HOUR), store.getRoutine(routineId)!.digest, token).ok, label).toBe(false);
+      expect(refreshRoutineAgents(store, routineId, later(3 * HOUR)), label).toMatchObject({ ok: false, reason: "unresolved", problem: expect.stringContaining("cannot be read exactly") });
+      expect(raw.prepare("SELECT * FROM routine WHERE id = ?").get(routineId), label).toEqual(before.row);
+      expect(store.routineFires(routineId), label).toEqual(before.fires);
+      expect(store.listTasks().map(one => one.id), label).toEqual(before.tasks);
+      expect(store.listNotifications("all").length, label).toBe(before.notifications);
+    }
+    restore();
+    expect(store.getRoutine(routineId)!.termsProblem).toBeNull();
+    expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: true, live: true });
+  });
+
   test("routine-recovery: unreadable snapshot bytes and an unfrozen approval are withdrawn by the refresh the same way, and a LIVE approval under unchanged terms is left alone", () => {
     store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);

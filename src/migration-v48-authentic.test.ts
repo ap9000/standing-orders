@@ -16,7 +16,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openStore, SCHEMA_VERSION, schemaVersionPreflight, type Store } from "./store.js";
+import { openStore, openStoreNoMigrate, readSchemaVersion, SCHEMA_VERSION, schemaVersionPreflight, type Database, type Store } from "./store.js";
 import { routineAgentsState } from "./routine.js";
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "v47-authentic.sql");
@@ -192,6 +192,13 @@ describe("the schema-version preflight reads exactly one safe supported integer 
     ["a newer build's mid-flight epoch", `UPDATE schema_version SET version = ${-(SCHEMA_VERSION + 1)}`, /written by a newer build/],
     ["two version rows", "INSERT INTO schema_version (version) VALUES (47)", /carries 2 rows, not one/],
     ["no version row", "DELETE FROM schema_version", /carries no row/],
+    // The impossible negatives (raw authority repair): an upgrade never
+    // begins at the version it upgrades to, so −48 is a marker no build
+    // ever wrote — it is not "a resumable epoch", it refuses.
+    ["this build's own version as a mid-flight epoch", `UPDATE schema_version SET version = ${-SCHEMA_VERSION}`, /a mid-flight marker no build ever wrote/],
+    // A nonempty file with NO version table is not fresh: it is a database
+    // some other program shaped, and this build's DDL never runs over it.
+    ["a nonempty file with no version table", "DROP TABLE schema_version", /carries tables but no schema_version table/],
   ] as const) {
     test(`${label} refuses before DDL — the file is untouched`, () => {
       dir = mkdtempSync(join(tmpdir(), "so-preflight-"));
@@ -203,8 +210,107 @@ describe("the schema-version preflight reads exactly one safe supported integer 
       // Nothing moved: not the version, not one table's DDL, not one row.
       expect(snapshot(file)).toEqual(before);
       expect(before.schema.find(one => one.type === "table" && one.name === "routine")!.sql).not.toContain("route_json");
+      // EVERY door reads through the one strict reader: the non-migrating
+      // door refuses in the same words, and the live per-unit-of-work
+      // check answers false — never a coerced number that compares equal.
+      const door = openStoreNoMigrate(file);
+      expect(door).toMatchObject({ ok: false, reason: "version" });
+      if (!door.ok) expect(door.message).toMatch(words);
+      const raw = new sqlite.DatabaseSync(file);
+      const read = readSchemaVersion(raw as never);
+      expect(read.ok).toBe(false);
+      if (!read.ok) expect(read.problem).toMatch(words);
+      raw.close();
+      expect(snapshot(file)).toEqual(before);
     });
   }
+
+  test("the live schema check reads through the strict reader: a corrupt version under an open connection answers false, and the door refuses the −48 marker", () => {
+    dir = mkdtempSync(join(tmpdir(), "so-preflight-"));
+    const file = loadFixture(dir);
+    const store = openStore(file);
+    expect(store.schemaCurrent()).toBe(true);
+    corrupt(file, `UPDATE schema_version SET version = ${-SCHEMA_VERSION}`);
+    expect(store.schemaCurrent()).toBe(false);
+    expect(openStoreNoMigrate(file)).toMatchObject({ ok: false, reason: "version", message: expect.stringContaining("no build ever wrote") });
+    corrupt(file, "UPDATE schema_version SET version = 'forty-eight'");
+    expect(store.schemaCurrent()).toBe(false);
+    corrupt(file, "INSERT INTO schema_version (version) VALUES (48)");
+    expect(store.schemaCurrent()).toBe(false);
+    store.close();
+  });
+
+  test("the epoch sentinel and its clearing are checked compare-and-sets: a version that moves under the open refuses, and the file keeps the other writer's marker", () => {
+    dir = mkdtempSync(join(tmpdir(), "so-preflight-"));
+    const file = loadFixture(dir);
+    // A connect wrapper: the FIRST sentinel write finds the row already
+    // moved by a second migrator (simulated through an independent
+    // connection) — the CAS matches nothing, and this open refuses rather
+    // than stamping over a marker it never read.
+    const racing = (moveTo: number, on: RegExp): ((path: string) => Database) => (path: string): Database => {
+      const real = new sqlite.DatabaseSync(path);
+      let moved = false;
+      return {
+        prepare: sql => {
+          const statement = real.prepare(sql);
+          if (!on.test(sql)) return statement as never;
+          return {
+            ...statement,
+            run: (...args: unknown[]) => {
+              if (!moved) {
+                moved = true;
+                const other = new sqlite.DatabaseSync(path);
+                other.exec(`UPDATE schema_version SET version = ${moveTo}`);
+                other.close();
+              }
+              return statement.run(...(args as never[]));
+            },
+            get: (...args: unknown[]) => statement.get(...(args as never[])),
+            all: (...args: unknown[]) => statement.all(...(args as never[])),
+          } as never;
+        },
+        exec: sql => real.exec(sql),
+        close: () => real.close(),
+      } as Database;
+    };
+    // The epoch stamp: v47 → −47 expected, but the row is already −47
+    // (another migrator stamped it first).
+    expect(() => openStore(file, { connect: racing(-47, /^UPDATE schema_version SET version = \? WHERE version = \?$/) })).toThrow(/moved from v47 between the preflight and the epoch stamp/);
+    expect(rawVersion(file)).toBe(-47);
+    // The clearing write: the sentinel −47 is expected, but the other
+    // migrator finished and wrote 48 — this open's own clear matches
+    // nothing and refuses; the file keeps the finished marker.
+    corrupt(file, "UPDATE schema_version SET version = 47");
+    let stamps = 0;
+    const clearingRace = (path: string): Database => {
+      const real = new sqlite.DatabaseSync(path);
+      return {
+        prepare: sql => {
+          const statement = real.prepare(sql);
+          if (!/^UPDATE schema_version SET version = \? WHERE version = \?$/.test(sql)) return statement as never;
+          return {
+            run: (...args: unknown[]) => {
+              stamps += 1;
+              if (stamps === 2) {
+                const other = new sqlite.DatabaseSync(path);
+                other.exec(`UPDATE schema_version SET version = ${SCHEMA_VERSION}`);
+                other.close();
+              }
+              return statement.run(...(args as never[]));
+            },
+          } as never;
+        },
+        exec: sql => real.exec(sql),
+        close: () => real.close(),
+      } as Database;
+    };
+    expect(() => openStore(file, { connect: clearingRace })).toThrow(/the epoch sentinel -47 moved under this migration/);
+    expect(rawVersion(file)).toBe(SCHEMA_VERSION);
+    // A plain open of the now-current file changes nothing.
+    const before = snapshot(file);
+    openStore(file).close();
+    expect(snapshot(file)).toEqual(before);
+  });
 
   test("the preflight itself: a fresh file answers null, a supported version answers itself, a mid-flight epoch answers its negative", () => {
     dir = mkdtempSync(join(tmpdir(), "so-preflight-"));

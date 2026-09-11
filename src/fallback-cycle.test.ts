@@ -9,7 +9,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { openStore, type Store } from "./store.js";
-import { propose, approve, addApprover, chainFromJson, chainDigestOf, entryDigestOf } from "./scope.js";
+import { propose, approve, addApprover, chainFromJson, chainDigestOf, digestOf, entryDigestOf } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
 import * as routing from "./phase-routing.js";
 
@@ -64,7 +64,10 @@ const entryArgs = (store: Store, taskId: string, index: number) => {
     repairModel: entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel,
     provider: entry.profile.provider,
     model: entry.profile.model,
-    route: { routeDigest: sealed.ok ? routeDigestOf(sealed.route) : `chain:${chainDigestOf(chain)}`, phase: "build" as const, provider: entry.profile.provider, model: entry.profile.model, chosen: "fallback" as const },
+    // The sealed route's digest, exactly — there is no chain-only digest
+    // (raw authority repair); a fixture on a chain with no sealed route
+    // presents the word the admission will refuse.
+    route: { routeDigest: sealed.ok ? routeDigestOf(sealed.route) : "unsealed", phase: "build" as const, provider: entry.profile.provider, model: entry.profile.model, chosen: "fallback" as const },
   };
 };
 
@@ -417,11 +420,10 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     // RESUME from a tail that is not parked: rolled back — no row.
     expect(() => open({ leaseId: "l3", custody: { kind: "resume", parkedRun: base } })).toThrow(/is not this task's parked chain tail/);
     expect(rows()).toBe(1);
-    // A repair child of the tail inherits IN its insert; a reviewer child does not.
+    // A repair child of the tail inherits IN its insert; a reviewer child
+    // (below, once a chain-bound attempt has finished) does not.
     const repair = open({ role: "repair", parentRun: base, ...presented(store, ref, "repair") });
     expect(store.getRun(repair)).toMatchObject({ chainCycle: cycle.id, chainIndex: 0, entryDigest: store.getRun(base)!.entryDigest, authMode: "subscription" });
-    const review = open({ role: "reviewer", parentRun: base, branch: undefined, worktree: undefined, ...presented(store, ref, "reviewer") });
-    expect(store.getRun(review)).toMatchObject({ role: "reviewer", chainCycle: null, chainIndex: null, entryDigest: null, authMode: null });
     // A repair whose parent belongs to ANOTHER task is a caller bug: no row.
     store.createTask({ id: "t-other", title: "w" }, T0);
     const other = store.refFor("built-in", "t-other").id;
@@ -440,6 +442,16 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     // The transfer is single-use: a second resume off the same parked tail rolls back.
     expect(() => open({ leaseId: "l5", custody: { kind: "resume", parkedRun: base } })).toThrow(/is not the live tail of its fallback cycle|not this task's parked chain tail/);
     expect(store.fallbackCycleFor(ref)?.tailRun).toBe(successor);
+    // A REVIEWER after a chain-bound attempt: admitted only through the
+    // finished attempt's open review request (raw authority repair), and it
+    // takes no custody — no cycle, index, digest, or auth mode.
+    store.saveArtifact({ run: successor, kind: "terminal-diff", key: "k", bytesOriginal: 1, bytesStored: 1, truncated: false, sha256: "s", capture: "git diff (exit 0)", captureStatus: "ok" }, T0);
+    store.finishRun(successor, { outcome: "built", committed: true, now: T0 });
+    expect(() => open({ role: "reviewer", parentRun: successor, branch: undefined, worktree: undefined, ...presented(store, ref, "reviewer") })).toThrow(/reviewed only through its open review request — none was presented/);
+    const asked = store.requestReview(successor, "alex", T0);
+    if (!asked.ok) throw new Error(asked.reason);
+    const review = open({ role: "reviewer", parentRun: successor, request: asked.id, branch: undefined, worktree: undefined, ...presented(store, ref, "reviewer") });
+    expect(store.getRun(review)).toMatchObject({ role: "reviewer", chainCycle: null, chainIndex: null, entryDigest: null, authMode: null });
   });
 
   test("fallback-bound: admission requires chosen=fallback and the exact task, live cycle, approved chain, index, entry digest, provider, model, auth mode, and repair model — every mismatch creates no run and consumes no edge", () => {
@@ -523,10 +535,54 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     // A resume or repair kind against a pending cycle: refused (the cycle is not open).
     refused({ ...exact(), kind: "resume", parkedRun: base, expectTail: null } as Parameters<Store["admitFallback"]>[0], /is pending-admission, not open/);
     refused({ ...exact(), kind: "repair", parentRun: base, expectTail: null, route: { ...e1.route, phase: "repair" } } as Parameters<Store["admitFallback"]>[0], /is pending-admission, not open/);
-    // The exact statement admits: one run, the edge consumed, the cycle open at 1.
-    const admitted = store.admitFallback(exact(), T0);
+    // NO CHAIN-ONLY DIGEST (raw authority repair): the chain approval
+    // rewritten as a PRE-ROUTING one — no route era, no route bytes, the
+    // digests re-derived over the chain alone so the chain still reads
+    // as approved — has no sealed route, and a fallback presented under
+    // any digest (the old `chain:` word included) admits nothing. The
+    // admission pass says so in words and mutates nothing: no run, no
+    // consumed edge, the cycle exactly as it was.
+    {
+      const rawScope = store.raw();
+      const keep = rawScope.prepare("SELECT digest, approved_digest, proposed_route_json, approved_route_json, route_era FROM task_scope WHERE task_id = 't-bound'").get() as Record<string, unknown>;
+      const scopeNow = store.getScope("t-bound")!;
+      const chainNow = store.approvedChainOf("t-bound")!;
+      const unrouted = digestOf({ goal: scopeNow.goal, outOfScope: scopeNow.outOfScope, touches: scopeNow.touches, budgetMicrousd: scopeNow.budgetMicrousd, acceptance: scopeNow.acceptance, qualityMode: scopeNow.qualityMode }, { chain: chainNow }, null);
+      rawScope.prepare("UPDATE task_scope SET digest = ?, approved_digest = ?, proposed_route_json = NULL, approved_route_json = NULL, route_era = NULL WHERE task_id = 't-bound'").run(unrouted, unrouted);
+      expect(store.approvedChainOf("t-bound")).not.toBeNull();
+      expect(store.sealedRouteOf("t-bound")).toMatchObject({ ok: false, reason: "legacy" });
+      expect(store.routeAuthorityFor(ref, "builder", { index: 1, entryDigest: e1.entryDigest })).toMatchObject({ ok: false, problem: expect.stringContaining("nothing spends as a fallback under a chain-only digest") });
+      // A live mode GRANTS the paid fallback, so the only thing standing
+      // between the pending cycle and a run is the sealed-authority proof.
+      const grantTerms: ModeTerms = { ...presetTerms("standard", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString()), allowPaidFallback: true };
+      store.signMode(
+        { repo: REPO, name: "standard", termsJson: modeTermsJson(grantTerms), digest: modeDigestOf(grantTerms), signedBy: "alex", absoluteExpiry: grantTerms.absoluteExpiry, publication: grantTerms.publication },
+        T0,
+      );
+      const cycleBefore = rawScope.prepare("SELECT * FROM fallback_cycle WHERE id = ?").get(cycle.id);
+      const edgesBefore = rawScope.prepare("SELECT * FROM fallback_transition WHERE cycle = ? ORDER BY id").all(cycle.id);
+      for (const digest of [`chain:${chainDigestOf(chainNow)}`, e1.route.routeDigest, "legacy"]) {
+        refused({ ...exact(), route: { ...e1.route, routeDigest: digest } }, /sealed agent route does not stand .* nothing spends as a fallback under a chain-only digest/);
+      }
+      const pass = store.admitNextChainEntry(cycle.id, { leaseId: "lp", runner: "b-1", branch: "bp", worktree: "/wp" }, T0);
+      expect(pass).toMatchObject({ ok: false, reason: "stale-approval", detail: expect.stringContaining("chain-only digest") });
+      expect(rows()).toBe(before);
+      expect(edgeFree()).toBe(true);
+      expect(rawScope.prepare("SELECT * FROM fallback_cycle WHERE id = ?").get(cycle.id)).toEqual(cycleBefore);
+      expect(rawScope.prepare("SELECT * FROM fallback_transition WHERE cycle = ? ORDER BY id").all(cycle.id)).toEqual(edgesBefore);
+      rawScope.prepare("UPDATE task_scope SET digest = ?, approved_digest = ?, proposed_route_json = ?, approved_route_json = ?, route_era = ? WHERE task_id = 't-bound'").run(keep["digest"], keep["approved_digest"], keep["proposed_route_json"], keep["approved_route_json"], keep["route_era"]);
+      expect(store.sealedRouteOf("t-bound")).toMatchObject({ ok: true });
+    }
+    // A recovered draft's lineage rides the insert (raw authority repair):
+    // a parent that is not this task's attempt admits nothing; a repair
+    // turn recovers none.
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: 9999 } }, /run #9999 is not one of this task's attempts — nothing recovers its draft/);
+    // The exact statement admits: one run, the edge consumed, the cycle
+    // open at 1 — carrying the interrupted base attempt as its parent.
+    const admitted = store.admitFallback({ ...exact(), run: { ...exact().run, recoveredFrom: base } }, T0);
     expect(admitted.ok).toBe(true);
     if (!admitted.ok) return;
+    expect(store.getRun(admitted.runId)).toMatchObject({ parentRun: base, chainCycle: cycle.id, chainIndex: 1 });
     expect(rows()).toBe(before + 1);
     expect(edgeFree()).toBe(false);
     expect(store.fallbackCycleFor(ref)).toMatchObject({ state: "open", cursor: 1, tailRun: admitted.runId });
@@ -561,6 +617,7 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     refusedRepair({ route: e1.route }, /a repair run spends as the repair leg, but the stamp says build/);
     refusedRepair({ route: { ...repairStamp, chosen: "recommended" } }, /spends as `fallback`/);
     refusedRepair({ run: { ...repairFacts().run, taskRef: elseRef } }, /belongs to task_ref/);
+    refusedRepair({ run: { ...repairFacts().run, recoveredFrom: base } }, /a repair turn mends its live tail — it recovers no interrupted attempt/);
     const repaired = store.admitFallback(repairFacts(), T0);
     expect(repaired.ok).toBe(true);
     if (!repaired.ok) return;

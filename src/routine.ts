@@ -371,13 +371,19 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
     // read here before anything is written.
     const integrity = routineIntegrity(routine);
     if (!integrity.approved) {
+      // Not approved is a plain read: nothing is written, nothing is
+      // paged — terms that cannot be read exactly (raw authority repair)
+      // refuse here too, leaving the routine, its slots, ledger, tasks,
+      // notifications, and next-fire time exactly as they were.
       return {
         ok: false as const,
         reason: "not-approved" as const,
         detail:
-          routine.approvedAt === null
-            ? "nobody has agreed to this standing order"
-            : "the template was edited after approval — approve it again",
+          routine.termsProblem != null
+            ? `the stored terms cannot be read exactly (${routine.termsProblem}) — file this standing order again`
+            : routine.approvedAt === null
+              ? "nobody has agreed to this standing order"
+              : "the template was edited after approval — approve it again",
       };
     }
     if (routine.paused) return { ok: false as const, reason: "paused" as const };
@@ -702,6 +708,17 @@ export type RoutineIntegrity = {
 type IntegrityRow = Routine;
 
 export function routineIntegrity(routine: IntegrityRow): RoutineIntegrity {
+  // THE RAW TERMS FIRST (raw authority repair): a row whose stored terms
+  // do not read back exactly — a touch or requirement that is not a
+  // string, a rubric entry with a key this code never writes or one that
+  // does not parse, a flag or ceiling that is not the shape it was written
+  // as — is NOT approved, not live, not approvable, and not refreshable,
+  // whatever its columns say: the filtered reading of it must never hash,
+  // fire, or be re-filed as if it were the terms the approver read.
+  if (routine.termsProblem != null) {
+    const problem = `the stored terms cannot be read exactly (${routine.termsProblem}) — file this standing order again`;
+    return { approved: false, live: false, liveProblem: null, agents: { state: "unverified", approvable: false, refresh: false, problem } };
+  }
   const terms = termsOf(routine);
   const stamped = routine.approvedAt !== null && routine.approvedDigest !== null && routine.approvedDigest === routine.digest;
   const workingRehashes = routineDigestOf(terms, routine.profile ?? null, routine.route ?? null) === routine.digest;
@@ -781,6 +798,12 @@ export function refreshRoutineAgents(store: Store, routineId: number, now: Date)
   return store.transact(() => {
     const routine = store.getRoutine(routineId);
     if (routine === null) return { ok: false as const, reason: "no-such-routine" as const, problem: "no such routine" };
+    // Terms that do not read back exactly are never re-filed from their
+    // filtered reading (raw authority repair): the refresh refuses in
+    // words and writes nothing.
+    if (routine.termsProblem != null) {
+      return { ok: false as const, reason: "unresolved" as const, problem: `the stored terms cannot be read exactly (${routine.termsProblem}) — file this standing order again` };
+    }
     const authority = resolveRoutineAuthority(store, routine.repo, routine.acceptance, now);
     if (!authority.ok) return { ok: false as const, reason: "unresolved" as const, problem: authority.problem };
     const terms = termsOf(routine);

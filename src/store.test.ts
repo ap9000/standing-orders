@@ -726,6 +726,42 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
     expect(store.getRun(run)).toMatchObject({ outcome: "parked", reason: "decision:1" });
   });
 
+  test("lineage is proved at the insert and by ONE warm-resume binding (raw authority repair): no late parent stamp exists, a foreign parent opens nothing, and the warm binding re-proves task, park, session, and first-try before it writes", () => {
+    const ref = refOf("t-1");
+    const other = refOf("t-lineage-other");
+    const parked = store.startRun({ taskRef: ref, leaseId: "lease-1", runner: "builder-1", provider: "claude", sessionId: "session-1", branch: "standing-orders/t-1", worktree: "/pool/t-1", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(parked, { outcome: "parked", reason: "decision:1", now: T0 });
+    // A recovered draft's lineage rides the insert: the parent is this
+    // task's run, or the row never opens.
+    expect(() => store.startRun({ taskRef: other, leaseId: "lease-o", runner: "builder-1", branch: "b", worktree: "/w", parentRun: parked, now: later(1), ...presented(store, other, "builder") })).toThrow(/a builder run continues its own task's run only/);
+    expect(store.runsFor(other)).toHaveLength(0);
+    const recovering = store.startRun({ taskRef: ref, leaseId: "lease-2", runner: "builder-1", branch: "standing-orders/t-1", worktree: "/pool/t-1", parentRun: parked, now: later(1), ...presented(store, ref, "builder") });
+    expect(store.getRun(recovering)).toMatchObject({ parentRun: parked });
+    // The generic stamp carries no parent any more.
+    store.stampRun(recovering, { baseRevision: "abc" } as never);
+    expect(store.getRun(recovering)).toMatchObject({ parentRun: parked, baseRevision: "abc" });
+    // The warm-resume binding: every fact re-proved, or nothing written.
+    const attempt = store.startRun({ taskRef: ref, leaseId: "lease-3", runner: "builder-1", provider: "claude", branch: "standing-orders/t-1", worktree: "/pool/t-1", now: later(2), ...presented(store, ref, "builder") });
+    expect(store.bindWarmResume(attempt, parked, "session-x")).toMatchObject({ ok: false, problem: expect.stringContaining("does not carry session session-x") });
+    expect(store.bindWarmResume(attempt, recovering, "session-1")).toMatchObject({ ok: false, problem: expect.stringContaining("is not this task's parked builder attempt") });
+    expect(store.bindWarmResume(recovering, parked, "session-1")).toMatchObject({ ok: false, problem: expect.stringContaining("already continues run") });
+    // The park was already carried forward once (by `recovering`): the
+    // second try goes cold.
+    expect(store.bindWarmResume(attempt, parked, "session-1")).toMatchObject({ ok: false, problem: expect.stringContaining("was already resumed once") });
+    expect(store.getRun(attempt)).toMatchObject({ parentRun: null, sessionId: null });
+    // A park nobody carried yet binds exactly once.
+    const parked2 = store.startRun({ taskRef: ref, leaseId: "lease-4", runner: "builder-1", provider: "claude", sessionId: "session-2", branch: "standing-orders/t-1", worktree: "/pool/t-1", now: later(3), ...presented(store, ref, "builder") });
+    store.finishRun(parked2, { outcome: "parked", reason: "decision:2", now: later(3) });
+    expect(store.bindWarmResume(attempt, parked2, "session-2")).toEqual({ ok: true });
+    expect(store.getRun(attempt)).toMatchObject({ parentRun: parked2, sessionId: "session-2" });
+    expect(store.resumeCandidate(ref, "claude", "standing-orders/t-1")).toMatchObject({ run: { id: parked2 }, tried: true });
+    // An ended attempt binds nothing.
+    store.finishRun(attempt, { outcome: "built", reason: "done", now: later(4) });
+    const late = store.startRun({ taskRef: ref, leaseId: "lease-5", runner: "builder-1", provider: "claude", branch: "standing-orders/t-1", worktree: "/pool/t-1", now: later(5), ...presented(store, ref, "builder") });
+    store.finishRun(late, { outcome: "failed", reason: "x", now: later(5) });
+    expect(store.bindWarmResume(late, parked2, "session-2")).toMatchObject({ ok: false, problem: expect.stringContaining("is not an open builder attempt") });
+  });
+
   test("planner and formatting-repair bookkeeping never masquerade as the task result", () => {
     const ref = refOf("t-1");
     store.placeTask(ref, REPO);
@@ -1166,6 +1202,14 @@ describe("migration from an M3 database", () => {
     odd.exec(`CREATE TABLE decision (id INTEGER PRIMARY KEY, answered_via TEXT);`);
     odd.close();
 
+    // A nonempty file with NO version table is refused by the strict
+    // preflight BEFORE any DDL is inspected (raw authority repair): it is
+    // not fresh, and not a database this build shaped.
+    expect(() => openStore(file)).toThrow(/carries tables but no schema_version table/);
+    // With a version the build speaks, the odd DDL itself is the refusal.
+    const versioned = new DatabaseSync(file);
+    versioned.exec(`CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (2);`);
+    versioned.close();
     expect(() => openStore(file)).toThrow(/not a shape this migration knows/);
     rmSync(dir, { recursive: true, force: true });
   });
@@ -2184,6 +2228,15 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
          VALUES ('lease-next', (SELECT task_ref FROM run WHERE id = ?), 2, 'mac-a', ?, ?, ?)`,
       )
       .run(run, later(8).toISOString(), later(1000).toISOString(), later(8).toISOString());
+    // The attended session ended with its one attempt spent: an OPEN
+    // authorization whose attempt is spent admits nothing else (raw
+    // authority repair) — the next attempt is unattended, after closure.
+    expect(() => store.startRun({
+      taskRef: Number(store.raw().prepare("SELECT task_ref FROM run WHERE id = ?").get(run)!["task_ref"]),
+      leaseId: "lease-next", runner: "mac-a", branch: "so/t-held", worktree: "/tmp/wt2", now: later(9),
+      ...presented(store, Number(store.raw().prepare("SELECT task_ref FROM run WHERE id = ?").get(run)!["task_ref"]), "builder"),
+    })).toThrow(/already spent its one attempt on run #\d+/);
+    expect(store.closeAuthorization("auth-1", "run-ended", later(8))).toBe(true);
     const resumed = store.startRun({
       taskRef: Number(store.raw().prepare("SELECT task_ref FROM run WHERE id = ?").get(run)!["task_ref"]),
       leaseId: "lease-next",
@@ -2618,6 +2671,26 @@ describe("malformed authority fails closed and never shrinks (v48)", () => {
     expect(store.fallbackConfigProblem(REPO)).toContain("malformed");
     propose(store, { taskId: "t", goal: "guard", now: T0 });
     expect(store.getScope("t")?.profileState).toBe("unresolved");
+    // STRICT (raw authority repair): an entry carrying a key this code
+    // never writes, an unknown provider, a model that is not an exact id,
+    // a repair model that is not one, or an entry that is not an object —
+    // each is a stated problem, never "the known part of the entry".
+    for (const [label, entries, words] of [
+      ["an unknown key", [{ provider: "codex", model: "gpt-5-codex", authMode: "api-key", note: "x" }], /carries a key this code never writes/],
+      ["an unknown provider", [{ provider: "bard", model: "gpt-5-codex", authMode: "api-key" }], /names an unknown provider/],
+      ["a model that is not an id", [{ provider: "codex", model: "--dangerous", authMode: "api-key" }], /not an exact model id/],
+      ["an empty model", [{ provider: "codex", model: "", authMode: "api-key" }], /not an exact model id/],
+      ["a repair model that is not an id", [{ provider: "codex", model: "gpt-5-codex", authMode: "api-key", repairModel: "a b" }], /not an exact model id/],
+      ["a bogus auth mode", [{ provider: "codex", model: "gpt-5-codex", authMode: "maybe" }], /malformed/],
+      ["a list entry", [["codex", "gpt-5-codex"]], /not an object/],
+    ] as const) {
+      store.raw().prepare("UPDATE fallback_config SET entries_json = ? WHERE scope = ?").run(JSON.stringify(entries), REPO);
+      expect(store.fallbackConfigProblem(REPO), label).toMatch(words);
+      expect(store.fallbackConfig(REPO), label).toEqual([]);
+      propose(store, { taskId: "t", goal: "guard", now: T0 });
+      expect(store.getScope("t")?.profileState, label).toBe("unresolved");
+      expect(store.getScope("t")?.unresolvedReason, label).toContain("the configured fallback chain cannot file");
+    }
     // Repaired configuration: the chain files whole, and the approval binds it.
     store.setFallbackConfig(REPO, [{ provider: "codex", model: "gpt-5-codex", authMode: "api-key" }], "alex", T0);
     propose(store, { taskId: "t", goal: "guard", now: T0 });
@@ -2699,6 +2772,17 @@ describe("run admission proves route provenance before any row exists (v48)", ()
   const admit = (over: Record<string, unknown>) =>
     store.startRun({ taskRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0, ...over } as Parameters<Store["startRun"]>[0]);
   const runs = () => store.runsFor(taskRef).length;
+  /** A finished, reviewable attempt's OPEN review request (raw authority
+   * repair): a root reviewer answers exactly this, inside its insert. */
+  const reviewable = (run: number): { request: number } => {
+    if (store.getRun(run)?.outcome === null) {
+      store.saveArtifact({ run, kind: "terminal-diff", key: `k-${run}`, bytesOriginal: 1, bytesStored: 1, truncated: false, sha256: "s", capture: "git diff (exit 0)", captureStatus: "ok" }, T0);
+      store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+    }
+    const asked = store.requestReview(run, "alex", T0);
+    if (!asked.ok) throw new Error(`requestReview: ${asked.reason}`);
+    return { request: asked.id };
+  };
 
   test("phase, provider, model, and provenance mismatches are refused before the insert; the honest stamp is admitted and becomes the row's agent", () => {
     const build = { routeDigest: digest, phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" } as const;
@@ -2721,12 +2805,22 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     // The honest stamp: admitted, and the row carries the exact agent it names.
     const id = admit({ route: build });
     expect(store.getRun(id)).toMatchObject({ provider: "claude", model: "sonnet" });
+    // A REVIEWER answers a live review request (raw authority repair): with
+    // none, nothing opens; with one, the stamp is still proved.
+    expect(() => admit({ role: "reviewer", parentRun: id, branch: undefined, worktree: undefined, route: build })).toThrow(/reviewed only through its open review request — none was presented/);
+    const asked = reviewable(id);
+    expect(() => admit({ role: "reviewer", parentRun: id, request: asked.request + 100, branch: undefined, worktree: undefined, route: build })).toThrow(/is not run #\d+'s open request/);
     // a reviewer role on the build leg
-    expect(() => admit({ role: "reviewer", parentRun: id, branch: undefined, worktree: undefined, route: build })).toThrow(/a reviewer run spends as the review leg/);
+    expect(() => admit({ role: "reviewer", parentRun: id, ...asked, branch: undefined, worktree: undefined, route: build })).toThrow(/a reviewer run spends as the review leg/);
+    // The refusal consumed nothing: the request is still open.
+    expect(store.raw().prepare("SELECT consumed_at FROM review_request WHERE id = ?").get(asked.request)).toEqual({ consumed_at: null });
     expect(store.runRoute(id)).toMatchObject({ phase: "build", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: digest });
     // The review leg is the strong reviewer the elevated risk asked for.
-    const review = admit({ role: "reviewer", parentRun: id, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex", route: { routeDigest: digest, phase: "review", provider: "codex", model: "gpt-5-codex", chosen: "recommended" } });
+    const review = admit({ role: "reviewer", parentRun: id, ...asked, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex", route: { routeDigest: digest, phase: "review", provider: "codex", model: "gpt-5-codex", chosen: "recommended" } });
     expect(store.runRoute(review)).toMatchObject({ phase: "review", chosen: "recommended" });
+    expect(store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(asked.request)).toEqual({ consumed_reason: "dispatched" });
+    // A non-reviewer presenting a request: refused.
+    expect(() => admit({ request: asked.request, route: build })).toThrow(/a builder run answers no review request/);
     expect(runs()).toBe(2);
   });
 
@@ -2768,10 +2862,11 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     // A reviewer child presents the review leg (the strong codex reviewer); an unpresented one opens nothing.
     const reviewLeg = store.routeAuthorityFor(taskRef, "reviewer");
     if (reviewLeg === null || !reviewLeg.ok) throw new Error("review leg");
-    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex" })).toThrow(/present its review leg/);
-    const review = admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex", route: reviewLeg.stamp });
+    const askedBare = reviewable(bare);
+    expect(() => admit({ role: "reviewer", parentRun: bare, ...askedBare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex" })).toThrow(/present its review leg/);
+    expect(() => admit({ role: "reviewer", parentRun: bare, ...askedBare, branch: undefined, worktree: undefined, provider: "claude", model: "sonnet", route: reviewLeg.stamp })).toThrow(/names codex but the run would spend as claude/);
+    const review = admit({ role: "reviewer", parentRun: bare, ...askedBare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex", route: reviewLeg.stamp });
     expect(store.runRoute(review)).toMatchObject({ phase: "review", provider: "codex", model: "gpt-5-codex", chosen: "recommended", routeDigest: digest });
-    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "claude", model: "sonnet", route: reviewLeg.stamp })).toThrow(/names codex but the run would spend as claude/);
     expect(runs()).toBe(2);
     // STALE authority: the seal withdrawn, the old stamp — exact as it was —
     // admits nothing, and nothing else could govern a builder, scout,
@@ -2783,7 +2878,10 @@ describe("run admission proves route provenance before any row exists (v48)", ()
       expect(() => admit({ role, parentRun: bare })).toThrow(/nothing spends as its (build|repair) leg without a sealed route — the scope was approved and then changed/);
       expect(store.routeAuthorityFor(taskRef, role)).toMatchObject({ ok: false, problem: expect.stringContaining("without a sealed route") });
     }
-    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex", route: reviewLeg.stamp })).toThrow(/without a sealed route/);
+    // The reviewed run has no open request left (its review exists), and
+    // nothing could govern a reviewer under the withdrawn seal either way.
+    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex", route: reviewLeg.stamp })).toThrow(/reviewed only through its open review request/);
+    expect(store.routeAuthorityFor(taskRef, "reviewer")).toMatchObject({ ok: false, problem: expect.stringContaining("without a sealed route") });
     expect(runs()).toBe(2);
     // A planner still opens before approval — presenting the WORKING route's plan leg, exactly.
     const proposed = routeFromJson(store.getScope("t")!.proposedRouteJson ?? null)!;
@@ -2867,11 +2965,16 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     const exact = `profile:${profileDigestOf(pinned)}`;
     const open = (over: Record<string, unknown>) =>
       store.startRun({ taskRef: attRef, leaseId: "l", runner: "mac-a", branch: "b", worktree: "/w", now: T0, ...over } as Parameters<Store["startRun"]>[0]);
-    expect(() => open({})).toThrow(/presented no route authority/);
+    expect(() => open({})).toThrow(/an attended builder presents the authorization's pinned profile profile:[0-9a-f]{32} as its authority — none was presented/);
     expect(() => open({ route: { routeDigest: "legacy", phase: "build", provider: "claude", model: "opus", chosen: "legacy" } })).toThrow(/spends under the authorization's pinned profile/);
     expect(() => open({ route: { routeDigest: "profile:" + "0".repeat(32), phase: "build", provider: "claude", model: "opus", chosen: "legacy" } })).toThrow(/spends under the authorization's pinned profile/);
     expect(() => open({ route: { routeDigest: exact, phase: "build", provider: "claude", model: "sonnet", chosen: "legacy" }, model: "sonnet" })).toThrow(/pins claude · opus, not claude · sonnet/);
-    expect(() => open({ route: { routeDigest: exact, phase: "build", provider: "claude", model: "opus", chosen: "recommended" } })).toThrow(/nothing spends as a recommended build leg without a sealed route/);
+    expect(() => open({ route: { routeDigest: exact, phase: "build", provider: "claude", model: "opus", chosen: "recommended" } })).toThrow(/an attended builder spends under the authorization's pinned profile \(a legacy stamp\), not as a recommended leg/);
+    // LIVENESS (raw authority repair): an expired authorization, or one
+    // whose single attempt is spent, admits nothing — proved in the insert.
+    store.raw().prepare("UPDATE attended_authorization SET absolute_expiry = ? WHERE id = 'auth-exact'").run(T0.toISOString());
+    expect(() => open({ route: { routeDigest: exact, phase: "build", provider: "claude", model: "opus", chosen: "legacy" } })).toThrow(/expired at .* — nothing spends under it/);
+    store.raw().prepare("UPDATE attended_authorization SET absolute_expiry = ? WHERE id = 'auth-exact'").run(later(3_600_000).toISOString());
     expect(() => open({ route: { routeDigest: exact, phase: "build", provider: "claude", model: "opus", chosen: "legacy" }, custody: { kind: "base" } })).toThrow(/attended session spends under its own authority — it takes no chain custody/);
     expect(store.runsFor(attRef)).toHaveLength(0);
     const run = open({ route: { routeDigest: exact, phase: "build", provider: "claude", model: "opus", chosen: "legacy" } });
@@ -2956,7 +3059,8 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     // taking no custody of the chain.
     const reviewLeg = store.routeAuthorityFor(taskRef, "reviewer");
     if (reviewLeg === null || !reviewLeg.ok) throw new Error("review leg");
-    const review = admit({ role: "reviewer", parentRun: admitted.runId, branch: undefined, worktree: undefined, provider: reviewLeg.stamp.provider, model: reviewLeg.stamp.model ?? undefined, route: reviewLeg.stamp });
+    store.finishRun(repair, { outcome: "failed", reason: "x", now: T0 });
+    const review = admit({ role: "reviewer", parentRun: admitted.runId, ...reviewable(admitted.runId), branch: undefined, worktree: undefined, provider: reviewLeg.stamp.provider, model: reviewLeg.stamp.model ?? undefined, route: reviewLeg.stamp });
     expect(store.getRun(review)).toMatchObject({ role: "reviewer", chainCycle: null, chainIndex: null, entryDigest: null });
     expect(store.runRoute(review)).toMatchObject({ phase: "review", chosen: reviewLeg.stamp.chosen });
   });

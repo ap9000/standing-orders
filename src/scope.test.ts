@@ -542,9 +542,27 @@ describe("exact-key, safe-integer, timer-safe rehydration (v48 integrity)", () =
       ["digest", "a chain the digest never bound", () => raw.prepare("UPDATE task_scope SET proposed_chain_json = ? WHERE task_id = 'p'").run(JSON.stringify({ digestVersion: 1, chain: [{ profile: profile.profile, authMode: "subscription" }] }))],
       ["digest", "a digest that does not re-derive", () => raw.prepare("UPDATE task_scope SET digest = ? WHERE task_id = 'p'").run("f".repeat(32))],
       ["unrouted", "a pre-routing row", () => raw.prepare("UPDATE task_scope SET route_era = NULL WHERE task_id = 'p'").run()],
+      // THE RAW TERMS (raw authority repair): corruption the lenient
+      // readers used to filter, default, or coerce into the SAME digest —
+      // a non-string touch entry, a rubric entry with a key this code
+      // never writes, a text budget, a rubric that does not parse, a
+      // digest version or route era no build writes — is a stated
+      // problem, and no seal, consent, or yes lands on it.
+      ["terms", "a touch entry that is not a string", () => raw.prepare("UPDATE task_scope SET touches = ? WHERE task_id = 'p'").run(JSON.stringify(["src", 5]))],
+      ["terms", "touches that are not a list", () => raw.prepare("UPDATE task_scope SET touches = ? WHERE task_id = 'p'").run(JSON.stringify({ src: true }))],
+      ["terms", "touches that are not JSON", () => raw.prepare("UPDATE task_scope SET touches = '[' WHERE task_id = 'p'").run()],
+      ["terms", "a rubric entry with an unknown key", () => raw.prepare("UPDATE task_scope SET acceptance_json = ? WHERE task_id = 'p'").run(JSON.stringify([{ id: "c1", statement: "s", how: null, evidence: ["check"], extra: 1 }]))],
+      ["terms", "a rubric entry that does not parse", () => raw.prepare("UPDATE task_scope SET acceptance_json = ? WHERE task_id = 'p'").run(JSON.stringify([{ id: "c1", statement: "s", how: null, evidence: ["check"] }, { id: 7 }]))],
+      ["terms", "a rubric that is not a list", () => raw.prepare("UPDATE task_scope SET acceptance_json = '{}' WHERE task_id = 'p'").run()],
+      ["terms", "a text budget", () => raw.prepare("UPDATE task_scope SET budget_microusd = 'lots' WHERE task_id = 'p'").run()],
+      ["terms", "a fractional budget", () => raw.prepare("UPDATE task_scope SET budget_microusd = 1.5 WHERE task_id = 'p'").run()],
+      ["terms", "a digest version no build writes", () => raw.prepare("UPDATE task_scope SET digest_version = 3 WHERE task_id = 'p'").run()],
+      ["terms", "a route era no build writes", () => raw.prepare("UPDATE task_scope SET route_era = 99 WHERE task_id = 'p'").run()],
     ];
+    const rawRestore = raw.prepare("SELECT touches, acceptance_json, budget_microusd, digest_version FROM task_scope WHERE task_id = 'p'").get() as Record<string, unknown>;
     for (const [reason, label, corrupt] of cases) {
       restore();
+      raw.prepare("UPDATE task_scope SET touches = ?, acceptance_json = ?, budget_microusd = ?, digest_version = ? WHERE task_id = 'p'").run(rawRestore["touches"], rawRestore["acceptance_json"], rawRestore["budget_microusd"], rawRestore["digest_version"]);
       corrupt();
       const refused = scopeAuthorityOf(store.getScope("p")!);
       expect(refused, label).toMatchObject({ ok: false, reason });
@@ -552,8 +570,15 @@ describe("exact-key, safe-integer, timer-safe rehydration (v48 integrity)", () =
       const current = store.getScope("p")!;
       expect(approve(store, "p", "alex", T0, current.digest, "tok-alex").ok, label).toBe(false);
       expect(current.approvedAt, label).toBeNull();
+      if (reason === "terms") {
+        expect(current.termsProblem, label).toEqual(expect.any(String));
+        expect(store.sealedRouteOf("p"), label).toMatchObject({ ok: false, reason: "unreadable", detail: expect.stringContaining("cannot be read exactly") });
+        expect(store.routeAuthorityFor(ref, "builder"), label).toMatchObject({ ok: false, problem: expect.stringContaining("cannot be read exactly") });
+      }
     }
     restore();
+    raw.prepare("UPDATE task_scope SET touches = ?, acceptance_json = ?, budget_microusd = ?, digest_version = ? WHERE task_id = 'p'").run(rawRestore["touches"], rawRestore["acceptance_json"], rawRestore["budget_microusd"], rawRestore["digest_version"]);
+    expect(store.getScope("p")!.termsProblem).toBeNull();
     expect(scopeAuthorityOf(store.getScope("p")!).ok).toBe(true);
     expect(approve(store, "p", "alex", T0, store.getScope("p")!.digest, "tok-alex").ok).toBe(true);
     store.close();

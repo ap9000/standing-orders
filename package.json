@@ -13,6 +13,7 @@
     "certify:provider": "npm run build && node scripts/provider-canary.mjs",
     "prepublishOnly": "npm run typecheck && npm run build",
     "nul-scan": "node scripts/nul-scan.mjs",
+    "proof-preflight": "node scripts/proof-preflight.mjs",
     "fixture:v47": "node scripts/derive-v47-fixture.mjs"
   },
   "repository": {
@@ -57,6 +58,7 @@
   },
   "files": [
     "dist",
-    "scripts/provider-canary.mjs"
+    "scripts/provider-canary.mjs",
+    "scripts/proof-preflight.mjs"
   ]
 }

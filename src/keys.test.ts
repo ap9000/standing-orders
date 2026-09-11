@@ -10,7 +10,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { openStore, type Store } from "./store.js";
-import { saveProviderKey, readProviderKey, clearProviderKey, keyStatus, keyFileFor, verifyProviderKey, verdictWords, readAuthMode, setAuthMode, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
+import { saveProviderKey, readProviderKey, clearProviderKey, keyStatus, keyFileFor, verifyProviderKey, verdictWords, readAuthMode, readAuthModeStrict, setAuthMode, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
 import { invokeAgent, invokeHeldAgent } from "./invoke.js";
 import { runOperate } from "./operate.js";
 import { register } from "./runner.js";
@@ -152,6 +152,20 @@ describe("auth mode: subscription first, key as fallback", () => {
   let home: string;
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), "so-authmode-")); });
   afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  test("the strict read (raw authority repair): an absent file is the default, a stored word is that word, and a file that says neither is a stated problem — never the subscription default", () => {
+    expect(readAuthModeStrict("claude", home)).toEqual({ ok: true, mode: "subscription" });
+    expect(readAuthModeStrict("gemini", home)).toEqual({ ok: true, mode: "api-key" });
+    expect(setAuthMode("claude", "api-key", home)).toEqual({ ok: true });
+    expect(readAuthModeStrict("claude", home)).toEqual({ ok: true, mode: "api-key" });
+    writeFileSync(join(home, ".standing-orders", "keys", "claude.auth"), "bogus\n");
+    // The lenient reader coerces; the strict one refuses in words.
+    expect(readAuthMode("claude", home)).toBe("subscription");
+    expect(readAuthModeStrict("claude", home)).toMatchObject({ ok: false, problem: expect.stringContaining('says "bogus", not subscription or api-key') });
+    // A provider with no subscription login is the key whatever the file says.
+    writeFileSync(join(home, ".standing-orders", "keys", "openrouter.auth"), "subscription");
+    expect(readAuthModeStrict("openrouter", home)).toEqual({ ok: true, mode: "api-key" });
+  });
 
   test("defaults: claude/codex subscription, gemini/openrouter api-key; openrouter cannot go subscription", () => {
     expect(readAuthMode("claude", home)).toBe("subscription");

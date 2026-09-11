@@ -6,6 +6,8 @@ import { register, retireRunnerIfCurrent } from "./runner.js";
 import { acquire, currentClaim, reap } from "./claim.js";
 import { propose, approve, addApprover, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import { resetAttestationCache } from "./attest.js";
+import { PROOF_LIMITS } from "./proof.js";
+import { HANDOFF_LIST_CAP, HANDOFF_PAYLOAD_CAP } from "./decision.js";
 import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
 import { createHash as sha } from "node:crypto";
 
@@ -853,6 +855,27 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("Each caveat has a hard cap of 300 bytes UTF-8");
     expect(prompt).toContain("Target 180 bytes or fewer");
     expect(prompt).toContain("measure every caveat string's UTF-8 byte length");
+  });
+
+  test("the brief states EVERY proof and handoff cap the parsers hold the files to, and tells the agent to preflight each protocol file before it exits (raw authority repair)", async () => {
+    await build1();
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    // The proof: every remaining cap, named with the parser's own numbers.
+    expect(prompt).toContain(`the whole file under ${PROOF_LIMITS.payload} bytes; at most ${PROOF_LIMITS.criteria} criteria, ${PROOF_LIMITS.checks} checks, ${PROOF_LIMITS.changed} changed`);
+    expect(prompt).toContain(`paths, ${PROOF_LIMITS.caveats} caveats, and ${PROOF_LIMITS.screenshots} screenshots; each criterion id at most ${PROOF_LIMITS.criterionId} bytes`);
+    expect(prompt).toContain(`each statement at most ${PROOF_LIMITS.criterionStatement}`);
+    expect(prompt).toContain(`most ${PROOF_LIMITS.evidenceRef} bytes UTF-8; every string ONE line of plain text with no control`);
+    expect(prompt).toContain("every path repository-relative");
+    // The handoff: the whole-file cap and the one-line rule.
+    expect(prompt).toContain(`The whole file must be under ${HANDOFF_PAYLOAD_CAP} bytes`);
+    expect(prompt).toContain(`Keep each list to at most ${HANDOFF_LIST_CAP} items`);
+    expect(prompt).toContain("a newline or other control");
+    // The exit preflight.
+    expect(prompt).toContain("Preflight every protocol file before you exit");
+    expect(prompt).toContain("re-read it from disk, parse it as");
+    expect(prompt).toContain("Buffer.byteLength");
+    expect(prompt).toContain("confirm every evidence ref resolves to");
+    expect(prompt).toContain("refused whole — the machine never repairs it for you");
   });
 
   test("steering notes land fenced in the brief, and delivery settles only on the stream's receipt (arc 1)", async () => {

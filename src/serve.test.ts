@@ -4563,7 +4563,7 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
       store.casContestantState(agent.id, ["ready"], "building", agent.generation);
       store.startRun({
         taskRef, leaseId: taken.claim.leaseId, runner: "night-shift-3",
-        branch: agent.branch, worktree: `/pool/int-${agent.id}`, contestant: agent.id, now: new Date(Date.now() - 7_200_000),
+        branch: agent.branch, worktree: `/pool/int-${agent.id}`, contestant: agent.id, route: store.laneAuthorityFor(agent.id)!, now: new Date(Date.now() - 7_200_000),
       });
     }
     const racing = store.getContest(admitted.contestId);
@@ -4662,7 +4662,7 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     const conclude = (agent: typeof first, committed: boolean, head: string, slot: number | null) => {
       const runId = store.startRun({
         taskRef, leaseId: taken.claim.leaseId, runner: "night-shift-1",
-        branch: agent.branch, worktree: `/pool/${agent.id}`, contestant: agent.id, now: T0,
+        branch: agent.branch, worktree: `/pool/${agent.id}`, contestant: agent.id, route: store.laneAuthorityFor(agent.id)!, now: T0,
       });
       storeEvidence(store, evidenceRoot, runId, "terminal-diff", "terminal-diff.patch",
         Buffer.from("diff --git a/x b/x\n+raced\n", "utf8"), "git diff (exit 0)", T0, { captureStatus: "ok" });
@@ -10005,7 +10005,11 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
         matrix: [row("c1", "It works", "failed", [{ kind: "check", ref: "npm test" }, { kind: "screenshot", ref: "evidence/x.png" }], ["contradicted"], { judgement: "contradicts", note: "the guard is a TODO", author: "reviewer:codex" })],
       },
     });
-    const reviewerRun = store.startRun({ taskRef: richRef, leaseId: "lease-reviewer", runner: "night-shift-1", role: "reviewer", parentRun: rich, provider: "codex", now: T0, ...presented(store, richRef, "reviewer") });
+    // The reviewer answers the finished run's open review request inside
+    // its own admission (raw authority repair).
+    const richAsked = store.requestReview(rich, "alex", T0);
+    if (!richAsked.ok) throw new Error(`requestReview: ${richAsked.reason}`);
+    const reviewerRun = store.startRun({ taskRef: richRef, leaseId: "lease-reviewer", runner: "night-shift-1", role: "reviewer", parentRun: rich, request: richAsked.id, provider: "codex", now: T0, ...presented(store, richRef, "reviewer") });
     store.stampProviderStart(reviewerRun, T0);
     const richPatch = store.artifactsFor(rich).find(one => one.kind === "terminal-diff");
     if (richPatch === undefined) throw new Error("no patch");

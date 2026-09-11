@@ -293,6 +293,53 @@ export function chainFromJson(json: string | null): ChainEntry[] | null {
 }
 
 /**
+ * THE STRICT RAW TERMS READ (raw authority repair): the stored columns of
+ * a scope or a standing order, proved EXACTLY — a JSON list is a list of
+ * strings and nothing else, a rubric is a list of whole criteria carrying
+ * exactly the keys this code writes and parsing with zero problems, a
+ * budget is a safe integer or null. Nothing is filtered, defaulted, or
+ * coerced on the way to an authority: the words say what is wrong, and
+ * the caller refuses.
+ */
+export function exactStringList(value: unknown, what: string): { ok: true; list: string[] } | { ok: false; problem: string } {
+  if (typeof value !== "string") return { ok: false, problem: `${what} is not stored as text` };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return { ok: false, problem: `${what} is not valid JSON` };
+  }
+  if (!Array.isArray(parsed)) return { ok: false, problem: `${what} is not a JSON list` };
+  if (!parsed.every(one => typeof one === "string")) return { ok: false, problem: `${what} carries an entry that is not a string` };
+  return { ok: true, list: parsed as string[] };
+}
+
+export function exactAcceptance(value: unknown): { ok: true; criteria: AcceptanceCriterion[] } | { ok: false; problem: string } {
+  if (value === null || value === undefined) return { ok: true, criteria: [] };
+  if (typeof value !== "string") return { ok: false, problem: "the rubric is not stored as text" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return { ok: false, problem: "the rubric is not valid JSON" };
+  }
+  if (!Array.isArray(parsed)) return { ok: false, problem: "the rubric is not a JSON list" };
+  for (const [index, entry] of parsed.entries()) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return { ok: false, problem: `rubric entry ${index + 1} is not an object` };
+    if (!exactKeys(entry as object, ["id", "statement", "evidence"], ["how"])) return { ok: false, problem: `rubric entry ${index + 1} carries a key this code never writes` };
+  }
+  const read = parseAcceptanceCriteria(parsed);
+  if (read.problems.length > 0) return { ok: false, problem: `the rubric does not parse: ${read.problems.map(one => one.message).join("; ")}` };
+  return { ok: true, criteria: read.criteria };
+}
+
+export function exactSafeIntegerOrNull(value: unknown, what: string): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) return `${what} is not a safe integer`;
+  return null;
+}
+
+/**
  * The longest clock a snapshot may bind, in seconds: a JavaScript timer
  * holds at most 2^31 − 1 milliseconds, and a bound past that fires at
  * once instead of never — a "timeout" that is not one. Every stored
@@ -692,6 +739,17 @@ export type Scope = {
   proposedRouteJson?: string | null;
   approvedRouteJson?: string | null;
   routeEra?: number | null;
+  /** THE RAW TERMS VERDICT (raw authority repair): null when every stored
+   * term and metadata column read back EXACTLY — touches a JSON list of
+   * strings, the rubric a list of whole criteria with no unknown key, the
+   * budget a safe integer or null, the quality mode, risk level, approval
+   * kind, profile state, digest version, and route era each one of the
+   * words this code writes — and the words when one did not. The lenient
+   * fields above (`touches`, `acceptance`, …) are the console's reading;
+   * every authority — consent, seal, chain, dispatch — refuses on a
+   * non-null verdict, so filtering, defaulting, or coercion can never
+   * turn a corrupt row into authority. Undefined on a hand-built scope. */
+  termsProblem?: string | null;
 };
 
 export type Approval =
@@ -1190,9 +1248,15 @@ export function approvalOf(scope: Scope | null): Approval {
  */
 export type ScopeAuthority =
   | { ok: true; profile: ExecutionProfile; chain: ChainEntry[] | null; route: PhaseRoute; digest: string }
-  | { ok: false; reason: "unrouted" | "unresolved" | "profile" | "chain" | "route" | "parity" | "digest"; problem: string };
+  | { ok: false; reason: "terms" | "unrouted" | "unresolved" | "profile" | "chain" | "route" | "parity" | "digest"; problem: string };
 
 export function scopeAuthorityOf(scope: Scope): ScopeAuthority {
+  // THE RAW TERMS FIRST (raw authority repair): a row whose stored terms
+  // or metadata do not read back exactly is no authority at all — not
+  // the filtered, defaulted, or coerced reading of it.
+  if (scope.termsProblem != null) {
+    return { ok: false, reason: "terms", problem: `the scope's stored terms cannot be read exactly (${scope.termsProblem})` };
+  }
   if (scope.routeEra == null) {
     return { ok: false, reason: "unrouted", problem: "this scope predates agent routing — its terms name no agent for any role; re-file it to route it under today's agents" };
   }

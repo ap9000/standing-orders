@@ -88,6 +88,29 @@ export function readAuthMode(provider: ProviderId, home: string = homedir()): Au
   }
 }
 
+/**
+ * The auth mode as an AUTHORITY reads it (raw authority repair): an absent
+ * file is the provider's default, but a file that is present and says
+ * neither `subscription` nor `api-key` is a stated problem — never the
+ * subscription default a lenient read would coerce it to. A provider with
+ * no subscription login is the key, whatever the file says.
+ */
+export function readAuthModeStrict(provider: ProviderId, home: string = homedir()): { ok: true; mode: AuthMode } | { ok: false; problem: string } {
+  if (!SUBSCRIPTION_CAPABLE[provider]) return { ok: true, mode: "api-key" };
+  let raw: string;
+  try {
+    raw = readFileSync(authModeFileFor(provider, home), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, mode: DEFAULT_AUTH_MODE[provider] };
+    return { ok: false, problem: `the ${provider} auth-mode file cannot be read (${(error as NodeJS.ErrnoException).code ?? "error"}) — run \`keys auth ${provider} subscription|api-key\` to restate it` };
+  }
+  const value = raw.trim();
+  if (value !== "subscription" && value !== "api-key") {
+    return { ok: false, problem: `the ${provider} auth-mode file says ${JSON.stringify(value.slice(0, 40))}, not subscription or api-key — run \`keys auth ${provider} subscription|api-key\` to restate it` };
+  }
+  return { ok: true, mode: value };
+}
+
 export function setAuthMode(
   provider: ProviderId,
   mode: AuthMode,

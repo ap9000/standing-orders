@@ -185,19 +185,34 @@ describe("contest and contestant state moves are compare-and-swap, generation-bu
     expect(store.getContest(contest)?.generation).toBe(2);
   });
 
-  test("exactly one live run per agent: the pointer admits one claim", () => {
+  test("exactly one live run per agent: the ADMISSION binds the lane's pointer inside the insert — a held lane admits no second run, a released lane admits the next, and a lane stamp that is not the lane's opens nothing", () => {
     const [first] = contestants;
     if (first === undefined) throw new Error("setup");
     const ref = store.refFor("built-in", "race-me").id;
-    const runOf = (lease: string) =>
-      store.startRun({ taskRef: ref, leaseId: lease, runner: "night-shift-1", branch: "standing-orders/race-me", worktree: "/pool/x", now: T0 });
+    const rows = () => Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run").get() as { n: number }).n);
+    const runOf = (lease: string, over: Record<string, unknown> = {}) =>
+      store.startRun({ taskRef: ref, leaseId: lease, runner: "night-shift-1", branch: "standing-orders/race-me", worktree: "/pool/x", contestant: first, route: store.laneAuthorityFor(first)!, now: T0, ...over } as Parameters<Store["startRun"]>[0]);
+    // No stamp, a foreign digest, or the sealed route's leg instead of the
+    // lane's profile: refused before any row.
+    const before = rows();
+    expect(() => store.startRun({ taskRef: ref, leaseId: "l-0", runner: "night-shift-1", branch: "standing-orders/race-me", worktree: "/pool/x", contestant: first, now: T0 })).toThrow(/a contest lane presents its race-approved profile as its authority — none was presented/);
+    expect(() => runOf("l-0", { route: { ...store.laneAuthorityFor(first)!, routeDigest: "profile:" + "0".repeat(32) } })).toThrow(/a contest lane spends under its race-approved profile, not profile:0{32}/);
+    expect(() => runOf("l-0", { route: { ...store.laneAuthorityFor(first)!, chosen: "recommended" } })).toThrow(/a contest lane spends under its race-approved profile \(a legacy stamp\)/);
+    expect(() => runOf("l-0", { contestant: 9999, route: store.laneAuthorityFor(first)! })).toThrow(/contestant 9999 is not one of this task's racing agents/);
+    expect(rows()).toBe(before);
     const runA = runOf("l-a");
-    const runB = runOf("l-b");
-    const runC = runOf("l-c");
-    expect(store.claimContestantRun(first, runA, 1)).toBe(true);
-    expect(store.claimContestantRun(first, runB, 2)).toBe(false);
+    expect(store.getContestant(first)).toMatchObject({ activeRun: runA, generation: 2 });
+    // The lane is held: a second admission refuses, no row.
+    expect(() => runOf("l-b")).toThrow(/already holds run #\d+ — one live run per racing agent/);
+    expect(rows()).toBe(before + 1);
     store.releaseContestantRun(first, runA);
-    expect(store.claimContestantRun(first, runC, 2)).toBe(true);
+    const runC = runOf("l-c");
+    expect(store.getContestant(first)).toMatchObject({ activeRun: runC, generation: 3 });
+    // A run on a contest that is no longer dispatching or racing: refused.
+    store.releaseContestantRun(first, runC);
+    const contestRow = store.getContestant(first)!;
+    store.casContestState(contestRow.contest, ["dispatching"], "interrupted", store.getContest(contestRow.contest)!.generation);
+    expect(() => runOf("l-d")).toThrow(/the contest is interrupted — its lanes admit nothing/);
   });
 
   test("money accumulates across the lineage; the latch charges the FULL reservation", () => {
@@ -484,9 +499,8 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
     const [first] = store.contestants(contestId);
     if (first === undefined) throw new Error("setup");
     // One agent actually started (run with provider start); the other never did.
-    const run = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: first.branch, worktree: "/pool/c1", now: T0 });
+    const run = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: first.branch, worktree: "/pool/c1", contestant: first.id, route: store.laneAuthorityFor(first.id)!, now: T0 });
     store.stampProviderStart(run, T0);
-    store.claimContestantRun(first.id, run, store.getContestant(first.id)!.generation);
     release(store, leaseId, T0); // the daemon died; the reaper let go
     expect(recoverContests(store, T0)).toBe(1);
     expect(store.getContest(contestId)?.state).toBe("interrupted");
@@ -883,7 +897,7 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
       { provider: "claude", model: "claude-haiku-4-5", repairModel: "claude-haiku-4-5", branch: "b2", budgetMicrousd: 5_000_000, reserveMicrousd: 1_000_000 },
     ]);
     // c2 already built; c1 parked with an open question → decision-wait.
-    const run1 = store.startRun({ taskRef, leaseId: "l1", runner: "r", branch: "b1", worktree: "/p/1", contestant: ids[0], now: T0 });
+    const run1 = store.startRun({ taskRef, leaseId: "l1", runner: "r", branch: "b1", worktree: "/p/1", contestant: ids[0], route: store.laneAuthorityFor(ids[0])!, now: T0 });
     store.saveDecision(
       { run: run1, contestant: ids[0], urgency: "blocking", recap: "r", question: "q?", options: [{ id: "a", label: "A", consequence: "c", reversible: true }], recommendation: "a" },
       T0,
@@ -1072,6 +1086,9 @@ describe("stage 5 — pickability, the tuple digest, and the pick/abandon ceremo
       branch: contestant.branch,
       worktree: `/pool/${contestant.id}`,
       contestant: contestant.id,
+      // The lane's authority, presented — the admission proves and binds
+      // the lane inside the insert (raw authority repair).
+      route: store.laneAuthorityFor(contestant.id)!,
       now: T0,
     });
     if (spec.evidence !== "none") {
