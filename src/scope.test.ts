@@ -1,6 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { propose, approve, addApprover, approvalOf, authenticateApprover, digestOf, describeScope, profileDigestOf, profileFromJson, canonicalProfileJson, chainDigestOf, chainFromJson, canonicalChainJson } from "./scope.js";
+import { routeDigestOf, routeFromJson, routeIsSigned } from "./phase-routing.js";
+import { proveApprovedProfile } from "./builder.js";
+import { register } from "./runner.js";
+import { acquire } from "./claim.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
@@ -535,5 +539,117 @@ describe("filing under a fallback chain (E3a): the digest binds it, the seal cop
     const resealed = store.getScope("t-rewrite")!;
     expect(resealed.approvalKind).toBe("profile");
     expect(resealed.approvedChainJson ?? null).toBeNull();
+  });
+});
+
+describe("the phase route is a signed term (v47): the digest binds it, the seal copies it, later changes stale it", () => {
+  let store: Store;
+  const REPO = "/repos/routed";
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseTierConfig("installation", "build", "strong", "claude", "opus", "alex", T0);
+    store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "alex", T0);
+    const alex = addApprover(store, "alex", T0, undefined, () => "tok-alex");
+    if (!alex.ok) throw new Error("bootstrap");
+  });
+  afterEach(() => store.close());
+
+  const file = (id: string, options: { risk?: "routine" | "elevated" | "high"; qualityMode?: "default" | "strict" } = {}) => {
+    store.createTask({ id, title: id }, T0);
+    const ref = store.refFor("built-in", id).id;
+    store.placeTask(ref, REPO);
+    propose(store, { taskId: id, goal: "a guard", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], now: T0, ...(options.risk === undefined ? {} : { riskLevel: options.risk }), ...(options.qualityMode === undefined ? {} : { qualityMode: options.qualityMode }) });
+    return { ref, scope: store.getScope(id)! };
+  };
+
+  test("a routine route folds nothing into the digest; a high-risk route folds its digest in and drives the strong build profile", () => {
+    const routine = file("t-routine");
+    const routineRoute = routeFromJson(routine.scope.proposedRouteJson ?? null)!;
+    expect(routeIsSigned(routineRoute)).toBe(false);
+    expect(routine.scope.digest).toBe(digestOf({ goal: "a guard", outOfScope: null, touches: [], budgetMicrousd: null, acceptance: routine.scope.acceptance }, routine.scope.profile ?? null));
+    expect(routine.scope.profile?.model).toBe("sonnet");
+
+    const risky = file("t-high", { risk: "high" });
+    const riskyRoute = routeFromJson(risky.scope.proposedRouteJson ?? null)!;
+    expect(routeIsSigned(riskyRoute)).toBe(true);
+    expect(risky.scope.riskLevel).toBe("high");
+    // The strong tier drove the SEALED profile — route and profile agree.
+    expect(risky.scope.profile?.model).toBe("opus");
+    expect(riskyRoute.legs.find(one => one.phase === "build")).toMatchObject({ provider: "claude", model: "opus", tier: "strong" });
+    expect(risky.scope.digest).toBe(
+      digestOf({ goal: "a guard", outOfScope: null, touches: [], budgetMicrousd: null, acceptance: risky.scope.acceptance }, risky.scope.profile ?? null, riskyRoute),
+    );
+    expect(risky.scope.digest).not.toBe(
+      digestOf({ goal: "a guard", outOfScope: null, touches: [], budgetMicrousd: null, acceptance: risky.scope.acceptance }, risky.scope.profile ?? null),
+    );
+    const provenance = JSON.parse(String(store.raw().prepare("SELECT profile_provenance FROM task_scope WHERE task_id = 't-high'").get()?.["profile_provenance"])) as Record<string, unknown>;
+    expect(provenance["resolvedFrom"]).toBe("route");
+    expect(provenance["routeDigest"]).toBe(routeDigestOf(riskyRoute));
+  });
+
+  test("approval seals the exact route bytes; a task-level route edit stales it; a global config change cannot rewrite the sealed route", () => {
+    const { ref, scope } = file("t-seal", { risk: "elevated" });
+    expect(store.approvedRouteOf("t-seal")).toBeNull();
+    expect(approve(store, "t-seal", "alex", T0, scope.digest, "tok-alex").ok).toBe(true);
+    const sealed = store.getScope("t-seal")!;
+    expect(sealed.approvedRouteJson).toBe(sealed.proposedRouteJson);
+    const approvedRoute = store.approvedRouteOf("t-seal");
+    expect(approvedRoute).not.toBeNull();
+    expect(approvedRoute!.legs.find(one => one.phase === "review")).toMatchObject({ provider: "codex", model: "gpt-5-codex", tier: "strong" });
+    const sealedDigest = routeDigestOf(approvedRoute!);
+
+    // Global configuration moves: the strong reviewer changes. The sealed
+    // route does not — and neither does the approval.
+    store.setPhaseTierConfig("installation", "review", "strong", "claude", "opus", "alex", T0);
+    expect(approvalOf(store.getScope("t-seal")!).approved).toBe(true);
+    expect(routeDigestOf(store.approvedRouteOf("t-seal")!)).toBe(sealedDigest);
+
+    // A task-level override re-files the scope: the digest moves, the
+    // approval is stale, and the sealed route no longer governs.
+    const set = store.setRouteOverride(ref, { phase: "review", provider: "claude", model: "opus", by: "alex" }, T0);
+    expect(set.ok).toBe(true);
+    const refiled = store.refileScope("t-seal", new Date(T0.getTime() + 1_000))!;
+    expect(approvalOf(refiled)).toMatchObject({ approved: false, reason: "changed" });
+    expect(store.approvedRouteOf("t-seal")).toBeNull();
+    expect(routeFromJson(refiled.proposedRouteJson ?? null)!.legs.find(one => one.phase === "review")).toMatchObject({ provider: "claude", model: "opus", chosen: "override" });
+    // The old snapshot is kept as history until a fresh yes re-seals.
+    expect(refiled.approvedRouteJson).toBe(sealed.approvedRouteJson);
+    // Re-approving seals the new route.
+    expect(approve(store, "t-seal", "alex", T0, refiled.digest, "tok-alex").ok).toBe(true);
+    expect(store.approvedRouteOf("t-seal")!.overrides).toHaveLength(1);
+  });
+
+  test("a risk change stales the approval exactly as a goal edit does — even from routine to elevated", () => {
+    const { ref, scope } = file("t-risk");
+    expect(approve(store, "t-risk", "alex", T0, scope.digest, "tok-alex").ok).toBe(true);
+    expect(store.setTaskRisk(ref, "elevated", T0).ok).toBe(true);
+    const refiled = store.refileScope("t-risk", T0)!;
+    expect(refiled.riskLevel).toBe("elevated");
+    expect(approvalOf(refiled)).toMatchObject({ approved: false, reason: "changed" });
+    // The words in the approval card say the route and its reasons.
+    const words = describeScope(refiled);
+    expect(words).toContain("  risk         elevated");
+    expect(words.some(line => line.includes("review codex · gpt-5-codex  [recommended · strong]"))).toBe(true);
+    expect(words.some(line => line.includes("risk is elevated — the review runs on the strongest configured reviewer"))).toBe(true);
+  });
+
+  test("a tampered approved route snapshot no longer proves — the seal is the digest, not the column", () => {
+    const { scope } = file("t-tamper", { risk: "high" });
+    expect(approve(store, "t-tamper", "alex", T0, scope.digest, "tok-alex").ok).toBe(true);
+    expect(store.approvedRouteOf("t-tamper")).not.toBeNull();
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = REPLACE(approved_route_json, '\"risk\":\"high\"', '\"risk\":\"elevated\"') WHERE task_id = 't-tamper'").run();
+    expect(store.approvedRouteOf("t-tamper")).toBeNull();
+    expect(proveApprovedProfile(store.getScope("t-tamper"), null, { provider: "claude", model: "opus", maxTurns: undefined, timeoutMs: undefined, skipPermissions: false })).toMatchObject({ ok: false });
+  });
+
+  test("route edits are refused under a live claim", () => {
+    const { ref } = file("t-live");
+    register(store, { name: "r", host: "h", repos: [REPO], now: T0, newToken: () => "tok-r" });
+    store.saveScope({ ...store.getScope("t-live")!, approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: store.getScope("t-live")!.digest });
+    const taken = acquire(store, ref, "r", { token: "tok-r", now: T0 });
+    expect(taken.ok).toBe(true);
+    expect(store.setTaskRisk(ref, "high", T0)).toEqual({ ok: false, reason: "live-claim" });
+    expect(store.setRouteOverride(ref, { phase: "build", provider: "codex", model: "gpt-5", by: "alex" }, T0)).toEqual({ ok: false, reason: "live-claim" });
   });
 });

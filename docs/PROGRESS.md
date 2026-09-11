@@ -1,5 +1,25 @@
 # Progress
 
+**2026-09-11 — Which agent runs each phase is decided once, explained, and
+sealed.** Every task now carries an explainable route: one pure policy
+(`src/phase-routing.ts`) recommends the plan, build, repair, and review agents
+from the declared risk (routine, elevated, high), the quality mode, what the
+acceptance rubric demands, the repository's publication authority, and the
+operator's configured routine and strong tiers (`config set <phase> --tier
+strong …`; strength is never inferred from a model's name). Each leg says why
+in plain English, whether it was recommended, overridden, or pinned, and what
+its runners reported about the provider — ready, unavailable with the runner's
+own words, or unknown, which is stated and never upgraded. Approvers declare
+risk and override phases with attribution (`task route`, the task page); every
+edit re-files the scope, so a sealed approval reads stale, while a global
+configuration change can never rewrite a sealed route. Repairs stay on the
+build provider. A provider a runner reports unavailable halts before any
+claim or spend and is never substituted; only the explicitly approved fallback
+chain may switch. Dispatch, the reviewer, and review requests bind to the
+sealed route; each run and the sealed handoff name the route digest and the
+actual provider and model. Schema v47 is additive: legacy approvals keep their
+digest and are governed by their sealed profile alone.
+
 **2026-09-10 — Planner and reviewer handoffs can correct their own shape
 without rewriting the work.** Standing Orders first applies only conservative,
 syntax-level normalization to a structured reply. If strict validation still

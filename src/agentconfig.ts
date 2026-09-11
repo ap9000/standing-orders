@@ -24,6 +24,7 @@ import { isProviderId, validateSpec, type AgentSpec, type Phase, type ProviderId
 import { contestantProfileOf, type Store, type TaskRef } from "./store.js";
 import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, chainFromJson, canonicalChainJson, type ChainEntry, type ExecutionProfile, type UnattendedPermissionMode } from "./scope.js";
 import { SUBSCRIPTION_CAPABLE } from "./keys.js";
+import { legacyRouteOf, recommendRoute, routeFromJson, type PhaseRoute, type RouteCandidate, type RouteCandidates } from "./phase-routing.js";
 
 export const INSTALLATION_SCOPE = "installation";
 
@@ -275,4 +276,97 @@ export function resolveScopeChain(
     return { ok: false, reason: "duplicate", problem: "the fallback chain has a duplicate entry (same profile and auth mode) or is malformed" };
   }
   return { ok: true, chain: proven, kind: "chain" };
+}
+
+// ---- route candidates (v47, phase routing) --------------------------------
+
+/**
+ * The two candidate tiers the routing policy chooses between, per phase,
+ * read from configuration ONLY — never inferred from a model's name:
+ *
+ *   routine — the ordinary resolution above (project > installation >
+ *             default, review inheriting the planner's pair), i.e. exactly
+ *             the agent every pre-v47 scope resolved to;
+ *   strong  — the operator's named strong row (`config set <phase> --tier
+ *             strong …`), project over installation, review inheriting the
+ *             plan's strong row when it has none of its own; null when
+ *             nothing is configured, and the route then SAYS so.
+ *
+ * A misconfigured routine tier (unknown provider) is the same refusal the
+ * ordinary resolver gives; the caller files the scope unresolved with it.
+ */
+export type CandidatesResolution =
+  | { ok: true; candidates: RouteCandidates }
+  | { ok: false; phase: Phase; problem: string };
+
+export function resolveRouteCandidates(store: Store, repo: string | null): CandidatesResolution {
+  const phases: Phase[] = ["plan", "build", "repair", "review"];
+  const out: Partial<RouteCandidates> = {};
+  for (const phase of phases) {
+    const routine = resolvePhaseAgent(store, phase, repo, {});
+    if (!routine.ok) return { ok: false, phase, problem: routine.problem };
+    const strongProject = repo === null ? null : store.phaseTierConfig(repo, phase, "strong");
+    const strongInstallation = store.phaseTierConfig(INSTALLATION_SCOPE, phase, "strong");
+    const inheritedProject = phase === "review" && strongProject === null && strongInstallation === null && repo !== null ? store.phaseTierConfig(repo, "plan", "strong") : null;
+    const inheritedInstallation = phase === "review" && strongProject === null && strongInstallation === null ? store.phaseTierConfig(INSTALLATION_SCOPE, "plan", "strong") : null;
+    const strongRow = strongProject ?? inheritedProject ?? strongInstallation ?? inheritedInstallation;
+    const strongSource =
+      strongProject !== null ? "project (strong)" : inheritedProject !== null ? "project (strong, inherited from plan)" : strongInstallation !== null ? "installation (strong)" : inheritedInstallation !== null ? "installation (strong, inherited from plan)" : null;
+    const strong: RouteCandidate | null =
+      strongRow === null || strongSource === null || !isProviderId(strongRow.provider)
+        ? null
+        : { provider: strongRow.provider, model: strongRow.model, source: strongSource };
+    out[phase] = {
+      routine: { provider: routine.spec.provider, model: routine.spec.model, source: routine.source === "default" ? "the built-in default" : routine.source },
+      strong,
+    };
+  }
+  return { ok: true, candidates: out as RouteCandidates };
+}
+
+/**
+ * THE ROUTE A TASK RUNS UNDER, for dispatch and every surface: the sealed
+ * route when the approval stands (authoritative — mutable configuration
+ * never rewrites it), else the WORKING proposed route the next approval
+ * would seal, else — for a scope approved before v47 — the compatibility
+ * decoder over its sealed profile, else (no scope yet: a plan request) a
+ * live recommendation from the task's own risk, overrides, and pins over
+ * today's configuration. `source` says which, so a surface never presents
+ * a live recommendation as a sealed term.
+ */
+export type TaskRoute = { route: PhaseRoute; source: "approved" | "proposed" | "legacy" | "live" };
+
+export function routeOfTask(store: Store, taskId: string, ref: TaskRef | null, now: Date): TaskRoute | null {
+  const approved = store.approvedRouteOf(taskId);
+  if (approved !== null) return { route: approved, source: "approved" };
+  const scope = store.getScope(taskId);
+  const proposed = routeFromJson(scope?.proposedRouteJson ?? null);
+  if (proposed !== null) return { route: proposed, source: "proposed" };
+  const repo = ref?.repo ?? null;
+  const plan = resolvePhaseAgent(store, "plan", repo, {});
+  const review = resolvePhaseAgent(store, "review", repo, {});
+  const fallback = {
+    plan: plan.ok ? plan.spec : { provider: "claude" as const, model: null },
+    review: review.ok ? review.spec : { provider: "claude" as const, model: null },
+  };
+  const profile = scope?.approvedProfile ?? scope?.profile ?? null;
+  if (scope !== null && profile !== null) {
+    const legacy = legacyRouteOf({ provider: profile.provider, model: profile.model, repairModel: profile.repairModel }, fallback);
+    return legacy === null ? null : { route: legacy, source: "legacy" };
+  }
+  const candidates = resolveRouteCandidates(store, repo);
+  if (!candidates.ok) return null;
+  const route = recommendRoute({
+    risk: ref?.riskLevel ?? "routine",
+    qualityMode: ref?.qualityMode ?? store.qualityDefault().mode,
+    evidence: [],
+    publication: store.publicationAuthorityOf(repo, now),
+    candidates: candidates.candidates,
+    overrides: ref?.routeOverrides ?? [],
+    pins: {
+      plan: ref !== null && ref.planProvider !== null && isProviderId(ref.planProvider) ? { provider: ref.planProvider, model: ref.planModel } : null,
+      build: ref !== null && ref.agentProvider !== null && isProviderId(ref.agentProvider) ? { provider: ref.agentProvider, model: ref.agentModel } : null,
+    },
+  });
+  return { route, source: "live" };
 }

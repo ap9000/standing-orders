@@ -6,8 +6,8 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, BUILT_IN, type Store } from "./store.js";
-import { addApprover } from "./scope.js";
-import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
+import { addApprover, approve, propose } from "./scope.js";
+import { resolvePhaseAgent, resolveRouteCandidates, routeOfTask, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { approveRoutine, fireRoutine, routineDigestOf, type RoutineTerms } from "./routine.js";
 import { resolveScopeProfile } from "./agentconfig.js";
 
@@ -205,5 +205,68 @@ describe("firing pins the agent and re-proves the ceiling against it", () => {
     expect(approveRoutine(store, id, "alex", new Date(T0.getTime() + 2 * HOUR), newDigest, token).ok).toBe(true);
     const fired = fireRoutine(store, id, new Date(T0.getTime() + 3 * HOUR));
     expect(fired.ok).toBe(true);
+  });
+});
+
+describe("route candidates and the task route (v47)", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+  });
+  afterEach(() => store.close());
+
+  test("the routine tier is exactly the ordinary resolution; the strong tier is only ever a configured row", () => {
+    store.setPhaseConfig(INSTALLATION_SCOPE, "build", "claude", "sonnet", "test", T0);
+    const bare = resolveRouteCandidates(store, "/repo");
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect(bare.candidates.build).toEqual({ routine: { provider: "claude", model: "sonnet", source: "installation" }, strong: null });
+    expect(bare.candidates.plan.routine).toEqual({ provider: "claude", model: null, source: "the built-in default" });
+    expect(bare.candidates.review.strong).toBeNull();
+
+    store.setPhaseTierConfig(INSTALLATION_SCOPE, "build", "strong", "claude", "opus", "alex", T0);
+    store.setPhaseTierConfig(INSTALLATION_SCOPE, "plan", "strong", "codex", "gpt-5", "alex", T0);
+    store.setPhaseTierConfig("/repo", "build", "strong", "codex", "gpt-5-codex", "alex", T0);
+    const configured = resolveRouteCandidates(store, "/repo");
+    if (!configured.ok) throw new Error("expected candidates");
+    // project beats installation; review inherits the plan's strong row.
+    expect(configured.candidates.build.strong).toEqual({ provider: "codex", model: "gpt-5-codex", source: "project (strong)" });
+    expect(configured.candidates.plan.strong).toEqual({ provider: "codex", model: "gpt-5", source: "installation (strong)" });
+    expect(configured.candidates.review.strong).toEqual({ provider: "codex", model: "gpt-5", source: "installation (strong, inherited from plan)" });
+    // Another repo sees only the installation rows.
+    const other = resolveRouteCandidates(store, "/other");
+    if (!other.ok) throw new Error("expected candidates");
+    expect(other.candidates.build.strong).toEqual({ provider: "claude", model: "opus", source: "installation (strong)" });
+    // A routine tier that cannot run a phase refuses by phase (gemini on review).
+    store.setPhaseConfig(INSTALLATION_SCOPE, "review", "gemini", "gemini-2.5-pro", "test", T0);
+    expect(resolveRouteCandidates(store, "/repo")).toMatchObject({ ok: false, phase: "review" });
+  });
+
+  test("routeOfTask says which route governs: live before a scope, proposed after filing, approved after the seal, legacy for a pre-v47 approval", () => {
+    store.setPhaseConfig(INSTALLATION_SCOPE, "build", "claude", "sonnet", "test", T0);
+    const alex = addApprover(store, "alex", T0, undefined, () => "tok-alex");
+    if (!alex.ok) throw new Error("bootstrap");
+    store.createTask({ id: "t", title: "t" }, T0);
+    const ref = store.refFor(BUILT_IN, "t");
+    store.placeTask(ref.id, "/repo");
+    store.setTaskRisk(ref.id, "high", T0);
+    const live = routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0);
+    expect(live?.source).toBe("live");
+    expect(live?.route.risk).toBe("high");
+
+    propose(store, { taskId: "t", goal: "g", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], now: T0 });
+    expect(routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0)?.source).toBe("proposed");
+    const scope = store.getScope("t")!;
+    expect(approve(store, "t", "alex", T0, scope.digest, "tok-alex").ok).toBe(true);
+    const sealed = routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0);
+    expect(sealed?.source).toBe("approved");
+    expect(sealed?.route.risk).toBe("high");
+
+    // A pre-v47 approval: no route column, a sealed profile — the decoder.
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = NULL, proposed_route_json = NULL WHERE task_id = 't'").run();
+    const legacy = routeOfTask(store, "t", store.refFor(BUILT_IN, "t"), T0);
+    expect(legacy?.source).toBe("legacy");
+    expect(legacy?.route.legs.find(one => one.phase === "build")).toMatchObject({ provider: "claude", model: "sonnet" });
   });
 });

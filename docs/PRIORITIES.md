@@ -112,6 +112,16 @@ provider availability. Learn stable repository facts—commands, conventions,
 failure patterns, ownership, and preferred models—from verified outcomes, with
 visible provenance and an operator-controlled reset.
 
+The routing half has landed as explainable, risk-aware phase routing: one pure,
+table-driven policy recommends plan, build, repair, and review agents from the
+declared risk, quality mode, acceptance evidence needs, publication authority,
+runner-reported provider readiness, and the configured routine and strong
+candidate tiers, with plain-English reasons per leg. Approvers override per
+phase with attribution; approval seals the route and any explicit fallback
+chain; task-level route edits stale the approval while global configuration
+never rewrites a sealed route; an unavailable provider halts rather than being
+substituted. The learning half (project memory) is not started.
+
 ## Current focus
 
 Priority 3 is active. Priority 1 is implemented and has passed every

@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { agentExitWords, build, PROTECTED, verificationExecutableMissing, type Runner } from "./builder.js";
+import { agentExitWords, build, PROTECTED, proveApprovedProfile, verificationExecutableMissing, type Runner } from "./builder.js";
+import { routeDigestOf } from "./phase-routing.js";
 import { openStore, type Store } from "./store.js";
 import { register, retireRunnerIfCurrent } from "./runner.js";
 import { acquire, currentClaim, reap } from "./claim.js";
@@ -399,6 +400,35 @@ describe("the builder's gates", () => {
     const handoff = artifacts.find(one => one.kind === "handoff");
     expect(handoff).toBeDefined();
     expect(handoff?.capture).toContain("machine-authored");
+  });
+
+  test("route provenance (v47): the run and its sealed handoff name the route digest and the actual provider and model; a sealed route that disagrees with the sealed profile refuses", async () => {
+    store.setPhaseTierConfig("installation", "build", "strong", "claude", "opus", "test", T0);
+    claimIt();
+    propose(store, { taskId: "t-1", goal: "add a guard on the payout path", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], riskLevel: "high", now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    const sealedRoute = store.approvedRouteOf("t-1")!;
+    expect(sealedRoute.legs.find(one => one.phase === "build")).toMatchObject({ provider: "claude", model: "opus", tier: "strong" });
+    // Asking for the routine model is a re-route the approval never signed.
+    const rerouted = await build(store, request({ model: "sonnet" }));
+    expect(rerouted).toMatchObject({ ok: false, reason: "stale-approval" });
+    expect(agentCalls).toHaveLength(0);
+    // The sealed leg runs, and every record says so.
+    const req = request({ model: "opus" });
+    const result = await build(store, req);
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(agentCalls[0]?.[agentCalls[0].indexOf("--model") + 1]).toBe("opus");
+    expect(store.runRoute(req.runId as number)).toMatchObject({ routeDigest: routeDigestOf(sealedRoute), phase: "build", provider: "claude", model: "opus", chosen: "recommended" });
+    const handoff = store.artifactsFor(req.runId as number).find(one => one.kind === "handoff")!;
+    const sealed = readVerifiedArtifact(req.evidenceRoot as string, handoff);
+    if (!sealed.ok) throw new Error("handoff unreadable");
+    const payload = JSON.parse(sealed.content.toString("utf8")) as { provider: string; model?: string; route?: { digest: string; phase: string; provider: string; model: string | null; chosen: string } };
+    expect(payload.provider).toBe("claude");
+    expect(payload.model).toBe("opus");
+    expect(payload.route).toEqual({ digest: routeDigestOf(sealedRoute), phase: "build", provider: "claude", model: "opus", chosen: "recommended" });
+    // A sealed route that no longer agrees with the sealed profile is a stale seal, never a pass.
+    store.raw().prepare("UPDATE task_scope SET approved_route_json = REPLACE(approved_route_json, '\"model\":\"opus\"', '\"model\":\"haiku\"') WHERE task_id = 't-1'").run();
+    expect(proveApprovedProfile(store.getScope("t-1"), null, { provider: "claude", model: "opus", maxTurns: undefined, timeoutMs: undefined, skipPermissions: false })).toMatchObject({ ok: false });
   });
 
   test("a resumed attempt seals the CUMULATIVE terminal diff, pinned to the branch's first builder base (run 1461)", async () => {

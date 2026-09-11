@@ -18,7 +18,8 @@ import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
 import { createDecisionServer, SENSITIVE_INPUT, reviewPriorityOf, rankReviewQueue, withinSignedTouches, diffFileAnchor, reviewFilePriority, orderChangedFiles, type ReviewQueueFacts, type ReviewFileRow } from "./serve.js";
 import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
-import { resolveScopeProfile } from "./agentconfig.js";
+import { resolveScopeProfile, routeOfTask } from "./agentconfig.js";
+import { projectRoute, readinessWords } from "./phase-routing.js";
 import type { MateProviderAnswer } from "./converse.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
@@ -9832,5 +9833,181 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const cockpit = await (await fetch(url("/review?result=t-link"), { headers: { cookie } })).text();
     expect(cockpit).toContain(`<a href="/r/${run}">Full build history and evidence →</a>`);
     expect(cockpit).toContain('href="/t/t-link"');
+  });
+});
+
+describe("the phase route on the console (v47): one projection on the task page, in the ceremony, and in the focused chat", () => {
+  let store: Store;
+  let server: Server | null = null;
+  let base: string;
+  let approverToken: string;
+  let viewerToken: string;
+  let evidenceRoot: string;
+
+  const T0 = new Date("2026-09-10T00:00:00.000Z");
+  const url = (path: string) => `${base}${path}`;
+
+  const loginAs = async (name: string, token: string): Promise<string> => {
+    const response = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name, token }), redirect: "manual" });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+  const csrfOf = (html: string): string => {
+    const match = /name="csrf" value="([0-9a-f]{64})"/.exec(html);
+    if (match === null) throw new Error("no csrf on the page");
+    return match[1] as string;
+  };
+  const page = async (cookie: string, path: string): Promise<string> => (await fetch(url(path), { headers: { cookie } })).text();
+  const post = (cookie: string, path: string, fields: Record<string, string>) =>
+    fetch(url(path), { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields), redirect: "manual" });
+  const routeCardOf = (html: string): string => /<section class="card route-card" id="route"[^>]*>(.*?)<\/section>/s.exec(html)?.[1] ?? "";
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-route-"));
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseTierConfig("installation", "build", "strong", "claude", "opus", "test", T0);
+    store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "test", T0);
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    const viewer = addApprover(store, "vera", T0, { name: "alex", token: approverToken });
+    if (!viewer.ok) throw new Error("viewer add");
+    store.raw().prepare("UPDATE approver SET role = 'viewer' WHERE name = 'vera'").run();
+    viewerToken = viewer.token;
+    register(store, { name: "mac-mini", host: "here", capacity: 4, repos: ["/repo/main"], now: T0, newToken: () => "tok-mac-mini" });
+    store.createTask({ id: "payouts", title: "Harden payouts" }, T0);
+    const ref = store.refFor("built-in", "payouts").id;
+    store.placeTask(ref, "/repo/main");
+    propose(store, {
+      taskId: "payouts",
+      goal: "Harden the payouts flow",
+      acceptance: [{ id: "pay", statement: "Payouts never double-send", how: null, evidence: ["check", "screenshot"] }],
+      riskLevel: "high",
+      now: T0,
+    });
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(T0.getTime() + 60_000), repo: "/repo/main" });
+    await new Promise<void>(resolve => (server as Server).listen(0, "127.0.0.1", resolve));
+    const address = (server as Server).address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    if (server !== null) await new Promise<void>(resolve => (server as Server).close(() => resolve()));
+    server = null;
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the task page shows every leg with its reason and readiness, the ceremony restates the route, and the CLI projection is the same bytes", async () => {
+    store.recordProviderReadiness("mac-mini", [{ provider: "codex", state: "unavailable", reason: "`codex login status` says not logged in", probe: "identity" }], T0);
+    const cookie = await loginAs("alex", approverToken);
+    const html = await page(cookie, "/t/payouts");
+    const card = routeCardOf(html);
+    expect(card).toContain("High risk");
+    expect(card).toContain("strongest configured agents");
+    expect(card).toContain("proposed — the next approval seals it");
+    expect(card).toContain("risk is high — every phase uses the strongest configured agent");
+    expect(card).toContain("acceptance requires screenshots");
+    expect(card).toMatch(/<span class="route-phase">build<\/span><span class="route-agent"><span class="mono">claude · opus<\/span><span class="badge badge-running">recommended · strong<\/span>/);
+    expect(card).toMatch(/<span class="route-phase">review<\/span><span class="route-agent"><span class="mono">codex · gpt-5-codex<\/span>/);
+    expect(card).toContain("UNAVAILABLE — `codex login status` says not logged in");
+    expect(card).toContain("readiness unknown — no runner has reported this provider yet");
+    expect(card).toContain("Halted: a provider on this route is reported unavailable");
+    expect(card).toContain('name="risk"');
+    expect(card).toContain('name="phase"');
+    // The ceremony restates the route where the yes is given.
+    const ceremony = /<form method="post" action="\/t\/payouts\/approve"(.*?)<\/form>/s.exec(html)?.[1] ?? "";
+    expect(ceremony).toContain("route · high risk · strongest configured agents");
+    expect(ceremony).toContain("claude · opus");
+    expect(ceremony).toContain("a signed term of this approval");
+    // The same projection the CLI prints — one function, one set of words.
+    const ref = store.refFor("built-in", "payouts");
+    const routed = routeOfTask(store, "payouts", ref, new Date(T0.getTime() + 60_000))!;
+    const projection = projectRoute(routed.route, store.readinessLookupFor("/repo/main", null, new Date(T0.getTime() + 60_000)));
+    for (const leg of projection.legs) {
+      for (const reason of leg.reasons) expect(card).toContain(reason.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"));
+      expect(card).toContain(readinessWords(leg.readiness, leg.readinessReason).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"));
+    }
+    expect(html).toContain(projection.digest.slice(0, 8));
+  });
+
+  test("an approver overrides a phase from the page: recorded with attribution, the sealed approval goes stale, and clearing it re-files again", async () => {
+    const cookie = await loginAs("alex", approverToken);
+    const first = store.getScope("payouts")!;
+    expect(approve(store, "payouts", "alex", T0, first.digest, approverToken).ok).toBe(true);
+    const before = await page(cookie, "/t/payouts");
+    expect(routeCardOf(before)).toContain("sealed by the approval");
+    const csrf = csrfOf(before);
+    const bad = await post(cookie, "/t/payouts/route", { csrf, phase: "review", provider: "gemini", model: "gemini-2.5-pro" });
+    expect(bad.status).toBe(400);
+    const noModel = await post(cookie, "/t/payouts/route", { csrf, phase: "build", provider: "codex", model: "" });
+    expect(noModel.status).toBe(400);
+    const changed = await post(cookie, "/t/payouts/route", { csrf, phase: "review", provider: "claude", model: "opus" });
+    expect(changed.status).toBe(303);
+    expect(changed.headers.get("location")).toContain("/t/payouts");
+    expect(changed.headers.get("location")).toContain("stale");
+    const ref = store.refFor("built-in", "payouts");
+    expect(ref.routeOverrides).toEqual([expect.objectContaining({ phase: "review", provider: "claude", model: "opus", by: "alex" })]);
+    const after = store.getScope("payouts")!;
+    expect(approvalOf(after)).toMatchObject({ approved: false, reason: "changed" });
+    const html = await page(cookie, "/t/payouts");
+    const card = routeCardOf(html);
+    expect(card).toMatch(/<span class="route-phase">review<\/span><span class="route-agent"><span class="mono">claude · opus<\/span><span class="badge badge-overdue">overridden<\/span>/);
+    expect(card).toContain("overridden by alex to claude · opus (recommended codex · gpt-5-codex)");
+    expect(card).toContain("overrides: review →");
+    expect(card).toContain('name="clear-phase" value="review"');
+    // The risk moves too, through the same door.
+    const risk = await post(cookie, "/t/payouts/route", { csrf: csrfOf(html), risk: "elevated" });
+    expect(risk.status).toBe(303);
+    expect(store.getScope("payouts")!.riskLevel).toBe("elevated");
+    expect(routeCardOf(await page(cookie, "/t/payouts"))).toContain("Elevated risk");
+    // Clearing the override restores the recommendation.
+    const cleared = await post(cookie, "/t/payouts/route", { csrf, "clear-phase": "review" });
+    expect(cleared.status).toBe(303);
+    expect(store.refFor("built-in", "payouts").routeOverrides).toEqual([]);
+    expect(routeCardOf(await page(cookie, "/t/payouts"))).toMatch(/<span class="route-phase">review<\/span><span class="route-agent"><span class="mono">codex · gpt-5-codex<\/span>/);
+  });
+
+  test("a viewer reads the route but cannot change it; a live claim refuses the edit", async () => {
+    const viewer = await loginAs("vera", viewerToken);
+    const html = await page(viewer, "/t/payouts");
+    const card = routeCardOf(html);
+    expect(card).toContain("claude · opus");
+    expect(card).not.toContain('name="phase"');
+    const refused = await post(viewer, "/t/payouts/route", { csrf: csrfOf(html), risk: "routine" });
+    expect(refused.status).toBe(403);
+    expect(store.getScope("payouts")!.riskLevel).toBe("high");
+    // Under a live claim the approver's edit is refused too.
+    const cookie = await loginAs("alex", approverToken);
+    const scope = store.getScope("payouts")!;
+    expect(approve(store, "payouts", "alex", T0, scope.digest, approverToken).ok).toBe(true);
+    const ref = store.refFor("built-in", "payouts").id;
+    const taken = acquire(store, ref, "mac-mini", { token: "tok-mac-mini", now: new Date(T0.getTime() + 60_000) });
+    expect(taken.ok).toBe(true);
+    const running = await page(cookie, "/t/payouts");
+    expect(routeCardOf(running)).toContain("this task is running — the route cannot change under a live claim");
+    const blocked = await post(cookie, "/t/payouts/route", { csrf: csrfOf(running), risk: "routine" });
+    expect(blocked.status).toBe(409);
+    expect(approvalOf(store.getScope("payouts")!).approved).toBe(true);
+  });
+
+  test("the focused chat shows the same route beside the conversation and inside its approval card", async () => {
+    store.recordProviderReadiness("mac-mini", [{ provider: "claude", state: "unknown", reason: "installed (claude 1.2.3); no non-spending login check exists", probe: "version" }], T0);
+    const cookie = await loginAs("alex", approverToken);
+    const chat = await page(cookie, "/chat?task=payouts");
+    const aside = /<details class="chat-run-details task-chat-route" open>(.*?)<\/details>/s.exec(chat)?.[1] ?? "";
+    expect(aside).toContain("route · high risk · strongest configured agents");
+    expect(aside).toContain("(proposed)");
+    expect(aside).toMatch(/<span class="route-phase">build<\/span><span class="route-agent"><span class="mono">claude · opus<\/span>/);
+    expect(aside).toContain("readiness unknown");
+    // The aside is terse: the full observation lives on the task page.
+    expect(aside).not.toContain("no non-spending login check exists");
+    expect(aside).toContain("Change the route on the task");
+    const approvalCard = /<details class="card chat-action-card chat-approval" id="task-chat-action">(.*?)<\/details>\s*<\/section>|<details class="card chat-action-card chat-approval" id="task-chat-action">(.*)/s.exec(chat)?.[0] ?? "";
+    expect(approvalCard).toContain("High risk · strongest configured agents");
+    expect(approvalCard).toContain("route · high risk · strongest configured agents");
+    expect(approvalCard).toContain("codex · gpt-5-codex");
   });
 });

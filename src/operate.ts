@@ -171,7 +171,9 @@ import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./propo
 import { TEMPLATES, templateByName } from "./templates.js";
 import { planTournament, planComparison, contestNoun, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant, recoverContests, maybeAggregate as contestMaybeAggregate, sweepContestCleanup, escalateOverdueContests } from "./contest.js";
 import { isDirectChatProvider, isSubscriptionChatProvider, priceOf, PRICED_MODELS } from "./converse.js";
-import { resolvePhaseAgent, resolveScopeProfile, resolveScopeChain, INSTALLATION_SCOPE } from "./agentconfig.js";
+import { resolvePhaseAgent, resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, routeOfTask, INSTALLATION_SCOPE } from "./agentconfig.js";
+import { isRiskLevel, legOf, projectRoute, routeDigestOf, routeIsSigned, routeWords, RISK_LEVELS, PHASES as ROUTE_PHASES, type ReadinessObservation, type RouteOverride } from "./phase-routing.js";
+import { observeProviderReadiness, reportProviderReadinessAuthed } from "./runner.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validModelId, validateSpec, type ProviderAudit, type ProviderId, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { attestProvider, attestationOf, versionInRange, type AttestOutcome, type AttestationRange } from "./attest.js";
@@ -354,6 +356,12 @@ Capabilities — what the work needs, recorded and probed, never valued
                                         plan before building: an agent reads
                                         the repo, asks you questions, and
                                         proposes a scope you approve
+  standing-orders task route <id> [--risk routine|elevated|high]
+      [--phase plan|build|repair|review --provider <p> [--model <m>] | --clear-phase <phase>]
+      --as <you> --token <t>            which agent plans, builds, repairs, and
+                                        reviews this task, with the reason for
+                                        each; declare its risk or override a
+                                        phase — approval seals the route
 
 Routines — standing orders that fire on a schedule, each instance isolated
   standing-orders template list             common standing orders, shipped
@@ -378,6 +386,9 @@ Agents — which provider and model each phase runs on
   standing-orders providers                 what is installed, logged in, and
                                         configured on this machine — without
                                         spending anything to find out
+  standing-orders providers --report --runner <name> --token <t>
+                                        record this machine's readiness per
+                                        provider under its runner name
   standing-orders config set chat --provider claude-subscription|codex-subscription|anthropic-api|openrouter-api
       [--model <m>] [--weekly-usd <n>] [--daily-turns <n>] --as <you> --token <t>
       membership providers reuse a logged-in local harness with no dollar
@@ -400,6 +411,11 @@ Agents — which provider and model each phase runs on
                                         without it, installation-wide.
                                         Repair's PROVIDER always inherits
                                         the build it mends.
+  standing-orders config set <phase> --tier strong --provider <p> --model <m>
+      [--repo <path>] --as <you> --token <t>
+                                        the STRONG agent high-risk, strict,
+                                        screenshot-proof, and automerge
+                                        routes reach for; never inferred
   standing-orders config clear <phase> [--repo <path>] --as <you> --token <t>
 
   standing-orders setup show --repo <path>  what a fresh checkout runs first
@@ -496,7 +512,7 @@ type Args = {
 export const TASK_ACTIONS = [
   "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "plan",
-  "review", "accept", "repair",
+  "review", "accept", "repair", "route",
 ] as const;
 export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
@@ -524,6 +540,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "setup-digest", "stop-grace", "title", "name", "every", "lines",
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
+  "phase", "risk", "tier", "clear-phase",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
@@ -2310,23 +2327,62 @@ async function tickCommand(
     // into the run: pin > flags > project > installation > default. Planner
     // flags fall back to the pass flags, which is exactly today's behavior
     // when no plan-specific flag is given.
+    // THE ROUTE (v47): the sealed route when the approval stands, else the
+    // working proposed route, else the legacy decoder, else — with no scope
+    // yet — a live recommendation from the task's own risk, overrides, and
+    // pins. Dispatch resolves each phase from ITS leg: the plan leg for a
+    // planner (pass flags, an operator's explicit ask, still beat a
+    // recommendation but never a pin), the SEALED build leg for a signed
+    // route (mutable configuration cannot reroute an approved build), and
+    // the ordinary live resolution for a legacy-equivalent one — where the
+    // existing stale-approval refusal still catches configuration drift.
+    const taskRoute = attendedSpec !== null || racedAhead !== null ? null : routeOfTask(store, id, ref, clock());
+    const planLeg = taskRoute === null ? null : legOf(taskRoute.route, "plan");
+    const sealedBuildLeg = taskRoute !== null && taskRoute.source === "approved" && routeIsSigned(taskRoute.route) ? legOf(taskRoute.route, "build") : null;
+    const planFlagged = planProvider !== undefined || planModel !== undefined || providerFlag !== undefined || model !== undefined;
     const resolution = attendedSpec !== null
       ? null
       : wantsPlan
-        ? resolvePhaseAgent(store, "plan", repo, {
-            // P2/C7 precedence: the task's plan PIN beats every flag and
-            // config row; flags beat config; config beats the default.
-            provider: ref.planProvider ?? planProvider ?? providerFlag,
-            model: ref.planProvider !== null ? (ref.planModel ?? undefined) : (planModel ?? model),
-          })
+        ? planLeg !== null && (planLeg.chosen === "pinned" || !planFlagged)
+          ? resolvePhaseAgent(store, "plan", repo, { provider: planLeg.provider, model: planLeg.model ?? undefined })
+          : resolvePhaseAgent(store, "plan", repo, {
+              // P2/C7 precedence: the task's plan PIN beats every flag and
+              // config row; flags beat config; config beats the default.
+              provider: ref.planProvider ?? planProvider ?? providerFlag,
+              model: ref.planProvider !== null ? (ref.planModel ?? undefined) : (planModel ?? model),
+            })
         : racedAhead !== null
           ? resolvePhaseAgent(store, "build", repo, {}, ref)
-          : resolvePhaseAgent(store, "build", repo, { provider: providerFlag, model }, ref);
+          : sealedBuildLeg !== null
+            ? resolvePhaseAgent(store, "build", repo, { provider: sealedBuildLeg.provider, model: sealedBuildLeg.model ?? undefined }, ref)
+            : resolvePhaseAgent(store, "build", repo, { provider: providerFlag, model }, ref);
     if (resolution !== null && !resolution.ok) {
       dispatched.push({ id, outcome: "skipped", reason: "agent-config", detail: resolution.problem });
       continue;
     }
     const spec = resolution === null ? (attendedSpec as { provider: ProviderId; model: string | null }) : resolution.spec;
+
+    // THE READINESS HALT (v47): a provider THIS runner has reported
+    // unavailable never claims and never spends — no substitution, no
+    // second-best; the skip names the observation and the two ways out.
+    // Unknown readiness passes (every existing gate still applies); a
+    // raced task halts if any lane's provider is unavailable, because a
+    // subset is a different contest than the one signed.
+    {
+      const providersToProve = racedAhead !== null ? racedAhead.agents.map(agent => agent.provider) : [spec.provider];
+      const unavailable = providersToProve
+        .map(candidate => store.runnerReadinessOf(runner, candidate))
+        .find(seen => seen !== null && seen.state === "unavailable");
+      if (unavailable !== undefined && unavailable !== null) {
+        dispatched.push({
+          id,
+          outcome: "skipped",
+          reason: "provider-unavailable",
+          detail: `${unavailable.provider} is reported unavailable on ${runner} (${unavailable.reason}; observed ${unavailable.observedAt}) — nothing substitutes for a routed provider: override the phase with \`task route\` or restore the provider and report readiness again`,
+        });
+        continue;
+      }
+    }
 
     // THE PRE-CLAIM ATTESTATION SKIP (Phase 3 A3/B4/C2): an attested
     // provider outside its range never claims — no lease, no run row, no
@@ -2690,6 +2746,15 @@ async function tickCommand(
         ...(spec.model === null ? {} : { model: spec.model }),
         now: clock(),
       });
+      // Route provenance (v47): the planner names the route it ran under —
+      // a live recommendation before any scope exists — and its exact leg.
+      if (taskRoute !== null && planLeg !== null) {
+        store.stampRunRoute(
+          planRunId,
+          { routeDigest: routeDigestOf(taskRoute.route), phase: "plan", provider: spec.provider, model: spec.model, chosen: planFlagged && planLeg.chosen !== "pinned" ? "legacy" : planLeg.chosen },
+          clock(),
+        );
+      }
       const answers = store
         .answeredDecisionsFor(id, 5)
         .map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
@@ -2817,6 +2882,15 @@ async function tickCommand(
         now: clock(),
       });
       store.stampRun(scoutRunId, { scopeDigest: scopeRow?.approvedDigest ?? "", profileDigest: profileDigestOf(proof.effective.profile) });
+      // Route provenance (v47): a scout runs the sealed build leg's agent
+      // (the same sealed profile a build proves against) and says so.
+      if (taskRoute !== null) {
+        store.stampRunRoute(
+          scoutRunId,
+          { routeDigest: taskRoute.source === "approved" ? routeDigestOf(taskRoute.route) : `profile:${profileDigestOf(proof.effective.profile)}`, phase: "build", provider: spec.provider, model: proof.effective.model, chosen: taskRoute.source === "approved" ? legOf(taskRoute.route, "build").chosen : "legacy" },
+          clock(),
+        );
+      }
       const scoutAnswers = store
         .answeredDecisionsFor(id, 5)
         .map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
@@ -4569,9 +4643,35 @@ async function providersCommand(
     });
   }
 
+  // READINESS REPORTING (v47): `--report --runner <n> --token <t>` records
+  // this machine's non-spending observations under the runner's OWN name
+  // — authenticated, so nobody reports for a machine they do not hold —
+  // and the route projections then say ready / unavailable / unknown per
+  // provider. The observation runs the same version and identity probes
+  // this report prints, plus key presence and the attestation range.
+  let recorded: Omit<ReadinessObservation, "runner" | "observedAt">[] | null = null;
+  if (flags.has("report")) {
+    const runnerName = text(flags, "runner");
+    const runnerToken = text(flags, "token");
+    if (runnerName === undefined || runnerToken === undefined) {
+      return fail(write, json, "providers", "usage", "`standing-orders providers --report --runner <name> --token <t>` records readiness under that runner", EXIT.usage);
+    }
+    const observed = await observeProviderReadiness((file, args, options) => probe(file, args, { timeoutMs: options?.timeoutMs ?? 5_000, ...(options?.omitEnv === undefined ? {} : { omitEnv: options.omitEnv }) }));
+    const reported = reportProviderReadinessAuthed(store, { name: runnerName, token: runnerToken, observations: observed }, context.clock());
+    if (!reported.ok) {
+      return fail(write, json, "providers", reported.reason, describeAuth(reported.reason, runnerName), EXIT.refused);
+    }
+    recorded = observed;
+  }
+
   if (json) {
-    write(envelopeJson({ ok: true, command: "providers", providers: report }));
+    write(envelopeJson({ ok: true, command: "providers", providers: report, ...(recorded === null ? {} : { readiness: recorded }) }));
     return EXIT.ok;
+  }
+  if (recorded !== null) {
+    write(`readiness recorded for ${text(flags, "runner") ?? ""}:`);
+    for (const one of recorded) write(`  ${one.provider.padEnd(11)}${one.state.toUpperCase()} — ${one.reason} [${one.probe}]`);
+    write("");
   }
   for (const one of report) {
     const name = String(one["provider"]);
@@ -4935,8 +5035,16 @@ async function configCommand(
       };
     });
     const fallback = scope === INSTALLATION_SCOPE ? [] : store.fallbackConfig(scope);
+    // The STRONG tier (v47): the named strongest agent per phase, which
+    // high-risk, strict, evidence-sensitive, and publication-sensitive
+    // routes reach for. Never inferred — absent means "the default, said".
+    const candidates = resolveRouteCandidates(store, scope === INSTALLATION_SCOPE ? null : scope);
+    const strong = (["plan", "build", "repair", "review"] as const).map(one => ({
+      phase: one,
+      strong: candidates.ok ? candidates.candidates[one].strong : null,
+    }));
     if (json) {
-      write(envelopeJson({ ok: true, command: "config show", installation, project, resolved, fallback }));
+      write(envelopeJson({ ok: true, command: "config show", installation, project, resolved, fallback, strong, installationStrong: store.listPhaseTierConfig(INSTALLATION_SCOPE), projectStrong: scope === INSTALLATION_SCOPE ? [] : store.listPhaseTierConfig(scope) }));
       return EXIT.ok;
     }
     write(`Effective phase agents${scope === INSTALLATION_SCOPE ? "" : ` for ${scope}`}:`);
@@ -4947,6 +5055,12 @@ async function configCommand(
         write(`  ${one.phase.padEnd(8)} ${one.provider}${one.model === null ? " (harness default model)" : ` · ${one.model}`}  [${one.source}]`);
       }
     }
+    write("");
+    write("  strong tier (high-risk, strict, screenshot-proof, and automerge routes reach for these):");
+    for (const one of strong) {
+      write(`  ${one.phase.padEnd(8)} ${one.strong === null ? "none configured — such routes keep the default above and say so" : `${one.strong.provider}${one.strong.model === null ? " (harness default model)" : ` · ${one.strong.model}`}  [${one.strong.source}]`}`);
+    }
+    write("  set one with: standing-orders config set <phase> --tier strong --provider <p> --model <m> --as <you> --token <t>");
     write("");
     write("  repair note: the repair PROVIDER always inherits the build it mends — only its model is configurable.");
     if (fallback.length > 0) {
@@ -5194,7 +5308,22 @@ async function configCommand(
     return fail(write, json, `config ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, phase), EXIT.refused);
   }
 
+  // The STRONG tier (v47): a second, named row per phase the routing policy
+  // reaches for when risk, quality, evidence, or publication demand it.
+  // Authenticated and audited exactly like the routine row; existing
+  // approvals are untouched — a sealed route never re-resolves.
+  const tierGiven = text(flags, "tier");
+  if (tierGiven !== undefined && tierGiven !== "strong") {
+    return fail(write, json, `config ${action}`, "usage", "--tier is `strong` — the routine tier is the plain phase row", EXIT.usage);
+  }
+
   if (action === "clear") {
+    if (tierGiven === "strong") {
+      const clearedStrong = store.clearPhaseTierConfig(scope, phase, "strong");
+      return succeed(write, json, "config clear", { scope, phase, tier: "strong", cleared: clearedStrong }, () => [
+        clearedStrong ? `Cleared the strong ${phase} agent at ${scope} — demanding routes keep the default and say so; sealed routes are untouched.` : `No strong ${phase} agent was configured at ${scope}.`,
+      ]);
+    }
     const cleared = store.clearPhaseConfig(scope, phase);
     return succeed(write, json, "config clear", { scope, phase, cleared }, () => [
       cleared ? `Cleared ${phase} at ${scope} — it resolves one layer down now.` : `Nothing was configured for ${phase} at ${scope}.`,
@@ -5209,6 +5338,20 @@ async function configCommand(
   const valid = validateSpec({ provider: providerGiven, model: modelGiven });
   if (!valid.ok) {
     return fail(write, json, "config set", "invalid", valid.problem, EXIT.usage);
+  }
+  if (tierGiven === "strong") {
+    if (phase === "review" && providerGiven === "gemini") {
+      return fail(write, json, "config set", "invalid", "gemini has no isolation posture for the review phase yet — name claude or codex as the strong reviewer", EXIT.usage);
+    }
+    if (phase === "build" && modelGiven === null) {
+      return fail(write, json, "config set", "usage", "a strong build agent names an exact --model — approvals bind exact routing", EXIT.usage);
+    }
+    store.setPhaseTierConfig(scope, phase, "strong", providerGiven, modelGiven, acting.name, clock());
+    return succeed(write, json, "config set", { scope, phase, tier: "strong", provider: providerGiven, model: modelGiven }, () => [
+      `strong ${phase} at ${scope === INSTALLATION_SCOPE ? "the installation" : scope} is ${providerGiven}${modelGiven === null ? "" : ` · ${modelGiven}`}, set by ${acting.name}.`,
+      "  high-risk, strict, screenshot-proof, and automerge routes filed from now on reach for it; sealed routes are untouched.",
+      ...(phase === "repair" ? ["  a strong repair agent applies only when its provider is the build's — cross-provider repair does not exist."] : []),
+    ]);
   }
   store.setPhaseConfig(scope, phase, providerGiven, modelGiven, acting.name, clock());
   const warnings: string[] = [];
@@ -7542,12 +7685,32 @@ async function upCommand(
   // A runner with no projects still stays visibly alive while the UI waits
   // for the first addition. Watch loops heartbeat during their passes; this
   // machine-level pulse also covers the intentionally empty state.
+  // Provider readiness (v47): this machine's non-spending observations,
+  // recorded under its own runner name at start and refreshed every ten
+  // beats — so every route projection can say ready / unavailable /
+  // unknown per provider, and the dispatch gate can halt a leg this
+  // machine cannot run. Production only: a test's injected agent runner
+  // is a fake, and its readiness would be a fiction.
+  const observeReadiness = (): void => {
+    if (context.agentRunner !== undefined) return;
+    void observeProviderReadiness((file, args, options) => run(file, args, { timeoutMs: options?.timeoutMs ?? 5_000, ...(options?.omitEnv === undefined ? {} : { omitEnv: options.omitEnv }) }))
+      .then(observed => {
+        if (!stopping) reportProviderReadinessAuthed(store, { name: runnerName, token: runnerToken, observations: observed }, clock());
+      })
+      .catch(() => {
+        // A probe that cannot run leaves readiness unknown — never a fiction.
+      });
+  };
+  observeReadiness();
+  let beats = 0;
   const runnerHeartbeat = setInterval(() => {
     const beat = heartbeatRunner(store, runnerName, runnerToken, clock());
     if (!beat.ok && !stopping) {
       fatal = `the builder identity changed (${beat.reason})`;
       stop();
     }
+    beats++;
+    if (beats % 10 === 0) observeReadiness();
   }, 60_000);
   runnerHeartbeat.unref?.();
 
@@ -8571,6 +8734,8 @@ function taskCommand(
       return acceptTaskProof(rest, flags, context);
     case "repair":
       return repairTaskCommand(rest, flags, context);
+    case "route":
+      return routeTaskCommand(rest, flags, context);
     default:
       return fail(
         context.write,
@@ -8942,6 +9107,10 @@ function showTask(positional: readonly string[], context: Context): number {
   const latestFinished = runs.find(one => one.finishedAt !== null && (one.role === "builder" || one.role === "scout")) ?? null;
   const proofVerdict = latestFinished === null ? null : store.proofVerdictFor(latestFinished.id);
   const proofAccepted = latestFinished !== null && store.proofAcceptance(latestFinished.id) !== null;
+  // The route (v47), from the ONE projection every surface renders, with
+  // whatever readiness this task's runners have reported.
+  const routed = routeOfTask(store, id, ref, now);
+  const readiness = store.readinessLookupFor(ref.repo, ref.assignedRunner, now);
   const detail = {
     task,
     ref: ref.id,
@@ -8952,7 +9121,9 @@ function showTask(positional: readonly string[], context: Context): number {
     claim: currentClaim(store, ref.id, now),
     scope,
     approval: approvalOf(scope),
-    runs,
+    risk: ref.riskLevel ?? scope?.riskLevel ?? "routine",
+    route: routed === null ? null : { source: routed.source, ...projectRoute(routed.route, readiness) },
+    runs: runs.map(one => ({ ...one, route: store.runRoute(one.id) })),
     deliverable: ref.deliverable,
     report: readVerifiedReport(store, context.evidenceRoot, ref.id),
     proofVerdict: proofVerdict?.verdict ?? null,
@@ -8993,7 +9164,13 @@ function showTask(positional: readonly string[], context: Context): number {
     ...(detail.dispatch === null ? [] : [`  dispatch: ${detail.dispatch.summary} — ${detail.dispatch.detail}`]),
     ...(scope === null
       ? ["  no scope — nothing will build this until one is written and approved"]
-      : describeScope(scope)),
+      : describeScope(scope, readiness)),
+    // Provenance per run (v47): the actual provider and model each phase
+    // spent as, and the route it spent under.
+    ...detail.runs
+      .filter(one => one.route !== null)
+      .slice(0, 8)
+      .map(one => `  run #${one.id}  ${one.role.padEnd(8)} ${one.route!.provider}${one.route!.model === null ? "" : ` · ${one.route!.model}`}  [${one.route!.chosen}] route ${one.route!.routeDigest}`),
   ]);
 }
 
@@ -9448,6 +9625,10 @@ function scopeTask(
   if (acceptanceParse.problems.length > 0) {
     return fail(write, json, "task scope", "bad-acceptance", acceptanceParse.problems.map(p => p.message).join("; "), EXIT.usage);
   }
+  const riskGiven = text(flags, "risk");
+  if (riskGiven !== undefined && !isRiskLevel(riskGiven)) {
+    return fail(write, json, "task scope", "usage", `--risk is one of ${RISK_LEVELS.join(", ")}`, EXIT.usage);
+  }
   if (acceptanceParse.criteria.length === 0) {
     return fail(write, json, "task scope", "acceptance-required", "--acceptance named no valid criteria", EXIT.usage);
   }
@@ -9606,6 +9787,8 @@ function scopeTask(
       outOfScope: text(flags, "not") ?? null,
       touches,
       acceptance: acceptanceParse.criteria,
+      // v47: the declared risk — a durable task choice the route reads.
+      ...(riskGiven === undefined ? {} : { riskLevel: riskGiven }),
       ...(budgetUsd !== null
         ? { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }
         : coverage?.defaultBudgetMicrousd != null
@@ -9727,6 +9910,138 @@ function scopeTask(
  * a command that did it as a side effect of being run would be the wrong shape
  * entirely.
  */
+/**
+ * `standing-orders task route <id>` (v47): the explainable phase route —
+ * shown from the ONE projection every surface renders, and edited only by
+ * an approver: `--risk <routine|elevated|high>` declares the task's risk;
+ * `--phase <p> --provider <p> [--model <m>]` records a per-phase override
+ * with attribution; `--clear-phase <p>` removes one. Every edit re-files
+ * the scope (the same words, a recomputed route), so an approval sealed
+ * under the old route goes visibly stale. An override of a planner leg
+ * whose draft already landed asks for a REAL re-plan: the plan goes back
+ * to requested and approval waits for the new draft. Refused under a live
+ * claim — the running work read its route at start.
+ */
+async function routeTaskCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const id = positional[0];
+  if (id === undefined) {
+    return fail(write, json, "task route", "usage", "`standing-orders task route <id> [--risk <level>] [--phase <p> --provider <p> [--model <m>] | --clear-phase <p>] --as <you> --token <t>`", EXIT.usage);
+  }
+  if (store.getTask(id) === null) {
+    return fail(write, json, "task route", "unknown-task", `no task \`${id}\``, EXIT.refused);
+  }
+  const ref = store.refFor(BUILT_IN, id);
+  const riskGiven = text(flags, "risk");
+  const phaseGiven = text(flags, "phase");
+  const clearGiven = text(flags, "clear-phase");
+  const providerGiven = text(flags, "provider");
+  const modelGiven = text(flags, "model");
+  const editing = riskGiven !== undefined || phaseGiven !== undefined || clearGiven !== undefined;
+
+  const show = (): number => {
+    const scope = store.getScope(id);
+    const routed = routeOfTask(store, id, store.refFor(BUILT_IN, id), clock());
+    const readiness = store.readinessLookupFor(ref.repo, ref.assignedRunner, clock());
+    const projection = routed === null ? null : projectRoute(routed.route, readiness);
+    return succeed(
+      write,
+      json,
+      "task route",
+      { id, risk: store.refFor(BUILT_IN, id).riskLevel ?? scope?.riskLevel ?? "routine", source: routed?.source ?? null, route: projection, overrides: store.refFor(BUILT_IN, id).routeOverrides ?? [], approval: approvalOf(scope) },
+      () =>
+        projection === null
+          ? [`${id}: no route can be recommended yet — ${scope === null ? "place the task in a repository and file a scope" : scope.unresolvedReason ?? "the phase configuration cannot resolve"}`]
+          : [
+              `${id}: route ${routed?.source === "approved" ? "SEALED by the approval" : routed?.source === "proposed" ? "proposed — the next approval seals it" : routed?.source === "legacy" ? "from a pre-routing approval (build and repair sealed; plan and review resolve at run time)" : "recommended live — no scope filed yet"}`,
+              ...routeWords(projection),
+              ...(scope === null
+                ? []
+                : (() => {
+                    const approval = approvalOf(scope);
+                    return [`  approved     ${approval.approved ? `yes, by ${approval.by}` : approval.reason === "changed" ? "no — approved once, then the terms changed; approve again" : "no"}`];
+                  })()),
+            ],
+    );
+  };
+  if (!editing) return show();
+
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "task route", "usage", "changing a route takes `--as <you> --token <t>` — it reroutes spend", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, "task route", authenticated.reason, describeApproveFailure(authenticated.reason, id), EXIT.refused);
+  }
+  if (riskGiven !== undefined && !isRiskLevel(riskGiven)) {
+    return fail(write, json, "task route", "usage", `--risk is one of ${RISK_LEVELS.join(", ")}`, EXIT.usage);
+  }
+  if (phaseGiven !== undefined && clearGiven !== undefined) {
+    return fail(write, json, "task route", "usage", "say --phase … --provider … OR --clear-phase …, not both", EXIT.usage);
+  }
+  const phase = phaseGiven ?? clearGiven;
+  if (phase !== undefined && !(ROUTE_PHASES as readonly string[]).includes(phase)) {
+    return fail(write, json, "task route", "usage", `--${phaseGiven !== undefined ? "phase" : "clear-phase"} is one of ${ROUTE_PHASES.join(", ")}`, EXIT.usage);
+  }
+  if (phaseGiven !== undefined) {
+    if (providerGiven === undefined || !isProviderId(providerGiven)) {
+      return fail(write, json, "task route", "usage", `--provider is one of ${PROVIDER_IDS.join(", ")}`, EXIT.usage);
+    }
+    const valid = validateSpec({ provider: providerGiven, model: modelGiven ?? null });
+    if (!valid.ok) return fail(write, json, "task route", "invalid", valid.problem, EXIT.usage);
+    if (phaseGiven === "review" && providerGiven === "gemini") {
+      return fail(write, json, "task route", "invalid", "gemini has no isolation posture for the review phase yet — choose claude or codex", EXIT.usage);
+    }
+    if (phaseGiven === "build" && (modelGiven === undefined || modelGiven === "")) {
+      return fail(write, json, "task route", "usage", "a build override names an exact --model — approvals bind exact routing", EXIT.usage);
+    }
+  }
+  if (store.activeTournamentTerms(ref.id) !== null) {
+    return fail(write, json, "task route", "contest-open", `${id} has tournament terms on file — its lanes are the route; exclude or settle the contest first`, EXIT.refused);
+  }
+  if (riskGiven !== undefined) {
+    const set = store.setTaskRisk(ref.id, riskGiven, clock());
+    if (!set.ok) return fail(write, json, "task route", "claimed", `${id} is being worked on right now — the route cannot change under a live claim`, EXIT.refused);
+  }
+  if (phase !== undefined) {
+    const set = store.setRouteOverride(
+      ref.id,
+      phaseGiven !== undefined
+        ? { phase: phase as RouteOverride["phase"], provider: providerGiven as ProviderId, model: modelGiven ?? null, by: acting.name }
+        : { phase: phase as RouteOverride["phase"], provider: null },
+      clock(),
+    );
+    if (!set.ok) {
+      return fail(write, json, "task route", set.reason === "live-claim" ? "claimed" : "unknown-task", set.reason === "live-claim" ? `${id} is being worked on right now — the route cannot change under a live claim` : `no task \`${id}\``, EXIT.refused);
+    }
+  }
+  // Re-file the scope under the new inputs: same words, recomputed route,
+  // a digest that moves whenever the route is a signed term.
+  const before = store.getScope(id);
+  const wasApproved = before !== null && approvalOf(before).approved;
+  const refiled = store.refileScope(id, clock());
+  // A planner leg changed after its draft landed: the draft was authored
+  // by the old planner — ask for a real re-plan rather than relabeling it.
+  let replanned = false;
+  if (phase === "plan" && ref.plan === "drafted" && !(refiled !== null && approvalOf(refiled).approved)) {
+    store.setPlanState(ref.id, "requested");
+    replanned = true;
+  }
+  const after = store.getScope(id);
+  const stale = wasApproved && after !== null && !approvalOf(after).approved;
+  const code = show();
+  if (!json) {
+    if (stale) write(`  ! the approval sealed under the previous route is now stale — approve ${id} again to seal this one`);
+    if (replanned) write(`  ! the planner leg changed after a draft landed — a new planner run was requested; approval waits for its draft`);
+  }
+  return code;
+}
+
 async function approveTask(
   positional: readonly string[],
   flags: Map<string, string | true>,
@@ -9741,6 +10056,11 @@ async function approveTask(
   const scope = store.getScope(id);
   if (scope === null) {
     return fail(write, json, "task approve", "no-scope", `${id} has no scope to approve — write one first`, EXIT.refused);
+  }
+  // Console parity (v47): a plan leg changed after a draft asks for a real
+  // re-plan — nothing approves the obsolete draft while the planner is owed.
+  if (store.lookupRef(id)?.plan === "requested") {
+    return fail(write, json, "task approve", "planning", `${id} is waiting on a planner — approval is blocked until the drafted plan lands`, EXIT.refused);
   }
 
   let saw = text(flags, "digest");

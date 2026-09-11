@@ -8,6 +8,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { resolveScopeChain } from "./agentconfig.js";
+import { addApprover, approvalOf, approve, chainFromJson, digestOf, propose } from "./scope.js";
+import { routeFromJson } from "./phase-routing.js";
 import { presetTerms, modeTermsFromJson, modeTermsJson, modeWords } from "./modes.js";
 
 const T0 = new Date("2026-08-29T12:00:00.000Z");
@@ -95,5 +97,53 @@ describe("fallback config + chain resolution", () => {
     expect(store.clearFallbackConfig(REPO)).toBe(true);
     expect(store.fallbackConfig(REPO)).toEqual([]);
     expect(store.clearFallbackConfig(REPO)).toBe(false);
+  });
+});
+
+describe("a routed scope under a fallback chain (v47): the route drives the base, the chain stays the only substitution road", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseTierConfig("installation", "build", "strong", "claude", "opus", "alex", T0);
+    store.setFallbackConfig(REPO, [{ provider: "codex", model: "gpt-5-codex", authMode: "api-key" }], "alex", T0);
+    const alex = addApprover(store, "alex", T0, undefined, () => "tok-alex");
+    if (!alex.ok) throw new Error("bootstrap");
+  });
+  afterEach(() => store.close());
+
+  test("the sealed chain's base is the route's strong build leg; the digest binds chain AND route; the seal proves both, and a route edit unseals both", () => {
+    store.createTask({ id: "t", title: "t" }, T0);
+    const ref = store.refFor("built-in", "t").id;
+    store.placeTask(ref, REPO);
+    propose(store, { taskId: "t", goal: "guard", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], riskLevel: "high", now: T0 });
+    const scope = store.getScope("t")!;
+    const chain = chainFromJson(scope.proposedChainJson ?? null)!;
+    expect(chain[0]?.profile).toMatchObject({ provider: "claude", model: "opus" });
+    expect(chain[1]?.profile).toMatchObject({ provider: "codex", model: "gpt-5-codex" });
+    const route = routeFromJson(scope.proposedRouteJson ?? null)!;
+    expect(route.legs.find(one => one.phase === "build")).toMatchObject({ provider: "claude", model: "opus", tier: "strong" });
+    // The digest binds the whole chain and the signed route together.
+    const fields = { goal: "guard", outOfScope: null, touches: [], budgetMicrousd: null, acceptance: scope.acceptance };
+    expect(scope.digest).toBe(digestOf(fields, { chain }, route));
+    expect(scope.digest).not.toBe(digestOf(fields, { chain }));
+    expect(approve(store, "t", "alex", T0, scope.digest, "tok-alex").ok).toBe(true);
+    expect(store.getScope("t")!.approvalKind).toBe("chain");
+    expect(store.approvedChainOf("t")).toHaveLength(2);
+    expect(store.approvedRouteOf("t")).not.toBeNull();
+    // The explicit approved chain is the ONLY automatic substitution: the
+    // route itself never names a second-best. Editing the route unseals
+    // the chain authority as well — nothing dispatches on a stale seal.
+    expect(route.legs.every(one => one.problem === null)).toBe(true);
+    store.setRouteOverride(ref, { phase: "build", provider: "codex", model: "gpt-5-codex", by: "alex" }, T0);
+    const refiled = store.refileScope("t", T0)!;
+    expect(store.approvedChainOf("t")).toBeNull();
+    expect(store.approvedRouteOf("t")).toBeNull();
+    // The re-filed chain's base is the overridden leg — the same sealed
+    // shape, re-proposed, waiting for a fresh yes.
+    const rechained = chainFromJson(refiled.proposedChainJson ?? null)!;
+    expect(rechained[0]?.profile).toMatchObject({ provider: "codex", model: "gpt-5-codex" });
+    expect(routeFromJson(refiled.proposedRouteJson ?? null)!.legs.find(one => one.phase === "build")).toMatchObject({ provider: "codex", chosen: "override" });
+    expect(approvalOf(refiled)).toMatchObject({ approved: false, reason: "changed" });
   });
 });

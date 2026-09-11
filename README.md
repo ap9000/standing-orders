@@ -425,6 +425,40 @@ The same selector appears when a task is created and while its scope is still
 editable. The concrete choice is stamped on every run, survives global setting
 changes, and is visible on the task, approval, run-list, and run-detail views.
 
+### Explainable phase routing
+
+Which agent plans, builds, repairs, and reviews a task is decided once, from
+signed facts, and written down with its reasons. The route reads the task's
+declared **risk** (routine, elevated, high), its quality mode, what the
+acceptance rubric demands (screenshots, manual review), how far a live
+operating mode may carry the result unattended (an automerge mode strengthens
+the reviewer), and the agents you configured for each phase. Strength is never
+inferred from a model's name: the ordinary phase row is the routine tier, and
+`config set <phase> --tier strong --provider <p> --model <m>` names the agent
+high-risk, strict, screenshot-proof, and automerge routes reach for. With no
+strong row, a demanding task keeps the default and says so.
+
+```
+standing-orders task scope <id> --goal … --acceptance … --risk high
+standing-orders task route <id>                     # every leg, its reason, its readiness
+standing-orders task route <id> --phase review --provider codex --model gpt-5-codex --as you --token <t>
+standing-orders task route <id> --clear-phase review --as you --token <t>
+standing-orders providers --report --runner <name> --token <t>   # this machine's readiness
+```
+
+Every override is recorded under the approver's name. Approval seals the
+route (and any configured fallback chain) exactly as it seals the execution
+profile; a later risk change or override re-files the scope and the old
+approval reads stale, while a global configuration change can never rewrite
+a sealed route. Repairs always stay on the build provider. Runners report
+provider readiness without spending — installed, logged in, key present —
+and every route surface says **ready**, **unavailable** (with the runner's own
+words), or **unknown**; an unavailable provider halts before any claim and is
+never substituted, except through the explicitly approved fallback chain. The
+same projection appears in `task show`, on the task page and its approval
+card, in the focused chat, and on every run: each phase's record names the
+route digest and the actual provider and model it spent as.
+
 ## The phone, both directions
 
 The Telegram bridge closes the loop without a terminal: a parked decision

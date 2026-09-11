@@ -39,7 +39,8 @@ import { join } from "node:path";
 import { auditOf, isProviderId, safeDiagnostic, type ProviderId } from "./provider.js";
 import type { Store } from "./store.js";
 import { invokeAgent } from "./invoke.js";
-import { resolvePhaseAgent } from "./agentconfig.js";
+import { resolvePhaseAgent, routeOfTask } from "./agentconfig.js";
+import { legOf, routeDigestOf } from "./phase-routing.js";
 import { maybeTriggerRepair } from "./dispose.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import { evidenceRoot, readMailbox, readVerifiedArtifact, sniffImageKind } from "./evidence.js";
@@ -1142,11 +1143,37 @@ export async function reviewPass(
   const clock = options.clock ?? (() => options.now);
   const reports: ReviewPassReport[] = [];
   for (const request of store.openReviewRequests()) {
-    const resolution = resolvePhaseAgent(store, "review", request.repo, {});
+    // THE REVIEW LEG (v47): a task whose approval sealed a route reviews
+    // on that route's exact review leg — never on whatever the configuration
+    // says today. A legacy task (no sealed route) resolves as it always
+    // has. A leg the policy flagged as unrunnable (gemini) is a stated
+    // configuration problem: the request stays open, in words.
+    const taskRoute = routeOfTask(store, request.taskId, store.refForId(request.taskRef), clock());
+    const reviewLeg = taskRoute !== null && taskRoute.source === "approved" ? legOf(taskRoute.route, "review") : null;
+    if (reviewLeg !== null && reviewLeg.problem !== null) {
+      reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: reviewLeg.problem });
+      continue;
+    }
+    const resolution =
+      reviewLeg !== null
+        ? resolvePhaseAgent(store, "review", request.repo, { provider: reviewLeg.provider, model: reviewLeg.model ?? undefined })
+        : resolvePhaseAgent(store, "review", request.repo, {});
     if (!resolution.ok) {
       // A configuration problem is the operator's to fix — the request
       // stays open rather than being spent on a misroute.
       reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: resolution.problem });
+      continue;
+    }
+    // THE READINESS HALT (v47): a reviewer THIS runner reports unavailable
+    // is never substituted; the request stays open with the observation.
+    const readiness = store.runnerReadinessOf(options.runner, resolution.spec.provider);
+    if (readiness !== null && readiness.state === "unavailable") {
+      reports.push({
+        requestId: request.id,
+        run: request.run,
+        outcome: "skipped",
+        detail: `${resolution.spec.provider} is reported unavailable on ${options.runner} (${readiness.reason}; observed ${readiness.observedAt}) — nothing substitutes for the routed reviewer`,
+      });
       continue;
     }
     const admitted = store.admitReview(
@@ -1163,6 +1190,19 @@ export async function reviewPass(
       continue;
     }
     const task = store.getTask(admitted.taskId);
+    // Route provenance (v47): the reviewer run names the route and the
+    // exact leg it reviews as.
+    store.stampRunRoute(
+      admitted.reviewerRunId,
+      {
+        routeDigest: taskRoute === null ? "unrouted" : routeDigestOf(taskRoute.route),
+        phase: "review",
+        provider: resolution.spec.provider,
+        model: resolution.spec.model,
+        chosen: reviewLeg === null ? "legacy" : reviewLeg.chosen,
+      },
+      clock(),
+    );
     const result = await review(store, {
       sourceRunId: admitted.sourceRun,
       reviewerRunId: admitted.reviewerRunId,

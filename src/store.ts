@@ -33,11 +33,30 @@ import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
 import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileFromJson, parseAcceptanceCriteria, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
-import { resolveScopeProfile, resolveScopeChain } from "./agentconfig.js";
+import { resolveScopeProfile, resolveScopeChain, resolveRouteCandidates } from "./agentconfig.js";
+import {
+  canonicalOverridesJson,
+  canonicalRouteJson,
+  isRiskLevel,
+  legOf,
+  overridesFromJson,
+  recommendRoute,
+  routeDigestOf,
+  routeFromJson,
+  routeIsSigned,
+  type PhaseRoute,
+  type PublicationAuthority,
+  type ReadinessLookup,
+  type ReadinessObservation,
+  type ReadinessState,
+  type RiskLevel,
+  type RouteEvidenceKind,
+  type RouteOverride,
+} from "./phase-routing.js";
 import { readAuthMode } from "./keys.js";
 import { isFallbackEligible, recognizesEligible, classMatchesAuthMode, type TerminalClass } from "./exhaustion.js";
 import { modeTermsFromJson } from "./modes.js";
-import type { ProviderId } from "./provider.js";
+import { isProviderId, type ProviderId } from "./provider.js";
 import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
@@ -46,7 +65,7 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 46;
+export const SCHEMA_VERSION = 47;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -115,6 +134,12 @@ export type TaskRef = {
   /** Durable per-task evidence-policy override. null inherits the
    * installation default when a scope is next written. */
   qualityMode?: QualityMode | null;
+  /** v47: the task's declared risk; null reads as routine when the next
+   * scope is filed. The scope stores the signed level. */
+  riskLevel?: RiskLevel | null;
+  /** v47: the approver's per-phase route overrides, applied when the next
+   * scope is filed and recorded in the sealed route. */
+  routeOverrides?: RouteOverride[];
   /** Plan pins (P2/C7): read ONLY by the plan phase; precedence plan pin
    * > plan flags > plan config > installation > default. */
   planProvider: string | null;
@@ -1052,6 +1077,13 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- default when the next scope is filed; the scope stores the concrete
   -- signed choice.
   quality_mode            TEXT CHECK (quality_mode IN ('default','strict')),
+  -- Per-task declared risk (v47, phase routing). NULL reads as routine
+  -- when the next scope is filed; the scope stores the signed level.
+  risk_level              TEXT CHECK (risk_level IN ('routine','elevated','high')),
+  -- An approver's explicit per-phase route overrides (v47): a JSON list of
+  -- {phase, provider, model, by, at}, at most one per phase. Read when the
+  -- next scope is filed; the sealed route records what applied.
+  route_overrides_json    TEXT,
   -- A revision task (M6.8): which task's reviewed run it revises, and the
   -- immutable brief artifact carrying the exact comment batch. Every
   -- revision requires its own approval; nothing is inherited.
@@ -1144,6 +1176,53 @@ CREATE TABLE IF NOT EXISTS fallback_config (
   updated_at  TEXT NOT NULL,
   updated_by  TEXT NOT NULL,
   PRIMARY KEY (scope, phase)
+);
+
+-- The STRONG candidate tier (v47, phase routing): the operator's named
+-- strongest agent per phase, project or installation scoped, exactly like
+-- phase_config rows (which remain the routine tier). Strength is never
+-- inferred from a model's name — a phase without a strong row keeps its
+-- configured default and the route says so.
+CREATE TABLE IF NOT EXISTS phase_tier_config (
+  scope      TEXT NOT NULL,
+  phase      TEXT NOT NULL CHECK (phase IN ('plan','build','repair','review')),
+  tier       TEXT NOT NULL CHECK (tier IN ('strong')),
+  provider   TEXT NOT NULL CHECK (provider IN ('claude','codex','openrouter','gemini')),
+  model      TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  PRIMARY KEY (scope, phase, tier)
+);
+
+-- Runner-scoped provider readiness (v47): what one authenticated runner
+-- observed about one provider without spending — installed, logged in, key
+-- present — with the probe named and the time kept. 'unknown' is a real
+-- answer (claude has no non-spending login check) and is never upgraded.
+-- The route projection reads these beside the sealed route; the dispatch
+-- gate halts a leg the dispatching runner reports unavailable, and nothing
+-- substitutes for it.
+CREATE TABLE IF NOT EXISTS provider_readiness (
+  runner      TEXT NOT NULL REFERENCES runner(name) ON DELETE CASCADE,
+  provider    TEXT NOT NULL CHECK (provider IN ('claude','codex','openrouter','gemini')),
+  state       TEXT NOT NULL CHECK (state IN ('ready','unavailable','unknown')),
+  reason      TEXT NOT NULL,
+  probe       TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  PRIMARY KEY (runner, provider)
+);
+
+-- Route provenance per run (v47): which sealed route a run spent under and
+-- the exact leg it used — the actual provider and model, and whether that
+-- leg was recommended, overridden, pinned, or a legacy resolution. One row
+-- per run, stamped when the run opens under a route.
+CREATE TABLE IF NOT EXISTS run_route (
+  run          INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
+  route_digest TEXT NOT NULL,
+  phase        TEXT NOT NULL CHECK (phase IN ('plan','build','repair','review')),
+  provider     TEXT NOT NULL,
+  model        TEXT,
+  chosen       TEXT NOT NULL CHECK (chosen IN ('recommended','override','pinned','legacy')),
+  stamped_at   TEXT NOT NULL
 );
 
 -- A standing order (v8): a pre-approved template whose instances build
@@ -2132,7 +2211,20 @@ CREATE TABLE IF NOT EXISTS task_scope (
   -- The concrete quality policy (v41), folded into digest only when strict
   -- so every historical/default approval remains byte-identical.
   quality_mode          TEXT NOT NULL DEFAULT 'default' CHECK (quality_mode IN ('default','strict')),
-  approval_kind         TEXT NOT NULL DEFAULT 'profile' CHECK (approval_kind IN ('profile','chain'))
+  approval_kind         TEXT NOT NULL DEFAULT 'profile' CHECK (approval_kind IN ('profile','chain')),
+  -- The phase route (v47, explainable risk-aware routing). risk_level is
+  -- the signed risk; proposed_route_json is the WORKING canonical route
+  -- saveScope computed from risk, quality, evidence, publication, the
+  -- configured candidate tiers, and the task's overrides; the digest folds
+  -- its route digest in whenever the route says more than the legacy
+  -- resolution (a non-routine risk, an override, a strong-tier leg).
+  -- approved_route_json is the immutable snapshot the seal COPIED, exactly
+  -- as approved_profile_json mirrors profile_json — dispatch re-proves
+  -- against it and mutable configuration can never rewrite it. All NULL /
+  -- routine on every scope filed before v47.
+  risk_level            TEXT NOT NULL DEFAULT 'routine' CHECK (risk_level IN ('routine','elevated','high')),
+  proposed_route_json   TEXT,
+  approved_route_json   TEXT
 );
 
 -- Whoever is allowed to say yes to a scope.
@@ -2708,6 +2800,10 @@ CREATE TABLE IF NOT EXISTS review_request (
   -- and does not inherit its predecessor's queued asks.
   basis           TEXT NOT NULL DEFAULT 'human' CHECK (basis IN ('human','mode')),
   mode_digest     TEXT,
+  -- v47: the approved route digest the request was queued under. Admission
+  -- re-proves the task's sealed route still carries it — a re-approved
+  -- task with a different route spends the request unrun, in words.
+  route_digest    TEXT,
   requested_at    TEXT NOT NULL,
   consumed_at     TEXT,
   consumed_reason TEXT
@@ -3883,6 +3979,18 @@ function migrate(db: Database): void {
   // widening, using the same exact-recognizer copy/rename discipline as
   // v34 and v38; no historical row changes meaning.
   rebuildArtifactForV46(db);
+
+  // v47 (explainable risk-aware phase routing): additive columns only, the
+  // v41 quality precedent verbatim — every historical scope reads back as
+  // routine risk with no route, digests exactly as it did, and its sealed
+  // profile remains the whole authority for its build. The three new
+  // tables arrive by IF NOT EXISTS on fresh and upgraded files alike.
+  addColumn(db, "task_ref", "risk_level", "TEXT CHECK (risk_level IN ('routine','elevated','high'))");
+  addColumn(db, "task_ref", "route_overrides_json", "TEXT");
+  addColumn(db, "task_scope", "risk_level", "TEXT NOT NULL DEFAULT 'routine' CHECK (risk_level IN ('routine','elevated','high'))");
+  addColumn(db, "task_scope", "proposed_route_json", "TEXT");
+  addColumn(db, "task_scope", "approved_route_json", "TEXT");
+  addColumn(db, "review_request", "route_digest", "TEXT");
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -6816,7 +6924,7 @@ export class Store {
 
   // ---- scope --------------------------------------------------------------
 
-  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; permissionMode?: UnattendedPermissionMode; qualityMode?: QualityMode; posture?: "escalated"; proposedVia?: "mate" | "coordinator" | "scout" | null } = {}): void {
+  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; permissionMode?: UnattendedPermissionMode; qualityMode?: QualityMode; riskLevel?: RiskLevel; posture?: "escalated"; proposedVia?: "mate" | "coordinator" | "scout" | null } = {}): void {
     this.once(mutation, "saveScope", () => this.transact(() => {
       // THE filing invariant (foundations findings 5/13/19): every scope
       // row leaves this method either RESOLVED (working profile stamped,
@@ -6847,16 +6955,65 @@ export class Store {
       if (options.qualityMode !== undefined && ref !== null) {
         this.db.prepare("UPDATE task_ref SET quality_mode = ? WHERE id = ?").run(options.qualityMode, ref.id);
       }
-      if (profile === null) {
+      // THE ROUTE (v47): recommended once, here, from signed facts — risk,
+      // quality, the rubric's evidence needs, publication authority — over
+      // the CONFIGURED candidate tiers, the task's recorded overrides, and
+      // its pins. The build leg then drives the execution profile below,
+      // so the sealed profile and the sealed route can never disagree.
+      const riskLevel: RiskLevel = options.riskLevel ?? ref?.riskLevel ?? "routine";
+      if (options.riskLevel !== undefined && ref !== null) {
+        this.db.prepare("UPDATE task_ref SET risk_level = ? WHERE id = ?").run(options.riskLevel, ref.id);
+      }
+      let route: PhaseRoute | null = null;
+      let routeFlags: { provider?: string; model?: string; repairModel?: string } = {};
+      const candidatesResolved = resolveRouteCandidates(this, ref?.repo ?? null);
+      if (candidatesResolved.ok) {
+        const buildPin =
+          options.profile !== undefined
+            ? { provider: options.profile.provider, model: options.profile.model }
+            : ref !== null && ref.agentProvider !== null && isProviderId(ref.agentProvider)
+              ? { provider: ref.agentProvider, model: ref.agentModel }
+              : null;
+        const planPin = ref !== null && ref.planProvider !== null && isProviderId(ref.planProvider) ? { provider: ref.planProvider, model: ref.planModel } : null;
+        route = recommendRoute({
+          risk: riskLevel,
+          qualityMode,
+          evidence: [...new Set(scope.acceptance.flatMap(one => one.evidence))] as RouteEvidenceKind[],
+          publication: this.publicationAuthorityOf(ref?.repo ?? null, new Date(scope.proposedAt)),
+          candidates: candidatesResolved.candidates,
+          overrides: ref?.routeOverrides ?? [],
+          pins: { plan: planPin, build: buildPin },
+        });
+        const buildLeg = legOf(route, "build");
+        const repairLeg = legOf(route, "repair");
+        const routineBuild = candidatesResolved.candidates.build.routine;
+        const buildRouted = buildLeg.chosen !== "pinned" && (buildLeg.provider !== routineBuild.provider || buildLeg.model !== routineBuild.model);
+        const repairRouted = repairLeg.chosen === "override" || repairLeg.tier === "strong";
+        // Only a leg that LEFT the legacy resolution becomes a flag: the
+        // routine road resolves exactly as it always has (provenance and
+        // refusals included), so nothing filed before v47 moves.
+        routeFlags = {
+          ...(buildRouted ? { provider: buildLeg.provider, ...(buildLeg.model === null ? {} : { model: buildLeg.model }) } : {}),
+          ...(buildRouted || repairRouted ? { repairModel: repairLeg.model ?? "inherit" } : {}),
+        };
+      } else if (profile === null) {
+        unresolvedReason = candidatesResolved.problem;
+      }
+      if (profile === null && unresolvedReason === null) {
         const resolved = resolveScopeProfile(
           this,
           ref?.repo ?? null,
           ref === null ? undefined : { agentProvider: ref.agentProvider, agentModel: ref.agentModel },
-          { permissionMode },
+          { permissionMode, ...routeFlags },
         );
         if (resolved.ok) {
           profile = resolved.profile;
-          provenance = JSON.stringify(resolved.provenance);
+          provenance = JSON.stringify({
+            ...resolved.provenance,
+            ...(routeFlags.provider === undefined ? {} : { resolvedFrom: "route" }),
+            ...(routeFlags.repairModel === undefined ? {} : { repairFrom: "route" }),
+            ...(route === null ? {} : { routeDigest: routeDigestOf(route) }),
+          });
         } else {
           unresolvedReason = resolved.problem;
         }
@@ -6881,10 +7038,11 @@ export class Store {
         acceptance: scope.acceptance,
         qualityMode,
       };
+      const routeSigned = route !== null && routeIsSigned(route);
       const digest =
         profile === null
-          ? qualityMode === "strict" ? digestOf(digestInput) : scope.digest
-          : digestOf(digestInput, profile);
+          ? qualityMode === "strict" || routeSigned ? digestOf(digestInput, null, route) : scope.digest
+          : digestOf(digestInput, profile, route);
       // The fallback-chain binding (v30): when the scope resolved FROM CONFIG
       // (not an explicit routine/demo profile) and the repo has configured
       // fallbacks, the scope files as a CHAIN — the digest binds the whole
@@ -6906,7 +7064,7 @@ export class Store {
             this,
             chainRepo,
             chainRef === null ? undefined : { agentProvider: chainRef.agentProvider, agentModel: chainRef.agentModel },
-            { permissionMode },
+            { permissionMode, ...routeFlags },
             readAuthMode(profile.provider),
           );
           if (chain.ok && chain.kind === "chain") {
@@ -6914,6 +7072,7 @@ export class Store {
             boundDigest = digestOf(
               { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode },
               { chain: chain.chain },
+              route,
             );
           } else if (!chain.ok) {
             // The operator CONFIGURED fallbacks that cannot file (F+G
@@ -6924,7 +7083,7 @@ export class Store {
             // routing is fixed.
             profile = null;
             unresolvedReason = `the configured fallback chain cannot file: ${chain.problem} — fix \`config set fallback\` for this repository, or clear it`;
-            boundDigest = qualityMode === "strict" ? digestOf(digestInput) : scope.digest;
+            boundDigest = qualityMode === "strict" || routeSigned ? digestOf(digestInput, null, route) : scope.digest;
           }
         }
       }
@@ -6932,8 +7091,9 @@ export class Store {
         .prepare(
           `INSERT INTO task_scope
              (task_id, goal, out_of_scope, touches, budget_microusd, proposed_at, digest, approved_at, approved_by, approved_digest,
-              profile_json, profile_state, unresolved_reason, digest_version, profile_provenance, proposed_chain_json, acceptance_json, quality_mode)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              profile_json, profile_state, unresolved_reason, digest_version, profile_provenance, proposed_chain_json, acceptance_json, quality_mode,
+              risk_level, proposed_route_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (task_id) DO UPDATE SET
              goal = excluded.goal, out_of_scope = excluded.out_of_scope,
              touches = excluded.touches, budget_microusd = excluded.budget_microusd,
@@ -6943,7 +7103,8 @@ export class Store {
              profile_json = excluded.profile_json, profile_state = excluded.profile_state,
              unresolved_reason = excluded.unresolved_reason, digest_version = excluded.digest_version,
              profile_provenance = excluded.profile_provenance, proposed_chain_json = excluded.proposed_chain_json,
-             acceptance_json = excluded.acceptance_json, quality_mode = excluded.quality_mode`,
+             acceptance_json = excluded.acceptance_json, quality_mode = excluded.quality_mode,
+             risk_level = excluded.risk_level, proposed_route_json = excluded.proposed_route_json`,
         )
         .run(
           scope.taskId,
@@ -6964,12 +7125,38 @@ export class Store {
           proposedChainJson,
           scope.acceptance.length === 0 ? null : JSON.stringify(scope.acceptance),
           qualityMode,
+          riskLevel,
+          route === null ? null : canonicalRouteJson(route),
         );
       // Who wrote THIS text (mate arc, ruling 2): set per write, so a human
       // rewrite clears the mate's mark and a mate rewrite sets it.
       this.db.prepare("UPDATE task_scope SET proposed_via = ? WHERE task_id = ?").run(options.proposedVia ?? null, scope.taskId);
       return null;
     }));
+  }
+
+  /**
+   * Re-file a scope under its OWN current words (v47): the route is
+   * recomputed from the task's risk, overrides, and today's configuration,
+   * the digest recomputed to bind it, and everything an operator wrote —
+   * goal, boundaries, rubric, quality, budget, who authored it — carried
+   * verbatim. The previous approval is kept and goes stale by the digest
+   * exactly as a rewrite would. Null when the task has no scope.
+   */
+  refileScope(taskId: string, now: Date): Scope | null {
+    return this.transact(() => {
+      const row = this.db.prepare("SELECT * FROM task_scope WHERE task_id = ?").get(taskId);
+      if (row === undefined) return null;
+      const scope = readScope(row);
+      const proposedVia = row["proposed_via"] === null || row["proposed_via"] === undefined ? null : (String(row["proposed_via"]) as "mate" | "coordinator" | "scout");
+      const draft = { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode: scope.qualityMode ?? "default" };
+      this.saveScope(
+        { ...scope, proposedAt: now.toISOString(), digest: digestOf(draft) },
+        {},
+        { qualityMode: scope.qualityMode ?? "default", proposedVia },
+      );
+      return this.getScope(taskId);
+    });
   }
 
   /** The approval SEAL (foundations finding 4/17): stamps the approval
@@ -7014,7 +7201,10 @@ export class Store {
                     -- rewritten-then-reapproved scope re-seals from its CURRENT
                     -- working snapshot, so a stale chain can never survive.
                     approved_chain_json = proposed_chain_json,
-                    approval_kind = CASE WHEN proposed_chain_json IS NOT NULL THEN 'chain' ELSE 'profile' END
+                    approval_kind = CASE WHEN proposed_chain_json IS NOT NULL THEN 'chain' ELSE 'profile' END,
+                    -- The ROUTE seals exactly as the profile and chain do
+                    -- (v47): copied, never re-resolved.
+                    approved_route_json = proposed_route_json
               WHERE task_id = ?`,
           )
           .run(now.toISOString(), by, basis === undefined ? "password" : basis.kind, basis === undefined ? null : basis.modeDigest, taskId);
@@ -8577,8 +8767,9 @@ export class Store {
     // the current scope fields + this chain and require an exact match, so a
     // snapshot that does not correspond to the approved digest never governs.
     const rederived = digestOf(
-      { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance },
+      { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode: scope.qualityMode ?? "default" },
       { chain },
+      routeFromJson(scope.approvedRouteJson ?? null),
     );
     if (rederived !== scope.approvedDigest) return null;
     return chain;
@@ -9351,13 +9542,17 @@ export class Store {
         .prepare("SELECT 1 AS hit FROM run WHERE parent_run = ? AND role = 'reviewer' LIMIT 1")
         .get(runId);
       if (reviewed !== undefined) return { ok: false as const, reason: "already-reviewed" as const };
+      // v47: the request binds the task's SEALED route (when the approval
+      // stands and a route was sealed) — admission re-proves it.
+      const owner = this.refForId(run.taskRef);
+      const sealedRoute = owner === null ? null : this.approvedRouteOf(owner.externalId);
       const inserted = this.db
         .prepare(
-          `INSERT INTO review_request (run, requested_by, basis, mode_digest, requested_at)
-           SELECT ?, ?, ?, ?, ?
+          `INSERT INTO review_request (run, requested_by, basis, mode_digest, requested_at, route_digest)
+           SELECT ?, ?, ?, ?, ?, ?
            WHERE NOT EXISTS (SELECT 1 FROM review_request WHERE run = ? AND consumed_at IS NULL)`,
         )
-        .run(runId, by, basis === undefined ? "human" : "mode", basis === undefined ? null : basis.digest, now.toISOString(), runId);
+        .run(runId, by, basis === undefined ? "human" : "mode", basis === undefined ? null : basis.digest, now.toISOString(), sealedRoute === null ? null : routeDigestOf(sealedRoute), runId);
       if (Number(inserted.changes) === 0) return { ok: false as const, reason: "already-requested" as const };
       this.bumpWake();
       return { ok: true as const, id: Number(inserted.lastInsertRowid) };
@@ -9438,7 +9633,7 @@ export class Store {
     now: Date,
   ):
     | { ok: true; reviewerRunId: number; sourceRun: number; taskRef: number; taskId: string }
-    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "railed" | "unauthenticated"; rail?: string; detail?: string } {
+    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "railed" | "unauthenticated" | "route-changed"; rail?: string; detail?: string } {
     return this.transact(() => {
       // The reviewer road authenticates INSIDE the admission transaction
       // (review finding 4): reviewer runs hold no task claim by design,
@@ -9448,7 +9643,7 @@ export class Store {
       if (!identity.ok) return { ok: false as const, reason: "unauthenticated" as const, detail: identity.reason };
       const row = this.db
         .prepare(
-          `SELECT rr.run, rr.basis, rr.mode_digest,
+          `SELECT rr.run, rr.basis, rr.mode_digest, rr.route_digest,
                   run.task_ref AS taskRef, task_ref.external_id AS taskId, task_ref.repo
              FROM review_request rr
              JOIN run ON run.id = rr.run
@@ -9459,6 +9654,17 @@ export class Store {
       if (row === undefined) return { ok: false as const, reason: "gone" as const };
       const sourceRun = Number(row["run"]);
       const repo = row["repo"] === null ? null : String(row["repo"]);
+      // v47: a request queued under a sealed route re-proves that route is
+      // STILL the task's sealed route — a rewritten-and-reapproved task
+      // spends the request unrun, in words, rather than reviewing under a
+      // route nobody queued it for.
+      if (row["route_digest"] !== null && row["route_digest"] !== undefined) {
+        const sealedNow = this.approvedRouteOf(String(row["taskId"]));
+        if (sealedNow === null || routeDigestOf(sealedNow) !== String(row["route_digest"])) {
+          this.consumeReviewRequest(requestId, "route-changed", now);
+          return { ok: false as const, reason: "route-changed" as const };
+        }
+      }
       if (String(row["basis"]) === "mode") {
         const mode = repo === null ? null : this.activeMode(repo, now);
         let reviewAuto = false;
@@ -10517,6 +10723,225 @@ export class Store {
       .prepare("DELETE FROM phase_config WHERE scope = ? AND phase = ?")
       .run(scope, phase);
     return Number(changes) > 0;
+  }
+
+  // ---- phase routing (v47) -----------------------------------------------
+
+  /** The operator's named STRONG candidate for a phase at a scope, or null.
+   * Read by the routing policy only — a phase_config row stays the routine
+   * tier, so every pre-v47 resolution is untouched. */
+  phaseTierConfig(scope: string, phase: string, tier: "strong"): { provider: string; model: string | null; updatedAt: string; updatedBy: string } | null {
+    const row = this.db.prepare("SELECT * FROM phase_tier_config WHERE scope = ? AND phase = ? AND tier = ?").get(scope, phase, tier);
+    if (row === undefined) return null;
+    return {
+      provider: String(row["provider"]),
+      model: row["model"] === null ? null : String(row["model"]),
+      updatedAt: String(row["updated_at"]),
+      updatedBy: String(row["updated_by"]),
+    };
+  }
+
+  listPhaseTierConfig(scope: string): { phase: string; tier: "strong"; provider: string; model: string | null; updatedAt: string; updatedBy: string }[] {
+    return this.db
+      .prepare("SELECT * FROM phase_tier_config WHERE scope = ? ORDER BY phase, tier")
+      .all(scope)
+      .map(row => ({
+        phase: String(row["phase"]),
+        tier: "strong" as const,
+        provider: String(row["provider"]),
+        model: row["model"] === null ? null : String(row["model"]),
+        updatedAt: String(row["updated_at"]),
+        updatedBy: String(row["updated_by"]),
+      }));
+  }
+
+  setPhaseTierConfig(scope: string, phase: string, tier: "strong", provider: string, model: string | null, by: string, now: Date): void {
+    this.db
+      .prepare(
+        `INSERT INTO phase_tier_config (scope, phase, tier, provider, model, updated_at, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (scope, phase, tier) DO UPDATE SET provider = excluded.provider, model = excluded.model,
+                                                        updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+      )
+      .run(scope, phase, tier, provider, model, now.toISOString(), by);
+  }
+
+  clearPhaseTierConfig(scope: string, phase: string, tier: "strong"): boolean {
+    const { changes } = this.db.prepare("DELETE FROM phase_tier_config WHERE scope = ? AND phase = ? AND tier = ?").run(scope, phase, tier);
+    return Number(changes) > 0;
+  }
+
+  /** How far the plane may carry this repo's results unattended: a live
+   * automerge mode, a publication grant whose merges wait for a person, or
+   * nothing. A signed routing input, read at filing. */
+  publicationAuthorityOf(repo: string | null, now: Date): PublicationAuthority {
+    if (repo === null) return "none";
+    const mode = this.activeMode(repo, now);
+    if (mode !== null && modeTermsFromJson(mode.termsJson)?.publication === "automerge") return "automerge";
+    return this.publicationGrantFor(repo) === null ? "none" : "notify";
+  }
+
+  /** A durable TASK choice, like the quality override: applied when the
+   * next scope is filed. Refused under a live claim — the running work read
+   * its route at start. */
+  setTaskRisk(taskRef: number, risk: RiskLevel, now: Date): { ok: true } | { ok: false; reason: "live-claim" } {
+    return this.transact(() => {
+      if (this.hasLiveClaim(taskRef, now)) return { ok: false as const, reason: "live-claim" as const };
+      this.db.prepare("UPDATE task_ref SET risk_level = ? WHERE id = ?").run(risk, taskRef);
+      return { ok: true as const };
+    });
+  }
+
+  /** Record (or clear, with `provider` null) one phase's override. The
+   * caller has authenticated `by`; this is the recording, one per phase,
+   * refused under a live claim. Returns the resulting list. */
+  setRouteOverride(
+    taskRef: number,
+    override: { phase: RouteOverride["phase"]; provider: ProviderId; model: string | null; by: string } | { phase: RouteOverride["phase"]; provider: null },
+    now: Date,
+  ): { ok: true; overrides: RouteOverride[] } | { ok: false; reason: "live-claim" | "no-task" } {
+    return this.transact(() => {
+      if (this.hasLiveClaim(taskRef, now)) return { ok: false as const, reason: "live-claim" as const };
+      const row = this.db.prepare("SELECT route_overrides_json FROM task_ref WHERE id = ?").get(taskRef);
+      if (row === undefined) return { ok: false as const, reason: "no-task" as const };
+      const current = overridesFromJson(row["route_overrides_json"] === null || row["route_overrides_json"] === undefined ? null : String(row["route_overrides_json"]));
+      const kept = current.filter(one => one.phase !== override.phase);
+      const next: RouteOverride[] =
+        override.provider === null
+          ? kept
+          : [...kept, { phase: override.phase, provider: override.provider, model: override.model, by: override.by, at: now.toISOString() }];
+      this.db.prepare("UPDATE task_ref SET route_overrides_json = ? WHERE id = ?").run(canonicalOverridesJson(next), taskRef);
+      return { ok: true as const, overrides: overridesFromJson(canonicalOverridesJson(next)) };
+    });
+  }
+
+  /** A runner's own non-spending observations, replacing its previous ones
+   * per provider. Callers authenticate the runner first (runner.ts). */
+  recordProviderReadiness(runner: string, observations: readonly Omit<ReadinessObservation, "runner" | "observedAt">[], now: Date): void {
+    this.transact(() => {
+      for (const one of observations) {
+        this.db
+          .prepare(
+            `INSERT INTO provider_readiness (runner, provider, state, reason, probe, observed_at) VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (runner, provider) DO UPDATE SET state = excluded.state, reason = excluded.reason,
+                                                          probe = excluded.probe, observed_at = excluded.observed_at`,
+          )
+          .run(runner, one.provider, one.state, one.reason, one.probe, now.toISOString());
+      }
+    });
+  }
+
+  providerReadiness(runner: string): ReadinessObservation[] {
+    return this.db
+      .prepare("SELECT * FROM provider_readiness WHERE runner = ? ORDER BY provider")
+      .all(runner)
+      .map(row => ({
+        runner: String(row["runner"]),
+        provider: String(row["provider"]) as ProviderId,
+        state: String(row["state"]) as ReadinessState,
+        reason: String(row["reason"]),
+        probe: String(row["probe"]),
+        observedAt: String(row["observed_at"]),
+      }));
+  }
+
+  /** ONE runner's answer for one provider — the dispatch gate's question.
+   * null = that runner never reported it (unknown, never upgraded). */
+  runnerReadinessOf(runner: string, provider: string): ReadinessObservation | null {
+    const row = this.db.prepare("SELECT * FROM provider_readiness WHERE runner = ? AND provider = ?").get(runner, provider);
+    if (row === undefined) return null;
+    return {
+      runner: String(row["runner"]),
+      provider: String(row["provider"]) as ProviderId,
+      state: String(row["state"]) as ReadinessState,
+      reason: String(row["reason"]),
+      probe: String(row["probe"]),
+      observedAt: String(row["observed_at"]),
+    };
+  }
+
+  /**
+   * The readiness a task's surfaces show: the assigned runner's own report
+   * when the task is reserved for one, else the freshest report among
+   * live, unretired runners bound to the repo. A provider no runner has
+   * reported is unknown — said, never guessed.
+   */
+  readinessLookupFor(repo: string | null, assignedRunner: string | null, now: Date): ReadinessLookup {
+    const rows = this.db
+      .prepare(
+        `SELECT pr.*, runner.heartbeat_at AS heartbeat_at, runner.repos AS repos FROM provider_readiness pr
+           JOIN runner ON runner.name = pr.runner AND runner.retired_at IS NULL
+          ORDER BY pr.observed_at DESC`,
+      )
+      .all() as Record<string, unknown>[];
+    const liveness = 3 * 60_000;
+    const alive = (row: Record<string, unknown>): boolean => now.getTime() - Date.parse(String(row["heartbeat_at"])) <= liveness;
+    // Bound runners' observations, a live runner's first, freshest first
+    // within each — a stale report still speaks (its time is shown), but
+    // never over a runner that is here now.
+    const eligible = rows
+      .filter(row => {
+        if (assignedRunner !== null) return String(row["runner"]) === assignedRunner;
+        const repos = readJsonArray(row["repos"]);
+        return repo === null || repos.includes(repo);
+      })
+      .sort((a, b) => Number(alive(b)) - Number(alive(a)));
+    return provider => {
+      const row = eligible.find(one => String(one["provider"]) === provider);
+      if (row === undefined) return null;
+      return {
+        state: String(row["state"]) as ReadinessState,
+        reason: String(row["reason"]),
+        runner: String(row["runner"]),
+        observedAt: String(row["observed_at"]),
+      };
+    };
+  }
+
+  /** Route provenance per run (v47): the route a run spent under and the
+   * exact leg it used. One row per run; a second stamp is a no-op. */
+  stampRunRoute(run: number, leg: { routeDigest: string; phase: "plan" | "build" | "repair" | "review"; provider: string; model: string | null; chosen: "recommended" | "override" | "pinned" | "legacy" }, now: Date): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO run_route (run, route_digest, phase, provider, model, chosen, stamped_at)
+         SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM run WHERE id = ?)`,
+      )
+      .run(run, leg.routeDigest, leg.phase, leg.provider, leg.model, leg.chosen, now.toISOString(), run);
+  }
+
+  runRoute(run: number): { routeDigest: string; phase: "plan" | "build" | "repair" | "review"; provider: string; model: string | null; chosen: "recommended" | "override" | "pinned" | "legacy"; stampedAt: string } | null {
+    const row = this.db.prepare("SELECT * FROM run_route WHERE run = ?").get(run);
+    if (row === undefined) return null;
+    return {
+      routeDigest: String(row["route_digest"]),
+      phase: String(row["phase"]) as "plan" | "build" | "repair" | "review",
+      provider: String(row["provider"]),
+      model: row["model"] === null ? null : String(row["model"]),
+      chosen: String(row["chosen"]) as "recommended" | "override" | "pinned" | "legacy",
+      stampedAt: String(row["stamped_at"]),
+    };
+  }
+
+  /**
+   * The APPROVED route, if the approval still stands: the seal's snapshot,
+   * rehydrated strictly, and — when the route is a signed term — proved to
+   * be the one the approved digest binds by re-deriving that digest from
+   * the live fields, the sealed target, and this route. A rewritten scope,
+   * a snapshot that does not correspond to the signature, or a legacy
+   * approval with no route all answer null.
+   */
+  approvedRouteOf(taskId: string): PhaseRoute | null {
+    const scope = this.getScope(taskId);
+    if (scope === null || scope.approvedRouteJson == null) return null;
+    if (scope.approvedAt === null || scope.approvedDigest === null || scope.approvedDigest !== scope.digest) return null;
+    const route = routeFromJson(scope.approvedRouteJson);
+    if (route === null) return null;
+    if (!routeIsSigned(route)) return route;
+    const fields = { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode: scope.qualityMode ?? "default" };
+    const chain = scope.approvalKind === "chain" ? chainFromJson(scope.approvedChainJson ?? null) : null;
+    const target = chain !== null ? { chain } : (scope.approvedProfile ?? null);
+    const rederived = scope.approvedProfile === null && chain === null ? digestOf(fields, null, route) : digestOf(fields, target, route);
+    return rederived === scope.approvedDigest ? route : null;
   }
 
   /** Pin a task's agent — the fire transaction's stamp; flags never override it. */
@@ -17576,6 +18001,10 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
       row["quality_mode"] === "default" || row["quality_mode"] === "strict"
         ? row["quality_mode"]
         : null,
+    riskLevel: isRiskLevel(row["risk_level"]) ? row["risk_level"] : null,
+    routeOverrides: overridesFromJson(
+      row["route_overrides_json"] === null || row["route_overrides_json"] === undefined ? null : String(row["route_overrides_json"]),
+    ),
     planProvider:
       row["plan_provider"] === null || row["plan_provider"] === undefined
         ? null
@@ -18236,6 +18665,11 @@ function readScope(row: Record<string, unknown>): Scope {
     approvalKind: String(row["approval_kind"] ?? "profile") === "chain" ? "chain" : "profile",
     acceptance: readAcceptance(row["acceptance_json"]),
     qualityMode: row["quality_mode"] === "strict" ? "strict" : "default",
+    riskLevel: isRiskLevel(row["risk_level"]) ? row["risk_level"] : "routine",
+    proposedRouteJson:
+      row["proposed_route_json"] === null || row["proposed_route_json"] === undefined ? null : String(row["proposed_route_json"]),
+    approvedRouteJson:
+      row["approved_route_json"] === null || row["approved_route_json"] === undefined ? null : String(row["approved_route_json"]),
   };
 }
 

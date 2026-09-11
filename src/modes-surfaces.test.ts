@@ -12,7 +12,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { openStore, type Store } from "./store.js";
-import { addApprover, approvalOf, fileAndSealUnderMode, modeFilingCoverage, type AcceptanceCriterion } from "./scope.js";
+import { addApprover, approvalOf, describeScope, fileAndSealUnderMode, modeFilingCoverage, propose, type AcceptanceCriterion } from "./scope.js";
+import { projectRoute, recommendRoute, routeFromJson, routeWords } from "./phase-routing.js";
+import { resolveRouteCandidates, routeOfTask } from "./agentconfig.js";
 
 import { presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
 import { acquire } from "./claim.js";
@@ -275,5 +277,72 @@ describe("the credentialed-CLI auto-approve road and the plan pins", () => {
     expect(taken.ok).toBe(true);
     expect(store.setPlanPins(ref.id, "claude", null, T0)).toEqual({ ok: false, reason: "live-claim" });
     store.close();
+  });
+});
+
+describe("the route across surfaces (v47): a live automerge mode is publication authority, and every surface prints one projection", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "alex", T0);
+    const alex = addApprover(store, "alex", T0, undefined, () => "tok-alex");
+    if (!alex.ok) throw new Error("bootstrap");
+    store.createTask({ id: "t", title: "t" }, T0);
+    store.placeTask(store.refFor("built-in", "t").id, REPO);
+  });
+  afterEach(() => store.close());
+
+  test("publication authority is read from the live mode and the grant — automerge strengthens the reviewer; notify does not", () => {
+    expect(store.publicationAuthorityOf(REPO, T0)).toBe("none");
+    expect(store.publicationAuthorityOf(null, T0)).toBe("none");
+    store.savePublicationGrant({ repo: REPO, githubRepo: "o/r", remote: "origin", headPrefix: "standing-orders/", base: "main", capabilities: ["push-branch", "open-pr"], selector: "ours", draft: true, grantedBy: "alex", merge: true, mergeMethod: "squash" }, T0);
+    expect(store.publicationAuthorityOf(REPO, T0)).toBe("notify");
+    const candidates = resolveRouteCandidates(store, REPO);
+    if (!candidates.ok) throw new Error("candidates");
+    const notify = recommendRoute({ risk: "routine", qualityMode: "default", evidence: ["check"], publication: store.publicationAuthorityOf(REPO, T0), candidates: candidates.candidates, overrides: [] });
+    expect(notify.legs.find(one => one.phase === "review")).toMatchObject({ provider: "claude", tier: "routine" });
+    expect(notify.legs.find(one => one.phase === "review")?.reasons[0]).toContain("publication waits for a person");
+    const terms: ModeTerms = { ...presetTerms("standard", later(24).toISOString()), publication: "automerge" };
+    store.signMode({ repo: REPO, name: terms.name, termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, T0);
+    expect(store.publicationAuthorityOf(REPO, T0)).toBe("automerge");
+    propose(store, { taskId: "t", goal: "guard", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], now: T0 });
+    const route = routeFromJson(store.getScope("t")!.proposedRouteJson ?? null)!;
+    expect(route.publication).toBe("automerge");
+    expect(route.legs.find(one => one.phase === "review")).toMatchObject({ provider: "codex", model: "gpt-5-codex", tier: "strong" });
+    expect(route.demands).toEqual(["a live mode merges by itself — the review is the last gate, so it runs on the strongest configured reviewer"]);
+    // Past the mode's expiry the same filing is routine again.
+    expect(store.publicationAuthorityOf(REPO, later(25))).toBe("notify");
+  });
+
+  test("CLI words, the store projection, and the JSON envelope agree byte for byte on every leg", async () => {
+    register(store, { name: "mac-mini", host: "h", repos: [REPO], now: T0, newToken: () => "tok-mini" });
+    store.recordProviderReadiness("mac-mini", [{ provider: "codex", state: "ready", reason: "installed; logged in as ops", probe: "identity" }], T0);
+    propose(store, { taskId: "t", goal: "guard", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check", "screenshot"] }], riskLevel: "elevated", now: T0 });
+    const ref = store.refFor("built-in", "t");
+    const routed = routeOfTask(store, "t", ref, T0)!;
+    const projection = projectRoute(routed.route, store.readinessLookupFor(REPO, null, T0));
+    const words = routeWords(projection);
+    // describeScope (task show / task scope / task approve) prints exactly these lines.
+    const described = describeScope(store.getScope("t")!, store.readinessLookupFor(REPO, null, T0));
+    for (const line of words) expect(described).toContain(line);
+    // The CLI's JSON carries the same projection.
+    const file = join(mkdtempSync(join(tmpdir(), "so-route-surfaces-")), "db.sqlite");
+    const disk = openStore(file);
+    disk.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    disk.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "alex", T0);
+    register(disk, { name: "mac-mini", host: "h", repos: [REPO], now: T0, newToken: () => "tok-mini" });
+    disk.recordProviderReadiness("mac-mini", [{ provider: "codex", state: "ready", reason: "installed; logged in as ops", probe: "identity" }], T0);
+    disk.createTask({ id: "t", title: "t" }, T0);
+    disk.placeTask(disk.refFor("built-in", "t").id, REPO);
+    propose(disk, { taskId: "t", goal: "guard", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check", "screenshot"] }], riskLevel: "elevated", now: T0 });
+    disk.close();
+    const lines: string[] = [];
+    await runOperate("task", ["route", "t", "--json"], line => lines.push(line), { databaseFile: file, now: T0 });
+    const envelope = JSON.parse(lines.join("\n")) as { route: { digest: string; legs: { words: string; reasons: string[]; readiness: string }[] } };
+    expect(envelope.route.digest).toBe(projection.digest);
+    expect(envelope.route.legs.map(one => one.words)).toEqual(projection.legs.map(one => one.words));
+    expect(envelope.route.legs.map(one => one.readiness)).toEqual(["unknown", "unknown", "unknown", "ready"]);
+    rmSync(join(file, ".."), { recursive: true, force: true });
   });
 });

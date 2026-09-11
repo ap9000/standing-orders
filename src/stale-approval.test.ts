@@ -16,6 +16,7 @@ import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
 import { register } from "./runner.js";
 import type { Runner } from "./builder.js";
+import { routeDigestOf } from "./phase-routing.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const T0 = new Date("2026-09-03T00:00:00.000Z");
@@ -111,5 +112,111 @@ describe("a stale approval holds the task instead of retrying every pass", () =>
     expect(after.activeHolds(ref.id, new Date(T0.getTime() + 180_000)).some(one => one.reason.startsWith("stale-approval"))).toBe(false);
     expect(after.listNotifications("pending").filter(one => one.kind === "stale-approval")).toHaveLength(0);
     after.close();
+  });
+});
+
+describe("a sealed route governs dispatch (v47)", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let pool: string;
+  let lines: string[] = [];
+  const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
+  const payload = () => JSON.parse(lines.join("\n"));
+  const neverCalled: Runner = async () => {
+    throw new Error("no agent should ever spawn here");
+  };
+  const run = (argv: string[], now: Date = T0, agent: Runner = neverCalled) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now, agentRunner: agent });
+  };
+
+  beforeEach(async () => {
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-routed-")));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    pool = join(base, "pool");
+    await mkdir(repo, { recursive: true });
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "test@example.com"]);
+    await git(["config", "user.name", "Test"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+  });
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("a provider the runner reports unavailable halts before any claim or run — nothing substitutes; a fresh READY report lets it dispatch on the sealed leg", async () => {
+    const runnerToken = "tok-builder-1";
+    {
+      const store = openStore(db);
+      register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => runnerToken });
+      store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+      store.setPhaseTierConfig("installation", "build", "strong", "claude", "opus", "test", T0);
+      store.close();
+    }
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+    await run(["task", "add", "harden payouts", "--id", "payouts", "--repo", repo, "--json"]);
+    await run(["task", "scope", "payouts", "--goal", "Harden the payouts", "--acceptance", "c1: guarded | check", "--risk", "high", "--json"]);
+    const before = openStore(db);
+    const digest = before.getScope("payouts")?.digest as string;
+    before.close();
+    await run(["task", "approve", "payouts", "--as", "alex", "--token", approverToken, "--digest", digest, "--yes", "--json"]);
+    expect(payload().ok).toBe(true);
+
+    // The runner reports claude unavailable.
+    {
+      const store = openStore(db);
+      store.recordProviderReadiness("builder-1", [{ provider: "claude", state: "unavailable", reason: "`claude` is not installed on this runner's PATH", probe: "version" }], T0);
+      store.close();
+    }
+    const tick = (now: Date, agent: Runner = neverCalled) => run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], now, agent);
+    await tick(new Date(T0.getTime() + 60_000));
+    const halted = payload().dispatched.find((one: { id: string }) => one.id === "payouts");
+    expect(halted).toMatchObject({ outcome: "skipped", reason: "provider-unavailable" });
+    expect(halted.detail).toContain("claude is reported unavailable on builder-1");
+    expect(halted.detail).toContain("nothing substitutes");
+    {
+      const store = openStore(db);
+      const ref = store.refFor("built-in", "payouts");
+      expect(store.runsFor(ref.id)).toHaveLength(0);
+      expect(store.hasLiveClaim(ref.id, new Date(T0.getTime() + 60_000))).toBe(false);
+      // The route projection says HALTED with the runner's own words.
+      store.close();
+    }
+    await run(["task", "route", "payouts"]);
+    expect(lines.join("\n")).toContain("build  claude · opus  [recommended · strong] — UNAVAILABLE — `claude` is not installed");
+
+    // A fresh report clears it; the sealed STRONG leg (opus) dispatches
+    // even though the routine configuration says sonnet — the sealed route
+    // is the authority, never today's configuration.
+    {
+      const store = openStore(db);
+      store.recordProviderReadiness("builder-1", [{ provider: "claude", state: "unknown", reason: "installed; no non-spending login check exists", probe: "version" }], new Date(T0.getTime() + 90_000));
+      store.setPhaseConfig("installation", "build", "claude", "haiku", "test", new Date(T0.getTime() + 90_000));
+      store.close();
+    }
+    const spawned: string[][] = [];
+    const seeingAgent: Runner = async (_file, args) => {
+      spawned.push([...args]);
+      return { ...OK, stdout: JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "nothing to do", session_id: "s1" }) };
+    };
+    await tick(new Date(T0.getTime() + 120_000), seeingAgent);
+    const dispatched = payload().dispatched.find((one: { id: string }) => one.id === "payouts");
+    expect(dispatched.reason).not.toBe("stale-approval");
+    expect(dispatched.reason).not.toBe("provider-unavailable");
+    expect(spawned.length).toBeGreaterThan(0);
+    expect(spawned[0]?.[spawned[0].indexOf("--model") + 1]).toBe("opus");
+    const store = openStore(db);
+    const ref = store.refFor("built-in", "payouts");
+    const build = store.runsFor(ref.id).find(one => one.role === "builder")!;
+    expect(build).toMatchObject({ provider: "claude", model: "opus" });
+    // Provenance: the run names the sealed route and its exact leg.
+    expect(store.runRoute(build.id)).toMatchObject({ phase: "build", provider: "claude", model: "opus", chosen: "recommended", routeDigest: routeDigestOf(store.approvedRouteOf("payouts")!) });
+    store.close();
   });
 });

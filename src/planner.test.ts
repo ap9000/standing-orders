@@ -8,6 +8,7 @@
  * tree gets nothing ingested, question included.
  */
 
+import { routeDigestOf } from "./phase-routing.js";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
@@ -277,6 +278,22 @@ describe("planning mode, against real git", () => {
     // not an ancestor and the smoke-test file never existed there.
     const log = await git(["log", "--oneline", "standing-orders/limiter"]);
     expect(log.stdout).toContain("limiter");
+
+    // Route provenance (v47): every phase's run names the route it spent
+    // under and the actual provider and model — the planner under the live
+    // recommendation it ran before any scope existed, the builder under
+    // the sealed route the approval copied.
+    const proved = openStore(db);
+    const provedRef = proved.refFor("built-in", "limiter");
+    const runs = proved.runsFor(provedRef.id);
+    const plannerRuns = runs.filter(one => one.role === "planner");
+    expect(plannerRuns.length).toBeGreaterThan(0);
+    for (const plannerRun of plannerRuns) {
+      expect(proved.runRoute(plannerRun.id)).toMatchObject({ phase: "plan", provider: "claude", chosen: "recommended" });
+    }
+    const builderRun = runs.find(one => one.role === "builder")!;
+    expect(proved.runRoute(builderRun.id)).toMatchObject({ phase: "build", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: routeDigestOf(proved.approvedRouteOf("limiter")!) });
+    proved.close();
   });
 
   test("a planner that touches the tree gets nothing ingested — question included", async () => {

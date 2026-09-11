@@ -16,6 +16,7 @@ import { storeEvidence } from "./evidence.js";
 import { register } from "./runner.js";
 import { acquire } from "./claim.js";
 import { addApprover, approve, propose } from "./scope.js";
+import { routeDigestOf } from "./phase-routing.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { maybeRequestAutoReview } from "./dispose.js";
 import {
@@ -756,6 +757,86 @@ describe("the reviewer role in the store", () => {
 
     const passOnce = (agent: Runner) =>
       reviewPass(store, { runner: "builder-1", token: "tok-builder-1", now: T0, evidenceRoot, scratchRoot, agent });
+
+    test("the sealed route's review leg governs the reviewer — never today's configuration — and the run names its route (v47)", async () => {
+      // The task's scope seals an overridden reviewer; the installation's
+      // review row says something else and later changes again.
+      store.setPhaseConfig("installation", "build", "claude", "claude-sonnet-4", "alex", T0);
+      store.setPhaseConfig("installation", "review", "claude", "claude-haiku", "alex", T0);
+      propose(store, { taskId: "t-1", goal: "guard the payouts", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], now: T0 });
+      store.setRouteOverride(taskRef, { phase: "review", provider: "claude", model: "claude-opus-4-1", by: "alex" }, T0);
+      const refiled = store.refileScope("t-1", T0)!;
+      expect(approve(store, "t-1", "alex", T0, refiled.digest, approverToken).ok).toBe(true);
+      store.setPhaseConfig("installation", "review", "claude", "claude-sonnet-4", "alex", T0);
+
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("request failed");
+      expect(store.raw().prepare("SELECT route_digest FROM review_request WHERE id = ?").get(asked.id)?.["route_digest"]).toBe(routeDigestOf(store.approvedRouteOf("t-1")!));
+      const seen: string[][] = [];
+      const reports = await passOnce(async (_file, args, options) => {
+        seen.push([...args]);
+        return reviewingAgent({ version: 1, comments: [] })(_file, args, options);
+      });
+      expect(reports[0]).toMatchObject({ outcome: "reviewed" });
+      expect(seen[0]).toContain("--model");
+      expect(seen[0]?.[seen[0].indexOf("--model") + 1]).toBe("claude-opus-4-1");
+      const reviewer = store.runsFor(taskRef).find(run => run.role === "reviewer")!;
+      expect(reviewer.model).toBe("claude-opus-4-1");
+      expect(store.runRoute(reviewer.id)).toMatchObject({ phase: "review", provider: "claude", model: "claude-opus-4-1", chosen: "override", routeDigest: routeDigestOf(store.approvedRouteOf("t-1")!) });
+    });
+
+    test("a reviewer this runner reports unavailable is never substituted: the request stays open, the pass says why (v47)", async () => {
+      store.setPhaseConfig("installation", "review", "codex", "gpt-5-codex", "alex", T0);
+      store.recordProviderReadiness("builder-1", [{ provider: "codex", state: "unavailable", reason: "`codex login status` says not logged in", probe: "identity" }], T0);
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("request failed");
+      let calls = 0;
+      const reports = await passOnce(async () => {
+        calls += 1;
+        return { ...OK, stdout: SAID };
+      });
+      expect(calls).toBe(0);
+      expect(reports[0]).toMatchObject({ outcome: "skipped" });
+      expect(reports[0]?.detail).toContain("codex is reported unavailable on builder-1");
+      expect(reports[0]?.detail).toContain("nothing substitutes");
+      expect(store.openReviewRequests()).toHaveLength(1);
+      expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(0);
+      // Another runner that never reported codex admits it (unknown is not
+      // unavailable) and spends the attempt on the routed provider.
+      let otherCalls = 0;
+      const other = await reviewPass(store, { runner: "builder-2", token: "tok-builder-2", now: T0, evidenceRoot, scratchRoot, agent: async () => { otherCalls += 1; return { ...OK, stdout: SAID }; } });
+      expect(other[0]?.outcome).not.toBe("skipped");
+      expect(otherCalls).toBe(1);
+      expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(1);
+      expect(store.runsFor(taskRef).find(run => run.role === "reviewer")?.provider).toBe("codex");
+    });
+
+    test("a request queued under one sealed route is spent unrun when the task is re-approved under another (v47)", async () => {
+      store.setPhaseConfig("installation", "build", "claude", "claude-sonnet-4", "alex", T0);
+      propose(store, { taskId: "t-1", goal: "guard the payouts", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], now: T0, riskLevel: "high" });
+      const first = store.getScope("t-1")!;
+      expect(approve(store, "t-1", "alex", T0, first.digest, approverToken).ok).toBe(true);
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("request failed");
+      // The route changes and is re-approved: the old request no longer
+      // names the sealed route.
+      store.setRouteOverride(taskRef, { phase: "review", provider: "claude", model: "claude-opus-4-1", by: "alex" }, T0);
+      const refiled = store.refileScope("t-1", T0)!;
+      expect(approve(store, "t-1", "alex", T0, refiled.digest, approverToken).ok).toBe(true);
+      let calls = 0;
+      const reports = await passOnce(async () => {
+        calls += 1;
+        return { ...OK, stdout: SAID };
+      });
+      expect(calls).toBe(0);
+      expect(reports).toEqual([{ requestId: asked.id, run: builtRun, outcome: "skipped", detail: "route-changed" }]);
+      expect(store.openReviewRequests()).toHaveLength(0);
+      expect(store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(asked.id)?.["consumed_reason"]).toBe("route-changed");
+      // A fresh request under the new seal reviews normally.
+      expect(store.requestReview(builtRun, "alex", new Date(T0.getTime() + 1_000)).ok).toBe(true);
+      const again = await passOnce(reviewingAgent({ version: 1, comments: [] }));
+      expect(again[0]).toMatchObject({ outcome: "reviewed" });
+    });
 
     test("manual road end to end: request → pass → comments land, run closes, request consumed", async () => {
       const asked = store.requestReview(builtRun, "alex", T0);

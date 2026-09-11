@@ -153,12 +153,13 @@ import { classify, holdOwnerWords, attentionCardForUnverifiedDone } from "./boar
 import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
-import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import { isProviderId, reportsCost, PROVIDER_IDS, validModelId } from "./provider.js";
+import { resolvePhaseAgent, INSTALLATION_SCOPE, routeOfTask } from "./agentconfig.js";
+import { isRiskLevel, projectRoute, riskTitle, chosenWords, readinessWords, RISK_LEVELS, PHASES as ROUTE_PHASES, type RouteProjection, type RouteOverride, type RiskLevel } from "./phase-routing.js";
+import { isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type ProviderId } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
-import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow } from "./store.js";
+import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
@@ -3042,6 +3043,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         scope,
         raceTerms,
         approvalDigest,
+        // The phase route (v47): one projection for the card, the ceremony,
+        // and the focused chat, with the readiness this task's runners report.
+        route: routeViewOf(taskId, ref, scope, now, who),
+        canEditRoute: who.role === "approver",
         spendDefaults: store.getSpendDefaults(),
         permissionDefault: store.permissionDefault().mode,
         permissionMode: ref?.permissionMode ?? null,
@@ -3130,6 +3135,27 @@ export function createDecisionServer(options: ServeOptions): Server {
       };
   }
 
+  /** The route view (v47): the task's route from the ONE resolver dispatch
+   * uses, projected with the readiness its runners have reported, and the
+   * edit posture an approver's controls need. */
+  function routeViewOf(taskId: string, ref: TaskRef | null, scope: Scope | null, now: Date, who: Who): RouteView | null {
+    if (ref === null) return null;
+    const routed = routeOfTask(store, taskId, ref, now);
+    if (routed === null) return null;
+    const projection = projectRoute(routed.route, store.readinessLookupFor(ref.repo, ref.assignedRunner, now));
+    const live = store.hasLiveClaim(ref.id, now);
+    const raced = store.activeTournamentTerms(ref.id) !== null;
+    return {
+      source: routed.source,
+      projection,
+      riskLevel: ref.riskLevel ?? scope?.riskLevel ?? "routine",
+      overrides: ref.routeOverrides ?? [],
+      editable: who.role === "approver" && !live && !raced,
+      editableWhy: who.role !== "approver" ? "your login can watch — routing is an approver's act" : live ? "this task is running — the route cannot change under a live claim" : raced ? "tournament terms are on file — its lanes are the route" : null,
+      replanOnPlanChange: ref.plan === "drafted" && scope !== null && !approvalOf(scope).approved,
+    };
+  }
+
   /** Resolve a task-scoped chat lens without trusting its query string.
    * Only an admitted task becomes model context or visible page copy. */
   function taskChatFocus(taskId: string | null, now: Date, who?: Who): TaskChatFocus | null {
@@ -3164,6 +3190,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       milestoneProgress: view?.milestoneProgress ?? progressOf(ref.id, planRevisions?.current?.document ?? null),
       claimed: view?.claimed ?? store.hasLiveClaim(ref.id, now),
       liveRun: live === null ? null : { id: live.id, runner: live.runner, startedAt: live.startedAt, phase: live.phase },
+      route: view?.route ?? null,
       approval:
         view === null || who?.role !== "approver" || scope === null || approval.approved
           ? null
@@ -4438,7 +4465,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -5983,6 +6010,53 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return redirect(response, taskHref(taskId));
       }
+      case "route": {
+        // THE ROUTE EDIT (v47): an approver's session declares the risk,
+        // overrides one phase, or clears an override — recorded under
+        // their name; the scope re-files under the same words so a sealed
+        // route goes visibly stale; a planner leg changed after its draft
+        // landed asks for a real re-plan. The viewer gate above already
+        // refused a watcher; a live claim or a tournament refuses here.
+        const riskGiven = body.get("risk");
+        const phaseGiven = body.get("phase");
+        const clearGiven = body.get("clear-phase");
+        const providerGiven = body.get("provider");
+        const modelGiven = (body.get("model") ?? "").trim();
+        if (riskGiven !== null && !isRiskLevel(riskGiven)) return taskScreen(response, who, taskId, "risk is routine, elevated, or high", 400);
+        const phase = phaseGiven ?? clearGiven;
+        if (phase !== null && !(ROUTE_PHASES as readonly string[]).includes(phase)) return taskScreen(response, who, taskId, "phase is plan, build, repair, or review", 400);
+        if (riskGiven === null && phase === null) return taskScreen(response, who, taskId, "nothing to change on the route", 400);
+        if (phaseGiven !== null) {
+          if (providerGiven === null || !isProviderId(providerGiven)) return taskScreen(response, who, taskId, "provider is claude, codex, openrouter, or gemini", 400);
+          const valid = validateSpec({ provider: providerGiven, model: modelGiven === "" ? null : modelGiven });
+          if (!valid.ok) return taskScreen(response, who, taskId, `route not changed: ${valid.problem}`, 400);
+          if (phaseGiven === "review" && providerGiven === "gemini") return taskScreen(response, who, taskId, "gemini has no isolation posture for the review phase yet — choose claude or codex", 400);
+          if (phaseGiven === "build" && modelGiven === "") return taskScreen(response, who, taskId, "a build override names an exact model — approvals bind exact routing", 400);
+        }
+        if (store.activeTournamentTerms(ref.id) !== null) return taskScreen(response, who, taskId, "tournament terms are on file — its lanes are the route", 409);
+        if (riskGiven !== null) {
+          const set = store.setTaskRisk(ref.id, riskGiven, now);
+          if (!set.ok) return taskScreen(response, who, taskId, "this task is running — the route cannot change under a live claim", 409);
+        }
+        if (phase !== null) {
+          const set = store.setRouteOverride(
+            ref.id,
+            phaseGiven !== null
+              ? { phase: phase as RouteOverride["phase"], provider: providerGiven as ProviderId, model: modelGiven === "" ? null : modelGiven, by: who.name }
+              : { phase: phase as RouteOverride["phase"], provider: null },
+            now,
+          );
+          if (!set.ok) return taskScreen(response, who, taskId, set.reason === "live-claim" ? "this task is running — the route cannot change under a live claim" : "no such task", 409);
+        }
+        const before = store.getScope(taskId);
+        const refiled = store.refileScope(taskId, now);
+        if (phase === "plan" && ref.plan === "drafted" && !(refiled !== null && approvalOf(refiled).approved)) {
+          store.setPlanState(ref.id, "requested");
+        }
+        const stale = before !== null && approvalOf(before).approved && refiled !== null && !approvalOf(refiled).approved;
+        const back = body.get("return") === "chat" ? taskChatHref(taskId) : `${taskHref(taskId)}#route`;
+        return stale ? redirect(response, chatReturnWithSaid(back, "route changed — the approval sealed under the previous route is stale; approve again")) : redirect(response, back);
+      }
       case "scope": {
         const sawDigest = body.get("sawDigest");
         const permissionGiven = body.get("permission-mode");
@@ -7045,6 +7119,105 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
   return base + chainLine;
 }
 
+/** The route as every console surface renders it (v47): the SAME
+ * projection the CLI prints, one row per leg — provider and model, whether
+ * it was recommended, overridden, or pinned, its reasons, and the readiness
+ * the task's runners have reported (ready / UNAVAILABLE / unknown — an
+ * unknown is said, never upgraded). */
+export type RouteView = {
+  source: "approved" | "proposed" | "legacy" | "live";
+  projection: RouteProjection;
+  riskLevel: RiskLevel;
+  overrides: RouteOverride[];
+  /** An approver may edit: a live claim, a tournament, or a viewer session refuses. */
+  editable: boolean;
+  editableWhy: string | null;
+  /** A plan-leg change after a draft landed asks for a real re-plan. */
+  replanOnPlanChange: boolean;
+};
+
+function routeSourceWords(source: RouteView["source"]): string {
+  return source === "approved"
+    ? "sealed by the approval — configuration changes cannot reroute it"
+    : source === "proposed"
+      ? "proposed — the next approval seals it"
+      : source === "legacy"
+        ? "from a pre-routing approval: build and repair are sealed; plan and review resolve from configuration at run time"
+        : "recommended live — nothing is sealed until a scope is filed and approved";
+}
+
+function routeLegsHtml(projection: RouteProjection, compact = false, terse = false): string {
+  return (
+    `<ul class="route-legs">` +
+    projection.legs
+      .map(leg => {
+        const spec = leg.model === null ? `${escape(leg.provider)} <span class="meta">(harness default model)</span>` : `${escape(leg.provider)} · ${escape(leg.model)}`;
+        const chosen = chosenWords(leg);
+        const badgeClass = leg.chosen === "override" ? "badge badge-overdue" : leg.chosen === "pinned" ? "badge" : leg.tier === "strong" ? "badge badge-running" : "badge";
+        return (
+          `<li class="route-leg">` +
+          `<span class="route-phase">${escape(leg.phase)}</span>` +
+          `<span class="route-agent"><span class="mono">${spec}</span><span class="${badgeClass}">${escape(chosen)}</span></span>` +
+          // Terse (the chat aside): the state word, the reason only when it
+          // is a refusal — the full observation lives one tap away.
+          `<p class="route-readiness ${escape(leg.readiness)}">${escape(terse && leg.readiness !== "unavailable" ? readinessWords(leg.readiness, null) : readinessWords(leg.readiness, leg.readinessReason))}${leg.readinessRunner === null || terse ? "" : ` <span class="meta">— ${escape(leg.readinessRunner)}${leg.observedAt === null ? "" : `, ${escape(when(leg.observedAt))}`}</span>`}</p>` +
+          (compact ? "" : `<ul class="route-reasons">${leg.reasons.map(reason => `<li>${escape(reason)}</li>`).join("")}${leg.problem === null ? "" : `<li><strong>${escape(leg.problem)}</strong></li>`}</ul>`) +
+          `</li>`
+        );
+      })
+      .join("") +
+    `</ul>` +
+    (projection.halted ? `<p class="route-halted">Halted: a provider on this route is reported unavailable. Nothing substitutes — override the phase or restore the provider and report readiness again.</p>` : "")
+  );
+}
+
+/** The ceremony's route lines: what the yes agrees to, per phase. */
+function routeCeremonyHtml(route: RouteView | null | undefined): string {
+  if (route === null || route === undefined) return "";
+  const p = route.projection;
+  return (
+    `<div class="route-ceremony"><p class="approval-label">route · ${escape(p.riskTitle.toLowerCase())} · ${escape(p.postureWords)}</p>` +
+    (p.demands.length === 0 ? "" : `<p class="meta">${p.demands.map(escape).join("; ")}</p>`) +
+    routeLegsHtml(p, true) +
+    `<p class="meta">route <span class="mono">${shortDigest(p.digest)}</span>${p.signed ? " — a signed term of this approval" : " — legacy-equivalent; the sealed agent profile binds the build"}</p></div>`
+  );
+}
+
+/** The task page's route card: the projection, then an approver's controls —
+ * declare the risk, override one phase, clear an override. Every edit
+ * re-files the scope; an approval sealed under the old route goes stale. */
+function routeCardHtml(taskId: string, route: RouteView | null | undefined, csrf: string, canEdit: boolean): string {
+  if (route === null || route === undefined) return "";
+  const p = route.projection;
+  const overrideRows = route.overrides.length === 0
+    ? ""
+    : `<p class="meta">overrides: ${route.overrides.map(one => `${escape(one.phase)} → <span class="mono">${escape(one.provider)}${one.model === null ? "" : ` · ${escape(one.model)}`}</span> by ${escape(one.by)} ${escape(when(one.at))}${canEdit && route.editable ? ` <form method="post" action="${taskHref(taskId)}/route" class="route-clear"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="clear-phase" value="${escape(one.phase)}"><button type="submit" class="secondary" aria-label="clear the ${escape(one.phase)} override">clear</button></form>` : ""}`).join("; ")}</p>`;
+  const form = !canEdit
+    ? ""
+    : !route.editable
+      ? `<p class="meta">${escape(route.editableWhy ?? "the route cannot change right now")}</p>`
+      : `<form method="post" action="${taskHref(taskId)}/route" class="route-form-risk"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<label>risk<br><select name="risk" aria-label="declared risk">${RISK_LEVELS.map(one => `<option value="${one}"${one === route.riskLevel ? " selected" : ""}>${escape(riskTitle(one))}</option>`).join("")}</select></label>` +
+        `<button type="submit" class="secondary">Set risk</button></form>` +
+        `<form method="post" action="${taskHref(taskId)}/route" class="route-form" aria-label="override one phase"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<label>override phase<br><select name="phase">${ROUTE_PHASES.map(one => `<option value="${one}">${one}</option>`).join("")}</select></label>` +
+        `<label>provider<br><select name="provider"><option value="claude">claude</option><option value="codex">codex</option><option value="openrouter">openrouter</option><option value="gemini">gemini</option></select></label>` +
+        `<label>model<br><input name="model" placeholder="exact model id"></label>` +
+        `<label class="meta">recorded as you, applied when the scope re-files</label>` +
+        `<button type="submit">Override</button></form>` +
+        (route.replanOnPlanChange ? `<p class="meta">changing the planner here asks for a real re-plan — the drafted plan is not relabeled</p>` : "");
+  return (
+    `<section class="card route-card" id="route" aria-label="phase route">` +
+    `<div class="route-head"><h3>route</h3><span class="badge">${escape(p.riskTitle)}</span><span class="badge">${escape(p.postureWords)}</span><span class="meta">${escape(routeSourceWords(route.source))}</span></div>` +
+    (p.demands.length === 0 ? `<p class="meta">routine risk and default quality keep the economical defaults.</p>` : `<ul class="recap">${p.demands.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`) +
+    routeLegsHtml(p) +
+    `<p class="meta">route <span class="mono">${shortDigest(p.digest)}</span> · ${p.signed ? "a signed term: changing it re-files the scope and stales the approval" : "legacy-equivalent: the sealed agent profile binds the build"}</p>` +
+    overrideRows +
+    form +
+    `</section>`
+  );
+}
+
 /** Every character that could open a tag or an attribute, dead at the sink. */
 function escape(text: string): string {
   return text
@@ -8094,6 +8267,30 @@ const STYLE = `
   .approval-boundary .approval-label { margin: 0 0 .2rem; }
   .approval-boundary p { margin: 0; color: var(--muted-foreground); font-size: .8rem; overflow-wrap: anywhere; }
   .approval-chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .8rem 0 .3rem; }
+  /* The phase route (v47): one projection, rendered identically on the task
+     page, in the approval ceremony, and in the focused chat. */
+  .route-card { margin-top: .75rem; }
+  .route-head { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .6rem; }
+  .route-head h3 { margin: 0; font-size: .95rem; letter-spacing: -.02em; }
+  .route-legs { list-style: none; margin: .6rem 0 0; padding: 0; display: grid; gap: .45rem; }
+  .route-leg { display: grid; grid-template-columns: 4.2rem minmax(0, 1fr); gap: .2rem .6rem; align-items: baseline; padding: .55rem .7rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--muted) 45%, transparent); min-width: 0; }
+  .route-leg .route-phase { color: var(--muted-foreground); font: 500 .66rem/1.6 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+  .route-leg .route-agent { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; min-width: 0; overflow-wrap: anywhere; }
+  .route-leg .route-reasons { grid-column: 2; margin: 0; padding-left: 1rem; color: var(--muted-foreground); font-size: .74rem; line-height: 1.45; overflow-wrap: anywhere; }
+  .route-leg .route-readiness { grid-column: 2; margin: 0; font-size: .74rem; overflow-wrap: anywhere; }
+  .route-readiness.unavailable { color: var(--destructive); font-weight: 600; }
+  .route-readiness.unknown { color: var(--muted-foreground); }
+  .route-readiness.ready { color: var(--success); }
+  .route-halted { margin: .6rem 0 0; padding: .55rem .7rem; border: 1px solid color-mix(in srgb, var(--destructive) 40%, var(--border)); border-radius: calc(var(--radius) - 3px); background: var(--destructive-soft); font-size: .8rem; }
+  .route-form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) auto; gap: .5rem; align-items: end; margin-top: .75rem; }
+  .route-form label { margin: 0; min-width: 0; font-size: .74rem; }
+  .route-form input, .route-form select { width: 100%; min-width: 0; }
+  .route-form .wide { grid-column: 1 / -1; }
+  .route-form-risk { display: flex; flex-wrap: wrap; align-items: end; gap: .5rem; margin-top: .75rem; }
+  .route-clear { display: inline; }
+  .route-clear button { padding: .1rem .45rem; font-size: .68rem; min-height: 0; line-height: 1.5; }
+  .route-ceremony { margin: .5rem 0 0; }
+  .route-ceremony .route-legs { gap: .3rem; }
   .approval-chip { padding: .25rem .6rem; border: 1px solid var(--glass-border); border-radius: 999px; color: var(--muted-foreground); background: var(--glass); font-size: .7rem; }
   .approval-confirm { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; align-items: end; margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--glass-border); }
   .approval-confirm label { margin: 0; }
@@ -8935,6 +9132,10 @@ const STYLE = `
     .task-options { order: 4; }
     .task-options-grid { grid-template-columns: 1fr; }
     .task-options-grid .wide, .task-options-grid .permission-field { grid-column: auto; }
+    .route-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .route-form button[type=submit] { grid-column: 1 / -1; }
+    .route-leg { grid-template-columns: 1fr; }
+    .route-leg .route-reasons, .route-leg .route-readiness { grid-column: 1; }
     .approval-card { padding: 1rem; }
     .approval-boundaries, .approval-confirm { grid-template-columns: 1fr; }
     .approval-confirm .sticky-actions { margin-top: 0; }
@@ -10537,6 +10738,9 @@ type TaskChatFocus = {
   milestoneProgress: MilestoneProgressView[] | null;
   claimed: boolean;
   liveRun: { id: number; runner: string; startedAt: string; phase: string | null } | null;
+  /** The phase route (v47): the task page's exact projection, so chat and
+   * page can never disagree about which agent runs which phase. */
+  route: RouteView | null;
   /** Approval uses the task page's exact nonce and joint digest. */
   approval: {
     scope: Scope;
@@ -10605,6 +10809,12 @@ function taskChatContext(focus: TaskChatFocus): string {
     `<div class="task-chat-context-head"><span class="eyebrow">current task</span></div>` +
     `<h2>${escape(focus.title)}</h2>` +
     `<p class="meta mono">${escape(focus.id)}${focus.project === null ? "" : ` · ${escape(focus.project)}`}</p>` +
+    // The route's provenance in chat (v47): the same legs the task page
+    // and CLI print, compact — recommended / overridden / pinned per phase,
+    // and readiness — so a conversation never hides which agent runs.
+    (focus.route === null
+      ? ""
+      : `<details class="chat-run-details task-chat-route" open><summary>route · ${escape(focus.route.projection.riskTitle.toLowerCase())} · ${escape(focus.route.projection.postureWords)} <span class="meta">(${escape(focus.route.source === "approved" ? "sealed" : focus.route.source)})</span></summary>${routeLegsHtml(focus.route.projection, true, true)}<p class="meta"><a href="${taskHref(focus.id)}#route">Change the route on the task →</a></p></details>`) +
     `<div class="task-chat-overview-actions">` +
     `<a class="task-chat-overview-link" href="${taskHref(focus.id)}">Open full overview →</a></div>` +
     `</aside>`
@@ -10665,7 +10875,9 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
     (profile === null ? "" : `<span class="approval-chip">${escape(profile.provider)} · ${escape(profile.model)}</span>`) +
     (permission === null ? "" : `<span class="approval-chip">${escape(permission)}</span>`) +
     (scope.budgetMicrousd === null ? "" : `<span class="approval-chip">$${(scope.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap</span>`) +
+    (focus.route === null ? "" : `<span class="approval-chip">${escape(focus.route.projection.riskTitle)} · ${escape(focus.route.projection.postureWords)}</span>`) +
     `</div><details class="chat-run-details"><summary>Agent and fallback details</summary>${profileWords(scope)}</details>` +
+    routeCeremonyHtml(focus.route) +
     `<div class="approval-confirm"><label>Your password <span class="meta">— confirms this exact scope</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>` +
     `<button type="submit">Approve & start</button></div></form></details>`
   );
@@ -13630,6 +13842,9 @@ function taskBody(data: {
   /** Installation starting value and this task's explicit evidence depth. */
   qualityDefault?: QualityMode;
   qualityMode?: QualityMode | null;
+  /** The phase route (v47) and whether this session may edit it. */
+  route?: RouteView | null;
+  canEditRoute?: boolean;
   runs: Run[];
   /** Proof produced by the newest finished attempt. The two booleans are
    * machine facts about immutable, hash-addressed artifacts — never inferred
@@ -14159,6 +14374,9 @@ function taskBody(data: {
             (approvalPermission === null ? "" : `<span class="approval-chip">${escape(approvalPermission)}</span>`) +
             `</div>`,
           profileWords(scope),
+          // The ROUTE inside the ceremony (v47): which agent plans, builds,
+          // repairs, and reviews, with readiness — said where the yes is given.
+          routeCeremonyHtml(data.route),
           scope.budgetMicrousd === null
             ? ""
             : `<p class="meta">each build attempt has a $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} agent-reported usage cap — on a subscription this is a work limiter, not an API charge</p>`,
@@ -14757,7 +14975,7 @@ function taskBody(data: {
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
     section(
       "scope",
-      ["<h2>scope</h2>", scopeCard, revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
+      ["<h2>scope</h2>", scopeCard, routeCardHtml(task.id, data.route, data.csrf, data.canEditRoute === true), revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
       data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan),
     ),
     dependencyChoiceNeeded ? "" : section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),

@@ -644,6 +644,11 @@ export type HandoffArtifact = {
   taskId: string;
   runId: number;
   provider: string;
+  /** v47: the exact model that ran, and the sealed route leg it ran as —
+   * provenance a later reader can hold against the approval. Absent on
+   * artifacts written before routes existed. */
+  model?: string;
+  route?: { digest: string; phase: "plan" | "build" | "repair" | "review"; provider: string; model: string | null; chosen: "recommended" | "override" | "pinned" | "legacy" };
   sessionId: string | null;
   branch: string;
   worktree: string;

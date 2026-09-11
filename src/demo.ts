@@ -320,6 +320,10 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   // run does. Every seeded scope can then be approved from the demo instead
   // of inheriting an artificial "model not set" blocker.
   store.setPhaseConfig("installation", "build", "claude", "sonnet", "demo", now);
+  // The strong tier (v47): the named agents high-risk, strict, screenshot-
+  // proof, and automerge routes reach for — configured, never inferred.
+  store.setPhaseTierConfig("installation", "build", "strong", "claude", "opus", "demo", now);
+  store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "demo", now);
 
   // The demo's builder goes through the REAL claim machinery, and the claim
   // primitive proves identity and repo binding in-transaction — so the demo
@@ -331,6 +335,19 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     repos: [repos.api, repos.web],
     now: hoursAgo(30),
   });
+  // What the demo machine observed about each provider without spending
+  // (v47): claude installed but unproven (no non-spending login check),
+  // codex logged in, openrouter without a key, gemini not installed.
+  store.recordProviderReadiness(
+    "night-shift-1",
+    [
+      { provider: "claude", state: "unknown", reason: "installed (claude 2.1.0); no non-spending login check exists — a real run is the proof", probe: "version" },
+      { provider: "codex", state: "ready", reason: "installed (codex 0.62.0); logged in as demo@standing-orders.dev", probe: "identity" },
+      { provider: "openrouter", state: "unavailable", reason: "OPENROUTER_API_KEY is absent from this runner's environment", probe: "key" },
+      { provider: "gemini", state: "unavailable", reason: "`gemini` is not installed on this runner's PATH", probe: "version" },
+    ],
+    hoursAgo(0.2),
+  );
 
   const genericAcceptance: AcceptanceCriterion[] = [
     { id: "c1", statement: "The described change is made and verified.", how: null, evidence: ["manual-review"] },
@@ -353,6 +370,13 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     "Switch the request logger to JSON lines so the collector stops parsing free text. Keep the human console formatter for local dev. Migrate the two dashboards that grep the old format.",
   );
   const plannedRef = store.refFor("built-in", planned).id;
+  // An explainable route (v47): the operator declared elevated risk and
+  // overrode the reviewer, so the ceremony shows a recommended leg, a
+  // strong-tier leg, and an overridden leg side by side, with the runner's
+  // readiness per provider.
+  store.setTaskRisk(plannedRef, "elevated", hoursAgo(3.5));
+  store.setRouteOverride(plannedRef, { phase: "review", provider: "claude", model: "opus", by: "demo" }, hoursAgo(3.2));
+  store.refileScope(planned, hoursAgo(3.1));
   store.setPlanState(plannedRef, "drafted");
   const plannerRun = store.startRun({
     taskRef: plannedRef,
