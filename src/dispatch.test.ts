@@ -113,6 +113,30 @@ describe("Never Stuck dispatch diagnosis", () => {
     expect(diagnoseTaskDispatch(store, "t-proof", T0)).toMatchObject({ condition: "terminal", code: "complete", summary: "Complete with recorded acceptance" });
   });
 
+  test("a finished build shows pending, live, and failed review before claiming completion", () => {
+    const ref = file(store, "t-review-state");
+    enroll(store);
+    expect(acquireIfReady(store, ref, "worker", { token: TOKEN, repo: REPO, now: T0, newLeaseId: () => "lease-review-state" }).ok).toBe(true);
+    const authority = store.routeAuthorityFor(ref, "builder");
+    if (!authority?.ok) throw new Error("fixture route missing");
+    const run = store.startRun({ taskRef: ref, leaseId: "lease-review-state", runner: "worker", branch: "feat/review-state", worktree: REPO,
+      provider: authority.stamp.provider, ...(authority.stamp.model === null ? {} : { model: authority.stamp.model }), route: authority.stamp, now: T0 });
+    store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+    store.saveProofVerdict(run, "verified", [], T0);
+    store.setTaskState("t-review-state", "done", T0);
+    store.raw().prepare("INSERT INTO review_request (run, requested_by, basis, requested_at) VALUES (?, 'operator', 'human', ?)").run(run, T0.toISOString());
+    expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "waiting", code: "review-pending" });
+    store.raw().prepare("UPDATE review_request SET consumed_at = ? WHERE run = ?").run(T0.toISOString(), run);
+    const inserted = store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, started_at) VALUES (?, 'review-state', 'worker', 'reviewer', 'claude', ?, ?)").run(ref, run, T0.toISOString());
+    const review = Number(inserted.lastInsertRowid);
+    expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "running", code: "reviewing" });
+    expect(diagnoseTaskDispatch(store, "t-review-state", new Date(T0.getTime() + 60 * 60_000))).toMatchObject({ condition: "waiting", code: "review-failed", summary: "Review interrupted" });
+    store.finishRun(review, { outcome: "failed", reason: "reviewer-ingestion: database busy", now: T0 });
+    expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "waiting", code: "review-failed", summary: "Review needs attention" });
+    store.acceptProof(run, "operator", "Accepted the verified build after inspecting its result", T0);
+    expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "terminal", code: "complete" });
+  });
+
   test("a cancelled dependency is a repair, never a calm wait or a claim", () => {
     const blocker = file(store, "t-blocker");
     const dependent = file(store, "t-dependent");

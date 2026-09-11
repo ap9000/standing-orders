@@ -9,7 +9,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { realpathSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
@@ -85,6 +85,8 @@ describe("scout tasks, against real git", () => {
   /** A scout that concludes with a well-formed report. */
   const reportingAgent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
+    options?.onSpawn?.(1_000_001);
+    expect(readFileSync(join(cwd, ".standing-orders-lease"), "utf8")).toBe("1000001 builder-1\n");
     const prompt = String(args[args.indexOf("-p") + 1] ?? "");
     prompts.push(prompt);
     const name = REPORT_FILE.exec(prompt)?.[0];

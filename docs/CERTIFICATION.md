@@ -59,6 +59,21 @@ The first Codex result exposed overuse of `manual-review`; planning guidance
 now reserves that evidence kind for claims checks, changed paths, or visual
 proof cannot establish.
 
+## Repeated local recovery checks
+
+`npm run certify:recovery -- --rounds 100 --output output/certification/recovery.json`
+uses disposable repositories and real writer processes without invoking a model.
+It injects expiry of the controller's liveness and checks three cases: a partial
+draft, a completed handoff, and an existing commit with a late writer. Every
+case must refuse reuse while the writer lives, fence its stale completion, and
+preserve the draft and commit when a successor takes custody after writer exit.
+
+The certificate records each case and its source revision. A failure retains
+the fixture; `--keep` also retains passing fixtures. This is narrower than
+killing a real worker at every lifecycle boundary. Detached descendants,
+interrupted verification reuse, native session recovery, and Windows reboot
+remain separate gates.
+
 ## Automatic fallback is a separate claim
 
 A successful canary proves that a provider is installed, authenticated, and

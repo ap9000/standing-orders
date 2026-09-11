@@ -74,6 +74,7 @@ export type PlanRequest = {
   maxTurns?: number;
   timeoutMs?: number;
   pulseMs?: number;
+  onProviderSpawn?: (pid: number) => void;
   permissionMode?: string;
   evidenceRoot?: string;
   agent?: Runner;
@@ -821,6 +822,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
         idleTimeoutMs: timeoutMs,
         omitEnv: AGENT_ENV_DENYLIST,
         ...(agent === undefined ? {} : { runner: agent }),
+        ...(request.onProviderSpawn === undefined ? {} : { onSpawn: request.onProviderSpawn }),
         clock,
         ...(liveLog === null ? {} : { onStreamEvent: (event: Record<string, unknown>) => liveLog.observe(event) }),
       },
@@ -976,6 +978,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
             timeoutMs: STRUCTURED_REPAIR_TIMEOUT_MS,
             omitEnv: AGENT_ENV_DENYLIST,
             ...(agent === undefined ? {} : { runner: agent }),
+            ...(request.onProviderSpawn === undefined ? {} : { onSpawn: request.onProviderSpawn }),
             clock,
             ...(liveLog === null ? {} : { onStreamEvent: (event: Record<string, unknown>) => liveLog.observe(event) }),
           },

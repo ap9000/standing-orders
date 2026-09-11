@@ -37,6 +37,9 @@ export type DispatchDiagnosisCode =
   | "complete"
   | "needs-verification"
   | "proof-refuted"
+  | "review-pending"
+  | "reviewing"
+  | "review-failed"
   | "cancelled"
   | "failed"
   | "running"
@@ -217,10 +220,26 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
   if (task === null || ref === null) return null;
 
   if (task.state === "done") {
-    const result = store.runsFor(ref.id).find(run => (run.role === "builder" || run.role === "scout") && (run.outcome === "built" || run.outcome === "no-change") && run.finishedAt !== null);
+    const runs = store.runsFor(ref.id);
+    const result = runs.find(run => (run.role === "builder" || run.role === "scout") && (run.outcome === "built" || run.outcome === "no-change") && run.finishedAt !== null);
     if (result?.role === "scout") return answer("complete", "terminal", "Report ready", "The research report is ready to review.", { action: "open-result" });
     const proof = result === undefined ? null : store.proofVerdictFor(result.id);
     const accepted = result !== undefined && store.proofAcceptance(result.id) !== null;
+    if (!accepted && result !== undefined) {
+      const review = runs.find(run => run.role === "reviewer" && run.parentRun === result.id);
+      if (review?.outcome === null) {
+        const reviewer = store.getRunner(review.runner)?.runner;
+        return reviewer !== undefined && isAlive(reviewer, now)
+          ? answer("reviewing", "running", "Reviewing", "The build is preserved while an independent reviewer checks its sealed evidence.", { action: "open-result" })
+          : answer("review-failed", "waiting", "Review interrupted", "The reviewer has no live worker; recovery must settle the interrupted attempt.", { action: "open-result" });
+      }
+      if (review !== undefined && review.outcome !== "no-change" && review.outcome !== "built") {
+        return answer("review-failed", "waiting", "Review needs attention", "The build is preserved, but its requested review did not complete. Open the result for the recorded failure.", { action: "open-result" });
+      }
+      if (store.handle.prepare("SELECT 1 FROM review_request WHERE run = ? AND consumed_at IS NULL LIMIT 1").get(result.id) !== undefined) {
+        return answer("review-pending", "waiting", "Waiting for review", "The build finished and its requested independent review is waiting for a worker.", { action: "open-result" });
+      }
+    }
     if (!accepted && proof?.verdict === "refuted") return answer("proof-refuted", "waiting", "Proof correction needed", "The build finished, but its evidence conflicts with the approved result. Open the proof to correct it or record an explicit acceptance.", { action: "open-result" });
     if (!accepted && proof?.verdict === "short") return answer("needs-verification", "waiting", "Verification needed", "The build finished with missing evidence. Open the result for the exact criteria still needing verification.", { action: "open-result" });
     if (!accepted && proof === null) return answer("needs-verification", "waiting", "Result needs verification", "The task is marked done, but no verified completion receipt is available.", { action: "open-result" });

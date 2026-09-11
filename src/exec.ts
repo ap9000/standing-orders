@@ -112,7 +112,7 @@ function killGroup(child: import("node:child_process").ChildProcess): void {
     // with it instead of writing to the worktree after "stopped". Untested
     // on physical Windows, like the daemon — stated, not hidden.
     try {
-      spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", () => {});
     } catch {
       // taskkill missing or refused — the direct kill below still runs.
     }
@@ -205,6 +205,22 @@ function resolveChildEnv(options: RunOptions): Record<string, string | undefined
 export const NOT_FOUND_CODE = 127;
 export const TIMEOUT_CODE = 124;
 /** Output too large to hold. Not a timeout, and must not be reported as one. */
+/** A spawn callback records custody after the child exists. If that write
+ * fails, stop and reap the owned child before reporting failure; otherwise
+ * an unrecorded provider could keep writing after its caller retries. */
+function reapRejectedSpawn(child: ReturnType<typeof spawn> | undefined, group: boolean): Promise<void> {
+  if (child === undefined) return Promise.resolve();
+  return new Promise(resolve => {
+    if (group) liveProviders.add(child);
+    child.once("close", () => { liveProviders.delete(child); resolve(); });
+    child.on("error", () => {});
+    child.stdout?.resume();
+    child.stderr?.resume();
+    if (group) killGroup(child);
+    else { try { child.kill("SIGKILL"); } catch { /* The child must still exit before failure is returned. */ } }
+  });
+}
+
 export const OVERFLOW_CODE = 125;
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
@@ -359,7 +375,7 @@ function runBufferedGroup(
   bag: { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void },
 ): Promise<SpawnAttempt> {
   return new Promise(resolve => {
-    let child: ReturnType<typeof spawn>;
+    let child!: ReturnType<typeof spawn>;
     try {
       child = spawn(file, [...args], {
         cwd: bag.cwd,
@@ -371,9 +387,11 @@ function runBufferedGroup(
       });
       if (child.pid !== undefined) bag.onSpawn?.(child.pid);
     } catch (error) {
-      resolve({
-        result: { code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false },
-        transient: isTransientSpawnFailure(error as ExecError),
+      void reapRejectedSpawn(child, true).then(() => {
+        resolve({
+          result: { code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false },
+          transient: child === undefined && isTransientSpawnFailure(error as ExecError),
+        });
       });
       return;
     }
@@ -698,7 +716,7 @@ export function runStreamJsonl(
   const childEnv = resolveChildEnv(options);
 
   return new Promise(resolve => {
-    let child: ReturnType<typeof spawn>;
+    let child!: ReturnType<typeof spawn>;
     try {
       child = spawn(file, [...args], {
         cwd,
@@ -710,7 +728,9 @@ export function runStreamJsonl(
       });
       if (child.pid !== undefined) options.onSpawn?.(child.pid);
     } catch (error) {
-      resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      void reapRejectedSpawn(child, options.processGroup === true).then(() => {
+        resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      });
       return;
     }
     if (options.processGroup === true) liveProviders.add(child);
@@ -890,7 +910,7 @@ export function runGeminiStreamJsonl(
   const childEnv = resolveChildEnv(options);
 
   return new Promise(resolve => {
-    let child: ReturnType<typeof spawn>;
+    let child!: ReturnType<typeof spawn>;
     try {
       child = spawn(file, [...args], {
         cwd,
@@ -902,7 +922,9 @@ export function runGeminiStreamJsonl(
       });
       if (child.pid !== undefined) options.onSpawn?.(child.pid);
     } catch (error) {
-      resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      void reapRejectedSpawn(child, options.processGroup === true).then(() => {
+        resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      });
       return;
     }
     if (options.processGroup === true) liveProviders.add(child);
@@ -1114,7 +1136,7 @@ export function runClaudeStreamJsonl(
   const childEnv = resolveChildEnv(options);
 
   return new Promise(resolve => {
-    let child: ReturnType<typeof spawn>;
+    let child!: ReturnType<typeof spawn>;
     try {
       child = spawn(file, [...args], {
         cwd,
@@ -1126,7 +1148,9 @@ export function runClaudeStreamJsonl(
       });
       if (child.pid !== undefined) options.onSpawn?.(child.pid);
     } catch (error) {
-      resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      void reapRejectedSpawn(child, options.processGroup === true).then(() => {
+        resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      });
       return;
     }
     if (options.processGroup === true) liveProviders.add(child);

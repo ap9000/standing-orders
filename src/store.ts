@@ -12535,6 +12535,17 @@ export class Store {
     return Number(changed.changes) === 1;
   }
 
+  /** A correction process replaces the exited provider in the same open
+   * root attempt. It may refresh only that attempt's exact occupied slot. */
+  refreshSlotProcess(id: number, facts: { run: number; contestant?: number | null; incarnation?: string | null; processGroup: number }): boolean {
+    if (!Number.isInteger(facts.processGroup) || facts.processGroup <= 0) return false;
+    const changed = this.db.prepare(`UPDATE execution_slot SET process_group = ?
+      WHERE id = ? AND state = 'running' AND run = ? AND contestant IS ? AND incarnation IS ?
+        AND EXISTS (SELECT 1 FROM run WHERE id = ? AND outcome IS NULL)`)
+      .run(facts.processGroup, id, facts.run, facts.contestant ?? null, facts.incarnation ?? null, facts.run);
+    return Number(changed.changes) === 1;
+  }
+
   releaseExecutionSlot(id: number, now: Date): boolean {
     const changed = this.db
       .prepare("UPDATE execution_slot SET state = 'released', released_at = ? WHERE id = ? AND state IN ('reserved','running')")

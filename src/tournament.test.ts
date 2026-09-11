@@ -328,7 +328,14 @@ describe("worker-process slots and durable ceremony nonces", () => {
     expect(store.markSlotRunning(slot, { run, processGroup: 4242, incarnation: "inc-1" }, T0)).toBe(true);
     expect(store.markSlotRunning(slot, { run }, T0)).toBe(false); // once
     expect(store.getExecutionSlot(slot)?.processGroup).toBe(4242);
+    expect(store.refreshSlotProcess(slot, { run, processGroup: 4343, incarnation: "wrong" })).toBe(false);
+    expect(store.refreshSlotProcess(slot, { run: run + 1, processGroup: 4343, incarnation: "inc-1" })).toBe(false);
+    expect(store.refreshSlotProcess(slot, { run, processGroup: 4343, incarnation: "inc-1" })).toBe(true);
+    expect(store.getExecutionSlot(slot)?.processGroup).toBe(4343);
+    store.finishRun(run, { outcome: "no-change", now: T0 });
+    expect(store.refreshSlotProcess(slot, { run, processGroup: 4444, incarnation: "inc-1" })).toBe(false);
     expect(store.releaseExecutionSlot(slot, T0)).toBe(true);
+    expect(store.refreshSlotProcess(slot, { run, processGroup: 4444, incarnation: "inc-1" })).toBe(false);
     expect(store.releaseExecutionSlot(slot, T0)).toBe(false); // once
     expect(store.liveSlotCount("night-shift-1")).toBe(0);
   });

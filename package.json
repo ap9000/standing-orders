@@ -11,6 +11,7 @@
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
     "certify:provider": "npm run build && node scripts/provider-canary.mjs",
+    "certify:recovery": "npm run build && node scripts/recovery-canary.mjs",
     "prepublishOnly": "npm run typecheck && npm run build",
     "nul-scan": "node scripts/nul-scan.mjs",
     "proof-preflight": "node scripts/proof-preflight.mjs",
@@ -59,6 +60,7 @@
   "files": [
     "dist",
     "scripts/provider-canary.mjs",
+    "scripts/recovery-canary.mjs",
     "scripts/proof-preflight.mjs"
   ]
 }

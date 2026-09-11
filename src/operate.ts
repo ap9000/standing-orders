@@ -2139,12 +2139,13 @@ async function tickCommand(
         // flag-shaped overrides ride along.
         contestProfile: racer.profile ?? contestantProfileOf(racer.provider, racer.model, racer.repairModel),
         ...(remaining === null ? {} : { maxBudgetUsd: remaining / 1_000_000 }),
-        ...(resumeSlot === undefined
-          ? {}
-          : {
-              onProviderSpawn: (pid: number) =>
-                store.markSlotRunning(resumeSlot, { run: resumeRun, contestant: racer.id, incarnation: text(flags, "incarnation") ?? null, processGroup: pid }, clock()),
-            }),
+        onProviderSpawn: (pid: number) => {
+          worktrees.recordProviderOccupancy(leased.worktree.path, runner, pid, leased.worktree.leaseEpoch);
+          if (resumeSlot !== undefined) {
+            const facts = { run: resumeRun, contestant: racer.id, incarnation: text(flags, "incarnation") ?? null, processGroup: pid };
+            if (!store.markSlotRunning(resumeSlot, facts, clock()) && !store.refreshSlotProcess(resumeSlot, facts)) throw new Error("the provider's execution slot no longer belongs to this attempt");
+          }
+        },
         ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
         ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
         ...(context.shouldStop === undefined ? {} : { shouldStop: context.shouldStop }),
@@ -2749,7 +2750,7 @@ async function tickCommand(
       const baseSha = baseRead.stdout.trim();
       store.stampContestDispatch(admitted.contestId, baseSha, store.liveWorktreeSetup(repo)?.digest ?? null);
       const agents = store.contestants(admitted.contestId);
-      const prepared: { contestantId: number; slotId: number; runId: number; worktree: string; branch: string }[] = [];
+      const prepared: { contestantId: number; slotId: number; runId: number; worktree: string; branch: string; leaseEpoch: string | null }[] = [];
       let prepFailed = false;
       for (const [index, agent] of agents.entries()) {
         const leased = await worktrees.lease({ repo, branch: agent.branch, runner, taskRef: ref.id, now: clock(), base: baseSha });
@@ -2794,6 +2795,7 @@ async function tickCommand(
           runId: contestantRun,
           worktree: leased.worktree.path,
           branch: agent.branch,
+          leaseEpoch: leased.worktree.leaseEpoch ?? null,
         });
       }
       const freshContest = store.getContest(admitted.contestId);
@@ -2824,8 +2826,11 @@ async function tickCommand(
             // A comparison lane has no dollar cap — the sealed clock is the
             // bound; only race lanes carry the harness stop (E1).
             ...(agent.budgetMicrousd > 0 ? { maxBudgetUsd: agent.budgetMicrousd / 1_000_000 } : {}),
-            onProviderSpawn: pid =>
-              store.markSlotRunning(entry.slotId, { run: entry.runId, contestant: entry.contestantId, incarnation: text(flags, "incarnation") ?? null, processGroup: pid }, clock()),
+            onProviderSpawn: pid => {
+              worktrees.recordProviderOccupancy(entry.worktree, runner, pid, entry.leaseEpoch);
+              const facts = { run: entry.runId, contestant: entry.contestantId, incarnation: text(flags, "incarnation") ?? null, processGroup: pid };
+              if (!store.markSlotRunning(entry.slotId, facts, clock()) && !store.refreshSlotProcess(entry.slotId, facts)) throw new Error("the provider's execution slot no longer belongs to this attempt");
+            },
             ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
             ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
             ...(context.shouldStop === undefined ? {} : { shouldStop: context.shouldStop }),
@@ -2985,6 +2990,7 @@ async function tickCommand(
         branch: planBranch,
         now: clock(),
         clock,
+        onProviderSpawn: pid => { worktrees.recordProviderOccupancy(planLeased.worktree.path, runner, pid, planLeased.worktree.leaseEpoch); },
         evidenceRoot: context.evidenceRoot,
         answers,
         provider: spec.provider,
@@ -3119,6 +3125,7 @@ async function tickCommand(
         branch: scoutBranch,
         now: clock(),
         clock,
+        onProviderSpawn: pid => { worktrees.recordProviderOccupancy(scoutLeased.worktree.path, runner, pid, scoutLeased.worktree.leaseEpoch); },
         evidenceRoot: context.evidenceRoot,
         answers: scoutAnswers,
         provider: spec.provider,
@@ -3396,7 +3403,7 @@ async function tickCommand(
       // every profile whose honest clock is shorter (codex-shaped, gemini).
       ...(capMicrousd === null ? {} : { maxBudgetUsd: capMicrousd / 1_000_000 }),
       onProviderSpawn: pid => {
-        worktrees.markProviderOccupancy(leased.worktree.path, runner, pid);
+        worktrees.recordProviderOccupancy(leased.worktree.path, runner, pid, leased.worktree.leaseEpoch);
       },
       provider: spec.provider,
       ...(spec.model === null ? {} : { model: spec.model }),
@@ -3648,7 +3655,7 @@ async function tickCommand(
       clock,
       ...(capNow === null ? {} : { maxBudgetUsd: capNow / 1_000_000 }),
       onProviderSpawn: pid => {
-        worktrees.markProviderOccupancy(leased.worktree.path, runner, pid);
+        worktrees.recordProviderOccupancy(leased.worktree.path, runner, pid, leased.worktree.leaseEpoch);
       },
       provider: admitted.provider as ProviderId,
       model: admitted.model,

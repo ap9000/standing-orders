@@ -12,6 +12,17 @@ import { adapterFor } from "./provider.js";
 const NODE = process.execPath;
 
 describe("run", () => {
+  test.each([run, runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl])("a failed custody callback reaps the spawned child before returning (%#)", async transport => {
+    let pid: number | null = null;
+    const result = await transport(NODE, ["-e", "setInterval(()=>{},1000)"], {
+      processGroup: true, timeoutMs: 10_000,
+      onSpawn: value => { pid = value; throw new Error("cannot record provider custody"); },
+    });
+    expect(result).toMatchObject({ code: 1, timedOut: false, notFound: false });
+    expect(result.stderr).toContain("cannot record provider custody");
+    expect(pid).not.toBeNull();
+    expect(() => process.kill(pid!, 0)).toThrow();
+  });
   test("returns stdout and a zero code for a successful command", async () => {
     // Arrange / Act
     const result = await run(NODE, ["-e", "process.stdout.write('hello')"]);

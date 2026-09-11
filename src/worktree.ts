@@ -184,11 +184,20 @@ export class WorktreePool {
    * spawn means a replacement control plane waits for an orphaned provider
    * to finish instead of starting a second writer in the same worktree.
    */
-  markProviderOccupancy(path: string, runner: string, providerPid: number): boolean {
+  markProviderOccupancy(path: string, runner: string, providerPid: number, leaseEpoch?: string | null): boolean {
     if (!Number.isInteger(providerPid) || providerPid <= 0) return false;
     const leased = this.store.getWorktree(path);
     if (leased === null || leased.releasedAt !== null || leased.runner !== runner) return false;
+    if (leaseEpoch !== undefined && leased.leaseEpoch !== leaseEpoch) return false;
     return this.mark(path, runner, providerPid);
+  }
+
+  /** Spawn callbacks must fail if custody cannot be recorded. The transport
+   * kills and reaps its child before returning that callback failure. */
+  recordProviderOccupancy(path: string, runner: string, providerPid: number, leaseEpoch?: string | null): void {
+    if (!this.markProviderOccupancy(path, runner, providerPid, leaseEpoch)) {
+      throw new Error(`${path}: the provider's worktree custody could not be recorded`);
+    }
   }
 
   async lease(request: LeaseRequest): Promise<LeaseResult> {

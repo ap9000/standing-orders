@@ -2187,6 +2187,7 @@ async function correctProofReceipt(
         timeoutMs: Math.min(REPAIR_TIMEOUT_MS, effective.profile.repairTimeoutSeconds * 1000),
         omitEnv: AGENT_ENV_DENYLIST,
         ...(captured.agent === undefined ? {} : { runner: captured.agent }),
+        ...(request.onProviderSpawn === undefined ? {} : { onSpawn: request.onProviderSpawn }),
         clock,
       });
     } catch {
@@ -2737,6 +2738,7 @@ async function ingestPark(args: {
         timeoutMs: args.profile !== undefined ? args.profile.repairTimeoutSeconds * 1000 : REPAIR_TIMEOUT_MS,
         omitEnv: AGENT_ENV_DENYLIST,
         ...(agent === undefined ? {} : { runner: agent }),
+        ...(request.onProviderSpawn === undefined ? {} : { onSpawn: request.onProviderSpawn }),
         clock,
       },
     );

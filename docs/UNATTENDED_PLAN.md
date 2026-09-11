@@ -47,6 +47,30 @@ Main was still `917bc5b` when this plan was prepared.
 
 ## Execution status
 
+- The custody follow-up records the active provider PID for planning, scouting,
+  build corrections, and tournament corrections, bound to the original
+  worktree lease epoch. Correction processes refresh their exact open execution
+  slot. A failed spawn callback now kills and reaps its owned child before
+  reporting failure instead of leaving an unrecorded writer. The shared task
+  diagnosis shows pending/running/failed review even when the build is finished.
+  A reusable `certify:recovery` command exercises real live-writer exclusion,
+  stale completion fencing, and draft/commit preservation repeatedly.
+
+- Expanded September 11 canaries at `f8f5572` exited successfully:
+  Claude `sonnet` in 214s and Codex `gpt-5.6-sol` in 326s. Audit of the actual
+  judgements upheld all three criteria for Claude, but found all three Codex
+  judgements were `cannot-tell`: its restricted reviewer could not read the
+  evidence files. The Codex review certificate is therefore invalid; merely
+  keeping the machine proof verified was too weak a canary gate. Evidence
+  delivery and the certification assertion need correction. Both recorded
+  the same clean runtime hash
+  `12241fb22f8c1020658e62b01f7e2671c57695952886e1eb5ecca793d7b75ef4`.
+  A separate 100-round real-writer fixture passed in 25.2s at that revision.
+  It injected controller liveness expiry; it did not kill a real Standing
+  Orders worker at every transition or exercise reboot. The later custody
+  follow-up above passes typecheck and 118 files / 2,348 tests, with 12 existing
+  skips. Integration still awaits the corrected reviewer gate.
+
 - Assisted review lifecycle slice: reviewers renew the authenticated runner
   through their paid turn and ingestion, so independent reconciliation cannot
   mistake a long review for a dead worker. Watch renewals also update the

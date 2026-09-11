@@ -564,6 +564,8 @@ describe("the pool, against real git", () => {
     if (!leased.ok) return;
 
     expect(pool.markProviderOccupancy(leased.worktree.path, "someone-else", 424242)).toBe(false);
+    expect(pool.markProviderOccupancy(leased.worktree.path, "builder-1", 424242, "old-epoch")).toBe(false);
+    expect(() => pool.recordProviderOccupancy(leased.worktree.path, "builder-1", 424242, "old-epoch")).toThrow("custody could not be recorded");
     expect(pool.markProviderOccupancy(leased.worktree.path, "builder-1", 424242)).toBe(true);
     const marker = await import("node:fs/promises").then(fs => fs.readFile(join(leased.worktree.path, ".standing-orders-lease"), "utf8"));
     expect(marker).toBe("424242 builder-1\n");

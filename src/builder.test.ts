@@ -2705,8 +2705,10 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     let commits = 0;
     let checks = 0;
     let moved = false;
+    const pids: number[] = [];
     const agent: Runner = async (file, args, options) => {
       calls++;
+      options?.onSpawn?.(10_000 + calls);
       if (calls === 1) {
         await agentWithProof(wrong)(file, args, options);
       } else {
@@ -2724,6 +2726,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       return { ...OK, stdout: JSON.stringify({ result: "receipt", session_id: "proof-session" }) };
     };
     const req = request({ leaseId: "test-lease", agent,
+      onProviderSpawn: pid => pids.push(pid),
       git: (async (file, args, options) => {
         if (args.includes("commit")) commits++;
         if (moved && args.includes("diff") && args.includes("--binary")) return { ...OK, stdout: "unauthorized patch" };
@@ -2734,6 +2737,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
     expect(commits).toBe(1);
     expect(calls).toBe(behavior === "unchanged" || behavior === "rewrite-checks" ? 3 : 2);
+    expect(pids).toEqual(Array.from({ length: calls }, (_, i) => 10_001 + i));
     expect(checks).toBe(moved ? 0 : 1);
     expect(store.proofVerdictFor(req.runId)).toMatchObject({ verdict: behavior === "correct" ? "verified" : "refuted" });
     const attempts = store.artifactsFor(req.runId).filter(one => one.kind === "structured-output");

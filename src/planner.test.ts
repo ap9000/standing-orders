@@ -11,7 +11,7 @@
 import { routeDigestOf } from "./phase-routing.js";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { realpathSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
@@ -420,6 +420,8 @@ describe("planning mode, against real git", () => {
       calls += 1;
       seen.push({ args: [...args], timeoutMs: options?.timeoutMs });
       const cwd = options?.cwd ?? "";
+      options?.onSpawn?.(1_000_000 + calls);
+      expect(readFileSync(join(cwd, ".standing-orders-lease"), "utf8")).toBe(`${1_000_000 + calls} builder-1\n`);
       const prompt = String(args[args.indexOf("-p") + 1] ?? "");
       const name = PLAN_FILE.exec(prompt)?.[0];
       if (name !== undefined && cwd !== "") {

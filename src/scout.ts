@@ -65,6 +65,7 @@ export type ScoutRequest = {
   maxTurns?: number;
   timeoutMs?: number;
   pulseMs?: number;
+  onProviderSpawn?: (pid: number) => void;
   permissionMode?: string;
   evidenceRoot?: string;
   agent?: Runner;
@@ -249,6 +250,7 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
         idleTimeoutMs: timeoutMs,
         omitEnv: AGENT_ENV_DENYLIST,
         ...(agent === undefined ? {} : { runner: agent }),
+        ...(request.onProviderSpawn === undefined ? {} : { onSpawn: request.onProviderSpawn }),
         clock,
         ...(liveLog === null ? {} : { onStreamEvent: (event: Record<string, unknown>) => liveLog.observe(event) }),
       },
