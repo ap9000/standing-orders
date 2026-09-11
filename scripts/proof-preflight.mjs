@@ -12,10 +12,11 @@
 // standalone token — `c1: …`) is a blocking exception: the proof's verdict
 // disagrees with its own words, the plane refutes it, and this preflight
 // refuses it first so the criterion can be marked not-met before the end.
-// Every caveat must name at least one known criterion (a signed id or one
-// the proof answers): an unassigned caveat, or one tagged with an unknown
-// id, is refused the same way — unrelated ideas belong in the handoff's
-// followUps.
+// Every caveat must name at least one known criterion — a signed id when
+// `--criteria` names the rubric (a proof-authored extra id is no authority
+// then), or one the proof answers only when nothing was signed: an
+// unassigned caveat, or one tagged with an unknown id, is refused the same
+// way — unrelated ideas belong in the handoff's followUps.
 //
 //   node scripts/proof-preflight.mjs [--done <file>] [--proof <file>]
 //        [--park <file>] [--criteria c1,c2,…]
@@ -105,10 +106,10 @@ if (files.proof !== null) {
         problems.push(`proof: criterion ${one.criterionId} is marked met, but caveat ${one.index + 1} admits an exception to it — mark it not-met or drop the exception: ${JSON.stringify(one.caveat)}`);
       }
       // Every caveat names a known criterion (final authority closure): an
-      // unassigned caveat, or one tagged with an id nobody signed and the
-      // proof never answers, refuses here — the plane refutes the same
-      // proof, so it is said before the attempt ends. Unrelated ideas go
-      // to the handoff's followUps.
+      // unassigned caveat, or one tagged with an id nobody signed (or, with
+      // no signed rubric, the proof never answers), refuses here — the
+      // plane refutes the same proof, so it is said before the attempt
+      // ends. Unrelated ideas go to the handoff's followUps.
       for (const one of caveatAttributionProblems(proof, signed)) {
         problems.push(`proof: ${caveatAttributionWords(one)}`);
       }

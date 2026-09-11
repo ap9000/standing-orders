@@ -446,6 +446,51 @@ describe("adjudicate", () => {
     expect(caveatAttributionWords({ caveat: "x", index: 2, kind: "unassigned", tags: [] })).toContain("caveat 3 names no criterion");
   });
 
+  test("a proof-authored extra id is no signed authority (final admission closure): with a signed rubric, a caveat tagged with it alone is unknown in adjudication — and an untagged caveat naming only it is unassigned; with nothing signed, the proof's answered criteria attribute", () => {
+    const extra = "c7: The routine page still renders the old words under the extra criterion this proof wrote for itself.";
+    const withExtra = (caveats: string[], extraVerdict: "met" | "not-met" = "not-met") =>
+      parse({
+        ...sound,
+        criteria: [
+          { id: "c1", statement: run1497.c1, verdict: "not-met", how: "startRun proves in its insert." },
+          { id: "c4", statement: run1497.c4, verdict: "not-met", how: "readRoutine sets termsProblem." },
+          { id: "c7", statement: "An extra criterion the proof recorded on its own.", verdict: extraVerdict, how: "noted" },
+        ],
+        caveats,
+      });
+    const signed = [
+      { id: "c1", statement: run1497.c1, evidence: [] },
+      { id: "c4", statement: run1497.c4, evidence: [] },
+    ];
+    // Adjudication under the signed rubric: the proof answers c7, but c7
+    // was never signed — the tag is unknown, the proof refuted.
+    const refuted = adjudicate({ ...base, proofParse: withExtra([extra]), approvedCriteria: signed });
+    expect(refuted.verdict).toBe("refuted");
+    // The words say the id is the proof's own, never that nobody answered it.
+    expect(refuted.reasons).toEqual([`caveat 1 names "c7", a criterion the proof authored for itself that nobody signed — a proof-only id is no signed authority; every caveat names a signed criterion's exact id: ${extra}`]);
+    // The pure function agrees, whether c7 is the only tag or rides with a signed one.
+    const answersExtra = { criteria: [{ id: "c7", statement: "s", verdict: "not-met" as const, how: "h", evidence: [] }], caveats: [extra] };
+    expect(caveatAttributionProblems(answersExtra, ["c1", "c4"])).toEqual([{ caveat: extra, index: 0, kind: "unknown", tags: ["c7"], answered: ["c7"] }]);
+    expect(caveatAttributionProblems({ ...answersExtra, caveats: ["c1, c7: both"] }, ["c1", "c4"])).toEqual([{ caveat: "c1, c7: both", index: 0, kind: "unknown", tags: ["c7"], answered: ["c7"] }]);
+    // A tag the proof never answered keeps the plain words, beside an answered one.
+    expect(caveatAttributionWords({ caveat: "c7, c9: both", index: 0, kind: "unknown", tags: ["c7", "c9"], answered: ["c7"] })).toContain('names "c7", "c9", which is no signed or answered criterion');
+    // An untagged caveat whose only standalone id is the proof-authored
+    // one names nothing signed: unassigned, not attributed.
+    const untagged = "The extra criterion c7 still renders the old words.";
+    expect(caveatAttributionProblems({ ...answersExtra, caveats: [untagged] }, ["c1", "c4"])).toEqual([{ caveat: untagged, index: 0, kind: "unassigned", tags: [] }]);
+    expect(adjudicate({ ...base, proofParse: withExtra([untagged]), approvedCriteria: signed }).reasons).toEqual([`caveat 1 names no criterion — every caveat is an exception to exactly one signed criterion, named by its exact id (an unrelated idea belongs in the handoff's follow-ups): ${untagged}`]);
+    // A signed id the proof answers attributes as before, beside the extra criterion.
+    const ok = adjudicate({ ...base, proofParse: withExtra(["c1: the no-scope row is kept for now."]), approvedCriteria: signed });
+    expect(ok.verdict).toBe("short");
+    expect(ok.reasons.some(one => /caveat/.test(one))).toBe(false);
+    // UNSIGNED context: no rubric — the proof's own answered criteria are
+    // the known ids, so the same c7 tag attributes.
+    expect(caveatAttributionProblems(answersExtra, [])).toEqual([]);
+    const unsigned = adjudicate({ ...base, proofParse: withExtra([extra]) });
+    expect(unsigned.reasons.some(one => /names "c7"/.test(one))).toBe(false);
+    expect(unsigned.verdict).not.toBe("refuted");
+  });
+
   test("attributed caveats against not-met criteria pass attribution: a mixed proof is refuted only for the caveat that names nothing", () => {
     const mixed = [noScopeCaveat, routinePageCaveat, run1497Caveats[3]!];
     const result = adjudicate({ ...base, proofParse: stored(mixed, "not-met") });

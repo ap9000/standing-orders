@@ -9803,6 +9803,13 @@ export class Store {
           parentRun = holder.id;
         }
       }
+      // THE CURRENT CLAIM, for every kind (final admission closure): the
+      // entry, the resume, and the repair turn alike open only under the
+      // lease that holds the task now, on the runner that claim names —
+      // proved here, before the row, so a mismatched, expired, released,
+      // or superseded claim creates no run and consumes no edge.
+      const custody = this.custodyClaimProblem(args.run, now, `a fallback ${args.kind === "repair" ? "repair turn" : args.kind === "resume" ? "resume" : "entry"}`);
+      if (custody !== null) return refuse(custody);
       // Open the fallback run WITH its chain metadata, in the same body.
       const inserted = this.db
         .prepare(
@@ -14061,6 +14068,14 @@ export class Store {
               .get(BUILT_IN, run.taskRef);
             return row?.["quality_mode"] === "strict" ? "strict" : "default";
           })();
+    // THE CURRENT CLAIM (final admission closure): custody that changes
+    // fallback state — the base that opens the cycle, the resume that
+    // moves its tail — is taken only under the lease that holds the task
+    // now, on the runner that claim names; proved before any write.
+    if (custody !== null && ((custody.kind === "base" && chain !== null && binding !== null) || (custody.kind === "resume" && parkedTail !== null))) {
+      const claimProblem = this.custodyClaimProblem({ taskRef: run.taskRef, leaseId: run.leaseId, runner: run.runner }, run.now, custody.kind === "base" ? "base custody" : "a parked tail's resume");
+      if (claimProblem !== null) refuse(claimProblem);
+    }
     // THE CUSTODY WRITE (v48 authority repair), before the row and in the
     // same transaction: a base cycle that cannot open (one is live already)
     // throws, and no row is ever created outside the custody it was
@@ -14149,6 +14164,29 @@ export class Store {
       if (Number(moved.changes) === 0) refuse(`run #${parkedTail.id}'s cycle is not open with it as the parked tail — nothing resumes its custody`);
     }
     return id;
+  }
+
+  /**
+   * THE CURRENT CLAIM, exactly (final admission closure): every admission
+   * that changes fallback state — the base that opens a cycle, an entry
+   * admitted from a pending edge, a parked tail's resume, a repair turn
+   * under the live tail — proves in its own transaction that the run it
+   * opens is the task's, under the lease that holds the task RIGHT NOW,
+   * on the runner that claim names. A lease nobody holds, one released,
+   * expired, or superseded by a newer generation, or a claim another
+   * machine holds admits nothing: the words say which, and no cycle,
+   * edge, tail, or claim moves. Shared by the fallback road and the
+   * generic road's custody so both refuse in the same words.
+   */
+  private custodyClaimProblem(run: { taskRef: number; leaseId: string; runner: string }, now: Date, what: string): string | null {
+    const holding = this.currentLiveLease(run.taskRef, now);
+    if (holding !== run.leaseId) {
+      return `lease ${run.leaseId} is not this task's current live claim (${holding === null ? "nothing holds it" : `${holding} does`}) — ${what} opens under the claim that holds the task now`;
+    }
+    const claim = this.db.prepare("SELECT runner FROM claim WHERE lease_id = ? AND task_ref = ?").get(run.leaseId, run.taskRef) as { runner: string } | undefined;
+    if (claim === undefined) return `lease ${run.leaseId} is not one of this task's claims — ${what} opens under the claim that holds the task now`;
+    if (claim.runner !== run.runner) return `this task's live claim ${run.leaseId} is held by ${claim.runner} — ${what} on ${run.runner} is another machine's`;
+    return null;
   }
 
   /**

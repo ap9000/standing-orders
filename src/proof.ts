@@ -395,12 +395,27 @@ export function blockingCaveats(proof: Pick<ParsedProof, "criteria" | "caveats">
  * caveat is an exception to a signed criterion, and it names that
  * criterion's exact id as a standalone token — so a caveat that names NO
  * known criterion (`unassigned`), or whose leading tag names an id nobody
- * signed and the proof never answers (`unknown`), is a claim the verdict
- * cannot be reconciled with. An idea that is not an exception to any
- * criterion belongs in the handoff's follow-ups, not here. Known ids are
- * the proof's own criteria plus every signed criterion the caller names.
+ * signed (`unknown`), is a claim the verdict cannot be reconciled with.
+ * An idea that is not an exception to any criterion belongs in the
+ * handoff's follow-ups, not here.
+ *
+ * THE KNOWN IDS ARE THE SIGNED ONES (final admission closure): when a
+ * rubric was signed, only its ids count — an extra criterion the proof
+ * authored for itself is the proof's own word, never signed authority, so
+ * a caveat tagged with it alone is unknown in preflight and adjudication
+ * alike. Only a proof with NO signed rubric may attribute its caveats to
+ * the criteria it answered.
  */
-export type CaveatAttributionProblem = { caveat: string; index: number; kind: "unassigned" | "unknown"; tags: string[] };
+export type CaveatAttributionProblem = {
+  caveat: string;
+  index: number;
+  kind: "unassigned" | "unknown";
+  tags: string[];
+  /** The unknown tags the proof answered for itself (present only when a
+   * rubric was signed and at least one such tag exists): the words say
+   * the criterion is the proof's own, not that nobody answered it. */
+  answered?: string[];
+};
 
 /** The leading tag list of a caveat — `c1: …`, `c1, c4: …`, `(c2) …` — as
  * the tokens it names before its first colon or after its parentheses.
@@ -417,13 +432,15 @@ export function caveatAttributionProblems(
   proof: Pick<ParsedProof, "criteria" | "caveats">,
   signedIds: readonly string[] = [],
 ): CaveatAttributionProblem[] {
-  const known = new Set<string>([...proof.criteria.map(one => one.id), ...signedIds]);
+  const own = new Set<string>(proof.criteria.map(one => one.id));
+  const known = new Set<string>(signedIds.length > 0 ? signedIds : [...own]);
   const out: CaveatAttributionProblem[] = [];
   proof.caveats.forEach((caveat, index) => {
     const named = [...known].filter(id => caveatNames(caveat, id));
     const tags = leadingTags(caveat);
     const unknown = tags.filter(tag => !known.has(tag));
-    if (unknown.length > 0) out.push({ caveat, index, kind: "unknown", tags: unknown });
+    const answered = signedIds.length > 0 ? unknown.filter(tag => own.has(tag)) : [];
+    if (unknown.length > 0) out.push({ caveat, index, kind: "unknown", tags: unknown, ...(answered.length > 0 ? { answered } : {}) });
     else if (named.length === 0) out.push({ caveat, index, kind: "unassigned", tags: [] });
   });
   return out;
@@ -432,9 +449,14 @@ export function caveatAttributionProblems(
 /** The words one attribution problem refuses in — shared by the plane's
  * adjudication and the agent's exit preflight so both say the same thing. */
 export function caveatAttributionWords(problem: CaveatAttributionProblem): string {
-  return problem.kind === "unknown"
-    ? `caveat ${problem.index + 1} names ${problem.tags.map(tag => `"${tag}"`).join(", ")}, which is no signed or answered criterion — every caveat names an exact criterion id: ${problem.caveat}`
-    : `caveat ${problem.index + 1} names no criterion — every caveat is an exception to exactly one signed criterion, named by its exact id (an unrelated idea belongs in the handoff's follow-ups): ${problem.caveat}`;
+  if (problem.kind !== "unknown") {
+    return `caveat ${problem.index + 1} names no criterion — every caveat is an exception to exactly one signed criterion, named by its exact id (an unrelated idea belongs in the handoff's follow-ups): ${problem.caveat}`;
+  }
+  const quoted = problem.tags.map(tag => `"${tag}"`).join(", ");
+  const answered = problem.answered ?? [];
+  return answered.length > 0 && answered.length === problem.tags.length
+    ? `caveat ${problem.index + 1} names ${quoted}, a criterion the proof authored for itself that nobody signed — a proof-only id is no signed authority; every caveat names a signed criterion's exact id: ${problem.caveat}`
+    : `caveat ${problem.index + 1} names ${quoted}, which is no signed or answered criterion — every caveat names an exact criterion id: ${problem.caveat}`;
 }
 
 /** One claimed screenshot's fate once the caller has read its bytes off the
@@ -792,7 +814,9 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
     // no known criterion, or a tag nobody signed, is an exception the
     // verdict cannot be reconciled with — the proof's own words do not
     // say which criterion they qualify, and the plane refutes rather than
-    // guesses. Known ids are the signed rubric's and the proof's own.
+    // guesses. Known ids are the signed rubric's alone when one was
+    // signed (a proof-authored extra id is no authority); the proof's own
+    // only when nothing was signed.
     const unattributed = caveatAttributionProblems(proof, approvedCriteria.map(one => one.id));
     if (unattributed.length > 0) {
       return { verdict: "refuted", reasons: unattributed.map(caveatAttributionWords), matrix };

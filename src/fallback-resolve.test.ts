@@ -198,6 +198,8 @@ describe("a routed scope under a fallback chain (v47): the route drives the base
     expect(store.fallbackCycleFor(ref)?.state).toBe("pending-admission");
     expect(store.runsFor(ref)).toHaveLength(0);
     store.recordProviderReadiness("mac", [{ provider: "codex", state: "ready", reason: "logged in", probe: "identity" }], new Date(T0.getTime() + 2_000));
+    // The entry opens under the task's current live claim (final admission closure).
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('l', ?, 1, 'mac', ?, ?, ?)").run(ref, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
     const admitted = store.admitNextChainEntry(cycle.id, { leaseId: "l", runner: "mac", branch: "b", worktree: "/w" }, new Date(T0.getTime() + 2_000));
     expect(admitted).toMatchObject({ ok: true, provider: "codex", model: "gpt-5-codex" });
     if (!admitted.ok) return;

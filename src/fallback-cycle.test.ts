@@ -43,6 +43,19 @@ const presented = (
   return authority === null || !authority.ok ? {} : { route: authority.stamp };
 };
 
+/** The task's CURRENT live claim (final admission closure): every admission
+ * that changes fallback state — base, entry, resume, repair — opens only
+ * under the lease that holds the task now, on the runner that claim names,
+ * so a fixture holds the task before it admits. Generations climb, so the
+ * newest hold is the live one. */
+const hold = (store: Store, taskRef: number, leaseId: string, runner = "b-1"): void => {
+  const generation = Number((store.raw().prepare("SELECT COALESCE(MAX(lease_generation), 0) + 1 AS g FROM claim WHERE task_ref = ?").get(taskRef) as { g: number }).g);
+  store
+    .raw()
+    .prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(leaseId, taskRef, generation, runner, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
+};
+
 /** The admission arguments for the approved chain's entry at `index`,
  * stated exactly as the approved chain has them (the proof re-derives all of
  * it; a fixture may override one fact to prove the refusal). */
@@ -82,8 +95,10 @@ describe("the fallback cycle state machine", () => {
   // integrity): a chain-approved build presents custody or opens nothing,
   // so the cycle every test below walks was opened by the run's own
   // admission — `openedCycle` reads it back.
-  const openRun = (n: number) =>
-    store.startRun({ taskRef, leaseId: `l-${n}`, runner: "b-1", branch: `b${n}`, worktree: `/w${n}`, provider: "claude", now: T0, ...presented(store, taskRef), custody: { kind: "base" } });
+  const openRun = (n: number) => {
+    hold(store, taskRef, `l-${n}`);
+    return store.startRun({ taskRef, leaseId: `l-${n}`, runner: "b-1", branch: `b${n}`, worktree: `/w${n}`, provider: "claude", now: T0, ...presented(store, taskRef), custody: { kind: "base" } });
+  };
   const openedCycle = (): { ok: true; id: number } => {
     const live = store.fallbackCycleFor(taskRef);
     if (live === null) throw new Error("the base run opened no cycle");
@@ -142,8 +157,10 @@ describe("the fallback cycle state machine", () => {
     expect(c).toMatchObject({ state: "pending-admission", tailRun: null, transitionGeneration: 3 });
 
     // Single-use admission CREATES the next run atomically, bound to the
-    // exact pending edge (to_index === cursor 1) with the chain metadata.
+    // exact pending edge (to_index === cursor 1) with the chain metadata —
+    // under the task's current live claim (final admission closure).
     const e1 = entry1();
+    hold(store, taskRef, "l-1");
     const admitted = store.admitFallback(
       { cycleId, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: { taskRef, leaseId: "l-1", runner: "b-1", branch: "b1", worktree: "/w1", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
       T0,
@@ -188,6 +205,7 @@ describe("the fallback cycle state machine", () => {
     store.releaseFallbackToPending(cycleId, 2, T0);
     const before = Number((store.raw().prepare("SELECT COUNT(*) n FROM run WHERE task_ref = ?").get(taskRef) as { n: number }).n);
     const e1 = entry1();
+    hold(store, taskRef, "l-1");
     const first = store.admitFallback(
       { cycleId, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: { taskRef, leaseId: "l-1", runner: "b-1", branch: "b1", worktree: "/w1", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
       T0,
@@ -212,6 +230,7 @@ describe("the fallback cycle state machine", () => {
     const skip = store.quotaSkipFallback({ cycleId, expectGeneration: 0, fromIndex: 0, chainLength: 3, tailRun: baseRun }, T0) as { ok: true; toIndex: number; transitionId: number };
     // Admit at cursor 1 consumes THAT edge (to_index 1 === cursor 1).
     const e1 = entry1();
+    hold(store, taskRef, "l-1");
     const ad = store.admitFallback(
       { cycleId, expectGeneration: 1, expectCursor: 1, transitionId: skip.transitionId, run: { taskRef, leaseId: "l-1", runner: "b-1", branch: "b1", worktree: "/w1", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
       T0,
@@ -336,6 +355,26 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     expect(() => store.startRun({ taskRef: ref, leaseId: "lp", runner: "b-1", role: "planner", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref, "planner"), custody: { kind: "base" } })).toThrow(/chain custody is a builder's to take/);
     expect(rows()).toBe(0);
 
+    // THE CURRENT CLAIM (final admission closure): the base that opens the
+    // cycle is admitted only under the lease that holds the task now, on
+    // the runner that claim names — a lease nobody holds, a released or
+    // expired one, or another machine's opens no row and no cycle.
+    const stale = (over: Record<string, unknown>, words: RegExp) => {
+      expect(() => store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" }, ...over } as Parameters<Store["startRun"]>[0])).toThrow(words);
+      expect(rows()).toBe(0);
+      expect(store.fallbackCycleFor(ref)).toBeNull();
+    };
+    stale({}, /lease l is not this task's current live claim \(nothing holds it\) — base custody opens under the claim that holds the task now/);
+    hold(store, ref, "l");
+    stale({ runner: "other-machine" }, /this task's live claim l is held by b-1 — base custody on other-machine is another machine's/);
+    store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = 'l'").run(T0.toISOString());
+    stale({}, /lease l is not this task's current live claim \(nothing holds it\)/);
+    store.raw().prepare("UPDATE claim SET released_at = NULL, expires_at = ? WHERE lease_id = 'l'").run(new Date(T0.getTime() - 1).toISOString());
+    stale({}, /lease l is not this task's current live claim \(nothing holds it\)/);
+    store.raw().prepare("UPDATE claim SET expires_at = ? WHERE lease_id = 'l'").run(new Date(T0.getTime() + 900_000).toISOString());
+    hold(store, ref, "l-super");
+    stale({}, /lease l is not this task's current live claim \(l-super does\)/);
+    store.raw().prepare("DELETE FROM claim WHERE lease_id = 'l-super'").run();
     const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } });
     const c = store.fallbackCycleFor(ref)!;
     expect(c).toMatchObject({ state: "open", cursor: 0, tailRun: run });
@@ -354,13 +393,16 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const token = bootstrap();
     expect(approve(store, "t-retry", "alex", T0, store.getScope("t-retry")!.digest, token).ok).toBe(true);
 
+    hold(store, ref, "l1");
     const first = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b-1", branch: "b1", worktree: "/w1", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } });
     const c1 = store.fallbackCycleFor(ref)!;
     // The first run is BOUND to entry 0.
     expect(store.getRun(first)).toMatchObject({ chainCycle: c1.id, chainIndex: 0, authMode: "subscription" });
     // A second dispatch while the cycle lives: the insert rolls back — the
     // cycle's tail stays with the first run and no unbound row exists to
-    // spend outside the cycle.
+    // spend outside the cycle. (Under a fresh live claim, so the refusal
+    // proved is the cycle's, not the claim's.)
+    hold(store, ref, "l2");
     expect(() => store.startRun({ taskRef: ref, leaseId: "l2", runner: "b-1", branch: "b2", worktree: "/w2", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } })).toThrow(/base custody cannot open beside it/);
     expect(store.runsFor(ref)).toHaveLength(1);
     expect(store.fallbackCycleFor(ref)!.tailRun).toBe(first);
@@ -379,6 +421,7 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const token = bootstrap();
     expect(approve(store, "t-resume", "alex", T0, store.getScope("t-resume")!.digest, token).ok).toBe(true);
 
+    hold(store, ref, "l1");
     const parent = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } });
     const resume = (lease: string) => store.startRun({ taskRef: ref, leaseId: lease, runner: "b-1", branch: "b", worktree: `/${lease}`, provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "resume", parkedRun: parent } });
     // A LIVE (unconcluded) parent refuses the transfer — the provider may
@@ -387,6 +430,13 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     expect(store.runsFor(ref)).toHaveLength(1);
     // A PARKED parent is the paused lineage: the transfer proves and moves.
     store.finishRun(parent, { outcome: "parked", reason: "decision", now: T0 });
+    // Under the task's current live claim only (final admission closure):
+    // a successor whose lease is not the claim that holds the task now
+    // moves no tail and opens no row.
+    expect(() => resume("l3")).toThrow(/lease l3 is not this task's current live claim \(l1 does\) — a parked tail's resume opens under the claim that holds the task now/);
+    expect(store.runsFor(ref)).toHaveLength(1);
+    expect(store.fallbackCycleFor(ref)!.tailRun).toBe(parent);
+    hold(store, ref, "l3");
     const successor = resume("l3");
     const c = store.fallbackCycleFor(ref)!;
     expect(c).toMatchObject({ state: "open", cursor: 0, tailRun: successor });
@@ -408,13 +458,20 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const rows = () => Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run WHERE task_ref = ?").get(ref) as { n: number }).n);
     const open = (over: Record<string, unknown>) =>
       store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref), ...over } as Parameters<Store["startRun"]>[0]);
-    // BASE: the cycle opens with the row, bound to entry 0.
+    // BASE: the cycle opens with the row, bound to entry 0 — under the
+    // task's current live claim (final admission closure).
+    hold(store, ref, "l");
     const base = open({ custody: { kind: "base" } });
     const cycle = store.fallbackCycleFor(ref)!;
     expect(cycle).toMatchObject({ state: "open", cursor: 0, tailRun: base });
     expect(store.getRun(base)).toMatchObject({ chainCycle: cycle.id, chainIndex: 0, authMode: "subscription" });
     // A second BASE beside the live cycle: the insert rolls back — no row.
-    expect(() => open({ leaseId: "l2", custody: { kind: "base" } })).toThrow(/fallback cycle is live — base custody cannot open beside it/);
+    expect(() => open({ custody: { kind: "base" } })).toThrow(/fallback cycle is live — base custody cannot open beside it/);
+    // A base under a lease that is NOT the task's current claim, or on
+    // another machine: refused before the cycle is even asked.
+    expect(() => open({ leaseId: "l-stranger", custody: { kind: "base" } })).toThrow(/lease l-stranger is not this task's current live claim \(l does\) — base custody opens under the claim that holds the task now/);
+    expect(() => open({ runner: "other-machine", custody: { kind: "base" } })).toThrow(/live claim l is held by b-1 — base custody on other-machine is another machine's/);
+    expect(rows()).toBe(1);
     expect(rows()).toBe(1);
     expect(store.fallbackCycleFor(ref)?.tailRun).toBe(base);
     // RESUME from a tail that is not parked: rolled back — no row.
@@ -426,8 +483,7 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
       store.admitRepair({ taskRef, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", parentRun, now: T0, ...(presented(store, taskRef, "repair") as { route: import("./phase-routing.js").RouteStamp }) });
     expect(() => open({ role: "repair", parentRun: base, ...presented(store, ref, "repair") })).toThrow(/a repair turn is admitted by admitRepair/);
     // The repair turn mends the tail under the task's CURRENT live claim
-    // (final authority closure).
-    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('l', ?, 1, 'b-1', ?, ?, ?)").run(ref, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
+    // (final authority closure) — the claim the base was admitted under.
     const repaired = repairVia(ref, base);
     if (!repaired.ok) throw new Error(repaired.problem);
     const repair = repaired.runId;
@@ -444,6 +500,12 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     store.finishRun(repair, { outcome: "failed", reason: "x", now: T0 });
     store.finishRun(base, { outcome: "parked", reason: "decision", now: T0 });
     expect(store.resolveChainOnRunEnd(ref, "t-atomic", REPO, base, T0)).toEqual({ kind: "parked-tail" });
+    // The resume opens only under the task's current live claim (final
+    // admission closure): a stale lease or another machine moves no tail.
+    expect(() => open({ leaseId: "l4", custody: { kind: "resume", parkedRun: base } })).toThrow(/lease l4 is not this task's current live claim \(l does\) — a parked tail's resume opens under the claim that holds the task now/);
+    hold(store, ref, "l4");
+    expect(() => open({ leaseId: "l4", runner: "other-machine", custody: { kind: "resume", parkedRun: base } })).toThrow(/live claim l4 is held by b-1 — a parked tail's resume on other-machine is another machine's/);
+    expect(store.fallbackCycleFor(ref)?.tailRun).toBe(base);
     const successor = open({ leaseId: "l4", custody: { kind: "resume", parkedRun: base } });
     expect(store.fallbackCycleFor(ref)).toMatchObject({ state: "open", cursor: 0, tailRun: successor });
     expect(store.getRun(successor)).toMatchObject({ chainCycle: cycle.id, chainIndex: 0, authMode: "subscription" });
@@ -476,6 +538,7 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     store.placeTask(elseRef, REPO);
     propose(store, { taskId: "t-else", goal: "a guard", now: T0 });
     expect(approve(store, "t-else", "alex", T0, store.getScope("t-else")!.digest, token).ok).toBe(true);
+    hold(store, ref, "l");
     const base = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } });
     const cycle = store.fallbackCycleFor(ref)!;
     expect(store.beginFallbackSanitize(cycle.id, 0, base, T0)).toBe(true);
@@ -598,6 +661,7 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     // A reviewer row (an artifact-only pass: no branch, no worktree) written
     // straight into the table, ended as interrupted — no grant either.
     const reviewer = Number(store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, quality_mode, started_at, outcome, reason, finished_at) VALUES (?, 'lv', 'b-1', 'reviewer', 'claude', ?, 'default', ?, 'failed', 'interrupted', ?)").run(ref, base, T0.toISOString(), T0.toISOString()).lastInsertRowid);
+    hold(store, elseRef, "lb");
     const builtElsewhere = store.startRun({ taskRef: elseRef, leaseId: "lb", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, elseRef), custody: { kind: "base" } });
     store.finishRun(builtElsewhere, { outcome: "built", reason: "done", now: T0 });
     before = rows();
@@ -606,9 +670,23 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     refused({ ...exact(), run: { ...exact().run, recoveredFrom: reviewer } }, /is a reviewer run — a recovered draft is a builder's or its repair turn's/);
     refused({ ...exact(), run: { ...exact().run, recoveredFrom: builtElsewhere } }, /is not one of this task's attempts — nothing recovers its draft/);
     refused({ ...exact(), run: { ...exact().run, recoveredFrom: base, worktree: "/elsewhere" } }, /left its draft in \/w on b, not \/elsewhere on b/);
-    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('l', ?, 1, 'b-1', ?, ?, ?)").run(ref, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
+    // The base is still being built under its live claim `l`.
     refused({ ...exact(), run: { ...exact().run, recoveredFrom: base } }, /is still being built under lease l — nothing recovers a live attempt's draft/);
     store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = 'l'").run(T0.toISOString());
+    // THE CURRENT CLAIM on the entry road (final admission closure): with
+    // `l` released nothing holds the task — the exact statement admits
+    // nothing until the caller's lease IS the task's live claim, on the
+    // runner that claim names; an expired or superseded claim is the same
+    // refusal, and the edge, cycle, and rows stay exactly as they were.
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: base } }, /lease lf is not this task's current live claim \(nothing holds it\) — a fallback entry opens under the claim that holds the task now/);
+    hold(store, ref, "lf");
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: base, runner: "other-machine" } }, /live claim lf is held by b-1 — a fallback entry on other-machine is another machine's/);
+    store.raw().prepare("UPDATE claim SET expires_at = ? WHERE lease_id = 'lf'").run(new Date(T0.getTime() - 1).toISOString());
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: base } }, /lease lf is not this task's current live claim \(nothing holds it\)/);
+    store.raw().prepare("UPDATE claim SET expires_at = ? WHERE lease_id = 'lf'").run(new Date(T0.getTime() + 900_000).toISOString());
+    hold(store, ref, "l-super");
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: base } }, /lease lf is not this task's current live claim \(l-super does\)/);
+    store.raw().prepare("DELETE FROM claim WHERE lease_id = 'l-super'").run();
     const before2 = rows();
     expect(before2).toBe(before);
     // The exact statement admits: one run, the edge consumed, the cycle
@@ -638,9 +716,8 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
       entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, approved: e1.approved, route: repairStamp,
     });
     expect(() => store.startRun({ taskRef: ref, leaseId: "lr", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, role: "repair", parentRun: admitted.runId, now: T0, route: repairStamp } as never)).toThrow(/a repair turn is admitted by admitRepair/);
-    // Under the task's current live claim (final authority closure), so
-    // the refusal proved here is the fallback road's, not the claim's.
-    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('lf', ?, 2, 'b-1', ?, ?, ?)").run(ref, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
+    // Under the task's current live claim `lf` (final authority closure),
+    // so the refusal proved here is the fallback road's, not the claim's.
     expect(store.admitRepair({ taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, parentRun: admitted.runId, now: T0, route: repairStamp })).toMatchObject({ ok: false, problem: expect.stringMatching(/admitted only through admitFallback/) });
     expect(store.admitRepair({ taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, parentRun: admitted.runId, now: T0, ...(presented(store, ref, "repair") as { route: import("./phase-routing.js").RouteStamp }) })).toMatchObject({ ok: false, problem: expect.stringMatching(/admitted only through admitFallback/) });
     tailStays();
@@ -707,6 +784,20 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
       expect(rows()).toBe(ended);
       expect(store.fallbackCycleFor(ref)!.tailRun).toBe(admitted.runId);
     }
+    // THE CURRENT CLAIM on the resume road (final admission closure): the
+    // parked tail's successor opens only under the lease that holds the
+    // task now, on the runner that claim names — the tail stays otherwise.
+    {
+      const stale = store.admitFallback(resumeFacts(), T0);
+      expect(stale).toMatchObject({ ok: false, problem: expect.stringMatching(/lease ls is not this task's current live claim \(lf does\) — a fallback resume opens under the claim that holds the task now/) });
+      expect(rows()).toBe(ended);
+      expect(store.fallbackCycleFor(ref)!.tailRun).toBe(admitted.runId);
+      hold(store, ref, "ls");
+      const foreign = store.admitFallback({ ...resumeFacts(), run: { ...resumeFacts().run, runner: "other-machine" } }, T0);
+      expect(foreign).toMatchObject({ ok: false, problem: expect.stringMatching(/live claim ls is held by b-1 — a fallback resume on other-machine is another machine's/) });
+      expect(rows()).toBe(ended);
+      expect(store.fallbackCycleFor(ref)!.tailRun).toBe(admitted.runId);
+    }
     const resumed = store.admitFallback(resumeFacts(), T0);
     expect(resumed.ok).toBe(true);
     if (!resumed.ok) return;
@@ -759,6 +850,7 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     store.placeTask(ref, REPO);
     propose(store, { taskId: id, goal: "a guard", now: T0 });
     expect(approve(store, id, "alex", T0, store.getScope(id)!.digest, alexToken).ok).toBe(true);
+    hold(store, ref, "l");
     const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } });
     return { ref, run };
   };
@@ -885,6 +977,7 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
       T0,
     );
     expect(forged).toMatchObject({ ok: false, problem: expect.stringContaining("the stated entry digest e1 is not the approved entry 1's") });
+    hold(store, ref, "lf");
     const admitted = store.admitFallback(
       { cycleId: cyc.id, expectGeneration: cyc.transitionGeneration, expectCursor: 1, transitionId: txId, run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: "gemini", model: "gemini-2.5-pro" }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
       T0,
@@ -924,7 +1017,6 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     // the binding inherited IN its admission (v48 authority repair), presenting the entry's
     // repair authority (the base entry: the sealed repair leg).
     const tailRow = store.getRun(run)!;
-    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES (?, ?, 1, ?, ?, ?, ?)").run(tailRow.leaseId, ref, tailRow.runner, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
     const repaired = store.admitRepair({
       taskRef: ref, leaseId: tailRow.leaseId, runner: tailRow.runner, branch: "b", worktree: "/w",
       provider: "claude", parentRun: run, now: T0, ...(presented(store, ref, "repair") as { route: import("./phase-routing.js").RouteStamp }),
@@ -937,7 +1029,7 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     // cannot even be opened beside the live cycle (v48 integrity) — and a
     // row forged with the binding by hand is still not custody.
     expect(() => store.startRun({
-      taskRef: ref, leaseId: "l-s", runner: "b-1", branch: "b", worktree: "/w2",
+      taskRef: ref, leaseId: tailRow.leaseId, runner: "b-1", branch: "b", worktree: "/w2",
       provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" },
     })).toThrow(/base custody cannot open beside it/);
     const tail = store.getRun(run)!;

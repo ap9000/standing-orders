@@ -68,7 +68,19 @@ describe("the fault matrix (G)", () => {
     );
   };
 
-  /** A chain-approved task, its base cycle open, its base run bound. */
+  /** The task's CURRENT live claim (final admission closure): every
+   * admission that changes fallback state opens only under it, so the
+   * fixture holds the task before it admits; generations climb. */
+  const hold = (ref: number, leaseId: string): void => {
+    const generation = Number((store.raw().prepare("SELECT COALESCE(MAX(lease_generation), 0) + 1 AS g FROM claim WHERE task_ref = ?").get(ref) as { g: number }).g);
+    store
+      .raw()
+      .prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES (?, ?, ?, 'b-1', ?, ?, ?)")
+      .run(leaseId, ref, generation, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
+  };
+
+  /** A chain-approved task, its base cycle open, its base run bound —
+   * admitted under the task's live claim `l`. */
   const setup = (id: string) => {
     store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
     store.createTask({ id, title: "w" }, T0);
@@ -76,6 +88,7 @@ describe("the fault matrix (G)", () => {
     store.placeTask(ref, REPO);
     propose(store, { taskId: id, goal: "a guard", now: T0 });
     expect(approve(store, id, "alex", T0, store.getScope(id)!.digest, alexToken).ok).toBe(true);
+    hold(ref, "l");
     const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref, "builder"), custody: { kind: "base" } });
     return { ref, run };
   };
@@ -84,6 +97,8 @@ describe("the fault matrix (G)", () => {
     store.stampProviderStart(run, T0, VERSION);
     store.stampTerminalClass(run, "subscription", "usage-exhausted");
     store.finishRun(run, { outcome: "failed", reason: "exhausted", now: T0 });
+    // The disposition hands the claim back, as the tick's does.
+    release(store, "l", T0);
   };
 
   beforeEach(() => {
@@ -143,6 +158,7 @@ describe("the fault matrix (G)", () => {
     expect(store.resolveChainOnRunEnd(ref, "t-revoke", REPO, run, T0).kind).toBe("advanced");
     store.revokeMode(REPO, "alex", "changed my mind", T0);
     const cycle = store.fallbackCycleFor(ref)!;
+    hold(ref, "l2");
     const admitted = store.admitNextChainEntry(cycle.id, { leaseId: "l2", runner: "b-1", branch: "b", worktree: "/w2" }, T0);
     expect(admitted).toEqual({ ok: false, reason: "grant-withheld" });
     expect(store.fallbackCycleFor(ref)).toBeNull(); // closed, not incident
@@ -158,6 +174,7 @@ describe("the fault matrix (G)", () => {
     expect(store.resolveChainOnRunEnd(ref, "t-corrupt", REPO, run, T0).kind).toBe("advanced");
     store.raw().prepare("UPDATE task_scope SET approved_chain_json = 'not json' WHERE task_id = 't-corrupt'").run();
     const cycle = store.fallbackCycleFor(ref)!;
+    hold(ref, "l2");
     const admitted = store.admitNextChainEntry(cycle.id, { leaseId: "l2", runner: "b-1", branch: "b", worktree: "/w2" }, T0);
     expect(admitted).toEqual({ ok: false, reason: "stale-approval" });
     expect(store.fallbackCycleFor(ref)).toBeNull(); // incident is not live
@@ -171,6 +188,7 @@ describe("the fault matrix (G)", () => {
     concludeExhausted(run);
     expect(store.resolveChainOnRunEnd(ref, "t-replay", REPO, run, T0).kind).toBe("advanced");
     const cycle = store.fallbackCycleFor(ref)!;
+    hold(ref, "l2");
     const first = store.admitNextChainEntry(cycle.id, { leaseId: "l2", runner: "b-1", branch: "b", worktree: "/w2" }, T0);
     expect(first.ok).toBe(true);
     const replay = store.admitNextChainEntry(cycle.id, { leaseId: "l3", runner: "b-1", branch: "b", worktree: "/w3" }, T0);

@@ -3742,6 +3742,50 @@ async function tickCommand(
         broke++;
         continue;
       }
+      // THE SIGNED HEAD, BEFORE THE ATTEMPT IS SPENT (final admission
+      // closure): the continuation's terms signed the exact commit the
+      // parent finished at, and the leased worktree's HEAD is read here
+      // and held to it BEFORE admitAttended — the same order the queue's
+      // attended road keeps. A head the terms do not sign, or one that
+      // moved, opens no run, spends no attempt, invokes no provider: the
+      // worktree and claim are released and the authorization closes in
+      // the refusal's words — one terminal refusal, recorded once — so
+      // the operator authorizes again at today's head.
+      let signedContinuationHead: string | null = null;
+      try {
+        const terms = JSON.parse(continuation.termsJson) as { head?: unknown };
+        signedContinuationHead = typeof terms.head === "string" && terms.head !== "" ? terms.head : null;
+      } catch {
+        signedContinuationHead = null;
+      }
+      const continuationHeadRead = signedContinuationHead === null ? null : await git("git", ["rev-parse", "HEAD"], { cwd: leased.worktree.path });
+      if (continuationHeadRead !== null && continuationHeadRead.code !== 0) {
+        // The worktree's HEAD could not be READ — the head did not move,
+        // so nothing terminal is said about the authorization: custody is
+        // released and this tick records the failure; the next one reads
+        // again under the same open authorization.
+        await worktrees.release(leased.worktree.path, clock());
+        release(store, lease, clock());
+        dispatched.push({ id: taskId, outcome: "failed", reason: "head-unreadable", detail: `${taskId}: the leased worktree's HEAD could not be read (${continuationHeadRead.stderr.trim() || `git exited ${continuationHeadRead.code}`}) — the continuation authorization ${continuation.id} stays open; no run opened, no attempt spent` });
+        broke++;
+        continue;
+      }
+      const continuationHeadNow = continuationHeadRead === null ? "" : continuationHeadRead.stdout.trim();
+      if (signedContinuationHead === null || continuationHeadNow !== signedContinuationHead) {
+        await worktrees.release(leased.worktree.path, clock());
+        release(store, lease, clock());
+        store.closeAuthorization(continuation.id, "refused:stale-authorization", clock());
+        dispatched.push({
+          id: taskId,
+          outcome: "skipped",
+          reason: "stale-authorization",
+          detail:
+            signedContinuationHead === null
+              ? `${taskId}: the continuation authorization ${continuation.id} signs no readable head — nothing opens under it; no run opened, no attempt spent`
+              : `${taskId}: the head moved since the continuation authorization ${continuation.id} was signed (${signedContinuationHead.slice(0, 12)} → ${continuationHeadNow === "" ? "empty" : continuationHeadNow.slice(0, 12)}) — no run opened, no attempt spent; authorize it again at today's head`,
+        });
+        continue;
+      }
       // The continuation spends under the authorization's pinned profile
       // and says so at insert (v48 integrity).
       // THE ATTENDED ADMISSION (atomic authority closure): the continuation

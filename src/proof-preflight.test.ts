@@ -92,6 +92,34 @@ describe("scripts/proof-preflight.mjs refuses a met criterion a caveat admits an
     });
   }
 
+  test.skipIf(!built)("a proof-authored extra id is no signed authority (final admission closure): under --criteria c1,c4 a caveat tagged with the proof's own c7 exits 1 as unknown; with no rubric named, the answered c7 attributes", () => {
+    const extra = "c7: the routine page still renders the old words under the extra criterion.";
+    const proof = JSON.stringify({
+      ...(JSON.parse(proofOf("not-met", [extra])) as { criteria: unknown[] }),
+      criteria: [
+        ...(JSON.parse(proofOf("not-met")) as { criteria: unknown[] }).criteria,
+        { id: "c7", statement: "An extra criterion the proof recorded on its own.", verdict: "not-met", how: "noted", evidence: [{ kind: "check", ref: "npx vitest run" }] },
+      ],
+    });
+    const refused = run(proof);
+    expect(refused.status).toBe(1);
+    expect(refused.out).toContain(`proof: caveat 1 names "c7", a criterion the proof authored for itself that nobody signed — a proof-only id is no signed authority; every caveat names a signed criterion's exact id: ${extra}`);
+    expect(refused.out).toContain("1 problem(s)");
+    const dir = mkdtempSync(join(tmpdir(), "so-preflight-test-"));
+    try {
+      const file = join(dir, "PROOF.json");
+      writeFileSync(file, proof);
+      const result = spawnSync(process.execPath, [script, "--proof", file], { encoding: "utf8" });
+      const out = `${result.stdout}${result.stderr}`;
+      expect(result.status).toBe(0);
+      expect(out).not.toContain("no signed or answered criterion");
+      expect(out).not.toContain("proof-only id is no signed authority");
+      expect(out).toContain("every named file parses and resolves");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test.skipIf(!built)("a caveat tagged with an id nobody signed exits 1 as unknown; once the signed rubric names that id the tag is known and only the unanswered criterion remains", () => {
     const proof = proofOf("not-met", ["c9: the routine page still renders the old words."]);
     const refused = run(proof);

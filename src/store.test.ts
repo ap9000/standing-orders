@@ -3173,12 +3173,18 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     // a forged entry digest, a wrong pair, or the primary opens nothing.
     const baseLeg = store.routeAuthorityFor(taskRef, "builder");
     if (baseLeg === null || !baseLeg.ok) throw new Error("base leg");
+    // Under the task's current live claim (final admission closure): the
+    // base that opens the cycle, and the entry admitted after it, each
+    // open only under the lease that holds the task now.
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('l', ?, 1, 'r', ?, ?, ?)").run(taskRef, T0.toISOString(), later(900_000).toISOString(), T0.toISOString());
     const base = admit({ route: baseLeg.stamp, custody: { kind: "base" } });
     const opened = store.fallbackCycleFor(taskRef)!;
     store.beginFallbackSanitize(opened.id, 0, base, T0);
     const adv = store.advanceFallbackFenced({ cycleId: opened.id, expectGeneration: 1, fromIndex: 0, chainLength: 3, predecessorRun: base, terminalClass: "usage-exhausted", evidence: { provider: "claude", version: "1.0.0", authMode: "subscription", fp: "" } }, T0);
     if (!adv.ok) throw new Error("advance");
     store.releaseFallbackToPending(opened.id, 2, T0);
+    store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = 'l'").run(T0.toISOString());
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('lf', ?, 2, 'r', ?, ?, ?)").run(taskRef, T0.toISOString(), later(900_000).toISOString(), T0.toISOString());
     const runArgs = { taskRef, leaseId: "lf", runner: "r", branch: "b", worktree: "/w", provider: "codex", model: "gpt-5-codex" };
     const approvedFacts = { chainDigest: chainDigestOf(chain), profile: store.getScope("t")!.approvedProfile! };
     const entryFacts = { kind: "entry" as const, cycleId: opened.id, expectGeneration: 3, expectCursor: 1, expectTail: null, transitionId: adv.transitionId, approved: approvedFacts };
@@ -3201,9 +3207,8 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     if (boundRepair === null || !boundRepair.ok) return;
     const sealedRepair = store.routeAuthorityFor(taskRef, "repair");
     if (sealedRepair === null || !sealedRepair.ok) throw new Error("repair leg");
-    // Under the task's current live claim (final authority closure), so
-    // the refusal proved here is the fallback road's, not the claim's.
-    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('lf', ?, 1, 'r', ?, ?, ?)").run(taskRef, T0.toISOString(), later(900_000).toISOString(), T0.toISOString());
+    // Under the task's current live claim `lf` (final authority closure),
+    // so the refusal proved here is the fallback road's, not the claim's.
     const repairVia = (route: import("./phase-routing.js").RouteStamp) =>
       store.admitRepair({ taskRef, leaseId: "lf", runner: "r", branch: "b", worktree: "/w", provider: "codex", model: "gpt-5-codex", parentRun: admitted.runId, now: T0, route });
     expect(repairVia(sealedRepair.stamp)).toMatchObject({ ok: false, problem: expect.stringMatching(/admitted only through admitFallback/) });
@@ -3265,6 +3270,7 @@ describe("authority-integrity: a run row's chain binding and auth mode are read 
     expect(approve(store, "t", "alex", T0, store.getScope("t")!.digest, added.token).ok).toBe(true);
     const leg = store.routeAuthorityFor(taskRef, "builder");
     if (leg === null || !leg.ok) throw new Error("leg");
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('l', ?, 1, 'r', ?, ?, ?)").run(taskRef, T0.toISOString(), later(900_000).toISOString(), T0.toISOString());
     const run = store.startRun({ taskRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0, route: leg.stamp, custody: { kind: "base" } });
     const sound = store.getRun(run)!;
     expect(sound).toMatchObject({ chainIndex: 0, authMode: "subscription" });

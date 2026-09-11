@@ -849,6 +849,9 @@ describe("the reviewer role in the store", () => {
       propose(store, { taskId: "t-1", goal: "guard the payouts", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], now: T0 });
       expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
       expect(store.approvedChainOf("t-1")).not.toBeNull();
+      // The base takes custody under the task's current live claim (final
+      // admission closure).
+      store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('lease-chain', ?, 1, 'builder-1', ?, ?, ?)").run(taskRef, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
       const chainBuild = store.startRun({ taskRef, leaseId: "lease-chain", runner: "builder-1", branch: "standing-orders/t-1", worktree: "/pool/t-1", provider: "claude", now: T0, ...presented(store, taskRef, "builder"), custody: { kind: "base" } });
       const cycle = store.fallbackCycleFor(taskRef)!;
       expect(cycle).toMatchObject({ state: "open", cursor: 0, tailRun: chainBuild });
