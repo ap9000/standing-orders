@@ -23,6 +23,8 @@ export type ExecResult = {
 
 export type RunOptions = {
   cwd?: string;
+  /** Complete UTF-8 prompt for the Codex JSONL transport; closed after delivery. */
+  stdin?: string;
   /**
    * Absolute wall-clock ceiling. Keep this for bounded commands and repair
    * turns. Long-running provider sessions use idleTimeoutMs instead: useful
@@ -723,7 +725,7 @@ export function runStreamJsonl(
         shell: false,
         windowsHide: true,
         detached: options.processGroup === true && process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [options.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
         ...(childEnv === undefined ? {} : { env: childEnv }),
       });
       if (child.pid !== undefined) options.onSpawn?.(child.pid);
@@ -747,6 +749,7 @@ export function runStreamJsonl(
     let stderr = "";
     let timedOut = false;
     let notFound = false;
+    let inputFailed = false;
 
     const keep = (framed: BoundedJsonlLine): void => {
       if (framed.overflowed) {
@@ -861,7 +864,7 @@ export function runStreamJsonl(
         .filter((line): line is string => line !== null)
         .filter((line, index, all) => all.indexOf(line) === index);
       resolve({
-        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
+        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : inputFailed ? 1 : (code ?? 1),
         stdout: lines.join("\n"),
         stderr,
         timedOut,
@@ -877,6 +880,18 @@ export function runStreamJsonl(
       finish(null);
     });
     child.on("close", code => finish(code));
+    if (options.stdin !== undefined && child.stdin !== null) {
+      // Even an exit-0 child cannot prove a review if prompt delivery failed.
+      // Handle EPIPE without crashing the supervisor, then wait for close.
+      child.stdin.on("error", error => {
+        inputFailed = true;
+        stderr = `review prompt input failed: ${String(error)}`.slice(0, JSONL_STDERR_CAP);
+        if (options.processGroup === true) killGroup(child);
+        else child.kill("SIGKILL");
+      });
+      child.stdin.end(options.stdin, "utf8");
+    }
+
   });
 }
 

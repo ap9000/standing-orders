@@ -163,6 +163,22 @@ describe("argv dialects", () => {
     // The model's own shells never inherit the key — only the transport.
     expect(joined).toContain(`shell_environment_policy.exclude=["${OPENROUTER_ENV_KEY}"]`);
   });
+
+  test("Codex transports use stdin and explicit images for fresh and resumed isolated review only", () => {
+    for (const provider of ["codex", "openrouter"] as const) {
+      const adapter = adapterFor(provider);
+      for (const resumeSession of [null, "session-1"]) {
+        const request = { ...ASK, phase: "review" as const, resumeSession, reviewImages: ["/sealed/screen shot.png"] };
+        const args = adapter.argv(request);
+        expect(args.at(-1)).toBe("-");
+        expect(args).toEqual(expect.arrayContaining(["--image", "/sealed/screen shot.png", "features.shell_tool=false"]));
+        expect(args).not.toContain(ASK.brief);
+        expect(adapter.stdin?.(request)).toBe(ASK.brief);
+      }
+      expect(adapter.stdin?.(ASK)).toBeUndefined();
+      expect(adapter.argv({ ...ASK, reviewImages: ["/sealed/ignored.png"] })).not.toContain("--image");
+    }
+  });
 });
 
 describe("spec validation", () => {
@@ -201,6 +217,23 @@ describe("the turn bound codex does not have", () => {
 });
 
 describe("the streaming JSONL transport", () => {
+  test("delivers a prompt larger than OS argv limits intact through stdin and closes input", async () => {
+    const input = 'sealed "evidence"\n雪\u0000'.repeat(30000);
+    const script = `let input = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', c => input += c); process.stdin.on('end', () => { console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:require('node:crypto').createHash('sha256').update(input).digest('hex')}})); });`;
+    const result = await runStreamJsonl(process.execPath, ["-e", script], { stdin: input, timeoutMs: 5000 });
+    const { createHash } = await import("node:crypto");
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout).item.text).toBe(createHash("sha256").update(input).digest("hex"));
+  });
+
+  test("closed prompt input is a failed delivery even when the child reports success", async () => {
+    const script = `require('node:fs').closeSync(0); console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:0,output_tokens:0}})); setTimeout(() => process.exit(0),100);`;
+    const result = await runStreamJsonl(process.execPath, ["-e", script], { stdin: "x".repeat(2 * 1024 * 1024), timeoutMs: 5000 });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("prompt input failed");
+    expect(result.timedOut).toBe(false);
+  });
+
   test("retains only the load-bearing lines from an arbitrarily long stream", async () => {
     // A child that floods 50k noise events, then says what matters. The
     // buffered runner would overflow at 8 MiB and lose the terminal usage;

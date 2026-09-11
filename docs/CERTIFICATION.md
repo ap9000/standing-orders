@@ -14,7 +14,9 @@ the public CLI through the same path as a real task:
    approved check, and adjudicate the evidence;
 7. require a `verified` criterion matrix;
 8. with `--review`, request an independent review and require the resulting
-   proof to remain verified;
+   proof to remain verified, with every signed criterion independently upheld
+   by the requested reviewer (missing, contradictory, and `cannot-tell`
+   judgements fail this self-contained fixture);
 9. prove a second dispatch is empty.
 
 It does not push, open a pull request, mutate a real project, synthesize a
@@ -27,11 +29,17 @@ npm run certify:provider -- --provider codex --model gpt-5.6-sol --review
 ```
 
 Use `--keep` to retain a passing sandbox and `--output <file>` to write the
-machine-readable certificate. Version 2 records the source revision, a hash of
+machine-readable certificate. Version 3 records the source revision, a hash of
 the built runtime and canary scripts, each CLI step's elapsed time and exit
 status, and the participating run identities. Every CLI boundary rechecks the
 runtime; changing the build during a canary prevents a passing certificate.
 The exact changed-path set is also checked against the two requested files.
+Version 2 only checked the completed reviewer and surviving machine verdict;
+that was insufficient when a reviewer could not read its evidence. Version 3
+requires actual upholding judgements. Codex review now receives sealed text
+through stdin and real screenshot attachments while shell access stays disabled.
+General reviews may still truthfully answer `cannot-tell`; that answer does not
+certify this fixture.
 
 The approver and approval are automated fixture setup inside the disposable
 database. A passing result demonstrates this bounded workflow without a manual

@@ -47,6 +47,17 @@ Main was still `917bc5b` when this plan was prepared.
 
 ## Execution status
 
+- Assisted review evidence delivery: Codex and OpenRouter's Codex adapter now
+  receive the complete sealed text through stdin and screenshots as explicit
+  image attachments while shell, unified execution, and app access remain
+  disabled. The scratch inventory and all input hashes are still re-proved
+  after the turn. Encoded text over 1 MiB is refused, never silently truncated.
+  Input pipe errors fail the turn and terminate its child. The version-3
+  canary requires every signed criterion to be independently upheld by the
+  requested reviewer; a `cannot-tell` judgement cannot produce a certificate.
+  Focused regressions pass, including a real large-input pipe and early closure.
+  Real-provider review certification must be rerun on this revision.
+
 - The custody follow-up records the active provider PID for planning, scouting,
   build corrections, and tournament corrections, bound to the original
   worktree lease epoch. Correction processes refresh their exact open execution

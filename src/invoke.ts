@@ -172,12 +172,14 @@ export async function invokeAgent(
 
   const adapter = adapterFor(spec.provider);
   const { startSessionId: _untrustedStartSessionId, ...invocationWithoutStart } = invocation;
-  const argv = adapter.argv({
+  const resolvedInvocation = {
     ...invocationWithoutStart,
     model: spec.model,
     resumeSession: requestedResumeSessionId,
     ...(startSessionId === undefined ? {} : { startSessionId }),
-  });
+  };
+  const argv = adapter.argv(resolvedInvocation);
+  const stdin = adapter.stdin?.(resolvedInvocation);
   // Long-running phases pass idleTimeoutMs: the process has no absolute
   // deadline and is stopped only after a full no-output interval. Bounded
   // callers (notably repair) keep timeoutMs and its hard wall clock. A
@@ -223,6 +225,7 @@ export async function invokeAgent(
     keyHome,
     timeoutMs: _hardTimeout,
     idleTimeoutMs: _idleTimeout,
+    stdin: _callerStdin,
     ...runOptions
   } = options;
   // The live setting is read STRICTLY (atomic authority closure): a
@@ -347,6 +350,7 @@ export async function invokeAgent(
   try {
     result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
       ...runOptions,
+      ...(stdin === undefined ? {} : { stdin }),
       ...(hardTimeoutMs === undefined ? {} : { timeoutMs: hardTimeoutMs }),
       ...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),
       ...(defaultTimeoutMs === undefined ? {} : { timeoutMs: defaultTimeoutMs }),

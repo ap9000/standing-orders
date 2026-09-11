@@ -60,6 +60,7 @@
   "files": [
     "dist",
     "scripts/provider-canary.mjs",
+    "scripts/canary-assertions.mjs",
     "scripts/recovery-canary.mjs",
     "scripts/proof-preflight.mjs"
   ]

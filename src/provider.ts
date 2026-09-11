@@ -69,6 +69,8 @@ export type Invocation = {
    * (Phase 3 A5) — a mismatch is a provider-protocol failure, never a
    * silent survivor. */
   startSessionId?: string;
+  /** Sealed reviewer screenshots, attached explicitly by transports without a read tool. */
+  reviewImages?: readonly string[];
 };
 
 export type ProviderRunner = (
@@ -134,6 +136,8 @@ export type ParsedEnvelope = {
 type Adapter = {
   binary: string;
   argv(invocation: Invocation): string[];
+  /** Prompt input for transports that use stdin instead of a bounded OS argument. */
+  stdin?(invocation: Invocation): string | undefined;
   parse(stdout: string): ParsedEnvelope;
   /** The production transport when no runner was injected. */
   defaultRunner: ProviderRunner;
@@ -508,7 +512,10 @@ const codexArgv = (extra: readonly string[]) => (invocation: Invocation): string
         : codexSandboxArgv("workspace-write", resuming)),
     ...(invocation.model === null ? [] : ["-m", invocation.model]),
     ...extra,
-    invocation.brief,
+    ...(invocation.phase === "review" ? (invocation.reviewImages ?? []).flatMap(path => ["--image", path]) : []),
+    // Review includes the sealed text itself: no shell/read tool exists in
+    // this posture. stdin avoids both per-argument and Windows argv limits.
+    invocation.phase === "review" ? "-" : invocation.brief,
   ];
 };
 
@@ -804,6 +811,7 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
   codex: {
     binary: "codex",
     argv: codexArgv([]),
+    stdin: invocation => invocation.phase === "review" ? invocation.brief : undefined,
     parse: codexParse,
     defaultRunner: runStreamJsonl,
     extraOmitEnv: foreignCredentialEnv("codex"),
@@ -811,6 +819,7 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
   },
   openrouter: {
     binary: "codex",
+    stdin: invocation => invocation.phase === "review" ? invocation.brief : undefined,
     argv: codexArgv([
       "-c",
       `model_provider=${toml(OPENROUTER_PROVIDER_KEY)}`,

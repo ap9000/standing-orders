@@ -14,6 +14,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertReviewedCriteria } from "./canary-assertions.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const bin = join(root, "dist", "bin.js");
@@ -112,7 +113,7 @@ async function runtimeIdentity() {
     }
   }
   await hashDirectory(join(root, "dist"), "dist");
-  for (const file of ["package.json", "scripts/provider-canary.mjs", "scripts/proof-preflight.mjs"]) {
+  for (const file of ["package.json", "scripts/provider-canary.mjs", "scripts/canary-assertions.mjs", "scripts/proof-preflight.mjs"]) {
     hash.update(file).update("\0").update(await readFile(join(root, file))).update("\0");
   }
   const revision = await run("git", ["rev-parse", "HEAD"]);
@@ -277,6 +278,7 @@ async function main() {
       if (!final.runs?.some(one => one.role === "reviewer" && one.outcome === "no-change" && one.provider === options.provider && one.model === options.model)) {
         throw new Error("no completed reviewer run proved the requested provider and model");
       }
+      assertReviewedCriteria(final.proofMatrix, afterPlan.scope.acceptance.map(one => one.id), options.provider, options.model);
     }
 
     const duplicate = await cli("prove the completed task cannot dispatch twice", [
@@ -288,7 +290,7 @@ async function main() {
 
     const providerRun = final.runs.find(runRow => runRow?.provider === options.provider && runRow?.providerStartedAt != null);
     certificate = {
-      version: 2,
+      version: 3,
       passed: true,
       provider: options.provider,
       model: options.model,
@@ -330,7 +332,7 @@ async function main() {
     passed = true;
   } catch (error) {
     certificate = {
-      version: 2,
+      version: 3,
       passed: false,
       provider: options.provider,
       model: options.model,
