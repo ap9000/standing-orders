@@ -402,6 +402,34 @@ describe("execution profiles (foundations, findings 13/14/17/21)", () => {
     expect(profileFromJson(JSON.stringify({ digestVersion: 2, profile: { ...codex, maxTurns: 40 } }))).toBeNull();
     expect(profileFromJson(JSON.stringify({ digestVersion: 2, profile: { ...claude, provider: "gemini" } }))).toBeNull();
   });
+
+  test("authority-integrity: numeric and model parsing is strict — a snapshot with a negative, zero, fractional, or non-numeric bound, a clock that is not whole seconds, or a model that is not an exact id rehydrates as nothing", () => {
+    const wrap = (profile: Record<string, unknown>) => JSON.stringify({ digestVersion: 2, profile });
+    // Sound: exact ids and whole positive bounds.
+    expect(profileFromJson(wrap({ ...claude, repairModel: "inherit" }))).not.toBeNull();
+    expect(profileFromJson(wrap({ ...claude, repairModel: "haiku-4.5" }))).not.toBeNull();
+    // Turn bounds.
+    for (const bad of [0, -1, 1.5, "40", Number.NaN, Number.POSITIVE_INFINITY, null]) {
+      expect(profileFromJson(wrap({ ...claude, maxTurns: bad }))).toBeNull();
+      expect(profileFromJson(wrap({ ...claude, repairMaxTurns: bad }))).toBeNull();
+    }
+    // Clocks, on every provider shape.
+    for (const bad of [0, -300, 0.5, "1800"]) {
+      expect(profileFromJson(wrap({ ...claude, timeoutSeconds: bad }))).toBeNull();
+      expect(profileFromJson(wrap({ ...claude, repairTimeoutSeconds: bad }))).toBeNull();
+      expect(profileFromJson(wrap({ ...codex, timeoutSeconds: bad }))).toBeNull();
+      expect(profileFromJson(wrap({ ...openrouter, repairTimeoutSeconds: bad }))).toBeNull();
+    }
+    // Model ids: no leading dash (argv injection), no whitespace, no control bytes, no empty, a bounded length.
+    for (const bad of ["-p", "son net", "sonnet\n", "", "x".repeat(129), 42, null]) {
+      expect(profileFromJson(wrap({ ...claude, model: bad }))).toBeNull();
+      expect(profileFromJson(wrap({ ...claude, repairModel: bad }))).toBeNull();
+      expect(profileFromJson(wrap({ ...codex, model: bad }))).toBeNull();
+    }
+    // A chain carrying one such entry is no chain at all — never a shorter one.
+    expect(chainFromJson(canonicalChainJson([{ profile: claude, authMode: "subscription" as const }, { profile: { ...claude, model: "-p" } as typeof claude, authMode: "api-key" as const }]))).toBeNull();
+    expect(chainFromJson(canonicalChainJson([{ profile: claude, authMode: "subscription" as const }, { profile: { ...claude, maxTurns: -1 } as typeof claude, authMode: "api-key" as const }]))).toBeNull();
+  });
 });
 
 

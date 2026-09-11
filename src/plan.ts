@@ -480,7 +480,7 @@ export function parsePlanRevisionProposal(raw: string): PlanRevisionProposalPars
 export type AuthoritySnapshot = { scopeDigest: string; deliverable: "branch" | "report" };
 
 export function authoritySnapshotDigest(snapshot: AuthoritySnapshot): string {
-  return createHash("sha256").update(`${snapshot.scopeDigest} ${snapshot.deliverable}`, "utf8").digest("hex").slice(0, 32);
+  return createHash("sha256").update(`${snapshot.scopeDigest}\u0000${snapshot.deliverable}`, "utf8").digest("hex").slice(0, 32);
 }
 
 export type AuthorityChangeField = "signed-scope" | "publication-authority";

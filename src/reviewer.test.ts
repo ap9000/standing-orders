@@ -34,6 +34,21 @@ import {
 import type { Runner } from "./builder.js";
 import type { CriterionMatrixRow } from "./proof.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 const T0 = new Date("2026-08-27T12:00:00.000Z");
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 /** The reviewer's answer now rides the provider's own final message — the
@@ -241,6 +256,7 @@ describe("the reviewer role in the store", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
+      ...presented(store, taskRef, "builder"),
     });
     // Truncation is forced the honest way: content past the kind's cap.
     const content = opts.truncated === true ? Buffer.alloc(300 * 1024, 0x61) : Buffer.from(patch, "utf8");
@@ -343,7 +359,7 @@ describe("the reviewer role in the store", () => {
   });
 
   test("startRun's reviewer arm opens without a workspace; the CHECK refuses every mixed shape", () => {
-    const reviewer = store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0 });
+    const reviewer = store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0, ...presented(store, taskRef, "reviewer") });
     const row = store.getRun(reviewer);
     expect(row?.role).toBe("reviewer");
     expect(row?.branch).toBeNull();
@@ -367,16 +383,16 @@ describe("the reviewer role in the store", () => {
   });
 
   test("one review per source run, ever — the partial unique holds", () => {
-    store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0 });
+    store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0, ...presented(store, taskRef, "reviewer") });
     expect(() =>
-      store.startRun({ taskRef, leaseId: "review:2", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0 }),
+      store.startRun({ taskRef, leaseId: "review:2", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0, ...presented(store, taskRef, "reviewer") }),
     ).toThrow();
   });
 
   test("requestReview: every refusal road is typed", () => {
     expect(store.requestReview(9999, "alex", T0)).toEqual({ ok: false, reason: "no-run" });
 
-    const open = store.startRun({ taskRef, leaseId: "lease-x", runner: "builder-1", branch: "b", worktree: "/w", now: T0 });
+    const open = store.startRun({ taskRef, leaseId: "lease-x", runner: "builder-1", branch: "b", worktree: "/w", now: T0, ...presented(store, taskRef, "builder") });
     expect(store.requestReview(open, "alex", T0)).toEqual({ ok: false, reason: "unfinished" });
     store.finishRun(open, { outcome: "built", committed: true, now: T0 });
     expect(store.requestReview(open, "alex", T0)).toEqual({ ok: false, reason: "no-diff" });
@@ -396,7 +412,7 @@ describe("the reviewer role in the store", () => {
 
     // A run that already HAS its review refuses a fresh ask.
     const other = seedBuilt();
-    const reviewer = store.startRun({ taskRef: store.refFor("built-in", "t-1").id, leaseId: "review:3", runner: "builder-1", role: "reviewer", parentRun: other.runId, now: T0 });
+    const reviewer = store.startRun({ taskRef: store.refFor("built-in", "t-1").id, leaseId: "review:3", runner: "builder-1", role: "reviewer", parentRun: other.runId, now: T0, ...presented(store, store.refFor("built-in", "t-1").id, "reviewer") });
     store.finishRun(reviewer, { outcome: "no-change", reason: "reviewed — 0 comment(s)", now: T0 });
     expect(store.requestReview(other.runId, "alex", T0)).toEqual({ ok: false, reason: "already-reviewed" });
 
@@ -405,7 +421,7 @@ describe("the reviewer role in the store", () => {
   });
 
   test("addReviewerComments proves role, parentage, task, and artifact binding", () => {
-    const reviewer = store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0 });
+    const reviewer = store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0, ...presented(store, taskRef, "reviewer") });
     store.stampProviderStart(reviewer, T0);
     const comment = { path: "src/payouts.ts", line: 2, note: "the limiter is never awaited", severity: "problem" as const };
 
@@ -459,6 +475,7 @@ describe("the reviewer role in the store", () => {
       provider: "claude",
       sessionId: "review-session",
       now: T0,
+      ...presented(store, taskRef, "reviewer"),
     });
     store.stampProviderStart(rootReviewer, T0);
     const child = store.startRun({
@@ -470,6 +487,7 @@ describe("the reviewer role in the store", () => {
       provider: "claude",
       sessionId: "review-session",
       now: T0,
+      ...presented(store, taskRef, "reviewer"),
     });
     store.stampProviderStart(child, T0);
     store.raw().prepare("UPDATE run SET runner = ?, lease_id = ? WHERE id = ?").run("builder-2", "borrowed", child);
@@ -498,6 +516,7 @@ describe("the reviewer role in the store", () => {
       provider: "claude",
       sessionId: "review-session",
       now: T0,
+      ...presented(store, taskRef, "reviewer"),
     });
     const firstCorrection = store.startRun({
       taskRef,
@@ -508,6 +527,7 @@ describe("the reviewer role in the store", () => {
       provider: "claude",
       sessionId: "review-session",
       now: T0,
+      ...presented(store, taskRef, "reviewer"),
     });
     const acceptedLeaf = store.startRun({
       taskRef,
@@ -518,6 +538,7 @@ describe("the reviewer role in the store", () => {
       provider: "claude",
       sessionId: "review-session",
       now: T0,
+      ...presented(store, taskRef, "reviewer"),
     });
     for (const run of [root, firstCorrection, acceptedLeaf]) store.stampProviderStart(run, T0);
     const diffSha = store.getArtifact(diffArtifact)?.sha256;
@@ -566,6 +587,7 @@ describe("the reviewer role in the store", () => {
       parentRun: builtRun,
       provider: "claude",
       now: T0,
+      ...presented(store, taskRef, "reviewer"),
     });
     store.stampProviderStart(reviewer, T0);
     const diffSha = store.getArtifact(diffArtifact)?.sha256;
@@ -607,6 +629,7 @@ describe("the reviewer role in the store", () => {
       parentRun: builtRun,
       provider: "claude",
       now: T0,
+      ...presented(store, taskRef, "reviewer"),
     });
     store.stampProviderStart(reviewer, T0);
     const diffSha = store.getArtifact(diffArtifact)?.sha256;
@@ -654,6 +677,7 @@ describe("the reviewer role in the store", () => {
       parentRun: builtRun,
       provider: "claude",
       now: T0,
+      ...presented(store, taskRef, "reviewer"),
     });
     store.stampProviderStart(reviewer, T0);
     const diffSha = store.getArtifact(diffArtifact)?.sha256;
@@ -1303,7 +1327,7 @@ describe("the reviewer role in the store", () => {
 
     test("a truncated diff never spawns an agent", async () => {
       const truncated = seedBuilt(PATCH, { truncated: true });
-      const reviewer = store.startRun({ taskRef, leaseId: "review:t", runner: "builder-1", role: "reviewer", parentRun: truncated.runId, now: T0 });
+      const reviewer = store.startRun({ taskRef, leaseId: "review:t", runner: "builder-1", role: "reviewer", parentRun: truncated.runId, now: T0, ...presented(store, taskRef, "reviewer") });
       let spawned = false;
       const spy: Runner = async () => {
         spawned = true;
@@ -1787,6 +1811,7 @@ describe("the reviewer role in the store", () => {
           parentRun: builtRun,
           provider: "claude",
           now: T0,
+          ...presented(store, taskRef, "reviewer"),
         });
         store.stampProviderStart(reviewerRun, T0);
 
@@ -2062,6 +2087,7 @@ describe("the reviewer role in the store", () => {
       branch: "standing-orders/t-strict",
       worktree: "/pool/t-strict",
       now: T0,
+      ...presented(store, strictRef.id, "builder"),
     });
     expect(store.getRun(strictRun)?.qualityMode).toBe("strict");
     store.stampRun(strictRun, { scopeDigest: scope.digest });
@@ -2090,7 +2116,7 @@ describe("the reviewer role in the store", () => {
       legacy.createTask({ id: "t-legacy", title: "old work" }, T0);
       const ref = legacy.refFor("built-in", "t-legacy").id;
       legacy.placeTask(ref, REPO);
-      const run = legacy.startRun({ taskRef: ref, leaseId: "l-old", runner: "b-1", branch: "b", worktree: "/w", now: T0 });
+      const run = legacy.startRun({ taskRef: ref, leaseId: "l-old", runner: "b-1", branch: "b", worktree: "/w", now: T0, ...presented(legacy, ref, "builder") });
       legacy.finishRun(run, { outcome: "built", committed: true, now: T0 });
       legacy.raw().prepare("INSERT INTO review_request (run, requested_by, requested_at) VALUES (?, 'mode:deadbeef', ?)").run(run, T0.toISOString());
       legacy.raw().prepare("INSERT INTO review_request (run, requested_by, requested_at, consumed_at, consumed_reason) VALUES (?, 'alex', ?, ?, 'reviewed')").run(run, T0.toISOString(), T0.toISOString());
@@ -2109,7 +2135,7 @@ describe("the reviewer role in the store", () => {
     // Already-spent history keeps its own words.
     expect(rows[1]).toMatchObject({ consumed_reason: "reviewed" });
     // A reopen does not re-sweep: fresh typed requests survive restarts.
-    const run2 = upgraded.startRun({ taskRef: upgraded.refFor("built-in", "t-legacy").id, leaseId: "l-new", runner: "b-1", branch: "b2", worktree: "/w2", now: T0 });
+    const run2 = upgraded.startRun({ taskRef: upgraded.refFor("built-in", "t-legacy").id, leaseId: "l-new", runner: "b-1", branch: "b2", worktree: "/w2", now: T0, ...presented(upgraded, upgraded.refFor("built-in", "t-legacy").id, "builder") });
     storeEvidence(upgraded, evidenceRoot, run2, "terminal-diff", "terminal-diff.patch", Buffer.from(PATCH, "utf8"), "git diff (exit 0)", T0, { captureStatus: "ok" });
     upgraded.finishRun(run2, { outcome: "built", committed: true, now: T0 });
     expect(upgraded.requestReview(run2, "alex", T0).ok).toBe(true);
@@ -2120,7 +2146,7 @@ describe("the reviewer role in the store", () => {
   });
 
   test("workspace consumers see a reviewer run's missing worktree as null, never \"null\"", () => {
-    const reviewer = store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0 });
+    const reviewer = store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0, ...presented(store, taskRef, "reviewer") });
     const row = store.getRun(reviewer);
     if (row === null) throw new Error("row");
     // The typed fact every guard keys on (D5): consumers switch on null,

@@ -314,8 +314,29 @@ describe("the fallback chain end-to-end (E3d)", () => {
     // The parked fallback keeps the cycle's custody open at its entry — the
     // decision it raised waits for a person, under exactly this lineage.
     expect(store.raw().prepare("SELECT state, cursor, tail_run FROM fallback_cycle").get()).toMatchObject({ state: "open", cursor: 1, tail_run: fallback["id"] });
-    expect(store.listDecisions().filter(one => one.state === "open")).toHaveLength(1);
+    const decision = store.listDecisions().filter(one => one.state === "open");
+    expect(decision).toHaveLength(1);
     store.close();
+
+    // atomic-chain (parked-resume, past the base): once the person answers,
+    // the next pass resumes the PARKED FALLBACK TAIL — its successor takes
+    // the entry's custody in its own insert and spends as exactly that
+    // entry (gemini, api-key, index 1) under `fallback` provenance, never
+    // as the sealed claude build leg.
+    geminiFumblesFirst = false;
+    await run(["decide", String(decision[0]!.id), "--choose", "closed", "--as", "alex", "--token", approverToken, "--json"]);
+    providersRan = [];
+    await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"]);
+    const resumedOutcomes = payload().dispatched as { id: string; outcome: string; reason?: string }[];
+    expect(providersRan).toEqual(["gemini"]);
+    expect(resumedOutcomes.some(one => one.id === "t-fbr" && one.outcome === "built")).toBe(true);
+    const again = openStore(db);
+    const successor = again.raw().prepare("SELECT id, role, provider, model, outcome, auth_mode, chain_index, entry_digest, chain_cycle FROM run ORDER BY id DESC LIMIT 1").get() as Record<string, unknown>;
+    expect(successor).toMatchObject({ role: "builder", provider: "gemini", model: "gemini-2.5-pro", auth_mode: "api-key", chain_index: 1, entry_digest: fallback["entry_digest"], chain_cycle: fallback["chain_cycle"], outcome: "built" });
+    expect(again.runRoute(Number(successor["id"]))).toMatchObject({ phase: "build", provider: "gemini", model: "gemini-2.5-pro", chosen: "fallback", routeDigest: routeDigestOf(sealed!) });
+    // The cycle closed on success, with the successor as its last tail.
+    expect(again.raw().prepare("SELECT state, cursor, tail_run FROM fallback_cycle").get()).toMatchObject({ state: "closed", cursor: 1, tail_run: successor["id"] });
+    again.close();
   });
 
   test("WITHOUT the paid-fallback grant, the exhausted base never advances — the cycle ends clean, nothing else spends", async () => {

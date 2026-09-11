@@ -9,6 +9,21 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
 
@@ -974,7 +989,9 @@ describe("routine — standing orders from the command line", () => {
     expect(payload()).toMatchObject({ changed: true, before: "unfrozen" });
     const refreshedDigest = payload().routine.digest as string;
     expect(refreshedDigest).not.toBe(v47Digest);
-    expect(payload().routine.approvedDigest).toBe(v47Digest);
+    // The unfrozen approval is withdrawn by the refresh (v48 authority repair): no digest,
+    // no snapshot, no armed slot — only the history of who once agreed.
+    expect(payload().routine).toMatchObject({ approvedDigest: null, approvedRoute: null, nextFireAt: null, approvedBy: "alex" });
     expect(await run(["routine", "run-now", "nightly-deps", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.refused);
     expect(payload()).toMatchObject({ reason: "not-approved" });
     expect(await run(["routine", "refresh", "nightly-deps", "--json"])).toBe(EXIT.ok);
@@ -1312,7 +1329,7 @@ describe("task show and task accept speak the machine's own proof verdict (Prior
     try {
       store.createTask({ id: "t-1", title: "the work" }, T0);
       const ref = store.refFor("built-in", "t-1");
-      const run2 = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "r-1", branch: "b", worktree: "/wt", now: T0 });
+      const run2 = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "r-1", branch: "b", worktree: "/wt", now: T0, ...presented(store, ref.id, "builder") });
       store.finishRun(run2, { outcome: "built", committed: true, now: T0 });
       store.saveProofVerdict(run2, verdict, reasons, T0);
       store.setTaskState("t-1", "done", T0);
@@ -1405,7 +1422,7 @@ describe("task repair: the first CLI road to a revision (v40, evidence-review-v1
       if (!seeded.ok) throw new Error("bootstrap");
       const sealed = approveFn(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, seeded.token);
       if (!sealed.ok) throw new Error(`the fixture approval was refused: ${sealed.reason}`);
-      const runId = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "r-1", branch: "b", worktree: "/wt", now: T0 });
+      const runId = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "r-1", branch: "b", worktree: "/wt", now: T0, ...presented(store, ref.id, "builder") });
       store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
       store.saveProofVerdict(runId, "short", ["needs a look"], T0, [
         { id: "c1", statement: "it works", requiredEvidence: ["manual-review"], state: "missing", detail: ['criterion "c1" needs work'], answered: [], review: null },
@@ -1450,7 +1467,7 @@ describe("task repair: the first CLI road to a revision (v40, evidence-review-v1
     const store = openStore(db);
     store.createTask({ id: "t-plain", title: "plain" }, T0);
     const ref = store.refFor("built-in", "t-plain");
-    const runId = store.startRun({ taskRef: ref.id, leaseId: "l-2", runner: "r-1", branch: "b", worktree: "/wt", now: T0 });
+    const runId = store.startRun({ taskRef: ref.id, leaseId: "l-2", runner: "r-1", branch: "b", worktree: "/wt", now: T0, ...presented(store, ref.id, "builder") });
     store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
     store.close();
     const code = await run(["task", "repair", String(runId), "--json"]);
@@ -1641,7 +1658,7 @@ describe("intake pr-comments — named reviewers only, idempotent by comment id 
     store.createTask({ id: "t-pub", title: "shipped" }, T0);
     const ref = store.refFor("built-in", "t-pub").id;
     store.placeTask(ref, "/code/thing");
-    const runId = store.startRun({ taskRef: ref, leaseId: "l-1", runner: "b-1", branch: "so/t-pub", worktree: "/w", now: T0 });
+    const runId = store.startRun({ taskRef: ref, leaseId: "l-1", runner: "b-1", branch: "so/t-pub", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
     store.finishRun(runId, { outcome: "built", now: T0 });
     // A REAL evidence file: ingestion now verifies bytes before binding
     // words to them (audit IV-10), so the fixture earns its hash.

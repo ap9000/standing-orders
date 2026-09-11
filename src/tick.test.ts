@@ -23,6 +23,21 @@ import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 import type { Runner } from "./builder.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const AGENT_SAID = JSON.stringify({ result: "Added the guard and a test for it." });
@@ -2084,6 +2099,7 @@ describe("watch — the loop, zero tokens idle", () => {
     store.startRun({
       taskRef: ref, leaseId: "lease-dead", runner: "builder-1", branch: "standing-orders/t-1",
       worktree: join(pool, "x"), now: past,
+      ...presented(store, ref, "builder"),
     });
     store.close();
 

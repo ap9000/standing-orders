@@ -30,6 +30,21 @@ import { mkdtempSync, writeFileSync as writeSync2 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { join as join2 } from "node:path";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 /** The worktree the current test's build runs in — a real directory, because
  * the protocol files (park mailbox, terminal handoff) live on a real disk. */
 let wt = "";
@@ -111,6 +126,7 @@ describe("the builder's gates", () => {
     worktree: wt,
     runId: store.startRun({
       taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      ...presented(store, taskRef, "builder"),
     }),
     evidenceRoot: join2(wt, ".evidence"),
     branch: "feat/a",
@@ -327,6 +343,7 @@ describe("the builder's gates", () => {
     // the scripted git will report, session captured.
     const parked = store.startRun({
       taskRef, leaseId: "l-park", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      ...presented(store, taskRef, "builder"),
     });
     const sealedScope = store.getScope("t-1");
     store.stampRun(parked, {
@@ -554,6 +571,7 @@ describe("the builder's gates", () => {
   test("the phase vocabulary is closed, and a finished run's phase is history", () => {
     const runId = store.startRun({
       taskRef, leaseId: "lease-p", runner: "builder-1", branch: "b", worktree: wt, now: T0,
+      ...presented(store, taskRef, "builder"),
     });
     store.setRunPhase(runId, "agent-running");
     expect(store.getRun(runId)?.phase).toBe("agent-running");
@@ -737,6 +755,7 @@ describe("what the builder tells the agent", () => {
       worktree: wt,
       runId: store.startRun({
         taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+        ...presented(store, taskRef, "builder"),
       }),
       evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
@@ -859,6 +878,7 @@ describe("what the builder tells the agent", () => {
     store.fileSteerNote("t-1", "alex", "the note that must not vanish", T0);
     const firstRun = store.startRun({
       taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      ...presented(store, taskRef, "builder"),
     });
     await build1({ runId: firstRun }); // the default agent fires no receipt
     const after = store.listSteerNotes(taskRef)[0];
@@ -926,6 +946,7 @@ describe("what the builder tells the agent", () => {
       branch: "feat/a",
       worktree: wt,
       now: T0,
+      ...presented(store, taskRef, "builder"),
     });
     await build(store, {
       taskId: "t-1",
@@ -1049,6 +1070,7 @@ describe("what the builder does afterwards", () => {
       worktree: wt,
       runId: store.startRun({
         taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+        ...presented(store, taskRef, "builder"),
       }),
       evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
@@ -1181,6 +1203,7 @@ describe("what the builder does afterwards", () => {
       worktree: wt,
       runId: store.startRun({
         taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+        ...presented(store, taskRef, "builder"),
       }),
       evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
@@ -1251,6 +1274,7 @@ describe("the gates cannot be talked around", () => {
       worktree: wt,
       runId: store.startRun({
         taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+        ...presented(store, taskRef, "builder"),
       }),
       evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
@@ -1359,6 +1383,7 @@ describe("scope text is data, not instructions", () => {
       worktree: wt,
       runId: store.startRun({
         taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+        ...presented(store, taskRef, "builder"),
       }),
       evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
@@ -1426,6 +1451,7 @@ describe("the lease marker never reaches a commit", () => {
       worktree: wt,
       runId: store.startRun({
         taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+        ...presented(store, taskRef, "builder"),
       }),
       evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
@@ -1506,6 +1532,7 @@ describe("the commit message", () => {
       worktree: wt,
       runId: store.startRun({
         taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+        ...presented(store, taskRef, "builder"),
       }),
       evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
@@ -1628,6 +1655,7 @@ describe("the pulse", () => {
     worktree: wt,
     runId: store.startRun({
       taskRef, leaseId, runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      ...presented(store, taskRef, "builder"),
     }),
     evidenceRoot: join2(wt, ".evidence"),
     branch: "feat/a",
@@ -1852,6 +1880,7 @@ describe("the park", () => {
       branch: "feat/a",
       worktree,
       now: T0,
+      ...presented(store, taskRef, "builder"),
     });
     gitCalls.length = 0;
   });
@@ -2073,6 +2102,7 @@ describe("bounded repair", () => {
       branch: "feat/a",
       worktree,
       now: T0,
+      ...presented(store, taskRef, "builder"),
     });
   });
 
@@ -2135,7 +2165,7 @@ describe("bounded repair", () => {
 
     // The route removed from the routed row while the build runs: the
     // repair refuses — no mending under agents nobody can read.
-    const third = store.startRun({ taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0 });
+    const third = store.startRun({ taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0, ...presented(store, taskRef, "builder") });
     const vanishing = staged([invalid, valid], ["sess-3"]);
     const wrapped: Runner = async (file, args, options) => {
       const spoken = await vanishing.agent(file, args, options);
@@ -2250,7 +2280,7 @@ describe("bounded repair", () => {
     expect(await build(store, request({ agent }))).toMatchObject({ ok: false, reason: "stale-approval" });
     expect(calls).toHaveLength(0);
     // A fresh admission under the re-sealed route is the road.
-    const fresh = store.startRun({ taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0 });
+    const fresh = store.startRun({ taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0, ...presented(store, taskRef, "builder") });
     await build(store, request({ agent, runId: fresh }));
     const main = calls[0] ?? [];
     const repair = calls[1] ?? [];
@@ -2371,6 +2401,7 @@ describe("the gemini repair road: native resume since S1 (Phase 3 A8/B8/C4, upda
     runId = store.startRun({
       taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1",
       branch: "feat/g", worktree, provider: "gemini", now: T0,
+      ...presented(store, taskRef, "builder"),
     });
     // A fake in-range gemini on PATH: the gateway's attestation probes it.
     const bin = join(mkdtempSync(join(tmpdir(), "so-gem-bin-")), "b");
@@ -2493,6 +2524,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     worktree: wt,
     runId: store.startRun({
       taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      ...presented(store, taskRef, "builder"),
     }),
     evidenceRoot: join2(wt, ".evidence"),
     branch: "feat/a",
@@ -3276,6 +3308,7 @@ describe("adaptive execution plans", () => {
     // verified read proves it before a byte reaches the brief.
     planRunId = store.startRun({
       taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree, role: "planner", now: T0,
+      ...presented(store, taskRef, "planner"),
     });
     const content = Buffer.from(PLAN, "utf8");
     const key = writeEvidenceFile(evidence, planRunId, "plan.md", content);
@@ -3296,6 +3329,7 @@ describe("adaptive execution plans", () => {
 
     runId = store.startRun({
       taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree, now: T0,
+      ...presented(store, taskRef, "builder"),
     });
     gitCalls.length = 0;
     agentCalls.length = 0;
@@ -3497,6 +3531,7 @@ describe("adaptive execution plans", () => {
       acquire(bare, ref, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
       const bareRun = bare.startRun({
         taskRef: ref, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree, now: T0,
+        ...presented(bare, ref, "builder"),
       });
 
       const result = await build(bare, request({ taskRef: ref, runId: bareRun, agent: checkpointingAgent([]) }));

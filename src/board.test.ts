@@ -14,6 +14,20 @@ import { register } from "./runner.js";
 import { acquire, release } from "./claim.js";
 import { addApprover, approve, propose } from "./scope.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 const T0 = new Date("2026-08-01T12:00:00Z");
 
 /** The runner gate (MCP spec v6): every claiming runner is registered and
@@ -274,6 +288,7 @@ describe("boardScoped — one snapshot, all the facts", () => {
       // The sealed route's exact build model — any other opens no run (v48).
       model: "sonnet",
       now,
+      ...presented(store, withRun, "builder"),
     });
     const bareTaken = acquire(store, bare, "builder-2", { token: tok("builder-2"), now, ttlMs: 60 * 60_000 });
     if (!bareTaken.ok) throw new Error("claim refused");
@@ -305,6 +320,7 @@ describe("boardScoped — one snapshot, all the facts", () => {
       branch: "standing-orders/t-parked",
       worktree: "/pool/t-parked",
       now,
+      ...presented(store, ref, "builder"),
     });
     const decisionId = store.saveDecision(
       {

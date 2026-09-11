@@ -3830,8 +3830,14 @@ function migrate(db: Database): void {
   // nothing to classify, and a v24 database must never be re-classified:
   // a freshly approved routine with no profile column YET would otherwise
   // be "grandfathered" by its own migration on the next open.
+  // The version the file was AT when this upgrade began (v48 authority repair): openStore
+  // has already negated it into the epoch sentinel, and a sentinel resumed
+  // after a crash is negative too — so the ORIGIN is the magnitude, never
+  // the sign. Read as a plain comparison, −47 < 24 re-ran the v24 data
+  // pass on every upgrade from v24 onward and on every resumed epoch.
   const stored = db.prepare("SELECT version FROM schema_version").get() as { version?: number } | undefined;
-  if (stored !== undefined && Number(stored.version) < 24) migrateToV24(db);
+  const origin = stored === undefined ? null : Math.abs(Number(stored.version));
+  if (origin !== null && origin < 24) migrateToV24(db);
 
   // v25 (attended core): two shape rebuilds, each recognized exactly and
   // idempotent, ordered AFTER every addColumn above so the only pre-v25
@@ -8936,8 +8942,11 @@ export class Store {
   }
 
   /**
-   * The coordinator's base-cycle door (E3b): called right after a run is
-   * created for a task, it opens the fallback cycle IF (and only if) the
+   * The coordinator's base-cycle door (E3b) — since the v48 authority
+   * repair the tick takes it INSIDE the run's insert (`startRun({ custody:
+   * { kind: "base" } })`), where a cycle that cannot open rolls the row
+   * back; this post-insert road remains for callers that already hold a
+   * row. It opens the fallback cycle IF (and only if) the
    * task's approval sealed an explicit chain. A single-profile approval
    * opens nothing and returns null — every task until an operator configures
    * a fallback chain, so this is inert by default. The chain digest is
@@ -9053,11 +9062,14 @@ export class Store {
         // the same custody, and the cycle stays open for it.
         if (run.outcome === "parked") return { kind: "parked-tail" as const };
         const cls: TerminalClass = run.terminalClass ?? "unknown";
-        const authMode = run.authMode ?? "subscription";
+        // A chain-bound tail carries its pinned auth mode from admission; a
+        // row whose auth mode does not read (v48 authority repair) is a corrupt stamp and
+        // ends the cycle as an ordinary end — never as a subscription run.
+        const authMode = run.authMode ?? null;
         // An ordinary end (failure, refusal, interruption) — or a corrupt
         // class/auth pairing, which must READ as ordinary (finding 8) —
         // ends the cycle. The retry road opens a fresh one at the base.
-        if (!isFallbackEligible(cls) || !classMatchesAuthMode(cls, authMode)) {
+        if (authMode === null || !isFallbackEligible(cls) || !classMatchesAuthMode(cls, authMode)) {
           this.closeFallbackCycle(cycle.id, cycle.transitionGeneration, "entry-ended", now);
           return { kind: "closed" as const, reason: "entry-ended" as const };
         }
@@ -9295,6 +9307,7 @@ export class Store {
           },
           entryDigest: entryDigestOf(entry),
           authMode: entry.authMode,
+          repairModel: entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel,
           route: { routeDigest: sealed.ok ? routeDigestOf(sealed.route) : `chain:${c.chainDigest}`, phase: "build", provider: entry.profile.provider, model: entry.profile.model, chosen: "fallback" },
         },
         now,
@@ -9312,7 +9325,9 @@ export class Store {
    * (Codex E3d review, finding 2): the pinned entry — auth mode included —
    * follows the custody, so a repair turn can never spend under the mutable
    * per-provider auth file when its parent was pinned. First-write on the
-   * child; a no-op when the parent carries no binding.
+   * child; a no-op when the parent carries no binding. A repair turn now
+   * inherits inside its own admission (same task only); this remains the
+   * explicit road for a caller that holds both rows.
    */
   inheritChainBinding(childRun: number, parentRun: number): void {
     this.db
@@ -9331,7 +9346,9 @@ export class Store {
   /**
    * The PARKED-RESUME custody transfer (Codex E3d review, finding 5): the
    * ONE road a chain cycle's tail moves to a successor run — proved, never
-   * re-tagged in passing. In one transaction: the parent must carry the
+   * re-tagged in passing. The tick takes it inside the successor's own
+   * insert (`startRun({ custody: { kind: "resume", parkedRun } })`), where
+   * a transfer that cannot be proved rolls the row back. In one transaction: the parent must carry the
    * binding, its cycle must be OPEN with the parent as tail at the parent's
    * index, and the parent must have parked (the paused-lineage state).
    * The successor inherits the binding and becomes the tail.
@@ -9544,6 +9561,13 @@ export class Store {
    * chain metadata (cycle, index, entry digest, auth mode) so nothing
    * downstream can substitute a foreign run. Returns the new run id, or
    * null on a lost CAS / already-consumed edge.
+   *
+   * EVERYTHING the caller states is re-proved against durable state
+   * before any row exists (v48 authority repair): the cycle belongs to the run's task; the
+   * approved chain still stands and is the cycle's; the entry at the
+   * cursor exists and carries exactly the stated digest, auth mode,
+   * provider, model, and repair model; the presented stamp is `fallback`
+   * on that entry. One disagreement creates no run and consumes no edge.
    */
   admitFallback(
     args: {
@@ -9554,44 +9578,58 @@ export class Store {
       run: { taskRef: number; leaseId: string; runner: string; branch: string; worktree: string; provider: string; model?: string };
       entryDigest: string;
       authMode: "subscription" | "api-key";
-      /** v48: the run's `fallback` route provenance, proved against the
-       * exact entry this admission binds (cursor + entry digest) BEFORE
-       * the row exists and written beside it. Omitted, the task's own
-       * approved chain dictates it; a task under agent routing never opens
-       * an unstamped fallback run. */
-      route?: RouteStamp;
+      /** The entry's effective repair model as the caller understands it —
+       * `inherit` resolved to the build model — proved against the approved
+       * entry so a repair turn later spends as exactly what was approved. */
+      repairModel: string;
+      /** The run's `fallback` route provenance, proved against the exact
+       * entry this admission binds (cursor + entry digest) BEFORE the row
+       * exists and written beside it. Required: nothing is dictated here. */
+      route: RouteStamp;
     },
     now: Date,
   ): { ok: true; runId: number } | { ok: false; problem?: string } {
     // The savepoint rides inside a (reentrant) transaction so the route
     // stamp's own transact() nests instead of colliding with it.
     return this.transact(() => this.savepoint(() => {
+      const refuse = (problem: string): { ok: false; problem: string } => ({ ok: false as const, problem: `fallback admission refused for task_ref ${args.run.taskRef}: ${problem}` });
       // The pending edge must exist BEFORE anything is created: this cycle,
       // unconsumed, to_index === current cursor, and the cycle
       // pending-admission at the expected generation + cursor.
       const edge = this.db
         .prepare(
-          `SELECT 1 AS hit FROM fallback_transition t JOIN fallback_cycle c ON c.id = t.cycle
+          `SELECT c.task_ref AS task_ref, c.chain_digest AS chain_digest FROM fallback_transition t JOIN fallback_cycle c ON c.id = t.cycle
             WHERE t.id = ? AND t.cycle = ? AND t.consumed_by IS NULL AND t.to_index = c.cursor
               AND c.state = 'pending-admission' AND c.transition_generation = ? AND c.cursor = ?`,
         )
-        .get(args.transitionId, args.cycleId, args.expectGeneration, args.expectCursor);
+        .get(args.transitionId, args.cycleId, args.expectGeneration, args.expectCursor) as Record<string, unknown> | undefined;
       if (edge === undefined) return { ok: false as const };
-      // THE ADMISSION PROOF (v48), before the row: the stamp — presented,
-      // or dictated by the approved chain — must be `fallback` on exactly
-      // the entry this admission binds, as the pair the run will spend as.
-      // A stamp that cannot be proved opens nothing.
+      // The exact task: the cycle's own owner, never the caller's word.
+      if (Number(edge["task_ref"]) !== args.run.taskRef) return refuse(`cycle ${args.cycleId} belongs to task_ref ${Number(edge["task_ref"])}, not ${args.run.taskRef}`);
+      const owner = this.refForId(args.run.taskRef);
+      if (owner === null) return refuse("no such task");
+      const chain = this.approvedChainOf(owner.externalId);
+      if (chain === null) return refuse("the chain approval no longer stands — nothing is admitted under it");
+      if (chainDigestOf(chain) !== String(edge["chain_digest"])) return refuse(`the live cycle was opened under chain ${String(edge["chain_digest"])}, but the approved chain is ${chainDigestOf(chain)}`);
+      const entry = chain[args.expectCursor];
+      if (entry === undefined) return refuse(`the approved chain has no entry ${args.expectCursor}`);
+      if (args.expectCursor === 0) return refuse("entry 0 is the chain's primary — it is dispatched as the base, never admitted as a fallback");
+      if (entryDigestOf(entry) !== args.entryDigest) return refuse(`the stated entry digest ${args.entryDigest} is not the approved entry ${args.expectCursor}'s ${entryDigestOf(entry)}`);
+      if (entry.authMode !== args.authMode) return refuse(`the approved entry ${args.expectCursor} is pinned to ${entry.authMode}, not ${args.authMode}`);
+      if (entry.profile.provider !== args.run.provider) return refuse(`the approved entry ${args.expectCursor} runs ${entry.profile.provider}, not ${args.run.provider}`);
+      const model = args.run.model ?? null;
+      if (model !== null && model !== entry.profile.model) return refuse(`the approved entry ${args.expectCursor} runs ${entry.profile.provider} · ${entry.profile.model}, not ${args.run.provider} · ${model}`);
+      const entryRepairModel = entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel;
+      if (entryRepairModel !== args.repairModel) return refuse(`the approved entry ${args.expectCursor} repairs on ${entry.profile.provider} · ${entryRepairModel}, not ${args.repairModel}`);
+      // THE ADMISSION PROOF (v48, authority repair), before the row: the presented stamp
+      // must be `fallback` on exactly the entry this admission binds, as
+      // the pair the run will spend as. A stamp that cannot be proved
+      // opens nothing.
       const bound = { index: args.expectCursor, entryDigest: args.entryDigest };
-      let stamp: RouteStamp | null = args.route ?? null;
-      if (stamp === null) {
-        const derived = this.governingStampFor(args.run.taskRef, "builder", bound);
-        if (derived !== null && !derived.ok) return { ok: false as const, problem: derived.problem };
-        stamp = derived === null ? null : derived.stamp;
-      }
-      if (stamp !== null) {
-        const problem = this.routeAdmissionProblem({ taskRef: args.run.taskRef, role: "builder", provider: args.run.provider, model: args.run.model ?? stamp.model, contestant: null, chain: bound }, stamp, now);
-        if (problem !== null) return { ok: false as const, problem: `fallback admission refused for task_ref ${args.run.taskRef}: ${problem}` };
-      }
+      const stamp: RouteStamp = args.route;
+      if ((stamp as { chosen?: unknown }).chosen !== "fallback") return refuse(`an admitted fallback entry spends as \`fallback\`, not \`${String((stamp as { chosen?: unknown }).chosen)}\``);
+      const problem = this.routeAdmissionProblem({ taskRef: args.run.taskRef, role: "builder", provider: args.run.provider, model: model ?? entry.profile.model, contestant: null, chain: bound }, stamp, now);
+      if (problem !== null) return refuse(problem);
       // Open the fallback run WITH its chain metadata, in the same body.
       const inserted = this.db
         .prepare(
@@ -9604,7 +9642,7 @@ export class Store {
           args.run.runner,
           args.run.branch,
           args.run.worktree,
-          args.run.model ?? stamp?.model ?? null,
+          model ?? entry.profile.model,
           args.run.provider,
           args.cycleId,
           args.expectCursor,
@@ -9613,10 +9651,8 @@ export class Store {
           now.toISOString(),
         );
       const runId = Number(inserted.lastInsertRowid);
-      if (stamp !== null) {
-        const stamped = this.stampRunRoute(runId, stamp, now);
-        if (!stamped.ok) throw new Error(stamped.conflict);
-      }
+      const stamped = this.stampRunRoute(runId, stamp, now);
+      if (!stamped.ok) throw new Error(stamped.conflict);
       // Consume the edge with the real run id — the WHERE re-proves it is
       // still the unconsumed edge at the current cursor (single-use).
       const consumed = this.db
@@ -11415,8 +11451,31 @@ export class Store {
     }
     // legacy
     if (leg.routeDigest !== "legacy" && !leg.routeDigest.startsWith("profile:")) return `a legacy stamp names a profile digest or the word legacy, not ${leg.routeDigest}`;
-    if (routed && run.contestant === null && this.openAuthorizationFor(run.taskRef) === null) {
+    if (run.contestant !== null || this.openAuthorizationFor(run.taskRef) !== null) return null;
+    if (routed) {
       return sealed.ok ? "a sealed agent route governs this task — nothing spends as legacy under it" : "this task is filed under agent routing — nothing spends as legacy on it";
+    }
+    // EXACT legacy authority (v48 authority repair): an ordinary run on a pre-routing row
+    // names the very profile that governs it — the sealed profile's digest
+    // (the bound chain entry's for a chain-bound run), and for a build or
+    // repair its exact pair — or nothing. The bare word `legacy` belongs to
+    // a task with no scope at all.
+    if (scope === null) return leg.routeDigest === "legacy" ? null : "a task with no scope spends as the word legacy, not under a profile digest";
+    const chain = this.approvedChainOf(taskId);
+    const boundEntry = run.chain != null && chain !== null ? chain[run.chain.index] : undefined;
+    if (run.chain != null && (chain === null || boundEntry === undefined || entryDigestOf(boundEntry) !== run.chain.entryDigest)) {
+      return `the run is bound to chain entry ${run.chain.index}, which the approved chain does not carry under that digest`;
+    }
+    const approved = scope.approvedAt !== null && scope.approvedDigest !== null && scope.approvedDigest === scope.digest;
+    const governing = boundEntry !== undefined ? boundEntry.profile : approved ? (scope.approvedProfile ?? null) : null;
+    if (governing === null) return "no sealed profile governs this pre-routing row — nothing spends as legacy on it";
+    const expected = `profile:${profileDigestOf(governing)}`;
+    if (leg.routeDigest !== expected) return `the legacy stamp names ${leg.routeDigest}, but the sealed profile is ${expected}`;
+    if (phase === "build" || phase === "repair") {
+      const expectedModel = phase === "repair" ? (governing.repairModel === "inherit" ? governing.model : governing.repairModel) : governing.model;
+      if (governing.provider !== leg.provider || expectedModel !== leg.model) {
+        return `the sealed profile's ${phase} agent is ${governing.provider} · ${expectedModel}, not ${leg.provider} · ${leg.model ?? "(none)"}`;
+      }
     }
     return null;
   }
@@ -12797,6 +12856,25 @@ export class Store {
       .run(now.toISOString(), by, digest, nextFireAt, now.toISOString(), id);
   }
 
+  /**
+   * WITHDRAW an approval that no longer verifies (v48 authority repair): the refresh road
+   * clears the approval's authority — its digest, its frozen snapshot, the
+   * armed schedule — so a corrupt or never-taken snapshot cannot keep
+   * reading as approved while the working agents happen to be unchanged.
+   * `approved_at`/`approved_by` stay as history: the page reads "approved,
+   * then refreshed — approve again", never "never approved".
+   */
+  withdrawRoutineApproval(id: number, now: Date): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE routine SET approved_digest = NULL, approved_profile_json = NULL, approved_route_json = NULL,
+                            next_fire_at = NULL, updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(now.toISOString(), id);
+    return Number(changes) > 0;
+  }
+
   /** Pausing is instant and needs no ceremony; resuming re-arms the schedule. */
   setRoutinePaused(id: number, paused: boolean, now: Date): boolean {
     const { changes } = this.db
@@ -13166,8 +13244,18 @@ export class Store {
       /** Which racing agent this run belongs to (v14); absent = ordinary. */
       contestant?: number;
       /** v47: the run's route provenance, written in this same admission
-       * transaction so provenance can never lag authority. */
+       * transaction so provenance can never lag authority. A task filed
+       * under agent routing REQUIRES it (v48 authority repair): the caller presents the
+       * exact authority it holds, or no row opens. */
       route?: RouteStamp;
+      /** v48 authority repair: how this run takes fallback-chain custody, proved and
+       * persisted in this same insert — `base` opens the task's cycle at
+       * the approved chain's first entry (inert without a chain approval),
+       * `resume` takes a parked tail's custody through the proven
+       * transfer. A binding that cannot be proved rolls the insert back.
+       * A repair turn inherits its same-task parent's binding without
+       * asking; a fallback entry is admitted by admitFallback. */
+      custody?: { kind: "base" } | { kind: "resume"; parkedRun: number };
       now: Date;
     } & (
       | {
@@ -13188,35 +13276,65 @@ export class Store {
 
   private startRunInTransaction(run: Parameters<Store["startRun"]>[0]): number {
     const role = run.role ?? "builder";
-    // THE ADMISSION PROOF (v48): a run's route provenance is held to the
-    // authority the task holds BEFORE the row exists — the stamp's shape,
-    // its phase against the role, its exact provider and model against
-    // what the run will spend as, and its digest and leg against the
-    // sealed route, the approved chain entry the run is bound to, or a
-    // proven pre-routing row. A stamp that cannot be proved opens no run:
-    // nothing spends with provenance that disagrees with authority. The
-    // stamp is the authority for the provider and model columns when the
-    // caller left them unsaid; a caller who says otherwise is refused.
+    // THE ADMISSION PROOF (v48, authority repair): a run's route provenance is held to
+    // the authority the task holds BEFORE the row exists — the stamp's
+    // shape, its phase against the role, its exact provider and model
+    // against what the run will spend as, and its digest and leg against
+    // the sealed route, the approved chain entry the run is bound to, or
+    // a proven pre-routing row. A stamp that cannot be proved opens no
+    // run: nothing spends with provenance that disagrees with authority.
+    // The stamp is the authority for the provider and model columns when
+    // the caller left them unsaid; a caller who says otherwise is refused.
     //
-    // A ROUTED task never opens an unstamped run: a caller that presents
-    // no stamp on a task filed under agent routing gets the one the
-    // governing authority dictates — the sealed route's leg for the run's
-    // phase (a planner may run under the working proposed route before
-    // any approval), proved against the run's own provider and model
-    // exactly as a presented stamp would be — or no row at all. Contest
-    // lanes and attended sessions carry their own authority and stay
-    // unstamped until they spend.
+    // A ROUTED task never opens an unstamped run, and the store DICTATES
+    // nothing (v48 authority repair): the caller PRESENTS the exact route authority it
+    // holds — the sealed leg for its phase, the working plan leg before
+    // approval, the bound fallback entry — or no row opens, in words.
+    // Contest lanes and attended sessions carry their own authority and
+    // stay unstamped until they spend.
     let provider = run.provider ?? null;
     let model = run.model ?? null;
-    // A child of a chain-bound parent (a repair turn, a structured
-    // correction) is bound to the parent's exact entry from the start —
-    // the binding rides the INSERT below, so the proof can hold the stamp
-    // to that entry and no later inheritance can change what spends.
+    const ref = this.refForId(run.taskRef);
+    if (ref === null) throw new Error(`run admission refused: task_ref ${run.taskRef} is not a task`);
+    const taskId = ref.externalId;
+    const scope = this.getScope(taskId);
+    const routed = scope !== null && scope.routeEra != null;
     const parent = run.parentRun === undefined ? null : this.getRun(run.parentRun);
-    const inheritedChain =
-      parent !== null && parent.chainCycle != null && parent.chainIndex != null && parent.entryDigest != null
-        ? { cycle: parent.chainCycle, index: parent.chainIndex, entryDigest: parent.entryDigest, authMode: parent.authMode ?? null }
-        : null;
+    // CHAIN CUSTODY, decided before the row (v48 authority repair): a repair turn inherits
+    // exactly its SAME-TASK parent's binding — a parent on another task is
+    // a caller bug, refused; a reviewer, planner, or builder child never
+    // inherits (a review after a fallback reviews under the review leg, it
+    // does not take the chain's custody). Base and parked-resume custody
+    // are proved here and written below, in this transaction.
+    let binding: { cycle: number | null; index: number; entryDigest: string; authMode: "subscription" | "api-key" | null } | null = null;
+    if (role === "repair" && parent !== null) {
+      if (parent.taskRef !== run.taskRef) {
+        throw new Error(`run admission refused for task_ref ${run.taskRef} (repair): run #${parent.id} belongs to task_ref ${parent.taskRef} — a repair turn mends its own task's run only`);
+      }
+      if (parent.chainCycle != null && parent.chainIndex != null && parent.entryDigest != null) {
+        binding = { cycle: parent.chainCycle, index: parent.chainIndex, entryDigest: parent.entryDigest, authMode: parent.authMode ?? null };
+      }
+    }
+    const custody = run.custody ?? null;
+    const chain = custody === null ? null : this.approvedChainOf(taskId);
+    let parkedTail: Run | null = null;
+    if (custody !== null && custody.kind === "resume") {
+      parkedTail = this.getRun(custody.parkedRun);
+      if (parkedTail === null || parkedTail.taskRef !== run.taskRef || parkedTail.outcome !== "parked" || parkedTail.chainCycle == null || parkedTail.chainIndex == null || parkedTail.entryDigest == null) {
+        throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): run #${custody.parkedRun} is not this task's parked chain tail — nothing resumes its custody`);
+      }
+      if (chain === null) throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): the chain approval no longer stands — nothing resumes custody under it`);
+      const entry = chain[parkedTail.chainIndex];
+      if (entry === undefined || entryDigestOf(entry) !== parkedTail.entryDigest) {
+        throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): the parked tail is bound to chain entry ${parkedTail.chainIndex} under a digest the approved chain no longer carries`);
+      }
+      binding = { cycle: parkedTail.chainCycle, index: parkedTail.chainIndex, entryDigest: parkedTail.entryDigest, authMode: parkedTail.authMode ?? null };
+    } else if (custody !== null && custody.kind === "base" && chain !== null) {
+      const base = chain[0];
+      if (base === undefined) throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): the approved chain has no base entry`);
+      binding = { cycle: null, index: 0, entryDigest: entryDigestOf(base), authMode: base.authMode };
+    }
+    const bound = binding === null ? null : { index: binding.index, entryDigest: binding.entryDigest };
     let stamp: RouteStamp | null = null;
     if (run.route !== undefined) {
       const stampProvider = typeof (run.route as { provider?: unknown }).provider === "string" ? (run.route as { provider: string }).provider : null;
@@ -13224,26 +13342,21 @@ export class Store {
       provider = provider ?? stampProvider;
       model = model ?? (typeof stampModel === "string" ? stampModel : null);
       const problem = this.routeAdmissionProblem(
-        { taskRef: run.taskRef, role, provider: provider ?? "claude", model, contestant: run.contestant ?? null, chain: inheritedChain === null ? null : { index: inheritedChain.index, entryDigest: inheritedChain.entryDigest } },
+        { taskRef: run.taskRef, role, provider: provider ?? "claude", model, contestant: run.contestant ?? null, chain: bound },
         run.route,
         run.now,
       );
       if (problem !== null) throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): ${problem}`);
       stamp = run.route;
-    } else if ((run.contestant ?? null) === null && this.openAuthorizationFor(run.taskRef) === null) {
-      const derived = this.governingStampFor(run.taskRef, role, inheritedChain === null ? null : { index: inheritedChain.index, entryDigest: inheritedChain.entryDigest });
-      if (derived !== null) {
-        if (!derived.ok) throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): ${derived.problem}`);
-        provider = provider ?? derived.stamp.provider;
-        model = model ?? derived.stamp.model;
-        const problem = this.routeAdmissionProblem(
-          { taskRef: run.taskRef, role, provider: provider ?? "claude", model, contestant: null, chain: inheritedChain === null ? null : { index: inheritedChain.index, entryDigest: inheritedChain.entryDigest } },
-          derived.stamp,
-          run.now,
-        );
-        if (problem !== null) throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): ${problem}`);
-        stamp = derived.stamp;
-      }
+    } else if (routed && (run.contestant ?? null) === null && this.openAuthorizationFor(run.taskRef) === null) {
+      // Nothing is dictated — but the refusal says what the caller would
+      // have had to present, or why nothing could govern the run at all.
+      const could = this.routeAuthorityFor(run.taskRef, role, bound);
+      throw new Error(
+        `run admission refused for task_ref ${run.taskRef} (${role}): this task is filed under agent routing and the caller presented no route authority — ${
+          could !== null && !could.ok ? could.problem : `nothing opens unstamped on it (present its ${phaseOfRole(role)} leg)`
+        }`,
+      );
     }
     const qualityMode: QualityMode =
       role === "reviewer" && run.parentRun !== undefined
@@ -13277,10 +13390,10 @@ export class Store {
         run.sessionId ?? null,
         run.contestant ?? null,
         qualityMode,
-        inheritedChain?.cycle ?? null,
-        inheritedChain?.index ?? null,
-        inheritedChain?.entryDigest ?? null,
-        inheritedChain?.authMode ?? null,
+        binding?.cycle ?? null,
+        binding === null || binding.cycle === null ? null : binding.index,
+        binding === null || binding.cycle === null ? null : binding.entryDigest,
+        binding === null || binding.cycle === null ? null : binding.authMode,
         run.now.toISOString(),
       );
     const id = Number(inserted.lastInsertRowid);
@@ -13290,36 +13403,51 @@ export class Store {
       const stamped = this.stampRunRoute(id, stamp, run.now);
       if (!stamped.ok) throw new Error(stamped.conflict);
     }
+    // THE CUSTODY WRITE (v48 authority repair), in the same transaction: a base cycle that
+    // cannot open (one is live already) or a parked-resume transfer that
+    // cannot be proved throws, and the row above goes with it — no run
+    // ever exists outside the custody it was admitted under.
+    if (custody !== null && custody.kind === "base" && chain !== null && binding !== null) {
+      const opened = this.openFallbackCycle(run.taskRef, chainDigestOf(chain), id, run.now);
+      if (!opened.ok) {
+        throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): the task's fallback cycle is live — base custody cannot open beside it`);
+      }
+      this.db
+        .prepare("UPDATE run SET chain_cycle = ?, chain_index = 0, entry_digest = ?, auth_mode = ? WHERE id = ?")
+        .run(opened.id, binding.entryDigest, binding.authMode, id);
+    } else if (custody !== null && custody.kind === "resume" && parkedTail !== null) {
+      if (!this.resumeChainCustody(parkedTail.id, id, run.now)) {
+        throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): run #${parkedTail.id}'s cycle is not open with it as the parked tail — nothing resumes its custody`);
+      }
+    }
     return id;
   }
 
   /**
-   * The stamp a routed task DICTATES for a run that presents none (v48):
-   * null when the task is not filed under agent routing (a pre-routing
-   * row, a task with no scope — those roads stamp when they spend); the
-   * sealed route's leg for the run's phase when the approval stands; the
-   * working proposed route's plan leg for a planner before any approval;
-   * a repair or correction child of a chain-bound parent inherits the
-   * parent's fallback provenance for its own phase. Anything else is the
-   * words for why no row may open: a routed task without a sealed route
-   * has nothing a builder, reviewer, or repair could spend under.
+   * The exact route authority a task holds for one run, in the caller's
+   * hands (v48 authority repair): the sealed route's leg for the run's phase when the
+   * approval stands; the working proposed route's plan leg for a planner
+   * before any approval; for a run bound to a NON-primary chain entry, that
+   * entry's `fallback` provenance for its phase. The store never applies
+   * this on a caller's behalf — `startRun` requires the caller to PRESENT
+   * it and proves the presented stamp against the same durable state, so
+   * a caller that holds no authority opens nothing. Null when the task is
+   * not filed under agent routing (a pre-routing row, a task with no
+   * scope — those roads stamp when they spend); the words when the task
+   * is routed and nothing could govern the run.
    */
-  private governingStampFor(taskRef: number, role: Run["role"] | "scout", bound: { index: number; entryDigest: string } | null): { ok: true; stamp: RouteStamp } | { ok: false; problem: string } | null {
+  routeAuthorityFor(taskRef: number, role: Run["role"] | "scout", bound: { index: number; entryDigest: string } | null = null): { ok: true; stamp: RouteStamp } | { ok: false; problem: string } | null {
     const ref = this.refForId(taskRef);
     if (ref === null) return null;
     const scope = this.getScope(ref.externalId);
     if (scope === null || scope.routeEra == null) return null;
     const phase = phaseOfRole(role);
     const sealed = this.sealedRouteOf(ref.externalId);
-    // A child bound to a NON-primary chain entry builds and repairs as that
-    // entry — `fallback` provenance, the entry's own exact pair (its repair
-    // model for a repair turn), under the sealed route's digest (or the
-    // chain's when no route is sealed). The proof below re-checks the
-    // binding's digest against the approved chain.
     if (bound !== null && bound.index > 0 && (phase === "build" || phase === "repair")) {
       const chain = this.approvedChainOf(ref.externalId);
       const entry = chain === null ? undefined : chain[bound.index];
       if (chain === null || entry === undefined) return { ok: false, problem: "the run is bound to a fallback chain entry the task's approved chain does not have" };
+      if (entryDigestOf(entry) !== bound.entryDigest) return { ok: false, problem: `the run is bound to chain entry ${bound.index} under digest ${bound.entryDigest}, but the approved entry there is ${entryDigestOf(entry)}` };
       const model = phase === "repair" ? (entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel) : entry.profile.model;
       return { ok: true, stamp: { routeDigest: sealed.ok ? routeDigestOf(sealed.route) : `chain:${chainDigestOf(chain)}`, phase, provider: entry.profile.provider, model, chosen: "fallback" } };
     }
@@ -18274,6 +18402,15 @@ export class Store {
   }
 }
 
+/** A stored count or id that must be a whole, non-negative number — a
+ * NULL, an empty string, a fraction, or text reads as null (v48 authority repair). */
+function wholeNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "bigint") return value >= 0n ? Number(value) : null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return null;
+  return value;
+}
+
 function readRun(row: Record<string, unknown>): Run {
   return {
     id: Number(row["id"]),
@@ -18326,15 +18463,15 @@ function readRun(row: Record<string, unknown>): Run {
         : (RUN_PHASES as readonly string[]).includes(String(row["phase"]))
           ? (String(row["phase"]) as RunPhase)
           : null,
-    chainCycle: row["chain_cycle"] === null || row["chain_cycle"] === undefined ? null : Number(row["chain_cycle"]),
-    chainIndex: row["chain_index"] === null || row["chain_index"] === undefined ? null : Number(row["chain_index"]),
-    entryDigest: row["entry_digest"] === null || row["entry_digest"] === undefined ? null : String(row["entry_digest"]),
-    authMode:
-      row["auth_mode"] === null || row["auth_mode"] === undefined
-        ? null
-        : String(row["auth_mode"]) === "api-key"
-          ? "api-key"
-          : "subscription",
+    // The chain binding is read STRICTLY (v48 authority repair): a cycle id and an index
+    // are non-negative integers, an entry digest is a non-empty string, an
+    // auth mode is exactly one of the two words — anything else reads as
+    // no binding at all, which every custody proof refuses, never as the
+    // base entry or the subscription credential.
+    chainCycle: wholeNumber(row["chain_cycle"]),
+    chainIndex: wholeNumber(row["chain_index"]),
+    entryDigest: row["entry_digest"] === null || row["entry_digest"] === undefined || String(row["entry_digest"]) === "" ? null : String(row["entry_digest"]),
+    authMode: row["auth_mode"] === "api-key" ? "api-key" : row["auth_mode"] === "subscription" ? "subscription" : null,
     terminalClass:
       row["terminal_class"] === null || row["terminal_class"] === undefined
         ? null

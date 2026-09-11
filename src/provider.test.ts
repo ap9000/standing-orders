@@ -54,6 +54,25 @@ describe("argv dialects", () => {
     expect(resumed.slice(0, 3)).toEqual(["exec", "resume", "thread-1"]);
   });
 
+  test("codex resume carries the sandbox as a config override — `exec resume` has no --sandbox flag (0.145.0 exits 2 before initializing)", () => {
+    const resumed = adapterFor("codex").argv({ ...ASK, resumeSession: "thread-1", model: "gpt-5-codex" });
+    expect(resumed).not.toContain("--sandbox");
+    expect(resumed).not.toContain("-s");
+    expect(resumed).toEqual(expect.arrayContaining(["-c", 'sandbox_mode="workspace-write"', "-m", "gpt-5-codex", "--json", "--skip-git-repo-check"]));
+    expect(resumed[resumed.length - 1]).toBe("do the thing");
+    // The same exact mode the fresh turn was sealed with, in both spellings.
+    expect(adapterFor("codex").argv({ ...ASK, resumeSession: "thread-1", skipPermissions: true })).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(adapterFor("codex").argv({ ...ASK, resumeSession: "thread-1", skipPermissions: true })).not.toContain('sandbox_mode="workspace-write"');
+    // A resumed reviewer correction keeps read-only isolation, as an override.
+    const review = adapterFor("codex").argv({ ...ASK, resumeSession: "review-1", phase: "review" });
+    expect(review).not.toContain("--sandbox");
+    expect(review).toEqual(expect.arrayContaining(["--ignore-user-config", "-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"']));
+    expect(review).not.toContain("workspace-write");
+    // A fresh turn is byte-identical to before: the flag form.
+    expect(adapterFor("codex").argv({ ...ASK })).toEqual(expect.arrayContaining(["--sandbox", "workspace-write"]));
+    expect(adapterFor("openrouter").argv({ ...ASK, resumeSession: "thread-2" })).not.toContain("--sandbox");
+  });
+
   test("claude review phase keeps its resumable, cwd-confined isolation argv", () => {
     const build = adapterFor("claude").argv({ ...ASK, phase: "build" });
     expect(build).not.toContain("--strict-mcp-config");

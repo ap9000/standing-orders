@@ -5,6 +5,20 @@ import { join } from "node:path";
 import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
 import { addApprover, approve, digestOf, propose } from "./scope.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 const T0 = new Date("2026-09-07T12:00:00.000Z");
 
 /** v48: a routed task opens no run without a sealed route — approve first. */
@@ -50,6 +64,7 @@ describe("two quality modes", () => {
       branch: "standing-orders/release",
       worktree: "/pool/release",
       now: T0,
+      ...presented(store, store.refFor("built-in", "release").id, "builder"),
     });
     expect(store.getRun(run)?.qualityMode).toBe("strict");
     expect(store.qualityDefault()).toMatchObject({ mode: "strict", updatedBy: "alex" });
@@ -84,7 +99,7 @@ describe("two quality modes", () => {
       propose(legacy, { taskId: "old", goal: "keep the old workflow", now: T0 });
       sealScope(legacy, "old");
       const ref = legacy.refFor("built-in", "old");
-      legacy.startRun({ taskRef: ref.id, leaseId: "legacy", runner: "builder", branch: "old", worktree: "/old", now: T0 });
+      legacy.startRun({ taskRef: ref.id, leaseId: "legacy", runner: "builder", branch: "old", worktree: "/old", now: T0, ...presented(legacy, ref.id, "builder") });
       // A v40 fixture predates v44's plan_revision/authority_digest columns
       // too — drop them along with quality_mode so this reopen genuinely
       // exercises the v41 recognizer against the exact v34 shape it expects,

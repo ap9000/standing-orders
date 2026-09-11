@@ -730,11 +730,21 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         };
       }
     } else {
+      // A ROUTED task's run was admitted with its authority (v48 authority repair) — an
+      // unstamped one on a routed row is a row nothing admitted, and this
+      // road never dictates the stamp it lacks. Only a pre-routing row (or
+      // a contest lane, an attended session) stamps its proven profile.
+      const scopeRouted = store.getScope(taskId)?.routeEra != null;
+      if (sealed !== null && scopeRouted && store.getRun(request.runId) !== null) {
+        return {
+          ok: false,
+          reason: "stale-approval",
+          message: `${taskId}: run #${request.runId} was opened without route provenance on a task filed under agent routing — nothing spends on it; a fresh attempt is admitted under the sealed route (stale-approval)`,
+        };
+      }
       const stamped = store.stampRunRoute(
         request.runId,
-        sealed !== null && sealed.ok
-          ? { routeDigest: routeDigestOf(sealed.route), phase: "build", provider, model: effective.model, chosen: legOf(sealed.route, "build").chosen }
-          : { routeDigest: `profile:${provenProfileDigest}`, phase: "build", provider, model: effective.model, chosen: "legacy" },
+        { routeDigest: `profile:${provenProfileDigest}`, phase: "build", provider, model: effective.model, chosen: "legacy" },
         now,
       );
       if (!stamped.ok) return { ok: false, reason: "stale-approval", message: `${taskId}: ${stamped.conflict} (stale-approval)` };
@@ -2577,10 +2587,10 @@ async function ingestPark(args: {
       },
     });
     // A repair turn inherits its parent's chain binding VERBATIM (Codex E3d
-    // review, finding 2): the pinned entry — auth mode included — follows
-    // the custody, so the mending turn spends under exactly the credential
-    // the operator approved for this entry. No-op for unpinned parents.
-    store.inheritChainBinding(repairRun, runId);
+    // review, finding 2) — inside its own admission (v48 authority repair), so the pinned
+    // entry, auth mode included, follows the custody from the first byte
+    // of the row and the mending turn spends under exactly the credential
+    // the operator approved for this entry.
 
     const spoken = await invokeAgent(
       store,

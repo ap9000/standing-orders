@@ -11,7 +11,8 @@
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
     "certify:provider": "npm run build && node scripts/provider-canary.mjs",
-    "prepublishOnly": "npm run typecheck && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run build",
+    "nul-scan": "node scripts/nul-scan.mjs"
   },
   "repository": {
     "type": "git",

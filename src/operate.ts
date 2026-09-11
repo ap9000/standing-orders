@@ -188,7 +188,7 @@ import {
 import { plan as planTask } from "./planner.js";
 import { attachTmux, elapsedWords, openInTmux, PEEK_TAIL_LINES, runPeek, snapshotLiveRuns } from "./peek-cli.js";
 import { scout as scoutTask } from "./scout.js";
-import { profileDigestOf } from "./scope.js";
+import { profileDigestOf, chainDigestOf, entryDigestOf } from "./scope.js";
 import { reviewPass } from "./reviewer.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import { run, terminateLiveProviders, run as execRun } from "./exec.js";
@@ -1678,15 +1678,30 @@ async function buildCommand(
   // yet is fine: build() refuses no-claim itself, and the run row records
   // that the attempt was made.
   const held = currentClaim(store, ref.id, now);
-  const runId = store.startRun({
-    taskRef: ref.id,
-    leaseId: held?.leaseId ?? "unclaimed",
-    runner,
-    branch,
-    worktree: leased.worktree.path,
-    ...(text(flags, "model") === undefined ? {} : { model: text(flags, "model") as string }),
-    now,
-  });
+  // The standalone road PRESENTS the route authority it holds (v48 authority repair): the
+  // sealed build leg of a routed task, or nothing on a pre-routing row —
+  // the same proof the tick's admission wears, refused in words here.
+  const authority = store.routeAuthorityFor(ref.id, "builder");
+  if (authority !== null && !authority.ok) {
+    await worktrees.release(leased.worktree.path, now);
+    return fail(write, json, "build", "admission-refused", `${id}: ${authority.problem}`, EXIT.refused);
+  }
+  let runId: number;
+  try {
+    runId = store.startRun({
+      taskRef: ref.id,
+      leaseId: held?.leaseId ?? "unclaimed",
+      runner,
+      branch,
+      worktree: leased.worktree.path,
+      ...(authority === null ? {} : { provider: authority.stamp.provider, route: authority.stamp }),
+      ...(text(flags, "model") === undefined ? {} : { model: text(flags, "model") as string }),
+      now,
+    });
+  } catch (error) {
+    await worktrees.release(leased.worktree.path, now);
+    return fail(write, json, "build", "admission-refused", error instanceof Error ? error.message : String(error), EXIT.refused);
+  }
 
   const result = await build(store, {
     taskId: id,
@@ -2349,6 +2364,21 @@ async function tickCommand(
     const route = taskRoute !== null && taskRoute.kind === "route" ? taskRoute : null;
     const planLeg = route === null ? null : legOf(route.route, "plan");
     const sealedBuildLeg = route !== null && route.source === "approved" ? legOf(route.route, "build") : null;
+    // A parked chain tail PAST the base (v48 authority repair): its successor resumes the
+    // entry's custody and spends as that entry — the exact approved pair
+    // under `fallback` provenance — never as the sealed build leg. An
+    // entry the approved chain no longer carries under the tail's digest
+    // is refused here, in words, before any claim moves.
+    let parkedEntry: { index: number; provider: ProviderId; model: string } | null = null;
+    if (parkedChainTail !== null && parkedChainTail.chainIndex != null && parkedChainTail.chainIndex > 0 && !wantsPlan && !wantsScout && attendedSpec === null && racedAhead === null) {
+      const chain = store.approvedChainOf(id);
+      const entry = chain === null ? undefined : chain[parkedChainTail.chainIndex];
+      if (entry === undefined || entryDigestOf(entry) !== parkedChainTail.entryDigest) {
+        dispatched.push({ id, outcome: "skipped", reason: "stale-approval", detail: `${id}: the parked attempt #${parkedChainTail.id} is bound to fallback entry ${parkedChainTail.chainIndex}, which the approved chain no longer carries — nothing resumes it` });
+        continue;
+      }
+      parkedEntry = { index: parkedChainTail.chainIndex, provider: entry.profile.provider, model: entry.profile.model };
+    }
     const planFlagged = planProvider !== undefined || planModel !== undefined || providerFlag !== undefined || model !== undefined;
     if (wantsPlan && planLeg !== null && planFlagged) {
       // Pass flags cannot contradict the task's plan leg: a flag that names
@@ -2379,26 +2409,37 @@ async function tickCommand(
             })
         : racedAhead !== null
           ? resolvePhaseAgent(store, "build", repo, {}, ref)
-          : sealedBuildLeg !== null
-            ? resolvePhaseAgent(store, "build", repo, { provider: sealedBuildLeg.provider, model: sealedBuildLeg.model }, ref)
-            : resolvePhaseAgent(store, "build", repo, { provider: providerFlag, model }, ref);
+          : parkedEntry !== null
+            ? resolvePhaseAgent(store, "build", repo, { provider: parkedEntry.provider, model: parkedEntry.model })
+            : sealedBuildLeg !== null
+              ? resolvePhaseAgent(store, "build", repo, { provider: sealedBuildLeg.provider, model: sealedBuildLeg.model }, ref)
+              : resolvePhaseAgent(store, "build", repo, { provider: providerFlag, model }, ref);
     if (resolution !== null && !resolution.ok) {
       dispatched.push({ id, outcome: "skipped", reason: "agent-config", detail: resolution.problem });
       continue;
     }
     const spec = resolution === null ? (attendedSpec as { provider: ProviderId; model: string | null }) : resolution.spec;
-    // The leg is the authority: what resolved must BE the leg, exactly.
-    const governingLeg = wantsPlan ? planLeg : sealedBuildLeg;
+    // The leg is the authority: what resolved must BE the leg, exactly —
+    // the sealed build leg, or the parked fallback entry's own pair.
+    const governingLeg = wantsPlan ? planLeg : parkedEntry !== null ? { provider: parkedEntry.provider, model: parkedEntry.model, chosen: "fallback" as const } : sealedBuildLeg;
     if (governingLeg !== null && (spec.provider !== governingLeg.provider || spec.model !== governingLeg.model)) {
       dispatched.push({ id, outcome: "skipped", reason: "agent-config", detail: `${id}: the ${wantsPlan ? "plan" : "build"} leg names ${governingLeg.provider} · ${governingLeg.model} but resolution produced ${spec.provider} · ${spec.model ?? "(no model)"} — nothing substitutes` });
       continue;
     }
-    // Route provenance for the run this pass opens (v47): stamped IN the
-    // admission transaction, from the leg that governs it.
-    const routeStamp = (phase: "plan" | "build"): RouteStamp | null =>
-      route === null || governingLeg === null
-        ? null
-        : { routeDigest: routeDigestOf(route.route), phase, provider: spec.provider, model: spec.model, chosen: governingLeg.chosen };
+    // Route provenance for the run this pass opens (v47): PRESENTED to the
+    // admission transaction, from the leg that governs it — the store
+    // dictates nothing (v48 authority repair). A parked fallback entry's successor presents
+    // `fallback` under the sealed route (or the chain digest when no route
+    // is sealed, the pre-routing chain road).
+    const routeStamp = (phase: "plan" | "build"): RouteStamp | null => {
+      if (governingLeg === null) return null;
+      if (parkedEntry !== null && phase === "build") {
+        const chain = store.approvedChainOf(id);
+        const digest = route !== null ? routeDigestOf(route.route) : chain === null ? null : `chain:${chainDigestOf(chain)}`;
+        return digest === null ? null : { routeDigest: digest, phase, provider: spec.provider, model: spec.model, chosen: "fallback" };
+      }
+      return route === null ? null : { routeDigest: routeDigestOf(route.route), phase, provider: spec.provider, model: spec.model, chosen: governingLeg.chosen };
+    };
 
     // THE READINESS HALT (v47): a provider THIS runner has reported
     // unavailable never claims and never spends — no substitution, no
@@ -3049,18 +3090,35 @@ async function tickCommand(
     // a row with no outcome — an attempt that vanished, visible by morning.
     // Its route provenance (v47) is written in the same admission
     // transaction; build() then refuses to spend as anything else.
+    // The chain custody for this run (E3b/E3d, atomic since the v48 authority repair): a parked
+    // chain tail hands custody to this successor through the PROVEN resume
+    // transfer, otherwise a chain approval opens its fresh cycle bound to
+    // this run — both proved and written IN the run's own insert. A
+    // single-profile approval — every task until an operator configures a
+    // fallback chain — binds nothing, so this is inert by default. A
+    // binding that cannot be proved, or a stamp the task's authority does
+    // not admit, rolls the insert back: no row, no claim kept, said why.
     const buildStamp = routeStamp("build");
-    const runId = store.startRun({
-      taskRef: ref.id,
-      leaseId: lease,
-      runner,
-      branch,
-      worktree: leased.worktree.path,
-      provider: spec.provider,
-      ...(spec.model === null ? {} : { model: spec.model }),
-      now: clock(),
-      ...(buildStamp === null ? {} : { route: buildStamp }),
-    });
+    let runId: number;
+    try {
+      runId = store.startRun({
+        taskRef: ref.id,
+        leaseId: lease,
+        runner,
+        branch,
+        worktree: leased.worktree.path,
+        provider: spec.provider,
+        ...(spec.model === null ? {} : { model: spec.model }),
+        now: clock(),
+        ...(buildStamp === null ? {} : { route: buildStamp }),
+        custody: parkedChainTail !== null && liveCycle !== null ? { kind: "resume", parkedRun: parkedChainTail.id } : { kind: "base" },
+      });
+    } catch (error) {
+      await worktrees.release(leased.worktree.path, clock());
+      release(store, lease, clock());
+      dispatched.push({ id, outcome: "skipped", reason: "admission-refused", detail: error instanceof Error ? error.message : String(error) });
+      continue;
+    }
     if (leased.resumedFromRun !== undefined) {
       store.stampRun(runId, { parentRun: leased.resumedFromRun });
       store.addRunNote(
@@ -3069,20 +3127,6 @@ async function tickCommand(
         `Recovered the ${leased.recoveryKind === "completed" ? "completed source draft" : "work-in-progress draft"} from interrupted attempt #${leased.resumedFromRun}. This fresh attempt is reviewing and verifying it; the safety patch is retained.`,
         clock(),
       );
-    }
-
-    // The chain custody for this run (E3b/E3d): a parked chain tail hands
-    // custody to this successor through the PROVEN resume transfer (parent
-    // parked + binding + tail all re-proved in one transaction); otherwise
-    // a chain approval opens its fresh cycle bound to this run. A
-    // single-profile approval — every task until an operator configures a
-    // fallback chain — does nothing, so this is inert by default. Either
-    // road failing leaves the run UNBOUND, and the chain-entry dispatch
-    // proof refuses it before any money moves.
-    if (parkedChainTail !== null && liveCycle !== null) {
-      store.resumeChainCustody(parkedChainTail.id, runId, clock());
-    } else {
-      store.openChainCycleForDispatch(ref.id, id, runId, clock());
     }
 
     // The per-attempt dollar cap (v15): the scope's approved term and the

@@ -1,5 +1,56 @@
 # Progress
 
+**2026-09-11 — Plan-first and routed execution fail closed without getting
+stuck.** A real Codex plan-first run now finishes: `codex exec resume` has no
+`--sandbox` flag (0.145.0), so every structured correction and repair-by-
+resume was an immediately doomed turn that exited before it initialized — the
+resume now carries its sandbox as a configuration override (`-c
+sandbox_mode=…`), keeps one exact thread identity across the root and its
+corrections, and ingests a schema-valid plan; a resume the harness refuses by
+its own protocol, or never comes up for, ends the attempt with its typed
+reason (never a second resume of the doomed identity) and the retry after the
+planning backoff is a fresh planner root in a fresh session. Run admission
+dictates nothing any more: every routed planner, builder, scout, reviewer,
+fallback, and repair run PRESENTS the exact authority it holds
+(`routeAuthorityFor` puts it in the caller's hands), and a missing, forged,
+stale, or inexact legacy stamp — a `legacy` stamp must name the very sealed
+profile and its build pair; the bare word belongs to a task with no scope —
+opens no row, in words that say what would have had to be presented. Chain
+custody is proved and written in the run's own insert: base custody opens the
+cycle with the row, a parked-resume takes the parked tail's custody through
+the proven transfer (the tick now resumes a parked fallback entry as that
+entry, under `fallback` provenance, never as the sealed build leg), a repair
+inherits exactly its same-task parent's binding, a reviewer after a fallback
+takes none, and a binding that cannot be proved rolls the insert back.
+Fallback admission re-proves everything it is told against durable state —
+the task, the live cycle, the approved chain, the index, the entry digest,
+provider, model, auth mode, repair model, and `fallback` provenance — and a
+mismatch creates no run and consumes no edge. Parsing is strict everywhere
+authority is read: a model is an exact id, a repair model `inherit` or one, a
+turn bound or clock a positive whole number, a run row's chain index and auth
+mode read as no binding rather than the base entry or the subscription
+credential, and a chain-bound tail whose auth mode does not read ends as an
+ordinary end. One integrity projection (`routineIntegrity`) gates a standing
+order's state word, its consent door, its approval, and its firing before any
+mutation: an approval is live only when its frozen snapshot reads back,
+hashes with the stored terms to the signed digest, states no leg problem, and
+agrees with the sealed profile's build and repair pairs; a corrupt approved
+snapshot is not live, `routine refresh` withdraws such an approval even when
+the working agents are unchanged, and only the explicit reapproval fires
+again. The v24 data pass no longer re-runs on every upgrade — the epoch
+sentinel had made −47 read as "before v24" — so an authentic v47 database and
+an interrupted −47 one upgrade without re-running older passes, changing ids,
+backfilling a route, or approving anything, and then refresh → reapprove →
+fire succeed. Consent stays closed where no yes could bind: the inbox row
+reads *needs attention* instead of *review & approve* for an unreadable,
+missing, or newly unsealed legacy route, the routine's recovery is one
+labelled and described button with nothing to type, and the demo's seeded
+transcript plumbing is gone. The evidence under
+`evidence/explainable-risk-aware-phase-routing-v1/` is a real
+subscription-backed chat on a scratch plane with a manifest beside the
+1400×900 and 390×844 DPR-1 captures, plus the real Codex plan-first run's
+report.
+
 **2026-09-11 — Routing authority is closed at the row, the firing, and the
 door.** A task filed under agent routing never opens an unstamped run: a
 planner, builder, scout, reviewer, repair turn, or fallback that presents no

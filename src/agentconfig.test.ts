@@ -388,4 +388,21 @@ describe("route candidates and the task route (v47)", () => {
     expect(pinned).toMatchObject({ kind: "route", source: "live" });
     if (pinned?.kind === "route") expect(pinned.route.legs[0]).toMatchObject({ phase: "plan", provider: "claude", model: "opus", chosen: "pinned" });
   });
+
+  test("authority-integrity: an exact pin is an exact ID — a stored pin whose model is not argv-safe (a leading dash, whitespace, a control byte) files the route unreadable in words, never into a leg", () => {
+    exactInstall();
+    store.createTask({ id: "q", title: "q" }, T0);
+    const ref = store.refFor(BUILT_IN, "q");
+    store.placeTask(ref.id, "/repo");
+    for (const bad of ["-p", "son net", "opus\n", "x".repeat(129)]) {
+      store.raw().prepare("UPDATE task_ref SET plan_provider = 'claude', plan_model = ? WHERE id = ?").run(bad, ref.id);
+      const routed = routeOfTask(store, "q", store.refFor(BUILT_IN, "q"), T0);
+      expect(routed).toMatchObject({ kind: "unreadable", problem: expect.stringContaining("not an exact id") });
+      store.raw().prepare("UPDATE task_ref SET plan_provider = NULL, plan_model = NULL, agent_provider = 'claude', agent_model = ? WHERE id = ?").run(bad, ref.id);
+      const built = routeOfTask(store, "q", store.refFor(BUILT_IN, "q"), T0);
+      expect(built).toMatchObject({ kind: "unreadable", problem: expect.stringContaining("not an exact id") });
+      store.raw().prepare("UPDATE task_ref SET agent_provider = NULL, agent_model = NULL WHERE id = ?").run(ref.id);
+    }
+    expect(routeOfTask(store, "q", store.refFor(BUILT_IN, "q"), T0)).toMatchObject({ kind: "route", source: "live" });
+  });
 });

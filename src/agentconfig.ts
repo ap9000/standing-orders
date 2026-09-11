@@ -24,7 +24,7 @@ import { isProviderId, validateSpec, type AgentSpec, type Phase, type ProviderId
 import { contestantProfileOf, type Store, type TaskRef } from "./store.js";
 import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, chainFromJson, canonicalChainJson, type ChainEntry, type ExecutionProfile, type UnattendedPermissionMode } from "./scope.js";
 import { SUBSCRIPTION_CAPABLE } from "./keys.js";
-import { legOf, PHASES, recommendRoute, routeFromJson, routeProblems, sameSpec, type ExactSpec, type PhaseRoute, type RouteCandidate, type RouteCandidates, type RouteEvidenceKind } from "./phase-routing.js";
+import { exactModelId, legOf, PHASES, recommendRoute, routeFromJson, routeProblems, sameSpec, type ExactSpec, type PhaseRoute, type RouteCandidate, type RouteCandidates, type RouteEvidenceKind } from "./phase-routing.js";
 import type { AcceptanceCriterion } from "./scope.js";
 
 export const INSTALLATION_SCOPE = "installation";
@@ -382,6 +382,12 @@ export function exactPinOf(provider: string | null, model: string | null, phase:
   if (!isProviderId(provider)) return { ok: false, problem: `the task's ${phase} pin names unknown provider \`${provider}\`` };
   if (model === null || model === "") {
     return { ok: false, problem: phase === "plan" ? `the plan pin names ${provider} with no exact model — \`task plan <id> --provider ${provider} --model <model>\` names one` : `the task's build pin names ${provider} with no exact model — approvals bind exact routing` };
+  }
+  // An exact pin is an exact ID: a stored model that is not argv-safe (a
+  // leading dash, whitespace, a control byte) files the scope unresolved
+  // in words rather than riding into a route or a spawn.
+  if (!exactModelId(model)) {
+    return { ok: false, problem: `the task's ${phase} pin names ${provider} with a model that is not an exact id — re-pin it with an exact model id` };
   }
   return { ok: true, pin: { provider, model } };
 }

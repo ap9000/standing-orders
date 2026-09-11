@@ -31,7 +31,7 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { openStore, type Store } from "./store.js";
 import { addApprover, propose, approve, type AcceptanceCriterion } from "./scope.js";
-import { legOf, routeDigestOf } from "./phase-routing.js";
+import { legOf, routeDigestOf, type RouteStamp } from "./phase-routing.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 import { approveRoutine, fireRoutine } from "./routine.js";
@@ -51,6 +51,17 @@ const DEMO_PROFILE = {
   maxTurns: 1_000, repairMaxTurns: 4, timeoutSeconds: 1_200, timeoutKind: "idle" as const, repairTimeoutSeconds: 300,
   repairModel: "inherit",
 };
+
+
+/** The exact route authority a demo run presents at admission (v48 authority repair): the
+ * store dictates nothing, so every routed row here presents the sealed (or,
+ * for a planner, the working) leg exactly as a real dispatch would. */
+function presentedRoute(store: Store, taskRef: number, role: "builder" | "repair" | "planner" | "scout" | "reviewer"): { route: RouteStamp } | Record<string, never> {
+  const authority = store.routeAuthorityFor(taskRef, role);
+  if (authority === null) return {};
+  if (!authority.ok) throw new Error(`demo seed: ${authority.problem}`);
+  return { route: authority.stamp };
+}
 
 export type DemoSeed = {
   login: { name: string; password: string };
@@ -390,6 +401,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     branch: `standing-orders-plan/${planned}`,
     worktree: join(repos.web, ".demo-worktree-plan"),
     now: hoursAgo(3),
+    ...presentedRoute(store, plannedRef, "planner"),
   });
   storeEvidence(
     store,
@@ -420,6 +432,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     branch: `standing-orders/${asking}`,
     worktree: join(repos.api, ".demo-worktree"),
     now: hoursAgo(2),
+    ...presentedRoute(store, store.refFor("built-in", asking).id, "builder"),
   });
   store.saveDecision(
     {
@@ -481,6 +494,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     branch: `standing-orders-plan/${building}`,
     worktree: join(repos.api, ".demo-worktree-plan-2"),
     now: hoursAgo(19),
+    ...presentedRoute(store, buildingRef, "planner"),
   });
   const buildingRev1Artifact = storeEvidence(
     store,
@@ -502,6 +516,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     branch: `standing-orders/${building}`,
     worktree: join(repos.api, ".demo-worktree-1"),
     now: hoursAgo(2),
+    ...presentedRoute(store, buildingRef, "builder"),
   });
   const buildingRev2Artifact = storeEvidence(
     store,
@@ -548,6 +563,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     branch: `standing-orders/${building}`,
     worktree: join(repos.api, ".demo-worktree-2"),
     now: hoursAgo(0.4),
+    ...presentedRoute(store, buildingRef, "builder"),
   });
   store.setRunPlanRevision(liveRun, buildingRev2Id, "demo-authority-digest-unchanged");
   {
@@ -734,6 +750,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     branch: `standing-orders/${failed}`,
     worktree: join(repos.api, ".demo-worktree-4"),
     now: hoursAgo(6),
+    ...presentedRoute(store, store.refFor("built-in", failed).id, "builder"),
   });
   store.finishRun(failedRun, {
     outcome: "failed",
@@ -776,6 +793,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     branch: `standing-orders/${copyReview}`,
     worktree: join(repos.web, ".demo-worktree-5"),
     now: hoursAgo(4),
+    ...presentedRoute(store, store.refFor("built-in", copyReview).id, "builder"),
   });
   store.stampRun(copyReviewRun, { baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
   storeEvidence(
@@ -882,6 +900,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     branch: `standing-orders/${reviewed}`,
     worktree: join(repos.api, ".demo-worktree-4"),
     now: hoursAgo(5),
+    ...presentedRoute(store, store.refFor("built-in", reviewed).id, "builder"),
   });
   store.stampRun(reviewedRun, {
     baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
@@ -999,6 +1018,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     parentRun: reviewedRun,
     provider: "codex",
     now: hoursAgo(3.9),
+    ...presentedRoute(store, store.refFor("built-in", reviewed).id, "reviewer"),
   });
   const reviewedProofSha = store.getArtifact(reviewedProofArtifact)?.sha256 ?? null;
   const reviewedDiffSha = store.getArtifact(reviewedDiffArtifact)?.sha256 ?? "";

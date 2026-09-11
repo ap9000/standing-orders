@@ -13,7 +13,7 @@ import { openStore, type Store } from "./store.js";
 import { acquire, release } from "./claim.js";
 import { register, hashToken } from "./runner.js";
 import { addApprover, approvalOf, approve, propose } from "./scope.js";
-import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
+import { approveRoutine, fireRoutine, refreshRoutineAgents, routineDigestOf } from "./routine.js";
 import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
 import { createDecisionServer, SENSITIVE_INPUT, reviewPriorityOf, rankReviewQueue, withinSignedTouches, diffFileAnchor, reviewFilePriority, orderChangedFiles, type ReviewQueueFacts, type ReviewFileRow } from "./serve.js";
@@ -21,6 +21,21 @@ import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
 import { resolveRoutineAuthority, routeOfTask } from "./agentconfig.js";
 import { projectRoute, readinessWords } from "./phase-routing.js";
 import type { MateProviderAnswer } from "./converse.js";
+
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
@@ -95,6 +110,7 @@ describe("the web decision view", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
+      ...presented(store, taskRef, "builder"),
     });
 
     decisionId = store.saveDecision(
@@ -384,6 +400,7 @@ describe("the web decision view", () => {
       branch: "b",
       worktree: "/w",
       now: T0,
+      ...presented(store, taskRef, "builder"),
     });
     mkdirSync(join(evidenceRoot, String(foreignRun)), { recursive: true });
     const secret = Buffer.from("somebody else's diff", "utf8");
@@ -697,6 +714,7 @@ describe("the operations console", () => {
       branch: `standing-orders/x-${n}`,
       worktree: `/pool/x-${n}`,
       now: new Date(Date.now() - n * 60_000),
+      ...presented(store, taskRef, "builder"),
     });
 
   beforeEach(async () => {
@@ -757,10 +775,10 @@ describe("the operations console", () => {
   test("evidence-first task page: attempts ledger, spend by provider, the unmeasured said in words (M5.5/6)", async () => {
     store.createTask({ id: "t-spend", title: "spendy" }, T0);
     const ref = store.refFor("built-in", "t-spend").id;
-    const claudeRun = store.startRun({ taskRef: ref, leaseId: "l-s1", runner: "b-1", branch: "b", worktree: "/w", now: T0 });
+    const claudeRun = store.startRun({ taskRef: ref, leaseId: "l-s1", runner: "b-1", branch: "b", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
     store.recordUsage(claudeRun, { tokensIn: 41_000, tokensOut: 3_000, costUsd: 1.23 });
     store.finishRun(claudeRun, { outcome: "built", now: T0 });
-    const codexRun = store.startRun({ taskRef: ref, leaseId: "l-s2", runner: "b-1", branch: "b", worktree: "/w", provider: "codex", now: T0 });
+    const codexRun = store.startRun({ taskRef: ref, leaseId: "l-s2", runner: "b-1", branch: "b", worktree: "/w", provider: "codex", now: T0, ...presented(store, ref, "builder") });
     store.recordUsage(codexRun, { tokensIn: 80_000, tokensOut: 9_000 });
     store.finishRun(codexRun, { outcome: "failed", reason: "agent", now: T0 });
 
@@ -783,7 +801,7 @@ describe("the operations console", () => {
   test("an operator note lands beside the run, immutable and validated (M6)", async () => {
     store.createTask({ id: "t-note", title: "noted" }, T0);
     const ref = store.refFor("built-in", "t-note").id;
-    const run = store.startRun({ taskRef: ref, leaseId: "l-n1", runner: "b-1", branch: "b", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "l-n1", runner: "b-1", branch: "b", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
     store.finishRun(run, { outcome: "failed", reason: "agent", now: T0 });
 
     const cookie = await login();
@@ -817,7 +835,7 @@ describe("the operations console", () => {
     const ref = store.refFor("built-in", "t-lim").id;
     propose(store, { taskId: "t-lim", goal: "fix the rounding", outOfScope: "authentication", touches: ["src/payments/"], acceptance: [{ id: "c1", statement: "The rounding is fixed.", evidence: ["check"] }], now: T0 });
     sealScopeFixture(store, "t-lim", approverToken);
-    const run = store.startRun({ taskRef: ref, leaseId: "l-lim", runner: "b-1", branch: "so/t-lim", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "l-lim", runner: "b-1", branch: "so/t-lim", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
     store.finishRun(run, { outcome: "built", now: T0 });
     mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
     const patch = Buffer.from("diff --git a/p b/p\n+x\n", "utf8");
@@ -865,7 +883,7 @@ describe("the operations console", () => {
   test("review comments on the terminal diff seal into one revision task that must be approved (M6.8)", async () => {
     store.createTask({ id: "t-rev", title: "original work" }, T0);
     const ref = store.refFor("built-in", "t-rev").id;
-    const run = store.startRun({ taskRef: ref, leaseId: "l-r1", runner: "b-1", branch: "so/t-rev", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "l-r1", runner: "b-1", branch: "so/t-rev", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
     store.recordOutcomeFacts(run, { headRevision: "headsha1234", handoff: "did it" });
     store.finishRun(run, { outcome: "built", now: T0 });
     mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
@@ -934,7 +952,7 @@ describe("the operations console", () => {
     // Two published PRs: one quiet, one with an observed CI failure.
     store.createTask({ id: "t-pr1", title: "shipped one" }, T0);
     const ref1 = store.refFor("built-in", "t-pr1").id;
-    const run1 = store.startRun({ taskRef: ref1, leaseId: "l-p1", runner: "b-1", branch: "so/t-pr1", worktree: "/w", now: T0 });
+    const run1 = store.startRun({ taskRef: ref1, leaseId: "l-p1", runner: "b-1", branch: "so/t-pr1", worktree: "/w", now: T0, ...presented(store, ref1, "builder") });
     store.finishRun(run1, { outcome: "built", now: T0 });
     store.setTaskState("t-pr1", "done", T0);
     const pub1 = store.createPublicationIntent(
@@ -949,7 +967,7 @@ describe("the operations console", () => {
 
     store.createTask({ id: "t-pr2", title: "shipped two" }, T0);
     const ref2 = store.refFor("built-in", "t-pr2").id;
-    const run2 = store.startRun({ taskRef: ref2, leaseId: "l-p2", runner: "b-1", branch: "so/t-pr2", worktree: "/w", now: T0 });
+    const run2 = store.startRun({ taskRef: ref2, leaseId: "l-p2", runner: "b-1", branch: "so/t-pr2", worktree: "/w", now: T0, ...presented(store, ref2, "builder") });
     store.finishRun(run2, { outcome: "built", now: T0 });
     store.setTaskState("t-pr2", "done", new Date(T0.getTime() - 60_000));
     const pub2 = store.createPublicationIntent(
@@ -1107,6 +1125,11 @@ describe("the operations console", () => {
       chat: await (await fetch(url("/chat?task=t-c"), { headers: { cookie } })).text(),
       next: await (await fetch(url("/next"), { headers: { cookie } })).text(),
     });
+    const inboxRow = async () => {
+      const inbox = await (await fetch(url("/"), { headers: { cookie } })).text();
+      const start = inbox.indexOf('href="/t/t-c"');
+      return start === -1 ? "" : inbox.slice(start, inbox.indexOf("</a>", start));
+    };
     const nonceOf = (html: string) => /name="nonce" value="([0-9a-f]{32})"/.exec(html)?.[1] ?? null;
     const closed = (html: string) => {
       expect(nonceOf(html)).toBeNull();
@@ -1114,13 +1137,15 @@ describe("the operations console", () => {
       expect(html).not.toMatch(/approve (&amp; start|this scope)/i);
       expect(html).toContain("consent-closed");
     };
-    // Open first: the door mints on every surface.
+    // Open first: the door mints on every surface, and the inbox offers the act.
     let pages = await surfaces();
     expect(nonceOf(pages.task)).not.toBeNull();
     expect(nonceOf(pages.chat)).not.toBeNull();
     expect(nonceOf(pages.next)).not.toBeNull();
+    expect(await inboxRow()).toContain("review &amp; approve");
 
-    // Unreadable route bytes: closed everywhere, in words, with the road.
+    // Unreadable route bytes: closed everywhere, in words, with the road —
+    // the inbox row names the attention it needs and offers no approve act.
     store.raw().prepare("UPDATE task_scope SET proposed_route_json = '{\"version\":1' WHERE task_id = 't-c'").run();
     pages = await surfaces();
     for (const html of Object.values(pages)) {
@@ -1129,6 +1154,15 @@ describe("the operations console", () => {
       expect(html).toContain("re-file the scope");
     }
     expect(pages.task).toContain('href="/t/t-c#scope"');
+    let row = await inboxRow();
+    expect(row).not.toContain("review &amp; approve");
+    expect(row).toContain("needs attention: the agents on file can’t be read");
+    // MISSING route bytes on a routed row (no working route at all): the
+    // same closed door on every surface.
+    store.raw().prepare("UPDATE task_scope SET proposed_route_json = NULL WHERE task_id = 't-c'").run();
+    pages = await surfaces();
+    for (const html of Object.values(pages)) closed(html);
+    expect(await inboxRow()).toContain("needs attention");
     // The POST road is closed too: no nonce was rendered, so none is accepted;
     // and the seal itself refuses an unreadable route.
     const forced = await post("/t/t-c/approve", cookie, { csrf, nonce: "", digest, token: approverToken });
@@ -1143,6 +1177,9 @@ describe("the operations console", () => {
       closed(html);
       expect(html).toContain("predates agent routing");
     }
+    row = await inboxRow();
+    expect(row).not.toContain("review &amp; approve");
+    expect(row).toContain("needs attention: this scope predates agent routing");
     expect(store.sealScopeApproval("t-c", "alex", T0)).toBe(false);
 
     // Re-filing routes it again: the door opens, the nonce is back.
@@ -1151,6 +1188,7 @@ describe("the operations console", () => {
     expect(nonceOf(pages.task)).not.toBeNull();
     expect(pages.task).toContain('type="password"');
     expect(nonceOf(pages.next)).not.toBeNull();
+    expect(await inboxRow()).toContain("review &amp; approve");
   });
 
   test("approval is step-up: the session alone never approves", async () => {
@@ -1617,6 +1655,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     const run = store.startRun({
       taskRef: ref, leaseId: `lease-${id}`, runner: "b1",
       branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: T0,
+      ...presented(store, ref, "builder"),
     });
     const decision = store.saveDecision(
       {
@@ -1836,6 +1875,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
       branch: "standing-orders/t-live", worktree: "/pool/standing-orders-t-live-abc",
       // The sealed route's exact model — any other opens no run (v48).
       model: "sonnet", now: new Date(now.getTime() - 12 * 60_000),
+      ...presented(store, ref, "builder"),
     });
     store.createTask({ id: "t-ready", title: "all set" }, T0);
     store.saveScope({
@@ -2012,6 +2052,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const run = store.startRun({
       taskRef: ref, leaseId: "plan-lease", runner: "b", role: "planner",
       branch: "standing-orders-plan/t-plan", worktree: "/pool/plan", now: new Date(),
+      ...presented(store, ref, "planner"),
     });
     const content = Buffer.from([
       "## Approach",
@@ -2091,6 +2132,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const plannerRun = store.startRun({
       taskRef: ref, leaseId: "plan-lease-adapt", runner: "b", role: "planner",
       branch: "standing-orders-plan/t-adapt", worktree: "/pool/plan-adapt", now: T0,
+      ...presented(store, ref, "planner"),
     });
     const rev1Text = [
       "## Approach", "Guard the change behind a feature flag.",
@@ -2117,6 +2159,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const buildRun = store.startRun({
       taskRef: ref, leaseId: "build-lease-adapt", runner: "b", role: "builder",
       branch: "standing-orders/t-adapt", worktree: "/pool/build-adapt", now: T0,
+      ...presented(store, ref, "builder"),
     });
     const rev2Text = rev1Text
       .replace("1. Add the guard.", "1. Confirm the flag default (already flipped).")
@@ -2175,6 +2218,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const buildRun2 = store.startRun({
       taskRef: ref, leaseId: "build-lease-adapt-2", runner: "b", role: "builder",
       branch: "standing-orders/t-adapt-2", worktree: "/pool/build-adapt-2", now: T0,
+      ...presented(store, ref, "builder"),
     });
     const rev3Content = Buffer.from(rev2Text.replace("## Approach", "## Approach\nRevised once more."), "utf8");
     mkdirSync(join(evidenceRoot, String(buildRun2)), { recursive: true });
@@ -2236,6 +2280,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const plannerRun = store.startRun({
       taskRef: ref, leaseId: "plan-lease-reject", runner: "b", role: "planner",
       branch: "standing-orders-plan/t-reject", worktree: "/pool/plan-reject", now: T0,
+      ...presented(store, ref, "planner"),
     });
     const rev1Content = Buffer.from(
       ["## Approach", "Do it plainly.", "## Milestones", "1. Do it.", "## Dependencies", "- None found.", "## Risks", "- None found.", "## Proof", "- Run the suite.", ""].join("\n"),
@@ -2254,6 +2299,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const buildRun = store.startRun({
       taskRef: ref, leaseId: "build-lease-reject", runner: "b", role: "builder",
       branch: "standing-orders/t-reject", worktree: "/pool/build-reject", now: T0,
+      ...presented(store, ref, "builder"),
     });
     const rev2Content = Buffer.from(rev1Content.toString("utf8").replace("Do it plainly.", "Do it carefully."), "utf8");
     mkdirSync(join(evidenceRoot, String(buildRun)), { recursive: true });
@@ -2695,6 +2741,28 @@ describe("routines — standing orders on the console", () => {
     expect(page).toContain("cannot be read");
     expect(page).not.toContain('type="password"');
     expect(nonceOf(page)).toBeNull();
+    // The recovery is ONE plain-language act with accessible, neutral
+    // controls: a labelled, described button — never a danger verb, never
+    // a password — and no seeded transcript anywhere near it.
+    expect(page).toMatch(/<form method="post" action="\/routines\/\d+\/refresh" class="card approve-form agents-recovery" id="agents-recovery" aria-labelledby="agents-recovery-title">/);
+    expect(page).toContain('<p id="agents-recovery-why" class="recap">');
+    expect(page).toContain('<button type="submit" aria-describedby="agents-recovery-why">Refresh agents</button>');
+    expect(page.slice(page.indexOf('id="agents-recovery"'), page.indexOf("</form>", page.indexOf('id="agents-recovery"')))).not.toContain('class="danger"');
+    expect(page).not.toContain("demoTranscript");
+    // A snapshot that READS but no longer hashes to the approval (a rewritten
+    // review leg): not live either — closed in its own words, same road.
+    const routed = refreshRoutineAgents(store, id, T0);
+    expect(routed.ok).toBe(true);
+    const verify = approveRoutine(store, id, "alex", T0, store.getRoutine(id)!.digest, approverToken);
+    expect(verify.ok).toBe(true);
+    const approvedJson = String((store.raw().prepare("SELECT approved_route_json AS j FROM routine WHERE id = ?").get(id) as { j: string }).j);
+    store.raw().prepare("UPDATE routine SET approved_route_json = ? WHERE id = ?").run(approvedJson.replace('"model":"sonnet","phase":"review"', '"model":"opus","phase":"review"'), id);
+    page = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
+    expect(page).toContain("do not verify");
+    expect(page).not.toContain('type="password"');
+    expect(page).not.toContain("run now");
+    expect(nonceOf(page)).toBeNull();
+    expect(page).toContain('id="agents-recovery"');
     // The refresh act: a session's own POST, nothing approved by it.
     const refreshed = await fetch(url(`/routines/${id}/refresh`), {
       method: "POST",
@@ -2705,7 +2773,8 @@ describe("routines — standing orders on the console", () => {
     expect(refreshed.status).toBe(303);
     const after = store.getRoutine(id)!;
     expect(after.route).not.toBeNull();
-    expect(after.approvedDigest).not.toBe(after.digest);
+    // The unverified approval was WITHDRAWN by the refresh, working data unchanged.
+    expect(after).toMatchObject({ approvedDigest: null, approvedRoute: null, nextFireAt: null });
     expect(fireRoutine(store, id, new Date(T0.getTime() + 2 * 3_600_000))).toMatchObject({ ok: false, reason: "not-approved" });
     // Now the exact agents are restated above a password, under a fresh nonce.
     page = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
@@ -2870,7 +2939,7 @@ describe("/next — clearing the queue one thing at a time", () => {
     // One open question and one unapproved scope wait.
     store.createTask({ id: "t-q", title: "asked" }, T0);
     const qRef = store.refFor("built-in", "t-q").id;
-    const run = store.startRun({ taskRef: qRef, leaseId: "l1", runner: "b", branch: "br", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: qRef, leaseId: "l1", runner: "b", branch: "br", worktree: "/w", now: T0, ...presented(store, qRef, "builder") });
     store.saveDecision({
       run, urgency: "blocking", recap: "Two ways to cache.", question: "Per-user or global?",
       options: [
@@ -2986,7 +3055,7 @@ describe("since you last looked", () => {
       // Work concludes while the operator is away.
       store.createTask({ id: "t-d", title: "w" }, T0);
       const ref = store.refFor("built-in", "t-d").id;
-      const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b", branch: "br", worktree: "/w", now: clockBox.now });
+      const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b", branch: "br", worktree: "/w", now: clockBox.now, ...presented(store, ref, "builder") });
       store.finishRun(run, { outcome: "built", now: clockBox.now });
 
       // A fragment poll in the open tab does NOT count as looking.
@@ -3210,6 +3279,7 @@ describe("the first-run checklist (adoption track, step 3)", () => {
       branch: "standing-orders/w-1",
       worktree: "/pool/w-1",
       now: T0,
+      ...presented(store, store.refFor("built-in", "w-1").id, "builder"),
     });
     store.finishRun(run, { outcome: "built", committed: true, now: new Date("2026-08-14T13:00:00.000Z") });
     const html = await (await fetch(url("/"), { headers: { cookie } })).text();
@@ -3839,6 +3909,7 @@ describe("the fleet — runner lanes as the agents × projects surface", () => {
       taskRef: ref, leaseId: taken.claim.leaseId, runner: "builder-1",
       branch: "standing-orders/t-live", worktree: "/pool/t-live",
       model: "claude", now: new Date(now.getTime() - 5 * 60_000),
+      ...presented(store, ref, "builder"),
     });
     // A queued reservation on builder-2.
     store.createTask({ id: "t-queued", title: "reserved work" }, T0);
@@ -4013,6 +4084,7 @@ describe("the workbench (attended A1) and the live substrate", () => {
       branch: "standing-orders/building-now",
       worktree: "/pool/building-now",
       now: new Date(),
+      ...presented(store, ref, "builder"),
     });
     store.setRunPhase(run, "agent-running");
     store.setTaskState("building-now", "running", T0);
@@ -4136,6 +4208,7 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     liveRun = store.startRun({
       taskRef: aliveRef, leaseId: aliveTaken.claim.leaseId, runner: "night-shift-1",
       branch: "standing-orders/alive", worktree: "/pool/alive", now: new Date(),
+      ...presented(store, aliveRef, "builder"),
     });
     store.setRunPhase(liveRun, "agent-running");
     store.setTaskState("alive", "running", T0);
@@ -4152,6 +4225,7 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     orphanRun = store.startRun({
       taskRef: orphanRef, leaseId: orphanTaken.claim.leaseId, runner: "night-shift-2",
       branch: "standing-orders/orphan", worktree: "/pool/orphan", now: new Date(Date.now() - 7_200_000),
+      ...presented(store, orphanRef, "builder"),
     });
     store.setTaskState("orphan", "running", T0);
 
@@ -4736,6 +4810,7 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
       branch: "standing-orders/peek-1",
       worktree,
       now: T0,
+      ...presented(store, taskRef, "builder"),
     });
     const baseSha = "b".repeat(40);
     store.stampRun(runId, { baseRevision: baseSha });
@@ -5219,7 +5294,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
   test("a decision's option-per-card forms are never sticky-wrapped", async () => {
     store.createTask({ id: "t-q", title: "asked" }, T0);
     const ref = store.refFor("built-in", "t-q").id;
-    const run = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b", branch: "br", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b", branch: "br", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
     store.saveDecision({
       run, urgency: "blocking", recap: "Two ways.", question: "Which way?",
       options: [
@@ -5373,6 +5448,7 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       runId = store.startRun({
         taskRef, leaseId: "l-review", runner: "builder-1",
         branch: "so/t-review", worktree: "/pool/t review", now: T0,
+        ...presented(store, taskRef, "builder"),
       });
       const patch = [
         "diff --git a/src/a.ts b/src/a.ts",
@@ -5434,6 +5510,7 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       const other = store.startRun({
         taskRef: store.refFor("built-in", "t-review").id, leaseId: "l-other", runner: "someone-else",
         branch: "so/other", worktree: "/pool/other", now: T0,
+        ...presented(store, store.refFor("built-in", "t-review").id, "builder"),
       });
       store.finishRun(other, { outcome: "built", committed: true, now: T0 });
       const cookie = await login();
@@ -6236,7 +6313,7 @@ describe("the continuation ceremony (Phase 2E, A4)", () => {
          VALUES ('lease-fin', ?, 1, 'mac-a', ?, ?, ?, ?)`,
       )
       .run(ref.id, T1.toISOString(), new Date(T1.getTime() + 60_000).toISOString(), T1.toISOString(), new Date(T1.getTime() + 50_000).toISOString());
-    parentRun = store.startRun({ taskRef: ref.id, leaseId: "lease-fin", runner: "mac-a", branch: "so/t-fin", worktree: "/w", now: T1 });
+    parentRun = store.startRun({ taskRef: ref.id, leaseId: "lease-fin", runner: "mac-a", branch: "so/t-fin", worktree: "/w", now: T1, ...presented(store, ref.id, "builder") });
     store.recordOutcomeFacts(parentRun, { headRevision: "b".repeat(40) });
     store.finishRun(parentRun, { outcome: "built", committed: true, now: T1 });
     server = createDecisionServer({
@@ -6469,6 +6546,7 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     const run = store.startRun({
       taskRef: ref, leaseId: `lease-${id}`, runner: "b1",
       branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: T0,
+      ...presented(store, ref, "builder"),
     });
     return store.saveDecision(
       {
@@ -6496,6 +6574,7 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     const run = store.startRun({
       taskRef: ref, leaseId: `lease-${id}`, runner: "b1", provider: "claude",
       branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now,
+      ...presented(store, ref, "builder"),
     });
     store.stampProviderStart(run, now);
     if (costUsd !== null || tokens !== undefined) {
@@ -6671,6 +6750,7 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     const run = store.startRun({
       taskRef: ref, leaseId: "lease-free", runner: "b1",
       branch: "standing-orders/d-free", worktree: "/pool/d-free", now: T0,
+      ...presented(store, ref, "builder"),
     });
     store.saveDecision(
       {
@@ -6752,6 +6832,7 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     store.startRun({
       taskRef: openRef, leaseId: "lease-open", runner: "b1",
       branch: "standing-orders/r-open", worktree: "/pool/r-open", now: new Date(),
+      ...presented(store, openRef, "builder"),
     });
 
     const since = new Date(Date.now() - 24 * 3_600_000).toISOString();
@@ -7057,6 +7138,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const run = store.startRun({
       taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", provider, ...(model === undefined ? {} : { model }),
       branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: new Date(Date.now() - 7 * 60_000),
+      ...presented(store, ref, "builder"),
     });
     store.setRunPhase(run, "agent-running");
     store.setTaskState(id, "running", T0);
@@ -7068,6 +7150,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const run = store.startRun({
       taskRef: ref, leaseId: `lease-${id}-${outcome}-${costUsd ?? "u"}`, runner: "night-shift-1", provider: "claude",
       branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: T0,
+      ...presented(store, ref, "builder"),
     });
     store.stampProviderStart(run, T0);
     store.recordUsage(run, { ...tokens, ...(costUsd === null ? {} : { costUsd }) });
@@ -7340,7 +7423,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     store.placeTask(ref, "/repo/main");
     propose(store, { taskId: "t-review", goal: "wire the guard", acceptance: [{ id: "c1", statement: "it works", how: null, evidence: ["manual-review"] }], now: T0 });
     sign("t-review");
-    const run = store.startRun({ taskRef: ref, leaseId: "l-review", runner: "night-shift-1", provider: "claude", branch: "b", worktree: "/wt", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "l-review", runner: "night-shift-1", provider: "claude", branch: "b", worktree: "/wt", now: T0, ...presented(store, ref, "builder") });
     store.finishRun(run, { outcome: "built", committed: true, now: T0 });
     store.saveProofVerdict(
       run,
@@ -7548,6 +7631,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const quiet = store.startRun({
       taskRef: ref2, leaseId: "lease-quiet", runner: "night-shift-1", provider: "claude",
       branch: "standing-orders/t-quiet", worktree: "/pool/t-quiet", now: T0,
+      ...presented(store, ref2, "builder"),
     });
     store.stampProviderStart(quiet, T0);
     store.recordUsage(quiet, { costUsd: 0.4 });
@@ -7745,7 +7829,7 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     store.createTask({ id: "t-n", title: "asks a question" }, T0);
     const ref = store.refFor("built-in", "t-n").id;
     store.placeTask(ref, "/repo/main");
-    const run = store.startRun({ taskRef: ref, leaseId: "lease-n", runner: "b1", branch: "standing-orders/t-n", worktree: "/pool/t-n", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "lease-n", runner: "b1", branch: "standing-orders/t-n", worktree: "/pool/t-n", now: T0, ...presented(store, ref, "builder") });
     store.saveDecision(
       {
         run, urgency: "blocking", recap: "why it stopped", question: "Which way?",
@@ -8288,7 +8372,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const scope = store.getScope("a");
     if (scope === null) throw new Error("no scope");
     expect(approve(store, "a", "alex", clockNow, scope.digest, approverToken)).toMatchObject({ ok: true });
-    const run = store.startRun({ taskRef: ref, leaseId: "decision-lease", runner: "builder", branch: "standing-orders/a", worktree: "/tmp/a", now: clockNow });
+    const run = store.startRun({ taskRef: ref, leaseId: "decision-lease", runner: "builder", branch: "standing-orders/a", worktree: "/tmp/a", now: clockNow, ...presented(store, ref, "builder") });
     const decision = store.saveDecision({
       run,
       urgency: "blocking",
@@ -8576,7 +8660,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const minted = mintCoordinator(store, { name: "planner-bot", repos: [repoDir], by: "alex", now: clockNow });
     if (!minted.ok) throw new Error("mint");
     sealScopeFixture(store, "a", approverToken);
-    const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: clockNow });
+    const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: clockNow, ...presented(store, store.refFor("built-in", "a").id, "builder") });
     store.saveDecision({ run, urgency: "blocking", recap: "RECAP-CANARY", question: "Ship it?", options: [{ id: "go", label: "Ship", consequence: "it ships", reversible: false }], recommendation: "go" }, clockNow);
     expect(proposeAsCoordinator(store, minted.token, "next", { ref: "b" }, clockNow)).toMatchObject({ ok: true, id: 1 });
     expect(proposeAsCoordinator(store, minted.token, "answer", { decision: 1, option: "go", rationale: "tests are green" }, clockNow, { readDecisions: new Set([1]) })).toMatchObject({ ok: true, id: 2 });
@@ -8696,7 +8780,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
 
     // The report lands as evidence; the page renders it only once verified.
     sealScopeFixture(store, taskId, approverToken);
-    const run = store.startRun({ taskRef: ref.id, leaseId: "scout-lease", runner: "b", role: "scout", branch: "standing-orders-scout/x", worktree: "/pool/scout", now: new Date() });
+    const run = store.startRun({ taskRef: ref.id, leaseId: "scout-lease", runner: "b", role: "scout", branch: "standing-orders-scout/x", worktree: "/pool/scout", now: new Date(), ...presented(store, ref.id, "scout") });
     const report = { title: "The cookie races the assertion", summary: "The read wins under load.", report: "## Findings\nAsync cookie in src/session.ts.\n", followUps: [{ title: "Await the cookie", goal: "Wait for it before asserting." }] };
     const content = Buffer.from(JSON.stringify(report, null, 2), "utf8");
     const { mkdirSync: mkdirS, writeFileSync: writeS } = await import("node:fs");
@@ -9016,7 +9100,7 @@ describe("/peek: every live agent in the console (peek)", () => {
     register(store, { name: "night-shift-1", host: "host", capacity: 2, repos: ["/repo/main"], now: new Date(), newToken: () => "tok-peek" });
     const taken = acquire(store, ref, "night-shift-1", { token: "tok-peek", now: new Date(), ttlMs: 60 * 60_000 });
     if (!taken.ok) throw new Error("claim failed");
-    const run = store.startRun({ taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", role: "builder", provider: "codex", branch: "standing-orders/t-peek", worktree: "/pool/t-peek", now: new Date() });
+    const run = store.startRun({ taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", role: "builder", provider: "codex", branch: "standing-orders/t-peek", worktree: "/pool/t-peek", now: new Date(), ...presented(store, ref, "builder") });
     store.setRunPhase(run, "agent-running");
     const log = openLiveLog(evidenceRoot, run);
     log?.observe({ type: "item.completed", item: { type: "agent_message", text: "Reading the retry loop now." } });
@@ -9182,7 +9266,7 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     store.createTask({ id: "t-ask", title: "asks a question" }, T0);
     const ref = store.refFor("built-in", "t-ask").id;
     store.placeTask(ref, "/repo/main");
-    const run = store.startRun({ taskRef: ref, leaseId: "lease-ask", runner: "b1", branch: "standing-orders/t-ask", worktree: "/pool/t-ask", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "lease-ask", runner: "b1", branch: "standing-orders/t-ask", worktree: "/pool/t-ask", now: T0, ...presented(store, ref, "builder") });
     store.saveDecision(
       {
         run, urgency: "blocking", recap: "why it stopped", question: "Which way?",
@@ -9434,7 +9518,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     } = {},
   ): number => {
     const when = parts.finishedAt ?? T0;
-    const run = store.startRun({ taskRef: ref, leaseId: `lease-${id}`, runner: "night-shift-1", provider: "claude", branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: new Date(when.getTime() - 60_000) });
+    const run = store.startRun({ taskRef: ref, leaseId: `lease-${id}`, runner: "night-shift-1", provider: "claude", branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: new Date(when.getTime() - 60_000), ...presented(store, ref, "builder") });
     if (parts.patch !== undefined) {
       storeEvidence(store, evidenceRoot, run, "terminal-diff", "terminal-diff.patch", Buffer.from(parts.patch, "utf8"), "git diff --no-ext-diff 0000..HEAD (exit 0)", when, { captureStatus: "ok" });
     }
@@ -9668,6 +9752,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       branch: "standing-orders/t-result-lineage",
       worktree: "/pool/t-result-lineage",
       now: new Date(T0.getTime() + 1),
+      ...presented(store, ref, "repair"),
     });
     store.finishRun(correction, {
       outcome: "no-change",
@@ -9860,7 +9945,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
         matrix: [row("c1", "It works", "failed", [{ kind: "check", ref: "npm test" }, { kind: "screenshot", ref: "evidence/x.png" }], ["contradicted"], { judgement: "contradicts", note: "the guard is a TODO", author: "reviewer:codex" })],
       },
     });
-    const reviewerRun = store.startRun({ taskRef: richRef, leaseId: "lease-reviewer", runner: "night-shift-1", role: "reviewer", parentRun: rich, provider: "codex", now: T0 });
+    const reviewerRun = store.startRun({ taskRef: richRef, leaseId: "lease-reviewer", runner: "night-shift-1", role: "reviewer", parentRun: rich, provider: "codex", now: T0, ...presented(store, richRef, "reviewer") });
     store.stampProviderStart(reviewerRun, T0);
     const richPatch = store.artifactsFor(rich).find(one => one.kind === "terminal-diff");
     if (richPatch === undefined) throw new Error("no patch");

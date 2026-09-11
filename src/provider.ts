@@ -449,12 +449,17 @@ function claudeParse(stdout: string): ParsedEnvelope {
 }
 
 /**
- * Codex argv. The brief is the positional prompt; resume is a subcommand.
- * Auto uses `workspace-write` because the protocol REQUIRES workspace
- * writes (the mailbox, the handoff). Full access uses Codex's one explicit
- * combined bypass flag; that exact choice came from the sealed profile.
- * Never `--ephemeral`: repair resumes.
+ * The sandbox on a RESUME rides as a config override (`-c sandbox_mode=…`),
+ * never as `--sandbox`: `codex exec resume` (0.145.0, probed 2026-09-11)
+ * has no `--sandbox` flag and exits 2 before initializing when handed one
+ * — every structured correction and repair-by-resume was an immediately
+ * doomed turn that never echoed its thread. The override names the same
+ * exact mode the fresh turn was sealed with; the bypass flag and every
+ * `-c` override are accepted by both subcommands.
  */
+const codexSandboxArgv = (mode: "read-only" | "workspace-write", resuming: boolean): string[] =>
+  resuming ? ["-c", `sandbox_mode="${mode}"`] : ["--sandbox", mode];
+
 /**
  * Codex's own fail-closed equivalent of `CLAUDE_REVIEW_ISOLATION_ARGV`:
  * read-only sandbox rather than the ordinary `workspace-write` (a reviewer
@@ -465,10 +470,9 @@ function claudeParse(stdout: string): ParsedEnvelope {
  * servers, exactly the surface `--strict-mcp-config` closes for claude —
  * ignored outright.
  */
-const CODEX_REVIEW_ISOLATION_ARGV: readonly string[] = [
+const CODEX_REVIEW_ISOLATION_ARGV = (resuming: boolean): readonly string[] => [
   "--ignore-user-config",
-  "--sandbox",
-  "read-only",
+  ...codexSandboxArgv("read-only", resuming),
   "-c",
   'approval_policy="never"',
   "-c",
@@ -483,20 +487,30 @@ const CODEX_REVIEW_ISOLATION_ARGV: readonly string[] = [
   "apps._default.enabled=false",
 ];
 
-const codexArgv = (extra: readonly string[]) => (invocation: Invocation): string[] => [
-  "exec",
-  ...(invocation.resumeSession === null ? [] : ["resume", invocation.resumeSession]),
-  "--json",
-  "--skip-git-repo-check",
-  ...(invocation.phase === "review"
-    ? CODEX_REVIEW_ISOLATION_ARGV
-    : invocation.skipPermissions
-      ? ["--dangerously-bypass-approvals-and-sandbox"]
-      : ["--sandbox", "workspace-write"]),
-  ...(invocation.model === null ? [] : ["-m", invocation.model]),
-  ...extra,
-  invocation.brief,
-];
+/**
+ * Codex argv. The brief is the positional prompt; resume is a subcommand.
+ * Auto uses `workspace-write` because the protocol REQUIRES workspace
+ * writes (the mailbox, the handoff). Full access uses Codex's one explicit
+ * combined bypass flag; that exact choice came from the sealed profile.
+ * Never `--ephemeral`: repair resumes.
+ */
+const codexArgv = (extra: readonly string[]) => (invocation: Invocation): string[] => {
+  const resuming = invocation.resumeSession !== null;
+  return [
+    "exec",
+    ...(invocation.resumeSession === null ? [] : ["resume", invocation.resumeSession]),
+    "--json",
+    "--skip-git-repo-check",
+    ...(invocation.phase === "review"
+      ? CODEX_REVIEW_ISOLATION_ARGV(resuming)
+      : invocation.skipPermissions
+        ? ["--dangerously-bypass-approvals-and-sandbox"]
+        : codexSandboxArgv("workspace-write", resuming)),
+    ...(invocation.model === null ? [] : ["-m", invocation.model]),
+    ...extra,
+    invocation.brief,
+  ];
+};
 
 /**
  * The retained JSONL lines (the streaming transport keeps only these):

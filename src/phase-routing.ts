@@ -66,6 +66,11 @@ export const MODEL_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 function exactModel(v: unknown): v is string {
   return typeof v === "string" && MODEL_ID_SHAPE.test(v);
 }
+/** The same exactness for callers outside this policy (the profile
+ * rehydrator): one shape, one definition. */
+export function exactModelId(v: unknown): v is string {
+  return exactModel(v);
+}
 
 export const ROUTE_VERSION = 1;
 /** The durable route ERA a scope row carries once it was filed under this

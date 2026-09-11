@@ -484,17 +484,38 @@ holds — the sealed route's digest and that phase's exact leg, the one approved
 fallback-chain entry the run is bound to for a `fallback` run (two entries
 that share a provider and model but differ in auth mode or repair model are
 different authorities, and an ambiguous pair proves nothing), or a proven
-pre-routing row for `legacy`. A task filed under routing never opens an
-unstamped run: a planner, builder, scout, reviewer, repair turn, or fallback
-that presents no stamp gets the one its governing authority dictates, proved
-against its own agent — or no row at all. The chain binding of a repair or
-correction child rides its own insert, so a stamp is held to exactly the
-entry the child spends under. A stamp that cannot be proved opens no run, and
-a run admitted under a route the scope has since re-sealed away refuses to
-spend. Malformed authority — corrupt route, profile, chain, or fallback JSON,
-a model id that is not one — fails closed in words and never shrinks: a
-fallback row that cannot be read files the scope unresolved rather than
-sealing a single profile nobody configured.
+pre-routing row for `legacy`, whose stamp must name the very sealed profile
+(and, for a build or repair, its exact pair) — the bare word `legacy` belongs
+only to a task with no scope. A task filed under routing never opens an
+unstamped run, and the store dictates nothing: every planner, builder, scout,
+reviewer, repair turn, and fallback **presents** the exact authority it holds
+(`routeAuthorityFor` puts it in the caller's hands, in words), and a missing,
+forged, stale, or inexact stamp opens no row — the refusal names what would
+have had to be presented. Chain custody is proved and written in the same
+insert: base custody opens the task's fallback cycle with the row, a
+parked-resume takes the parked tail's custody through the proven transfer,
+a repair turn inherits exactly its same-task parent's binding, and a fallback
+entry is admitted only when everything it is told — the task, the live cycle,
+the approved chain, the index, the entry digest, provider, model, auth mode,
+repair model, and `fallback` provenance — re-proves against durable state; a
+binding that cannot be proved rolls the insert back, and a mismatch creates no
+run and consumes no edge. A reviewer after a fallback spawns under the review
+leg and takes no custody. A run admitted under a route the scope has since
+re-sealed away refuses to spend. Malformed authority — corrupt route, profile,
+chain, or fallback JSON, a model id that is not one, a turn bound or clock
+that is not a positive whole number, a run row whose chain index or auth mode
+does not read — fails closed in words and never shrinks: a fallback row that
+cannot be read files the scope unresolved rather than sealing a single profile
+nobody configured, and an unreadable binding is no binding, never the base
+entry or the subscription credential.
+
+Codex resumes carry their sandbox as a configuration override (`-c
+sandbox_mode=…`): `codex exec resume` has no `--sandbox` flag, so a structured
+correction or repair-by-resume handed one exited before it initialized. A
+resume the harness refuses by its own protocol, or never comes up for, ends
+the planning attempt with its typed reason — the recorded session is not
+resumed twice — and the next attempt, after the planning backoff, is a fresh
+planner root in a fresh session.
 
 A **routine** freezes its agents too. Filing a standing order resolves its
 four-role route from the configuration of that moment and binds it into the
@@ -502,13 +523,23 @@ digest you sign; approval seals the snapshot, and every firing re-hashes that
 snapshot against the approval, holds the build and repair legs to the sealed
 profile's exact provider and model, copies it onto the instance verbatim, and
 rolls the whole firing back unless the instance seals under it — a later
-`config set` cannot re-route a firing. A routine approved before agents were
-frozen (an upgrade from before v48), or whose snapshot cannot be read, fires
-nothing and pages once; its page and `routine show` say so and offer the one
-road: `standing-orders routine refresh <name>` (or the page's **Refresh
-agents** button) re-resolves the agents from today's configuration and
-approves nothing — you read the exact agents it now names and approve it
-again with your password, and only that yes fires the new snapshot.
+`config set` cannot re-route a firing. One integrity projection answers
+every question about a standing order's agents — what the page says, whether
+a password may be minted, whether a yes may land, whether a firing may proceed
+— read before any write: an approval is *live* only when its frozen snapshot
+reads back, hashes with the stored terms to the digest the approver signed,
+states no leg problem, and agrees with the sealed profile's build and repair
+pairs. A routine approved before agents were frozen (an upgrade from before
+v48), one whose snapshot cannot be read, or one whose snapshot no longer
+verifies fires nothing and pages once; its page and `routine show` say so and
+offer the one road: `standing-orders routine refresh <name>` (or the page's
+**Refresh agents** button) re-resolves the agents from today's configuration,
+withdraws an approval that is not live even when the working agents are
+unchanged, and approves nothing — you read the exact agents it now names and
+approve it again with your password, and only that yes fires the new
+snapshot. An authentic v47 database, or one whose v47→v48 upgrade was
+interrupted, upgrades without re-running older data passes, changing ids,
+backfilling a route, or approving anything.
 
 Every approval surface — the task page, the focused chat, and `/next` — shows
 the same concise line of exact agents above the password, with the declared
@@ -518,8 +549,11 @@ could bind — an unreadable route, a route that cannot run, a standing order
 without frozen agents, or a pre-routing row whose old approval no longer
 stands — those surfaces mint no nonce and show no password or approve button,
 only the reason and the act that opens it (re-file the scope, change the
-agents, refresh the routine); an old approval already on a pre-routing row is
-grandfathered, but no new yes lands on it. The task page's controls offer,
+agents, refresh the routine) — the inbox row reads *needs attention* rather
+than *review & approve*, and the routine's recovery is one labelled, described
+button with nothing to type; an old approval already on a pre-routing row is
+grandfathered, but no new yes lands on it. The demo sandbox shows no seeded
+conversation: chat evidence is a real subscription-backed plane. The task page's controls offer,
 per role, only the agents you configured *for that role* (gemini never
 reviews; repairs stay on the build provider), a current agent the
 configuration no longer names is shown for what runs today and never offered

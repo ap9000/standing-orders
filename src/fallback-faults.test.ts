@@ -19,6 +19,21 @@ import { acquireFallback, release } from "./claim.js";
 import { runOperate, EXIT } from "./operate.js";
 import { modeTermsFromJson, presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 const rec = vi.hoisted(() => ({ eligible: new Set<string>() }));
 vi.mock("./exhaustion.js", async importOriginal => {
   const actual = await importOriginal<typeof import("./exhaustion.js")>();
@@ -57,7 +72,7 @@ describe("the fault matrix (G)", () => {
     store.placeTask(ref, REPO);
     propose(store, { taskId: id, goal: "a guard", now: T0 });
     expect(approve(store, id, "alex", T0, store.getScope(id)!.digest, alexToken).ok).toBe(true);
-    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref, "builder") });
     store.openChainCycleForDispatch(ref, id, run, T0);
     return { ref, run };
   };

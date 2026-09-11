@@ -1,0 +1,194 @@
+{
+ "what": "a REAL Codex plan-first run on a scratch plane (nothing stubbed): file a task, ask for a plan, tick once with the codex planner under its configured exact model; then resume the very thread with the adapter's exact argv",
+ "codexVersion": "codex-cli 0.145.0",
+ "codexLogin": "Logged in using ChatGPT",
+ "backedBy": "ChatGPT subscription login (no API key)",
+ "plane": {
+  "database": "/tmp/so-plan/orders.db",
+  "repo": "/tmp/so-plan/repo (a two-file payouts service)",
+  "driver": "/tmp/so-plan/plan-first.mjs"
+ },
+ "planFirstRun": {
+  "provider": "codex",
+  "model": "gpt-5.6-sol",
+  "elapsedMs": 232358,
+  "tickExit": 0,
+  "dispatched": [
+   {
+    "id": "payout-limiter",
+    "outcome": "planned"
+   }
+  ],
+  "runs": [
+   {
+    "id": 1,
+    "role": "planner",
+    "provider": "codex",
+    "model": "gpt-5.6-sol",
+    "outcome": "built",
+    "reason": "plan-drafted",
+    "parentRun": null,
+    "sessionId": "01a09064-5b51-7430-aaa5-bc876c3086eb",
+    "providerStartedAt": "2026-09-11T12:14:50.795Z",
+    "route": {
+     "routeDigest": "0feed677b25f8374572aabfdaf9df8ae",
+     "phase": "plan",
+     "provider": "codex",
+     "model": "gpt-5.6-sol",
+     "chosen": "recommended",
+     "stampedAt": "2026-09-11T12:14:50.762Z"
+    },
+    "artifacts": [
+     {
+      "kind": "structured-output",
+      "key": "1/planner-response-1.txt",
+      "capture": "planner response 1 from run 1 (parser accepted, syntax normalized; workflow pending)",
+      "bytes": 4423,
+      "sha256": "7123a21ed4d81472f340c1adf5362be604cdaf5cd760e85d6ba3daf91ff84260"
+     },
+     {
+      "kind": "plan",
+      "key": "1/plan.md",
+      "capture": "planner handoff (verified tree)",
+      "bytes": 2267,
+      "sha256": "9feb4db931766106fe9f3b73d99b1b7fbf3aae757dfaab75c12c387986adc497"
+     }
+    ]
+   }
+  ],
+  "scope": {
+   "goal": "The exported payout handler enforces a deterministic, process-local limit of five calls per tenant per 60-second fixed window while preserving the existing request signature, amount validation, and `{ ok: boolean }` response contract; automated tests prove tenant isolation, rejection at the limit, and recovery after the window expires.",
+   "outOfScope": "Distributed or durable rate-limit coordination, deployment/configuration infrastructure, changes to the HTTP or response contract, and rate limiting for endpoints other than payouts.",
+   "touches": [
+    "src/payouts.ts",
+    "src/payouts.test.ts"
+   ],
+   "acceptance": [
+    {
+     "id": "c1-same-tenant-limit",
+     "statement": "For one tenant, the first five positive-amount calls within a 60-second window return `{ ok: true }`, and the sixth returns `{ ok: false }`.",
+     "how": "Exercise a fresh handler instance with a controlled clock so no wall-clock delay or shared module state affects the result.",
+     "evidence": [
+      "check"
+     ]
+    },
+    {
+     "id": "c2-tenant-isolation",
+     "statement": "Exhausting one tenant's allowance does not reduce another tenant's allowance; the second tenant can still make five positive-amount calls in the same window.",
+     "how": "Interleave calls for two distinct tenant strings against the same limiter instance.",
+     "evidence": [
+      "check"
+     ]
+    },
+    {
+     "id": "c3-window-reset",
+     "statement": "A tenant rejected at its limit can make a positive-amount call successfully once 60 seconds have elapsed from the start of its window.",
+     "how": "Advance an injected clock exactly to the window boundary instead of sleeping.",
+     "evidence": [
+      "check"
+     ]
+    },
+    {
+     "id": "c4-existing-validation",
+     "statement": "Below the rate limit, positive amounts still return `{ ok: true }`, while zero and negative amounts still return `{ ok: false }`.",
+     "how": "Use separate fresh tenants or handler instances so rate-limit state cannot mask amount-validation behavior.",
+     "evidence": [
+      "check"
+     ]
+    }
+   ],
+   "digest": "75fb6fb66f23216b637167ef0a6bdfd0",
+   "routeEra": 1,
+   "proposedRoute": [
+    [
+     "plan",
+     "codex",
+     "gpt-5.6-sol",
+     "recommended"
+    ],
+    [
+     "build",
+     "claude",
+     "sonnet",
+     "recommended"
+    ],
+    [
+     "repair",
+     "claude",
+     "sonnet",
+     "recommended"
+    ],
+    [
+     "review",
+     "claude",
+     "sonnet",
+     "recommended"
+    ]
+   ]
+  },
+  "plan": "drafted"
+ },
+ "threadIdentity": {
+  "plannerRunSessionId": "01a09064-5b51-7430-aaa5-bc876c3086eb",
+  "resumeEchoedThread": [
+   "01a09064-5b51-7430-aaa5-bc876c3086eb"
+  ],
+  "oneExactThread": true
+ },
+ "resumeWithAdapterArgv": {
+  "argv": [
+   "exec",
+   "resume",
+   "01a09064-5b51-7430-aaa5-bc876c3086eb",
+   "--json",
+   "--skip-git-repo-check",
+   "-c",
+   "sandbox_mode=\"workspace-write\"",
+   "-m",
+   "gpt-5.6-sol",
+   "Reply with exactly the word RESUMED and nothing else. Change no files."
+  ],
+  "exit": 0,
+  "elapsedMs": 4914,
+  "threadStarted": [
+   "01a09064-5b51-7430-aaa5-bc876c3086eb"
+  ],
+  "finalMessage": [
+   "RESUMED"
+  ],
+  "usage": {
+   "input_tokens": 204319,
+   "cached_input_tokens": 186496,
+   "cache_write_input_tokens": 0,
+   "output_tokens": 7583,
+   "reasoning_output_tokens": 5006
+  },
+  "stderrTail": [
+   "2026-09-11T12:25:02.915599Z ERROR codex_models_manager::cache: failed to load models cache: missing field `base_instructions` at line 95 column 5",
+   ""
+  ]
+ },
+ "resumeWithPreFixArgv": {
+  "argv": [
+   "exec",
+   "resume",
+   "01a09064-5b51-7430-aaa5-bc876c3086eb",
+   "--json",
+   "--skip-git-repo-check",
+   "--sandbox",
+   "workspace-write",
+   "-m",
+   "gpt-5.6-sol",
+   "<prompt>"
+  ],
+  "exit": 2,
+  "stderr": [
+   "error: unexpected argument '--sandbox' found",
+   "  tip: to pass '--sandbox' as a value, use '-- --sandbox'",
+   "Usage: codex exec resume --json --skip-git-repo-check <SESSION_ID> [PROMPT]",
+   "For more information, try '--help'."
+  ],
+  "stdoutBytes": 0,
+  "meaning": "the resume the previous build issued exited 2 before initializing \u2014 an immediately doomed turn that never echoed its thread"
+ }
+}

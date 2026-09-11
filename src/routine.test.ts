@@ -19,11 +19,27 @@ import {
   parseSchedule,
   refreshRoutineAgents,
   routineAgentsState,
+  routineIntegrity,
   routineDigestOf,
   termsOf,
   validateRoutineTerms,
   type RoutineTerms,
 } from "./routine.js";
+
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
 
 const T0 = new Date("2026-08-13T22:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
@@ -390,7 +406,9 @@ describe("firing, inside one proving transaction", () => {
       // and the old snapshot cannot fire.
       const pending = up.getRoutine(created.id)!;
       expect(pending.digest).not.toBe(v47Digest);
-      expect(pending.approvedDigest).toBe(v47Digest);
+      // The unfrozen approval is WITHDRAWN by the refresh (v48 authority repair): no digest,
+      // no snapshot, no armed slot — only the history of who once agreed.
+      expect(pending).toMatchObject({ approvedDigest: null, approvedRoute: null, approvedProfile: null, nextFireAt: null, approvedBy: "alex" });
       expect(pending.route).not.toBeNull();
       expect(routineAgentsState(pending)).toMatchObject({ state: "pending", approvable: true, refresh: false });
       expect(fireRoutine(up, created.id, later(2 * HOUR))).toMatchObject({ ok: false, reason: "not-approved" });
@@ -419,6 +437,88 @@ describe("firing, inside one proving transaction", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("routine-recovery: ONE integrity projection gates state, consent, approval, and fire — a corrupt approved snapshot is not live, refresh withdraws it even though the working data is unchanged, and reapproval restores firing", () => {
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
+    // File the working agents from today's configuration, then approve —
+    // so a later refresh under the same configuration changes no term.
+    expect(refreshRoutineAgents(store, routineId, T0).ok).toBe(true);
+    approve(routineId);
+    const liveBefore = routineIntegrity(store.getRoutine(routineId)!);
+    expect(liveBefore).toMatchObject({ approved: true, live: true, liveProblem: null, agents: { state: "frozen", approvable: false, refresh: false } });
+    // The working columns stay EXACTLY as approved; only the frozen snapshot
+    // is rewritten (a review leg the approver never saw). The approval
+    // columns still claim a yes.
+    const approvedJson = String((store.raw().prepare("SELECT approved_route_json AS j FROM routine WHERE id = ?").get(routineId) as { j: string }).j);
+    const rerouted = approvedJson.replace('"model":"sonnet","phase":"review"', '"model":"opus","phase":"review"');
+    expect(rerouted).not.toBe(approvedJson);
+    store.raw().prepare("UPDATE routine SET approved_route_json = ? WHERE id = ?").run(rerouted, routineId);
+    const corrupt = store.getRoutine(routineId)!;
+    expect(corrupt.approvedDigest).toBe(corrupt.digest);
+    // The projection: approved on the columns, NOT live — and every gate
+    // reads that one answer.
+    const integrity = routineIntegrity(corrupt);
+    expect(integrity).toMatchObject({ approved: true, live: false, liveProblem: expect.stringContaining("do not hash to the approval"), agents: { state: "unverified", approvable: false, refresh: true } });
+    expect(routineAgentsState(corrupt)).toEqual(integrity.agents);
+    // Fire: refused, nothing written, the slot still due.
+    expect(fireRoutine(store, routineId, later(HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("do not hash to the approval") });
+    expect(store.listTasks()).toHaveLength(0);
+    expect(store.routineFires(routineId)).toHaveLength(0);
+    // Approve: a yes on the same digest lands nothing new — the snapshot the
+    // columns claim is not one a person can meaningfully agree to.
+    expect(approveRoutine(store, routineId, "alex", later(HOUR), corrupt.digest, token)).toMatchObject({ ok: false, reason: "changed" });
+    expect(String((store.raw().prepare("SELECT approved_route_json AS j FROM routine WHERE id = ?").get(routineId) as { j: string }).j)).toBe(rerouted);
+    // Refresh: the working agents already bind these exact terms — the
+    // digest does not move — and the corrupt approval is still WITHDRAWN.
+    const refreshed = refreshRoutineAgents(store, routineId, later(HOUR));
+    expect(refreshed).toMatchObject({ ok: true, changed: true });
+    const withdrawn = store.getRoutine(routineId)!;
+    expect(withdrawn.digest).toBe(corrupt.digest);
+    expect(withdrawn).toMatchObject({ approvedDigest: null, approvedRoute: null, approvedProfile: null, nextFireAt: null, approvedBy: "alex" });
+    expect(routineIntegrity(withdrawn)).toMatchObject({ approved: false, live: false, agents: { state: "pending", approvable: true, refresh: false } });
+    expect(fireRoutine(store, routineId, later(2 * HOUR))).toMatchObject({ ok: false, reason: "not-approved" });
+    // A second refresh under the same configuration is a no-op now.
+    expect(refreshRoutineAgents(store, routineId, later(HOUR))).toMatchObject({ ok: true, changed: false });
+    // Reapproval seals the working snapshot afresh, and firing resumes
+    // under exactly the approved route.
+    expect(approveRoutine(store, routineId, "alex", later(2 * HOUR), withdrawn.digest, token).ok).toBe(true);
+    const again = store.getRoutine(routineId)!;
+    expect(routineIntegrity(again)).toMatchObject({ approved: true, live: true, agents: { state: "frozen" } });
+    const fired = fireRoutine(store, routineId, later(4 * HOUR));
+    expect(fired.ok).toBe(true);
+    if (!fired.ok) return;
+    const sealed = store.sealedRouteOf(fired.taskId);
+    expect(sealed.ok).toBe(true);
+    if (sealed.ok) expect(routeDigestOf(sealed.route)).toBe(routeDigestOf(again.approvedRoute!));
+  });
+
+  test("routine-recovery: unreadable snapshot bytes and an unfrozen approval are withdrawn by the refresh the same way, and a LIVE approval under unchanged terms is left alone", () => {
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
+    expect(refreshRoutineAgents(store, routineId, T0).ok).toBe(true);
+    approve(routineId);
+    // Live + unchanged: byte-for-byte alone, still approved.
+    expect(refreshRoutineAgents(store, routineId, later(HOUR))).toMatchObject({ ok: true, changed: false });
+    expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: true, live: true });
+    // Unreadable snapshot bytes: not live; refresh withdraws.
+    store.raw().prepare("UPDATE routine SET approved_route_json = '{\"version\":1' WHERE id = ?").run(routineId);
+    expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: true, live: false, agents: { state: "unreadable", refresh: true } });
+    expect(refreshRoutineAgents(store, routineId, later(HOUR))).toMatchObject({ ok: true, changed: true });
+    expect(store.getRoutine(routineId)).toMatchObject({ approvedDigest: null, approvedRouteUnreadable: false, nextFireAt: null });
+    expect(fireRoutine(store, routineId, later(2 * HOUR))).toMatchObject({ ok: false, reason: "not-approved" });
+    // Approve again; then an approval whose snapshot was never taken.
+    expect(approveRoutine(store, routineId, "alex", later(2 * HOUR), store.getRoutine(routineId)!.digest, token).ok).toBe(true);
+    store.raw().prepare("UPDATE routine SET approved_route_json = NULL WHERE id = ?").run(routineId);
+    expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: true, live: false, agents: { state: "unfrozen", refresh: true } });
+    expect(fireRoutine(store, routineId, later(3 * HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen" });
+    expect(refreshRoutineAgents(store, routineId, later(3 * HOUR))).toMatchObject({ ok: true, changed: true });
+    expect(store.getRoutine(routineId)).toMatchObject({ approvedDigest: null, nextFireAt: null });
+    expect(approveRoutine(store, routineId, "alex", later(3 * HOUR), store.getRoutine(routineId)!.digest, token).ok).toBe(true);
+    expect(fireRoutine(store, routineId, later(5 * HOUR)).ok).toBe(true);
   });
 
   test("early is not due, and a recorded slot cannot fire twice", () => {
@@ -485,6 +585,7 @@ describe("firing, inside one proving transaction", () => {
     const run = store.startRun({
       taskRef: ref.id, leaseId: "lease-1", runner: "r1",
       branch: "b", worktree: "w", now: later(HOUR),
+      ...presented(store, ref.id, "builder"),
     });
     store.stampProviderStart(run, later(HOUR));
     const unmeasured = fireRoutine(store, routineId, later(2 * HOUR));
@@ -664,6 +765,7 @@ describe("the review's regressions (Codex Phase C findings)", () => {
     const run = store.startRun({
       taskRef: ref.id, leaseId: "old-lease", runner: "r1",
       branch: "b", worktree: "w", now: new Date(T0.getTime() - 8 * DAY),
+      ...presented(store, ref.id, "builder"),
     });
     store.stampProviderStart(run, later(HOUR));
     const blocked = fireRoutine(store, routineId, later(2 * HOUR));
@@ -679,7 +781,7 @@ describe("the review's regressions (Codex Phase C findings)", () => {
 
     // Episode one: an unmeasured paid run blocks and pages.
     const ref = store.refFor(BUILT_IN, first.taskId);
-    const run1 = store.startRun({ taskRef: ref.id, leaseId: "l1", runner: "r1", branch: "b", worktree: "w", now: later(HOUR) });
+    const run1 = store.startRun({ taskRef: ref.id, leaseId: "l1", runner: "r1", branch: "b", worktree: "w", now: later(HOUR), ...presented(store, ref.id, "builder") });
     store.stampProviderStart(run1, later(HOUR));
     expect(fireRoutine(store, routineId, later(2 * HOUR))).toMatchObject({ ok: false, reason: "unmeasured" });
     // Still episode one: a second blocked slot does not page twice.
@@ -695,7 +797,7 @@ describe("the review's regressions (Codex Phase C findings)", () => {
 
     // Episode two: a NEW unmeasured run blocks again — and pages again.
     const ref2 = store.refFor(BUILT_IN, recovered.taskId);
-    const run2 = store.startRun({ taskRef: ref2.id, leaseId: "l2", runner: "r1", branch: "b", worktree: "w", now: later(4 * HOUR) });
+    const run2 = store.startRun({ taskRef: ref2.id, leaseId: "l2", runner: "r1", branch: "b", worktree: "w", now: later(4 * HOUR), ...presented(store, ref2.id, "builder") });
     store.stampProviderStart(run2, later(4 * HOUR));
     expect(fireRoutine(store, routineId, later(5 * HOUR))).toMatchObject({ ok: false, reason: "unmeasured" });
     expect(store.listNotifications("all").filter(one => one.kind === "routine-blocked")).toHaveLength(2);

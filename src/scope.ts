@@ -30,6 +30,7 @@ import type { Store, Mutation } from "./store.js";
 import type { QualityMode } from "./quality.js";
 import {
   NO_READINESS,
+  exactModelId,
   isRiskLevel,
   projectRoute,
   routeDigestOf,
@@ -297,15 +298,22 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
   if (wrapper.digestVersion !== PROFILE_DIGEST_VERSION) return null;
   const p = wrapper.profile as Record<string, unknown> | null | undefined;
   if (p === null || p === undefined || typeof p !== "object") return null;
-  const str = (v: unknown): v is string => typeof v === "string" && v !== "";
-  const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  // STRICT fields (v48 authority repair): a model is an exact id (the same shape every
+  // provider argv accepts), a repair model is `inherit` or an exact id, a
+  // turn bound is a positive integer, and a clock is a positive whole
+  // number of seconds — a snapshot carrying anything else (a negative
+  // turn count, a fractional second, a model that is not an id) was not
+  // written by this code and rehydrates as nothing.
+  const str = (v: unknown): v is string => exactModelId(v);
+  const repairRef = (v: unknown): v is string => v === "inherit" || exactModelId(v);
+  const num = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
   if (p["provider"] === "claude") {
     if (
       str(p["model"]) &&
       (p["permissionArgv"] === "auto" || p["permissionArgv"] === "acceptEdits" || p["permissionArgv"] === "bypassPermissions") &&
       num(p["maxTurns"]) && num(p["repairMaxTurns"]) &&
       num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
-      str(p["repairModel"])
+      repairRef(p["repairModel"])
     ) {
       return {
         provider: "claude",
@@ -327,7 +335,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
       (p["sandboxMode"] === "workspace-write" || p["sandboxMode"] === "danger-full-access") &&
       p["maxTurns"] === "unsupported" && p["repairMaxTurns"] === "unsupported" &&
       num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
-      str(p["repairModel"])
+      repairRef(p["repairModel"])
     ) {
       return {
         provider: p["provider"],
@@ -349,7 +357,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
       (p["approvalArgv"] === "auto_edit" || p["approvalArgv"] === "yolo") &&
       p["maxTurns"] === "unsupported" && p["repairMaxTurns"] === "unsupported" &&
       num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
-      str(p["repairModel"])
+      repairRef(p["repairModel"])
     ) {
       return {
         provider: "gemini",

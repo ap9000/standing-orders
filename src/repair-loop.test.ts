@@ -18,6 +18,21 @@ import { presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./mode
 import { maybeTriggerRepair, maybeSettleRepairChain } from "./dispose.js";
 import type { CriterionMatrixRow } from "./proof.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 const T0 = new Date("2026-09-08T00:00:00.000Z");
 const REPO = "/repos/thing";
 
@@ -89,7 +104,7 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
       const approved = approve(store, taskId, "alex", T0, scope.digest, alexToken);
       if (!approved.ok) throw new Error(`the fixture approval was refused: ${approved.reason}`);
     }
-    const runId = store.startRun({ taskRef, leaseId: `l-${taskId}-${Math.random().toString(16).slice(2, 8)}`, runner: "builder-1", branch: `b-${taskId}`, worktree: `/pool/${taskId}`, now: T0 });
+    const runId = store.startRun({ taskRef, leaseId: `l-${taskId}-${Math.random().toString(16).slice(2, 8)}`, runner: "builder-1", branch: `b-${taskId}`, worktree: `/pool/${taskId}`, now: T0, ...presented(store, taskRef, "builder") });
     store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
     store.saveProofVerdict(runId, verdict, reasons, T0, matrix);
     maybeSettleRepairChain(store, taskId, verdict, T0);

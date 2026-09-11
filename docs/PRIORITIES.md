@@ -132,15 +132,25 @@ line of exact agents before the password, with each risk level explained; the
 console offers only configured, role-valid agent choices; and chat reads the
 route and proposes confirmation-gated changes through the same authenticated
 edit. The remaining authority gaps closed on top of that: a routed task never
-opens an unstamped run (the governing authority dictates the stamp, or no row
-opens), fallback stamps bind to one exact chain entry, routine firings re-hash
-the approved snapshot and roll back unless the instance seals, malformed route,
-profile, chain, or fallback data fails closed without shrinking authority, a
-legacy routine or scope gets a plain refresh/re-file road instead of a
-password, agent choices are role-specific with stale agents display-only, and
-the chat change is re-proved inside the edit transaction — with the console
-flow proved on a real subscription-backed chat rather than seeded demo turns.
-The learning half (project memory) is not started.
+opens an unstamped run and the store dictates nothing — every planner,
+builder, reviewer, fallback, and repair run presents the exact authority it
+holds or no row opens; chain custody (base, parked-resume, fallback, repair)
+is proved and written in the run's own insert and rolls back when it cannot
+be; fallback admission re-proves the task, live cycle, approved chain, index,
+entry digest, provider, model, auth mode, repair model, and `fallback`
+provenance, consuming no edge on a mismatch; profile, chain, route, fallback,
+auth, and numeric parsing is strict and corrupt data cannot approve, admit,
+spawn, or shrink authority; one integrity projection gates every routine
+surface and act, a corrupt approved snapshot is never live, refresh withdraws
+it even under unchanged working data, and an authentic or interrupted v47
+upgrade re-runs no older data pass and approves nothing; a legacy routine or
+scope gets a plain refresh/re-file road instead of a password on the task,
+chat, inbox, and routine surfaces; Codex resumes carry their sandbox as an
+override so a structured correction is no longer an immediately doomed turn,
+and a protocol failure on a resume is retried as a fresh planner root — all
+proved on a real Codex plan-first run and a real subscription-backed chat
+rather than seeded demo turns. The learning half (project memory) is not
+started.
 
 ## Current focus
 

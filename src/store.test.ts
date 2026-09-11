@@ -6,6 +6,21 @@ import { SCHEMA_VERSION, databasePath, openStore, BUILT_IN, type Capability, typ
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
 
@@ -496,6 +511,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
+      ...presented(store, ref, "builder"),
     });
 
   test("two owners can hold one task, and each lifts only its own", () => {
@@ -611,6 +627,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       branch: "standing-orders/t-2",
       worktree: "/pool/t-2",
       now: T0,
+      ...presented(store, other, "builder"),
     });
 
     const option = { id: "a", label: "a", consequence: "c", reversible: true };
@@ -700,6 +717,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       parentRun: run,
       sessionId: "sess-1",
       now: later(1_000),
+      ...presented(store, ref, "repair"),
     });
 
     store.finishRun(run, { outcome: "parked", reason: "decision:1", now: later(2_000) });
@@ -723,6 +741,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: later(1),
+      ...presented(store, ref, "planner"),
     });
     store.finishRun(planner, { outcome: "no-change", reason: "structured planner output repaired", now: later(1) });
     const repair = store.startRun({
@@ -734,6 +753,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: later(2),
+      ...presented(store, ref, "repair"),
     });
     store.finishRun(repair, { outcome: "built", reason: "repaired-park", now: later(2) });
 
@@ -752,6 +772,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
+      ...presented(store, ref, "builder"),
     });
     store.finishRun(parked, { outcome: "parked", reason: "decision:1", now: T0 });
     const bookkeeping = store.startRun({
@@ -765,6 +786,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: later(1),
+      ...presented(store, ref, "repair"),
     });
     store.finishRun(bookkeeping, { outcome: "built", reason: "repaired-park", now: later(1) });
 
@@ -883,6 +905,7 @@ describe("answering a decision", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
+      ...presented(store, ref, "builder"),
     });
     decisionId = store.saveDecision(
       {
@@ -1099,6 +1122,7 @@ describe("migration from an M3 database", () => {
       const stallRun = store.startRun({
         taskRef: 1, leaseId: "l-stall", runner: "b", branch: "br", worktree: "/w",
         now: new Date("2026-08-12T06:00:00.000Z"),
+        ...presented(store, 1, "builder"),
       });
       const stall = store.createIncident({ run: stallRun, kind: "attempts-exhausted" }, new Date("2026-08-12T06:00:00.000Z"));
       expect(store.openIncidents().find(one => one.id === stall)?.kind).toBe("attempts-exhausted");
@@ -1107,6 +1131,7 @@ describe("migration from an M3 database", () => {
       const run3 = store.startRun({
         taskRef: 1, leaseId: "l-3", runner: "b", branch: "br", worktree: "/w",
         now: new Date("2026-08-11T05:00:00.000Z"),
+        ...presented(store, 1, "builder"),
       });
       const next = store.saveDecision(
         {
@@ -1192,6 +1217,7 @@ describe("the watch foundations", () => {
     store.setTaskState("t-1", "running", T0);
     const run = store.startRun({
       taskRef: ref, leaseId: "lease-a", runner: "builder-1", branch: "b", worktree: "/w", now: T0,
+      ...presented(store, ref, "builder"),
     });
     store.saveWorktree({
       path: "/w", repo: "/repo", branch: "b", runner: "builder-1", taskRef: ref,
@@ -1303,6 +1329,7 @@ describe("console mutation semantics, re-proved server-side", () => {
     const ref = store.refFor(BUILT_IN, "t-1").id;
     const run = store.startRun({
       taskRef: ref, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0,
+      ...presented(store, ref, "builder"),
     });
     const incident = store.createIncident({ run, kind: "attempts-exhausted" }, T0);
     store.holdOwned(
@@ -1337,6 +1364,7 @@ describe("the console read model, bounded by construction", () => {
       branch: `standing-orders/t-${n}`,
       worktree: `/pool/t-${n}`,
       now: T0,
+      ...presented(store, ref, "builder"),
     });
 
   test("runs page newest-first, the cursor strictly exclusive, the task attached", () => {
@@ -1508,6 +1536,7 @@ describe("migration from a v6 database (planning, v7)", () => {
       const planner = store.startRun({
         taskRef: 1, leaseId: "l-2", runner: "b", role: "planner",
         branch: "standing-orders-plan/t-1", worktree: "/w2", now: new Date("2026-08-12T02:00:00.000Z"),
+        ...presented(store, 1, "planner"),
       });
       expect(planner).toBeGreaterThan(1);
       store.handle
@@ -1545,6 +1574,7 @@ describe("migration from a v6 database (planning, v7)", () => {
       const codexRun = store.startRun({
         taskRef: 1, leaseId: "l-9", runner: "b", branch: "br", worktree: "/w9",
         provider: "codex", now: new Date("2026-08-12T04:00:00.000Z"),
+        ...presented(store, 1, "builder"),
       });
       expect(store.getRun(codexRun)?.provider).toBe("codex");
       const pin = store.handle.prepare("SELECT agent_provider, agent_model FROM task_ref WHERE id = 1").get();
@@ -1734,7 +1764,7 @@ describe("the v24 migration (Parity II foundations, rulings 10/11)", () => {
     const notes = store.listSteerNotes(ref);
     expect(notes[0]).toMatchObject({ authorshipState: "unverified-legacy", supersededReason: "unverified-author" });
     expect(notes[0]?.supersededAt).not.toBeNull();
-    const run = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b", branch: "br", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b", branch: "br", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
     expect(store.attachSteerNotes(ref, run, T0)).toEqual([]);
     store.close();
     rmSync(dirname(file), { recursive: true, force: true });
@@ -1841,6 +1871,7 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
       branch: "so/t-held",
       worktree: "/tmp/wt",
       now: T0,
+      ...presented(store, ref.id, "builder"),
     });
     expect(store.consumeAuthorization("auth-1", run, T0)).toBe(true);
     const custody = store.openHeldSession({
@@ -1867,7 +1898,7 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
            VALUES ('lease-m', ?, 1, 'w', ?, ?, ?)`,
         )
         .run(ref.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
-      const run = db.startRun({ taskRef: ref.id, leaseId: "lease-m", runner: "w", branch: "b", worktree: "/w", now: T0 });
+      const run = db.startRun({ taskRef: ref.id, leaseId: "lease-m", runner: "w", branch: "b", worktree: "/w", now: T0, ...presented(db, ref.id, "builder") });
       db.raw()
         .prepare(
           `INSERT INTO decision (run, urgency, state, recap, question, options, recommendation, created_at, answered_at, answered_by, answered_via, choice)
@@ -1993,7 +2024,7 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
          VALUES ('lease-a', ?, 1, 'mac-a', ?, ?, ?)`,
       )
       .run(ref.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
-    const run = store.startRun({ taskRef: ref.id, leaseId: "lease-a", runner: "mac-a", branch: "b", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: ref.id, leaseId: "lease-a", runner: "mac-a", branch: "b", worktree: "/w", now: T0, ...presented(store, ref.id, "builder") });
     expect(store.consumeAuthorization("auth-new", run, later(130))).toBe(true);
     expect(store.consumeAuthorization("auth-new", run, later(131))).toBe(false);
     expect(store.getRun(run)?.attendedAuthorization).toBe("auth-new");
@@ -2160,6 +2191,7 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
       branch: "so/t-held",
       worktree: "/tmp/wt2",
       now: later(9),
+      ...presented(store, Number(store.raw().prepare("SELECT task_ref FROM run WHERE id = ?").get(run)!["task_ref"]), "builder"),
     });
     const attached = store.attachAnswers(resumed, Number(store.raw().prepare("SELECT task_ref FROM run WHERE id = ?").get(run)!["task_ref"]));
     expect(attached.map(one => one.id)).toContain(decision);
@@ -2215,7 +2247,7 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
          VALUES ('lease-2', ?, 1, 'mac-a', ?, ?, ?)`,
       )
       .run(ref2.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
-    const run2 = store.startRun({ taskRef: ref2.id, leaseId: "lease-2", runner: "mac-a", branch: "b2", worktree: "/w2", now: T0 });
+    const run2 = store.startRun({ taskRef: ref2.id, leaseId: "lease-2", runner: "mac-a", branch: "b2", worktree: "/w2", now: T0, ...presented(store, ref2.id, "builder") });
     expect(
       store.openHeldSession({
         run: run2,
@@ -2475,8 +2507,8 @@ describe("the v28 parallel-sessions migration: the per-runner bound is withdrawn
       });
       expect(minted.ok).toBe(true);
     }
-    const runA = store.startRun({ taskRef: refA, leaseId: "lease-a", runner: "mac-a", branch: "a", worktree: "/w1", now: T0 });
-    const runB = store.startRun({ taskRef: refB, leaseId: "lease-b", runner: "mac-a", branch: "b", worktree: "/w2", now: T0 });
+    const runA = store.startRun({ taskRef: refA, leaseId: "lease-a", runner: "mac-a", branch: "a", worktree: "/w1", now: T0, ...presented(store, refA, "builder") });
+    const runB = store.startRun({ taskRef: refB, leaseId: "lease-b", runner: "mac-a", branch: "b", worktree: "/w2", now: T0, ...presented(store, refB, "builder") });
     expect(openSession("a", runA)).toMatchObject({ ok: true });
     expect(openSession("b", runB)).toMatchObject({ ok: true });
     expect(store.openHeldSessionCount("mac-a")).toBe(2);
@@ -2603,7 +2635,7 @@ describe("malformed authority fails closed and never shrinks (v48)", () => {
     propose(store, { taskId: "t", goal: "guard", now: T0 });
     expect(approve(store, "t", "alex", T0, store.getScope("t")!.digest, token).ok).toBe(true);
     const taskRef = store.refFor(BUILT_IN, "t").id;
-    const admit = () => store.startRun({ taskRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    const admit = () => store.startRun({ taskRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0, ...presented(store, taskRef, "builder") });
     const snapshot = store.raw().prepare("SELECT approved_route_json AS r, approved_profile_json AS p, approved_chain_json AS c FROM task_scope WHERE task_id = 't'").get() as { r: string; p: string; c: string };
     // Corrupt route bytes.
     store.raw().prepare("UPDATE task_scope SET approved_route_json = '{\"version\":1' WHERE task_id = 't'").run();
@@ -2663,6 +2695,7 @@ describe("run admission proves route provenance before any row exists (v48)", ()
   });
   afterEach(() => store.close());
 
+  /** A bare admission: nothing presented unless `over` presents it. */
   const admit = (over: Record<string, unknown>) =>
     store.startRun({ taskRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0, ...over } as Parameters<Store["startRun"]>[0]);
   const runs = () => store.runsFor(taskRef).length;
@@ -2707,42 +2740,105 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     expect(runs()).toBe(0);
   });
 
-  test("a routed task never opens an UNSTAMPED run: a run that presents no stamp gets the sealed leg — proved against its own agent — or no row at all", async () => {
-    // The dictated stamp: the sealed build leg, persisted with the row.
-    const bare = admit({});
+  test("explicit-admission: a routed task never opens an UNSTAMPED run — the store dictates nothing; the caller presents the exact leg it holds or no row opens", async () => {
+    const { routeDigestOf, routeFromJson } = await import("./phase-routing.js");
+    // MISSING authority: a builder, planner, scout, reviewer, or repair that
+    // presents nothing opens nothing — the refusal names what it would have
+    // had to present.
+    expect(() => admit({})).toThrow(/presented no route authority — nothing opens unstamped on it \(present its build leg\)/);
+    expect(() => admit({ role: "planner" })).toThrow(/present its plan leg/);
+    expect(() => admit({ role: "scout" })).toThrow(/present its build leg/);
+    expect(runs()).toBe(0);
+    // The authority the task holds is in the caller's hands, in words —
+    // and presenting it is what opens the row.
+    const held = store.routeAuthorityFor(taskRef, "builder");
+    expect(held).toMatchObject({ ok: true, stamp: { phase: "build", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: digest } });
+    if (held === null || !held.ok) return;
+    const bare = admit({ route: held.stamp });
     expect(store.getRun(bare)).toMatchObject({ provider: "claude", model: "sonnet" });
     expect(store.runRoute(bare)).toMatchObject({ phase: "build", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: digest });
     // The same stamp restated is idempotent; a different one is a conflict.
     expect(store.stampRunRoute(bare, { routeDigest: digest, phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" }, T0)).toEqual({ ok: true, first: false });
     expect(store.stampRunRoute(bare, { routeDigest: digest, phase: "build", provider: "claude", model: "opus", chosen: "recommended" }, T0)).toMatchObject({ ok: false, conflict: expect.stringContaining("already carries route provenance") });
-    // An agent the sealed leg does not name opens nothing, stamp or no stamp.
-    expect(() => admit({ model: "opus" })).toThrow(/names model sonnet but the run would spend as opus/);
-    expect(() => admit({ provider: "codex" })).toThrow(/names claude but the run would spend as codex/);
-    // A reviewer child gets the review leg (the strong codex reviewer).
-    const review = admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex" });
+    // An agent the sealed leg does not name opens nothing, presented or not.
+    expect(() => admit({ model: "opus", route: held.stamp })).toThrow(/names model sonnet but the run would spend as opus/);
+    expect(() => admit({ provider: "codex", route: held.stamp })).toThrow(/names claude but the run would spend as codex/);
+    expect(() => admit({ provider: "codex", model: "gpt-5-codex" })).toThrow(/presented no route authority/);
+    // A reviewer child presents the review leg (the strong codex reviewer); an unpresented one opens nothing.
+    const reviewLeg = store.routeAuthorityFor(taskRef, "reviewer");
+    if (reviewLeg === null || !reviewLeg.ok) throw new Error("review leg");
+    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex" })).toThrow(/present its review leg/);
+    const review = admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex", route: reviewLeg.stamp });
     expect(store.runRoute(review)).toMatchObject({ phase: "review", provider: "codex", model: "gpt-5-codex", chosen: "recommended", routeDigest: digest });
-    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "claude", model: "sonnet" })).toThrow(/names codex but the run would spend as claude/);
+    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "claude", model: "sonnet", route: reviewLeg.stamp })).toThrow(/names codex but the run would spend as claude/);
     expect(runs()).toBe(2);
-    // MISSING authority: with the seal gone, a builder, scout, reviewer, or
-    // repair presents nothing that could govern it — zero rows, in words.
+    // STALE authority: the seal withdrawn, the old stamp — exact as it was —
+    // admits nothing, and nothing else could govern a builder, scout,
+    // reviewer, or repair: zero rows, in words.
     const { propose } = await import("./scope.js");
     propose(store, { taskId: "t", goal: "a wider guard", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], now: T0 });
+    expect(() => admit({ route: held.stamp })).toThrow(/nothing spends as a recommended build leg without a sealed route/);
     for (const role of ["builder", "scout", "repair"] as const) {
       expect(() => admit({ role, parentRun: bare })).toThrow(/nothing spends as its (build|repair) leg without a sealed route — the scope was approved and then changed/);
+      expect(store.routeAuthorityFor(taskRef, role)).toMatchObject({ ok: false, problem: expect.stringContaining("without a sealed route") });
     }
-    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex" })).toThrow(/nothing spends as its review leg without a sealed route/);
+    expect(() => admit({ role: "reviewer", parentRun: bare, branch: undefined, worktree: undefined, provider: "codex", model: "gpt-5-codex", route: reviewLeg.stamp })).toThrow(/without a sealed route/);
     expect(runs()).toBe(2);
-    // A planner still opens before approval — under the working route's plan leg.
-    const { routeDigestOf, routeFromJson } = await import("./phase-routing.js");
+    // A planner still opens before approval — presenting the WORKING route's plan leg, exactly.
     const proposed = routeFromJson(store.getScope("t")!.proposedRouteJson ?? null)!;
-    const planner = admit({ role: "planner" });
+    const planLeg = store.routeAuthorityFor(taskRef, "planner");
+    expect(planLeg).toMatchObject({ ok: true, stamp: { phase: "plan", routeDigest: routeDigestOf(proposed) } });
+    if (planLeg === null || !planLeg.ok) return;
+    const planner = admit({ role: "planner", route: planLeg.stamp });
     expect(store.runRoute(planner)).toMatchObject({ phase: "plan", provider: "claude", model: "sonnet", routeDigest: routeDigestOf(proposed) });
+    // FORGED authority: a digest nobody sealed, on any role, opens nothing.
+    expect(() => admit({ route: { ...held.stamp, routeDigest: "f".repeat(32) } })).toThrow(/without a sealed route/);
+    expect(() => admit({ role: "planner", route: { ...planLeg.stamp, routeDigest: "f".repeat(32) } })).toThrow(/is not the governing route/);
+    expect(runs()).toBe(3);
     // A pre-routing row and a task with no scope are not routed: they open
     // unstamped and stamp when they spend, exactly as before.
     store.createTask({ id: "bare-task", title: "no scope" }, T0);
     const bareRef = store.refFor(BUILT_IN, "bare-task").id;
+    expect(store.routeAuthorityFor(bareRef, "builder")).toBeNull();
     const unrouted = store.startRun({ taskRef: bareRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0 });
     expect(store.runRoute(unrouted)).toBeNull();
+  });
+
+  test("explicit-admission: legacy authority is EXACT — a pre-routing row's stamp names the very sealed profile (and its build pair) or opens nothing; the bare word belongs to a task with no scope", async () => {
+    const { profileDigestOf, propose, approve } = await import("./scope.js");
+    // A pre-routing row: filed and approved, then its route era erased —
+    // exactly what a v46 database carries into v47.
+    store.createTask({ id: "old", title: "old" }, T0);
+    const oldRef = store.refFor(BUILT_IN, "old").id;
+    store.placeTask(oldRef, REPO);
+    propose(store, { taskId: "old", goal: "old work", now: T0 });
+    expect(approve(store, "old", "alex", T0, store.getScope("old")!.digest, token).ok).toBe(true);
+    store.raw().prepare("UPDATE task_scope SET route_era = NULL, proposed_route_json = NULL, approved_route_json = NULL WHERE task_id = 'old'").run();
+    expect(store.sealedRouteOf("old")).toMatchObject({ ok: false, reason: "legacy" });
+    expect(store.routeAuthorityFor(oldRef, "builder")).toBeNull();
+    const sealedProfile = store.getScope("old")!.approvedProfile!;
+    const exact = `profile:${profileDigestOf(sealedProfile)}`;
+    const legacy = (over: Record<string, unknown>) =>
+      store.startRun({ taskRef: oldRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0, ...over } as Parameters<Store["startRun"]>[0]);
+    // Inexact: the bare word, a foreign profile digest, or the right digest under the wrong pair.
+    expect(() => legacy({ route: { routeDigest: "legacy", phase: "build", provider: "claude", model: "sonnet", chosen: "legacy" } })).toThrow(/the legacy stamp names legacy, but the sealed profile is profile:/);
+    expect(() => legacy({ route: { routeDigest: "profile:" + "0".repeat(64), phase: "build", provider: "claude", model: "sonnet", chosen: "legacy" } })).toThrow(/but the sealed profile is/);
+    expect(() => legacy({ route: { routeDigest: exact, phase: "build", provider: "claude", model: "opus", chosen: "legacy" }, model: "opus" })).toThrow(/sealed profile's build agent is claude · sonnet, not claude · opus/);
+    expect(store.runsFor(oldRef)).toHaveLength(0);
+    // Exact: admitted, and the row carries it.
+    const run = legacy({ route: { routeDigest: exact, phase: "build", provider: "claude", model: "sonnet", chosen: "legacy" } });
+    expect(store.runRoute(run)).toMatchObject({ chosen: "legacy", routeDigest: exact });
+    // Unsealed (the approval lapsed): no profile governs the row, and the exact old digest admits nothing.
+    propose(store, { taskId: "old", goal: "old work, wider", now: T0 });
+    store.raw().prepare("UPDATE task_scope SET route_era = NULL, proposed_route_json = NULL WHERE task_id = 'old'").run();
+    expect(() => legacy({ route: { routeDigest: exact, phase: "build", provider: "claude", model: "sonnet", chosen: "legacy" } })).toThrow(/no sealed profile governs this pre-routing row/);
+    expect(store.runsFor(oldRef)).toHaveLength(1);
+    // A task with NO scope spends as the bare word — never under a profile digest.
+    store.createTask({ id: "none", title: "none" }, T0);
+    const noneRef = store.refFor(BUILT_IN, "none").id;
+    expect(() => store.startRun({ taskRef: noneRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0, route: { routeDigest: exact, phase: "build", provider: "claude", model: "sonnet", chosen: "legacy" } })).toThrow(/spends as the word legacy, not under a profile digest/);
+    const bareWord = store.startRun({ taskRef: noneRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0, route: { routeDigest: "legacy", phase: "build", provider: "claude", model: "sonnet", chosen: "legacy" } });
+    expect(store.runRoute(bareWord)).toMatchObject({ routeDigest: "legacy" });
   });
 
   test("a fallback stamp binds the run to ONE exact chain entry: two entries sharing a provider and model but differing in auth mode or repair model are different authorities", async () => {
@@ -2769,7 +2865,9 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     expect(runs()).toBe(0);
     // Bound to the exact entry at admission (the cycle's cursor + digest),
     // the stamp proves; a forged entry digest, or the primary, opens nothing.
-    const base = admit({});
+    const baseLeg = store.routeAuthorityFor(taskRef, "builder");
+    if (baseLeg === null || !baseLeg.ok) throw new Error("base leg");
+    const base = admit({ route: baseLeg.stamp });
     const opened = store.openFallbackCycle(taskRef, chainDigestOf(chain), base, T0);
     if (!opened.ok) throw new Error("cycle");
     store.beginFallbackSanitize(opened.id, 0, base, T0);
@@ -2777,21 +2875,35 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     if (!adv.ok) throw new Error("advance");
     store.releaseFallbackToPending(opened.id, 2, T0);
     const runArgs = { taskRef, leaseId: "lf", runner: "r", branch: "b", worktree: "/w", provider: "codex", model: "gpt-5-codex" };
-    const forged = store.admitFallback({ cycleId: opened.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: runArgs, entryDigest: entryDigestOf(chain[2]!), authMode: "subscription", route: fallback }, T0);
-    expect(forged).toMatchObject({ ok: false, problem: expect.stringContaining("bound to chain entry 1 under digest") });
-    const wrongPair = store.admitFallback({ cycleId: opened.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: { ...runArgs, model: "o3" }, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key", route: { ...fallback, model: "o3" } }, T0);
-    expect(wrongPair).toMatchObject({ ok: false, problem: expect.stringContaining("is codex · gpt-5-codex, not codex · o3") });
+    const forged = store.admitFallback({ cycleId: opened.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: runArgs, entryDigest: entryDigestOf(chain[2]!), authMode: "subscription", repairModel: "gpt-5-codex", route: fallback }, T0);
+    expect(forged).toMatchObject({ ok: false, problem: expect.stringContaining("is not the approved entry 1's") });
+    const wrongPair = store.admitFallback({ cycleId: opened.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: { ...runArgs, model: "o3" }, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key", repairModel: "gpt-5-codex", route: { ...fallback, model: "o3" } }, T0);
+    expect(wrongPair).toMatchObject({ ok: false, problem: expect.stringContaining("runs codex · gpt-5-codex, not codex · o3") });
     expect(runs()).toBe(1);
-    const admitted = store.admitFallback({ cycleId: opened.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: runArgs, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key", route: fallback }, T0);
+    const admitted = store.admitFallback({ cycleId: opened.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: runArgs, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key", repairModel: "gpt-5-codex", route: fallback }, T0);
     expect(admitted.ok).toBe(true);
     if (!admitted.ok) return;
     expect(store.runRoute(admitted.runId)).toMatchObject({ chosen: "fallback", provider: "codex", model: "gpt-5-codex" });
     expect(store.getRun(admitted.runId)).toMatchObject({ chainIndex: 1, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key" });
     // A repair child of the bound run inherits the binding IN its admission
-    // and spends as the same entry's repair model — `fallback`, entry 1.
-    const repair = admit({ role: "repair", parentRun: admitted.runId, provider: "codex", model: "gpt-5-codex" });
+    // and spends as the same entry's repair model — `fallback`, entry 1 —
+    // presenting exactly that authority; the sealed repair leg admits nothing here.
+    const boundRepair = store.routeAuthorityFor(taskRef, "repair", { index: 1, entryDigest: entryDigestOf(chain[1]!) });
+    expect(boundRepair).toMatchObject({ ok: true, stamp: { phase: "repair", chosen: "fallback", provider: "codex", model: "gpt-5-codex" } });
+    if (boundRepair === null || !boundRepair.ok) return;
+    const sealedRepair = store.routeAuthorityFor(taskRef, "repair");
+    if (sealedRepair === null || !sealedRepair.ok) throw new Error("repair leg");
+    expect(() => admit({ role: "repair", parentRun: admitted.runId, provider: "codex", model: "gpt-5-codex", route: sealedRepair.stamp })).toThrow(/would spend as codex|not codex/);
+    const repair = admit({ role: "repair", parentRun: admitted.runId, provider: "codex", model: "gpt-5-codex", route: boundRepair.stamp });
     expect(store.getRun(repair)).toMatchObject({ chainCycle: opened.id, chainIndex: 1, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key" });
     expect(store.runRoute(repair)).toMatchObject({ phase: "repair", chosen: "fallback", provider: "codex", model: "gpt-5-codex" });
+    // A REVIEWER after the fallback spawns normally: under the review leg,
+    // taking no custody of the chain.
+    const reviewLeg = store.routeAuthorityFor(taskRef, "reviewer");
+    if (reviewLeg === null || !reviewLeg.ok) throw new Error("review leg");
+    const review = admit({ role: "reviewer", parentRun: admitted.runId, branch: undefined, worktree: undefined, provider: reviewLeg.stamp.provider, model: reviewLeg.stamp.model ?? undefined, route: reviewLeg.stamp });
+    expect(store.getRun(review)).toMatchObject({ role: "reviewer", chainCycle: null, chainIndex: null, entryDigest: null });
+    expect(store.runRoute(review)).toMatchObject({ phase: "review", chosen: reviewLeg.stamp.chosen });
   });
 
   test("a stamp is proved against the authority the task holds NOW: a re-filed scope unseals the route, and the old digest no longer admits anything", async () => {
@@ -2807,6 +2919,159 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     const planner = admit({ role: "planner", route: { routeDigest: routeDigestOf(proposed), phase: "plan", provider: "claude", model: "sonnet", chosen: "recommended" } });
     expect(store.runRoute(planner)).toMatchObject({ phase: "plan", routeDigest: routeDigestOf(proposed) });
   });
+});
+
+describe("authority-integrity: a run row's chain binding and auth mode are read strictly", () => {
+  test("a corrupt auth mode, a fractional or empty chain index, or an empty entry digest reads as NO binding — every custody proof refuses, and an ended tail with an unreadable auth mode closes as an ordinary end, never as a subscription run", async () => {
+    const { addApprover, approve, propose } = await import("./scope.js");
+    const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", T0);
+    store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "test", T0);
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("approver");
+    store.createTask({ id: "t", title: "t" }, T0);
+    const taskRef = store.refFor(BUILT_IN, "t").id;
+    store.placeTask(taskRef, REPO);
+    propose(store, { taskId: "t", goal: "guard", now: T0 });
+    expect(approve(store, "t", "alex", T0, store.getScope("t")!.digest, added.token).ok).toBe(true);
+    const leg = store.routeAuthorityFor(taskRef, "builder");
+    if (leg === null || !leg.ok) throw new Error("leg");
+    const run = store.startRun({ taskRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0, route: leg.stamp, custody: { kind: "base" } });
+    const sound = store.getRun(run)!;
+    expect(sound).toMatchObject({ chainIndex: 0, authMode: "subscription" });
+    expect(sound.chainCycle).not.toBeNull();
+    expect(store.proveChainCustodyForSpawn(run, T0)).toBe(true);
+    const set = (column: string, value: unknown) => store.raw().prepare(`UPDATE run SET ${column} = ? WHERE id = ?`).run(value as string, run);
+    // Auth mode: only the two words read; a third reads as null and the
+    // spawn proof refuses (the approved entry is pinned to a mode).
+    set("auth_mode", "bogus");
+    expect(store.getRun(run)!.authMode).toBeNull();
+    expect(store.proveChainCustodyForSpawn(run, T0)).toBe(false);
+    set("auth_mode", "subscription");
+    // Chain index: a fraction, text, or the empty string is no index — never 0.
+    for (const bad of [0.5, "zero", ""]) {
+      set("chain_index", bad);
+      expect(store.getRun(run)!.chainIndex).toBeNull();
+      expect(store.proveChainCustodyForSpawn(run, T0)).toBe(false);
+    }
+    set("chain_index", 0);
+    set("entry_digest", "");
+    expect(store.getRun(run)!.entryDigest).toBeNull();
+    expect(store.proveChainCustodyForSpawn(run, T0)).toBe(false);
+    set("entry_digest", sound.entryDigest);
+    expect(store.proveChainCustodyForSpawn(run, T0)).toBe(true);
+    // An ended tail whose auth mode no longer reads: an ordinary end.
+    store.stampTerminalClass(run, "subscription", "usage-exhausted");
+    store.finishRun(run, { outcome: "failed", reason: "exhausted", now: T0 });
+    set("auth_mode", "bogus");
+    expect(store.resolveChainOnRunEnd(taskRef, "t", REPO, run, T0)).toEqual({ kind: "closed", reason: "entry-ended" });
+    expect(store.fallbackCycleFor(taskRef)).toBeNull();
+    store.close();
+  });
+});
+
+describe("migration-recovery: authentic v47 and interrupted −47 databases upgrade without rerunning older data passes, changing ids, backfilling authority, or auto-approving", () => {
+  /** A v47-shaped file with rows the OLDER data passes would touch if they
+   * ran again, a task steer the v24 pass would quarantine, and a routine
+   * approved under v47 (no route columns). Returns the ids to re-prove. */
+  const seedV47 = async (dir: string, startVersion: number) => {
+    const { addApprover } = await import("./scope.js");
+    const { routineDigestOf } = await import("./routine.js");
+    const db = join(dir, "orders.db");
+    const seeded = openStore(db);
+    const raw = seeded.raw();
+    const added = addApprover(seeded, "alex", T0);
+    if (!added.ok) throw new Error("approver");
+    seeded.createTask({ id: "t-old", title: "old" }, T0);
+    const ref = seeded.refFor(BUILT_IN, "t-old").id;
+    seeded.placeTask(ref, REPO);
+    // A scope row shaped as the v24 data pass looks for: resolved, no
+    // profile snapshot, no approved snapshot. A rerun would write
+    // profile_json and a new digest into it.
+    raw.prepare(
+      `INSERT INTO task_scope (task_id, goal, out_of_scope, touches, budget_microusd, digest, proposed_at, profile_state, profile_json, approved_profile_json, digest_version)
+       VALUES ('t-old', 'old work', NULL, '[]', NULL, 'digest-v47-as-signed', ?, 'resolved', NULL, NULL, 1)`,
+    ).run(T0.toISOString());
+    // A steer note the v24 pass would supersede as 'unverified-author'.
+    raw.prepare("INSERT INTO task_steer (task_ref, author, note, created_at, authorship_state) VALUES (?, 'alex', 'keep the old formatter', ?, 'unverified-legacy')").run(ref, T0.toISOString());
+    const profile = { provider: "claude" as const, model: "sonnet", permissionArgv: "acceptEdits" as const, maxTurns: 40, repairMaxTurns: 4, timeoutSeconds: 1800, repairTimeoutSeconds: 300, repairModel: "inherit" };
+    const terms = { repo: REPO, goal: "refresh the lockfile", outOfScope: null, touches: ["package.json"], acceptance: [], requirements: [], schedule: "every:60", singleFlight: true, costCeilingUsd: null, budgetPerRunMicrousd: null };
+    const routineDigest = routineDigestOf(terms, profile);
+    const created = seeded.createRoutine({ name: "nightly-deps", ...terms, digest: routineDigest, profile }, T0);
+    if (!created.ok) throw new Error("routine");
+    raw.prepare("UPDATE routine SET approved_at = ?, approved_by = 'alex', approved_digest = digest, approved_profile_json = profile_json, next_fire_at = ? WHERE id = ?").run(T0.toISOString(), new Date(T0.getTime() + 3_600_000).toISOString(), created.id);
+    raw.exec("ALTER TABLE routine DROP COLUMN route_json");
+    raw.exec("ALTER TABLE routine DROP COLUMN approved_route_json");
+    const before = {
+      scope: raw.prepare("SELECT * FROM task_scope WHERE task_id = 't-old'").get() as Record<string, unknown>,
+      steer: raw.prepare("SELECT * FROM task_steer").all() as Record<string, unknown>[],
+      routine: raw.prepare("SELECT id, name, digest, approved_at, approved_by, approved_digest, approved_profile_json, next_fire_at FROM routine WHERE id = ?").get(created.id) as Record<string, unknown>,
+      taskRefIds: (raw.prepare("SELECT id, external_id FROM task_ref ORDER BY id").all() as Record<string, unknown>[]),
+      routineDigest,
+    };
+    raw.prepare("UPDATE schema_version SET version = ?").run(startVersion);
+    seeded.close();
+    return { db, token: added.token, routineId: created.id, before };
+  };
+
+  for (const [label, startVersion] of [["an authentic v47", 47], ["an interrupted −47 epoch", -47]] as const) {
+    test(`${label} upgrades in place: the v24 data pass does not rerun, ids and digests stay, nothing is backfilled or auto-approved — and refresh → explicit reapproval → exact fire then succeed`, async () => {
+      const { approveRoutine, fireRoutine, refreshRoutineAgents, routineAgentsState } = await import("./routine.js");
+      const { routeDigestOf } = await import("./phase-routing.js");
+      const dir = mkdtempSync(join(tmpdir(), "standing-orders-mig-"));
+      try {
+        const { db, token, routineId, before } = await seedV47(dir, startVersion);
+        const up = openStore(db);
+        const raw = up.raw();
+        expect(raw.prepare("SELECT version FROM schema_version").get()).toMatchObject({ version: SCHEMA_VERSION });
+        // The older data pass did NOT run again: the resolved scope keeps
+        // its NULL snapshot and signed digest, the steer note is not
+        // quarantined, and nothing else about either row moved.
+        expect(raw.prepare("SELECT * FROM task_scope WHERE task_id = 't-old'").get()).toEqual({ ...before.scope, risk_level: "routine", proposed_route_json: null, approved_route_json: null, route_era: null });
+        expect(raw.prepare("SELECT * FROM task_steer").all()).toEqual(before.steer);
+        expect((raw.prepare("SELECT * FROM task_steer").get() as Record<string, unknown>)["superseded_at"]).toBeNull();
+        // Ids stay: task refs and the routine.
+        expect(raw.prepare("SELECT id, external_id FROM task_ref ORDER BY id").all()).toEqual(before.taskRefIds);
+        // The routine's approval columns are exactly as v47 left them —
+        // no route backfilled, no fresh approval, the same digest.
+        expect(raw.prepare("SELECT id, name, digest, approved_at, approved_by, approved_digest, approved_profile_json, next_fire_at FROM routine WHERE id = ?").get(routineId)).toEqual(before.routine);
+        expect(raw.prepare("SELECT route_json, approved_route_json FROM routine WHERE id = ?").get(routineId)).toEqual({ route_json: null, approved_route_json: null });
+        const migrated = up.getRoutine(routineId)!;
+        expect(routineAgentsState(migrated)).toMatchObject({ state: "unfrozen", approvable: false, refresh: true });
+        // It fires nothing, and creates nothing, until a person acts.
+        expect(fireRoutine(up, routineId, new Date(T0.getTime() + 2 * 3_600_000))).toMatchObject({ ok: false, reason: "route-unfrozen" });
+        expect(up.listTasks().filter(one => one.id !== "t-old")).toHaveLength(0);
+        // Refresh (withdraws the unfrozen approval, approves nothing), then
+        // the explicit reapproval, then the exact fire under the new snapshot.
+        up.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+        up.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+        up.setPhaseConfig("installation", "review", "claude", "opus", "alex", T0);
+        expect(refreshRoutineAgents(up, routineId, new Date(T0.getTime() + 2 * 3_600_000))).toMatchObject({ ok: true, changed: true });
+        const pending = up.getRoutine(routineId)!;
+        expect(pending).toMatchObject({ id: routineId, approvedDigest: null, approvedRoute: null, nextFireAt: null });
+        expect(pending.digest).not.toBe(before.routineDigest);
+        expect(fireRoutine(up, routineId, new Date(T0.getTime() + 2 * 3_600_000))).toMatchObject({ ok: false, reason: "not-approved" });
+        expect(approveRoutine(up, routineId, "alex", new Date(T0.getTime() + 2 * 3_600_000), pending.digest, token).ok).toBe(true);
+        const frozen = up.getRoutine(routineId)!;
+        expect(routineAgentsState(frozen)).toMatchObject({ state: "frozen" });
+        const fired = fireRoutine(up, routineId, new Date(T0.getTime() + 4 * 3_600_000));
+        expect(fired.ok).toBe(true);
+        if (!fired.ok) return;
+        const sealed = up.sealedRouteOf(fired.taskId);
+        expect(sealed.ok).toBe(true);
+        if (sealed.ok) expect(routeDigestOf(sealed.route)).toBe(routeDigestOf(frozen.approvedRoute!));
+        up.close();
+        // A second open is a plain no-op: the version stands, nothing moves.
+        const again = openStore(db);
+        expect(again.raw().prepare("SELECT version FROM schema_version").get()).toMatchObject({ version: SCHEMA_VERSION });
+        again.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 describe("migration to v48: the routine freezes its route; `agents` joins the proposal kinds", () => {

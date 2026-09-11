@@ -1008,7 +1008,16 @@ export function createDecisionServer(options: ServeOptions): Server {
           rollup,
           interactive: project !== null,
           decisions: store.listDecisionsScoped(project).filter(one => visible(one.repo)).slice(0, 10),
-          approvals: store.scopesAwaitingApproval(project, 10, admission).filter(one => visible(one.repo)),
+          // Each waiting scope wears its consent door (v48 authority repair): a scope whose
+          // approval is closed — unreadable route, a route that cannot run,
+          // a pre-routing row whose approval lapsed — reads as needing
+          // attention, never as something to approve.
+          approvals: store.scopesAwaitingApproval(project, 10, admission).filter(one => visible(one.repo)).map(one => {
+            const ref = store.lookupRef(one.taskId);
+            const scope = store.getScope(one.taskId);
+            const door = consentDoorOf(scope, routeViewOf(one.taskId, ref, scope, now, who));
+            return { ...one, closed: door.open ? null : door.title };
+          }),
           requeueables: store.listRequeueablesScoped(project, now, 10, admission).filter(one => visible(one.repo)),
           needsVerification: store
             .listCompletedWorkScoped(project, 10, admission)
@@ -2110,14 +2119,6 @@ export function createDecisionServer(options: ServeOptions): Server {
             takeMateNote(who.session.csrf, null),
           ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled, focusTask === null ? "/chat" : taskChatHref(focusTask.id)) } : {}),
           ...(who.role === "approver" ? { coordinatorProposals: coordinatorProposalsSection(coordinatorRows, decisionsFor(store, coordinatorRows), who.session.csrf, now, true, focusTask === null ? null : taskChatHref(focusTask.id)) } : {}),
-          // The demo sandbox's seeded conversation (v48): read, never written.
-          ...((): { demoTranscript?: NonNullable<Parameters<typeof chatPage>[1]["demoTranscript"]> } => {
-            if (enabled.ok || (enabled as { code?: string }).code !== "demo" || !store.isDemo()) return {};
-            const thread = store.liveMateThreadFor(who.name);
-            if (thread === null) return {};
-            const proposals = store.listMateProposals(thread.id);
-            return { demoTranscript: { messages: store.listMateMessages(thread.id, 40), proposals, decisions: decisionsFor(store, proposals), now } };
-          })(),
         }),
       );
     }
@@ -7344,7 +7345,7 @@ function agentsCeremonyHtml(view: RouteView | null | undefined): string {
 function routineAgentsHtml(routine: Routine, approved: boolean, ceremony = false): string {
   const agents = routineAgentsState(routine);
   const route: PhaseRoute | null = (approved ? routine.approvedRoute : routine.route) ?? null;
-  if (route === null || agents.state === "unreadable" || agents.state === "unresolved" || agents.state === "unfrozen") {
+  if (route === null || agents.state !== "frozen" && agents.state !== "pending") {
     // The closed door, with its one road: no agents to restate means no
     // yes to give — the words say which fact closed it and what opens it.
     const words =
@@ -7352,7 +7353,9 @@ function routineAgentsHtml(routine: Routine, approved: boolean, ceremony = false
         ? `the agents on file cannot be read back (${agents.problem ?? "corrupt snapshot"}) — refresh the agents from today's configuration, read them, and approve this standing order again; until then nothing fires`
         : agents.state === "unfrozen"
           ? "approved before agents were frozen — refresh the agents, read the exact planner, builder, repair, and reviewer it then names, and approve this standing order again; until then nothing fires"
-          : `not resolved — ${agents.problem ?? "this standing order does not name an exact agent for every role"}; configure the project's agents, then refresh and approve again`;
+          : agents.state === "unverified"
+            ? `the frozen agents do not verify (${agents.problem ?? "the approved snapshot is not whole"}) — refresh the agents from today's configuration, read them, and approve this standing order again; until then nothing fires`
+            : `not resolved — ${agents.problem ?? "this standing order does not name an exact agent for every role"}; configure the project's agents, then refresh and approve again`;
     return `<div class="agents-ceremony agents-closed"><p class="approval-label">agents</p><p class="agents-summary">${escape(words)}</p></div>`;
   }
   const projection = projectRoute(route, () => null);
@@ -10310,7 +10313,7 @@ function inboxPage(chrome: Chrome, data: {
    * review, finding 4) — the partial belongs to a chosen project. */
   interactive: boolean;
   decisions: (Decision & { taskId: string; repo?: string | null })[];
-  approvals: { taskId: string; title: string; goal: string; proposedAt: string; repo?: string | null }[];
+  approvals: { taskId: string; title: string; goal: string; proposedAt: string; repo?: string | null; /** v48 authority repair: the closed consent door's title, or null when a yes could bind. */ closed?: string | null }[];
   requeueables: { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number; repo?: string | null }[];
   cancelledBlockers: { blockerId: string; dependentCount: number; exampleDependent: string; repo?: string | null; blockerRepo?: string | null }[];
   gaps: Gap[];
@@ -10363,7 +10366,7 @@ function inboxPage(chrome: Chrome, data: {
               `<a class="decide-card" href="${taskHref(one.taskId)}">` +
               `<p class="q">${escape(one.title)}</p>` +
               `<span class="meta">${escape(one.goal.length > 120 ? one.goal.slice(0, 120) + "\u2026" : one.goal)}</span><br>` +
-              `<span class="mono meta">${escape(one.taskId)}</span>${chip(one.repo)} <span class="right meta">review &amp; approve \u2192</span>` +
+              `<span class="mono meta">${escape(one.taskId)}</span>${chip(one.repo)} <span class="right meta">${one.closed == null ? "review &amp; approve \u2192" : `needs attention: ${escape(one.closed.toLowerCase())} \u2192`}</span>` +
               `</a>`,
           )
           .join("\n");
@@ -11496,10 +11499,6 @@ function chatPage(chrome: Chrome, data: {
   mateMint?: string;
   /** Pending coordinator proposals as cards (mate arc v3), approvers only. */
   coordinatorProposals?: string;
-  /** The demo sandbox's illustrative conversation (v48): a seeded thread
-   * rendered read-only so the flow can be seen without a model; its cards
-   * refuse honestly when pressed (no live session mints in a sandbox). */
-  demoTranscript?: { messages: MateMessage[]; proposals: MateProposal[]; decisions: Map<number, Decision>; now: Date };
 }): Screen {
   const configForm = (current: import("./store.js").ChatConfig | null): string => {
     const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
@@ -11559,31 +11558,11 @@ function chatPage(chrome: Chrome, data: {
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   if (!data.enabled.ok) {
     const code = (data.enabled as { code?: string }).code;
-    if (code === "demo" && data.demoTranscript !== undefined && data.demoTranscript.messages.length > 0) {
-      const transcript = data.demoTranscript;
-      const byTurn = new Map<number, MateProposal[]>();
-      for (const one of transcript.proposals) byTurn.set(one.turn, [...(byTurn.get(one.turn) ?? []), one]);
-      const returnTo = data.focusTask === null ? null : taskChatHref(data.focusTask.id);
-      parts.push(`<div class="thread">`);
-      for (const message of transcript.messages) {
-        if (message.role === "operator") {
-          parts.push(`<div class="msg op" data-message-role="operator"><p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
-          continue;
-        }
-        const cards = message.turn === null ? [] : (byTurn.get(message.turn) ?? []);
-        parts.push(
-          `<div class="msg mate" data-message-role="assistant">` +
-            renderChatText(message.text) +
-            cards.map(one => mateProposalCard(one, data.csrf, false, transcript.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null, returnTo)).join("") +
-            `<div class="chat-message-foot">${chatActivity(message.activity)}<time datetime="${escape(message.createdAt)}">${escape(relativeAge(message.createdAt, transcript.now))}</time></div>` +
-            `</div>`,
-        );
-      }
-      parts.push(`</div>`);
-    }
+    // The sandbox shows no conversation at all: chat evidence is a real
+    // subscription-backed plane, never a seeded transcript (v48 authority repair).
     parts.push(
       code === "demo"
-        ? `<div class="card" id="latest"><p><strong>Chat isn’t available in demo mode</strong></p><p class="meta">Demo data never contacts an external model${data.demoTranscript !== undefined && data.demoTranscript.messages.length > 0 ? "; the conversation above is seeded to show the shape of a real one" : ""}. Start Standing Orders with a real project to use chat.</p></div>`
+        ? `<div class="card" id="latest"><p><strong>Chat isn’t available in demo mode</strong></p><p class="meta">Demo data never contacts an external model. Start Standing Orders with a real project to use chat.</p></div>`
         : `<div class="card" id="latest"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`,
     );
     // The ceiling refusals need a restart to fix; configuration does not —
@@ -12191,22 +12170,27 @@ function routineScreenPage(chrome: Chrome, data: {
   // that are unresolved, unreadable, or never frozen. Those states get the
   // one recovery act instead: refresh the agents, then approve again.
   const agents = routineAgentsState(routine);
+  // One plain-language act with accessible, neutral controls: the form is
+  // named by its title, the button described by the reason — no password,
+  // no danger verb, nothing to type.
   const refreshForm =
-    `<form method="post" action="${routineHref(routine.id)}/refresh" class="card approve-form agents-recovery" id="agents-recovery">` +
+    `<form method="post" action="${routineHref(routine.id)}/refresh" class="card approve-form agents-recovery" id="agents-recovery" aria-labelledby="agents-recovery-title">` +
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-    `<p><strong>${escape(
+    `<p id="agents-recovery-title"><strong>${escape(
       agents.state === "unfrozen"
         ? "This standing order was approved before its agents were frozen — nothing fires until you approve it again."
         : agents.state === "unreadable"
           ? "The agents on file for this standing order cannot be read — nothing approves or fires until they are refreshed."
-          : "This standing order cannot be approved yet: it does not name an exact agent for every role.",
+          : agents.state === "unverified"
+            ? "The agents this standing order's approval froze do not verify — nothing fires until they are refreshed and approved again."
+            : "This standing order cannot be approved yet: it does not name an exact agent for every role.",
     )}</strong></p>` +
-    `<p class="recap">${escape(
+    `<p id="agents-recovery-why" class="recap">${escape(
       agents.state === "unresolved" && agents.problem !== null
         ? `${agents.problem}. Configure the project's agents (config set <phase> --provider … --model …), then refresh.`
         : "Refreshing reads today's configured agents into this order and shows you exactly who would plan, build, repair, and review each firing. Nothing is approved by refreshing — the password step comes after, on this page.",
     )}</p>` +
-    `<button type="submit">Refresh agents</button></form>`;
+    `<button type="submit" aria-describedby="agents-recovery-why">Refresh agents</button></form>`;
   const approveForm = approved
     ? agents.refresh ? refreshForm : ""
     : !agents.approvable
@@ -12782,7 +12766,7 @@ function portfolioOverview(data: {
   done: WorkbenchDone[];
   saturated: boolean;
   decisions: (Decision & { taskId: string; repo?: string | null })[];
-  approvals: { taskId: string; title: string; goal: string; proposedAt: string; repo?: string | null }[];
+  approvals: { taskId: string; title: string; goal: string; proposedAt: string; repo?: string | null; /** v48 authority repair: the closed consent door's title, or null when a yes could bind. */ closed?: string | null }[];
   requeueables: { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number; repo?: string | null }[];
   cancelledBlockers: { blockerId: string; dependentCount: number; exampleDependent: string; repo?: string | null; blockerRepo?: string | null }[];
   gaps: Gap[];

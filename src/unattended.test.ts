@@ -26,6 +26,21 @@ import { run as exec, type ExecResult, type RunOptions } from "./exec.js";
 import { openStore } from "./store.js";
 import { register } from "./runner.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 type Runner = (file: string, args: readonly string[], options?: RunOptions) => Promise<ExecResult>;
 
 const T0 = new Date("2026-08-12T22:00:00.000Z");
@@ -327,7 +342,7 @@ describe("v40: a drafted, unapproved repair moves the idle-spend invariant not a
     // v48: the source attempt ran under a sealed route — approve before it opens.
     const sealed = approveScope(store, "t-guard", "alex", T0, store.getScope("t-guard")!.digest, approverToken);
     if (!sealed.ok) throw new Error(`the fixture approval was refused: ${sealed.reason}`);
-    const sourceRun = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "builder-1", branch: "b", worktree: "/wt", now: T0 });
+    const sourceRun = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "builder-1", branch: "b", worktree: "/wt", now: T0, ...presented(store, ref.id, "builder") });
     store.finishRun(sourceRun, { outcome: "built", committed: true, now: T0 });
     // The source task delivered (its short proof is what drafts the repair);
     // only the DRAFT could dispatch on the next tick.

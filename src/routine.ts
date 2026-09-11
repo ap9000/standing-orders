@@ -260,19 +260,18 @@ export function approveRoutine(
     const routine = store.getRoutine(routineId);
     if (routine === null) return { ok: false as const, reason: "no-such-routine" as const };
     if (sawDigest !== routine.digest) return { ok: false as const, reason: "changed" as const };
-    // A routine that cannot say exactly what would run is unapprovable
-    // (v24, same rule as scopes) — restatement is the road. Since v48 that
-    // means all four roles: a routine with no frozen route (filed before
-    // routing froze, or under a configuration that could not make one
-    // exact) cannot be agreed to until it is filed again.
-    if (routine.profile === null || routine.profile === undefined || routine.route === null || routine.route === undefined || routeProblems(routine.route).length > 0) {
-      return { ok: false as const, reason: "profile-unresolved" as const };
-    }
-    // The digest is re-derived from the stored terms, never trusted as a
-    // column (Codex Phase C review, H1): a row whose digest does not match
-    // its own terms is not something a person can meaningfully agree to.
-    if (routineDigestOf(termsOf(routine), routine.profile, routine.route) !== routine.digest) {
-      return { ok: false as const, reason: "changed" as const };
+    // ONE projection gates the yes (v48 authority repair): a routine that cannot say exactly
+    // what would run is unapprovable (v24, same rule as scopes) —
+    // restatement is the road. Since v48 that means all four roles: a
+    // routine with no frozen route (filed before routing froze, or under a
+    // configuration that could not make one exact) cannot be agreed to
+    // until it is filed again. The digest is re-derived from the stored
+    // terms inside the projection, never trusted as a column (Codex Phase
+    // C review, H1): a row whose digest does not match its own terms is
+    // not something a person can meaningfully agree to.
+    const integrity = routineIntegrity(routine);
+    if (!integrity.agents.approvable) {
+      return { ok: false as const, reason: integrity.agents.state === "unverified" ? ("changed" as const) : ("profile-unresolved" as const) };
     }
 
     const schedule = parseSchedule(routine.schedule);
@@ -368,12 +367,10 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
     // digest, and — because a digest column can be written by any store
     // caller — the digest is re-derived from the stored terms themselves
     // (Codex Phase C review, H1). Terms edited under a reused digest fire
-    // nothing, whatever the columns claim.
-    if (
-      routine.approvedAt === null ||
-      routine.approvedDigest !== routine.digest ||
-      routineDigestOf(termsOf(routine), routine.profile ?? null, routine.route ?? null) !== routine.digest
-    ) {
+    // nothing, whatever the columns claim. ONE projection answers (v48 authority repair),
+    // read here before anything is written.
+    const integrity = routineIntegrity(routine);
+    if (!integrity.approved) {
       return {
         ok: false as const,
         reason: "not-approved" as const,
@@ -461,19 +458,30 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
     // stays due, the operator is paged once, and approving the standing
     // order again — under agents it now names — is the road. No later
     // `config set` can reach a firing.
-    const frozenRoute = routine.approvedRoute ?? null;
-    const frozenProfile = routine.approvedProfile ?? null;
-    const unreadable = routine.approvedRouteUnreadable === true || routine.approvedProfileUnreadable === true;
-    if (frozenRoute === null || frozenProfile === null) {
-      // Two different facts, said apart: a snapshot that was never taken
-      // (approved before routing froze) and one whose bytes cannot be read
-      // (corrupt). Both fail closed; the road is the same — file again.
-      const subject = unreadable
-        ? `${routine.name} needs filing again: its frozen agents cannot be read`
-        : `${routine.name} needs approving again: its agents were never frozen`;
-      const body = unreadable
-        ? `The agents this standing order's approval froze cannot be read back. Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`
-        : `This standing order was approved before Standing Orders froze which agents plan, build, repair, and review each firing. Open it, refresh its agents, read the agents it now names, and approve it again; until then its firings wait.`;
+    // THE FROZEN SNAPSHOT IS RE-HASHED (v48, authority repair) by the same projection: the
+    // approved profile and the approved four-role route must read back,
+    // hash with the stored terms to the very digest the approver signed —
+    // a snapshot column rewritten after the yes fires nothing — carry no
+    // stated leg problem, and agree with the sealed profile's build and
+    // repair pairs. Anything short of live fails closed here, before
+    // anything is written; two facts are said apart on the page: a
+    // snapshot never taken (approved before routing froze) and one whose
+    // bytes cannot be read (corrupt). The road is the same — refresh the
+    // agents, read them, approve again.
+    if (!integrity.live) {
+      const state = integrity.agents.state;
+      const subject =
+        state === "unreadable"
+          ? `${routine.name} needs filing again: its frozen agents cannot be read`
+          : state === "unfrozen"
+            ? `${routine.name} needs approving again: its agents were never frozen`
+            : `${routine.name} needs approving again: its frozen agents do not verify`;
+      const body =
+        state === "unreadable"
+          ? `The agents this standing order's approval froze cannot be read back. Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`
+          : state === "unfrozen"
+            ? `This standing order was approved before Standing Orders froze which agents plan, build, repair, and review each firing. Open it, refresh its agents, read the agents it now names, and approve it again; until then its firings wait.`
+            : `The agents this standing order's approval froze do not verify (${integrity.liveProblem ?? "the frozen snapshot is not whole"}). Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`;
       if (!manual) {
         store.enqueueRoutineEpisode(
           `routine-route:${routineId}`,
@@ -485,31 +493,17 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
       return {
         ok: false as const,
         reason: "route-unfrozen" as const,
-        detail: unreadable
-          ? "the agents this standing order's approval froze cannot be read — refresh its agents and approve it again to fire it"
-          : "this standing order was approved before its agents were frozen — refresh its agents and approve it again to fire it",
+        detail:
+          state === "unreadable"
+            ? "the agents this standing order's approval froze cannot be read — refresh its agents and approve it again to fire it"
+            : state === "unfrozen"
+              ? "this standing order was approved before its agents were frozen — refresh its agents and approve it again to fire it"
+              : `${integrity.liveProblem ?? "the approved agents do not verify"} — refresh its agents and approve it again to fire it`,
       };
     }
-    // THE FROZEN SNAPSHOT IS RE-HASHED (v48): the approved profile and the
-    // approved four-role route must hash, with the stored terms, to the
-    // very digest the approver signed — a snapshot column rewritten after
-    // the yes fires nothing. Then the build leg must BE the profile's pair,
-    // the repair leg its provider and repair model, and no leg may carry a
-    // stated problem — proved here, inside the transaction, before
-    // anything is written.
-    if (routineDigestOf(termsOf(routine), frozenProfile, frozenRoute) !== routine.approvedDigest) {
-      return { ok: false as const, reason: "route-unfrozen" as const, detail: "the approved agents do not hash to the approval this standing order carries — file it again and approve it again" };
-    }
-    const frozenProblems = routeProblems(frozenRoute);
-    if (frozenProblems.length > 0) {
-      return { ok: false as const, reason: "route-unfrozen" as const, detail: `the approved route cannot run: ${frozenProblems.join("; ")} — file the standing order again` };
-    }
+    const frozenRoute = routine.approvedRoute as PhaseRoute;
+    const frozenProfile = routine.approvedProfile as ExecutionProfile;
     const frozenBuild = legOf(frozenRoute, "build");
-    const frozenRepair = legOf(frozenRoute, "repair");
-    const frozenRepairModel = frozenProfile.repairModel === "inherit" ? frozenProfile.model : frozenProfile.repairModel;
-    if (frozenBuild.provider !== frozenProfile.provider || frozenBuild.model !== frozenProfile.model || frozenRepair.provider !== frozenProfile.provider || frozenRepair.model !== frozenRepairModel) {
-      return { ok: false as const, reason: "route-unfrozen" as const, detail: `the approved agents (${frozenProfile.provider} · ${frozenProfile.model}, repair ${frozenProfile.provider} · ${frozenRepairModel}) disagree with the approved route (${frozenBuild.provider} · ${frozenBuild.model}, repair ${frozenRepair.provider} · ${frozenRepair.model}) — file the standing order again` };
-    }
     // The instance's agent IS the frozen build leg — never resolved from
     // flags or configuration at fire time (Codex provider review, critical
     // finding; v48 makes the whole route the pin).
@@ -671,28 +665,94 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
  * `refresh` says whether the one recovery road — re-resolve the agents
  * from today's configuration and approve again — applies.
  */
-export type RoutineAgentsState = { state: "frozen" | "pending" | "unfrozen" | "unreadable" | "unresolved"; approvable: boolean; refresh: boolean; problem: string | null };
+export type RoutineAgentsState = { state: "frozen" | "pending" | "unfrozen" | "unreadable" | "unverified" | "unresolved"; approvable: boolean; refresh: boolean; problem: string | null };
 
-export function routineAgentsState(routine: Pick<Routine, "route" | "approvedRoute" | "profile" | "approvedProfile" | "approvedAt" | "approvedDigest" | "digest" | "routeUnreadable" | "approvedRouteUnreadable" | "approvedProfileUnreadable">): RoutineAgentsState {
-  const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
+/**
+ * THE ONE INTEGRITY PROJECTION (v48 authority repair): every question about a standing
+ * order's agents — what the page says, whether a yes may be minted,
+ * whether an approval may land, whether a firing may proceed — is answered
+ * from this one reading of the row, computed BEFORE any mutation and never
+ * from a column alone.
+ *
+ *   approved  the stamp exists, the digest column matches the stored terms'
+ *             digest, and that digest re-derives from the stored terms,
+ *             working profile, and working route (a column rewritten under
+ *             a reused digest is not an approval).
+ *   live      the approval stands AND its frozen snapshot is whole: both
+ *             snapshot columns read back, they hash with the stored terms to
+ *             the very digest the approver signed, no leg states a problem,
+ *             and the build and repair legs are the sealed profile's exact
+ *             pairs. Only a live approval fires; nothing else does.
+ *   agents    the word every surface uses, with whether a yes could bind
+ *             (`approvable`) and whether the one recovery road applies
+ *             (`refresh`).
+ */
+export type RoutineIntegrity = {
+  approved: boolean;
+  live: boolean;
+  /** Why the approval is not live, when it is not — in words a page can show. */
+  liveProblem: string | null;
+  agents: RoutineAgentsState;
+};
+
+type IntegrityRow = Pick<Routine, "route" | "approvedRoute" | "profile" | "approvedProfile" | "approvedAt" | "approvedDigest" | "digest" | "routeUnreadable" | "approvedRouteUnreadable" | "approvedProfileUnreadable"> &
+  Partial<Pick<Routine, "goal" | "outOfScope" | "touches" | "acceptance" | "requirements" | "schedule" | "costCeilingUsd" | "budgetPerRunMicrousd">>;
+
+/** Whether the row carries every term the digest binds — a full Routine.
+ * A partial projection (older callers) skips the re-derivation and reads
+ * the columns alone; the store's own rows always carry the terms. */
+function carriesTerms(routine: IntegrityRow): routine is IntegrityRow & Routine {
+  return typeof routine.goal === "string" && typeof routine.schedule === "string" && Array.isArray(routine.touches);
+}
+
+export function routineIntegrity(routine: IntegrityRow): RoutineIntegrity {
+  const terms = carriesTerms(routine) ? termsOf(routine) : null;
+  const stamped = routine.approvedAt !== null && routine.approvedDigest !== null && routine.approvedDigest === routine.digest;
+  const workingRehashes =
+    terms === null || routineDigestOf(terms, routine.profile ?? null, routine.route ?? null) === routine.digest;
+  const approved = stamped && workingRehashes;
+  const closed = (state: RoutineAgentsState["state"], problem: string, refresh = true): RoutineIntegrity => ({
+    approved,
+    live: false,
+    liveProblem: approved ? problem : null,
+    agents: { state, approvable: false, refresh, problem },
+  });
   if (approved) {
     if (routine.approvedRouteUnreadable === true || routine.approvedProfileUnreadable === true) {
-      return { state: "unreadable", approvable: false, refresh: true, problem: "the agents this approval froze cannot be read back" };
+      return closed("unreadable", "the agents this approval froze cannot be read back");
     }
     const route = routine.approvedRoute ?? null;
     const profile = routine.approvedProfile ?? null;
-    if (route === null || profile === null) return { state: "unfrozen", approvable: false, refresh: true, problem: "approved before agents were frozen" };
+    if (route === null || profile === null) return closed("unfrozen", "approved before agents were frozen");
+    if (terms !== null && routineDigestOf(terms, profile, route) !== routine.approvedDigest) {
+      return closed("unverified", "the approved agents do not hash to the approval this standing order carries");
+    }
     const problems = routeProblems(route);
-    if (problems.length > 0) return { state: "unresolved", approvable: false, refresh: true, problem: problems.join("; ") };
-    return { state: "frozen", approvable: false, refresh: false, problem: null };
+    if (problems.length > 0) return closed("unresolved", problems.join("; "));
+    const build = legOf(route, "build");
+    const repair = legOf(route, "repair");
+    const repairModel = profile.repairModel === "inherit" ? profile.model : profile.repairModel;
+    if (build.provider !== profile.provider || build.model !== profile.model || repair.provider !== profile.provider || repair.model !== repairModel) {
+      return closed(
+        "unverified",
+        `the approved agents (${profile.provider} · ${profile.model}, repair ${profile.provider} · ${repairModel}) disagree with the approved route (${build.provider} · ${build.model}, repair ${repair.provider} · ${repair.model})`,
+      );
+    }
+    return { approved: true, live: true, liveProblem: null, agents: { state: "frozen", approvable: false, refresh: false, problem: null } };
   }
-  if (routine.routeUnreadable === true) return { state: "unreadable", approvable: false, refresh: true, problem: "the filed agents cannot be read back" };
+  if (routine.routeUnreadable === true) return closed("unreadable", "the filed agents cannot be read back");
   const route = routine.route ?? null;
   const profile = routine.profile ?? null;
-  if (route === null || profile === null) return { state: "unresolved", approvable: false, refresh: true, problem: "this standing order does not name an exact agent for every role" };
+  if (route === null || profile === null) return closed("unresolved", "this standing order does not name an exact agent for every role");
   const problems = routeProblems(route);
-  if (problems.length > 0) return { state: "unresolved", approvable: false, refresh: true, problem: problems.join("; ") };
-  return { state: "pending", approvable: true, refresh: false, problem: null };
+  if (problems.length > 0) return closed("unresolved", problems.join("; "));
+  if (!workingRehashes) return closed("unverified", "the filed terms do not hash to this standing order's reference — file it again");
+  return { approved: false, live: false, liveProblem: null, agents: { state: "pending", approvable: true, refresh: false, problem: null } };
+}
+
+/** The agents word every surface uses — one reading of the projection. */
+export function routineAgentsState(routine: IntegrityRow): RoutineAgentsState {
+  return routineIntegrity(routine).agents;
 }
 
 export type RefreshRoutineResult =
@@ -719,10 +779,21 @@ export function refreshRoutineAgents(store: Store, routineId: number, now: Date)
     if (!authority.ok) return { ok: false as const, reason: "unresolved" as const, problem: authority.problem };
     const terms = termsOf(routine);
     const digest = routineDigestOf(terms, authority.profile, authority.route);
-    if (digest === routine.digest && routine.route != null && routine.profile != null) {
+    // The projection is read BEFORE any write (v48 authority repair): an approval that is
+    // not live — never frozen, unreadable, or a snapshot that no longer
+    // verifies — is WITHDRAWN here, even when the working agents already
+    // bind these exact terms, so a corrupt frozen snapshot can never keep
+    // reading as approved. A live approval under unchanged terms is left
+    // byte-for-byte alone.
+    const integrity = routineIntegrity(routine);
+    const unchanged = digest === routine.digest && routine.route != null && routine.profile != null && !routine.routeUnreadable;
+    if (unchanged && (integrity.live || !integrity.approved) && integrity.agents.state !== "unverified") {
       return { ok: true as const, routine, changed: false };
     }
-    store.updateRoutineTerms(routineId, { ...terms, digest, profile: authority.profile, route: authority.route }, now);
+    if (integrity.approved && !integrity.live) store.withdrawRoutineApproval(routineId, now);
+    if (!unchanged || integrity.agents.state === "unverified") {
+      store.updateRoutineTerms(routineId, { ...terms, digest, profile: authority.profile, route: authority.route }, now);
+    }
     return { ok: true as const, routine: store.getRoutine(routineId) as Routine, changed: true };
   });
 }
@@ -752,9 +823,9 @@ export function routineAgentsWords(routine: Pick<Routine, "route" | "approvedRou
   const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
   const agents = routineAgentsState(routine);
   const route = approved ? routine.approvedRoute ?? null : routine.route ?? null;
-  if (route === null || agents.state === "unreadable" || agents.state === "unresolved") {
+  if (route === null || agents.state === "unreadable" || agents.state === "unresolved" || agents.state === "unverified") {
     return [
-      `  agents       ${agents.state === "unreadable" ? "cannot be read" : agents.state === "unfrozen" ? "not frozen" : "not resolved"} — ${agents.problem ?? "this standing order does not name an exact agent for every role"}`,
+      `  agents       ${agents.state === "unreadable" ? "cannot be read" : agents.state === "unfrozen" ? "not frozen" : agents.state === "unverified" ? "do not verify" : "not resolved"} — ${agents.problem ?? "this standing order does not name an exact agent for every role"}`,
       `               refresh them with \`routine refresh <name>\`, read the agents it then names, and approve it again`,
     ];
   }

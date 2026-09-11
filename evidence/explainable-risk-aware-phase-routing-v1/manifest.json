@@ -1,0 +1,218 @@
+{
+ "evidence": "explainable-risk-aware-phase-routing-v1",
+ "capturedAt": "2026-09-11T12:24:33.970Z",
+ "plane": {
+  "kind": "scratch, non-demo",
+  "database": "/tmp/so-live2/orders.db (STANDING_ORDERS_DB)",
+  "schemaVersion": 48,
+  "demoMarker": false,
+  "demoBannerOnAnyCapture": false,
+  "console": "standing-orders serve --port 4994 --repo /tmp/so-live2/repo",
+  "builtFrom": "cc2aebeb0dfc0a096cc025bedad7759f00d782d2",
+  "workingTreeDirty": true
+ },
+ "chat": {
+  "provider": "claude-subscription",
+  "model": "default",
+  "backedBy": "the operator's Claude subscription login on this machine (claude-subscription); no API key",
+  "turnsSpent": 2,
+  "message": "Treat this as high risk \u2014 the collector and both dashboards depend on the log format, so a bad rollout is expensive.",
+  "task": "rotate-log-format",
+  "sentAt": "2026-09-11T12:24:08.412Z",
+  "pendingSeenAt": "2026-09-11T12:24:32.861Z",
+  "confirmedAt": "2026-09-11T12:24:33.970Z",
+  "proposals": [
+   {
+    "id": 1,
+    "kind": "agents",
+    "state": "confirmed"
+   }
+  ],
+  "result": "the confirmed agents card declared the task high risk; the earlier approval no longer covers it and the task page asks for a new yes"
+ },
+ "task": {
+  "id": "rotate-log-format",
+  "riskAfter": "high",
+  "approvalStandsAfter": false,
+  "approvedBy": "alex"
+ },
+ "browser": {
+  "engine": "headless Chromium (playwright)",
+  "deviceScaleFactor": 1,
+  "viewports": [
+   {
+    "width": 1400,
+    "height": 900
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "colorScheme": "dark",
+  "unclippedCheck": "document.documentElement.scrollWidth <= clientWidth on every capture"
+ },
+ "captures": [
+  {
+   "file": "chat-desktop.png",
+   "sha256": "401ec1ba78a09ab606ca0f3d73212255b43a05c00af189a0326fb5e50a938699",
+   "bytes": 230695,
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "deviceScaleFactor": 1,
+   "shows": "chat: the agents proposal card pending beside a visible composer",
+   "page": "/chat?task=rotate-log-format",
+   "unclipped": true,
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "capturedAt": "2026-09-11T12:24:33.254Z",
+   "pixels": {
+    "width": 1400,
+    "height": 900
+   },
+   "pendingCardVisible": true,
+   "composerVisible": true,
+   "cardText": "Agents change proposed by mate pending Declare Rotate the request-log format to JSON lines high risk The collector and both dashboards depend on the request-log format, so a bad rollout is expensive; every role should use the strongest configured agent. AGENTS NOW claude \u00b7 sonnet plans, builds, and repairs; claude \u00b7 opus reviews RISK High risk \u2014 every role \u2014 planner, builder, repair, and reviewer \u2014 uses the strongest agent you have configured PROJECT r1 Recorded under your name when you confirm. The current approval no longer covers the task afterwards \u2014 approve it again on the task. change ag",
+   "demoBanner": null
+  },
+  {
+   "file": "mobile-chat.png",
+   "sha256": "71424fb208488459ae7a687cf38df7aa5db7683b9fd8e61a05d1c68f9a35c445",
+   "bytes": 103208,
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "deviceScaleFactor": 1,
+   "shows": "chat on a phone: the pending agents card and the composer on one screen",
+   "page": "/chat?task=rotate-log-format",
+   "unclipped": true,
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "capturedAt": "2026-09-11T12:24:33.893Z",
+   "pixels": {
+    "width": 390,
+    "height": 844
+   },
+   "pendingCardVisible": true,
+   "composerVisible": true,
+   "demoBanner": null
+  },
+  {
+   "file": "chat-desktop-confirmed.png",
+   "sha256": "7dd2929aff82a8b340652fd7ab663ee25bf90b441727e71d037d8b1fecceaa71",
+   "bytes": 261304,
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "deviceScaleFactor": 1,
+   "shows": "chat: the confirmed agents change and its result",
+   "page": "/chat?task=rotate-log-format",
+   "unclipped": true,
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "capturedAt": "2026-09-11T12:24:34.407Z",
+   "pixels": {
+    "width": 1400,
+    "height": 900
+   },
+   "confirmedText": "Agents changed for Rotate the request-log format to JSON lines: risk is now high risk \u2014 the earlier approval no longer covers this task; approve it again \u2014 review & start in chat",
+   "demoBanner": null
+  },
+  {
+   "file": "mobile-chat-confirmed.png",
+   "sha256": "df64918bc39f556304bf310517ade0e4c8252f2075bac1d4e789f18e935fd0f7",
+   "bytes": 113918,
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "deviceScaleFactor": 1,
+   "shows": "chat on a phone: the confirmed agents change",
+   "page": "/chat?task=rotate-log-format",
+   "unclipped": true,
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "capturedAt": "2026-09-11T12:24:34.818Z",
+   "pixels": {
+    "width": 390,
+    "height": 844
+   },
+   "confirmedText": "Agents changed for Rotate the request-log format to JSON lines: risk is now high risk \u2014 the earlier approval no longer covers this task; approve it again \u2014 review & start in chat",
+   "demoBanner": null
+  },
+  {
+   "file": "desktop.png",
+   "sha256": "67f68827d818c57ebba16e8ae2dadb641e7bfc7e37431c5ea240eb0806bb87be",
+   "bytes": 223446,
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "deviceScaleFactor": 1,
+   "shows": "task page: the Agents card with the role controls expanded, the approval pending again",
+   "page": "/t/rotate-log-format",
+   "unclipped": true,
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "capturedAt": "2026-09-11T12:24:35.267Z",
+   "pixels": {
+    "width": 1400,
+    "height": 900
+   },
+   "roleControls": {
+    "changeOpen": [
+     true
+    ],
+    "selects": 5,
+    "roles": [
+     "risk",
+     "agent",
+     "agent",
+     "agent",
+     "agent"
+    ]
+   },
+   "demoBanner": null
+  },
+  {
+   "file": "mobile.png",
+   "sha256": "f4299f8d7275eb94262d186a370be1cb36f1213b3cc672cbb9d71477922e39d7",
+   "bytes": 91209,
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "deviceScaleFactor": 1,
+   "shows": "task page on a phone: the Agents card with the role controls expanded",
+   "page": "/t/rotate-log-format",
+   "unclipped": true,
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "capturedAt": "2026-09-11T12:24:35.626Z",
+   "pixels": {
+    "width": 390,
+    "height": 844
+   },
+   "roleControls": {
+    "changeOpen": [
+     true
+    ],
+    "selects": 5,
+    "roles": [
+     "risk",
+     "agent",
+     "agent",
+     "agent",
+     "agent"
+    ]
+   },
+   "demoBanner": null
+  }
+ ],
+ "driver": "/tmp/so-live2/drive.mjs \u2014 login, mint the mate session with the approver password, send the typed message, poll for article[data-card-kind=agents].pending, capture, confirm the card, capture, open the task page with every Agents details and .agents-change expanded, capture",
+ "notes": []
+}

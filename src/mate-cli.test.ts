@@ -8,6 +8,20 @@ import { addApprover, approve } from "./scope.js";
 import { runOperate } from "./operate.js";
 import type { MateProviderAnswer } from "./converse.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 const T0 = new Date("2026-09-02T12:00:00.000Z");
 type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
 const answer = (blocks: Block[]) =>
@@ -174,7 +188,7 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
     store0.refileScope("a", T0);
     const sealed = approve(store0, "a", "alex", T0, store0.getScope("a")!.digest, token);
     if (!sealed.ok) throw new Error(`the fixture approval was refused: ${sealed.reason}`);
-    const runId = store0.startRun({ taskRef: store0.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    const runId = store0.startRun({ taskRef: store0.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0, ...presented(store0, store0.refFor("built-in", "a").id, "builder") });
     store0.saveDecision({ run: runId, urgency: "blocking", recap: "r", question: "Which?", options: [{ id: "y", label: "Y", consequence: "cy", reversible: false }], recommendation: "y" }, T0);
     store0.close();
     script.push(

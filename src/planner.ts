@@ -939,7 +939,6 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
           ...(parentStamp === null ? {} : { route: parentStamp }),
         });
         store.stampRun(repairRun, { baseRevision });
-        store.inheritChainBinding(repairRun, request.runId);
       } catch (error) {
         if (repairRun !== null) {
           try {
@@ -1033,13 +1032,24 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
         store.finishRun(correctionRun, { outcome: "failed", reason: "evidence", now: clock() });
         return correctionEvidenceProblem;
       }
+      // A RESUME the harness refused by its own protocol, or never came up
+      // for, is a doomed turn (v48 authority repair): the exact session on record is not one
+      // anybody can continue, so the attempt ends here with its typed
+      // reason — never a second resume of the same identity. The planning
+      // strike's backoff then retries the task as a FRESH planner root in
+      // a fresh session (every root starts one; nothing resumes across
+      // attempts), and the whole custody of this attempt — root, rejected
+      // reply, doomed correction — stays sealed as evidence.
       if (repaired.kind === "refused") {
         store.finishRun(correctionRun, { outcome: "refused", reason: repaired.reason, now: clock() });
         return {
           ok: false,
           kind: "failure",
           reason: repaired.reason,
-          message: repaired.diagnostic ?? "the provider refused the structured repair turn",
+          message:
+            repaired.reason === "provider-protocol"
+              ? `${repaired.diagnostic ?? "the provider broke its own protocol on the resumed correction"} — the resumed session is not continued; the next planning attempt starts a fresh session`
+              : (repaired.diagnostic ?? "the provider refused the structured repair turn"),
         };
       }
       if (turn === null) throw new Error("unreachable structured repair result");
@@ -1050,7 +1060,11 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
           ok: false,
           kind: "failure",
           reason,
-          message: turn.timedOut ? "the structured repair turn timed out" : turn.initFailed ? "the provider did not initialize for structured repair" : `repair agent exit ${turn.code}`,
+          message: turn.timedOut
+            ? "the structured repair turn timed out"
+            : turn.initFailed
+              ? "the provider did not initialize for the resumed correction — the session is not continued; the next planning attempt starts a fresh session"
+              : `repair agent exit ${turn.code}`,
         };
       }
       if (!sameSession) {

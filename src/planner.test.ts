@@ -535,12 +535,14 @@ describe("planning mode, against real git", () => {
     store.close();
   });
 
-  test("a correction that does not re-announce the exact session is rejected but its payload is still sealed", async () => {
+  test("planner-handoff: a correction that does not re-announce the exact session is rejected, its payload sealed — and the retry, after the planning backoff, is a FRESH root in a fresh session, never a second resume of the doomed identity", async () => {
     const { runnerToken, approverToken } = await setup();
     await run(["task", "plan", "limiter", "--as", "alex", "--token", approverToken, "--json"], planningAgent);
     let calls = 0;
+    const resumeFlags: string[] = [];
     const switchedSession: Runner = async (_file, args, options) => {
       calls += 1;
+      resumeFlags.push(args.includes("--resume") ? String(args[args.indexOf("--resume") + 1]) : "fresh");
       const cwd = options?.cwd ?? "";
       const prompt = String(args[args.indexOf("-p") + 1] ?? "");
       const name = PLAN_FILE.exec(prompt)?.[0];
@@ -550,7 +552,10 @@ describe("planning mode, against real git", () => {
           JSON.stringify(calls === 1 ? { ...validPlanPayload(), plan: "not a sectioned plan" } : validPlanPayload()),
         );
       }
-      return { ...OK, stdout: calls === 1 ? saidInSession("original-session") : SAID };
+      // Turn 1 plans in the original session; turn 2 RESUMES it but the
+      // harness answers as a different session (a fork — protocol broken);
+      // turn 3 is the next attempt's own fresh root.
+      return { ...OK, stdout: calls === 1 ? saidInSession("original-session") : calls === 2 ? SAID : saidInSession("fresh-session") };
     };
 
     expect(await tick(runnerToken, switchedSession)).toBe(EXIT.failed);
@@ -558,13 +563,71 @@ describe("planning mode, against real git", () => {
     expect(payload().dispatched).toContainEqual(
       expect.objectContaining({ id: "limiter", outcome: "failed", reason: "provider-protocol" }),
     );
-    const store = openStore(db);
-    const runs = store.runsFor(store.refFor("built-in", "limiter").id).filter(one => one.role === "planner").sort((a, b) => a.id - b.id);
-    expect(runs[1]).toMatchObject({ role: "planner", outcome: "refused", reason: "provider-protocol" });
+    let store = openStore(db);
+    let runs = store.runsFor(store.refFor("built-in", "limiter").id).filter(one => one.role === "planner").sort((a, b) => a.id - b.id);
+    expect(runs[1]).toMatchObject({ role: "planner", outcome: "refused", reason: "provider-protocol", sessionId: "original-session" });
     const rejected = store.artifactsFor(runs[1]?.id ?? -1).filter(one => one.kind === "structured-output");
     expect(rejected).toHaveLength(1);
     expect(rejected[0]?.capture).toContain("not accepted");
     expect(store.getScope("limiter")).toBeNull();
+    store.close();
+
+    // The doomed identity is NOT resumed again: the planning backoff holds
+    // the task for a minute, then the next pass opens a fresh root that
+    // starts its own session and ingests the plan.
+    expect(await tick(runnerToken, switchedSession)).toBe(EXIT.refused);
+    expect(calls).toBe(2); // held: nothing dispatched inside the backoff
+    expect(await tick(runnerToken, switchedSession, new Date(T0.getTime() + 61_000))).toBe(EXIT.ok);
+    expect(calls).toBe(3);
+    expect(resumeFlags).toEqual(["fresh", "original-session", "fresh"]);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "limiter", outcome: "planned" }));
+    store = openStore(db);
+    runs = store.runsFor(store.refFor("built-in", "limiter").id).filter(one => one.role === "planner").sort((a, b) => a.id - b.id);
+    expect(runs).toHaveLength(3);
+    expect(runs[2]).toMatchObject({ parentRun: null, outcome: "built", reason: "plan-drafted", sessionId: "fresh-session" });
+    expect(store.getScope("limiter")?.goal).toBe(validPlanPayload().goal);
+    store.close();
+  });
+
+  test("planner-handoff: a resume the harness never initializes for (an argv it rejects, exit 2, no thread echoed) ends the attempt as provider-protocol — the recorded identity unconfirmed — and the retry is a fresh root", async () => {
+    const { runnerToken, approverToken } = await setup();
+    await run(["task", "plan", "limiter", "--as", "alex", "--token", approverToken, "--json"], planningAgent);
+    let calls = 0;
+    const resumeFlags: string[] = [];
+    const rejectedResume: Runner = async (_file, args, options) => {
+      calls += 1;
+      resumeFlags.push(args.includes("--resume") ? String(args[args.indexOf("--resume") + 1]) : "fresh");
+      const cwd = options?.cwd ?? "";
+      const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+      const name = PLAN_FILE.exec(prompt)?.[0];
+      if (calls === 2) {
+        // The harness exits 2 before initializing — no init, nothing said.
+        return { ...OK, code: 2, stdout: "", stderr: "error: unexpected argument '--sandbox' found" };
+      }
+      if (name !== undefined && cwd !== "") {
+        await writeFile(
+          join(cwd, name),
+          JSON.stringify(calls === 1 ? { ...validPlanPayload(), plan: "not a sectioned plan" } : validPlanPayload()),
+        );
+      }
+      return { ...OK, stdout: calls === 1 ? saidInSession("original-session") : saidInSession("fresh-session") };
+    };
+
+    expect(await tick(runnerToken, rejectedResume)).toBe(EXIT.failed);
+    expect(calls).toBe(2);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "limiter", outcome: "failed", reason: "provider-protocol" }));
+    let store = openStore(db);
+    let runs = store.runsFor(store.refFor("built-in", "limiter").id).filter(one => one.role === "planner").sort((a, b) => a.id - b.id);
+    expect(runs[1]).toMatchObject({ outcome: "refused", reason: "provider-protocol", sessionId: "original-session" });
+    expect(store.getScope("limiter")).toBeNull();
+    store.close();
+    expect(await tick(runnerToken, rejectedResume, new Date(T0.getTime() + 61_000))).toBe(EXIT.ok);
+    expect(calls).toBe(3);
+    expect(resumeFlags).toEqual(["fresh", "original-session", "fresh"]);
+    store = openStore(db);
+    runs = store.runsFor(store.refFor("built-in", "limiter").id).filter(one => one.role === "planner").sort((a, b) => a.id - b.id);
+    expect(runs[2]).toMatchObject({ parentRun: null, outcome: "built", reason: "plan-drafted", sessionId: "fresh-session" });
+    expect(store.getScope("limiter")?.goal).toBe(validPlanPayload().goal);
     store.close();
   });
 

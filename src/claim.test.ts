@@ -20,6 +20,21 @@ import {
   DEFAULT_LEASE_MS,
 } from "./claim.js";
 
+
+/** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
+ * store dictates nothing, so a routed row presents the leg it holds, exactly
+ * as a real dispatch would; absent authority presents nothing and the
+ * admission says why. */
+const presented = (
+  s: Pick<import("./store.js").Store, "routeAuthorityFor">,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
+  bound: { index: number; entryDigest: string } | null = null,
+): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
+  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  return authority === null || !authority.ok ? {} : { route: authority.stamp };
+};
+
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
 /** acquireIfReady re-proves the approved scope for builder dispatches
@@ -811,6 +826,7 @@ describe("sealing a park", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
+      ...presented(store, task, "builder"),
     });
 
   const openPlannerRepair = (leaseId: string) => {
@@ -824,6 +840,7 @@ describe("sealing a park", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
+      ...presented(store, task, "planner"),
     });
     store.stampRun(root, { baseRevision: "a".repeat(40) });
     store.stampProviderStart(root, T0);
@@ -838,6 +855,7 @@ describe("sealing a park", () => {
       worktree: "/pool/t-1",
       parentRun: root,
       now: T0,
+      ...presented(store, task, "planner"),
     });
     store.stampRun(child, { baseRevision: "a".repeat(40) });
     store.stampProviderStart(child, T0);
@@ -1116,6 +1134,7 @@ describe("the resume and the attention budget", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: at,
+      ...presented(store, task, "builder"),
     });
 
   const parkAndAnswer = (choice = "closed") => {
@@ -1184,6 +1203,7 @@ describe("the resume and the attention budget", () => {
       const ref = store.refFor("built-in", `other-${i}`).id;
       const run = store.startRun({
         taskRef: ref, leaseId: `l-${i}`, runner: "r", branch: "b", worktree: "/w", now: T0,
+        ...presented(store, ref, "builder"),
       });
       store.saveDecision(
         {
@@ -1261,6 +1281,7 @@ describe("the failure taxonomy, fenced", () => {
     acquire(store, task, "runner-a", { token: tok("runner-a"), now: at, ttlMs: 60 * 60_000, newLeaseId: () => leaseId });
     return store.startRun({
       taskRef: task, leaseId, runner: "runner-a", branch: "b", worktree: "/w", now: at,
+      ...presented(store, task, "builder"),
     });
   };
 
@@ -1341,6 +1362,7 @@ describe("the failure taxonomy, fenced", () => {
     acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, ttlMs: 60_000, newLeaseId: () => "lease-1" });
     const run = store.startRun({
       taskRef: task, leaseId: "lease-1", runner: "runner-a", branch: "b", worktree: "/w", now: T0,
+      ...presented(store, task, "builder"),
     });
     acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(120_000) });
 
@@ -1479,6 +1501,7 @@ describe("sealing a plan revision", () => {
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
+      ...presented(store, task, "builder"),
     });
 
   /** The replacement plan document's row. The ledger's `artifact` column is
@@ -1647,6 +1670,7 @@ describe("sealing a plan revision", () => {
       worktree: "/pool/t-1",
       role: "planner",
       now: T0,
+      ...presented(store, task, "planner"),
     });
     const artifact = planArtifact(runId);
 
