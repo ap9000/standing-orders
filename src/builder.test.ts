@@ -868,11 +868,17 @@ describe("what the builder tells the agent", () => {
     // attaches to a criterion and that the preflight refuses the clash.
     await build1();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
-    expect(prompt).toContain("A caveat that admits an exception to a criterion must name that");
-    expect(prompt).toContain("criterion must then be marked not-met");
-    expect(prompt).toContain("Never name a met");
-    expect(prompt).toContain("confirm no caveat");
-    expect(prompt).toContain("names a criterion marked met");
+    expect(prompt).toContain("EVERY caveat is an exception to a signed criterion and names that");
+    expect(prompt).toContain("be marked not-met");
+    expect(prompt).toContain("Never name a met criterion's id inside a");
+    // Every caveat is attributed (final authority closure): the brief says
+    // an unassigned or unknown-tagged caveat refutes the proof, that
+    // unrelated ideas go to the handoff's followUps, and that the exit
+    // preflight checks attribution beside the blocking rule.
+    expect(prompt).toContain("a caveat that names no criterion, or whose leading tag is an id");
+    expect(prompt).toContain("handoff's followUps, never in caveats");
+    expect(prompt).toContain("caveat names a signed criterion's exact id and no caveat names a");
+    expect(prompt).toContain("criterion marked met; and confirm every");
   });
 
   test("the brief states EVERY proof and handoff cap the parsers hold the files to, and tells the agent to preflight each protocol file before it exits (raw authority repair)", async () => {

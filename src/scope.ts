@@ -1353,6 +1353,21 @@ export function scopeAuthorityOf(scope: Scope, env: ScopeAuthorityEnv = {}): Sco
     const read = env.authMode(profile.provider);
     if (!read.ok) return { ok: false, reason: "auth-mode", problem: read.problem };
     authMode = read.mode;
+    // PINNED AND LIVE AUTH AGREE, or nothing (final authority closure): a
+    // chain filed under one credential for its base entry, read beside a
+    // live mode file that now says the other, is a scope whose signed
+    // words no longer describe what would spend — a subscription chain
+    // approved after the operator moved to an API key would bill the
+    // key. It holds no authority until it is filed again under today's
+    // mode.
+    const base = chain === null ? null : chain[0] ?? null;
+    if (base !== null && base.authMode !== authMode) {
+      return {
+        ok: false,
+        reason: "auth-mode",
+        problem: `the scope's fallback chain pins its base entry to ${base.authMode === "subscription" ? "your subscription" : "your API key"} for ${profile.provider}, but the live auth mode is now ${authMode === "subscription" ? "your subscription" : "your API key"} — re-file the scope under today's mode`,
+      };
+    }
   }
   return { ok: true, profile, chain, route, digest, authMode };
 }

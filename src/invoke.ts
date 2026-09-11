@@ -108,7 +108,7 @@ export type InvokeResult =
   | { kind: "ran"; outcome: AgentOutcome }
   | {
       kind: "refused";
-      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody" | "auth-mode";
+      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody" | "auth-mode" | "route-authority";
       providerVersion: string | null;
       diagnostic: string | null;
       /** Bounded agent reply when a spawned turn later failed a protocol
@@ -299,6 +299,24 @@ export async function invokeAgent(
   // the tuple re-proven against LIVE rows AFTER every awaited step, in
   // the same breath as the stamp — a takeover during the attestation
   // await can no longer slip a stale process through.
+  // THE PLANNER'S ROUTE, RE-PROVED AT THE SPAWN (final authority closure):
+  // the provenance the planner was admitted under is held to the authority
+  // its task holds RIGHT NOW — the strict working projection of a filed
+  // scope (exact terms, resolved profile, whole chain, route parity, digest,
+  // live auth mode), or the bare word `legacy` on a task with no scope. A
+  // scope rewritten, corrupted, or unresolved between the claim and this
+  // instant invokes no provider: a value-shaped refusal, no spend.
+  if (run.role === "planner") {
+    const proved = store.proveRouteForSpawn(runId, clock());
+    if (!proved.ok) {
+      return {
+        kind: "refused",
+        reason: "route-authority",
+        providerVersion: attested === null ? null : attested.version,
+        diagnostic: `the planner's route authority lapsed before spawn — ${proved.problem}`,
+      };
+    }
+  }
   if (!store.proveRunnerCustodyForSpawn(runId, clock())) {
     return {
       kind: "refused",

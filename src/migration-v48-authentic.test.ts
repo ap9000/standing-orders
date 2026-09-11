@@ -317,10 +317,16 @@ describe("the schema-version preflight reads exactly one safe supported integer 
   // a non-default user version, application id, or schema cookie was
   // shaped by something, and it is not a fresh file this build may expand
   // to schema 48 — every door refuses it in words and moves nothing.
+  // A 4096-byte file created by `PRAGMA journal_mode = WAL` alone (final
+  // authority closure) has an empty sqlite_master AND every checked header
+  // cookie at zero — the one persisted page is the whole evidence that
+  // something shaped it, and the complete fresh-file invariant (a page
+  // count of zero) refuses it at every door, byte-identically.
   for (const [label, shape, words] of [
     ["a user version of 77", "PRAGMA user_version = 77", /persisted user version of 77/],
     ["an application id", "PRAGMA application_id = 1398101071", /persisted application id of 1398101071/],
     ["a schema cookie left by a created-and-dropped table", "CREATE TABLE gone (id INTEGER); DROP TABLE gone", /persisted schema cookie of \d+/],
+    ["a WAL journal mode alone (one persisted page, every cookie zero)", "PRAGMA journal_mode = WAL", /no schema_version table but 1 persisted page\(s\)/],
   ] as const) {
     test(`an unversioned file with empty sqlite_master but ${label} refuses at every door — the bytes are untouched`, () => {
       dir = mkdtempSync(join(tmpdir(), "so-preflight-"));
@@ -328,9 +334,14 @@ describe("the schema-version preflight reads exactly one safe supported integer 
       const raw = new sqlite.DatabaseSync(file);
       raw.exec(shape);
       expect(raw.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get()).toEqual({ n: 0 });
+      if (shape.includes("WAL")) {
+        for (const pragma of ["user_version", "application_id", "schema_version"]) expect(raw.prepare(`PRAGMA ${pragma}`).get()).toEqual({ [pragma]: 0 });
+        expect(raw.prepare("PRAGMA page_count").get()).toEqual({ page_count: 1 });
+      }
       raw.close();
       const before = readFileSync(file);
       expect(before.length).toBeGreaterThan(0);
+      if (shape.includes("WAL")) expect(before.length).toBe(4096);
       expect(() => openStore(file)).toThrow(words);
       expect(() => openStore(file)).toThrow(/alters nothing it cannot name/);
       expect(readFileSync(file).equals(before)).toBe(true);

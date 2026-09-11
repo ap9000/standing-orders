@@ -5,6 +5,8 @@ import { routeDigestOf, routeFromJson } from "./phase-routing.js";
 import { proveApprovedProfile } from "./builder.js";
 import { register } from "./runner.js";
 import { acquire } from "./claim.js";
+import { invokeAgent } from "./invoke.js";
+import { routeOfTask } from "./agentconfig.js";
 import { readAuthModeStrict } from "./keys.js";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1088,5 +1090,123 @@ describe("one strict projection gates filing, consent, the seal, and dispatch (a
     expect(runs()).toBe(0);
     raw.prepare("UPDATE task_scope SET risk_level = 'routine' WHERE task_id = 't-risk'").run();
     expect(store.sealedRouteOf("t-risk").ok).toBe(true);
+  });
+
+  test("auth parity (final authority closure): a chain filed under one credential for its base entry, read beside a live mode file that now says the other, holds no authority — no seal, no plan authority, no run — until it is filed again under today's mode", () => {
+    store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
+    const { ref, scope } = file("t-auth-parity");
+    expect(scope.profileState).toBe("resolved");
+    const chain = chainFromJson(scope.proposedChainJson ?? null)!;
+    expect(chain[0]).toMatchObject({ authMode: "subscription" });
+    expect(scopeAuthorityOf(scope, strictEnv)).toMatchObject({ ok: true, authMode: "subscription" });
+    const planLeg = store.routeAuthorityFor(ref, "planner");
+    expect(planLeg).toMatchObject({ ok: true, stamp: { phase: "plan", chosen: "recommended" } });
+    if (planLeg === null || !planLeg.ok) throw new Error("plan leg");
+    // The reproduction: the operator moves claude to an API key AFTER the
+    // chain was filed pinned to the subscription.
+    writeFileSync(authFile(), "api-key");
+    const words = /fallback chain pins its base entry to your subscription for claude, but the live auth mode is now your API key — re-file the scope under today's mode/;
+    everyDoorClosed("t-auth-parity", ref, "auth-mode", words);
+    // The planner's claim, admission, and spawn-time proof all refuse it.
+    expect(store.workingPlanRouteOf("t-auth-parity")).toMatchObject({ ok: false, problem: expect.stringMatching(words) });
+    expect(store.routeAuthorityFor(ref, "planner")).toMatchObject({ ok: false, problem: expect.stringMatching(words) });
+    expect(() =>
+      store.startRun({ taskRef: ref, leaseId: "lease", runner: "r", role: "planner", branch: "b", worktree: "/w", provider: "claude", model: "sonnet", now: T0, route: planLeg.stamp }),
+    ).toThrow(words);
+    expect(runs()).toBe(0);
+    // Restated to the pinned mode, the same scope proves and seals.
+    writeFileSync(authFile(), "subscription");
+    expect(scopeAuthorityOf(store.getScope("t-auth-parity")!, strictEnv)).toMatchObject({ ok: true, authMode: "subscription" });
+    expect(approve(store, "t-auth-parity", "alex", T0, store.getScope("t-auth-parity")!.digest, "tok-alex").ok).toBe(true);
+    // Sealed side: the live mode moving after the yes stales the seal too.
+    writeFileSync(authFile(), "api-key");
+    expect(scopeAuthorityOf(store.getScope("t-auth-parity")!, strictEnv)).toMatchObject({ ok: false, reason: "auth-mode" });
+  });
+
+  test("the planner re-proves the strict scope projection at the claim, the admission, and the invocation (final authority closure): a corrupt proposed-via marker, a risk the route was not recommended for, and an unresolved fallback `[]` each create no run and invoke no provider", async () => {
+    register(store, { name: "r", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-r" });
+    const { ref, scope } = file("t-plan");
+    const raw = store.raw();
+    const planLeg = store.routeAuthorityFor(ref, "planner");
+    if (planLeg === null || !planLeg.ok) throw new Error("plan leg");
+    expect(routeOfTask(store, "t-plan", store.refForId(ref), T0)).toMatchObject({ kind: "route", source: "proposed" });
+    expect(store.workingPlanRouteOf("t-plan")).toMatchObject({ ok: true });
+    const sound = raw.prepare("SELECT proposed_via, risk_level, proposed_chain_json FROM task_scope WHERE task_id = 't-plan'").get() as Record<string, unknown>;
+    const restore = () => raw.prepare("UPDATE task_scope SET proposed_via = ?, risk_level = ?, proposed_chain_json = ? WHERE task_id = 't-plan'").run(sound["proposed_via"], sound["risk_level"], sound["proposed_chain_json"]);
+    const cases: [string, string, RegExp][] = [
+      ["a corrupt proposed-via marker", "UPDATE task_scope SET proposed_via = 'bogus' WHERE task_id = 't-plan'", /proposed-via marker is not one this code writes/],
+      ["a risk the route was not recommended for", "UPDATE task_scope SET risk_level = 'high' WHERE task_id = 't-plan'", /recommended for routine risk but the scope's risk level is high/],
+      ["an unresolved fallback []", `UPDATE task_scope SET proposed_chain_json = '${JSON.stringify({ digestVersion: 1, chain: [] })}' WHERE task_id = 't-plan'`, /fallback chain cannot be read exactly/],
+    ];
+    for (const [label, sql, words] of cases) {
+      restore();
+      raw.exec(sql);
+      // THE CLAIM: the working plan authority the tick asks for before any
+      // claim refuses in words (the lenient display route still reads).
+      expect(store.workingPlanRouteOf("t-plan"), label).toMatchObject({ ok: false, problem: expect.stringMatching(words) });
+      // THE ADMISSION: neither the store's own answer nor the stamp the
+      // planner held before the corruption opens a run.
+      expect(store.routeAuthorityFor(ref, "planner"), label).toMatchObject({ ok: false, problem: expect.stringMatching(words) });
+      expect(() =>
+        store.startRun({ taskRef: ref, leaseId: "lease", runner: "r", role: "planner", branch: "b", worktree: "/w", provider: "claude", model: "sonnet", now: T0, route: planLeg.stamp }),
+      ).toThrow(words);
+      expect(runs(), label).toBe(0);
+    }
+    restore();
+    // THE INVOCATION: a planner admitted while the scope proved, whose
+    // scope is corrupted before its spawn, invokes no provider — a
+    // value-shaped refusal naming what moved, no start stamp.
+    const took = acquire(store, ref, "r", { now: T0, token: "tok-r", newLeaseId: () => "lease-plan", ttlMs: 10 * 365 * 24 * 3600 * 1000 });
+    if (!took.ok) throw new Error(`claim refused: ${took.reason}`);
+    const planner = store.startRun({ taskRef: ref, leaseId: "lease-plan", runner: "r", role: "planner", branch: "b", worktree: "/w", provider: "claude", model: "sonnet", now: T0, route: planLeg.stamp });
+    expect(store.runRoute(planner)).toMatchObject({ phase: "plan", chosen: "recommended" });
+    raw.exec("UPDATE task_scope SET risk_level = 'high' WHERE task_id = 't-plan'");
+    let spawned = false;
+    const refused = await invokeAgent(store, planner, { provider: "claude", model: "sonnet" }, { phase: "plan", brief: "plan it", maxTurns: 10, permissionMode: "acceptEdits", skipPermissions: false, resumeSession: null }, {
+      runner: async () => {
+        spawned = true;
+        return { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+      },
+      keyHome: home,
+      clock: () => T0,
+    });
+    expect(refused).toMatchObject({ kind: "refused", reason: "route-authority", diagnostic: expect.stringMatching(/route authority lapsed before spawn .* recommended for routine risk but the scope's risk level is high/) });
+    expect(spawned).toBe(false);
+    expect(store.getRun(planner)?.providerStartedAt ?? null).toBeNull();
+    // Restored, the same run spawns.
+    restore();
+    const ran = await invokeAgent(store, planner, { provider: "claude", model: "sonnet" }, { phase: "plan", brief: "plan it", maxTurns: 10, permissionMode: "acceptEdits", skipPermissions: false, resumeSession: null }, {
+      runner: async () => {
+        spawned = true;
+        return { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+      },
+      keyHome: home,
+      clock: () => T0,
+    });
+    expect(ran.kind).toBe("ran");
+    expect(spawned).toBe(true);
+    void scope;
+  });
+
+  test("a task with NO scope plans as the word legacy only (final authority closure): a live-recommendation stamp opens nothing, the bare word for the exact pair opens the planner", () => {
+    store.createTask({ id: "t-bare", title: "t" }, T0);
+    const ref = store.refFor("built-in", "t-bare").id;
+    store.placeTask(ref, REPO);
+    const live = routeOfTask(store, "t-bare", store.refForId(ref), T0);
+    expect(live).toMatchObject({ kind: "route", source: "live" });
+    if (live === null || live.kind !== "route") throw new Error("live route");
+    expect(store.workingPlanRouteOf("t-bare")).toMatchObject({ ok: false, problem: expect.stringMatching(/has no scope — a planner on it presents the bare word legacy/) });
+    expect(() =>
+      store.startRun({ taskRef: ref, leaseId: "lease", runner: "r", role: "planner", branch: "b", worktree: "/w", provider: "claude", model: "sonnet", now: T0, route: { routeDigest: routeDigestOf(live.route), phase: "plan", provider: "claude", model: "sonnet", chosen: "recommended" } }),
+    ).toThrow(/a task with no scope plans as the word legacy — nothing spends as a routed plan leg on it/);
+    expect(() =>
+      store.startRun({ taskRef: ref, leaseId: "lease", runner: "r", role: "planner", branch: "b", worktree: "/w", provider: "claude", model: "sonnet", now: T0, route: { routeDigest: "profile:" + "0".repeat(32), phase: "plan", provider: "claude", model: "sonnet", chosen: "legacy" } }),
+    ).toThrow(/a task with no scope spends as the word legacy, not under a profile digest/);
+    expect(runs()).toBe(0);
+    const legacy = store.routeAuthorityFor(ref, "planner", null, { provider: "claude", model: "sonnet" });
+    expect(legacy).toMatchObject({ ok: true, stamp: { routeDigest: "legacy", phase: "plan", provider: "claude", model: "sonnet", chosen: "legacy" } });
+    if (legacy === null || !legacy.ok) throw new Error("legacy");
+    const planner = store.startRun({ taskRef: ref, leaseId: "lease", runner: "r", role: "planner", branch: "b", worktree: "/w", provider: "claude", model: "sonnet", now: T0, route: legacy.stamp });
+    expect(store.runRoute(planner)).toMatchObject({ routeDigest: "legacy", chosen: "legacy", phase: "plan" });
   });
 });

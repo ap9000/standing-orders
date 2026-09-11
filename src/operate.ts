@@ -228,6 +228,10 @@ export type OperateOptions = {
   dispatchAdapter?: DispatchAdapter;
   /** Injected by tests: the mate's provider fetch, key environment, and stdin lines. */
   mateSeams?: MateCliSeams;
+  /** Injected by tests: a held-session coordinator, so a `tick` exercises
+   * the attended road exactly as a co-located `up` would (production wires
+   * one only inside `up`). */
+  heldCoordinator?: import("./held.js").HeldSessionCoordinator;
 };
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
@@ -672,6 +676,7 @@ export async function runOperate(
       ...(options.dispatchAdapter === undefined ? {} : { dispatchAdapter: options.dispatchAdapter }),
       ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
       ...(options.mateSeams === undefined ? {} : { mateSeams: options.mateSeams }),
+      ...(options.heldCoordinator === undefined ? {} : { heldCoordinator: options.heldCoordinator }),
     });
   } catch (error) {
     return fail(write, json, command, "failed", describe(error), EXIT.failed);
@@ -1821,6 +1826,11 @@ async function buildCommand(
 
 // ---- the unattended pass --------------------------------------------------
 
+/** An attended authorization whose signed head the leased worktree no
+ * longer matches (final authority closure): thrown BEFORE admission so no
+ * run opens and no attempt is spent, reported as its own skip reason. */
+class StaleAuthorization extends Error {}
+
 /** What happened to one task this pass looked at. */
 type TickOutcome = {
   id: string;
@@ -2398,6 +2408,22 @@ async function tickCommand(
       continue;
     }
     const route = taskRoute !== null && taskRoute.kind === "route" ? taskRoute : null;
+    // THE PLANNER'S CLAIM RE-PROVES THE STRICT SCOPE PROJECTION (final
+    // authority closure): a planner on a filed, unapproved scope runs
+    // under the WORKING route only as the whole scope proves — exact raw
+    // terms (a proposed-via marker this code never writes), a resolved
+    // profile, a whole fallback chain (an unresolved `[]` is none), route
+    // parity with the signed risk, the digest, and the live auth mode
+    // agreeing with a chain's pinned base mode. One disagreement skips the
+    // task in words before any claim; the admission and the spawn ask the
+    // same question again.
+    if (wantsPlan && route !== null && route.source === "proposed") {
+      const working = store.workingPlanRouteOf(id);
+      if (!working.ok) {
+        dispatched.push({ id, outcome: "skipped", reason: "agent-config", detail: `${id}: ${working.problem}` });
+        continue;
+      }
+    }
     const planLeg = route === null ? null : legOf(route.route, "plan");
     const sealedBuildLeg = route !== null && route.source === "approved" ? legOf(route.route, "build") : null;
     // A parked chain tail PAST the base (v48 authority repair): its successor resumes the
@@ -2487,7 +2513,11 @@ async function tickCommand(
       if (attendedSpec !== null && phase === "build") {
         return { routeDigest: `profile:${attendedSpec.digest}`, phase, provider: spec.provider, model: spec.model, chosen: "legacy" };
       }
-      if (governingLeg === null || route === null) {
+      // A task with NO scope holds no filed route (final authority
+      // closure): its planner presents the bare word `legacy` for the pair
+      // the live recommendation resolved — the recommendation chose the
+      // agent, but nothing anybody filed is the authority it spends under.
+      if (governingLeg === null || route === null || (phase === "plan" && route.source === "live")) {
         const legacy = store.routeAuthorityFor(ref.id, phase === "plan" ? "planner" : "builder", null, { provider: spec.provider, model: spec.model });
         return legacy !== null && legacy.ok ? legacy.stamp : null;
       }
@@ -3229,6 +3259,31 @@ async function tickCommand(
         // by id, runner, and generation — and the insert consumes its
         // attempt and binds the row to it in one transaction.
         if (buildStamp === null) throw new Error(`${id}: the attended authorization's pinned profile presents no build authority`);
+        // THE SIGNED HEAD, BEFORE THE ATTEMPT IS SPENT (final authority
+        // closure): the authorization signed the exact commit the watched
+        // attempt would start from. The leased worktree's HEAD is read
+        // here and held to it BEFORE admission — a head that moved opens
+        // no run and spends no attempt; the authorization closes in the
+        // refusal's words so the operator sees why and may authorize
+        // again at today's head. The coordinator's final proof re-reads
+        // the same term against the captured base revision.
+        let signedHead: string | null = null;
+        try {
+          const terms = JSON.parse(attendedDispatch.termsJson) as { head?: unknown };
+          signedHead = typeof terms.head === "string" && terms.head !== "" ? terms.head : null;
+        } catch {
+          signedHead = null;
+        }
+        if (signedHead === null) {
+          store.closeAuthorization(attendedDispatch.id, "refused:stale-authorization", clock());
+          throw new StaleAuthorization(`${id}: the attended authorization ${attendedDispatch.id} signs no readable head — nothing opens under it`);
+        }
+        const headRead = await git("git", ["rev-parse", "HEAD"], { cwd: leased.worktree.path });
+        const headNow = headRead.code === 0 ? headRead.stdout.trim() : "";
+        if (headNow !== signedHead) {
+          store.closeAuthorization(attendedDispatch.id, "refused:stale-authorization", clock());
+          throw new StaleAuthorization(`${id}: the head moved since the attended authorization ${attendedDispatch.id} was signed (${signedHead.slice(0, 12)} → ${headNow === "" ? "unreadable" : headNow.slice(0, 12)}) — no run opened, no attempt spent; authorize it again at today's head`);
+        }
         const admittedAttended = store.admitAttended({
           taskRef: ref.id,
           leaseId: lease,
@@ -3280,7 +3335,7 @@ async function tickCommand(
     } catch (error) {
       await worktrees.release(leased.worktree.path, clock());
       release(store, lease, clock());
-      dispatched.push({ id, outcome: "skipped", reason: "admission-refused", detail: error instanceof Error ? error.message : String(error) });
+      dispatched.push({ id, outcome: "skipped", reason: error instanceof StaleAuthorization ? "stale-authorization" : "admission-refused", detail: error instanceof Error ? error.message : String(error) });
       continue;
     }
     if (leased.resumedFromRun !== undefined) {

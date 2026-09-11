@@ -3327,6 +3327,18 @@ export function readSchemaVersion(db: Database): { ok: true; version: number | n
       if (value === undefined) return refuse(`the file's ${word} cannot be read — it is not a fresh database`);
       if (String(value) !== "0") return refuse(`the file carries no schema_version table but a persisted ${word} of ${String(value)} — it is not a fresh database, and not one this build shaped`);
     }
+    // THE COMPLETE FRESH-FILE INVARIANT (final authority closure): a
+    // genuinely fresh database has NO persisted page at all — a
+    // nonexistent path, a zero-byte file, or `:memory:` reads a page
+    // count of zero. A file that already holds a page (one written by
+    // `PRAGMA journal_mode = WAL` alone, whose sqlite_master is empty and
+    // whose header cookies all still read zero) was shaped by something,
+    // and is not a new file this build may expand over: it refuses,
+    // untouched and byte-identically, on every open.
+    const pages = db.prepare("PRAGMA page_count").get() as Record<string, unknown> | undefined;
+    const pageCount = pages === undefined ? undefined : pages["page_count"];
+    if (pageCount === undefined) return refuse("the file's page count cannot be read — it is not a fresh database");
+    if (String(pageCount) !== "0") return refuse(`the file carries no schema_version table but ${String(pageCount)} persisted page(s) — it is not a fresh database, and not one this build shaped`);
     return { ok: true, version: null };
   }
   // The value is read as its storage class and its decimal text, so a
@@ -9744,6 +9756,14 @@ export class Store {
         if (args.kind === "repair") return refuse("a repair turn mends its live tail — it recovers no interrupted attempt");
         const recovered = this.getRun(args.run.recoveredFrom);
         if (recovered === null || recovered.taskRef !== args.run.taskRef) return refuse(`run #${args.run.recoveredFrom} is not one of this task's attempts — nothing recovers its draft`);
+        // THE SAME RECOVERY GRANT the recovered-draft admission proves
+        // (final authority closure): a same-task run is not authority by
+        // itself — it must be this task's interrupted builder or repair
+        // turn in this very workspace, and an open one only under a lease
+        // nobody holds. A failed planner, a parked run, a live attempt, or
+        // a foreign worktree recovers nothing, and the edge stays unconsumed.
+        const grant = this.recoveryGrantProblem(recovered, { taskRef: args.run.taskRef, branch: args.run.branch, worktree: args.run.worktree }, now);
+        if (grant !== null) return refuse(grant);
         parentRun = recovered.id;
       }
       if (args.kind === "entry") {
@@ -9767,7 +9787,21 @@ export class Store {
         if (holder.chainCycle !== cycle.id || holder.chainIndex !== args.expectCursor || holder.entryDigest !== args.entryDigest || holder.authMode !== args.authMode) {
           return refuse(`run #${holder.id} is not bound to entry ${args.expectCursor} of cycle ${cycle.id} under digest ${args.entryDigest} (${args.authMode})`);
         }
-        if (args.kind === "repair") parentRun = holder.id;
+        if (args.kind === "repair") {
+          // THE ONE REPAIR RULE (final authority closure), the same words
+          // admitRepair refuses in: a fallback entry's repair turn mends
+          // its live tail under the tail's own runner and lease, and that
+          // lease must be the task's CURRENT live claim — an attempt whose
+          // claim was released, expired, or superseded is one nobody is
+          // building, and copying its identity proves nothing.
+          if (holder.runner !== args.run.runner) return refuse(`run #${holder.id} runs on ${holder.runner} — its repair turn on ${args.run.runner} is another machine's`);
+          if (holder.leaseId !== args.run.leaseId) return refuse(`run #${holder.id} holds lease ${holder.leaseId} — a repair turn under lease ${args.run.leaseId} is not its own`);
+          const holding = this.currentLiveLease(args.run.taskRef, now);
+          if (holding !== holder.leaseId) {
+            return refuse(`run #${holder.id}'s lease ${holder.leaseId} is not this task's current live claim (${holding === null ? "nothing holds it" : `${holding} does`}) — a repair turn mends an attempt still being built under its claim`);
+          }
+          parentRun = holder.id;
+        }
       }
       // Open the fallback run WITH its chain metadata, in the same body.
       const inserted = this.db
@@ -11591,13 +11625,18 @@ export class Store {
       // route when a scope exists, else the live recommendation.
       if (scope !== null) {
         if (!routed) return "a row that predates agent routing plans as legacy, never as a routed leg";
-        const proposed = routeFromJson(scope.proposedRouteJson ?? null);
-        if (proposed === null) return sealed.reason === "unreadable" ? sealed.detail : (scope.unresolvedReason ?? "the task's filed route cannot be read");
-        return sameLeg(proposed);
+        // THE STRICT WORKING PROJECTION (final authority closure): a
+        // planner's proposed route is believed only as the whole scope
+        // re-proves — exact terms, profile, chain, route, parity, digest,
+        // and auth mode — never parsed from the route column alone.
+        const working = this.workingPlanRouteOf(taskId);
+        if (!working.ok) return working.problem;
+        return sameLeg(working.route);
       }
-      const live = routeOfTask(this, taskId, ref, now);
-      if (live === null || live.kind !== "route") return live !== null && live.kind === "unreadable" ? live.problem : "no route governs this task";
-      return sameLeg(live.route);
+      // A task with NO scope holds no route anybody filed (final authority
+      // closure): its planner presents the bare word `legacy` for the pair
+      // it spends as, never a live recommendation re-derived here.
+      return "a task with no scope plans as the word legacy — nothing spends as a routed plan leg on it";
     }
     if (leg.chosen === "fallback") {
       const chain = this.approvedChainOf(taskId);
@@ -11651,6 +11690,8 @@ export class Store {
       // The STORED sealed profile alone (atomic authority closure): no
       // synthesized profile is accepted beside it.
       if (lane.profile == null) return `contestant ${lane.id} carries no sealed profile — nothing spends on the lane`;
+      const laneProblem = laneAuthorityProblem(lane);
+      if (laneProblem !== null) return laneProblem;
       if (leg.routeDigest !== `profile:${profileDigestOf(lane.profile)}`) return `a contest lane spends under its race-approved profile, not ${leg.routeDigest}`;
       if ((phase === "build" || phase === "repair") && (leg.provider !== lane.provider || leg.model !== (phase === "repair" ? lane.repairModel : lane.model))) {
         return `the racing agent is ${lane.provider} · ${phase === "repair" ? lane.repairModel : lane.model}, not ${leg.provider} · ${leg.model ?? "(none)"}`;
@@ -12218,8 +12259,12 @@ export class Store {
     const lane = this.getContestant(contestantId);
     // The STORED sealed profile, or nothing (atomic authority closure): a
     // lane with no readable profile has no authority to present, and no
-    // synthesized profile stands in for the one the race approved.
-    if (lane === null || lane.profile == null) return null;
+    // synthesized profile stands in for the one the race approved. A lane
+    // that has ended, or whose stored profile disagrees with its own
+    // provider, model, or repair-model columns, presents nothing either
+    // (final authority closure) — the admission refuses the same row in
+    // words, so nothing derived here can be accepted there.
+    if (lane === null || lane.profile == null || laneAuthorityProblem(lane) !== null) return null;
     const profile = lane.profile;
     return { routeDigest: `profile:${profileDigestOf(profile)}`, phase, provider: lane.provider, model: phase === "repair" ? lane.repairModel : lane.model, chosen: "legacy" };
   }
@@ -13833,6 +13878,15 @@ export class Store {
       if (parent.outcome !== null) refuse(`run #${parent.id} ended as ${parent.outcome} — a repair turn mends a live attempt only`);
       if (parent.runner !== run.runner) refuse(`run #${parent.id} runs on ${parent.runner} — its repair turn on ${run.runner} is another machine's`);
       if (parent.leaseId !== run.leaseId) refuse(`run #${parent.id} holds lease ${parent.leaseId} — a repair turn under lease ${run.leaseId} is not its own`);
+      // THE CURRENT CLAIM (final authority closure): an open parent whose
+      // lease is no longer the task's live claim — released, expired, or
+      // superseded by a newer generation — is an attempt nobody is
+      // building; copying its runner and lease proves nothing. The lease
+      // must be the claim that holds the task RIGHT NOW.
+      const holding = this.currentLiveLease(run.taskRef, run.now);
+      if (holding !== parent.leaseId) {
+        refuse(`run #${parent.id}'s lease ${parent.leaseId} is not this task's current live claim (${holding === null ? "nothing holds it" : `${holding} does`}) — a repair turn mends an attempt still being built under its claim`);
+      }
     }
     // THE LIVE AUTHORIZATION (atomic authority closure): an attended
     // attempt opens under exactly the authorization the caller names —
@@ -13891,6 +13945,16 @@ export class Store {
       if (contest.runner === null || contest.runner !== run.runner) refuse(`the contest runs on ${contest.runner ?? "no runner"} — a lane run on ${run.runner} is another machine's`);
       if ((contest.incarnation ?? null) !== (road.incarnation ?? null)) refuse(`the contest was dispatched by watch incarnation ${contest.incarnation ?? "none"}, not ${road.incarnation ?? "none"}`);
       if (lane.profile == null) refuse(`contestant ${lane.id} carries no sealed profile — nothing spends on the lane`);
+      // THE LIVE LANE, exactly (final authority closure): a lane that has
+      // ended admits nothing; a stored profile whose provider, model, or
+      // repair model disagrees with the lane's own columns is a row two
+      // authorities wrote, and no stamp is derived from or accepted on it;
+      // and the contest's stamped lease must be the task's CURRENT live
+      // claim, not merely the lease the contest remembers.
+      const laneProblem = laneAuthorityProblem(lane);
+      if (laneProblem !== null) refuse(laneProblem);
+      const laneHolding = this.currentLiveLease(run.taskRef, run.now);
+      if (laneHolding !== run.leaseId) refuse(`the contest's lease ${run.leaseId} is not this task's current live claim (${laneHolding === null ? "nothing holds it" : `${laneHolding} does`}) — a lane run opens under live custody only`);
       if (lane.activeRun !== null && !(parent !== null && lane.activeRun === parent.id && parent.outcome === "parked")) {
         refuse(`contestant ${contestant} already holds run #${lane.activeRun} — one live run per racing agent`);
       }
@@ -13907,11 +13971,8 @@ export class Store {
     // nobody holds any more.
     if (road.road === "recovered") {
       if (parent === null) refuse("a recovered draft names the interrupted attempt it inherits — none was named");
-      if (parent.role !== "builder" && parent.role !== "repair") refuse(`run #${parent.id} is a ${parent.role} run — a recovered draft is a builder's or its repair turn's`);
-      if (parent.worktree !== run.worktree || parent.branch !== run.branch) refuse(`run #${parent.id} left its draft in ${parent.worktree ?? "no worktree"} on ${parent.branch ?? "no branch"}, not ${run.worktree} on ${run.branch}`);
-      const interrupted = parent.outcome === null || (parent.outcome === "failed" && parent.reason === "interrupted");
-      if (!interrupted) refuse(`run #${parent.id} ended as ${parent.outcome}${parent.reason === null ? "" : ` (${parent.reason})`} — only an interrupted attempt's draft is recovered`);
-      if (parent.outcome === null && this.liveClaimByLease(parent.leaseId, run.now) !== null) refuse(`run #${parent.id} is still being built under lease ${parent.leaseId} — nothing recovers a live attempt's draft`);
+      const grant = this.recoveryGrantProblem(parent, { taskRef: run.taskRef, branch: run.branch ?? "", worktree: run.worktree ?? "" }, run.now);
+      if (grant !== null) refuse(grant);
     }
     // CHAIN CUSTODY, decided before the row (v48 authority repair): a repair turn inherits
     // exactly its SAME-TASK parent's binding — and only while that parent IS
@@ -14091,6 +14152,27 @@ export class Store {
   }
 
   /**
+   * THE ONE RECOVERY GRANT (final authority closure), shared by the
+   * recovered-draft admission and the fallback admission's `recoveredFrom`:
+   * the interrupted attempt whose draft a fresh run inherits is THIS
+   * task's own builder or repair turn, left in this very worktree on this
+   * branch, either ended as `failed` for `interrupted` or still open under
+   * a lease nobody holds any more. A planner, scout, or reviewer; a
+   * parked, built, or otherwise failed run; a foreign workspace; or an
+   * attempt still being built under a live claim is no grant — the words
+   * say which, and the caller opens nothing.
+   */
+  private recoveryGrantProblem(parent: Run, run: { taskRef: number; branch: string; worktree: string }, now: Date): string | null {
+    if (parent.taskRef !== run.taskRef) return `run #${parent.id} belongs to task_ref ${parent.taskRef} — a builder run continues its own task's run only`;
+    if (parent.role !== "builder" && parent.role !== "repair") return `run #${parent.id} is a ${parent.role} run — a recovered draft is a builder's or its repair turn's`;
+    if (parent.worktree !== run.worktree || parent.branch !== run.branch) return `run #${parent.id} left its draft in ${parent.worktree ?? "no worktree"} on ${parent.branch ?? "no branch"}, not ${run.worktree} on ${run.branch}`;
+    const interrupted = parent.outcome === null || (parent.outcome === "failed" && parent.reason === "interrupted");
+    if (!interrupted) return `run #${parent.id} ended as ${parent.outcome}${parent.reason === null ? "" : ` (${parent.reason})`} — only an interrupted attempt's draft is recovered`;
+    if (parent.outcome === null && this.liveClaimByLease(parent.leaseId, now) !== null) return `run #${parent.id} is still being built under lease ${parent.leaseId} — nothing recovers a live attempt's draft`;
+    return null;
+  }
+
+  /**
    * Whether `holder` is the LIVE tail of its task's open fallback cycle
    * under the approved chain — the words when it is not (v48 integrity).
    * Re-derived from durable state only: the task's one live cycle is the
@@ -14112,6 +14194,52 @@ export class Store {
       return `run #${holder.id} is bound to chain entry ${holder.chainIndex} under a digest or auth mode the approved chain does not carry there`;
     }
     return null;
+  }
+
+  /**
+   * THE WORKING PLAN AUTHORITY (final authority closure): the route a
+   * planner runs under before any approval, believed only as the ONE strict
+   * stored-scope projection proves it — exact raw terms (a proposed-via
+   * marker this code never writes is a terms problem), a resolved profile,
+   * a whole fallback chain (an empty or malformed one is no chain), a
+   * readable route whose build and repair legs are the profile's exact
+   * pairs and whose signed risk and quality are the row's, the digest
+   * re-derived from those very values, the operator's live auth mode read
+   * strictly and agreeing with a chain's pinned base mode, and no leg
+   * stating a problem. The claim, the admission, and the invocation all
+   * ask this same question; one disagreement is the words, and nothing
+   * opens or spawns on it. A sealed route is not this road's business —
+   * the caller reads the seal first.
+   */
+  workingPlanRouteOf(taskId: string): { ok: true; route: PhaseRoute } | { ok: false; problem: string } {
+    const scope = this.getScope(taskId);
+    if (scope === null) return { ok: false, problem: "the task has no scope — a planner on it presents the bare word legacy" };
+    const authority = scopeAuthorityOf(scope, { authMode: provider => readAuthModeStrict(provider) });
+    if (!authority.ok) return { ok: false, problem: `the task's filed scope holds no plan authority (${authority.problem}) — re-file the scope` };
+    const problems = routeProblems(authority.route);
+    if (problems.length > 0) return { ok: false, problem: `the task's filed route states a problem (${problems.join("; ")}) — re-file the scope under a configuration that resolves every role` };
+    return { ok: true, route: authority.route };
+  }
+
+  /**
+   * THE SPAWN-TIME ROUTE PROOF (final authority closure): the provenance a
+   * run was admitted under, re-proved against the authority the task holds
+   * RIGHT NOW, immediately before a provider process exists — the same
+   * proof the admission ran, over the same durable state. A planner whose
+   * scope was rewritten, corrupted, or unresolved between its claim and
+   * this instant spawns nothing; the words say why.
+   */
+  proveRouteForSpawn(runId: number, now: Date): { ok: true } | { ok: false; problem: string } {
+    const run = this.getRun(runId);
+    if (run === null || run.outcome !== null) return { ok: false, problem: `run #${runId} is not an open attempt` };
+    const stamped = this.runRoute(runId);
+    if (stamped === null) return { ok: false, problem: `run #${runId} carries no route provenance — nothing spends unstamped` };
+    const { stampedAt: _stampedAt, ...leg } = stamped;
+    const parent = run.parentRun === null ? null : this.getRun(run.parentRun);
+    const proofLane = run.contestant ?? (run.role === "repair" && parent !== null ? parent.contestant : null);
+    const bound = run.chainIndex != null && run.entryDigest != null ? { index: run.chainIndex, entryDigest: run.entryDigest } : null;
+    const problem = this.routeAdmissionProblem({ taskRef: run.taskRef, role: run.role, provider: run.provider, model: run.model, contestant: proofLane, chain: bound }, leg, now);
+    return problem === null ? { ok: true } : { ok: false, problem };
   }
 
   /**
@@ -14190,10 +14318,13 @@ export class Store {
       return { ok: true, stamp: { routeDigest: routeDigestOf(sealed.route), phase, provider: leg.provider, model: leg.model, chosen: leg.chosen } };
     }
     if (phase === "plan") {
-      const proposed = routeFromJson(scope.proposedRouteJson ?? null);
-      if (proposed === null) return { ok: false, problem: sealed.reason === "unreadable" ? sealed.detail : (scope.unresolvedReason ?? "the task's filed route cannot be read — re-file the scope") };
-      const leg = legOf(proposed, "plan");
-      return { ok: true, stamp: { routeDigest: routeDigestOf(proposed), phase, provider: leg.provider, model: leg.model, chosen: leg.chosen } };
+      // The working route a planner may present is the strict projection's
+      // (final authority closure) — an invalid or unresolved scope holds
+      // no plan authority, in words.
+      const working = this.workingPlanRouteOf(ref.externalId);
+      if (!working.ok) return { ok: false, problem: working.problem };
+      const leg = legOf(working.route, "plan");
+      return { ok: true, stamp: { routeDigest: routeDigestOf(working.route), phase, provider: leg.provider, model: leg.model, chosen: leg.chosen } };
     }
     return { ok: false, problem: `this task is filed under agent routing and nothing spends as its ${phase} leg without a sealed route — ${sealed.detail}` };
   }
@@ -15179,23 +15310,10 @@ export class Store {
     return Number(changes) > 0;
   }
 
-  /**
-   * Consume the ONE attempt — called inside the final dispatch-proof
-   * transaction, immediately before spawn. CAS: a second consumer loses.
-   */
-  consumeAuthorization(id: string, run: number, now: Date): boolean {
-    const { changes } = this.db
-      .prepare(
-        `UPDATE attended_authorization SET attempt_run = ?, consumed_at = ?
-          WHERE id = ? AND closed_at IS NULL AND attempt_run IS NULL`,
-      )
-      .run(run, now.toISOString(), id);
-    if (Number(changes) > 0) {
-      this.db.prepare("UPDATE run SET attended_authorization = ? WHERE id = ?").run(id, run);
-      return true;
-    }
-    return false;
-  }
+  // The one attempt is consumed and bound by `admitAttended` alone (final
+  // authority closure): there is no post-insert consume road — a two-write
+  // path that could bind a foreign run, or leave `attempt_run` set while
+  // the run's own binding stayed null, does not exist.
 
   /**
    * Money already committed against an authorization: settled and uncertain
@@ -19774,6 +19892,29 @@ function readContest(row: Record<string, unknown>): Contest {
     overduePaged: Number(row["overdue_paged"] ?? 0) === 1,
     kind: String(row["kind"] ?? "race") === "comparison" ? "comparison" : "race",
   };
+}
+
+/** The lane states a run may still open on: a built, failed, or stopped
+ * lane is terminal and admits nothing more. */
+const LIVE_LANE_STATES: ReadonlySet<ContestantState> = new Set(["pending", "ready", "building", "parked"]);
+
+/**
+ * Why a contest lane cannot present or accept authority (final authority
+ * closure), or null when it can: the lane must be nonterminal, carry a
+ * readable stored profile, and that profile's provider, model, and
+ * effective repair model must BE the lane's own columns. A profile_json
+ * copied from another agent beside stale provider/model columns is a row
+ * two authorities wrote; nothing spends on it.
+ */
+export function laneAuthorityProblem(lane: Contestant): string | null {
+  if (!LIVE_LANE_STATES.has(lane.state)) return `contestant ${lane.id} is ${lane.state} — a lane that has ended admits nothing`;
+  const profile = lane.profile ?? null;
+  if (profile === null) return `contestant ${lane.id} carries no sealed profile — nothing spends on the lane`;
+  const repairModel = profile.repairModel === "inherit" ? profile.model : profile.repairModel;
+  if (profile.provider !== lane.provider || profile.model !== lane.model || repairModel !== lane.repairModel) {
+    return `contestant ${lane.id}'s stored profile (${profile.provider} · ${profile.model}, repair ${repairModel}) is not the lane's own agent (${lane.provider} · ${lane.model}, repair ${lane.repairModel}) — nothing spends on a lane two authorities wrote`;
+  }
+  return null;
 }
 
 function readContestant(row: Record<string, unknown>): Contestant {

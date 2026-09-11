@@ -425,6 +425,9 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const repairVia = (taskRef: number, parentRun: number) =>
       store.admitRepair({ taskRef, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", parentRun, now: T0, ...(presented(store, taskRef, "repair") as { route: import("./phase-routing.js").RouteStamp }) });
     expect(() => open({ role: "repair", parentRun: base, ...presented(store, ref, "repair") })).toThrow(/a repair turn is admitted by admitRepair/);
+    // The repair turn mends the tail under the task's CURRENT live claim
+    // (final authority closure).
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('l', ?, 1, 'b-1', ?, ?, ?)").run(ref, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
     const repaired = repairVia(ref, base);
     if (!repaired.ok) throw new Error(repaired.problem);
     const repair = repaired.runId;
@@ -482,12 +485,12 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const e1 = entryArgs(store, "t-bound", 1);
     const exact = () => ({
       cycleId: cycle.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId,
-      run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.model },
+      run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "b", worktree: "/w", provider: e1.provider, model: e1.model },
       entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved,
     });
     const rows = () => Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run").get() as { n: number }).n);
     const edgeFree = () => (store.raw().prepare("SELECT consumed_by FROM fallback_transition WHERE id = ?").get(adv.transitionId) as { consumed_by: number | null }).consumed_by === null;
-    const before = rows();
+    let before = rows();
     const refused = (args: Parameters<Store["admitFallback"]>[0], words: RegExp | null) => {
       const result = store.admitFallback(args, T0);
       expect(result.ok).toBe(false);
@@ -582,13 +585,39 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     // a parent that is not this task's attempt admits nothing; a repair
     // turn recovers none.
     refused({ ...exact(), run: { ...exact().run, recoveredFrom: 9999 } }, /run #9999 is not one of this task's attempts — nothing recovers its draft/);
+    // THE SAME RECOVERY GRANT as the recovered-draft admission (final
+    // authority closure): a same-task run is not authority by itself. A
+    // failed interrupted PLANNER, a builder that failed for any other
+    // reason, a parked run, an attempt still being built under a live
+    // claim, or a draft left in another workspace recovers nothing — no
+    // run, no edge consumed, the cycle untouched.
+    const failedPlanner = store.startRun({ taskRef: ref, leaseId: "lp", runner: "b-1", role: "planner", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref, "planner") });
+    store.finishRun(failedPlanner, { outcome: "failed", reason: "interrupted", now: T0 });
+    const scout = store.startRun({ taskRef: ref, leaseId: "ls", runner: "b-1", role: "scout", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref, "scout") });
+    store.finishRun(scout, { outcome: "failed", reason: "interrupted", now: T0 });
+    // A reviewer row (an artifact-only pass: no branch, no worktree) written
+    // straight into the table, ended as interrupted — no grant either.
+    const reviewer = Number(store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, quality_mode, started_at, outcome, reason, finished_at) VALUES (?, 'lv', 'b-1', 'reviewer', 'claude', ?, 'default', ?, 'failed', 'interrupted', ?)").run(ref, base, T0.toISOString(), T0.toISOString()).lastInsertRowid);
+    const builtElsewhere = store.startRun({ taskRef: elseRef, leaseId: "lb", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, elseRef), custody: { kind: "base" } });
+    store.finishRun(builtElsewhere, { outcome: "built", reason: "done", now: T0 });
+    before = rows();
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: failedPlanner } }, /is a planner run — a recovered draft is a builder's or its repair turn's/);
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: scout } }, /is a scout run — a recovered draft is a builder's or its repair turn's/);
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: reviewer } }, /is a reviewer run — a recovered draft is a builder's or its repair turn's/);
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: builtElsewhere } }, /is not one of this task's attempts — nothing recovers its draft/);
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: base, worktree: "/elsewhere" } }, /left its draft in \/w on b, not \/elsewhere on b/);
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('l', ?, 1, 'b-1', ?, ?, ?)").run(ref, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
+    refused({ ...exact(), run: { ...exact().run, recoveredFrom: base } }, /is still being built under lease l — nothing recovers a live attempt's draft/);
+    store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = 'l'").run(T0.toISOString());
+    const before2 = rows();
+    expect(before2).toBe(before);
     // The exact statement admits: one run, the edge consumed, the cycle
     // open at 1 — carrying the interrupted base attempt as its parent.
     const admitted = store.admitFallback({ ...exact(), run: { ...exact().run, recoveredFrom: base } }, T0);
     expect(admitted.ok).toBe(true);
     if (!admitted.ok) return;
     expect(store.getRun(admitted.runId)).toMatchObject({ parentRun: base, chainCycle: cycle.id, chainIndex: 1 });
-    expect(rows()).toBe(before + 1);
+    expect(rows()).toBe(before2 + 1);
     expect(edgeFree()).toBe(false);
     expect(store.fallbackCycleFor(ref)).toMatchObject({ state: "open", cursor: 1, tailRun: admitted.runId });
 
@@ -603,10 +632,15 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const repairStamp = { ...e1.route, phase: "repair" as const };
     const repairFacts = (): Parameters<Store["admitFallback"]>[0] => ({
       kind: "repair", parentRun: admitted.runId, cycleId: cycle.id, expectCursor: 1, expectTail: admitted.runId,
-      run: { taskRef: ref, leaseId: "lr", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel },
+      // The tail's own lease and runner (final authority closure): a
+      // fallback entry's repair turn is admitted under exactly them.
+      run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel },
       entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, approved: e1.approved, route: repairStamp,
     });
     expect(() => store.startRun({ taskRef: ref, leaseId: "lr", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, role: "repair", parentRun: admitted.runId, now: T0, route: repairStamp } as never)).toThrow(/a repair turn is admitted by admitRepair/);
+    // Under the task's current live claim (final authority closure), so
+    // the refusal proved here is the fallback road's, not the claim's.
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('lf', ?, 2, 'b-1', ?, ?, ?)").run(ref, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
     expect(store.admitRepair({ taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, parentRun: admitted.runId, now: T0, route: repairStamp })).toMatchObject({ ok: false, problem: expect.stringMatching(/admitted only through admitFallback/) });
     expect(store.admitRepair({ taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, parentRun: admitted.runId, now: T0, ...(presented(store, ref, "repair") as { route: import("./phase-routing.js").RouteStamp }) })).toMatchObject({ ok: false, problem: expect.stringMatching(/admitted only through admitFallback/) });
     tailStays();
@@ -624,6 +658,18 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     refusedRepair({ route: { ...repairStamp, chosen: "recommended" } }, /spends as `fallback`/);
     refusedRepair({ run: { ...repairFacts().run, taskRef: elseRef } }, /belongs to task_ref/);
     refusedRepair({ run: { ...repairFacts().run, recoveredFrom: base } }, /a repair turn mends its live tail — it recovers no interrupted attempt/);
+    // THE ONE REPAIR RULE on the fallback road too (final authority
+    // closure): another runner, another lease, or a tail whose lease is no
+    // longer the task's current live claim — released, or superseded by a
+    // newer generation — admits no repair turn, and the tail stays.
+    refusedRepair({ run: { ...repairFacts().run, runner: "other-machine" } }, /runs on b-1 — its repair turn on other-machine is another machine's/);
+    refusedRepair({ run: { ...repairFacts().run, leaseId: "lr" } }, /holds lease lf — a repair turn under lease lr is not its own/);
+    store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = 'lf'").run(T0.toISOString());
+    refusedRepair({}, /lease lf is not this task's current live claim \(nothing holds it\)/);
+    store.raw().prepare("UPDATE claim SET released_at = NULL WHERE lease_id = 'lf'").run();
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('l-newer', ?, 3, 'b-1', ?, ?, ?)").run(ref, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
+    refusedRepair({}, /lease lf is not this task's current live claim \(l-newer does\)/);
+    store.raw().prepare("DELETE FROM claim WHERE lease_id = 'l-newer'").run();
     const repaired = store.admitFallback(repairFacts(), T0);
     expect(repaired.ok).toBe(true);
     if (!repaired.ok) return;
@@ -878,6 +924,7 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     // the binding inherited IN its admission (v48 authority repair), presenting the entry's
     // repair authority (the base entry: the sealed repair leg).
     const tailRow = store.getRun(run)!;
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES (?, ?, 1, ?, ?, ?, ?)").run(tailRow.leaseId, ref, tailRow.runner, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
     const repaired = store.admitRepair({
       taskRef: ref, leaseId: tailRow.leaseId, runner: tailRow.runner, branch: "b", worktree: "/w",
       provider: "claude", parentRun: run, now: T0, ...(presented(store, ref, "repair") as { route: import("./phase-routing.js").RouteStamp }),

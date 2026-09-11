@@ -201,8 +201,18 @@ describe("contest and contestant state moves are compare-and-swap, generation-bu
     // custody — lease, runner, incarnation — is stamped first, exactly as
     // admitContest does, and every lane run opens through admitContestLane
     // under it; a refusal is words and zero rows.
+    // The contest's stamped lease is the task's CURRENT live claim (final
+    // authority closure): each lease the fixture stamps supersedes the
+    // last as a newer claim generation, exactly as a real dispatch holds it.
+    let generation = 0;
+    const holdClaim = (lease: string) =>
+      store
+        .raw()
+        .prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES (?, ?, ?, 'night-shift-1', ?, ?, ?)")
+        .run(lease, ref, ++generation, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
     const runOf = (lease: string, over: Record<string, unknown> = {}) => {
       store.stampContestLease(contest, lease, "night-shift-1", null);
+      if (store.currentLiveLease(ref, T0) !== lease) holdClaim(lease);
       const admitted = store.admitContestLane({ taskRef: ref, leaseId: lease, runner: "night-shift-1", incarnation: null, branch: "standing-orders/race-me", worktree: "/pool/x", contestant: first, route: store.laneAuthorityFor(first)!, now: T0, ...over } as Parameters<Store["admitContestLane"]>[0]);
       if (!admitted.ok) throw new Error(admitted.problem);
       return admitted.runId;
@@ -233,6 +243,34 @@ describe("contest and contestant state moves are compare-and-swap, generation-bu
     expect(store.laneAuthorityFor(first)).toBeNull();
     expect(() => runOf("l-0", { route: pinnedStamp })).toThrow(/carries no sealed profile — nothing spends on the lane/);
     store.raw().prepare("UPDATE contestant SET profile_json = ? WHERE id = ?").run(canonicalProfileJson(laneRow.profile!), first);
+    expect(rows()).toBe(before);
+    // PROFILE-TO-COLUMNS PARITY (final authority closure): a profile_json
+    // copied from another agent beside this lane's own provider and model
+    // columns is a row two authorities wrote — the lane presents nothing,
+    // and a stamp derived from it earlier is refused in words, no row.
+    const [, second] = contestants;
+    const secondRow = store.getContestant(second!)!;
+    const laneStampBefore = store.laneAuthorityFor(first)!;
+    store.raw().prepare("UPDATE contestant SET profile_json = ? WHERE id = ?").run(canonicalProfileJson(secondRow.profile!), first);
+    expect(store.laneAuthorityFor(first)).toBeNull();
+    expect(() => runOf("l-0", { route: { ...laneStampBefore, routeDigest: `profile:${profileDigestOf(secondRow.profile!)}` } })).toThrow(/stored profile \(claude · claude-haiku-4-5, repair claude-haiku-4-5\) is not the lane's own agent \(claude · claude-sonnet-5, repair claude-sonnet-5\)/);
+    expect(() => runOf("l-0", { route: laneStampBefore })).toThrow(/is not the lane's own agent/);
+    store.raw().prepare("UPDATE contestant SET repair_model = 'claude-opus-4-1' WHERE id = ?").run(first);
+    store.raw().prepare("UPDATE contestant SET profile_json = ? WHERE id = ?").run(canonicalProfileJson(laneRow.profile!), first);
+    expect(store.laneAuthorityFor(first)).toBeNull();
+    expect(() => runOf("l-0", { route: laneStampBefore })).toThrow(/repair claude-sonnet-5\) is not the lane's own agent \(claude · claude-sonnet-5, repair claude-opus-4-1\)/);
+    store.raw().prepare("UPDATE contestant SET repair_model = 'claude-sonnet-5' WHERE id = ?").run(first);
+    expect(store.laneAuthorityFor(first)).toEqual(laneStampBefore);
+    // A lane that has ended admits nothing, and presents nothing.
+    store.raw().prepare("UPDATE contestant SET state = 'failed' WHERE id = ?").run(first);
+    expect(store.laneAuthorityFor(first)).toBeNull();
+    expect(() => runOf("l-0", { route: laneStampBefore })).toThrow(/is failed — a lane that has ended admits nothing/);
+    store.raw().prepare("UPDATE contestant SET state = 'pending' WHERE id = ?").run(first);
+    // CURRENT CUSTODY: the contest's stamped lease must be the task's live
+    // claim right now — a lease nobody holds, or one a newer claim
+    // superseded, opens nothing.
+    store.stampContestLease(contest, "l-stale", "night-shift-1", null);
+    expect(store.admitContestLane({ taskRef: ref, leaseId: "l-stale", runner: "night-shift-1", incarnation: null, branch: "standing-orders/race-me", worktree: "/pool/x", contestant: first, route: laneStampBefore, now: T0 })).toMatchObject({ ok: false, problem: expect.stringMatching(/the contest's lease l-stale is not this task's current live claim \(l-0 does\) — a lane run opens under live custody only/) });
     expect(rows()).toBe(before);
     expect(store.getContestant(first)).toMatchObject({ activeRun: null, generation: 1 });
     const runA = runOf("l-a");
@@ -935,6 +973,7 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
     ]);
     // c2 already built; c1 parked with an open question → decision-wait.
     store.stampContestLease(contest, "l1", "r", null);
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('l1', ?, 1, 'r', ?, ?, ?)").run(taskRef, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
     const lane1 = store.admitContestLane({ taskRef, leaseId: "l1", runner: "r", incarnation: null, branch: "b1", worktree: "/p/1", contestant: ids[0]!, route: store.laneAuthorityFor(ids[0]!)!, now: T0 });
     if (!lane1.ok) throw new Error(lane1.problem);
     const run1 = lane1.runId;

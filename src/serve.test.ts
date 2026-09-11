@@ -9814,6 +9814,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     // admission, then restores the history the surfaces read.
     const builtRow = store.getRun(built)!;
     store.raw().prepare("UPDATE run SET outcome = NULL WHERE id = ?").run(built);
+    // ... under the task's CURRENT live claim (final authority closure).
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES (?, ?, 99, 'night-shift-1', ?, ?, ?)").run(builtRow.leaseId, ref, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
     const admittedCorrection = store.admitRepair({
       taskRef: ref,
       leaseId: builtRow.leaseId,
@@ -9826,6 +9828,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       ...(presented(store, ref, "repair") as { route: import("./phase-routing.js").RouteStamp }),
     });
     store.raw().prepare("UPDATE run SET outcome = ? WHERE id = ?").run(builtRow.outcome, built);
+    store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = ? AND lease_generation = 99").run(T0.toISOString(), builtRow.leaseId);
     if (!admittedCorrection.ok) throw new Error(admittedCorrection.problem);
     const correction = admittedCorrection.runId;
     store.finishRun(correction, {

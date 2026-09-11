@@ -170,14 +170,17 @@ export const ROUTINE_NAME = /^[a-z0-9][a-z0-9-]{0,40}$/;
 export function validateRoutineTerms(
   terms: RoutineTerms,
   options: {
-    /** The integrity projection's reading of a STORED row (atomic
-     * authority closure): its rubric's shape was proved by the raw reader,
-     * and a routine filed before rubrics existed carries none — the
-     * filing door alone demands at least one criterion. */
-    storedRubric?: boolean;
+    /** The STORED row's name (final authority closure): validated with the
+     * terms wherever a stored routine is read back, so a raw name this
+     * code never files — one no instance id could be stamped from — is
+     * as invalid as an empty rubric, and no door moves on it. */
+    name?: string;
   } = {},
 ): RoutineProblem[] {
   const problems: RoutineProblem[] = [];
+  if (options.name !== undefined && !ROUTINE_NAME.test(options.name)) {
+    problems.push({ field: "name", problem: "a lowercase id stem — letters, digits, and dashes, at most 41 characters" });
+  }
   if (terms.goal.trim() === "" || terms.goal.length > 2_000 || hasForbiddenControls(terms.goal)) {
     problems.push({ field: "goal", problem: "required, at most 2000 characters, no control characters" });
   }
@@ -192,12 +195,15 @@ export function validateRoutineTerms(
   }
   // v39: this is the ONLY place a routine's rubric is authored — every
   // firing copies it forward unchanged, never re-asks. A track that never
-  // gains one never gets past this validation, so `fireRoutine` can trust
-  // a stored routine's acceptance is non-empty without re-checking it.
+  // gains one never gets past this validation — filed, migrated, or
+  // corrupted alike (final authority closure): an empty rubric is invalid
+  // wherever a stored row is read back, so a routine that predates
+  // rubrics (a migrated NULL acceptance_json) cannot refresh, take a yes,
+  // or fire `acceptance: []` until valid terms are filed again.
   const acceptanceParse = parseAcceptanceCriteria(terms.acceptance);
   if (acceptanceParse.problems.length > 0) {
     problems.push({ field: "acceptance", problem: acceptanceParse.problems.map(p => p.message).join("; ") });
-  } else if (acceptanceParse.criteria.length === 0 && options.storedRubric !== true) {
+  } else if (acceptanceParse.criteria.length === 0) {
     problems.push({ field: "acceptance", problem: "a standing order needs at least one signed acceptance criterion" });
   }
   if (parseSchedule(terms.schedule) === null) {
@@ -393,9 +399,11 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
         detail:
           routine.termsProblem != null
             ? `the stored terms cannot be read exactly (${routine.termsProblem}) — file this standing order again`
-            : routine.approvedAt === null
-              ? "nobody has agreed to this standing order"
-              : "the template was edited after approval — approve it again",
+            : integrity.agents.state === "unverified" && integrity.agents.problem !== null && integrity.agents.problem.startsWith("the stored terms are not ones this code files")
+              ? integrity.agents.problem
+              : routine.approvedAt === null
+                ? "nobody has agreed to this standing order"
+                : "the template was edited after approval — approve it again",
       };
     }
     if (routine.paused) return { ok: false as const, reason: "paused" as const };
@@ -743,7 +751,7 @@ export function routineIntegrity(routine: IntegrityRow): RoutineIntegrity {
   // holds, an empty rubric. Every filing door validates these; the
   // projection validates them AGAIN so a rehashed row is never approvable
   // or live on terms the filing door would have refused.
-  const semantic = validateRoutineTerms(terms, { storedRubric: true });
+  const semantic = validateRoutineTerms(terms, { name: routine.name });
   if (semantic.length > 0) {
     const problem = `the stored terms are not ones this code files (${semantic.map(one => `${one.field}: ${one.problem}`).join("; ")}) — file this standing order again`;
     return { approved: false, live: false, liveProblem: null, agents: { state: "unverified", approvable: false, refresh: false, problem } };
@@ -849,7 +857,7 @@ export function refreshRoutineAgents(store: Store, routineId: number, now: Date)
     // ceiling) are not re-filed either (atomic authority closure): the
     // refresh cannot mend terms, and rehashing them would only launder
     // the corruption into a digest a person could sign.
-    const semantic = validateRoutineTerms(termsOf(routine), { storedRubric: true });
+    const semantic = validateRoutineTerms(termsOf(routine), { name: routine.name });
     if (semantic.length > 0) {
       return { ok: false as const, reason: "unresolved" as const, problem: `the stored terms are not ones this code files (${semantic.map(one => `${one.field}: ${one.problem}`).join("; ")}) — file this standing order again` };
     }

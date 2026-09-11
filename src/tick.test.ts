@@ -21,6 +21,8 @@ import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
+import { HeldSessionCoordinator } from "./held.js";
+import { canonicalProfileJson, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import type { Runner } from "./builder.js";
 
 
@@ -343,6 +345,58 @@ describe("tick, against real git", () => {
     const mine = await tick(runnerToken, ["--max", "2"]);
     expect(mine).toBe(EXIT.ok);
     expect(payload().dispatched.map((one: { id: string }) => one.id)).toEqual(["t-private"]);
+  });
+
+  test("the attended road proves the SIGNED HEAD before admission (final authority closure): a head that moved opens no run, spends no attempt, leaves no claim or worktree, and closes the authorization in the refusal's words", async () => {
+    const { runnerToken } = await credentials();
+    await run(["task", "add", "the work", "--id", "t-att", "--repo", repo]);
+    const profile: ExecutionProfile = { provider: "claude", model: "sonnet", permissionArgv: "auto", maxTurns: 40, repairMaxTurns: 4, timeoutSeconds: 1800, repairTimeoutSeconds: 300, repairModel: "inherit" };
+    const seeded = openStore(db);
+    const ref = seeded.refFor("built-in", "t-att");
+    // The authorization signed a head the repository never had.
+    const minted = seeded.mintAttendedAuthorization({
+      id: "auth-stale",
+      taskRef: ref.id,
+      approver: "alex",
+      runner: "builder-1",
+      runnerGeneration: 1,
+      compositeDigest: "a".repeat(32),
+      termsJson: JSON.stringify({ attentionMode: "console-visible", scopeDigest: "", profileDigest: profileDigestOf(profile), profileJson: canonicalProfileJson(profile), repo, head: "f".repeat(40) }),
+      maxSessionTurns: 4,
+      budgetMicrousd: 500_000,
+      absoluteExpiry: new Date(T0.getTime() + 3_600_000).toISOString(),
+      now: T0,
+    });
+    expect(minted.ok).toBe(true);
+    seeded.beatAuthorization("auth-stale", T0);
+    seeded.close();
+    // No agent may run: the stub throws if anything spawns.
+    const neverSpawns: Runner = async () => {
+      throw new Error("nothing spawns under a stale head");
+    };
+    lines = [];
+    const code = await runOperate("tick", ["--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], line => lines.push(line), {
+      databaseFile: db,
+      now: T0,
+      agentRunner: neverSpawns,
+      heldCoordinator: new HeldSessionCoordinator(),
+    });
+    expect(code).toBe(EXIT.refused);
+    expect(payload().dispatched).toEqual([
+      expect.objectContaining({ id: "t-att", outcome: "skipped", reason: "stale-authorization", detail: expect.stringContaining("the head moved since the attended authorization auth-stale was signed (ffffffffffff →") }),
+    ]);
+    expect(String(payload().dispatched[0]?.detail)).toContain("no run opened, no attempt spent");
+    const proved = openStore(db);
+    // No run, no route, no attempt spent — and the authorization is closed
+    // typed, so the operator sees why and may authorize again.
+    expect(proved.runsFor(ref.id)).toHaveLength(0);
+    expect(proved.raw().prepare("SELECT COUNT(*) AS n FROM run_route").get()).toEqual({ n: 0 });
+    expect(proved.readAuthorization("auth-stale")).toMatchObject({ attemptRun: null, consumedAt: null, endReason: "refused:stale-authorization" });
+    expect(proved.readAuthorization("auth-stale")?.closedAt).not.toBeNull();
+    expect(proved.currentLiveLease(ref.id, T0)).toBeNull();
+    expect(proved.raw().prepare("SELECT COUNT(*) AS n FROM worktree WHERE released_at IS NULL AND task_ref = ?").get(ref.id)).toEqual({ n: 0 });
+    expect(proved.getTask("t-att")?.state).toBe("queued");
+    proved.close();
   });
 
   test("one task goes queued → branch → commit, unattended", async () => {

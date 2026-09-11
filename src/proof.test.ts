@@ -8,6 +8,8 @@ import {
   foldReview,
   passFraction,
   blockingCaveats,
+  caveatAttributionProblems,
+  caveatAttributionWords,
   PROOF_LIMITS,
   type AdjudicateInput,
   type AdjudicateResult,
@@ -20,7 +22,10 @@ const sound = {
   criteria: [{ id: "c1", statement: "The button opens the settings panel.", verdict: "met", how: "Clicked it in the demo build." }],
   checks: [{ command: "npm test", exitCode: 0, summary: "1668 tests passed." }],
   changed: ["src/x.ts"],
-  caveats: ["The panel does not yet remember scroll position."],
+  // A sound proof carries no unattributed caveat (final authority closure):
+  // "the panel does not yet remember scroll position" is a follow-up for
+  // the handoff, not an exception to a signed criterion.
+  caveats: [],
   screenshots: [{ path: "evidence/settings-panel.png", caption: "Settings panel open." }],
 };
 
@@ -352,7 +357,33 @@ describe("adjudicate", () => {
         { id: "c1", statement: run1497.c1, verdict, how: "startRun proves in its insert." },
         { id: "c4", statement: run1497.c4, verdict, how: "readRoutine sets termsProblem." },
       ],
-      caveats: [noScopeCaveat, routinePageCaveat, "Reviewer proofs use an injected stubbed reviewer agent, not a live provider."],
+      caveats: [noScopeCaveat, routinePageCaveat],
+    });
+  // The EXACT caveats runs 1497 and 1500 stored (final authority closure):
+  // not one names a criterion id, so the machine cannot say which signed
+  // criterion each qualifies — every one is unassigned, and a proof that
+  // carries them is refuted, never verified, however its criteria read.
+  const run1497Caveats = [
+    "A task with no scope still opens an unstamped run when nothing is presented (kept to avoid churn across ~250 fixtures); the spend gate refuses such rows. A presented no-scope stamp must be the bare word legacy.",
+    "Pre-routing (route_era NULL) chain approvals can no longer run non-primary fallback entries; the tick reports fallback-stale-approval with the reason until the scope is re-filed and approved.",
+    "A corrupt routine SNAPSHOT still pages once at the edge (pre-existing pinned behavior); corrupt raw TERMS write nothing at all, not even a page.",
+    "Reviewer proofs use an injected stubbed reviewer agent, not a live provider; migration proofs replay a logical SQL dump of a v47 database, not a binary v47 file.",
+  ];
+  const run1500Caveats = [
+    "Attended launch refusals after admission (stale head, run-held, session-cap) now close the admission-bound authorization as refused:<reason>; the operator re-authorizes instead of an automatic retry.",
+    "The blocking-caveat rule is a token contract: a caveat that admits an exception without naming the criterion id is not machine-attributable; the brief tells agents to name it.",
+    "Contest lane repair turns on routed tasks were refused before this change too (sealed-route leg vs lane profile); untouched and not covered by tests.",
+    "Auth-mode strictness at filing, consent, and seal reads the operator's home through readAuthModeStrict with no keyHome injection; tests point HOME at a temp dir.",
+    "Migrated routines with an empty legacy rubric stay refreshable and approvable (storedRubric); the filing door still requires at least one criterion.",
+  ];
+  const stored = (caveats: string[], verdict: "met" | "not-met" = "met") =>
+    parse({
+      ...sound,
+      criteria: [
+        { id: "c1", statement: run1497.c1, verdict, how: "startRun proves in its insert." },
+        { id: "c4", statement: run1497.c4, verdict, how: "readRoutine sets termsProblem." },
+      ],
+      caveats,
     });
 
   test("run 1497 pinned: a met c1 whose caveat admits the no-scope row, and a met c4 whose caveat admits the routine page, refute the proof", () => {
@@ -387,6 +418,40 @@ describe("adjudicate", () => {
       ["c4", "failed"],
     ]);
     expect(result.matrix[0]!.detail[0]).toBe(`criterion "c1" is marked met, but caveat 1 admits an exception to it: ${noScopeCaveat}`);
+  });
+
+  for (const [label, caveats] of [
+    ["run 1497", run1497Caveats],
+    ["run 1500", run1500Caveats],
+  ] as const) {
+    test(`${label}'s exact stored caveats name no criterion: every one is unassigned, and the proof is refuted whether its criteria read met or not-met`, () => {
+      const problems = caveatAttributionProblems({ criteria: [], caveats: [...caveats] }, ["c1", "c2", "c3", "c4", "c5", "c6"]);
+      expect(problems.map(one => [one.index, one.kind])).toEqual(caveats.map((_, index) => [index, "unassigned"]));
+      for (const verdict of ["met", "not-met"] as const) {
+        const result = adjudicate({ ...base, proofParse: stored([...caveats], verdict), diffStat: { captured: true, truncated: false, paths: new Set(["src/x.ts"]) } });
+        expect(result.verdict).toBe("refuted");
+        expect(result.reasons).toEqual(caveats.map((caveat, index) => `caveat ${index + 1} names no criterion — every caveat is an exception to exactly one signed criterion, named by its exact id (an unrelated idea belongs in the handoff's follow-ups): ${caveat}`));
+        expect(verdictWords(result.verdict, result.reasons).word).toBe("conflicting evidence");
+      }
+    });
+  }
+
+  test("a caveat tagged with an id nobody signed and the proof never answers is unknown — refuted in words; a signed id the proof does not answer is still known", () => {
+    const unknown = "c9: the routine page still renders the old words.";
+    const result = adjudicate({ ...base, proofParse: stored([unknown], "not-met") });
+    expect(result.verdict).toBe("refuted");
+    expect(result.reasons).toEqual([`caveat 1 names "c9", which is no signed or answered criterion — every caveat names an exact criterion id: ${unknown}`]);
+    expect(caveatAttributionProblems({ criteria: [], caveats: [unknown] }, ["c9"])).toEqual([]);
+    expect(caveatAttributionProblems({ criteria: [], caveats: ["c1, c9: both"] }, ["c1"])).toEqual([{ caveat: "c1, c9: both", index: 0, kind: "unknown", tags: ["c9"] }]);
+    expect(caveatAttributionWords({ caveat: "x", index: 2, kind: "unassigned", tags: [] })).toContain("caveat 3 names no criterion");
+  });
+
+  test("attributed caveats against not-met criteria pass attribution: a mixed proof is refuted only for the caveat that names nothing", () => {
+    const mixed = [noScopeCaveat, routinePageCaveat, run1497Caveats[3]!];
+    const result = adjudicate({ ...base, proofParse: stored(mixed, "not-met") });
+    expect(result.verdict).toBe("refuted");
+    expect(result.reasons).toHaveLength(1);
+    expect(result.reasons[0]).toContain("caveat 3 names no criterion");
   });
 
   test("blockingCaveats names a criterion only by its exact standalone id token", () => {

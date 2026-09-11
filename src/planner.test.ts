@@ -18,6 +18,7 @@ import { runOperate, EXIT } from "./operate.js";
 import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
 import { register } from "./runner.js";
+import { propose } from "./scope.js";
 import type { Runner } from "./builder.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
@@ -286,20 +287,65 @@ describe("planning mode, against real git", () => {
     expect(log.stdout).toContain("limiter");
 
     // Route provenance (v47): every phase's run names the route it spent
-    // under and the actual provider and model — the planner under the live
-    // recommendation it ran before any scope existed, the builder under
-    // the sealed route the approval copied.
+    // under and the actual provider and model — the planner, which ran
+    // before any scope existed, under the bare word `legacy` for the exact
+    // pair the live recommendation resolved (final authority closure: a
+    // task with no scope holds no filed route to spend as a routed leg),
+    // the builder under the sealed route the approval copied.
     const proved = openStore(db);
     const provedRef = proved.refFor("built-in", "limiter");
     const runs = proved.runsFor(provedRef.id);
     const plannerRuns = runs.filter(one => one.role === "planner");
     expect(plannerRuns.length).toBeGreaterThan(0);
     for (const plannerRun of plannerRuns) {
-      expect(proved.runRoute(plannerRun.id)).toMatchObject({ phase: "plan", provider: "claude", chosen: "recommended" });
+      expect(proved.runRoute(plannerRun.id)).toMatchObject({ phase: "plan", provider: "claude", chosen: "legacy", routeDigest: "legacy" });
     }
     const builderRun = runs.find(one => one.role === "builder")!;
     expect(proved.runRoute(builderRun.id)).toMatchObject({ phase: "build", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: routeDigestOf(proved.approvedRouteOf("limiter")!) });
     proved.close();
+  });
+
+  test("the planner's claim re-proves the strict scope projection (final authority closure): a filed scope whose risk the route was not recommended for is skipped in words before any claim — no run, no lease, no provider — and the restored scope plans", async () => {
+    const { runnerToken, approverToken } = await setup();
+    // A scope filed (unapproved) — the planner would run under its WORKING route.
+    {
+      const store = openStore(db);
+      propose(store, { taskId: "limiter", goal: "a sliding-window limiter", acceptance: [{ id: "c1", statement: "limits", how: null, evidence: ["check"] }], now: T0 });
+      store.close();
+    }
+    await run(["task", "plan", "limiter", "--as", "alex", "--token", approverToken, "--json"], planningAgent);
+    expect(payload().ok).toBe(true);
+    // The reproduction: the row's risk is rewritten under the route that
+    // was recommended for routine risk.
+    {
+      const store = openStore(db);
+      store.raw().prepare("UPDATE task_scope SET risk_level = 'high' WHERE task_id = 'limiter'").run();
+      store.close();
+    }
+    let spawned = false;
+    const neverSpawns: Runner = async () => {
+      spawned = true;
+      throw new Error("nothing spawns on a scope that does not prove");
+    };
+    expect(await tick(runnerToken, neverSpawns)).toBe(EXIT.refused);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "limiter", outcome: "skipped", reason: "agent-config", detail: expect.stringMatching(/holds no plan authority \(the route was recommended for routine risk but the scope's risk level is high\)/) }));
+    expect(spawned).toBe(false);
+    {
+      const store = openStore(db);
+      const ref = store.refFor("built-in", "limiter");
+      expect(store.runsFor(ref.id)).toHaveLength(0);
+      expect(store.currentLiveLease(ref.id, T0)).toBeNull();
+      expect(store.raw().prepare("SELECT COUNT(*) AS n FROM claim").get()).toEqual({ n: 0 });
+      // Restored, the planner runs under the working route it proves.
+      store.raw().prepare("UPDATE task_scope SET risk_level = 'routine' WHERE task_id = 'limiter'").run();
+      store.close();
+    }
+    expect(await tick(runnerToken, askingAgent)).toBe(EXIT.ok);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "limiter", outcome: "parked" }));
+    const store = openStore(db);
+    const planner = store.runsFor(store.refFor("built-in", "limiter").id).find(one => one.role === "planner")!;
+    expect(store.runRoute(planner.id)).toMatchObject({ phase: "plan", provider: "claude", model: "sonnet", chosen: "recommended" });
+    store.close();
   });
 
   test("pass flags cannot reroute the planner (v47): a flag that contradicts the task's plan leg is refused in words; one that restates it runs; a plan pin needs an exact model", async () => {
@@ -322,7 +368,9 @@ describe("planning mode, against real git", () => {
       store.close();
     }
     // A flag that restates the leg exactly is fine, and the planner run
-    // names its route: the plan leg, recommended, under the live route.
+    // names its route: the exact pair the live recommendation resolved,
+    // presented as the bare word `legacy` — a task with no scope holds no
+    // filed route (final authority closure).
     const restated = await run(
       ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--plan-provider", "claude", "--plan-model", "sonnet", "--json"],
       askingAgent,
@@ -332,7 +380,7 @@ describe("planning mode, against real git", () => {
     const store = openStore(db);
     const planner = store.runsFor(store.refFor("built-in", "limiter").id).find(one => one.role === "planner")!;
     expect(planner).toMatchObject({ provider: "claude", model: "sonnet" });
-    expect(store.runRoute(planner.id)).toMatchObject({ phase: "plan", provider: "claude", model: "sonnet", chosen: "recommended" });
+    expect(store.runRoute(planner.id)).toMatchObject({ phase: "plan", provider: "claude", model: "sonnet", chosen: "legacy", routeDigest: "legacy" });
     store.close();
   });
 

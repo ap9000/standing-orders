@@ -543,6 +543,15 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       ...presented(store, ref, "builder"),
     });
 
+  /** The task's live claim under a lease (final authority closure): a
+   * repair turn mends an attempt only while its lease is the task's
+   * CURRENT claim, so every fixture that repairs holds one first. */
+  const claimAs = (ref: number, leaseId: string, runner = "builder-1", generation = 1) =>
+    store
+      .raw()
+      .prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(leaseId, ref, generation, runner, T0.toISOString(), later(900_000).toISOString(), T0.toISOString());
+
   test("two owners can hold one task, and each lifts only its own", () => {
     const ref = refOf("t-1");
 
@@ -754,6 +763,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
 
   test("a repair run records its parentage, and 'parked' is a real outcome", () => {
     const ref = refOf("t-1");
+    claimAs(ref, "lease-1");
     const run = runOn(ref);
     const repair = repairOn(ref, run, { sessionId: "sess-1" });
 
@@ -769,6 +779,19 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
     const rows = () => Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run").get() as { n: number }).n);
     const run = runOn(ref);
     const before = rows();
+    // THE CURRENT CLAIM (final authority closure): an open parent whose
+    // lease is not the task's live claim — none held, a released one, or
+    // one superseded by a newer generation — admits no repair turn: the
+    // runner and lease it copies prove nothing while nobody builds it.
+    expect(() => repairOn(ref, run)).toThrow(/run #\d+'s lease lease-1 is not this task's current live claim \(nothing holds it\) — a repair turn mends an attempt still being built under its claim/);
+    claimAs(ref, "lease-1");
+    store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = 'lease-1'").run(T0.toISOString());
+    expect(() => repairOn(ref, run)).toThrow(/is not this task's current live claim \(nothing holds it\)/);
+    store.raw().prepare("UPDATE claim SET released_at = NULL WHERE lease_id = 'lease-1'").run();
+    claimAs(ref, "lease-newer", "builder-1", 2);
+    expect(() => repairOn(ref, run)).toThrow(/is not this task's current live claim \(lease-newer does\)/);
+    store.raw().prepare("DELETE FROM claim WHERE lease_id = 'lease-newer'").run();
+    expect(rows()).toBe(before);
     // The generic road opens no repair, with or without a parent.
     expect(() => store.startRun({ taskRef: ref, leaseId: "lease-1", runner: "builder-1", branch: "standing-orders/t-1", worktree: "/pool/t-1", role: "repair", now: later(1), ...presented(store, ref, "repair") } as never)).toThrow(/a repair turn is admitted by admitRepair/);
     expect(() => store.startRun({ taskRef: ref, leaseId: "lease-1", runner: "builder-1", branch: "standing-orders/t-1", worktree: "/pool/t-1", role: "repair", parentRun: run, now: later(1), ...presented(store, ref, "repair") } as never)).toThrow(/a repair turn is admitted by admitRepair/);
@@ -857,6 +880,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
   test("planner and formatting-repair bookkeeping never masquerade as the task result", () => {
     const ref = refOf("t-1");
     store.placeTask(ref, REPO);
+    claimAs(ref, "lease-1");
     const built = runOn(ref);
     // The repair turn mends the LIVE attempt (atomic authority closure):
     // opened before the build ends, settled after.
@@ -883,6 +907,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
 
   test("only a later builder supersedes a parked builder's warm resume", () => {
     const ref = refOf("t-1");
+    claimAs(ref, "lease-1");
     const parked = store.startRun({
       taskRef: ref,
       leaseId: "lease-1",
@@ -2152,13 +2177,37 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
     expect(attempt({ route: { routeDigest: "legacy", phase: "build", provider: "claude", model: "sonnet", chosen: "legacy" } })).toMatchObject({ ok: false, problem: expect.stringMatching(/spends under the authorization's pinned profile/) });
     expect(rows()).toBe(before);
     expect(store.readAuthorization("auth-new")?.attemptRun).toBeNull();
+    // INJECTED WRITE FAILURES (final authority closure): the admission is
+    // one transaction — a failure on the run_route insert, on the
+    // authorization's CAS, or on the run insert itself rolls every write
+    // back: no run row, `attempt_run` still null, nothing half-bound.
+    const raw = store.raw();
+    const realPrepare = raw.prepare.bind(raw);
+    for (const doomed of ["INSERT INTO run_route", "UPDATE attended_authorization SET attempt_run", "INSERT INTO run ("]) {
+      raw.prepare = ((sql: string) => {
+        if (sql.includes(doomed)) throw new Error(`injected: ${doomed}`);
+        return realPrepare(sql);
+      }) as typeof raw.prepare;
+      try {
+        expect(() => attempt({})).toThrow(/injected/);
+      } finally {
+        raw.prepare = realPrepare;
+      }
+      expect(rows()).toBe(before);
+      expect(store.raw().prepare("SELECT COUNT(*) AS n FROM run_route").get()).toEqual({ n: 0 });
+      expect(store.readAuthorization("auth-new")).toMatchObject({ attemptRun: null, consumedAt: null, closedAt: null });
+    }
     const admitted = attempt({});
     expect(admitted.ok).toBe(true);
     const run = admitted.ok ? admitted.runId : -1;
     expect(store.getRun(run)?.attendedAuthorization).toBe("auth-new");
     expect(store.readAuthorization("auth-new")).toMatchObject({ attemptRun: run, consumedAt: later(130).toISOString() });
     expect(attempt({ leaseId: "lease-b", now: later(131) })).toMatchObject({ ok: false, problem: expect.stringMatching(/already spent its one attempt on run #\d+/) });
-    expect(store.consumeAuthorization("auth-new", run, later(131))).toBe(false);
+    // NO POST-INSERT CONSUME ROAD (final authority closure): the two-write
+    // path that once bound any run — a cross-task, wrong-runner one
+    // included — to an authorization after the fact does not exist; the
+    // one attempt binds inside admitAttended or not at all.
+    expect((store as unknown as Record<string, unknown>)["consumeAuthorization"]).toBeUndefined();
     expect(rows()).toBe(before + 1);
     store.close();
   });
@@ -3086,7 +3135,9 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     expect(store.getRun(run)).toMatchObject({ provider: "claude", model: "opus", chainCycle: null });
     expect(store.runRoute(run)).toMatchObject({ routeDigest: exact, chosen: "legacy" });
     // A repair turn under it names the pinned repair pair (inherit = the
-    // build model), through the repair road, mending the bound attempt.
+    // build model), through the repair road, mending the bound attempt —
+    // under the task's current live claim (final authority closure).
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('l', ?, 1, 'mac-a', ?, ?, ?)").run(attRef, T0.toISOString(), later(900_000).toISOString(), T0.toISOString());
     const repairVia = (model: string) =>
       store.admitRepair({ taskRef: attRef, leaseId: "l", runner: "mac-a", branch: "b", worktree: "/w", provider: "claude", model, parentRun: run, now: T0, route: { routeDigest: exact, phase: "repair", provider: "claude", model, chosen: "legacy" } });
     expect(repairVia("sonnet")).toMatchObject({ ok: false, problem: expect.stringMatching(/pins claude · opus/) });
@@ -3150,6 +3201,9 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     if (boundRepair === null || !boundRepair.ok) return;
     const sealedRepair = store.routeAuthorityFor(taskRef, "repair");
     if (sealedRepair === null || !sealedRepair.ok) throw new Error("repair leg");
+    // Under the task's current live claim (final authority closure), so
+    // the refusal proved here is the fallback road's, not the claim's.
+    store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('lf', ?, 1, 'r', ?, ?, ?)").run(taskRef, T0.toISOString(), later(900_000).toISOString(), T0.toISOString());
     const repairVia = (route: import("./phase-routing.js").RouteStamp) =>
       store.admitRepair({ taskRef, leaseId: "lf", runner: "r", branch: "b", worktree: "/w", provider: "codex", model: "gpt-5-codex", parentRun: admitted.runId, now: T0, route });
     expect(repairVia(sealedRepair.stamp)).toMatchObject({ ok: false, problem: expect.stringMatching(/admitted only through admitFallback/) });
@@ -3158,8 +3212,11 @@ describe("run admission proves route provenance before any row exists (v48)", ()
     const repairFacts = { kind: "repair" as const, parentRun: admitted.runId, cycleId: opened.id, expectCursor: 1, expectTail: admitted.runId, entryDigest: entryDigestOf(chain[1]!), authMode: "api-key" as const, repairModel: "gpt-5-codex", approved: approvedFacts };
     expect(store.admitFallback({ ...repairFacts, run: { ...runArgs, leaseId: "lr" }, route: sealedRepair.stamp }, T0)).toMatchObject({ ok: false, problem: expect.stringContaining("spends as `fallback`") });
     expect(store.admitFallback({ ...repairFacts, run: { ...runArgs, leaseId: "lr" }, route: { ...boundRepair.stamp, phase: "build" } }, T0)).toMatchObject({ ok: false, problem: expect.stringContaining("a repair run spends as the repair leg") });
+    // The tail's own lease, the task's current live claim (final authority
+    // closure): a foreign lease admits no fallback repair turn either.
+    expect(store.admitFallback({ ...repairFacts, run: { ...runArgs, leaseId: "lr" }, route: boundRepair.stamp }, T0)).toMatchObject({ ok: false, problem: expect.stringMatching(/holds lease lf — a repair turn under lease lr is not its own/) });
     expect(runs()).toBe(2);
-    const repaired = store.admitFallback({ ...repairFacts, run: { ...runArgs, leaseId: "lr" }, route: boundRepair.stamp }, T0);
+    const repaired = store.admitFallback({ ...repairFacts, run: { ...runArgs, leaseId: "lf" }, route: boundRepair.stamp }, T0);
     expect(repaired.ok).toBe(true);
     if (!repaired.ok) return;
     const repair = repaired.runId;
@@ -3267,11 +3324,19 @@ describe("migration-recovery: authentic v47 and interrupted −47 databases upgr
     // A steer note the v24 pass would supersede as 'unverified-author'.
     raw.prepare("INSERT INTO task_steer (task_ref, author, note, created_at, authorship_state) VALUES (?, 'alex', 'keep the old formatter', ?, 'unverified-legacy')").run(ref, T0.toISOString());
     const profile = { provider: "claude" as const, model: "sonnet", permissionArgv: "acceptEdits" as const, maxTurns: 40, repairMaxTurns: 4, timeoutSeconds: 1800, repairTimeoutSeconds: 300, repairModel: "inherit" };
-    const terms = { repo: REPO, goal: "refresh the lockfile", outOfScope: null, touches: ["package.json"], acceptance: [], requirements: [], schedule: "every:60", singleFlight: true, costCeilingUsd: null, budgetPerRunMicrousd: null };
+    const rubric = [{ id: "c1", statement: "the lockfile is refreshed", how: null, evidence: ["check" as const] }];
+    const terms = { repo: REPO, goal: "refresh the lockfile", outOfScope: null, touches: ["package.json"], acceptance: rubric, requirements: [], schedule: "every:60", singleFlight: true, costCeilingUsd: null, budgetPerRunMicrousd: null };
     const routineDigest = routineDigestOf(terms, profile);
     const created = seeded.createRoutine({ name: "nightly-deps", ...terms, digest: routineDigest, profile }, T0);
     if (!created.ok) throw new Error("routine");
     raw.prepare("UPDATE routine SET approved_at = ?, approved_by = 'alex', approved_digest = digest, approved_profile_json = profile_json, next_fire_at = ? WHERE id = ?").run(T0.toISOString(), new Date(T0.getTime() + 3_600_000).toISOString(), created.id);
+    // A routine approved BEFORE rubrics existed (final authority closure):
+    // its acceptance_json is NULL, exactly as the v39 migration left it.
+    const legacyTerms = { ...terms, acceptance: [] };
+    const legacyDigest = routineDigestOf(legacyTerms, profile);
+    const legacy = seeded.createRoutine({ name: "legacy-deps", ...legacyTerms, digest: legacyDigest, profile }, T0);
+    if (!legacy.ok) throw new Error("legacy routine");
+    raw.prepare("UPDATE routine SET acceptance_json = NULL, approved_at = ?, approved_by = 'alex', approved_digest = digest, approved_profile_json = profile_json, next_fire_at = ? WHERE id = ?").run(T0.toISOString(), new Date(T0.getTime() + 3_600_000).toISOString(), legacy.id);
     raw.exec("ALTER TABLE routine DROP COLUMN route_json");
     raw.exec("ALTER TABLE routine DROP COLUMN approved_route_json");
     const before = {
@@ -3283,16 +3348,16 @@ describe("migration-recovery: authentic v47 and interrupted −47 databases upgr
     };
     raw.prepare("UPDATE schema_version SET version = ?").run(startVersion);
     seeded.close();
-    return { db, token: added.token, routineId: created.id, before };
+    return { db, token: added.token, routineId: created.id, legacyRoutineId: legacy.id, rubric, before };
   };
 
   for (const [label, startVersion] of [["an authentic v47", 47], ["an interrupted −47 epoch", -47]] as const) {
     test(`${label} upgrades in place: the v24 data pass does not rerun, ids and digests stay, nothing is backfilled or auto-approved — and refresh → explicit reapproval → exact fire then succeed`, async () => {
-      const { approveRoutine, fireRoutine, refreshRoutineAgents, routineAgentsState } = await import("./routine.js");
+      const { approveRoutine, fireRoutine, refreshRoutineAgents, routineAgentsState, routineDigestOf } = await import("./routine.js");
       const { routeDigestOf } = await import("./phase-routing.js");
       const dir = mkdtempSync(join(tmpdir(), "standing-orders-mig-"));
       try {
-        const { db, token, routineId, before } = await seedV47(dir, startVersion);
+        const { db, token, routineId, legacyRoutineId, rubric, before } = await seedV47(dir, startVersion);
         const up = openStore(db);
         const raw = up.raw();
         expect(raw.prepare("SELECT version FROM schema_version").get()).toMatchObject({ version: SCHEMA_VERSION });
@@ -3332,6 +3397,44 @@ describe("migration-recovery: authentic v47 and interrupted −47 databases upgr
         const sealed = up.sealedRouteOf(fired.taskId);
         expect(sealed.ok).toBe(true);
         if (sealed.ok) expect(routeDigestOf(sealed.route)).toBe(routeDigestOf(frozen.approvedRoute!));
+        // THE MIGRATED EMPTY RUBRIC (final authority closure): a routine
+        // approved before rubrics existed reads back with NO criterion,
+        // and that is invalid on a stored row exactly as it is at the
+        // filing door — not approvable, not refreshable, not live. The
+        // refresh, the yes, and the manual and scheduled firings all
+        // refuse in the rubric's words and write NOTHING: no routine
+        // column, slot, ledger row, task, notification, or next-fire time
+        // moves until valid terms are filed again.
+        const at = new Date(T0.getTime() + 5 * 3_600_000);
+        const legacyBefore = {
+          row: raw.prepare("SELECT * FROM routine WHERE id = ?").get(legacyRoutineId),
+          fires: up.routineFires(legacyRoutineId),
+          tasks: up.listTasks().map(one => one.id),
+          notifications: up.listNotifications("all").length,
+        };
+        expect((legacyBefore.row as Record<string, unknown>)["acceptance_json"]).toBeNull();
+        const rubricWords = /acceptance: a standing order needs at least one signed acceptance criterion/;
+        expect(routineAgentsState(up.getRoutine(legacyRoutineId)!)).toMatchObject({ state: "unverified", approvable: false, refresh: false, problem: expect.stringMatching(rubricWords) });
+        expect(refreshRoutineAgents(up, legacyRoutineId, at)).toMatchObject({ ok: false, reason: "unresolved", problem: expect.stringMatching(rubricWords) });
+        expect(approveRoutine(up, legacyRoutineId, "alex", at, up.getRoutine(legacyRoutineId)!.digest, token).ok).toBe(false);
+        for (const manual of [false, true]) {
+          expect(fireRoutine(up, legacyRoutineId, at, { manual })).toMatchObject({ ok: false, reason: "not-approved", detail: expect.stringMatching(rubricWords) });
+        }
+        expect(raw.prepare("SELECT * FROM routine WHERE id = ?").get(legacyRoutineId)).toEqual(legacyBefore.row);
+        expect(up.routineFires(legacyRoutineId)).toEqual(legacyBefore.fires);
+        expect(up.listTasks().map(one => one.id)).toEqual(legacyBefore.tasks);
+        expect(up.listNotifications("all").length).toBe(legacyBefore.notifications);
+        // Valid terms re-filed — a rubric with at least one criterion —
+        // and only then does the recovery road open: refresh, the
+        // explicit yes, and an exact firing.
+        const legacyRow = up.getRoutine(legacyRoutineId)!;
+        const refiled = { goal: legacyRow.goal, outOfScope: legacyRow.outOfScope, touches: legacyRow.touches, acceptance: rubric, requirements: legacyRow.requirements, schedule: legacyRow.schedule, singleFlight: true, costCeilingUsd: legacyRow.costCeilingUsd, budgetPerRunMicrousd: legacyRow.budgetPerRunMicrousd };
+        up.updateRoutineTerms(legacyRoutineId, { ...refiled, digest: routineDigestOf({ repo: legacyRow.repo, ...refiled }, legacyRow.profile ?? null, null) }, at);
+        expect(refreshRoutineAgents(up, legacyRoutineId, at)).toMatchObject({ ok: true, changed: true });
+        const legacyPending = up.getRoutine(legacyRoutineId)!;
+        expect(routineAgentsState(legacyPending)).toMatchObject({ state: "pending", approvable: true });
+        expect(approveRoutine(up, legacyRoutineId, "alex", at, legacyPending.digest, token).ok).toBe(true);
+        expect(fireRoutine(up, legacyRoutineId, new Date(T0.getTime() + 7 * 3_600_000)).ok).toBe(true);
         up.close();
         // A second open is a plain no-op: the version stands, nothing moves.
         const again = openStore(db);

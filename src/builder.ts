@@ -315,7 +315,11 @@ export type BuildRefusal =
   // The strict auth-mode read at the spawn (atomic authority closure): a
   // present mode file that says neither word — no spend, no strike, the
   // words name the file to restate.
-  | "auth-mode";
+  | "auth-mode"
+  // The route re-proof at the spawn (final authority closure): the
+  // provenance a run was admitted under no longer proves against the
+  // authority its task holds — no spend, the words say what moved.
+  | "route-authority";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
@@ -3037,12 +3041,16 @@ function brief(
     "  Target 180 bytes or fewer so you have margin; before you finalize the",
     "  file, measure every caveat string's UTF-8 byte length and shorten any",
     "  that run long.",
-    "  A caveat that admits an exception to a criterion must name that",
-    "  criterion's exact id as a standalone token (for example `c1: …`), and",
-    "  that criterion must then be marked not-met: a criterion marked met",
-    "  while a caveat names it is a blocking caveat — the proof contradicts",
-    "  itself and is refuted whole, never verified. Never name a met",
-    "  criterion's id inside a caveat.",
+    "  EVERY caveat is an exception to a signed criterion and names that",
+    "  criterion's exact id as a standalone token (for example `c1: …`);",
+    "  a caveat that names no criterion, or whose leading tag is an id",
+    "  nobody signed, is unattributed and refutes the whole proof — an",
+    "  idea that is not an exception to any criterion belongs in the",
+    "  handoff's followUps, never in caveats. A named criterion must then",
+    "  be marked not-met: a criterion marked met while a caveat names it is",
+    "  a blocking caveat — the proof contradicts itself and is refuted",
+    "  whole, never verified. Never name a met criterion's id inside a",
+    "  caveat.",
     "  Screenshot evidence must be a real PNG or JPEG, at least 320 by 200",
     "  pixels, of meaningful byte size — the machine reads the actual file at",
     "  each claimed path, checks its signature and dimensions, and stores it",
@@ -3069,8 +3077,9 @@ function brief(
     "  JSON, and measure every capped string's UTF-8 byte length (for",
     "  example with `node -e` and `Buffer.byteLength`) against the caps",
     "  above; count the list lengths; confirm every evidence ref resolves to",
-    "  an exact entry in checks, changed, or screenshots; confirm no caveat",
-    "  names a criterion marked met; and confirm every",
+    "  an exact entry in checks, changed, or screenshots; confirm every",
+    "  caveat names a signed criterion's exact id and no caveat names a",
+    "  criterion marked met; and confirm every",
     "  signed criterion is answered by its exact id with its statement",
     "  verbatim. Fix anything short, rewrite through a temporary name, and",
     "  only then end. A file that does not parse, or that breaks one cap, is",

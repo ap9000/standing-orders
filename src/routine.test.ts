@@ -686,22 +686,30 @@ describe("firing, inside one proving transaction", () => {
     expect(routineIntegrity(store.getRoutine(routineId)!).agents).toMatchObject({ state: "pending", approvable: true });
   });
 
-  test("routine-semantics (atomic authority closure): rehashed terms this code never files — single_flight 0, a −1 cost ceiling, a zero per-run budget, an unparseable schedule — are not approvable, not live, not refreshable, and scheduled or manual firings write nothing, not even a page", () => {
+  test("routine-semantics (atomic authority closure): rehashed terms this code never files — single_flight 0, a −1 cost ceiling, a zero per-run budget, an unparseable schedule, an empty or migrated-NULL rubric, an invalid raw name — are not approvable, not live, not refreshable, and scheduled or manual firings write nothing, not even a page", () => {
     approve(routineId);
     expect(fireRoutine(store, routineId, later(HOUR)).ok).toBe(true);
     const raw = store.raw();
-    const sound = raw.prepare("SELECT single_flight, cost_ceiling_usd, budget_per_run_microusd, schedule, digest, approved_digest FROM routine WHERE id = ?").get(routineId) as Record<string, unknown>;
+    const sound = raw.prepare("SELECT single_flight, cost_ceiling_usd, budget_per_run_microusd, schedule, acceptance_json, name, digest, approved_digest FROM routine WHERE id = ?").get(routineId) as Record<string, unknown>;
     const restore = () =>
-      raw.prepare("UPDATE routine SET single_flight = ?, cost_ceiling_usd = ?, budget_per_run_microusd = ?, schedule = ?, digest = ?, approved_digest = ? WHERE id = ?")
-        .run(sound["single_flight"], sound["cost_ceiling_usd"], sound["budget_per_run_microusd"], sound["schedule"], sound["digest"], sound["approved_digest"], routineId);
+      raw.prepare("UPDATE routine SET single_flight = ?, cost_ceiling_usd = ?, budget_per_run_microusd = ?, schedule = ?, acceptance_json = ?, name = ?, digest = ?, approved_digest = ? WHERE id = ?")
+        .run(sound["single_flight"], sound["cost_ceiling_usd"], sound["budget_per_run_microusd"], sound["schedule"], sound["acceptance_json"], sound["name"], sound["digest"], sound["approved_digest"], routineId);
     // Each corruption is REHASHED — the digest columns re-derive from the
     // corrupt terms exactly as the raw reader admits them — so only the
-    // semantic validation stands between the row and a yes.
+    // semantic validation stands between the row and a yes. An empty
+    // rubric (final authority closure) is invalid on a STORED row too,
+    // whether rehashed as `[]` or left NULL by a migration that predates
+    // rubrics: nothing refreshes, approves, or fires `acceptance: []`. A
+    // raw name this code never files is outside the digest entirely, and
+    // is invalid all the same.
     const cases: [string, Partial<RoutineTerms>, string, RegExp][] = [
       ["a single-flight flag of 0", { singleFlight: false }, "single_flight = 0", /singleFlight: v1 routines run one instance at a time/],
       ["a −1 cost ceiling", { costCeilingUsd: -1 }, "cost_ceiling_usd = -1", /costCeilingUsd: a positive dollar amount/],
       ["a zero per-run budget", { budgetPerRunMicrousd: 0 }, "budget_per_run_microusd = 0", /budgetPerRunMicrousd: a positive whole micro-dollar amount/],
       ["a schedule no parser holds", { schedule: "hourly" }, "schedule = 'hourly'", /schedule: `every:<minutes>`/],
+      ["an empty rubric", { acceptance: [] }, "acceptance_json = '[]'", /acceptance: a standing order needs at least one signed acceptance criterion/],
+      ["a migrated NULL rubric", { acceptance: [] }, "acceptance_json = NULL", /acceptance: a standing order needs at least one signed acceptance criterion/],
+      ["a raw name this code never files", {}, "name = 'Nightly Deps!'", /name: a lowercase id stem/],
     ];
     for (const [label, corruption, sql, words] of cases) {
       restore();
@@ -723,7 +731,7 @@ describe("firing, inside one proving transaction", () => {
       expect(routineAgentsState(routine).approvable, label).toBe(false);
       for (const manual of [false, true]) {
         const refused = fireRoutine(store, routineId, later(3 * HOUR), { manual });
-        expect(refused, label).toMatchObject({ ok: false, reason: "not-approved" });
+        expect(refused, label).toMatchObject({ ok: false, reason: "not-approved", detail: expect.stringMatching(words) });
       }
       expect(approveRoutine(store, routineId, "alex", later(3 * HOUR), routine.digest, token).ok, label).toBe(false);
       expect(refreshRoutineAgents(store, routineId, later(3 * HOUR)), label).toMatchObject({ ok: false, reason: "unresolved", problem: expect.stringMatching(words) });
