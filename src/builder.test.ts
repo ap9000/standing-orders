@@ -1178,6 +1178,21 @@ describe("what the builder does afterwards", () => {
     expect(result).toMatchObject({ ok: false, reason: "no-op" });
   });
 
+  test.each([
+    ["?? STANDING-ORDERS-PROOF-0123456789abcdef.json\n", true],
+    ["?? nested/STANDING-ORDERS-PROOF-0123456789abcdef.json\n", false],
+  ])("no-change excludes a root protocol receipt, but not unrelated work: %s", async (status, success) => {
+    const result = await withGit(async (_f, args) => {
+      if (args.includes("symbolic-ref")) return symref(args);
+      if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+      return { ...OK, stdout: args.includes("status") ? status : "" };
+    }, async (_f, args, options) => {
+      conclude(args, options, "no-change");
+      return { ...OK, stdout: AGENT_SAID };
+    });
+    expect(result.ok).toBe(success);
+  });
+
   test("a stated no-change with a dirty tree is a contradiction, refused", async () => {
     const lying: Runner = async (_file, args, options) => {
       conclude(args, options, "no-change", "Nothing needed.");

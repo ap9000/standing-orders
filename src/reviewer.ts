@@ -1197,6 +1197,7 @@ export async function reviewPass(
     /** The runner's credential — admitReview authenticates it inside the
      * admission transaction (MCP review finding 4). */
     token: string;
+    watchIncarnation?: string;
     now: Date;
     clock?: () => Date;
     evidenceRoot?: string;
@@ -1247,7 +1248,8 @@ export async function reviewPass(
     }
     const admitted = store.admitReview(
       request.id,
-      { runner: options.runner, token: options.token, provider: resolution.spec.provider, model: resolution.spec.model },
+      { runner: options.runner, token: options.token, provider: resolution.spec.provider, model: resolution.spec.model,
+        ...(options.watchIncarnation === undefined ? {} : { watchIncarnation: options.watchIncarnation }) },
       clock(),
     );
     if (!admitted.ok) {

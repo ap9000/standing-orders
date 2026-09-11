@@ -85,6 +85,50 @@ proof cannot establish.
 
 ## Repeated local recovery checks
 
+`npm run certify:crash -- --rounds 20 --concurrency 20 --output output/certification/crash-120.json`
+drives actual public-CLI watch processes through six external-process barriers:
+planning, dependency setup, building, immediately after commit, verification,
+and review. It kills the supervisor with SIGKILL, refuses a replacement before
+the normal 90-second watch lease expires, and attempts takeover while the old
+subprocess survives. No injected clock or real model is used in this matrix.
+
+Every case checks exclusive writing, terminal run accounting, and duplicate
+dispatch. Build recovery must preserve the file contents and original commit,
+run the approved verification, and produce verified proof without another
+commit. Planning must produce a fresh draft awaiting approval. An interrupted
+review must close as interrupted and show that attention is needed; this does
+not certify an automatic review retry. Failed and passing fixtures are retained
+with subprocess event logs, SQLite state, and worker output.
+
+The crash tests exposed planner checkout reclamation, verification-process
+ownership, post-commit proof settlement, and claimless reviewer recovery bugs.
+The fixes include schema v49: reviews and their correction children explicitly
+belong to a watch incarnation. Older review rows remain unbound. POSIX process
+group markers protect surviving descendants after a group leader exits;
+detached descendants and physical Windows process trees remain separate gates.
+
+### Real-provider task pilot
+
+`node scripts/pilot.mjs --playwright /installed/playwright/index.mjs --output output/certification/pilot.json`
+runs ten assignments through both subscription providers, split into two
+successive batches with fresh sessions and repositories. Each fixed contract
+is approved before unattended watch dispatch; the mode automatically requests
+an independent review. The pilot never repairs a provider's checkout manually.
+
+Assignments cover backend bugs, changes across multiple files, approved offline
+dependency setup, revisions of existing behavior, and browser interactions.
+The UI assignments execute Chromium at desktop and mobile sizes and capture
+PNG evidence. Verification files and dependency definitions are seeded inputs;
+the final diff must change only the approved implementation paths. A completed
+case requires verified proof, every criterion independently upheld, and empty
+duplicate dispatch. Every failed case remains in the report and retains evidence.
+
+This pilot uses fixed scopes. Provider-authored planning is covered by the
+separate provider canary; mid-flight human revisions, comparisons with direct
+provider latency, real account exhaustion, and Windows remain separate gates.
+The pilot records those limits, per-step durations, source/runtime identity,
+run results, and intervention counts instead of claiming universal reliability.
+
 `npm run certify:recovery -- --rounds 100 --output output/certification/recovery.json`
 uses disposable repositories and real writer processes without invoking a model.
 It injects expiry of the controller's liveness and checks three cases: a partial

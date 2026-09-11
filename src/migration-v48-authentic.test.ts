@@ -57,9 +57,9 @@ function rawVersion(file: string): unknown {
 /** The v48 migration's additive columns, projected out of an upgraded row. */
 const V48_ROUTINE_COLUMNS = ["route_json", "approved_route_json"];
 function withoutNew(table: string, row: Record<string, unknown>): Record<string, unknown> {
-  if (table !== "routine") return row;
   const copy = { ...row };
-  for (const column of V48_ROUTINE_COLUMNS) delete copy[column];
+  if (table === "routine") for (const column of V48_ROUTINE_COLUMNS) delete copy[column];
+  if (table === "run") delete copy["watch_incarnation"];
   return copy;
 }
 
@@ -121,6 +121,7 @@ describe("the authentic v47 database upgrades to v48 and stays put", () => {
         expect(upgraded.rows[table.name]!.map(row => withoutNew(table.name, row)), table.name).toEqual(authentic.rows[table.name]);
       }
       for (const row of upgraded.rows["routine"]!) expect(row).toMatchObject({ route_json: null, approved_route_json: null });
+      for (const row of upgraded.rows["run"]!) expect(row).toMatchObject({ watch_incarnation: null });
       const routineDdl = upgraded.schema.find(one => one.type === "table" && one.name === "routine")!.sql;
       expect(routineDdl).toContain("route_json");
       expect(routineDdl).toContain("approved_route_json");

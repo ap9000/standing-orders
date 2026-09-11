@@ -3,6 +3,8 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
 import { WorktreePool, worktreePath, type Runner } from "./worktree.js";
@@ -568,8 +570,26 @@ describe("the pool, against real git", () => {
     expect(() => pool.recordProviderOccupancy(leased.worktree.path, "builder-1", 424242, "old-epoch")).toThrow("custody could not be recorded");
     expect(pool.markProviderOccupancy(leased.worktree.path, "builder-1", 424242)).toBe(true);
     const marker = await import("node:fs/promises").then(fs => fs.readFile(join(leased.worktree.path, ".standing-orders-lease"), "utf8"));
-    expect(marker).toBe("424242 builder-1\n");
+    expect(marker).toBe("424242 builder-1 group\n");
     expect(pool.markProviderOccupancy(leased.worktree.path, "builder-1", 0)).toBe(false);
+  });
+
+  test.skipIf(process.platform === "win32")("an orphaned process group keeps its checkout occupied after the recorded leader exits", async () => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const leased = await pool.lease({ repo, branch: "feat/group", base: "main", runner: "builder-1", now: T0 });
+    if (!leased.ok) throw new Error("fixture lease failed");
+    const leader = spawn(process.execPath, ["-e", `require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'}).unref()`], { detached: true, stdio: "ignore" });
+    const pid = leader.pid!;
+    try {
+      expect(pool.markProviderOccupancy(leased.worktree.path, "builder-1", pid)).toBe(true);
+      await once(leader, "exit");
+      expect(() => process.kill(pid, 0)).toThrow();
+      expect(pool.inUse(leased.worktree.path)).toEqual({ held: true, by: pid });
+      process.kill(-pid, "SIGKILL");
+      await expect.poll(() => pool.inUse(leased.worktree.path).held).toBe(false);
+    } finally {
+      try { process.kill(-pid, "SIGKILL"); } catch {}
+    }
   });
 
   test("a released checkout is re-inspected even when its old row said clean", async () => {

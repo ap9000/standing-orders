@@ -34,6 +34,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import { runWithIsolatedDatabase } from "./child-database.js";
+import { recordWorktreeProcess } from "./worktree.js";
 import type { Decision, SteerNote, Store } from "./store.js";
 import { approvalOf, digestOf, profileDigestOf, chainDigestOf, entryDigestOf, routeParityProblem, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
 import { legOf, routeDigestOf, routeFromJson, type RouteStamp } from "./phase-routing.js";
@@ -874,6 +875,11 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // scrubbed environment the agent does — an approved `npm ci` is not an
   // approved read of the bot token.
   const setupWanted = store.liveWorktreeSetup(leased.repo);
+  const observeSpawn = request.onProviderSpawn;
+  request = { ...request, onProviderSpawn: pid => {
+    recordWorktreeProcess(store, worktree, runner, pid, leased.leaseEpoch);
+    observeSpawn?.(pid);
+  } };
   if (setupWanted !== null && leased.setupDigest !== setupWanted.digest) {
     // Setup is a process spawn like any other (review finding 4): the
     // runner tuple is re-proven against LIVE rows immediately before it —
@@ -890,6 +896,8 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     const made = await runWithIsolatedDatabase(runSetup, shell.file, shell.args, {
       cwd: worktree,
       timeoutMs: setupWanted.timeoutMs,
+      processGroup: true,
+      onSpawn: pid => request.onProviderSpawn?.(pid),
       envAllowlist: SETUP_ENV_ALLOWLIST,
       omitEnv: SETUP_ENV_DENYLIST,
     });
@@ -1813,7 +1821,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       line =>
         line.trim() !== "" &&
         !line.trimEnd().endsWith(LEASE_MARKER) &&
-        !looksLikeProtocolFile(line.trim().split("/").pop() ?? line.trim()),
+        !(line.startsWith("?? ") && looksLikeProtocolFile(line.slice(3))),
     );
 
   // The pinned base (run 1461's fix): a resumed attempt's own base_revision
@@ -1840,7 +1848,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     // never be how a no-change run says no change, and on a resume, the
     // honest diff is whatever earlier attempts already committed.
     store.setRunPhase(request.runId, "capturing-evidence");
-    await captureTerminalDiff(store, git, worktree, pinnedBase, baseRevision, root, request.runId, clock());
+    const diffEvidence = await captureTerminalDiff(store, git, worktree, pinnedBase, baseRevision, root, request.runId, clock());
     storeHandoffArtifact(store, root, {
       schema: 1,
       taskId,
@@ -1862,6 +1870,15 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       followUps: handoff.followUps,
       freshness: { stampedAt: clock().toISOString(), currentAsOf: baseRevision },
     }, clock());
+    // A predecessor may have committed and crashed before checking. The
+    // successor truthfully makes no new edits, but still owes the original
+    // branch's proof and approved verification. Never require a dummy edit.
+    if (pinnedBase !== baseRevision) {
+      try {
+        store.setRunPhase(request.runId, "verifying-proof");
+        await settleProof(captured, diffEvidence.statId, baseRevision);
+      } catch { /* Preserve the commit; absent proof remains visible. */ }
+    }
     return { ok: true, committed: false, noChange: true, branch, summary: handoff.conclusion };
   }
 
@@ -2363,6 +2380,8 @@ async function settleProof(
       const result = await runWithIsolatedDatabase(verifyRunner, verifyShell.file, verifyShell.args, {
         cwd: worktree,
         timeoutMs: configured.timeoutMs,
+        processGroup: true,
+        onSpawn: pid => request.onProviderSpawn?.(pid),
         envAllowlist: SETUP_ENV_ALLOWLIST,
         omitEnv: SETUP_ENV_DENYLIST,
       });
@@ -2427,6 +2446,8 @@ async function settleProof(
             const restored = await runWithIsolatedDatabase(setupRunner, setupShell.file, setupShell.args, {
               cwd: worktree,
               timeoutMs: liveBeforeSetup.timeoutMs,
+              processGroup: true,
+              onSpawn: pid => request.onProviderSpawn?.(pid),
               envAllowlist: SETUP_ENV_ALLOWLIST,
               omitEnv: SETUP_ENV_DENYLIST,
             });

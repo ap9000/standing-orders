@@ -3493,7 +3493,7 @@ describe("migration to v48: the routine freezes its route; `agents` joins the pr
     // Reopen: the migration runs.
     const store = openStore(db);
     expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(48);
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(48);
     const columns = (store.raw().prepare("PRAGMA table_info(routine)").all() as { name: string }[]).map(one => one.name);
     expect(columns).toEqual(expect.arrayContaining(["route_json", "approved_route_json"]));
     // The old row survived with its id; the new kind is admitted.

@@ -71,7 +71,7 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 48;
+export const SCHEMA_VERSION = 49;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -575,6 +575,8 @@ export type Run = {
   taskRef: number;
   leaseId: string;
   runner: string;
+  /** Explicit watch ownership for claimless review runs; null on cron/legacy reviews. */
+  watchIncarnation?: string | null;
   /** 'repair' = a resumed session mending its own park payload. Never
    * 'driver'; see the DDL. 'reviewer' (v29) = an artifact-only pass.
    * 'scout' (v34) = a read-only investigation whose deliverable is a report. */
@@ -4224,6 +4226,11 @@ function migrate(db: Database, origin: number | null): void {
   addColumn(db, "routine", "approved_route_json", "TEXT");
   rebuildMateProposalForV48(db);
   db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
+
+  // v49: reviews have no task claim. Bind watch-owned reviews explicitly so
+  // takeover can recover them without closing concurrent cron reviews.
+  // Historical rows remain unbound; never infer custody from timestamps.
+  addColumn(db, "run", "watch_incarnation", "TEXT");
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -4393,6 +4400,13 @@ function V34_RUN_PLUS_V41_PLUS_V44_DDL(name: string): string {
   );
 }
 
+function V49_RUN_DDL(name: string): string {
+  return V34_RUN_PLUS_V41_PLUS_V44_DDL(name).replace(
+    " authority_digest TEXT,\n    CHECK",
+    " authority_digest TEXT, watch_incarnation TEXT,\n    CHECK",
+  );
+}
+
 const V34_RUN_COLUMNS = [
   "id", "task_ref", "lease_id", "runner", "scope_digest", "profile_digest", "provider_version", "role", "provider",
   "parent_run", "session_id", "base_revision", "branch", "worktree", "model", "phase", "contestant", "outcome",
@@ -4415,7 +4429,8 @@ export function rebuildRunForV34(db: Database): void {
   if (
     stored === canonicalDdl(V34_RUN_DDL("run")) ||
     stored === canonicalDdl(V34_RUN_PLUS_V41_DDL("run")) ||
-    stored === canonicalDdl(V34_RUN_PLUS_V41_PLUS_V44_DDL("run"))
+    stored === canonicalDdl(V34_RUN_PLUS_V41_PLUS_V44_DDL("run")) ||
+    stored === canonicalDdl(V49_RUN_DDL("run"))
   ) return;
   if (stored !== canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL)) {
     throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
@@ -4683,7 +4698,8 @@ function rebuildRunForV29(db: Database): void {
     stored === canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL) ||
     stored === canonicalDdl(V34_RUN_DDL("run")) ||
     stored === canonicalDdl(V34_RUN_PLUS_V41_DDL("run")) ||
-    stored === canonicalDdl(V34_RUN_PLUS_V41_PLUS_V44_DDL("run"))
+    stored === canonicalDdl(V34_RUN_PLUS_V41_PLUS_V44_DDL("run")) ||
+    stored === canonicalDdl(V49_RUN_DDL("run"))
   ) return;
   if (stored !== canonicalDdl(V28_RUN_DDL("run"))) {
     throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
@@ -10210,11 +10226,11 @@ export class Store {
    */
   admitReview(
     requestId: number,
-    spec: { runner: string; token: string; provider: string; model: string | null },
+    spec: { runner: string; token: string; provider: string; model: string | null; watchIncarnation?: string },
     now: Date,
   ):
     | { ok: true; reviewerRunId: number; sourceRun: number; taskRef: number; taskId: string }
-    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "railed" | "unauthenticated" | "route-changed" | "route-mismatch" | "provider-unavailable"; rail?: string; detail?: string } {
+    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "railed" | "unauthenticated" | "route-changed" | "route-mismatch" | "provider-unavailable" | "watch-custody"; rail?: string; detail?: string } {
     return this.transact(() => {
       // The reviewer road authenticates INSIDE the admission transaction
       // (review finding 4): reviewer runs hold no task claim by design,
@@ -10235,6 +10251,11 @@ export class Store {
       if (row === undefined) return { ok: false as const, reason: "gone" as const };
       const sourceRun = Number(row["run"]);
       const repo = row["repo"] === null ? null : String(row["repo"]);
+      if (spec.watchIncarnation !== undefined && (repo === null || !this.db.prepare(
+        "SELECT 1 FROM watch_lease WHERE runner = ? AND repo = ? AND owner = ? AND expires_at > ?",
+      ).get(spec.runner, repo, spec.watchIncarnation, now.toISOString()))) {
+        return { ok: false as const, reason: "watch-custody" as const, detail: "the watch no longer owns this repository; the review request remains pending" };
+      }
       // v47: a request queued under a sealed route re-proves, INSIDE this
       // admission transaction, that the route is STILL the task's sealed
       // route (a rewritten-and-reapproved task spends the request unrun, in
@@ -10325,6 +10346,9 @@ export class Store {
         now: admittedAt,
         route: stamp,
       });
+      if (spec.watchIncarnation !== undefined) {
+        this.db.prepare("UPDATE run SET watch_incarnation = ? WHERE id = ?").run(spec.watchIncarnation, reviewerRunId);
+      }
       return {
         ok: true as const,
         reviewerRunId,
@@ -10824,7 +10848,10 @@ export class Store {
       // ROOT reviewer's timestamp instead.
       if (run.role === "reviewer") {
         const root = this.reviewerRoot(run);
-        return root !== null && found.runner.registeredAt <= root.startedAt;
+        if (root === null || found.runner.registeredAt > root.startedAt) return false;
+        return root.watchIncarnation == null || this.db.prepare(
+          "SELECT 1 FROM watch_lease WHERE runner = ? AND repo = ? AND owner = ? AND expires_at > ?",
+        ).get(run.runner, repo, root.watchIncarnation, now.toISOString()) !== undefined;
       }
       return this.currentLiveLease(run.taskRef, now) === run.leaseId;
     });
@@ -14211,6 +14238,9 @@ export class Store {
     // The provenance row lands in the same transaction as the run row —
     // proved above, written here; a run and its route are one fact.
     this.writeRunRoute(id, stamp, run.now);
+    if (role === "reviewer" && parent?.role === "reviewer" && parent.watchIncarnation != null) {
+      this.db.prepare("UPDATE run SET watch_incarnation = ? WHERE id = ?").run(parent.watchIncarnation, id);
+    }
     if (requestToConsume !== null) {
       // The request is spent by the very row that answers it — a CAS on the
       // open request proved above; a request consumed under us rolls the
@@ -18820,6 +18850,16 @@ export class Store {
           .run(stamp, runner, taskRef);
         extra += 1;
       }
+      // Reviews have synthetic lease ids, not task claims. Only explicitly
+      // bound reviews belong to this dead watch; concurrent cron reviews and
+      // another watch's rows must remain untouched.
+      const reviews = this.db.prepare(
+        "UPDATE run SET outcome = 'failed', reason = 'interrupted', finished_at = ? WHERE runner = ? AND watch_incarnation = ? AND role = 'reviewer' AND outcome IS NULL",
+      ).run(stamp, runner, incarnation);
+      extra += Number(reviews.changes);
+      this.db.prepare(
+        "UPDATE review_request SET consumed_reason = 'interrupted' WHERE consumed_reason = 'dispatched' AND run IN (SELECT parent_run FROM run WHERE runner = ? AND watch_incarnation = ? AND role = 'reviewer' AND reason = 'interrupted')",
+      ).run(runner, incarnation);
       if (claims.length + extra > 0) this.bumpWake();
       return claims.length + extra;
     });
@@ -19439,6 +19479,7 @@ function readRun(row: Record<string, unknown>): Run {
     taskRef: Number(row["task_ref"]),
     leaseId: String(row["lease_id"]),
     runner: String(row["runner"]),
+    watchIncarnation: row["watch_incarnation"] == null ? null : String(row["watch_incarnation"]),
     role: String(row["role"] ?? "builder") as Run["role"],
     provider: String(row["provider"] ?? "claude"),
     parentRun: row["parent_run"] === null || row["parent_run"] === undefined ? null : Number(row["parent_run"]),

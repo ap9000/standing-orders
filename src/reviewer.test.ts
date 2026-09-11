@@ -306,6 +306,53 @@ describe("the reviewer role in the store", () => {
     rmSync(evidenceRoot, { recursive: true, force: true });
   });
 
+  test("watch review admission refuses missing, foreign, or expired custody without consuming the request", () => {
+    const asked = askReview(builtRun);
+    const spec = { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null, watchIncarnation: "watch-a" };
+    expect(store.admitReview(asked.request, spec, T0)).toMatchObject({ ok: false, reason: "watch-custody" });
+    store.acquireWatchLease("builder-1", REPO, "watch-a", 60_000, T0);
+    expect(store.admitReview(asked.request, { ...spec, watchIncarnation: "watch-b" }, T0)).toMatchObject({ ok: false, reason: "watch-custody" });
+    expect(store.admitReview(asked.request, spec, new Date(T0.getTime() + 60_000))).toMatchObject({ ok: false, reason: "watch-custody" });
+    expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(0);
+    expect(store.raw().prepare("SELECT consumed_at FROM review_request WHERE id = ?").get(asked.request)).toMatchObject({ consumed_at: null });
+    expect(store.admitReview(asked.request, spec, T0)).toMatchObject({ ok: true });
+  });
+
+  test("watch takeover fences and closes its review and correction, while leaving cron reviews and the built result intact", () => {
+    const asked = askReview(builtRun);
+    store.acquireWatchLease("builder-1", REPO, "watch-a", 60_000, T0);
+    const admitted = store.admitReview(asked.request, {
+      runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null, watchIncarnation: "watch-a",
+    }, T0);
+    if (!admitted.ok) throw new Error(admitted.reason);
+    const parent = store.getRun(admitted.reviewerRunId)!;
+    store.stampProviderStart(parent.id, T0);
+    store.stampRun(parent.id, { sessionId: "watch-review-session" });
+    const provenance = store.runRoute(parent.id)!;
+    const correction = store.admitCorrection({
+      taskRef, leaseId: parent.leaseId, runner: parent.runner, provider: "claude",
+      sessionId: "watch-review-session", parentRun: parent.id,
+      route: { routeDigest: provenance.routeDigest, phase: provenance.phase, provider: provenance.provider, model: provenance.model, chosen: provenance.chosen }, now: T0,
+    });
+    if (!correction.ok) throw new Error(correction.problem);
+    expect(store.getRun(correction.runId)?.watchIncarnation).toBe("watch-a");
+    const cronSource = seedBuilt().runId;
+    const cronRequest = askReview(cronSource);
+    const cron = store.admitReview(cronRequest.request, { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null }, T0);
+    if (!cron.ok) throw new Error(cron.reason);
+    expect(store.proveRunnerCustodyForSpawn(correction.runId, T0)).toBe(true);
+    const later = new Date(T0.getTime() + 60_001);
+    store.acquireWatchLease("builder-1", REPO, "watch-b", 60_000, later);
+    expect(store.proveRunnerCustodyForSpawn(correction.runId, later)).toBe(false);
+    expect(store.proveRunnerCustodyForSpawn(cron.reviewerRunId, later)).toBe(true);
+    expect(store.recoverIncarnation("builder-1", "watch-a", later)).toBe(2);
+    expect(store.recoverIncarnation("builder-1", "watch-a", later)).toBe(0);
+    for (const id of [parent.id, correction.runId]) expect(store.getRun(id)).toMatchObject({ outcome: "failed", reason: "interrupted" });
+    expect(store.getRun(cron.reviewerRunId)?.outcome).toBeNull();
+    expect(store.getRun(builtRun)?.outcome).toBe("built");
+    expect(store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(asked.request)).toMatchObject({ consumed_reason: "interrupted" });
+  });
+
   test("a rotation AFTER admission fences the reviewer spawn — the runner row is younger than the run", () => {
     // Round-2 finding 3: admitReview authenticates in its transaction,
     // but the run keeps only the runner NAME — so custody at spawn must

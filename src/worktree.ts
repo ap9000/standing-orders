@@ -124,6 +124,16 @@ function safeSegment(text: string): string {
   return cleaned === "" ? "x" : cleaned;
 }
 
+/** Record a potentially writing subprocess against the original checkout lease. */
+export function recordWorktreeProcess(store: Store, path: string, runner: string, pid: number, leaseEpoch?: string | null): void {
+  const leased = store.getWorktree(path);
+  if (!Number.isInteger(pid) || pid <= 0 || leased === null || leased.releasedAt !== null || leased.runner !== runner ||
+      (leaseEpoch !== undefined && leased.leaseEpoch !== leaseEpoch)) {
+    throw new Error(`${path}: subprocess custody no longer matches its worktree lease`);
+  }
+  writeFileSync(join(path, MARKER), `${pid} ${runner} group\n`, "utf8");
+}
+
 export class WorktreePool {
   private readonly runner: Runner;
 
@@ -160,9 +170,17 @@ export class WorktreePool {
     const note = join(path, MARKER);
     if (!existsSync(note)) return { held: false };
 
-    const pid = Number(readFileSync(note, "utf8").trim().split(/\s+/)[0]);
+    const parts = readFileSync(note, "utf8").trim().split(/\s+/);
+    const pid = Number(parts[0]);
     if (!Number.isInteger(pid) || pid <= 0) return { held: false };
     if (pid === process.pid) return { held: false };
+
+    // A shell/provider can exit before its descendants. A recorded POSIX
+    // process group remains an owner until that whole group has gone.
+    if (parts[2] === "group" && process.platform !== "win32") {
+      try { process.kill(-pid, 0); return { held: true, by: pid }; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return { held: true, by: pid }; }
+    }
 
     try {
       process.kill(pid, 0);
@@ -189,7 +207,8 @@ export class WorktreePool {
     const leased = this.store.getWorktree(path);
     if (leased === null || leased.releasedAt !== null || leased.runner !== runner) return false;
     if (leaseEpoch !== undefined && leased.leaseEpoch !== leaseEpoch) return false;
-    return this.mark(path, runner, providerPid);
+    try { recordWorktreeProcess(this.store, path, runner, providerPid, leaseEpoch); return true; }
+    catch { return false; }
   }
 
   /** Spawn callbacks must fail if custody cannot be recorded. The transport

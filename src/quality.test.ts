@@ -106,6 +106,7 @@ describe("two quality modes", () => {
       // not today's schema with only one column missing.
       legacy.raw().exec("ALTER TABLE run DROP COLUMN plan_revision");
       legacy.raw().exec("ALTER TABLE run DROP COLUMN authority_digest");
+      legacy.raw().exec("ALTER TABLE run DROP COLUMN watch_incarnation");
       legacy.raw().exec("ALTER TABLE run DROP COLUMN quality_mode");
       legacy.raw().exec("ALTER TABLE task_scope DROP COLUMN quality_mode");
       legacy.raw().exec("ALTER TABLE task_ref DROP COLUMN quality_mode");

@@ -86,7 +86,7 @@ describe("scout tasks, against real git", () => {
   const reportingAgent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     options?.onSpawn?.(1_000_001);
-    expect(readFileSync(join(cwd, ".standing-orders-lease"), "utf8")).toBe("1000001 builder-1\n");
+    expect(readFileSync(join(cwd, ".standing-orders-lease"), "utf8")).toBe("1000001 builder-1 group\n");
     const prompt = String(args[args.indexOf("-p") + 1] ?? "");
     prompts.push(prompt);
     const name = REPORT_FILE.exec(prompt)?.[0];

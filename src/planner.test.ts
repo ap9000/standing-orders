@@ -421,7 +421,7 @@ describe("planning mode, against real git", () => {
       seen.push({ args: [...args], timeoutMs: options?.timeoutMs });
       const cwd = options?.cwd ?? "";
       options?.onSpawn?.(1_000_000 + calls);
-      expect(readFileSync(join(cwd, ".standing-orders-lease"), "utf8")).toBe(`${1_000_000 + calls} builder-1\n`);
+      expect(readFileSync(join(cwd, ".standing-orders-lease"), "utf8")).toBe(`${1_000_000 + calls} builder-1 group\n`);
       const prompt = String(args[args.indexOf("-p") + 1] ?? "");
       const name = PLAN_FILE.exec(prompt)?.[0];
       if (name !== undefined && cwd !== "") {

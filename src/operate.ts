@@ -2952,6 +2952,7 @@ async function tickCommand(
         taskRef: ref.id,
         now: clock(),
         base,
+        reclaim: { evidenceRoot: context.evidenceRoot },
       });
       if (!planLeased.ok) {
         release(store, lease, clock());
@@ -3903,6 +3904,7 @@ async function tickCommand(
     const reviewed = await reviewPass(store, {
       runner,
       token,
+      ...(text(flags, "incarnation") === undefined ? {} : { watchIncarnation: text(flags, "incarnation") as string }),
       now: clock(),
       clock,
       shouldStop: () => context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true,
