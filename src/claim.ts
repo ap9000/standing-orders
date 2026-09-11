@@ -50,6 +50,7 @@ import {
   BUILT_IN,
   type Store,
   type Mutation,
+  type Run,
   type TaskState,
 } from "./store.js";
 import type { ParsedDecision, Problem } from "./decision.js";
@@ -990,6 +991,53 @@ export function finalizeParkHeld(
   });
 }
 
+/**
+ * Validate the optional accepted formatting child against the open planner
+ * root. The child remains open until the root's fence settles, so a crash or
+ * takeover can never leave it masquerading as successfully delivered work.
+ */
+function plannerRepairChild(store: Store, root: Run, repairRunId: number | null): Run | null {
+  if (repairRunId === null) return null;
+  if (root.role !== "planner" || root.outcome !== null || root.providerStartedAt === null) {
+    throw new Error(`run ${root.id} cannot own a structured planner correction`);
+  }
+  const accepted = store.getRun(repairRunId);
+  if (accepted === null || accepted.id === root.id || accepted.role !== "planner" || accepted.outcome !== null) {
+    throw new Error(`run ${repairRunId} is not an open planner correction for ${root.id}`);
+  }
+  const sameCustody = (run: Run): boolean =>
+    run.taskRef === root.taskRef &&
+    run.leaseId === root.leaseId &&
+    run.runner === root.runner &&
+    run.provider === root.provider &&
+    run.model === root.model &&
+    run.sessionId !== null &&
+    run.sessionId === root.sessionId &&
+    run.branch === root.branch &&
+    run.worktree === root.worktree &&
+    run.baseRevision === root.baseRevision &&
+    run.providerStartedAt !== null;
+  if (!sameCustody(accepted)) {
+    throw new Error(`run ${repairRunId} does not share planner ${root.id}'s exact custody and session`);
+  }
+
+  let cursor = accepted;
+  for (let edge = 1; edge <= 2; edge += 1) {
+    if (cursor.parentRun === root.id) return accepted;
+    const parent = cursor.parentRun === null ? null : store.getRun(cursor.parentRun);
+    if (
+      parent === null ||
+      parent.role !== "planner" ||
+      parent.outcome !== "failed" ||
+      !sameCustody(parent)
+    ) {
+      throw new Error(`run ${repairRunId} is outside planner ${root.id}'s bounded linear correction chain`);
+    }
+    cursor = parent;
+  }
+  throw new Error(`run ${repairRunId} is outside planner ${root.id}'s bounded linear correction chain`);
+}
+
 export function finalizeParkFenced(
   store: Store,
   args: {
@@ -998,6 +1046,9 @@ export function finalizeParkFenced(
     taskId: string;
     decision: ParsedDecision;
     artifactIds: readonly number[];
+    /** Open planner correction that authored the accepted payload. It is
+     * settled in this same fence, never earlier. */
+    repairRunId?: number | null;
     now: Date;
   },
 ): { ok: true; decisionId: number } | { ok: false; reason: "fenced" | "unknown" } {
@@ -1011,6 +1062,7 @@ export function finalizeParkFenced(
       // sealed by this call — that is a caller defect, not a race to absorb.
       throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a park seals exactly one`);
     }
+    const repairRun = plannerRepairChild(store, run, args.repairRunId ?? null);
 
     const { changes } = db
       .prepare(
@@ -1019,6 +1071,7 @@ export function finalizeParkFenced(
       )
       .run(now.toISOString(), leaseId);
     if (Number(changes) === 0) {
+      if (repairRun !== null) store.finishRun(repairRun.id, { outcome: "refused", reason: "fenced", now });
       store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
       return refusal(db, leaseId);
     }
@@ -1052,6 +1105,9 @@ export function finalizeParkFenced(
       now,
     );
     store.finishRun(runId, { outcome: "parked", reason: `decision:${decisionId}`, now });
+    if (repairRun !== null) {
+      store.finishRun(repairRun.id, { outcome: "no-change", reason: "structured planner output repaired", now });
+    }
     store.enqueueNotification(
       {
         dedupeKey: `decision:${decisionId}`,
@@ -1339,6 +1395,8 @@ export function finalizePlanFenced(
       sha256: string;
       capture: string;
     } | null;
+    /** Open planner correction that authored the accepted payload. */
+    repairRunId?: number | null;
     now: Date;
   },
 ): PlanFinalize {
@@ -1352,6 +1410,7 @@ export function finalizePlanFenced(
     if (run.role !== "planner") {
       throw new Error(`run ${runId} is a ${run.role} run — only planner runs draft plans`);
     }
+    const repairRun = plannerRepairChild(store, run, args.repairRunId ?? null);
     const { changes } = db
       .prepare(
         `UPDATE claim SET released_at = ?, released_by = 'completed'
@@ -1359,6 +1418,7 @@ export function finalizePlanFenced(
       )
       .run(now.toISOString(), leaseId);
     if (Number(changes) === 0) {
+      if (repairRun !== null) store.finishRun(repairRun.id, { outcome: "refused", reason: "fenced", now });
       store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
       return refusal(db, leaseId);
     }
@@ -1382,6 +1442,9 @@ export function finalizePlanFenced(
     store.setPlanState(run.taskRef, "drafted");
     store.resetPlanStrikes(run.taskRef);
     store.finishRun(runId, { outcome: "built", reason: "plan-drafted", now });
+    if (repairRun !== null) {
+      store.finishRun(repairRun.id, { outcome: "no-change", reason: "structured planner output repaired", now });
+    }
     store.enqueueNotification(
       {
         dedupeKey: `plan:${run.taskRef}:${runId}`,

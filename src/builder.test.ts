@@ -83,7 +83,14 @@ describe("the builder's gates", () => {
   const agent: Runner = async (_file, args, options) => {
     agentCalls.push([...args]);
     conclude(args, options);
-    return { ...OK, stdout: AGENT_SAID };
+    const resumeAt = args.indexOf("--resume");
+    return {
+      ...OK,
+      stdout:
+        resumeAt < 0
+          ? AGENT_SAID
+          : JSON.stringify({ result: "Added the guard and a test for it.", session_id: args[resumeAt + 1] }),
+    };
   };
 
   /** Reports the leased branch, one modified file, and commits it happily. */
@@ -343,7 +350,7 @@ describe("the builder's gates", () => {
     const built = await build(store, first);
     expect(built).toMatchObject({ ok: true });
     expect(agentCalls.some(args => args.includes("--resume") && args.includes("sess-park-1"))).toBe(true);
-    expect(store.getRun(first.runId as number)?.parentRun).toBe(parked);
+    expect(store.getRun(first.runId as number)).toMatchObject({ parentRun: parked, sessionId: "sess-park-1" });
 
     // A second attempt at the same park goes cold: one warm try per park,
     // because a dead session must never fail its way into a stall.
@@ -2063,13 +2070,19 @@ describe("bounded repair", () => {
     expect(repairs.every(r => r.outcome === "failed" && r.reason === "malformed-decision")).toBe(true);
   });
 
-  test("each repair resumes the newest session — resuming forks a fresh id", async () => {
-    const { agent, calls } = staged([invalid, invalid, invalid], ["sess-1", "sess-2", "sess-3"]);
+  test("a forked repair reply is refused and never replaces the durable resume identity", async () => {
+    const { agent, calls } = staged([invalid, invalid, valid], ["sess-1", "sess-forked", "sess-1"]);
 
-    await build(store, request({ agent }));
+    const result = await build(store, request({ agent }));
 
+    expect(result).toMatchObject({ ok: true });
+    const first = calls[1] ?? [];
     const second = calls[2] ?? [];
-    expect(second[second.indexOf("--resume") + 1]).toBe("sess-2");
+    expect(first[first.indexOf("--resume") + 1]).toBe("sess-1");
+    expect(second[second.indexOf("--resume") + 1]).toBe("sess-1");
+    const repairs = store.runsFor(taskRef).filter(run => run.role === "repair").sort((a, b) => a.id - b.id);
+    expect(repairs[0]).toMatchObject({ sessionId: "sess-1", outcome: "failed", reason: "provider-protocol" });
+    expect(repairs[1]).toMatchObject({ sessionId: "sess-1", outcome: "built", reason: "repaired-park" });
   });
 
   test("a broken repair turn spends one of the two attempts", async () => {
@@ -2186,7 +2199,11 @@ describe("the gemini repair road: native resume since S1 (Phase 3 A8/B8/C4, upda
         writeFileSync(join(cwd, mailboxFrom(args)), typeof payload === "string" ? payload : JSON.stringify(payload));
       }
       turn++;
-      const minted = args[args.indexOf("--session-id") + 1] ?? "never-minted";
+      const resumeAt = args.indexOf("--resume");
+      const minted =
+        resumeAt >= 0
+          ? args[resumeAt + 1]
+          : args[args.indexOf("--session-id") + 1] ?? "never-minted";
       return {
         ...OK,
         stdout: [

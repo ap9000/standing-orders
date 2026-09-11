@@ -54,6 +54,15 @@ breaking automation that branches on the code.
    **Get this task running** from the typed diagnosis and route to the nearest
    guarded action. The entrance never performs a second mutation, bypasses a
    confirmation, or converts diagnosis into permission.
+9. **Structured-output recovery cannot rewrite intent.** Planner and reviewer
+   replies receive conservative syntax-only normalization before strict
+   validation. If validation still fails, the exact errors may be returned
+   through at most two child runs in the same resumable session. Corrections may
+   not invent scope or criteria, and every original and corrected reply remains
+   sealed as `structured-output` evidence, including rejected replies. The planner re-proves
+   branch, HEAD, and tree after each reply; the reviewer re-verifies its sealed
+   scratch bundle. No resumable session means no correction. Provider,
+   custody, or tamper failures use their own fail-closed paths, never this one.
 
 ## Acceptance scenarios
 
@@ -75,6 +84,15 @@ paths:
   evidence-backed completion → another dispatch proves no duplicate;
 - full worker or exhausted provider quota → retrying with honest capacity or
   reset detail;
+- malformed planner reply → syntax-only normalization or no more than two
+  same-session correction children with exact validation errors → every reply
+  sealed → worktree re-proved after each reply → one accepted plan/decision or
+  the existing malformed terminal;
+- malformed reviewer reply → the same bounded correction rule → sealed scratch
+  re-verified after each reply → exact source-scope and criterion-matrix match →
+  one accepted criterion review or the existing malformed terminal;
+- missing session, provider failure, lost custody, or altered planner/reviewer
+  inputs → no structured correction is attempted;
 - completed UI work → criterion matrix plus screenshot/check/diff evidence.
 
 `src/dispatch.test.ts` owns the compact lifecycle regression. The larger

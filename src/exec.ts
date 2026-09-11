@@ -472,7 +472,9 @@ function resolveCode(
  * lose (Codex provider review, high finding 2). So stdout is consumed
  * incrementally and only the load-bearing lines are retained:
  *
- *   - every `thread.started` and `turn.completed` / `turn.failed` line
+ *   - a bounded identity witness for `thread.started` (first usable id,
+ *     first conflicting id, and last event), plus the LAST `turn.completed`
+ *     and `turn.failed` line
  *   - the LAST `item.completed` line carrying an agent_message
  *
  * each capped per line; everything else is counted and dropped. The
@@ -481,6 +483,211 @@ function resolveCode(
  */
 const JSONL_LINE_CAP = 64 * 1024;
 const JSONL_STDERR_CAP = 64 * 1024;
+
+/** Canonical identity at the transport boundary. Never persist or expose
+ * provider framing whitespace as part of a resumable session id. */
+function transportSessionId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const id = value.trim();
+  return id === "" ? null : id;
+}
+
+/**
+ * Provider replies are nested inside their JSONL envelope. A 64 KiB reply
+ * therefore needs appreciably more than 64 KiB on the wire once quotes,
+ * backslashes, and control characters are escaped. 512 KiB carries that
+ * worst useful case while remaining a hard, per-event memory boundary.
+ */
+export const JSONL_EVENT_HARD_CAP = 512 * 1024;
+const JSONL_OVERFLOW_PREFIX_CAP = 4 * 1024;
+
+type BoundedJsonlLine = {
+  /** A view into the framer's reusable buffer; consume it synchronously. */
+  prefix: Buffer;
+  bytesOriginal: number;
+  overflowed: boolean;
+};
+
+/**
+ * Split a byte stream into JSONL records without ever accumulating an
+ * unbounded partial line. The callback is synchronous so the same fixed
+ * storage can be reused for the next record. Counting the original bytes
+ * (rather than JavaScript characters) makes the overflow receipt exact.
+ */
+function boundedJsonlFramer(
+  cap: number,
+  onLine: (line: BoundedJsonlLine) => void,
+): { push: (chunk: Buffer) => void; finish: () => void } {
+  const retained = Buffer.allocUnsafe(cap);
+  let retainedBytes = 0;
+  let originalBytes = 0;
+  let nonWhitespace = false;
+
+  const append = (part: Buffer): void => {
+    originalBytes += part.length;
+    if (!nonWhitespace) {
+      for (const byte of part) {
+        if (byte !== 0x09 && byte !== 0x0a && byte !== 0x0d && byte !== 0x20) {
+          nonWhitespace = true;
+          break;
+        }
+      }
+    }
+    if (retainedBytes < cap) {
+      retainedBytes += part.copy(retained, retainedBytes, 0, cap - retainedBytes);
+    }
+  };
+
+  const emit = (): void => {
+    onLine({
+      prefix: retained.subarray(0, retainedBytes),
+      bytesOriginal: originalBytes,
+      overflowed: originalBytes > cap,
+    });
+    retainedBytes = 0;
+    originalBytes = 0;
+    nonWhitespace = false;
+  };
+
+  return {
+    push(chunk: Buffer): void {
+      let start = 0;
+      for (;;) {
+        const newline = chunk.indexOf(0x0a, start);
+        if (newline === -1) {
+          append(chunk.subarray(start));
+          return;
+        }
+        append(chunk.subarray(start, newline));
+        emit();
+        start = newline + 1;
+      }
+    },
+    finish(): void {
+      // Match the old `partial.trim() !== ""` rule: a final unterminated
+      // whitespace-only record is not an event and needs no receipt.
+      if (originalBytes > 0 && nonWhitespace) emit();
+    },
+  };
+}
+
+type StreamOverflowTransport = "codex" | "claude" | "gemini";
+
+function overflowReceiptText(transport: StreamOverflowTransport, line: BoundedJsonlLine): string {
+  const rawPrefix = line.prefix.subarray(0, Math.min(line.prefix.length, JSONL_OVERFLOW_PREFIX_CAP));
+  return JSON.stringify({
+    type: "standing-orders.stream-event-overflow",
+    transport,
+    message: `The provider emitted a JSONL event larger than the ${JSONL_EVENT_HARD_CAP}-byte safety limit.`,
+    eventBytesOriginal: line.bytesOriginal,
+    hardCapBytes: JSONL_EVENT_HARD_CAP,
+    prefixBytes: rawPrefix.length,
+    prefix: rawPrefix.toString("utf8"),
+    // The readable prefix can end halfway through a UTF-8 character. This
+    // companion is the exact retained byte prefix for forensic evidence.
+    prefixBase64: rawPrefix.toString("base64"),
+  });
+}
+
+function malformedReceiptText(transport: StreamOverflowTransport, line: BoundedJsonlLine): string {
+  const rawPrefix = line.prefix.subarray(0, Math.min(line.prefix.length, JSONL_OVERFLOW_PREFIX_CAP));
+  return JSON.stringify({
+    type: "standing-orders.stream-event-malformed",
+    transport,
+    message: "The provider emitted malformed JSON for a load-bearing stream event after initialization.",
+    eventBytesOriginal: line.bytesOriginal,
+    prefixBytes: rawPrefix.length,
+    prefix: rawPrefix.toString("utf8"),
+    prefixBase64: rawPrefix.toString("base64"),
+  });
+}
+
+function codexOverflowLine(line: BoundedJsonlLine): string {
+  return JSON.stringify({
+    type: "turn.failed",
+    error: {
+      type: "standing-orders.stream-event-overflow",
+      message: overflowReceiptText("codex", line),
+    },
+  });
+}
+
+function codexMalformedLine(line: BoundedJsonlLine): string {
+  return JSON.stringify({
+    type: "turn.failed",
+    error: {
+      type: "standing-orders.stream-event-malformed",
+      message: malformedReceiptText("codex", line),
+    },
+  });
+}
+
+function claudeOverflowLine(line: BoundedJsonlLine): string {
+  return JSON.stringify({
+    type: "result",
+    subtype: "standing-orders-stream-event-overflow",
+    is_error: true,
+    result: overflowReceiptText("claude", line),
+  });
+}
+
+function geminiOverflowLine(line: BoundedJsonlLine): string {
+  return JSON.stringify({
+    type: "result",
+    status: "standing-orders-stream-event-overflow",
+    error: { message: overflowReceiptText("gemini", line) },
+  });
+}
+
+function geminiMalformedLine(line: BoundedJsonlLine): string {
+  return JSON.stringify({
+    type: "result",
+    status: "standing-orders-stream-event-malformed",
+    error: { message: malformedReceiptText("gemini", line) },
+  });
+}
+
+/**
+ * Read only the leading, top-level `type` discriminant from an incomplete
+ * JSON object. Provider JSONL dialects put `type` first. Anchoring the match
+ * means content later in an oversized event can never spoof classification.
+ */
+function leadingJsonObjectType(prefix: Buffer): string | null {
+  const match = /^\s*\{\s*"type"\s*:\s*"([A-Za-z0-9._-]+)"/.exec(prefix.toString("utf8", 0, Math.min(prefix.length, 256)));
+  return match?.[1] ?? null;
+}
+
+/** Codex emits `item` immediately after the outer type. Only an agent
+ * message is load-bearing; completed command/tool telemetry is droppable. */
+function leadingCodexCompletedItemType(prefix: Buffer): string | null {
+  const match = /^\s*\{\s*"type"\s*:\s*"item\.completed"\s*,\s*"item"\s*:\s*\{\s*"type"\s*:\s*"([A-Za-z0-9._-]+)"/.exec(
+    prefix.toString("utf8", 0, Math.min(prefix.length, 512)),
+  );
+  return match?.[1] ?? null;
+}
+
+function leadingClaudeSystemSubtype(prefix: Buffer): string | null {
+  const match = /^\s*\{\s*"type"\s*:\s*"system"\s*,\s*"subtype"\s*:\s*"([A-Za-z0-9._-]+)"/.exec(
+    prefix.toString("utf8", 0, Math.min(prefix.length, 512)),
+  );
+  return match?.[1] ?? null;
+}
+
+function malformedCodexEventIsLoadBearing(prefix: Buffer): boolean {
+  const type = leadingJsonObjectType(prefix);
+  if (type === "thread.started" || type === "turn.completed" || type === "turn.failed") return true;
+  if (type !== "item.completed") return false;
+  const itemType = leadingCodexCompletedItemType(prefix);
+  return itemType === null || itemType === "agent_message";
+}
+
+function malformedGeminiEventIsLoadBearing(prefix: Buffer): boolean {
+  const type = leadingJsonObjectType(prefix);
+  // These two records authorize the session and the successful terminal.
+  // Malformed messages remain diagnostics only; startup prose, tool traffic,
+  // and warnings retain the transport's established noise tolerance.
+  return type === "init" || type === "result";
+}
 
 export function runStreamJsonl(
   file: string,
@@ -508,23 +715,54 @@ export function runStreamJsonl(
     }
     if (options.processGroup === true) liveProviders.add(child);
 
-    const kept: string[] = [];
+    let startedLine: string | null = null;
+    let startedIdentityLine: string | null = null;
+    let conflictingStartedLine: string | null = null;
+    let startedSessionId: string | null = null;
+    let completedLine: string | null = null;
+    let failedLine: string | null = null;
+    let overflowLine: string | null = null;
+    let malformedLine: string | null = null;
     let lastMessage: string | null = null;
-    let partial = "";
     let stderr = "";
     let timedOut = false;
     let notFound = false;
 
-    const keep = (line: string): void => {
-      if (line.length > JSONL_LINE_CAP) return; // oversized: counted absent, never truncated JSON
+    const keep = (framed: BoundedJsonlLine): void => {
+      if (framed.overflowed) {
+        const type = leadingJsonObjectType(framed.prefix);
+        if (type !== null && !["thread.started", "turn.completed", "turn.failed", "item.completed"].includes(type)) {
+          return;
+        }
+        if (type === "item.completed") {
+          const itemType = leadingCodexCompletedItemType(framed.prefix);
+          if (itemType !== null && itemType !== "agent_message") return;
+        }
+        // A load-bearing or unclassifiable hard-cap breach is independently
+        // retained as failure. Once those bytes were discarded, a later
+        // ordinary message must never turn the run green.
+        if (overflowLine === null) overflowLine = codexOverflowLine(framed);
+        return;
+      }
+      const line = framed.prefix.toString("utf8");
       try {
         const event = JSON.parse(line) as Record<string, unknown>;
         const type = String(event["type"] ?? "");
-        if (type === "thread.started" || type === "turn.completed" || type === "turn.failed") {
-          kept.push(line);
-          if (type === "thread.started" && options.onSessionId !== undefined) {
-            const id = event["thread_id"];
-            if (typeof id === "string" && id !== "") {
+        if (type === "thread.started") {
+          // Keep the last init for the existing transport contract and a
+          // bounded pair of earlier witnesses so a conflict cannot hide.
+          startedLine = line;
+          const id = transportSessionId(event["thread_id"]);
+          if (id !== null) {
+            // Retain only enough events to prove the identity contract:
+            // one usable id when the first init was blank, and one conflict.
+            if (startedSessionId === null) {
+              startedSessionId = id;
+              startedIdentityLine = line;
+            } else if (id !== startedSessionId && conflictingStartedLine === null) {
+              conflictingStartedLine = line;
+            }
+            if (options.onSessionId !== undefined) {
               try {
                 options.onSessionId(id);
               } catch {
@@ -532,6 +770,12 @@ export function runStreamJsonl(
               }
             }
           }
+        } else if (type === "turn.completed") {
+          completedLine = line;
+        } else if (type === "turn.failed") {
+          // Retain failure independently from completion: seeing either at
+          // any point is load-bearing, while one slot per kind stays bounded.
+          failedLine = line;
         } else if (type === "item.completed") {
           const item = event["item"] as Record<string, unknown> | undefined;
           if (item !== undefined && String(item["type"] ?? "") === "agent_message") {
@@ -546,9 +790,20 @@ export function runStreamJsonl(
           }
         }
       } catch {
-        // Not JSON: not an event; dropped.
+        // Startup prose and ordinary malformed telemetry remain ignorable.
+        // Once initialization is proven, however, a recognizable control or
+        // answer record cannot disappear merely because its JSON was cut.
+        if (
+          startedLine !== null &&
+          malformedLine === null &&
+          malformedCodexEventIsLoadBearing(framed.prefix)
+        ) {
+          malformedLine = codexMalformedLine(framed);
+        }
       }
     };
+
+    const framing = boundedJsonlFramer(JSONL_EVENT_HARD_CAP, keep);
 
     const watchdog = streamWatchdog(options, () => {
       timedOut = true;
@@ -556,17 +811,9 @@ export function runStreamJsonl(
       else child.kill("SIGKILL");
     });
 
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       watchdog.touch();
-      partial += chunk;
-      let cut = partial.indexOf("\n");
-      while (cut !== -1) {
-        keep(partial.slice(0, cut));
-        partial = partial.slice(cut + 1);
-        cut = partial.indexOf("\n");
-      }
-      if (partial.length > JSONL_LINE_CAP * 2) partial = partial.slice(-JSONL_LINE_CAP);
+      framing.push(chunk);
     });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
@@ -580,8 +827,19 @@ export function runStreamJsonl(
       settled = true;
       watchdog.stop();
       liveProviders.delete(child);
-      if (partial.trim() !== "") keep(partial);
-      const lines = lastMessage === null ? kept : [...kept, lastMessage];
+      framing.finish();
+      const lines = [
+        startedIdentityLine,
+        conflictingStartedLine,
+        startedLine,
+        completedLine,
+        failedLine,
+        overflowLine,
+        malformedLine,
+        lastMessage,
+      ]
+        .filter((line): line is string => line !== null)
+        .filter((line, index, all) => all.indexOf(line) === index);
       resolve({
         code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
         stdout: lines.join("\n"),
@@ -605,8 +863,9 @@ export function runStreamJsonl(
 /**
  * The streaming transport for gemini's stream-json dialect (Phase 3 D1/A7).
  *
- * Retention: the FIRST `init` event (the init signal + the only carrier of
- * session identity), the FIRST `severity:"error"` error event (diagnostics),
+ * Retention: a bounded `init` identity witness (the first init signal, first
+ * usable session id, and first conflicting id), the FIRST
+ * `severity:"error"` error event (diagnostics),
  * the LAST `result` event (tokens + structural status), and the assistant's
  * text — which gemini emits only as many `message` delta lines — ASSEMBLED
  * into one line of a dedicated internal schema the real CLI cannot emit:
@@ -649,30 +908,60 @@ export function runGeminiStreamJsonl(
     if (options.processGroup === true) liveProviders.add(child);
 
     let initLine: string | null = null;
+    let initIdentityLine: string | null = null;
+    let conflictingInitLine: string | null = null;
+    let initSessionId: string | null = null;
     let errorLine: string | null = null;
     let resultLine: string | null = null;
     let message = "";
     let messageTruncated = false;
-    let partial = "";
     let stderr = "";
     let timedOut = false;
     let notFound = false;
+    let overflowLine: string | null = null;
+    let malformedLine: string | null = null;
 
-    const keep = (line: string): void => {
-      if (line.length > JSONL_LINE_CAP) return; // oversized: never truncated JSON
+    const keep = (framed: BoundedJsonlLine): void => {
+      if (framed.overflowed) {
+        const type = leadingJsonObjectType(framed.prefix);
+        // Tool plumbing is never a terminal or answer. All load-bearing and
+        // unknown oversized events latch a terminal protocol failure so a
+        // later small success cannot hide discarded provider bytes.
+        if (type !== "tool_use" && type !== "tool_result") {
+          if (overflowLine === null) overflowLine = geminiOverflowLine(framed);
+        }
+        return;
+      }
+      const line = framed.prefix.toString("utf8");
       let event: Record<string, unknown>;
       try {
         event = JSON.parse(line) as Record<string, unknown>;
       } catch {
-        return; // not JSON: startup prose, dropped
+        if (
+          initLine !== null &&
+          malformedLine === null &&
+          malformedGeminiEventIsLoadBearing(framed.prefix)
+        ) {
+          malformedLine = geminiMalformedLine(framed);
+        }
+        return; // startup prose and non-load-bearing malformed noise are dropped
       }
       if (event === null || typeof event !== "object") return;
       const type = String(event["type"] ?? "");
       if (type === "init") {
-        if (initLine === null) {
-          initLine = line;
-          const id = event["session_id"];
-          if (typeof id === "string" && id !== "" && options.onSessionId !== undefined) {
+        if (initLine === null) initLine = line;
+        const id = transportSessionId(event["session_id"]);
+        let identityWitness = false;
+        if (id !== null) {
+          if (initSessionId === null) {
+            initSessionId = id;
+            initIdentityLine = line;
+            identityWitness = true;
+          } else if (id !== initSessionId && conflictingInitLine === null) {
+            conflictingInitLine = line;
+            identityWitness = true;
+          }
+          if (identityWitness && options.onSessionId !== undefined) {
             try {
               options.onSessionId(id);
             } catch {
@@ -707,23 +996,17 @@ export function runGeminiStreamJsonl(
       }
     };
 
+    const framing = boundedJsonlFramer(JSONL_EVENT_HARD_CAP, keep);
+
     const watchdog = streamWatchdog(options, () => {
       timedOut = true;
       if (options.processGroup === true) killGroup(child);
       else child.kill("SIGKILL");
     });
 
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       watchdog.touch();
-      partial += chunk;
-      let cut = partial.indexOf("\n");
-      while (cut !== -1) {
-        keep(partial.slice(0, cut));
-        partial = partial.slice(cut + 1);
-        cut = partial.indexOf("\n");
-      }
-      if (partial.length > JSONL_LINE_CAP * 2) partial = partial.slice(-JSONL_LINE_CAP);
+      framing.push(chunk);
     });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
@@ -737,12 +1020,19 @@ export function runGeminiStreamJsonl(
       settled = true;
       watchdog.stop();
       liveProviders.delete(child);
-      if (partial.trim() !== "") keep(partial);
-      const lines: string[] = [];
-      if (initLine !== null) lines.push(initLine);
+      framing.finish();
+      const lines: string[] = [initLine, initIdentityLine, conflictingInitLine]
+        .filter((line): line is string => line !== null)
+        .filter((line, index, all) => all.indexOf(line) === index);
       if (errorLine !== null) lines.push(errorLine);
       if (message !== "") lines.push(syntheticMessageLine(message, messageTruncated));
       if (resultLine !== null) lines.push(resultLine);
+      // Keep the overflow last: gemini's contract is last-result-wins, and
+      // no later small event may erase evidence that a record was discarded.
+      if (overflowLine !== null) lines.push(overflowLine);
+      // A recognizable, malformed terminal is just as conclusive as an
+      // oversized one. Keep it last so last-result-wins cannot erase it.
+      if (malformedLine !== null) lines.push(malformedLine);
       resolve({
         code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
         stdout: lines.join("\n"),
@@ -797,8 +1087,8 @@ function syntheticMessageLine(content: string, truncated: boolean): string {
  * envelope, so stdout is consumed incrementally and only the load-bearing
  * lines are retained:
  *
- *   - the FIRST `system`/`init` event (the harness came up — claude's
- *     init signal, the classification codex always had)
+ *   - a bounded identity witness for `system`/`init`: the first init signal,
+ *     the first usable session id, and one conflicting id
  *   - the FIRST primary `result` event, selected STRUCTURALLY (finding 10):
  *     origin absent or `origin.kind === "human"` — an allowlist, so a
  *     background task's result (or any future origin kind) can never be
@@ -842,9 +1132,12 @@ export function runClaudeStreamJsonl(
     if (options.processGroup === true) liveProviders.add(child);
 
     let initLine: string | null = null;
+    let initIdentityLine: string | null = null;
+    let conflictingInitLine: string | null = null;
+    let initSessionId: string | null = null;
     let resultLine: string | null = null;
+    let overflowLine: string | null = null;
     let receiptFired = false;
-    let partial = "";
     let stderr = "";
     let timedOut = false;
     let notFound = false;
@@ -865,8 +1158,32 @@ export function runClaudeStreamJsonl(
       }
     };
 
-    const keep = (line: string): void => {
-      if (line.length > JSONL_LINE_CAP) return; // oversized: counted absent, never truncated JSON
+    const keep = (framed: BoundedJsonlLine): void => {
+      if (framed.overflowed) {
+        // An oversized result is the first primary candidate and therefore
+        // closes the slot fail-closed; an oversized non-result is merely a
+        // fallback that a later parseable primary result can supersede.
+        // Claude's parser trusts the first primary result. When a line is
+        // too large to classify, reserve that first slot fail-closed rather
+        // than let a later small result hide emitted bytes we discarded.
+        const type = leadingJsonObjectType(framed.prefix);
+        if (type !== null && type !== "result") {
+          if (type !== "system") return;
+          const subtype = leadingClaudeSystemSubtype(framed.prefix);
+          if (subtype !== null && subtype !== "init") return;
+          // An init too large to inspect may conceal a conflicting session
+          // identity. Latch it independently from the primary result so the
+          // same event set fails regardless of whether it arrived before or
+          // after the terminal, while a normal terminal can still account
+          // for the turn's usage.
+          if (overflowLine === null) overflowLine = claudeOverflowLine(framed);
+          return;
+        }
+        if (resultLine === null) resultLine = claudeOverflowLine(framed);
+        else if (overflowLine === null) overflowLine = claudeOverflowLine(framed);
+        return;
+      }
+      const line = framed.prefix.toString("utf8");
       let event: Record<string, unknown>;
       try {
         event = JSON.parse(line) as Record<string, unknown>;
@@ -876,16 +1193,23 @@ export function runClaudeStreamJsonl(
       if (event === null || typeof event !== "object") return;
       const type = String(event["type"] ?? "");
       if (type === "system" && String(event["subtype"] ?? "") === "init") {
-        if (initLine === null) {
-          initLine = line;
-          if (options.onSessionId !== undefined) {
-            const id = event["session_id"];
-            if (typeof id === "string" && id !== "") {
-              try {
-                options.onSessionId(id);
-              } catch {
-                // A registry that cannot be written must not kill the turn.
-              }
+        if (initLine === null) initLine = line;
+        const id = transportSessionId(event["session_id"]);
+        let identityWitness = false;
+        if (id !== null) {
+          if (initSessionId === null) {
+            initSessionId = id;
+            initIdentityLine = line;
+            identityWitness = true;
+          } else if (id !== initSessionId && conflictingInitLine === null) {
+            conflictingInitLine = line;
+            identityWitness = true;
+          }
+          if (identityWitness && options.onSessionId !== undefined) {
+            try {
+              options.onSessionId(id);
+            } catch {
+              // A registry that cannot be written must not kill the turn.
             }
           }
         }
@@ -911,23 +1235,17 @@ export function runClaudeStreamJsonl(
       }
     };
 
+    const framing = boundedJsonlFramer(JSONL_EVENT_HARD_CAP, keep);
+
     const watchdog = streamWatchdog(options, () => {
       timedOut = true;
       if (options.processGroup === true) killGroup(child);
       else child.kill("SIGKILL");
     });
 
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       watchdog.touch();
-      partial += chunk;
-      let cut = partial.indexOf("\n");
-      while (cut !== -1) {
-        keep(partial.slice(0, cut));
-        partial = partial.slice(cut + 1);
-        cut = partial.indexOf("\n");
-      }
-      if (partial.length > JSONL_LINE_CAP * 2) partial = partial.slice(-JSONL_LINE_CAP);
+      framing.push(chunk);
     });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
@@ -941,8 +1259,10 @@ export function runClaudeStreamJsonl(
       settled = true;
       watchdog.stop();
       liveProviders.delete(child);
-      if (partial.trim() !== "") keep(partial);
-      const lines = [initLine, resultLine].filter((one): one is string => one !== null);
+      framing.finish();
+      const lines = [initLine, initIdentityLine, conflictingInitLine, resultLine, overflowLine]
+        .filter((one): one is string => one !== null)
+        .filter((line, index, all) => all.indexOf(line) === index);
       resolve({
         code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
         stdout: lines.join("\n"),
@@ -1158,8 +1478,8 @@ export function startClaudeHeldSession(
       if (type === "system" && String(event["subtype"] ?? "") === "init") {
         initSeq += 1;
         if (!sessionSeen && events.onSessionId !== undefined) {
-          const id = event["session_id"];
-          if (typeof id === "string" && id !== "") {
+          const id = transportSessionId(event["session_id"]);
+          if (id !== null) {
             sessionSeen = true;
             try {
               events.onSessionId(id);

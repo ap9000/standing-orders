@@ -923,7 +923,13 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       resumeSession = candidate.run.sessionId;
       // Causal parentage, stamped before the spawn: whatever happens next,
       // the record says which park this attempt tried to carry forward.
-      store.stampRun(request.runId, { parentRun: candidate.run.id });
+      store.stampRun(request.runId, {
+        parentRun: candidate.run.id,
+        // The gateway will only put --resume on a process whose run already
+        // carries this exact identity. Record the warm handoff and its causal
+        // parent together, before any provider process can start.
+        sessionId: candidate.run.sessionId,
+      });
     }
   }
 
@@ -2425,7 +2431,7 @@ async function ingestPark(args: {
   // Deliberately not 'driver' — the design's driver is the event-woken gate
   // role that first exists at M4, and cost data that conflated the two
   // would mean two things forever.
-  let sessionId = args.sessionId;
+  const sessionId = args.sessionId;
   // The resume question is the AUDIT'S, not the id's (Phase 3 A8): a
   // provider whose resume is unproven repairs in FRESH sessions with a
   // self-contained brief — the session-id gate would silently skip its
@@ -2534,8 +2540,9 @@ async function ingestPark(args: {
       continue;
     }
 
-    // Resuming forks a fresh session id; the next turn resumes the newest.
-    if (turnOutcome.sessionId !== null) sessionId = turnOutcome.sessionId;
+    // The gateway has proved this reply came from the exact durable session
+    // named on the child run. A fork is a provider-protocol refusal above;
+    // it can never become the identity used by the next correction.
 
     const rewritten = ingest(`park-repair-${turn + 1}.json`);
     if (rewritten === null) {

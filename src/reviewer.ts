@@ -15,8 +15,7 @@
  *
  * Sealing stays human (R3): comments land beside the operator's own on
  * the run page, author `reviewer:<provider>`, and the operator prunes
- * and seals them into a revision task exactly as today. One attempt per
- * request, one review per run, ever (R4 + one_review_per_source).
+ * and seals them into a revision task exactly as today.
  *
  * The confinement boundary, named honestly: READ confinement rests on
  * the provider's read-only tool/sandbox posture (provider.ts's dedicated
@@ -28,14 +27,16 @@
  * hold nothing but what was sealed into it, and every comment binds to
  * those exact bytes through the D8 transaction. An agent that read the
  * world can still only SAY things about the sealed patch, in its one
- * final message, signed as the agent it was.
+ * final message, signed as the agent it was. One logical review per
+ * request, with at most two same-session response corrections, one review
+ * per source run ever (R4 + one_review_per_source).
  */
 
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { auditOf, safeDiagnostic, type ProviderId } from "./provider.js";
+import { auditOf, isProviderId, safeDiagnostic, type ProviderId } from "./provider.js";
 import type { Store } from "./store.js";
 import { invokeAgent } from "./invoke.js";
 import { resolvePhaseAgent } from "./agentconfig.js";
@@ -45,6 +46,14 @@ import { evidenceRoot, readMailbox, readVerifiedArtifact, sniffImageKind } from 
 import type { Runner } from "./builder.js";
 import { CLAUDE_LIMITS } from "./scope.js";
 import { parseProof, serializeProof, type ApprovedCriterion, type CriterionJudgementWord, type ProofVerdict } from "./proof.js";
+import {
+  normalizeStructuredJson,
+  storeStructuredAttempt,
+  validationErrorsJson,
+  STRUCTURED_REPAIR_ATTEMPTS,
+  STRUCTURED_REPAIR_MAX_TURNS,
+  STRUCTURED_REPAIR_TIMEOUT_MS,
+} from "./structured-output.js";
 
 const DEFAULT_REVIEW_TIMEOUT_MS = 20 * 60_000;
 const DEFAULT_REVIEW_TURNS = CLAUDE_LIMITS.maxTurns;
@@ -362,6 +371,91 @@ function reviewerBrief(
   ].join("\n");
 }
 
+/**
+ * A correction turn stays inside the reviewer's original session and sees
+ * the same sealed scratch. The prior answer is already in that session, so
+ * repeating it here would only turn agent-authored bytes into instructions.
+ * Parser errors and signed ids are JSON-quoted data; the model may repair
+ * representation, but may not broaden the review or guess at evidence.
+ */
+function reviewerRepairBrief(problems: readonly ReviewProblem[], signedCriterionIds: readonly string[]): string {
+  return [
+    "Your previous REVIEWER reply did not pass the strict response parser.",
+    "This is a correction of that same review, not a new review. Keep every",
+    "substantive finding and judgement that remains valid; change only what",
+    "is necessary to satisfy the parser. Do not invent a path, line, signed",
+    "criterion id, observation, or conclusion. When the sealed files cannot",
+    "settle a signed criterion, use `cannot-tell` rather than guessing.",
+    "",
+    "The exact parser errors, quoted as JSON data:",
+    validationErrorsJson(problems),
+    "",
+    "The complete signed criterion-id set, quoted as JSON data:",
+    JSON.stringify(signedCriterionIds),
+    "",
+    "REPLY with the corrected review JSON only: no code fence and no prose.",
+    "It must keep version 1, a comments array, and—when signed ids are listed",
+    "above—exactly one criteria judgement for every listed id. Every comment",
+    "path must occur in REVIEW-DIFF.patch; notes remain non-empty and within",
+    `${REVIEW_LIMITS.note} characters. Create, write, or edit NOTHING in the`,
+    "scratch directory; reread its sealed inputs only if needed.",
+  ].join("\n");
+}
+
+type ParsedReview = Extract<ReturnType<typeof parseReview>, { ok: true }>;
+type ReviewValidation =
+  | { ok: true; parsed: ParsedReview; raw: string; normalized: boolean }
+  | {
+      ok: false;
+      raw: string | null;
+      normalized: boolean;
+      reason: "no-op" | "malformed-review";
+      problems: ReviewProblem[];
+    };
+
+/** Syntax-only normalization precedes the same strict semantic parser used
+ * for first-pass reviews. Empty and oversize final replies are typed parser
+ * inputs too, so the same-session correction gets an exact explanation. */
+function validateReviewReply(
+  raw: string | null,
+  patchPaths: ReadonlySet<string>,
+  approvedCriteriaIds: ReadonlySet<string>,
+): ReviewValidation {
+  if (raw === null) {
+    return {
+      ok: false,
+      raw,
+      normalized: false,
+      reason: "no-op",
+      problems: [{ reason: "the final reply is missing" }],
+    };
+  }
+  const normalized = normalizeStructuredJson(raw);
+  if (raw.trim() === "") {
+    return {
+      ok: false,
+      raw,
+      normalized: normalized.changed,
+      reason: "no-op",
+      problems: [{ reason: "the final reply is empty" }],
+    };
+  }
+  const bytes = Buffer.byteLength(raw, "utf8");
+  if (bytes > REVIEW_LIMITS.payload) {
+    return {
+      ok: false,
+      raw,
+      normalized: normalized.changed,
+      reason: "no-op",
+      problems: [{ reason: `the final reply is ${bytes} UTF-8 bytes; at most ${REVIEW_LIMITS.payload} are allowed` }],
+    };
+  }
+  const parsed = parseReview(normalized.text, patchPaths, approvedCriteriaIds);
+  return parsed.ok
+    ? { ok: true, parsed, raw, normalized: normalized.changed }
+    : { ok: false, raw, normalized: normalized.changed, reason: "malformed-review", problems: parsed.problems };
+}
+
 export type ReviewRequest = {
   /** The finished run whose sealed diff is being reviewed. */
   sourceRunId: number;
@@ -407,13 +501,38 @@ function tamperedSince(scratch: string, sealed: SealedScratchFile): boolean {
 
 /**
  * The pass. Assumes the reviewer run row is already opened (the caller
- * owns dispatch, rails, and finalization); everything here is the
- * artifact-only discipline: verify, materialize, invoke, prove, ingest.
+ * owns dispatch, rails, and failed-attempt finalization); everything here
+ * is the artifact-only discipline: verify, materialize, invoke, prove,
+ * ingest. A successful ingest concludes the admitted root and any accepted
+ * correction child atomically with the review rows.
  */
 export async function review(store: Store, request: ReviewRequest): Promise<ReviewResult> {
   const clock = request.clock ?? (() => request.now);
   const source = store.getRun(request.sourceRunId);
   if (source === null) return { ok: false, reason: "no-run", message: `run ${request.sourceRunId} does not exist` };
+  // Routing is durable admission state, not a caller preference. Refuse a
+  // stale or forged request before materializing evidence or spending, then
+  // use the recorded provider/model for every turn in this logical review.
+  const admittedReviewer = store.getRun(request.reviewerRunId);
+  if (
+    admittedReviewer === null ||
+    admittedReviewer.role !== "reviewer" ||
+    admittedReviewer.outcome !== null ||
+    admittedReviewer.parentRun !== source.id ||
+    admittedReviewer.taskRef !== source.taskRef ||
+    store.externalIdFor(source.taskRef) !== request.taskId ||
+    !isProviderId(admittedReviewer.provider) ||
+    admittedReviewer.provider !== request.provider ||
+    admittedReviewer.model !== request.model
+  ) {
+    return {
+      ok: false,
+      reason: "review-admission",
+      message: "the reviewer request no longer matches its durable admitted run — nothing was reviewed",
+    };
+  }
+  const provider = admittedReviewer.provider;
+  const model = admittedReviewer.model;
   const diff = store.artifactsFor(request.sourceRunId).find(one => one.kind === "terminal-diff");
   if (diff === undefined) {
     return { ok: false, reason: "no-diff", message: `run ${request.sourceRunId} has no sealed terminal diff to review` };
@@ -442,7 +561,20 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
   // previously judged from the proof's bare claim about them, never the
   // real artifact. All four gate on a signed rubric existing at all: a
   // grandfathered run (no rubric) writes exactly what it always has.
-  const scope = store.getScope(request.taskId);
+  const currentScope = store.getScope(request.taskId);
+  if (
+    source.scopeDigest !== null &&
+    (currentScope === null || currentScope.digest !== source.scopeDigest)
+  ) {
+    return {
+      ok: false,
+      reason: "scope-changed",
+      message: "this result was built against an earlier scope — review the matching result or run the task again under the current scope",
+    };
+  }
+  // A run with no scope digest is genuinely grandfathered: a scope added
+  // later must not be retroactively presented as authority for that build.
+  const scope = source.scopeDigest === null ? null : currentScope;
   const rubric: ApprovedCriterion[] = (scope?.acceptance ?? []).map(c => ({ id: c.id, statement: c.statement, evidence: c.evidence }));
   let proofForReview: { bytes: string } | null = null;
   let proofBinding: { artifactId: number; sha256: string } | null = null;
@@ -503,12 +635,156 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     const checkLogSealed = checkLogContent === null ? null : writeSealed(scratch, REVIEW_CHECK_LOG_NAME, checkLogContent);
     const screenshotsSealed = screenshotFiles.map(shot => writeSealed(scratch, shot.name, shot.content));
 
+    // THE PROOF COMES FIRST (R2's clean-tree law, scratch-shaped): the
+    // directory may hold EXACTLY the files WE sealed (the patch, and —
+    // v40 — the rubric, re-serialized proof, check log, and screenshots
+    // when this run has them) — as REGULAR FILES, no symlinks, no
+    // directories, and nothing else at all. There is no mailbox to permit
+    // any more (the reviewer's answer rides its own final message, never
+    // the scratch), so ANY file the agent added — the old mailbox
+    // convention included — is foreign. Every sealed file must still hash
+    // to what was written (Codex reviewer round 1, finding 3, extended to
+    // every materialized input: any of them the agent overwrote means its
+    // judgements describe evidence nobody actually showed it — ingest
+    // nothing). Anything foreign and nothing is ingested.
+    const permitted = new Set([
+      REVIEW_PATCH_NAME,
+      ...(rubricSealed === null ? [] : [rubricSealed.name]),
+      ...(proofSealed === null ? [] : [proofSealed.name]),
+      ...(checkLogSealed === null ? [] : [checkLogSealed.name]),
+      ...screenshotsSealed.map(one => one.name),
+    ]);
+    const recheckScratch = (): ReviewResult | null => {
+      let entries: { name: string; isFile(): boolean }[];
+      try {
+        entries = readdirSync(scratch, { withFileTypes: true });
+      } catch {
+        return {
+          ok: false,
+          reason: "dirty-scratch",
+          message: "the review scratch could not be re-read after the agent returned — nothing is ingested without re-proving every sealed input",
+        };
+      }
+      const foreign = entries.filter(one => !one.isFile() || !permitted.has(one.name)).map(one => one.name);
+      if (foreign.length > 0) {
+        return {
+          ok: false,
+          reason: "dirty-scratch",
+          message: `the reviewer wrote ${foreign.length} thing(s) it was never asked to (${foreign.slice(0, 3).join(", ")}${foreign.length > 3 ? ", …" : ""}) — a reviewer reads; nothing it wrote is ingested`,
+        };
+      }
+      const patchBack = readMailbox(join(scratch, REVIEW_PATCH_NAME), diff.bytesStored);
+      if (
+        !patchBack.ok ||
+        patchBack.raw.length !== diff.bytesStored ||
+        createHash("sha256").update(patchBack.raw).digest("hex") !== diff.sha256
+      ) {
+        return {
+          ok: false,
+          reason: "dirty-scratch",
+          message: "the patch in the scratch no longer matches the sealed artifact — comments bind to the exact bytes reviewed, and these are not them",
+        };
+      }
+      if (rubricSealed !== null && tamperedSince(scratch, rubricSealed)) {
+        return {
+          ok: false,
+          reason: "dirty-scratch",
+          message: "the rubric in the scratch no longer matches what was sealed — judgements bind to the exact signed rubric, and this is not it",
+        };
+      }
+      if (proofSealed !== null && tamperedSince(scratch, proofSealed)) {
+        return {
+          ok: false,
+          reason: "dirty-scratch",
+          message: "the proof in the scratch no longer matches what was sealed — judgements bind to the exact proof reviewed, and this is not it",
+        };
+      }
+      if (checkLogSealed !== null && tamperedSince(scratch, checkLogSealed)) {
+        return {
+          ok: false,
+          reason: "dirty-scratch",
+          message: "the check log in the scratch no longer matches what was sealed — judgements bind to the exact verification output reviewed, and this is not it",
+        };
+      }
+      for (const shotSealed of screenshotsSealed) {
+        if (tamperedSince(scratch, shotSealed)) {
+          return {
+            ok: false,
+            reason: "dirty-scratch",
+            message: `screenshot ${shotSealed.name} in the scratch no longer matches what was sealed — judgements bind to the exact screenshot bytes reviewed, and this is not it`,
+          };
+        }
+      }
+      return null;
+    };
+
+    // Admission proves the runner immediately before each spawn. Re-prove
+    // the same incarnation after the paid turn as well: a runner rotation
+    // while the provider is working must not let that now-orphaned reply
+    // reach review ingestion merely because there is no subsequent spawn.
+    const recheckRunnerCustody = (reviewerRunId: number): ReviewResult | null =>
+      store.proveRunnerCustodyForSpawn(reviewerRunId, clock())
+        ? null
+        : {
+            ok: false,
+            reason: "runner-custody",
+            message: "the reviewer's runner custody changed while it was working — nothing from that reply is ingested",
+          };
+
+    const invalidResult = (validation: Extract<ReviewValidation, { ok: false }>): ReviewResult => {
+      const problemList = validation.problems.map(one => one.reason).join(", ");
+      if (validation.reason === "no-op") {
+        return {
+          ok: false,
+          reason: "no-op",
+          message: `the reviewer ended without a usable review: ${problemList}`,
+        };
+      }
+      // A bounded, sanitized record of WHY all correction turns failed —
+      // the parser's own reasons first, followed by only the last emitted
+      // reply as best-effort context.
+      const diagnostic = validation.raw === null ? null : safeDiagnostic(`${problemList} — spoken: ${validation.raw}`);
+      return {
+        ok: false,
+        reason: "malformed-review",
+        message: `the reviewer concluded, but the payload is not a review: ${problemList}`,
+        ...(diagnostic === null ? {} : { diagnostic }),
+      };
+    };
+
+    const recordAttempt = (
+      runId: number,
+      attempt: number,
+      validation: ReviewValidation,
+      eligible: boolean,
+    ): ReviewResult | null => {
+      if (validation.raw === null) return null;
+      try {
+        storeStructuredAttempt(store, root, runId, {
+          phase: "reviewer",
+          attempt,
+          authoredRunId: runId,
+          raw: validation.raw,
+          accepted: eligible && validation.ok,
+          normalized: validation.normalized,
+          now: clock(),
+        });
+        return null;
+      } catch (error) {
+        return {
+          ok: false,
+          reason: "evidence",
+          message: `the reviewer reply could not be preserved as sealed evidence: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    };
+
     let invoked;
     try {
       invoked = await invokeAgent(
         store,
         request.reviewerRunId,
-        { provider: request.provider, model: request.model },
+        { provider, model },
         {
           phase: "review",
           brief: reviewerBrief(
@@ -528,7 +804,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
           permissionMode: "plan",
           skipPermissions: false,
           resumeSession: null,
-          ...(auditOf(request.provider).sessionIdentity === "minted" ? { startSessionId: randomUUID() } : {}),
+          ...(auditOf(provider).sessionIdentity === "minted" ? { startSessionId: randomUUID() } : {}),
         },
         {
           cwd: scratch,
@@ -539,8 +815,31 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
         },
       );
     } catch (error) {
-      return { ok: false, reason: "agent", message: error instanceof Error ? error.message : String(error) };
+      const dirty = recheckScratch();
+      return dirty ?? { ok: false, reason: "agent", message: error instanceof Error ? error.message : String(error) };
     }
+    const dirtyAfterInitial = recheckScratch();
+    const custodyAfterInitial = recheckRunnerCustody(request.reviewerRunId);
+    const approvedCriteriaIds = new Set(rubric.map(c => c.id));
+    let validation = validateReviewReply(
+      invoked.kind === "ran" ? invoked.outcome.finalMessage : (invoked.finalMessage ?? null),
+      patchPaths,
+      approvedCriteriaIds,
+    );
+    const initialEvidenceProblem = recordAttempt(
+      request.reviewerRunId,
+      1,
+      validation,
+      dirtyAfterInitial === null &&
+        custodyAfterInitial === null &&
+        invoked.kind === "ran" &&
+        !invoked.outcome.timedOut &&
+        !invoked.outcome.initFailed &&
+        invoked.outcome.code === 0,
+    );
+    if (initialEvidenceProblem !== null) return initialEvidenceProblem;
+    if (dirtyAfterInitial !== null) return dirtyAfterInitial;
+    if (custodyAfterInitial !== null) return custodyAfterInitial;
     if (invoked.kind === "refused") {
       return {
         ok: false,
@@ -566,106 +865,175 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     if (result.code !== 0) {
       return { ok: false, reason: "agent", message: `agent exit ${result.code}` };
     }
+    if (result.sessionId !== null) {
+      // The announced id is the only authority for a same-session
+      // correction. Persist it on the admitted root before opening a
+      // descendant, so lineage and custody can prove every resume.
+      store.stampRun(request.reviewerRunId, { sessionId: result.sessionId });
+    }
 
-    // THE PROOF COMES FIRST (R2's clean-tree law, scratch-shaped): the
-    // directory may hold EXACTLY the files WE sealed (the patch, and —
-    // v40 — the rubric, re-serialized proof, check log, and screenshots
-    // when this run has them) — as REGULAR FILES, no symlinks, no
-    // directories, and nothing else at all. There is no mailbox to permit
-    // any more (the reviewer's answer rides its own final message, never
-    // the scratch), so ANY file the agent added — the old mailbox
-    // convention included — is foreign. Every sealed file must still hash
-    // to what was written (Codex reviewer round 1, finding 3, extended to
-    // every materialized input: any of them the agent overwrote means its
-    // judgements describe evidence nobody actually showed it — ingest
-    // nothing). Anything foreign and nothing is ingested.
-    const permitted = new Set([
-      REVIEW_PATCH_NAME,
-      ...(rubricSealed === null ? [] : [rubricSealed.name]),
-      ...(proofSealed === null ? [] : [proofSealed.name]),
-      ...(checkLogSealed === null ? [] : [checkLogSealed.name]),
-      ...screenshotsSealed.map(one => one.name),
-    ]);
-    const entries = readdirSync(scratch, { withFileTypes: true });
-    const foreign = entries.filter(one => !one.isFile() || !permitted.has(one.name)).map(one => one.name);
-    if (foreign.length > 0) {
-      return {
-        ok: false,
-        reason: "dirty-scratch",
-        message: `the reviewer wrote ${foreign.length} thing(s) it was never asked to (${foreign.slice(0, 3).join(", ")}${foreign.length > 3 ? ", …" : ""}) — a reviewer reads; nothing it wrote is ingested`,
-      };
-    }
-    const patchBack = readMailbox(join(scratch, REVIEW_PATCH_NAME), diff.bytesStored);
-    if (
-      !patchBack.ok ||
-      patchBack.raw.length !== diff.bytesStored ||
-      createHash("sha256").update(patchBack.raw).digest("hex") !== diff.sha256
-    ) {
-      return {
-        ok: false,
-        reason: "dirty-scratch",
-        message: "the patch in the scratch no longer matches the sealed artifact — comments bind to the exact bytes reviewed, and these are not them",
-      };
-    }
-    if (rubricSealed !== null && tamperedSince(scratch, rubricSealed)) {
-      return {
-        ok: false,
-        reason: "dirty-scratch",
-        message: "the rubric in the scratch no longer matches what was sealed — judgements bind to the exact signed rubric, and this is not it",
-      };
-    }
-    if (proofSealed !== null && tamperedSince(scratch, proofSealed)) {
-      return {
-        ok: false,
-        reason: "dirty-scratch",
-        message: "the proof in the scratch no longer matches what was sealed — judgements bind to the exact proof reviewed, and this is not it",
-      };
-    }
-    if (checkLogSealed !== null && tamperedSince(scratch, checkLogSealed)) {
-      return {
-        ok: false,
-        reason: "dirty-scratch",
-        message: "the check log in the scratch no longer matches what was sealed — judgements bind to the exact verification output reviewed, and this is not it",
-      };
-    }
-    for (const shotSealed of screenshotsSealed) {
-      if (tamperedSince(scratch, shotSealed)) {
-        return {
-          ok: false,
-          reason: "dirty-scratch",
-          message: `screenshot ${shotSealed.name} in the scratch no longer matches what was sealed — judgements bind to the exact screenshot bytes reviewed, and this is not it`,
-        };
+    let parsed: ParsedReview;
+    let authoringRunId = request.reviewerRunId;
+    let acceptedChildRunId: number | null = null;
+    if (validation.ok) {
+      parsed = validation.parsed;
+    } else {
+      // Formatting recovery is deliberately narrower than the builder's
+      // semantic repair loop: no provider/scratch/custody failure enters
+      // it, and no provider without the original session id gets a fresh
+      // reviewer. At most two linear child runs resume the SAME session in
+      // the SAME sealed scratch, each under the review isolation profile.
+      const rootReviewer = store.getRun(request.reviewerRunId);
+      const sessionId = result.sessionId ?? rootReviewer?.sessionId ?? null;
+      if (rootReviewer === null || sessionId === null || auditOf(provider).resume !== "native") {
+        return invalidResult(validation);
       }
+
+      let parentRunId = request.reviewerRunId;
+      let accepted: ParsedReview | null = null;
+      for (let correction = 1; correction <= STRUCTURED_REPAIR_ATTEMPTS; correction += 1) {
+        let childRunId: number;
+        try {
+          childRunId = store.startRun({
+            taskRef: rootReviewer.taskRef,
+            leaseId: rootReviewer.leaseId,
+            runner: rootReviewer.runner,
+            role: "reviewer",
+            parentRun: parentRunId,
+            provider,
+            ...(model === null ? {} : { model }),
+            sessionId,
+            now: clock(),
+          });
+        } catch (error) {
+          return { ok: false, reason: "agent", message: error instanceof Error ? error.message : String(error) };
+        }
+
+        let correctionInvocation;
+        try {
+          correctionInvocation = await invokeAgent(
+            store,
+            childRunId,
+            { provider, model },
+            {
+              phase: "review",
+              brief: reviewerRepairBrief(validation.problems, [...approvedCriteriaIds]),
+              maxTurns: STRUCTURED_REPAIR_MAX_TURNS,
+              permissionMode: "plan",
+              skipPermissions: false,
+              resumeSession: sessionId,
+            },
+            {
+              cwd: scratch,
+              timeoutMs: STRUCTURED_REPAIR_TIMEOUT_MS,
+              omitEnv: AGENT_ENV_DENYLIST,
+              ...(request.agent === undefined ? {} : { runner: request.agent }),
+              clock,
+            },
+          );
+        } catch (error) {
+          const dirty = recheckScratch();
+          store.finishRun(childRunId, {
+            outcome: "failed",
+            reason: dirty === null ? "reviewer-agent" : "reviewer-dirty-scratch",
+            now: clock(),
+          });
+          return dirty ?? { ok: false, reason: "agent", message: error instanceof Error ? error.message : String(error) };
+        }
+
+        const dirty = recheckScratch();
+        const custody = recheckRunnerCustody(childRunId);
+        const correctionResult = correctionInvocation.kind === "ran" ? correctionInvocation.outcome : null;
+        validation = validateReviewReply(
+          correctionInvocation.kind === "ran"
+            ? correctionInvocation.outcome.finalMessage
+            : (correctionInvocation.finalMessage ?? null),
+          patchPaths,
+          approvedCriteriaIds,
+        );
+        const sameSession = correctionResult !== null && correctionResult.sessionId === sessionId;
+        const correctionEvidenceProblem = recordAttempt(
+          childRunId,
+          correction + 1,
+          validation,
+          dirty === null &&
+            custody === null &&
+            correctionResult !== null &&
+            !correctionResult.timedOut &&
+            !correctionResult.initFailed &&
+            correctionResult.code === 0 &&
+            sameSession,
+        );
+        if (correctionEvidenceProblem !== null) {
+          store.finishRun(childRunId, { outcome: "failed", reason: "reviewer-evidence", now: clock() });
+          return correctionEvidenceProblem;
+        }
+        if (dirty !== null) {
+          store.finishRun(childRunId, { outcome: "failed", reason: "reviewer-dirty-scratch", now: clock() });
+          return dirty;
+        }
+        if (custody !== null) {
+          store.finishRun(childRunId, { outcome: "refused", reason: "runner-custody", now: clock() });
+          return custody;
+        }
+        if (correctionInvocation.kind === "refused") {
+          store.finishRun(childRunId, {
+            outcome: "refused",
+            reason: correctionInvocation.reason,
+            now: clock(),
+          });
+          return {
+            ok: false,
+            reason: correctionInvocation.reason,
+            message:
+              correctionInvocation.diagnostic ??
+              (correctionInvocation.reason === "provider-unattested"
+                ? "the provider binary is outside its attested range"
+                : "the provider broke its own protocol"),
+          };
+        }
+        if (correctionResult === null) throw new Error("unreachable reviewer correction result");
+        if (correctionResult.timedOut) {
+          store.finishRun(childRunId, { outcome: "failed", reason: "reviewer-timeout", now: clock() });
+          return { ok: false, reason: "timeout", message: "the reviewer correction made no progress for 5 minutes and was stopped" };
+        }
+        if (correctionResult.initFailed) {
+          store.finishRun(childRunId, { outcome: "failed", reason: "reviewer-provider-init", now: clock() });
+          return { ok: false, reason: "provider-init", message: "the provider harness never initialized for the reviewer correction" };
+        }
+        if (correctionResult.code !== 0) {
+          store.finishRun(childRunId, { outcome: "failed", reason: `reviewer-agent-exit-${correctionResult.code}`, now: clock() });
+          return { ok: false, reason: "agent", message: `reviewer correction agent exit ${correctionResult.code}` };
+        }
+        if (!sameSession) {
+          store.finishRun(childRunId, { outcome: "failed", reason: "reviewer-provider-protocol", now: clock() });
+          return {
+            ok: false,
+            reason: "provider-protocol",
+            message:
+              correctionResult.sessionId === null
+                ? "the reviewer correction did not prove which session returned — nothing from it is ingested"
+                : "the reviewer correction returned from a different session — nothing from it is ingested",
+          };
+        }
+        if (validation.ok) {
+          accepted = validation.parsed;
+          authoringRunId = childRunId;
+          acceptedChildRunId = childRunId;
+          break;
+        }
+        store.finishRun(childRunId, {
+          outcome: "failed",
+          reason: validation.reason === "no-op" ? "reviewer-no-op" : "reviewer-malformed-review",
+          now: clock(),
+        });
+        parentRunId = childRunId;
+      }
+      if (accepted === null) return invalidResult(validation as Extract<ReviewValidation, { ok: false }>);
+      parsed = accepted;
     }
 
-    // No mailbox to read: the review IS the provider's own final message
-    // (AgentOutcome.finalMessage) — nothing else was ever written, and the
-    // scratch scan above already proved that. An absent, empty, or
-    // oversize reply reads exactly as an old missing mailbox did: money
-    // spent on silence.
-    const spoken = result.finalMessage;
-    if (spoken === null || spoken.trim() === "" || Buffer.byteLength(spoken, "utf8") > REVIEW_LIMITS.payload) {
-      return { ok: false, reason: "no-op", message: "the reviewer ended without a review — a session that says nothing spent money on silence" };
-    }
-    const parsed = parseReview(spoken, patchPaths, new Set(rubric.map(c => c.id)));
-    if (!parsed.ok) {
-      const problemList = parsed.problems.map(one => one.reason).join(", ");
-      // Run 1467's fix: a bounded, sanitized record of WHY the parse
-      // failed — the problem list first (ours, already safe), then the
-      // agent's own spoken bytes as best-effort context — so the next
-      // failure explains itself from the stored run instead of needing a
-      // live repro. `safeDiagnostic` applies the same control-char strip,
-      // secret scan, and byte cap every other provider diagnostic gets.
-      const diagnostic = safeDiagnostic(`${problemList} — spoken: ${spoken}`);
-      return {
-        ok: false,
-        reason: "malformed-review",
-        message: `the reviewer concluded, but the payload is not a review: ${problemList}`,
-        ...(diagnostic === null ? {} : { diagnostic }),
-      };
-    }
-
-    const author = request.model === null ? `reviewer:${request.provider}` : `reviewer:${request.provider}·${request.model}`;
+    const author = model === null ? `reviewer:${provider}` : `reviewer:${provider}·${model}`;
     // The proving transaction (D8), ingested WHOLE in one atomic call —
     // comments and criterion judgements used to commit through two
     // separate calls; a crash between them could land one without the
@@ -682,15 +1050,23 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     let commentIds: number[];
     let folded: { verdict: ProofVerdict } | null;
     try {
+      const finalCustody = recheckRunnerCustody(authoringRunId);
+      if (finalCustody !== null) {
+        if (acceptedChildRunId !== null) {
+          store.finishRun(acceptedChildRunId, { outcome: "refused", reason: "runner-custody", now: clock() });
+        }
+        return finalCustody;
+      }
       ({ commentIds, folded } = store.ingestReview(
         {
-          reviewerRunId: request.reviewerRunId,
+          reviewerRunId: authoringRunId,
           runId: request.sourceRunId,
           artifactId: diff.id,
           author,
           comments: parsed.comments,
           judgements: parsed.criteria,
           bindings: {
+            diffSha: diff.sha256,
             scopeDigest: scopeDigestAtReview,
             headSha: headAtReview,
             proof: proofBinding,
@@ -701,12 +1077,23 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
         clock(),
       ));
     } catch (error) {
+      if (acceptedChildRunId !== null) {
+        store.finishRun(acceptedChildRunId, {
+          outcome: error instanceof Error && error.name === "ReviewerCustodyError" ? "refused" : "failed",
+          reason: error instanceof Error && error.name === "ReviewerCustodyError" ? "runner-custody" : "reviewer-stale-evidence",
+          now: clock(),
+        });
+      }
       return {
         ok: false,
-        reason: "stale-evidence",
+        reason: error instanceof Error && error.name === "ReviewerCustodyError" ? "runner-custody" : "stale-evidence",
         message: error instanceof Error ? error.message : String(error),
       };
     }
+    // The admitted root and any correction child are settled by ingestReview
+    // in the same transaction as their comments/judgements. There is no
+    // post-commit crash window in which accepted review rows exist beside an
+    // open reviewer run that could replay them.
     const verdict: ProofVerdict | null = folded?.verdict ?? null;
     return { ok: true, commentIds, commentCount: commentIds.length, criteriaCount: parsed.criteria.length, verdict };
   } finally {
@@ -725,8 +1112,9 @@ export type ReviewPassReport = {
 };
 
 /**
- * The tick's review pass: consume open review requests, one bounded
- * attempt each (R4). Everything consequential happens inside the store's
+ * The tick's review pass: consume open review requests, one bounded logical
+ * review each (R4), with only the bounded same-session formatting
+ * corrections above. Everything consequential happens inside the store's
  * ONE admission transaction (`admitReview`): the request is claimed, a
  * mode-derived request re-proves the EXACT digest it was queued under
  * (R-REVOKE: a renewal is a new signature and inherits nothing), the
@@ -795,11 +1183,9 @@ export async function reviewPass(
       // moved a run's proof verdict — the reviewer's own reason, distinct
       // from the plain comment-count reason every review has always had.
       const judged = result.criteriaCount > 0 ? `, ${result.criteriaCount} judgement(s)${result.verdict === "refuted" ? ` (${"review-contradicted"})` : ""}` : "";
-      store.finishRun(admitted.reviewerRunId, {
-        outcome: "no-change",
-        reason: `reviewed — ${result.commentCount} comment(s)${judged}`,
-        now: clock(),
-      });
+      // `review()` already committed this exact completion reason together
+      // with the review rows. Keep request/report settlement here, but never
+      // reopen a crash window by finalizing the reviewer in a second write.
       store.stampReviewRequestOutcome(request.id, "reviewed");
       reports.push({
         requestId: request.id,
@@ -815,7 +1201,7 @@ export async function reviewPass(
         maybeTriggerRepair(store, request.repo, options.evidenceRoot ?? evidenceRoot(homedir()), request.run, result.verdict, clock());
       }
     } else {
-      // One attempt, spent (R4): review is additive — the task's outcome
+      // One logical attempt, spent (R4): review is additive — the task's outcome
       // already stands, so a broken pass is a visible typed run, never a
       // block and never a retry loop. Run 1467's fix: a malformed-review
       // failure carries its bounded, sanitized parse diagnostic into the

@@ -27,7 +27,7 @@ process.stdin.on("data", c => {
     if (mode === "frame-noise" && n === 1) {
       console.log(JSON.stringify({ so_supervisor: "ready", agentPgid: 424242 }));
     }
-    console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-fake" }));
+    console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "  sess-fake  " }));
     console.log(JSON.stringify({ type: "assistant", parent_tool_use_id: null }));
     // One JSON line emitted in TWO chunks: the relay and the transport's
     // line assembly must be byte-exact across the seam.
@@ -241,7 +241,7 @@ describe("the held invocation gateway", () => {
       calls.push({ file, args });
       // the provider-start stamp must already be durable at spawn time
       expect(store.getRun(run)?.providerStartedAt).not.toBeNull();
-      (options["events"] as { onSessionId?: (id: string) => void }).onSessionId?.("sess-gw");
+      (options["events"] as { onSessionId?: (id: string) => void }).onSessionId?.("  sess-gw  ");
       return Promise.resolve({ ok: false as const, reason: "spawn-failed" as const, message: "fake" });
     }) as never;
 

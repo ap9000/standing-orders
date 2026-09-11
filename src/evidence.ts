@@ -85,6 +85,7 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   proof: PROOF_LIMITS.payload,
   "check-log": 64 * 1024,
   screenshot: SCREENSHOT_BYTE_CAP,
+  "structured-output": 64 * 1024,
 };
 
 export function evidenceRoot(home: string): string {
@@ -162,10 +163,15 @@ export function proposalFileName(): string {
 export function readMailbox(
   path: string,
   cap: number = LIMITS.payload,
-): { ok: true; raw: Buffer } | { ok: false; problem: string; missing: boolean } {
+):
+  | { ok: true; raw: Buffer }
+  | { ok: false; problem: string; missing: boolean; raw?: Buffer; bytesOriginal?: number } {
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // O_NONBLOCK matters before the type check: opening a FIFO read-only can
+    // otherwise wait forever for a writer, outside every provider timeout.
+    // Once the descriptor is open we still accept regular files only.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     return {
@@ -183,7 +189,24 @@ export function readMailbox(
       return { ok: false, missing: false, problem: "the mailbox is not a regular file" };
     }
     if (stat.size > cap) {
-      return { ok: false, missing: false, problem: `the mailbox is over ${cap} bytes` };
+      // Oversize is invalid protocol, but it is still emitted evidence.
+      // Capture only the bounded prefix from this already no-follow-opened
+      // descriptor and carry the exact observed size so callers can retain
+      // an honest, capped artifact without allocating attacker-sized input.
+      const prefix = Buffer.alloc(cap);
+      let offset = 0;
+      while (offset < prefix.length) {
+        const read = readSync(fd, prefix, offset, prefix.length - offset, offset);
+        if (read <= 0) break;
+        offset += read;
+      }
+      return {
+        ok: false,
+        missing: false,
+        problem: `the mailbox is over ${cap} bytes`,
+        raw: prefix.subarray(0, offset),
+        bytesOriginal: Number(stat.size),
+      };
     }
     const buffer = Buffer.alloc(Number(stat.size));
     let offset = 0;

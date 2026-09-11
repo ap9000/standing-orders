@@ -2757,10 +2757,10 @@ export function createDecisionServer(options: ServeOptions): Server {
     return run.outcome === null && store.currentLiveLease(run.taskRef, clock()) === run.leaseId;
   }
 
-  /** Planner and reviewer bookkeeping can finish around a build but are
-   * never the task's delivered result. Repair attempts remain results. */
+  /** Planner, reviewer, and structured-output correction bookkeeping can
+   * finish around a build but are never the task's delivered result. */
   const runIsTaskResult = (run: Pick<Run, "role" | "finishedAt">): boolean =>
-    run.finishedAt !== null && (run.role === "builder" || run.role === "repair" || run.role === "scout");
+    run.finishedAt !== null && (run.role === "builder" || run.role === "scout");
 
   /** The live subset of a bounded run page \u2014 one indexed lookup per row. */
   function liveRunIds(rows: readonly (Pick<Run, "id" | "outcome" | "leaseId" | "taskRef">)[]): Set<number> {
@@ -6450,7 +6450,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * queue could not show — the done list's own predicate, re-proved per
    * read: the task is done, sits in this project (or in none), and its
    * repository passes the ceiling; the result run is the newest finished
-   * built/no-change attempt that is not a reviewer pass. Anything else is
+   * built/no-change builder or scout attempt. Anything else is
    * null, and null reads exactly like a task that never existed.
    */
   function completedRowFor(taskId: string, project: string | null): CompletedWorkRow | null {
@@ -6459,7 +6459,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (task === null || ref === null || task.state !== "done") return null;
     if (!(project === null || ref.repo === null || ref.repo === project) || !visible(ref.repo)) return null;
     const run =
-      store.runsFor(ref.id).find(one => (one.outcome === "built" || one.outcome === "no-change") && one.finishedAt !== null && one.role !== "reviewer") ?? null;
+      store.runsFor(ref.id).find(
+        one =>
+          (one.outcome === "built" || one.outcome === "no-change") &&
+          one.finishedAt !== null &&
+          (one.role === "builder" || one.role === "scout"),
+      ) ?? null;
     const publication = run === null ? null : store.publicationForRun(run.id);
     const verdict = run === null ? null : store.proofVerdictFor(run.id);
     return {
@@ -15630,6 +15635,7 @@ const EVIDENCE_WORDS: Record<string, string> = {
   proof: "the agent's proof",
   "check-log": "the plane's re-run check",
   screenshot: "a screenshot",
+  "structured-output": "an agent response",
 };
 
 function evidenceWords(kind: string): string {

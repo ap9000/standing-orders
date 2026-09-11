@@ -6,9 +6,10 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
 import { appendFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseNumstat, readVerifiedArtifact, redactSecretLines, scanForSecrets, writeEvidenceFile, sniffImageKind, validateScreenshotBytes, SCREENSHOT_BYTE_CAP } from "./evidence.js";
+import { parseNumstat, readMailbox, readVerifiedArtifact, redactSecretLines, scanForSecrets, writeEvidenceFile, sniffImageKind, validateScreenshotBytes, SCREENSHOT_BYTE_CAP } from "./evidence.js";
 import type { Artifact } from "./store.js";
 
 describe("reading evidence back, believing nothing", () => {
@@ -106,6 +107,31 @@ describe("reading evidence back, believing nothing", () => {
   test("a missing file is a calm refusal, not a throw", () => {
     const read = readVerifiedArtifact(root, record("1/never-written", Buffer.from("x")));
     expect(read).toMatchObject({ ok: false, problem: expect.stringContaining("gone or unresolvable") });
+  });
+});
+
+describe("reading protocol mailboxes", () => {
+  test("refuses a FIFO without waiting for a writer", () => {
+    if (process.platform === "win32") return;
+    const root = mkdtempSync(join(tmpdir(), "standing-orders-mailbox-"));
+    try {
+      const fifo = join(root, "reply.json");
+      try {
+        execFileSync("mkfifo", [fifo]);
+      } catch {
+        return; // This host cannot create the POSIX fixture.
+      }
+
+      const started = Date.now();
+      expect(readMailbox(fifo)).toMatchObject({
+        ok: false,
+        missing: false,
+        problem: "the mailbox is not a regular file",
+      });
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

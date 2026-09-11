@@ -8,6 +8,7 @@ import {
   finalizeFailureFenced,
   finalizeMalformedFenced,
   finalizeParkFenced,
+  finalizePlanFenced,
   finalizeRevisionFenced,
   type FailureClass,
   heartbeat,
@@ -798,6 +799,37 @@ describe("sealing a park", () => {
       now: T0,
     });
 
+  const openPlannerRepair = (leaseId: string) => {
+    const root = store.startRun({
+      taskRef: task,
+      leaseId,
+      runner: "runner-a",
+      role: "planner",
+      provider: "claude",
+      sessionId: "planner-session",
+      branch: "standing-orders/t-1",
+      worktree: "/pool/t-1",
+      now: T0,
+    });
+    store.stampRun(root, { baseRevision: "a".repeat(40) });
+    store.stampProviderStart(root, T0);
+    const child = store.startRun({
+      taskRef: task,
+      leaseId,
+      runner: "runner-a",
+      role: "planner",
+      provider: "claude",
+      sessionId: "planner-session",
+      branch: "standing-orders/t-1",
+      worktree: "/pool/t-1",
+      parentRun: root,
+      now: T0,
+    });
+    store.stampRun(child, { baseRevision: "a".repeat(40) });
+    store.stampProviderStart(child, T0);
+    return { root, child };
+  };
+
   test("one transaction: decision, hold, run outcome, outbox — or none of it", () => {
     acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
     const runId = openRun("lease-a");
@@ -829,6 +861,26 @@ describe("sealing a park", () => {
     expect(currentClaim(store, task, later(2_000))).toBeNull();
   });
 
+  test("an accepted planner correction settles only inside the successful park fence", () => {
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    const { root, child } = openPlannerRepair("lease-a");
+    expect(store.getRun(child)?.outcome).toBeNull();
+
+    const sealed = finalizeParkFenced(store, {
+      leaseId: "lease-a",
+      runId: root,
+      taskId: "t-1",
+      decision,
+      artifactIds: [],
+      repairRunId: child,
+      now: later(1_000),
+    });
+
+    expect(sealed).toMatchObject({ ok: true });
+    expect(store.getRun(root)?.outcome).toBe("parked");
+    expect(store.getRun(child)).toMatchObject({ outcome: "no-change", reason: "structured planner output repaired" });
+  });
+
   test("a superseded lease seals nothing — no decision, no hold, no page", () => {
     acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
     const runId = openRun("lease-a");
@@ -851,6 +903,110 @@ describe("sealing a park", () => {
     // The run records the refusal it was.
     expect(store.getRun(runId)).toMatchObject({ outcome: "refused", reason: "fenced" });
     // And runner-b's live claim was never touched.
+    expect(currentClaim(store, task, later(121_000))?.leaseId).toBe("lease-b");
+  });
+
+  test("a superseded park fence refuses the open planner correction atomically", () => {
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    const { root, child } = openPlannerRepair("lease-a");
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(120_000), newLeaseId: ids("lease-b") });
+
+    const sealed = finalizeParkFenced(store, {
+      leaseId: "lease-a",
+      runId: root,
+      taskId: "t-1",
+      decision,
+      artifactIds: [],
+      repairRunId: child,
+      now: later(121_000),
+    });
+
+    expect(sealed).toEqual({ ok: false, reason: "fenced" });
+    expect(store.getRun(root)).toMatchObject({ outcome: "refused", reason: "fenced" });
+    expect(store.getRun(child)).toMatchObject({ outcome: "refused", reason: "fenced" });
+    expect(store.listDecisions("all")).toHaveLength(0);
+  });
+
+  test("an accepted planner correction and its draft settle together inside the successful plan fence", () => {
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    const { root, child } = openPlannerRepair("lease-a");
+    const plan = {
+      goal: "Ship the guarded payout flow",
+      outOfScope: "No billing schema changes",
+      touches: ["src/payouts.ts"],
+      acceptance: [{ id: "c1", statement: "Rejected payouts fail closed.", how: null, evidence: ["check" as const] }],
+      plan: "## Approach\nGuard the payout boundary.",
+    };
+    expect(store.getRun(child)?.outcome).toBeNull();
+
+    const sealed = finalizePlanFenced(store, {
+      leaseId: "lease-a",
+      runId: root,
+      taskId: "t-1",
+      plan,
+      artifact: {
+        key: `${root}/plan.md`,
+        bytesOriginal: 42,
+        bytesStored: 42,
+        truncated: false,
+        sha256: "a".repeat(64),
+        capture: "validated planner handoff",
+      },
+      repairRunId: child,
+      now: later(1_000),
+    });
+
+    expect(sealed).toEqual({ ok: true });
+    expect(store.getRun(root)).toMatchObject({ outcome: "built", reason: "plan-drafted" });
+    expect(store.getRun(child)).toMatchObject({ outcome: "no-change", reason: "structured planner output repaired" });
+    expect(store.getScope("t-1")).toMatchObject({
+      goal: plan.goal,
+      outOfScope: plan.outOfScope,
+      touches: plan.touches,
+      acceptance: plan.acceptance,
+      approvedAt: null,
+    });
+    expect(store.refForId(task)?.plan).toBe("drafted");
+    expect(store.latestPlanArtifact(task)).toMatchObject({ run: root, sha256: "a".repeat(64) });
+    expect(store.listNotifications("pending").map(one => one.dedupeKey)).toContain(`plan:${task}:${root}`);
+    expect(currentClaim(store, task, later(2_000))).toBeNull();
+  });
+
+  test("a superseded plan fence refuses the root and accepted correction without landing a draft", () => {
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    const { root, child } = openPlannerRepair("lease-a");
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(120_000), newLeaseId: ids("lease-b") });
+
+    const sealed = finalizePlanFenced(store, {
+      leaseId: "lease-a",
+      runId: root,
+      taskId: "t-1",
+      plan: {
+        goal: "This must never land",
+        outOfScope: null,
+        touches: ["src/unsafe.ts"],
+        acceptance: [{ id: "c1", statement: "The draft lands.", how: null, evidence: ["check"] }],
+        plan: "## Approach\nThis must never land.",
+      },
+      artifact: {
+        key: `${root}/plan.md`,
+        bytesOriginal: 42,
+        bytesStored: 42,
+        truncated: false,
+        sha256: "b".repeat(64),
+        capture: "validated planner handoff",
+      },
+      repairRunId: child,
+      now: later(121_000),
+    });
+
+    expect(sealed).toEqual({ ok: false, reason: "fenced" });
+    expect(store.getRun(root)).toMatchObject({ outcome: "refused", reason: "fenced" });
+    expect(store.getRun(child)).toMatchObject({ outcome: "refused", reason: "fenced" });
+    expect(store.getScope("t-1")).toMatchObject({ goal: "the work", approvedBy: "alex" });
+    expect(store.refForId(task)?.plan).toBeNull();
+    expect(store.latestPlanArtifact(task)).toBeNull();
+    expect(store.listNotifications("pending")).toHaveLength(0);
     expect(currentClaim(store, task, later(121_000))?.leaseId).toBe("lease-b");
   });
 

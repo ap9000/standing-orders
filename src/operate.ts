@@ -2721,6 +2721,7 @@ async function tickCommand(
           taskId: id,
           decision: outcome.parked.decision,
           artifactIds: outcome.parked.artifactIds,
+          repairRunId: outcome.parked.repairRunId,
           now: clock(),
         });
         if (sealed.ok) {
@@ -2740,6 +2741,7 @@ async function tickCommand(
           taskId: id,
           plan: outcome.drafted.plan,
           artifact: outcome.drafted.artifact,
+          repairRunId: outcome.drafted.repairRunId,
           now: clock(),
         });
         if (sealed.ok) {
@@ -8937,7 +8939,7 @@ function showTask(positional: readonly string[], context: Context): number {
   // v40 fix: a reviewer run finishes after the build it reviews and
   // carries no proof verdict of its own — excluded so its outcome never
   // hijacks the task's own reported verdict.
-  const latestFinished = runs.find(one => one.finishedAt !== null && one.role !== "reviewer") ?? null;
+  const latestFinished = runs.find(one => one.finishedAt !== null && (one.role === "builder" || one.role === "scout")) ?? null;
   const proofVerdict = latestFinished === null ? null : store.proofVerdictFor(latestFinished.id);
   const proofAccepted = latestFinished !== null && store.proofAcceptance(latestFinished.id) !== null;
   const detail = {
@@ -9024,7 +9026,9 @@ async function acceptTaskProof(
 
   const ref = store.refFor(BUILT_IN, id);
   // v40 fix: a reviewer run is never the attempt whose proof is accepted.
-  const latest = store.runsFor(ref.id).find(one => one.finishedAt !== null && one.role !== "reviewer");
+  const latest = store.runsFor(ref.id).find(
+    one => one.finishedAt !== null && (one.role === "builder" || one.role === "scout"),
+  );
   if (latest === undefined) {
     return fail(write, json, "task accept", "no-run", `${id} has no finished attempt to accept`, EXIT.refused);
   }

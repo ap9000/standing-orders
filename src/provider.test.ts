@@ -54,16 +54,17 @@ describe("argv dialects", () => {
     expect(resumed.slice(0, 3)).toEqual(["exec", "resume", "thread-1"]);
   });
 
-  test("claude review phase gets the isolation argv: no MCP, no persistence, read-only tools, prompts that refuse", () => {
+  test("claude review phase keeps its resumable, cwd-confined isolation argv", () => {
     const build = adapterFor("claude").argv({ ...ASK, phase: "build" });
     expect(build).not.toContain("--strict-mcp-config");
     expect(build).not.toContain("--safe-mode");
+    expect(build).not.toContain("--restricted");
 
     const argv = adapterFor("claude").argv({ ...ASK, phase: "review" });
     expect(argv).toEqual(
       expect.arrayContaining([
+        "--restricted",
         "--safe-mode",
-        "--no-session-persistence",
         "--tools", "Read",
         "--permission-prompts", "none",
         "--strict-mcp-config",
@@ -72,6 +73,20 @@ describe("argv dialects", () => {
     );
     // Every ordinary flag still rides — this is additive, not a swap.
     expect(argv).toEqual(expect.arrayContaining(["--permission-mode", "auto", "--max-turns", "40"]));
+    // Structured-output correction resumes this exact confined session.
+    // Persistence must remain on for that resume to be real.
+    expect(argv).not.toContain("--no-session-persistence");
+    const resumed = adapterFor("claude").argv({ ...ASK, phase: "review", resumeSession: "review-session-1" });
+    expect(resumed).toEqual(expect.arrayContaining(["--resume", "review-session-1", "--restricted", "--safe-mode", "--tools", "Read"]));
+    expect(resumed).toEqual(expect.arrayContaining(["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--json-schema"]));
+    expect(resumed).not.toContain("--no-session-persistence");
+
+    // Review isolation wins even if a malformed caller asks for the global
+    // autonomy bypass. Restricted mode refuses that combination itself; the
+    // plane omits it so a safe review still runs instead of failing at init.
+    const bypassAttempt = adapterFor("claude").argv({ ...ASK, phase: "review", skipPermissions: true });
+    expect(bypassAttempt).not.toContain("--dangerously-skip-permissions");
+    expect(bypassAttempt).toContain("--restricted");
   });
 
   test("run 1467's fix: claude review turns carry a strict --json-schema; build and codex never do", () => {
@@ -335,6 +350,7 @@ describe("the provider audit — report before enforcement", () => {
     // This is CAPABILITY metadata — whether a given run saw it lives in
     // the envelope's initObserved, never here (finding 16).
     expect(claude.initSignal).toBe("system-init");
+    expect(claude.isolation).toMatchObject({ flag: "--restricted", resumeSafe: true, enforced: false });
 
     for (const id of PROVIDER_IDS) {
       const audit = auditOf(id);
@@ -359,6 +375,26 @@ describe("the provider audit — report before enforcement", () => {
     expect(claude.parse("not json").initObserved).toBe(false);
     // The legacy buffered envelope (recorded fixtures) still carries none.
     expect(claude.parse("{}").initObserved).toBe(null);
+  });
+
+  test("Codex canonicalizes one identity and rejects conflicting thread.started ids", () => {
+    const codex = adapterFor("codex");
+    const canonical = codex.parse(
+      [
+        JSON.stringify({ type: "thread.started", thread_id: "  thread-1  " }),
+        JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+      ].join("\n"),
+    );
+    expect(canonical).toMatchObject({ sessionId: "thread-1", protocolError: null, initObserved: true });
+
+    const conflicting = codex.parse(
+      [
+        JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+        JSON.stringify({ type: "thread.started", thread_id: "thread-2" }),
+      ].join("\n"),
+    );
+    expect(conflicting.sessionId).toBe(null);
+    expect(conflicting.protocolError).toMatch(/conflicting thread\.started session ids/);
   });
 });
 
@@ -387,6 +423,83 @@ describe("claudeParse — the streaming envelope", () => {
     expect(parsed.costUsd).toBe(0.42);
     expect(parsed.initObserved).toBe(true);
     expect(parsed.promptConsumed).toBe(true);
+    expect(parsed.protocolError).toBe(null);
+  });
+
+  test("conflicting init and terminal session ids are protocol-invalid and never select either id", () => {
+    const parsed = claude.parse(
+      [JSON.stringify({ type: "system", subtype: "init", session_id: "s-init" }), result({ session_id: "s-result" })].join("\n"),
+    );
+    expect(parsed.sessionId).toBe(null);
+    expect(parsed.protocolError).toMatch(/different session ids/);
+    // The terminal can still account for a consumed turn; protocol identity
+    // is an independent gate at invokeAgent.
+    expect(parsed.promptConsumed).toBe(true);
+  });
+
+  test("conflicting init session ids are protocol-invalid even when the terminal agrees with the first", () => {
+    const parsed = claude.parse(
+      [
+        JSON.stringify({ type: "system", subtype: "init", session_id: "  " }),
+        JSON.stringify({ type: "system", subtype: "init", session_id: "s-first" }),
+        JSON.stringify({ type: "system", subtype: "init", session_id: " s-first " }),
+        JSON.stringify({ type: "system", subtype: "init", session_id: "s-second" }),
+        result({ session_id: "s-first" }),
+      ].join("\n"),
+    );
+    expect(parsed).toMatchObject({
+      sessionId: null,
+      initObserved: true,
+      promptConsumed: true,
+      protocolError: expect.stringMatching(/conflicting system\/init session ids/),
+    });
+  });
+
+  test("a transport overflow witness after a valid Claude result remains a failure without losing usage", () => {
+    const parsed = claude.parse(
+      [
+        JSON.stringify({ type: "system", subtype: "init", session_id: "s-stable" }),
+        result({
+          session_id: "s-stable",
+          result: "done",
+          usage: { input_tokens: 19, output_tokens: 5 },
+        }),
+        JSON.stringify({
+          type: "result",
+          subtype: "standing-orders-stream-event-overflow",
+          is_error: true,
+          result: '{"type":"standing-orders.stream-event-overflow"}',
+        }),
+      ].join("\n"),
+    );
+
+    expect(parsed).toMatchObject({
+      sessionId: "s-stable",
+      finalMessage: "done",
+      tokensIn: 19,
+      tokensOut: 5,
+      structuralTerminal: { failed: true, code: "standing-orders-stream-event-overflow" },
+    });
+  });
+
+  test("a later blank init cannot erase the first usable session identity", () => {
+    const parsed = claude.parse(
+      [
+        JSON.stringify({ type: "system", subtype: "init", session_id: "s-stable" }),
+        JSON.stringify({ type: "system", subtype: "init", session_id: " \t " }),
+        result({ session_id: "s-stable" }),
+      ].join("\n"),
+    );
+    expect(parsed).toMatchObject({ sessionId: "s-stable", initObserved: true, protocolError: null });
+  });
+
+  test("blank session ids normalize to absence in streaming and legacy Claude envelopes", () => {
+    const streaming = claude.parse(
+      [JSON.stringify({ type: "system", subtype: "init", session_id: " \t " }), result({ session_id: "\n" })].join("\n"),
+    );
+    expect(streaming.sessionId).toBe(null);
+    expect(streaming.protocolError).toBe(null);
+    expect(claude.parse(JSON.stringify({ result: "old shape", session_id: "   " })).sessionId).toBe(null);
   });
 
   test("origin allowlist (finding 10): only absent or human origins are primary", () => {
@@ -458,6 +571,26 @@ describe("claudeParse — the streaming envelope", () => {
     expect(parsed.tokensIn).toBe(5);
     expect(parsed.initObserved).toBe(null);
     expect(parsed.promptConsumed).toBe(null);
+    expect(parsed.structuralTerminal).toBe(null);
+  });
+
+  test("a legacy buffered result with no subtype is structurally unknown, not a fabricated failure", () => {
+    const parsed = claude.parse(JSON.stringify({ result: "legacy success-shaped output", session_id: "s-legacy" }));
+    expect(parsed).toMatchObject({
+      sessionId: "s-legacy",
+      finalMessage: "legacy success-shaped output",
+      structuralTerminal: null,
+    });
+  });
+
+  test("a streaming primary result with a missing subtype remains a structural failure", () => {
+    const parsed = claude.parse(
+      [
+        JSON.stringify({ type: "system", subtype: "init", session_id: "s-stream" }),
+        JSON.stringify({ type: "result", is_error: false, result: "malformed", session_id: "s-stream" }),
+      ].join("\n"),
+    );
+    expect(parsed.structuralTerminal).toMatchObject({ failed: true });
   });
 });
 
@@ -552,6 +685,13 @@ describe("the gemini dialect (Phase 3, attested at 0.57.0)", () => {
     });
   });
 
+  test("session ids are trimmed, while blank ids normalize to absence for Gemini and Codex", () => {
+    expect(adapterFor("gemini").parse(JSON.stringify({ type: "init", session_id: "  gemini-1\t", model: "m" })).sessionId).toBe("gemini-1");
+    expect(adapterFor("codex").parse(JSON.stringify({ type: "thread.started", thread_id: "\n codex-1 " })).sessionId).toBe("codex-1");
+    expect(adapterFor("gemini").parse(JSON.stringify({ type: "init", session_id: " \t ", model: "m" })).sessionId).toBe(null);
+    expect(adapterFor("codex").parse(JSON.stringify({ type: "thread.started", thread_id: "\n" })).sessionId).toBe(null);
+  });
+
   test("an error-status result is NOT consumption — and its message is diagnostics", () => {
     const stream = [
       JSON.stringify({ type: "init", session_id: "s-1", model: "m" }),
@@ -567,7 +707,7 @@ describe("the gemini dialect (Phase 3, attested at 0.57.0)", () => {
     expect(envelope).toMatchObject({ sessionId: null, initObserved: false, promptConsumed: false, tokensIn: null });
   });
 
-  test("first init and last result win; a severity-error line feeds the bounded diagnostic", () => {
+  test("conflicting init ids fail closed while the last result and bounded diagnostic are retained", () => {
     const stream = [
       JSON.stringify({ type: "init", session_id: "first", model: "m" }),
       JSON.stringify({ type: "init", session_id: "second", model: "m" }),
@@ -577,7 +717,8 @@ describe("the gemini dialect (Phase 3, attested at 0.57.0)", () => {
       JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 5, output_tokens: 6 } }),
     ].join("\n");
     const envelope = adapterFor("gemini").parse(stream);
-    expect(envelope.sessionId).toBe("first");
+    expect(envelope.sessionId).toBe(null);
+    expect(envelope.protocolError).toMatch(/conflicting init session ids/);
     expect(envelope.tokensIn).toBe(5);
     expect(envelope.promptConsumed).toBe(true);
     expect(Buffer.byteLength(envelope.diagnostic ?? "", "utf8")).toBeLessThanOrEqual(2 * 1024 + 4);

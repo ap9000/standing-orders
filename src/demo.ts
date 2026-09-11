@@ -847,7 +847,10 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     worktree: join(repos.api, ".demo-worktree-4"),
     now: hoursAgo(5),
   });
-  store.stampRun(reviewedRun, { baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
+  store.stampRun(reviewedRun, {
+    baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    scopeDigest: reviewedProposed.digest,
+  });
   const DEMO_REPAIR_PATCH = `diff --git a/src/payout-limiter.ts b/src/payout-limiter.ts
 --- a/src/payout-limiter.ts
 +++ b/src/payout-limiter.ts
@@ -962,6 +965,8 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     now: hoursAgo(3.9),
   });
   const reviewedProofSha = store.getArtifact(reviewedProofArtifact)?.sha256 ?? null;
+  const reviewedDiffSha = store.getArtifact(reviewedDiffArtifact)?.sha256 ?? "";
+  store.stampProviderStart(reviewerRun, hoursAgo(3.9));
   const { folded } = store.ingestReview(
     {
       reviewerRunId: reviewerRun,
@@ -982,8 +987,14 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
           judgement: "contradicts",
           note: "The diff adds a TODO comment, not an actual lock — two concurrent settlements still race the limiter.",
         },
+        {
+          id: "c2",
+          judgement: "upholds",
+          note: "The stored check log supports that the existing limiter test suite still passes.",
+        },
       ],
       bindings: {
+        diffSha: reviewedDiffSha,
         scopeDigest: reviewedProposed.digest,
         headSha: store.getRun(reviewedRun)?.headRevision ?? store.getRun(reviewedRun)?.baseRevision ?? null,
         proof: reviewedProofSha === null ? null : { artifactId: reviewedProofArtifact, sha256: reviewedProofSha },
@@ -994,7 +1005,6 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     hoursAgo(3.9),
   );
   if (folded === null) throw new Error("seed reviewed+repaired: the fold produced nothing");
-  store.finishRun(reviewerRun, { outcome: "no-change", reason: `reviewed — 1 comment(s), 1 judgement(s) (${"review-contradicted"})`, now: hoursAgo(3.9) });
 
   // The bounded repair loop's own trigger — the SAME function the tick
   // calls after a review pass settles a verdict. No mode is signed, so

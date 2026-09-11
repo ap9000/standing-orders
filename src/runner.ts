@@ -111,7 +111,7 @@ export function register(store: Store, options: RegisterOptions): Registration {
           worktrees: store.releaseWorktreesOf(name, now),
         };
 
-  const runner: Runner = {
+  const proposed: Runner = {
     name,
     host,
     capacity,
@@ -122,7 +122,10 @@ export function register(store: Store, options: RegisterOptions): Registration {
     retiredAt: null,
   };
 
-  store.saveRunner(runner, hashToken(token), mutation);
+  // The store assigns the incarnation while holding its write transaction.
+  // Doing it from the `previous` snapshot above is racy: two registrars can
+  // read the same predecessor and otherwise mint the same generation.
+  const runner = store.saveRunner(proposed, hashToken(token), mutation);
   return {
     runner,
     token,

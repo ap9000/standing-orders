@@ -83,6 +83,12 @@ export type AgentEnding = { subtype: string | null; turns: number | null };
 /** What every envelope normalizes to, whatever dialect produced it. */
 export type ParsedEnvelope = {
   sessionId: string | null;
+  /**
+   * A structurally impossible provider envelope. Unlike diagnostic prose,
+   * this is a control signal consumed by the invocation gateway: the
+   * process spent, but its output may not authorize a handoff or resume.
+   */
+  protocolError: string | null;
   /** The agent's spoken conclusion — diagnostics only, never the handoff. */
   finalMessage: string | null;
   /** How the harness said the turn ended (claude: the result's subtype and
@@ -141,6 +147,13 @@ type Adapter = {
 
 const USAGE_JSON_CAP = 8 * 1024;
 
+/** Empty and whitespace-only identities are absence, never resumable ids. */
+function sessionIdOf(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const id = value.trim();
+  return id === "" ? null : id;
+}
+
 /** Deterministic TOML basic-string quoting for -c values — never the CLI's raw fallback. */
 function toml(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
@@ -179,8 +192,8 @@ export const claudeHeldArgv = (invocation: Omit<Invocation, "brief">): string[] 
 /**
  * Reviewer isolation (fail-closed for the phase that must never mutate):
  * the SAME flag family `subscription-chat.ts` already uses for its own
- * sealed-scratch turn — no session left behind, no tool but reading the
- * sealed files, no prompt that can stall a headless run waiting on an
+ * sealed-scratch turn — no tool but reading the sealed files, no prompt
+ * that can stall a headless run waiting on an
  * approval nobody can answer, and no MCP server (global OR project) loaded
  * at all. A reviewer that goes looking for tools beyond its scratch
  * directory is exactly the leak this closes: `--permission-mode plan`
@@ -189,8 +202,8 @@ export const claudeHeldArgv = (invocation: Omit<Invocation, "brief">): string[] 
  * until the timeout kills it, having spent the money on nothing.
  */
 const CLAUDE_REVIEW_ISOLATION_ARGV: readonly string[] = [
+  "--restricted",
   "--safe-mode",
-  "--no-session-persistence",
   "--tools",
   "Read",
   "--permission-prompts",
@@ -263,9 +276,11 @@ const claudeArgv = (invocation: Invocation): string[] => [
   "--verbose",
   "--max-turns",
   String(invocation.maxTurns),
-  ...(invocation.skipPermissions
-    ? ["--dangerously-skip-permissions"]
-    : ["--permission-mode", invocation.permissionMode]),
+  ...(invocation.phase === "review"
+    ? ["--permission-mode", invocation.permissionMode === "bypassPermissions" ? "plan" : invocation.permissionMode]
+    : invocation.skipPermissions
+      ? ["--dangerously-skip-permissions"]
+      : ["--permission-mode", invocation.permissionMode]),
   ...(invocation.model === null ? [] : ["--model", invocation.model]),
   ...(invocation.maxBudgetUsd === undefined ? [] : ["--max-budget-usd", String(invocation.maxBudgetUsd)]),
   ...(invocation.phase === "review"
@@ -320,13 +335,24 @@ function claudeEnvelopeOf(
   result: ClaudeResultShape | null,
   sessionFromInit: string | null,
   initObserved: boolean | null,
+  initSessionConflict = false,
 ): ParsedEnvelope {
   const input = result?.usage?.input_tokens;
   const output = result?.usage?.output_tokens;
   const cost = result?.total_cost_usd;
+  const sessionFromResult = sessionIdOf(result?.session_id);
+  const resultSessionConflict =
+    sessionFromInit !== null && sessionFromResult !== null && sessionFromInit !== sessionFromResult;
+  const sessionConflict = initSessionConflict || resultSessionConflict;
   return {
-    sessionId:
-      typeof result?.session_id === "string" ? result.session_id : sessionFromInit,
+    // Never choose one side of a contradictory identity. A repair must not
+    // resume either session until the gateway has refused this turn.
+    sessionId: sessionConflict ? null : sessionFromResult ?? sessionFromInit,
+    protocolError: initSessionConflict
+      ? "Claude emitted conflicting system/init session ids"
+      : resultSessionConflict
+        ? "the Claude init event and terminal result announced different session ids"
+        : null,
     finalMessage: claudeFinalMessage(result),
     ending: result === null ? null : {
       subtype: typeof result.subtype === "string" ? result.subtype : null,
@@ -350,23 +376,29 @@ function claudeEnvelopeOf(
     // from the error result's text at classification; the parser records a
     // structural failure terminal when the result is a non-success error.
     structuralTerminal:
-      result !== null && (result.is_error === true || String(result.subtype ?? "") !== "success")
+      result !== null &&
+      (result.is_error === true ||
+        (typeof result.subtype === "string" && result.subtype !== "success") ||
+        (initObserved !== null && typeof result.subtype !== "string"))
         ? { failed: true, text: typeof result.result === "string" ? result.result.slice(0, 2048) : null, code: typeof result.subtype === "string" ? result.subtype.slice(0, 128) : null }
         : null,
   };
 }
 
 /**
- * Reads the streaming runner's retained lines: at most one `system`/`init`
- * and one primary `result`, re-proved here (the parser trusts no transport
- * to have selected correctly). A single objet without a `type` field is the
+ * Reads the streaming runner's retained lines: a bounded set of
+ * `system`/`init` identity witnesses and one primary `result`, re-proved here
+ * (the parser trusts no transport to have selected correctly). A single
+ * object without a `type` field is the
  * legacy buffered envelope — kept for recorded fixtures, carrying no init
  * signal, exactly as before the transport switch.
  */
 function claudeParse(stdout: string): ParsedEnvelope {
   let initSeen = false;
   let sessionFromInit: string | null = null;
+  let initSessionConflict = false;
   let primary: ClaudeResultShape | null = null;
+  let transportFailure: ClaudeResultShape | null = null;
   for (const line of stdout.split("\n")) {
     if (line.trim() === "") continue;
     let event: Record<string, unknown>;
@@ -383,13 +415,37 @@ function claudeParse(stdout: string): ParsedEnvelope {
     }
     if (String(type) === "system" && String(event["subtype"] ?? "") === "init") {
       initSeen = true;
-      const id = event["session_id"];
-      if (typeof id === "string" && id !== "") sessionFromInit = id;
-    } else if (String(type) === "result" && primary === null && claudePrimaryOrigin(event as ClaudeResultShape)) {
-      primary = event as ClaudeResultShape;
+      const id = sessionIdOf(event["session_id"]);
+      if (id !== null) {
+        if (sessionFromInit === null) sessionFromInit = id;
+        else if (id !== sessionFromInit) initSessionConflict = true;
+      }
+    } else if (String(type) === "result") {
+      const result = event as ClaudeResultShape;
+      if (
+        result.is_error === true &&
+        result.subtype === "standing-orders-stream-event-overflow" &&
+        transportFailure === null
+      ) {
+        // The transport may append this bounded witness after an otherwise
+        // valid result when a later oversized init could conceal a second
+        // session identity. It is an independent protocol failure, not a
+        // replacement for the primary result's usage/accounting envelope.
+        transportFailure = result;
+      }
+      if (primary === null && claudePrimaryOrigin(result)) primary = result;
     }
   }
-  return claudeEnvelopeOf(primary, sessionFromInit, initSeen);
+  const envelope = claudeEnvelopeOf(primary, sessionFromInit, initSeen, initSessionConflict);
+  if (transportFailure === null) return envelope;
+  return {
+    ...envelope,
+    structuralTerminal: {
+      failed: true,
+      text: typeof transportFailure.result === "string" ? transportFailure.result.slice(0, 2048) : null,
+      code: "standing-orders-stream-event-overflow",
+    },
+  };
 }
 
 /**
@@ -450,6 +506,7 @@ const codexArgv = (extra: readonly string[]) => (invocation: Invocation): string
  */
 function codexParse(stdout: string): ParsedEnvelope {
   let sessionId: string | null = null;
+  let sessionConflict = false;
   let finalMessage: string | null = null;
   let tokensIn: number | null = null;
   let tokensOut: number | null = null;
@@ -469,8 +526,11 @@ function codexParse(stdout: string): ParsedEnvelope {
       // The init signal, id or no id: the harness came up. A malformed
       // thread_id loses the session, not the fact of initialization.
       initObserved = true;
-      const id = event["thread_id"];
-      if (typeof id === "string") sessionId = id;
+      const announced = sessionIdOf(event["thread_id"]);
+      if (announced !== null) {
+        if (sessionId === null) sessionId = announced;
+        else if (announced !== sessionId) sessionConflict = true;
+      }
     } else if (type === "turn.completed") {
       const usage = event["usage"] as Record<string, unknown> | undefined;
       const input = usage?.["input_tokens"];
@@ -506,7 +566,23 @@ function codexParse(stdout: string): ParsedEnvelope {
   // every surface downstream already says so instead of summing a lie.
   // promptConsumed stays null: codex carries no structural consumption
   // signal, and the gateway keeps its historical rule for it.
-  return { sessionId, finalMessage, tokensIn, tokensOut, costUsd: null, usageRaw, initObserved, promptConsumed: null, diagnostic: null, structuralTerminal };
+  return {
+    // As with Claude, never let either side of a contradictory identity
+    // become repair state. The gateway records the spend, then refuses it.
+    sessionId: sessionConflict ? null : sessionId,
+    protocolError: sessionConflict
+      ? "Codex emitted conflicting thread.started session ids"
+      : null,
+    finalMessage,
+    tokensIn,
+    tokensOut,
+    costUsd: null,
+    usageRaw,
+    initObserved,
+    promptConsumed: null,
+    diagnostic: null,
+    structuralTerminal,
+  };
 }
 
 /** Codex interval caps: inactivity for current profiles, wall clock for
@@ -573,17 +649,17 @@ const DIAGNOSTIC_CAP = 2 * 1024;
 
 /**
  * Reads the gemini retention runner's synthetic stdout (Phase 3 D2/A7):
- * at most one `init` (the init signal + session id — result events carry
- * no id, so identity is init-or-nothing), one `synthetic_message` (the
- * runner-assembled assistant text; a type the real CLI cannot emit, so
- * fixtures and transport share an unambiguous contract), the LAST
- * `result` (tokens + structural status), and the first error line
- * (diagnostics only). No legacy branch: the attestation floor is the
- * only dialect this parser has ever had to honor.
+ * a bounded set of `init` identity witnesses (result events carry no id, so
+ * identity is init-or-nothing), one `synthetic_message` (the runner-assembled
+ * assistant text; a type the real CLI cannot emit, so fixtures and transport
+ * share an unambiguous contract), the LAST `result` (tokens + structural
+ * status), and the first error line (diagnostics only). No legacy branch:
+ * the attestation floor is the only dialect this parser has ever had to honor.
  */
 function geminiParse(stdout: string): ParsedEnvelope {
   let initSeen = false;
   let sessionId: string | null = null;
+  let sessionConflict = false;
   let finalMessage: string | null = null;
   let tokensIn: number | null = null;
   let tokensOut: number | null = null;
@@ -601,10 +677,11 @@ function geminiParse(stdout: string): ParsedEnvelope {
     if (event === null || typeof event !== "object") continue;
     const type = String(event["type"] ?? "");
     if (type === "init") {
-      if (!initSeen) {
-        initSeen = true;
-        const id = event["session_id"];
-        if (typeof id === "string" && id !== "") sessionId = id;
+      initSeen = true;
+      const announced = sessionIdOf(event["session_id"]);
+      if (announced !== null) {
+        if (sessionId === null) sessionId = announced;
+        else if (announced !== sessionId) sessionConflict = true;
       }
     } else if (type === "synthetic_message") {
       const content = event["content"];
@@ -630,7 +707,11 @@ function geminiParse(stdout: string): ParsedEnvelope {
     }
   }
   return {
-    sessionId,
+    // A plane-minted id is useful only while the provider tells one
+    // consistent story about it. Never select either side of contradictory
+    // init events; the gateway records usage and refuses the turn.
+    sessionId: sessionConflict ? null : sessionId,
+    protocolError: sessionConflict ? "Gemini emitted conflicting init session ids" : null,
     finalMessage,
     tokensIn,
     tokensOut,
@@ -802,7 +883,10 @@ const AUDITS: Record<ProviderId, ProviderAudit> = {
     initSignal: "system-init",
     sessionIdentity: "announced",
     terminalContract: "none",
-    isolation: { flag: "--bare", resumeSafe: null, enforced: false },
+    // Restricted mode is resume-safe and is enforced for sealed reviewer
+    // turns. `enforced` remains false here because this provider-wide audit
+    // also covers ordinary build turns, where the flag is not applied.
+    isolation: { flag: "--restricted", resumeSafe: true, enforced: false },
     configSurface: [
       "~/.claude/CLAUDE.md and settings (hooks, MCP servers, plugins)",
       "repository CLAUDE.md / .claude directory",

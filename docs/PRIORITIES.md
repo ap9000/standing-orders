@@ -30,6 +30,16 @@ changes, a moved checkout, inability to confirm unchanged files, lost custody,
 or a still-missing executable stops recovery as missing evidence rather than
 claiming the product failed.
 
+Structured planner and reviewer replies have their own narrow recovery path.
+Standing Orders normalizes transport syntax only, then—when a resumable session
+exists—returns the exact validation errors through at most two correction child
+runs in that same session. A correction cannot invent scope or criteria; every
+attempt, including a rejected reply, is retained as sealed `structured-output`
+evidence.
+Planner worktree proof and reviewer scratch proof are repeated after each reply.
+Provider, custody, and tamper failures stop normally rather than being presented
+to the model as formatting work.
+
 ### Certification handoff
 
 The implementation and pre-Windows certification are complete. Real Claude
@@ -106,7 +116,10 @@ visible provenance and an operator-controlled reset.
 
 Priority 3 is active. Priority 1 is implemented and has passed every
 pre-Windows gate; only the physical-machine and real account-exhaustion checks
-listed above remain. Priority 2's proof contract, independent review, concise
+listed above remain. Its structured planner/reviewer recovery is also bounded:
+syntax-only normalization, no more than two same-session corrections, sealed
+attempt evidence, and fresh workspace or scratch proof after every reply.
+Priority 2's proof contract, independent review, concise
 result receipt, and annotated revision flow have landed, and Priority 5's first
 slice — the review cockpit over completed work — is in.
 

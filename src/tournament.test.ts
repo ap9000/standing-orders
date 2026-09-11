@@ -1713,6 +1713,7 @@ describe("slice B e2e — a mixed comparison through the real tick: claude, code
     let lines: string[] = [];
     const laneCalls: string[] = [];
     const parkedOnce = new Set<string>();
+    let geminiSession: string | null = null;
     /** One stub, three dialects — detected off the argv the plane rendered. */
     const agent = async (_file: string, args: readonly string[], options?: { cwd?: string }) => {
       const cwd = options?.cwd ?? "";
@@ -1725,7 +1726,10 @@ describe("slice B e2e — a mixed comparison through the real tick: claude, code
         const mailbox = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
         if (mailbox === undefined) throw new Error("no mailbox named in the gemini brief");
         await writeFile(join(cwd, mailbox), JSON.stringify(DECISION));
-        const minted = args[args.indexOf("--session-id") + 1] ?? "never-minted";
+        const sessionFlag = args.indexOf("--session-id");
+        const minted = sessionFlag < 0 ? undefined : args[sessionFlag + 1];
+        if (minted === undefined || minted === "") throw new Error("the first gemini turn did not receive a minted session id");
+        geminiSession = minted;
         return { ...OK, stdout: [
           JSON.stringify({ type: "init", session_id: minted, model: "gemini-2.5-pro" }),
           JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 40, output_tokens: 9 } }),
@@ -1744,9 +1748,12 @@ describe("slice B e2e — a mixed comparison through the real tick: claude, code
         ].join("\n") };
       }
       if (dialect === "gemini") {
-        const minted = args[args.indexOf("--session-id") + 1] ?? "never-minted";
+        const resumeFlag = args.indexOf("--resume");
+        const resumed = resumeFlag < 0 ? undefined : args[resumeFlag + 1];
+        if (resumed === undefined || resumed === "") throw new Error("the next gemini turn did not receive a session to resume");
+        if (resumed !== geminiSession) throw new Error("the gemini lane resumed a session other than the one it parked");
         return { ...OK, stdout: [
-          JSON.stringify({ type: "init", session_id: minted, model: "gemini-2.5-pro" }),
+          JSON.stringify({ type: "init", session_id: resumed, model: "gemini-2.5-pro" }),
           JSON.stringify({ type: "synthetic_message", content: "gemini finished" }),
           JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 700, output_tokens: 60 } }),
         ].join("\n") };

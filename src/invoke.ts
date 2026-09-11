@@ -13,7 +13,8 @@
  *
  * The architecture test asserts the boundary by imports, not by string
  * scan: only this module imports the registry's spawning surface
- * (`adapterFor`), and only builder/planner import `invokeAgent`.
+ * (`adapterFor`), and only builder, planner, reviewer, and scout import
+ * `invokeAgent`.
  */
 
 import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunner, type AgentEnding } from "./provider.js";
@@ -51,6 +52,14 @@ function isolatedAgentDatabase(runId: number): { dir: string; file: string } {
 
 function removeAgentDatabase(dir: string): void {
   rmSync(dir, { recursive: true, force: true });
+}
+
+/** Defend the durable registry even when a test or alternate transport calls
+ * the callback directly instead of passing through an in-tree JSONL runner. */
+function transportSessionId(id: unknown): string | null {
+  if (typeof id !== "string") return null;
+  const normalized = id.trim();
+  return normalized === "" ? null : normalized;
 }
 
 export type ProviderUsage = {
@@ -102,6 +111,9 @@ export type InvokeResult =
       reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody";
       providerVersion: string | null;
       diagnostic: string | null;
+      /** Bounded agent reply when a spawned turn later failed a protocol
+       * gate. Pre-spawn refusals omit it because no reply can exist. */
+      finalMessage?: string | null;
     };
 
 /**
@@ -131,8 +143,50 @@ export async function invokeAgent(
     );
   }
 
+  // Session selection is durable authority, not an argv-only hint. A resumed
+  // turn must name exactly the canonical identity already recorded on THIS
+  // run before anything awaits or spawns. That makes a wrong child-row id a
+  // caller bug in the same class as a wrong provider, and prevents COALESCE's
+  // first-write rule from leaving row A while the process actually resumes B.
+  const recordedSessionId = transportSessionId(run.sessionId);
+  if (run.sessionId !== null && recordedSessionId === null) {
+    throw new Error(`run ${runId} carries an empty durable session identity — nothing resumes an identity the registry cannot name`);
+  }
+  const requestedResumeSessionId =
+    invocation.resumeSession === null ? null : transportSessionId(invocation.resumeSession);
+  if (invocation.resumeSession !== null && requestedResumeSessionId === null) {
+    throw new Error(`run ${runId} was asked to resume an empty session identity`);
+  }
+  if (requestedResumeSessionId !== null && recordedSessionId !== requestedResumeSessionId) {
+    throw new Error(
+      recordedSessionId === null
+        ? `run ${runId} has no durable session identity matching the requested resume ${requestedResumeSessionId}`
+        : `run ${runId} records session ${recordedSessionId} but was asked to resume ${requestedResumeSessionId}`,
+    );
+  }
+
+  const requestedStartSessionId =
+    requestedResumeSessionId !== null || invocation.startSessionId === undefined
+      ? undefined
+      : transportSessionId(invocation.startSessionId);
+  if (requestedResumeSessionId === null && invocation.startSessionId !== undefined && requestedStartSessionId === null) {
+    throw new Error(`run ${runId} was asked to start under an empty session identity`);
+  }
+  const startSessionId = requestedResumeSessionId !== null ? undefined : (requestedStartSessionId ?? undefined);
+  if (recordedSessionId !== null && requestedResumeSessionId === null && startSessionId !== recordedSessionId) {
+    throw new Error(
+      `run ${runId} already records session ${recordedSessionId} but this invocation neither resumes nor starts under it`,
+    );
+  }
+
   const adapter = adapterFor(spec.provider);
-  const argv = adapter.argv({ ...invocation, model: spec.model });
+  const { startSessionId: _untrustedStartSessionId, ...invocationWithoutStart } = invocation;
+  const argv = adapter.argv({
+    ...invocationWithoutStart,
+    model: spec.model,
+    resumeSession: requestedResumeSessionId,
+    ...(startSessionId === undefined ? {} : { startSessionId }),
+  });
   // Long-running phases pass idleTimeoutMs: the process has no absolute
   // deadline and is stopped only after a full no-output interval. Bounded
   // callers (notably repair) keep timeoutMs and its hard wall clock. A
@@ -207,7 +261,6 @@ export async function invokeAgent(
   // alongside a resume would be stamped and later enforced against an
   // envelope that never carried it, a paid protocol refusal. When resuming,
   // the minted id is dropped here, before it is ever stamped.
-  const startSessionId = invocation.resumeSession !== null ? undefined : invocation.startSessionId;
   // The minted session identity (A5): stamped durably BEFORE the start
   // stamp — intent precedes the process, and the envelope must later
   // MATCH this id or the run fails typed.
@@ -254,6 +307,8 @@ export async function invokeAgent(
   else store.stampProviderStart(runId, clock());
 
   const spawn = runner ?? adapter.defaultRunner;
+  let transportAnnouncedSessionId: string | null = null;
+  let transportSessionConflict = false;
   // B3: the attested executable IS the spawned executable — one resolution.
   // A MANAGED key reaches exactly its own provider's child environment
   // (keys.ts): the foreign-credential strip already shed everybody
@@ -294,13 +349,43 @@ export async function invokeAgent(
       // The session registry's crash guarantee (M6.9): the id is stamped the
       // moment the stream announces it, first write wins — a daemon that
       // dies mid-turn still knows which session to offer the successor.
-      onSessionId: id => store.stampRun(runId, { sessionId: id }),
+      onSessionId: id => {
+        const normalized = transportSessionId(id);
+        if (normalized === null) return;
+        if (transportAnnouncedSessionId === null) transportAnnouncedSessionId = normalized;
+        else if (transportAnnouncedSessionId !== normalized) transportSessionConflict = true;
+        store.stampRun(runId, { sessionId: normalized });
+      },
     });
   } finally {
     removeAgentDatabase(isolatedDb.dir);
   }
 
   const envelope = adapter.parse(result.stdout);
+  // The callback is the crash-safe early stamp; the parsed envelope is the
+  // authoritative completed-stream account. Stamp it as a fallback for an
+  // alternate transport. On fresh runs COALESCE makes callback/parser
+  // disagreement visible in the durable row; resumed runs need the separate
+  // callback latch because their row deliberately carries the input session.
+  if (envelope.sessionId !== null) {
+    store.stampRun(runId, { sessionId: envelope.sessionId });
+  }
+  const durableSessionId = store.getRun(runId)?.sessionId ?? null;
+  // The durable id, callback id, and retained envelope must all resolve to
+  // ONE identity. This deliberately includes resumed turns: a provider that
+  // returns a fork has not proved the same-session repair/warm-resume
+  // contract, and COALESCE must not disguise row A / process B as success.
+  const sessionIdentityProblem = transportSessionConflict
+    ? "the provider transport announced conflicting session ids"
+    : transportAnnouncedSessionId !== null && transportAnnouncedSessionId !== envelope.sessionId
+      ? "the retained provider envelope did not match the session identity announced through the transport callback"
+      : durableSessionId !== envelope.sessionId
+        ? envelope.sessionId === null
+          ? "the retained provider envelope did not confirm the durably recorded session id"
+          : requestedResumeSessionId !== null
+            ? "the provider returned a session id different from the exact identity recorded for resume"
+            : "the provider session id was different from the identity durably recorded when the stream initialized"
+        : null;
   store.recordUsage(runId, {
     ...(envelope.tokensIn === null ? {} : { tokensIn: envelope.tokensIn }),
     ...(envelope.tokensOut === null ? {} : { tokensOut: envelope.tokensOut }),
@@ -328,6 +413,20 @@ export async function invokeAgent(
   });
   store.stampTerminalClass(runId, authMode, terminalClass);
 
+  // Contradictory structural identity is a provider protocol failure, not
+  // a session selection problem. Usage above remains recorded because the
+  // process ran and spent, but no downstream handoff or repair may trust
+  // either id from this envelope.
+  if (envelope.protocolError !== null) {
+    return {
+      kind: "refused",
+      reason: "provider-protocol",
+      providerVersion: attested === null ? null : attested.version,
+      diagnostic: envelope.protocolError,
+      finalMessage: envelope.finalMessage,
+    };
+  }
+
   // The minted-identity proof (A5): once the harness initialized, the id
   // it announced must be the id the plane minted — anything else means
   // the session on disk is not the session on record, and repair must
@@ -345,6 +444,34 @@ export async function invokeAgent(
         envelope.sessionId === null
           ? "the harness initialized without announcing its session id"
           : "the harness announced a session id different from the one it was started under",
+      finalMessage: envelope.finalMessage,
+    };
+  }
+
+  // An early transport announcement, a pre-existing resume identity, and
+  // the completed retained envelope must resolve to one canonical id. If
+  // either side is missing or different, no handoff or warm resume may use
+  // this run even though its spend remains on the record.
+  if (sessionIdentityProblem !== null) {
+    return {
+      kind: "refused",
+      reason: "provider-protocol",
+      providerVersion: attested === null ? null : attested.version,
+      diagnostic: sessionIdentityProblem,
+      finalMessage: envelope.finalMessage,
+    };
+  }
+
+  // A provider's explicit failure terminal always wins over its process exit
+  // status. Exit 0 only proves the wrapper closed cleanly; it cannot turn a
+  // failed model turn into a successful build.
+  if (result.code === 0 && envelope.structuralTerminal?.failed === true) {
+    return {
+      kind: "refused",
+      reason: "provider-protocol",
+      providerVersion: attested === null ? null : attested.version,
+      diagnostic: "the provider reported a failed terminal despite exiting with code 0",
+      finalMessage: envelope.finalMessage,
     };
   }
 
@@ -367,6 +494,7 @@ export async function invokeAgent(
         (envelope.initObserved === true
           ? "the harness exited 0 without its success terminal — the stream ended mid-protocol"
           : "the harness exited 0 without ever initializing"),
+      finalMessage: envelope.finalMessage,
     };
   }
 
@@ -483,9 +611,11 @@ export async function invokeHeldAgent(
       events: {
         ...events,
         onSessionId: id => {
-          store.stampRun(runId, { sessionId: id });
+          const normalized = transportSessionId(id);
+          if (normalized === null) return;
+          store.stampRun(runId, { sessionId: normalized });
           try {
-            events?.onSessionId?.(id);
+            events?.onSessionId?.(normalized);
           } catch {
             // Observational.
           }

@@ -242,7 +242,31 @@ install system software, or retry without a bound.
 
 Rollback proves worktree cleanliness and base revision first. `git reset --hard` leaves untracked files behind and can destroy repairable work.
 
-**Malformed agent output gets bounded repair, not an instant 422** — the adapter resumes the same session with a compact error so the agent re-emits only the bad payload (sandcastle's mechanism), twice, then emits `malformed-decision` (hyphenated, like every public reason token).
+**Malformed decisions get bounded repair, not an instant 422** — the adapter
+resumes the same session with a compact error so the agent re-emits only the bad
+payload (sandcastle's mechanism), twice, then emits `malformed-decision`
+(hyphenated, like every public reason token).
+
+Structured planner and reviewer handoffs use the same bound with a stricter
+contract. The plane may strip only transport syntax that cannot change meaning
+(a byte-order mark, one whole-response code fence, or one JSON-string wrapper),
+then applies the ordinary strict parser. A remaining failure returns the exact
+validation errors as inert JSON data to at most two child runs in the same
+resumable session. It never fills a field, extracts JSON from prose, invents
+scope or acceptance criteria. Every reply is sealed as `structured-output`
+evidence on the run that authored it, even when a later provider-status or
+session-identity check rejects it. The planner
+re-proves branch, HEAD, and tree after each turn; the artifact-only reviewer
+re-verifies its sealed scratch bundle under the provider's cwd-restricted,
+read-only review profile. Transport events remain bounded; an over-limit event
+becomes an explicit byte-counted receipt rather than false silence. Accepted
+correction children close in the same transaction as the root plan/decision
+fence or review ingest, and result queries exclude correction bookkeeping. No
+session means no correction, and provider, custody, identity, or tamper failures
+keep their own fail-closed outcome rather than being misclassified as formatting
+work. A reviewer can judge only the exact scope digest and complete criterion
+matrix attached to the source build; later scope revisions never apply
+retroactively.
 
 **Irreversible options never auto-apply**, regardless of stated confidence.
 
@@ -460,10 +484,10 @@ road's existing strike or turn budget.
 Capabilities are EARNED by fixture, not asserted: gemini's terminal
 contract (exit 0 believed only with init + a success `result`), its
 minted session identity (`--session-id` chosen by the plane, the init
-echo proven equal), its per-invocation usage scope, and its fresh-session
-repair road (resume is unproven, so the repair brief quotes the malformed
-payload through the standard per-line fence and assumes no session
-memory) each trace to a test. Unproven fields stay null and fail closed.
+echo proven equal), its native resume-by-UUID in the same working directory,
+and its per-invocation usage scope each trace to a test. A resumed correction
+uses that proven session; minting a new identity and resuming are mutually
+exclusive. Unproven fields stay null and fail closed.
 Money honesty is unchanged: gemini reports tokens, never dollars — it is
 tournament-ineligible in its own words, and every spend rollup states
 measured coverage ("$X measured across N of M runs") instead of summing

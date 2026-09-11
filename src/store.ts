@@ -46,7 +46,7 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 45;
+export const SCHEMA_VERSION = 46;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -797,7 +797,8 @@ export type Artifact = {
     | "report"
     | "proof"
     | "check-log"
-    | "screenshot";
+    | "screenshot"
+    | "structured-output";
   key: string;
   bytesOriginal: number;
   bytesStored: number;
@@ -1783,7 +1784,7 @@ CREATE TABLE IF NOT EXISTS decision (
 CREATE TABLE IF NOT EXISTS artifact (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report','proof','check-log','screenshot')),
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report','proof','check-log','screenshot','structured-output')),
   key            TEXT NOT NULL,
   bytes_original INTEGER NOT NULL,
   bytes_stored   INTEGER NOT NULL,
@@ -3876,6 +3877,12 @@ function migrate(db: Database): void {
   // their exact authority. Only a newly confirmed verify row may bind the
   // digest of an already-approved setup command for one recovery replay.
   addColumn(db, "verify_command", "recovery_setup_digest", "TEXT");
+
+  // v46 (structured-output repair): preserve every planner/reviewer reply
+  // involved in a bounded correction as sealed evidence. This is a CHECK
+  // widening, using the same exact-recognizer copy/rename discipline as
+  // v34 and v38; no historical row changes meaning.
+  rebuildArtifactForV46(db);
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -3920,6 +3927,11 @@ const INCIDENT_COLUMNS = ["id", "run", "kind", "created_at", "resolved_at", "res
 /** v38: artifact.kind additionally admits 'proof','check-log','screenshot'. */
 function V38_ARTIFACT_DDL(name: string): string {
   return V34_ARTIFACT_DDL(name).replace("'revision-brief','base-tree','report'", "'revision-brief','base-tree','report','proof','check-log','screenshot'");
+}
+
+/** v46: raw planner/reviewer protocol attempts become first-class evidence. */
+function V46_ARTIFACT_DDL(name: string): string {
+  return V38_ARTIFACT_DDL(name).replace("'proof','check-log','screenshot'", "'proof','check-log','screenshot','structured-output'");
 }
 
 /** v38: incident.kind additionally admits 'malformed-proof'. */
@@ -3976,7 +3988,10 @@ function rebuildExact(
  * uses for V34_RUN_DDL. */
 export function rebuildArtifactForV34(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact'").get();
-  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(V38_ARTIFACT_DDL("artifact"))) return;
+  if (
+    row !== undefined &&
+    [V38_ARTIFACT_DDL("artifact"), V46_ARTIFACT_DDL("artifact")].some(ddl => canonicalDdl(String(row["sql"])) === canonicalDdl(ddl))
+  ) return;
   rebuildExact(db, "artifact", V17_ARTIFACT_DDL, V34_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
 
@@ -3989,7 +4004,14 @@ export function rebuildIncidentForV34(db: Database): void {
 
 /** v38: artifact.kind admits 'proof','check-log','screenshot'. */
 export function rebuildArtifactForV38(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact'").get();
+  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(V46_ARTIFACT_DDL("artifact"))) return;
   rebuildExact(db, "artifact", [V17_ARTIFACT_DDL, V34_ARTIFACT_DDL], V38_ARTIFACT_DDL, ARTIFACT_COLUMNS);
+}
+
+/** v46: artifact.kind additionally admits structured-output. */
+export function rebuildArtifactForV46(db: Database): void {
+  rebuildExact(db, "artifact", V38_ARTIFACT_DDL, V46_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
 
 /** v38: incident.kind admits 'malformed-proof'. */
@@ -7615,31 +7637,80 @@ export class Store {
 
   // ---- runners ------------------------------------------------------------
 
-  saveRunner(runner: Runner, credentialHash: string, mutation: Mutation = {}): void {
-    this.once(mutation, "saveRunner", () => {
-      this.db
-        .prepare(
-          `INSERT INTO runner
-             (name, host, credential_hash, capacity, repos, agents, registered_at, heartbeat_at, retired_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
-           ON CONFLICT (name) DO UPDATE SET
-             host = excluded.host, credential_hash = excluded.credential_hash,
-             capacity = excluded.capacity, repos = excluded.repos, agents = excluded.agents,
-             registered_at = excluded.registered_at, heartbeat_at = excluded.heartbeat_at,
-             retired_at = NULL`,
-        )
-        .run(
-          runner.name,
-          runner.host,
-          credentialHash,
-          runner.capacity,
-          JSON.stringify(runner.repos),
-          JSON.stringify(runner.agents),
-          runner.registeredAt,
-          runner.heartbeatAt,
-        );
-      return null;
-    });
+  /**
+   * Replace a runner and return the incarnation timestamp actually stored.
+   *
+   * `registered_at` is the reviewer custody generation. Its assignment and
+   * the credential replacement therefore happen under the SAME IMMEDIATE
+   * transaction: concurrent registrations cannot both derive a generation
+   * from the same predecessor. A replacement also advances beyond every
+   * admitted root reviewer it invalidates. That second bound matters when a
+   * coarse/injected clock gives the replacement and reviewer the exact same
+   * millisecond — equality is valid for the original admission, but must
+   * never make its replacement look original too.
+   */
+  saveRunner(runner: Runner, credentialHash: string, mutation: Mutation = {}): Runner {
+    return this.once(mutation, "saveRunner", () =>
+      this.transact(() => {
+        const current = this.db
+          .prepare("SELECT registered_at FROM runner WHERE name = ?")
+          .get(runner.name) as { registered_at: string } | undefined;
+        const latestReviewer = this.db
+          .prepare(
+            `SELECT MAX(root.started_at) AS started_at
+               FROM run AS root
+               JOIN run AS source ON source.id = root.parent_run
+              WHERE root.runner = ? AND root.role = 'reviewer' AND source.role != 'reviewer'`,
+          )
+          .get(runner.name) as { started_at: string | null } | undefined;
+
+        const proposedMs = Date.parse(runner.registeredAt);
+        if (!Number.isFinite(proposedMs)) throw new Error(`runner ${runner.name}'s registration timestamp is invalid`);
+        const lowerBounds = [proposedMs];
+        if (current !== undefined) {
+          const currentMs = Date.parse(current.registered_at);
+          if (!Number.isFinite(currentMs)) throw new Error(`runner ${runner.name}'s stored registration timestamp is invalid`);
+          lowerBounds.push(currentMs + 1);
+        }
+        // Historical review admission remains a fence even if a damaged or
+        // manually repaired database lost the runner row before re-register.
+        const reviewerMs = latestReviewer?.started_at == null ? Number.NaN : Date.parse(latestReviewer.started_at);
+        if (Number.isFinite(reviewerMs)) lowerBounds.push(reviewerMs + 1);
+        const registeredAt = new Date(Math.max(...lowerBounds)).toISOString();
+        const saved: Runner = {
+          ...runner,
+          registeredAt,
+          // Registration supplies equal timestamps. Preserve an explicitly
+          // different heartbeat for fixture callers, but move the ordinary
+          // registration heartbeat with its atomically assigned generation.
+          heartbeatAt: runner.heartbeatAt === runner.registeredAt ? registeredAt : runner.heartbeatAt,
+          retiredAt: null,
+        };
+
+        this.db
+          .prepare(
+            `INSERT INTO runner
+               (name, host, credential_hash, capacity, repos, agents, registered_at, heartbeat_at, retired_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+             ON CONFLICT (name) DO UPDATE SET
+               host = excluded.host, credential_hash = excluded.credential_hash,
+               capacity = excluded.capacity, repos = excluded.repos, agents = excluded.agents,
+               registered_at = excluded.registered_at, heartbeat_at = excluded.heartbeat_at,
+               retired_at = NULL`,
+          )
+          .run(
+            saved.name,
+            saved.host,
+            credentialHash,
+            saved.capacity,
+            JSON.stringify(saved.repos),
+            JSON.stringify(saved.agents),
+            saved.registeredAt,
+            saved.heartbeatAt,
+          );
+        return saved;
+      }),
+    );
   }
 
   /**
@@ -7988,9 +8059,10 @@ export class Store {
   /**
    * The independent reviewer's per-criterion judgements land through ONE
    * proving transaction (the addReviewerComments/D8 pattern, extended):
-   * the authoring run must BE a reviewer, parented to exactly the judged
-   * run, sharing its task, and the artifact must be that run's own
-   * terminal diff. Every judgement row is immutable once inserted.
+   * the authoring run must BE the admitted reviewer or one of its bounded
+   * same-session correction children, sharing its task/provider/model
+   * lineage, and the artifact must be that run's own terminal diff. Every
+   * judgement row is immutable once inserted.
    *
    * Audit hardening (still evidence-review-v1, unreleased): `bindings`
    * names every OTHER input the reviewer was materialized — the scope
@@ -8014,12 +8086,16 @@ export class Store {
    * `matrix_json` already made this contract precise: nothing here is
    * silently rewritten, a surface can always say what the machine
    * attested versus what a reviewer later contradicted).
+   * A non-empty submission must cover that stored matrix exactly once per
+   * id. This repeats the parser's coverage proof at the durable boundary:
+   * no proof verdict, partial/foreign ids, or duplicates insert anything.
    *
-   * Called with `judgements: []` when a review carried comments but no
-   * criteria (every grandfathered review, and every task with no signed
-   * rubric) — a no-op that still proves the reviewer/run/artifact
-   * invariants, mirroring `addReviewerComments`' empty-array behavior.
-   * `bindings` is ignored entirely in that case: there is nothing to bind.
+   * Called with `judgements: []` only when both the signed rubric and stored
+   * matrix are proved empty (every genuinely grandfathered/rubricless
+   * review). It remains a fold no-op, but still proves reviewer lineage,
+   * exact diff, and the absence of signed criteria before comments can land.
+   * Proof/check/screenshot inputs are not materialized for that rubricless
+   * path, so their inventory becomes relevant only to a criterion review.
    */
   ingestCriterionReviews(
     args: {
@@ -8028,7 +8104,8 @@ export class Store {
       artifactId: number;
       author: string;
       judgements: readonly { id: string; judgement: CriterionJudgementWord; note: string }[];
-      bindings?: {
+      bindings: {
+        diffSha: string;
         scopeDigest: string | null;
         headSha: string | null;
         proof: { artifactId: number; sha256: string } | null;
@@ -8043,65 +8120,148 @@ export class Store {
       if (reviewer === null || reviewer.role !== "reviewer") {
         throw new Error(`run ${args.reviewerRunId} is not a reviewer — only the reviewer role authors criterion judgements`);
       }
-      if (reviewer.parentRun !== args.runId) {
+      if (!this.reviewerLineageReaches(args.reviewerRunId, args.runId)) {
         throw new Error(
-          `reviewer ${args.reviewerRunId} reviews run ${String(reviewer.parentRun)}, not ${args.runId} — judgements bind to the run the review was minted for`,
+          `reviewer ${args.reviewerRunId} reviews run outside the bounded lineage for ${args.runId} — judgements bind to the run the review was minted for`,
         );
       }
       const source = this.getRun(args.runId);
       if (source === null || source.taskRef !== reviewer.taskRef) {
         throw new Error(`reviewer ${args.reviewerRunId} and run ${args.runId} do not share a task — nothing is ingested`);
       }
-      const artifact = this.artifactsFor(args.runId).find(one => one.id === args.artifactId);
+      const runArtifacts = this.artifactsFor(args.runId);
+      const artifact = runArtifacts.find(one => one.id === args.artifactId);
       if (artifact === undefined || artifact.kind !== "terminal-diff") {
         throw new Error(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — judgements bind to the exact bytes reviewed`);
       }
+      if (artifact.sha256 !== args.bindings.diffSha) {
+        throw new Error(`run ${args.runId}'s terminal diff no longer matches what the reviewer was shown — nothing is ingested`);
+      }
+
+      // The parser normally proves full rubric coverage before this call,
+      // but the store is the durable trust boundary: direct/replayed callers
+      // must not be able to fold a partial, duplicated, or ungrounded review.
+      // Resolve the exact signed matrix BEFORE inserting anything so every
+      // refusal rolls comments and judgements back together in ingestReview.
+      const existing = this.proofVerdictFor(args.runId);
+      const expectedIds = existing?.matrix.map(row => row.id) ?? [];
+      const expected = new Set(expectedIds);
+      if (expected.size !== expectedIds.length) {
+        throw new Error(`run ${args.runId}'s stored criterion matrix contains duplicate ids — nothing is ingested`);
+      }
+
+      // Scope is historical build authority. A digest-bearing run must still
+      // resolve to those exact signed bytes at ingest, including the legacy
+      // case where those bytes carried no rubric. A run with no digest is
+      // genuinely grandfathered: a scope added later is never retroactive.
+      let signedIds: string[] = [];
+      if (source.scopeDigest !== null) {
+        const taskId = this.externalIdFor(source.taskRef);
+        const liveScope = taskId === null ? null : this.getScope(taskId);
+        if (liveScope === null || liveScope.digest !== source.scopeDigest) {
+          throw new Error(
+            `run ${args.runId}'s scope no longer matches the signed build scope — nothing is ingested`,
+          );
+        }
+        signedIds = liveScope.acceptance.map(criterion => criterion.id);
+      }
+      const signed = new Set(signedIds);
+      if (signed.size !== signedIds.length) {
+        throw new Error(`run ${args.runId}'s signed rubric contains duplicate ids — nothing is ingested`);
+      }
+      const expectedScopeBinding = signed.size === 0 ? null : source.scopeDigest;
+      if (args.bindings.scopeDigest !== expectedScopeBinding) {
+        throw new Error(
+          `run ${args.runId}'s build scope does not match the digest the reviewer was shown — nothing is ingested`,
+        );
+      }
+      if (
+        source.scopeDigest !== null &&
+        (expected.size !== signed.size || [...expected].some(id => !signed.has(id)))
+      ) {
+        throw new Error(
+          `run ${args.runId}'s stored criterion matrix does not match its exact signed criterion set — nothing is ingested`,
+        );
+      }
+      if (existing === null && args.judgements.length > 0) {
+        throw new Error(`run ${args.runId} has no proof verdict to review — nothing is ingested`);
+      }
+
+      const submittedIds = args.judgements.map(judgement => judgement.id);
+      const submitted = new Set(submittedIds);
+      if (submitted.size !== submittedIds.length) {
+        throw new Error(`reviewer ${args.reviewerRunId} submitted a criterion more than once — nothing is ingested`);
+      }
+      if (submitted.size !== expected.size || [...submitted].some(id => !expected.has(id))) {
+        throw new Error(
+          `reviewer ${args.reviewerRunId} did not cover the exact stored criterion set for run ${args.runId} — nothing is ingested`,
+        );
+      }
+      // Only a truly empty stored/signed rubric admits a comments-only
+      // review. This check deliberately comes AFTER deriving both sets: an
+      // empty caller array is input, never proof that there was no rubric.
       if (args.judgements.length === 0) return null;
+      if (existing === null) throw new Error("unreachable criterion review without a proof verdict");
 
       // Re-derive and re-validate every OTHER input the reviewer was
       // shown — never trust the caller's claim about what it showed the
-      // agent. A run with no `bindings` at all (a pre-hardening caller,
-      // or a test exercising the fold in isolation) skips this section
-      // entirely rather than binding to nothing.
+      // agent. Bindings are mandatory: absence must never silently mean
+      // "the reviewer saw nothing".
       const bindings = args.bindings;
-      let screenshotsJson = "[]";
-      if (bindings !== undefined) {
-        if (bindings.scopeDigest !== null) {
-          const taskId = this.externalIdFor(source.taskRef);
-          const liveScope = taskId === null ? null : this.getScope(taskId);
-          if (liveScope === null || liveScope.digest !== bindings.scopeDigest) {
-            throw new Error(
-              `run ${args.runId}'s scope no longer matches the digest the reviewer was shown — the signed rubric moved between materialization and ingest; nothing is ingested`,
-            );
-          }
-        }
-        if (bindings.headSha !== null) {
-          const liveHead = source.headRevision ?? source.baseRevision;
-          if (liveHead !== bindings.headSha) {
-            throw new Error(`run ${args.runId}'s head no longer matches what the reviewer was shown — nothing is ingested`);
-          }
-        }
-        if (bindings.proof !== null) {
-          const proofArtifact = this.artifactsFor(args.runId).find(one => one.id === bindings.proof?.artifactId);
-          if (proofArtifact === undefined || proofArtifact.kind !== "proof" || proofArtifact.sha256 !== bindings.proof.sha256) {
-            throw new Error(`run ${args.runId}'s proof no longer matches what the reviewer was shown — nothing is ingested`);
-          }
-        }
-        if (bindings.checkLog !== null) {
-          const checkLogArtifact = this.artifactsFor(args.runId).find(one => one.id === bindings.checkLog?.artifactId);
-          if (checkLogArtifact === undefined || checkLogArtifact.kind !== "check-log" || checkLogArtifact.sha256 !== bindings.checkLog.sha256) {
-            throw new Error(`run ${args.runId}'s check log no longer matches what the reviewer was shown — nothing is ingested`);
-          }
-        }
-        const runArtifacts = this.artifactsFor(args.runId);
-        for (const shot of bindings.screenshots) {
-          const shotArtifact = runArtifacts.find(one => one.id === shot.artifactId);
-          if (shotArtifact === undefined || shotArtifact.kind !== "screenshot" || shotArtifact.sha256 !== shot.sha256) {
-            throw new Error(`run ${args.runId}'s screenshot set no longer matches what the reviewer was shown — nothing is ingested`);
-          }
-        }
-        screenshotsJson = JSON.stringify(bindings.screenshots.map(s => ({ artifact: s.artifactId, sha256: s.sha256, path: s.path })));
+      const liveHead = source.headRevision ?? source.baseRevision;
+      if (bindings.headSha !== liveHead) {
+        throw new Error(`run ${args.runId}'s head no longer matches what the reviewer was shown — nothing is ingested`);
       }
+
+      // Proof and check-log are singular review inputs. Refuse an ambiguous
+      // live inventory, then require the caller's binding to equal the one
+      // source artifact exactly — including proving absence when it says
+      // null. This closes both forged omissions and mid-review additions.
+      const proofArtifacts = runArtifacts.filter(one => one.kind === "proof");
+      if (proofArtifacts.length > 1) {
+        throw new Error(`run ${args.runId} has more than one proof artifact — the exact review inventory is ambiguous; nothing is ingested`);
+      }
+      const liveProof = proofArtifacts[0] ?? null;
+      if (
+        (liveProof === null) !== (bindings.proof === null) ||
+        (liveProof !== null &&
+          bindings.proof !== null &&
+          (liveProof.id !== bindings.proof.artifactId || liveProof.sha256 !== bindings.proof.sha256))
+      ) {
+        throw new Error(`run ${args.runId}'s proof inventory no longer matches what the reviewer was shown — nothing is ingested`);
+      }
+
+      const checkLogArtifacts = runArtifacts.filter(one => one.kind === "check-log");
+      if (checkLogArtifacts.length > 1) {
+        throw new Error(`run ${args.runId} has more than one check-log artifact — the exact review inventory is ambiguous; nothing is ingested`);
+      }
+      const liveCheckLog = checkLogArtifacts[0] ?? null;
+      if (
+        (liveCheckLog === null) !== (bindings.checkLog === null) ||
+        (liveCheckLog !== null &&
+          bindings.checkLog !== null &&
+          (liveCheckLog.id !== bindings.checkLog.artifactId || liveCheckLog.sha256 !== bindings.checkLog.sha256))
+      ) {
+        throw new Error(`run ${args.runId}'s check-log inventory no longer matches what the reviewer was shown — nothing is ingested`);
+      }
+
+      // Screenshots are plural: equality means the complete id/hash/capture
+      // set, not merely that every caller-supplied member happens to exist.
+      const liveScreenshots = runArtifacts.filter(one => one.kind === "screenshot");
+      const boundScreenshots = new Map(bindings.screenshots.map(shot => [shot.artifactId, shot]));
+      if (
+        boundScreenshots.size !== bindings.screenshots.length ||
+        liveScreenshots.length !== bindings.screenshots.length ||
+        liveScreenshots.some(shot => {
+          const bound = boundScreenshots.get(shot.id);
+          return bound === undefined || bound.sha256 !== shot.sha256 || bound.path !== shot.capture;
+        })
+      ) {
+        throw new Error(`run ${args.runId}'s screenshot inventory no longer matches what the reviewer was shown — nothing is ingested`);
+      }
+      const screenshotsJson = JSON.stringify(
+        liveScreenshots.map(shot => ({ artifact: shot.id, sha256: shot.sha256, path: shot.capture })),
+      );
 
       for (const judgement of args.judgements) {
         this.db
@@ -8121,17 +8281,15 @@ export class Store {
             artifact.sha256,
             args.author,
             now.toISOString(),
-            bindings?.scopeDigest ?? null,
-            bindings?.headSha ?? null,
-            bindings?.proof?.artifactId ?? null,
-            bindings?.proof?.sha256 ?? null,
-            bindings?.checkLog?.artifactId ?? null,
-            bindings?.checkLog?.sha256 ?? null,
+            bindings.scopeDigest,
+            bindings.headSha,
+            bindings.proof?.artifactId ?? null,
+            bindings.proof?.sha256 ?? null,
+            bindings.checkLog?.artifactId ?? null,
+            bindings.checkLog?.sha256 ?? null,
             screenshotsJson,
           );
       }
-      const existing = this.proofVerdictFor(args.runId);
-      if (existing === null) return null;
       const folded = foldReview(
         { verdict: existing.verdict, reasons: existing.reasons, matrix: existing.matrix },
         args.judgements.map((j): CriterionJudgement => ({ id: j.id, judgement: j.judgement, note: j.note, author: args.author })),
@@ -8148,7 +8306,12 @@ export class Store {
    * caller — reentrant, so never actually torn in production, but two
    * calls a crash between could still leave comments landed with no
    * judgements, or vice versa. This is the ONE call the reviewer pass
-   * makes: everything above rolls back together, or none of it lands.
+   * makes: everything above rolls back together, or none of it lands. The
+   * admitted root reviewer and, when present, the correction child that
+   * authored the accepted payload are concluded in this transaction too.
+   * That terminal run state is the replay latch: committed review rows can
+   * never be left beside an open root that could author them again after a
+   * process crash.
    */
   ingestReview(
     args: {
@@ -8158,7 +8321,8 @@ export class Store {
       author: string;
       comments: readonly { path: string; line: number | null; note: string; severity: "note" | "question" | "problem" }[];
       judgements: readonly { id: string; judgement: CriterionJudgementWord; note: string }[];
-      bindings?: {
+      bindings: {
+        diffSha: string;
         scopeDigest: string | null;
         headSha: string | null;
         proof: { artifactId: number; sha256: string } | null;
@@ -8169,6 +8333,31 @@ export class Store {
     now: Date,
   ): { commentIds: number[]; folded: { verdict: ProofVerdictRow["verdict"] } | null } {
     return this.transact(() => {
+      // The last provider turn and this write are separated by application
+      // code. Re-prove the admitted runner incarnation inside the SAME
+      // transaction that lands the review so a rotation cannot win that
+      // final gap. The caller maps this named error back to its typed
+      // runner-custody outcome.
+      if (!this.proveRunnerCustodyForSpawn(args.reviewerRunId, now)) {
+        const error = new Error(
+          `reviewer ${args.reviewerRunId}'s runner custody no longer stands — nothing is ingested`,
+        );
+        error.name = "ReviewerCustodyError";
+        throw error;
+      }
+      const authoringReviewer = this.getRun(args.reviewerRunId);
+      const rootReviewer = authoringReviewer === null ? null : this.reviewerRoot(authoringReviewer, true);
+      if (rootReviewer === null) {
+        throw new Error(`reviewer ${args.reviewerRunId} no longer has a live, provider-started admitted lineage — nothing is ingested`);
+      }
+      const terminalDiff = this.artifactsFor(args.runId).find(one => one.id === args.artifactId);
+      if (
+        terminalDiff === undefined ||
+        terminalDiff.kind !== "terminal-diff" ||
+        terminalDiff.sha256 !== args.bindings.diffSha
+      ) {
+        throw new Error(`run ${args.runId}'s terminal diff no longer matches what the reviewer was shown — nothing is ingested`);
+      }
       const commentIds = this.addReviewerComments(
         { reviewerRunId: args.reviewerRunId, runId: args.runId, artifactId: args.artifactId, author: args.author, comments: args.comments },
         now,
@@ -8180,10 +8369,26 @@ export class Store {
           artifactId: args.artifactId,
           author: args.author,
           judgements: args.judgements,
-          ...(args.bindings === undefined ? {} : { bindings: args.bindings }),
+          bindings: args.bindings,
         },
         now,
       );
+      if (args.reviewerRunId !== rootReviewer.id) {
+        this.finishRun(args.reviewerRunId, {
+          outcome: "no-change",
+          reason: "structured review repaired",
+          now,
+        });
+      }
+      const judged =
+        args.judgements.length > 0
+          ? `, ${args.judgements.length} judgement(s)${folded?.verdict === "refuted" ? " (review-contradicted)" : ""}`
+          : "";
+      this.finishRun(rootReviewer.id, {
+        outcome: "no-change",
+        reason: `reviewed — ${commentIds.length} comment(s)${judged}`,
+        now,
+      });
       return { commentIds, folded };
     });
   }
@@ -9280,6 +9485,13 @@ export class Store {
         const railed = this.reserveModeRail(repo, 1, now);
         if (!railed.ok) return { ok: false as const, reason: "railed" as const, rail: railed.rail, detail: railed.detail };
       }
+      // The authenticated incarnation may itself have been assigned one or
+      // more logical milliseconds past this coarse/injected wall clock. Make
+      // the admitted root no older than that incarnation: equality means
+      // "this runner admitted this review"; the next atomic replacement is
+      // forced strictly past both and therefore fences it.
+      const registeredMs = Date.parse(identity.runner.registeredAt);
+      const admittedAt = new Date(Math.max(now.getTime(), registeredMs));
       const reviewerRunId = this.startRun({
         taskRef: Number(row["taskRef"]),
         leaseId: `review:${requestId}:${now.getTime().toString(36)}`,
@@ -9288,7 +9500,7 @@ export class Store {
         parentRun: sourceRun,
         provider: spec.provider,
         ...(spec.model === null ? {} : { model: spec.model }),
-        now,
+        now: admittedAt,
       });
       this.consumeReviewRequest(requestId, "dispatched", now);
       return {
@@ -9303,11 +9515,12 @@ export class Store {
 
   /**
    * The reviewer's comments land through ONE proving transaction (D8):
-   * the authoring run must BE a reviewer, must be parented to exactly the
-   * commented run, must share its task, and the artifact must be the
-   * commented run's own terminal diff. Anything else is an invariant
-   * breach — thrown, nothing inserted — because a comment bound to bytes
-   * the reviewer never saw is worse than no comment.
+   * the authoring run must BE the root reviewer or one of its at-most-two
+   * same-session structured-output repair children, must share the source's
+   * task/provider/model lineage, and the artifact must be the commented
+   * run's own terminal diff. Anything else is an invariant breach — thrown,
+   * nothing inserted — because a comment bound to bytes the reviewer never
+   * saw is worse than no comment.
    */
   addReviewerComments(
     args: {
@@ -9324,9 +9537,9 @@ export class Store {
       if (reviewer === null || reviewer.role !== "reviewer") {
         throw new Error(`run ${args.reviewerRunId} is not a reviewer — only the reviewer role authors reviewer comments`);
       }
-      if (reviewer.parentRun !== args.runId) {
+      if (!this.reviewerLineageReaches(args.reviewerRunId, args.runId)) {
         throw new Error(
-          `reviewer ${args.reviewerRunId} reviews run ${String(reviewer.parentRun)}, not ${args.runId} — comments bind to the run the review was minted for`,
+          `reviewer ${args.reviewerRunId} reviews run outside the bounded lineage for ${args.runId} — comments bind to the run the review was minted for`,
         );
       }
       const source = this.getRun(args.runId);
@@ -9360,6 +9573,73 @@ export class Store {
       }
       return ids;
     });
+  }
+
+  /**
+   * Prove an actual authoring reviewer is either the admitted root or one of
+   * its two linear correction children. The database's one-child-per-parent
+   * reviewer index prevents branching; this walk prevents an arbitrary or
+   * unbounded reviewer chain from borrowing another run's sealed diff.
+   */
+  private reviewerLineageReaches(reviewerRunId: number, sourceRunId: number): boolean {
+    const first = this.getRun(reviewerRunId);
+    if (first === null || first.role !== "reviewer") return false;
+    const root = this.reviewerRoot(first, true);
+    if (root === null || root.parentRun !== sourceRunId) return false;
+    const source = this.getRun(sourceRunId);
+    return source !== null && source.role !== "reviewer" && source.taskRef === first.taskRef;
+  }
+
+  /** Find the admitted root behind a reviewer correction, proving the
+   * bounded, same-task/provider/model chain on the way. The accepted leaf
+   * and admitted root must still be open; every superseded correction
+   * between them must already be terminal failed. That state sequence is
+   * the durable proof this is one linear correction attempt, not several
+   * simultaneously live authors whose eventual outputs could all ingest. */
+  private reviewerRoot(first: Run, requireProviderStarted = false): Run | null {
+    if (first.role !== "reviewer" || first.outcome !== null) return null;
+    const provider = first.provider;
+    const model = first.model;
+    const taskRef = first.taskRef;
+    const runner = first.runner;
+    const leaseId = first.leaseId;
+    if (requireProviderStarted && first.providerStartedAt === null) return null;
+    let cursor = first;
+    const lineage: Run[] = [first];
+    let repairEdges = 0;
+    while (cursor.parentRun !== null) {
+      const parent = this.getRun(cursor.parentRun);
+      if (parent === null) return null;
+      if (parent.role !== "reviewer") {
+        if (
+          parent.taskRef !== taskRef ||
+          cursor.outcome !== null ||
+          (requireProviderStarted && cursor.providerStartedAt === null)
+        ) return null;
+        // `lineage` is leaf -> ... -> root. Exclude both endpoints: only
+        // superseded correction attempts belong in this failed-state check.
+        if (lineage.slice(1, -1).some(run => run.outcome !== "failed")) return null;
+        return cursor;
+      }
+      repairEdges += 1;
+      if (
+        repairEdges > 2 ||
+        parent.taskRef !== taskRef ||
+        parent.provider !== provider ||
+        parent.model !== model ||
+        parent.runner !== runner ||
+        cursor.runner !== runner ||
+        parent.leaseId !== leaseId ||
+        cursor.leaseId !== leaseId ||
+        (requireProviderStarted && parent.providerStartedAt === null) ||
+        cursor.sessionId === null ||
+        parent.sessionId === null ||
+        cursor.sessionId !== parent.sessionId
+      ) return null;
+      lineage.push(parent);
+      cursor = parent;
+    }
+    return null;
   }
 
   /** Stamp a task as the revision it is: source task + immutable brief. */
@@ -9713,10 +9993,14 @@ export class Store {
       // is a marker, not a claim). Identity, liveness, and membership are
       // proven above; INCARNATION stands in for lease currency (round-2
       // finding 3): a rotation re-registers, which stamps a NEWER
-      // registered_at — a runner row younger than the run means the
-      // credential that admitted this review is not the one now answering
-      // to the name, and the stale process never spawns under it.
-      if (run.role === "reviewer") return found.runner.registeredAt <= run.startedAt;
+      // registered_at. Structured-output repair children are opened after
+      // the original admission, so their own started_at cannot be the
+      // credential fence; every descendant compares against the admitted
+      // ROOT reviewer's timestamp instead.
+      if (run.role === "reviewer") {
+        const root = this.reviewerRoot(run);
+        return root !== null && found.runner.registeredAt <= root.startedAt;
+      }
       return this.currentLiveLease(run.taskRef, now) === run.leaseId;
     });
   }
@@ -10935,7 +11219,8 @@ export class Store {
                -- own — excluded so it never outranks the builder's own
                -- attempt as "the latest".
                SELECT MAX(final.id) FROM run AS final
-               WHERE final.task_ref = task_ref.id AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL AND final.role != 'reviewer'
+               WHERE final.task_ref = task_ref.id AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL
+                 AND final.role IN ('builder','scout')
              )
              LEFT JOIN proof_verdict ON proof_verdict.run = run.id
             WHERE task_ref.repo IN (${marks})
@@ -11960,7 +12245,7 @@ export class Store {
     const superseded = this.db
       .prepare(
         `SELECT 1 AS hit FROM run
-          WHERE task_ref = ? AND id > ? AND outcome IN ('built','no-change') LIMIT 1`,
+          WHERE task_ref = ? AND id > ? AND role = 'builder' AND outcome IN ('built','no-change') LIMIT 1`,
       )
       .get(taskRef, parked.id);
     if (superseded !== undefined) return null;
@@ -15417,7 +15702,8 @@ export class Store {
          LEFT JOIN run ON run.id = (
            SELECT MAX(final.id) FROM run AS final
            WHERE final.task_ref = completed.ref_id
-             AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL AND final.role != 'reviewer'
+             AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL
+             AND final.role IN ('builder','scout')
          )
          LEFT JOIN publication ON publication.run = run.id
          LEFT JOIN proof_verdict ON proof_verdict.run = run.id
@@ -15812,7 +16098,8 @@ export class Store {
       .prepare(
         `SELECT COUNT(*) AS n FROM run
            JOIN task_ref ON task_ref.id = run.task_ref
-          WHERE task_ref.repo = ? AND run.outcome = 'built' AND run.finished_at IS NOT NULL AND run.finished_at >= ?`,
+          WHERE task_ref.repo = ? AND run.role IN ('builder','scout')
+            AND run.outcome IN ('built','no-change') AND run.finished_at IS NOT NULL AND run.finished_at >= ?`,
       )
       .get(repo, since) as { n: number };
     return { waiting: waiting, queued: Number(q.queued ?? 0), running: Number(q.running ?? 0), doneRecently: Number(done.n) };

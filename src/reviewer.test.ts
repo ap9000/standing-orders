@@ -43,6 +43,8 @@ const spoken = (payload: unknown): string => JSON.stringify({ result: JSON.strin
  * `--json-schema` — the review-phase-only structured-output field
  * `claudeEnvelopeOf` now prefers over the plain `result` string. */
 const spokenStructured = (payload: unknown): string => JSON.stringify({ structured_output: payload });
+const spokenInSession = (payload: unknown, sessionId = "review-session-1"): string =>
+  JSON.stringify({ result: typeof payload === "string" ? payload : JSON.stringify(payload), session_id: sessionId });
 /** A harmless spoken reply for fixtures where the content never matters
  * (the pass returns before it would be read). */
 const SAID = spoken({ version: 1, comments: [] });
@@ -289,6 +291,56 @@ describe("the reviewer role in the store", () => {
     expect(store.proveRunnerCustodyForSpawn(admitted.reviewerRunId, new Date(T0.getTime() + 5_000))).toBe(false);
   });
 
+  test("a same-millisecond runner replacement still fences an admitted reviewer", () => {
+    // The original runner is older than the reviewer. The replacement lands
+    // in the reviewer's exact millisecond, so simply maxing wall time against
+    // the prior registration would make both incarnations look identical.
+    const admissionTime = new Date(T0.getTime() + 1_000);
+    const asked = store.requestReview(builtRun, "alex", admissionTime);
+    if (!asked.ok) throw new Error("request failed");
+    const admitted = store.admitReview(
+      asked.id,
+      { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null },
+      admissionTime,
+    );
+    if (!admitted.ok) throw new Error("admission failed");
+
+    register(store, {
+      name: "builder-1",
+      host: "replacement",
+      repos: [REPO],
+      now: admissionTime,
+      newToken: () => "tok-replaced-in-the-same-millisecond",
+    });
+
+    expect(store.proveRunnerCustodyForSpawn(admitted.reviewerRunId, admissionTime)).toBe(false);
+  });
+
+  test("a reviewer admitted after a logical same-millisecond replacement belongs to the new incarnation", () => {
+    const replacement = register(store, {
+      name: "builder-1",
+      host: "replacement",
+      repos: [REPO],
+      now: T0,
+      newToken: () => "tok-current-same-millisecond",
+    });
+    // Its atomically assigned generation is one logical millisecond ahead
+    // of T0. Admission at the same coarse wall time must bind to that current
+    // generation, not falsely reject it as a future replacement.
+    expect(Date.parse(replacement.runner.registeredAt)).toBe(T0.getTime() + 1);
+    const asked = store.requestReview(builtRun, "alex", T0);
+    if (!asked.ok) throw new Error("request failed");
+    const admitted = store.admitReview(
+      asked.id,
+      { runner: "builder-1", token: replacement.token, provider: "claude", model: null },
+      T0,
+    );
+    if (!admitted.ok) throw new Error("admission failed");
+
+    expect(store.getRun(admitted.reviewerRunId)?.startedAt).toBe(replacement.runner.registeredAt);
+    expect(store.proveRunnerCustodyForSpawn(admitted.reviewerRunId, T0)).toBe(true);
+  });
+
   test("startRun's reviewer arm opens without a workspace; the CHECK refuses every mixed shape", () => {
     const reviewer = store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0 });
     const row = store.getRun(reviewer);
@@ -353,6 +405,7 @@ describe("the reviewer role in the store", () => {
 
   test("addReviewerComments proves role, parentage, task, and artifact binding", () => {
     const reviewer = store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0 });
+    store.stampProviderStart(reviewer, T0);
     const comment = { path: "src/payouts.ts", line: 2, note: "the limiter is never awaited", severity: "problem" as const };
 
     // A non-reviewer cannot author.
@@ -395,6 +448,288 @@ describe("the reviewer role in the store", () => {
     expect(all[1]?.severity).toBeNull();
   });
 
+  test("a correction child cannot borrow another runner or lease", () => {
+    const rootReviewer = store.startRun({
+      taskRef,
+      leaseId: "review:root",
+      runner: "builder-1",
+      role: "reviewer",
+      parentRun: builtRun,
+      provider: "claude",
+      sessionId: "review-session",
+      now: T0,
+    });
+    store.stampProviderStart(rootReviewer, T0);
+    const child = store.startRun({
+      taskRef,
+      leaseId: "review:root",
+      runner: "builder-1",
+      role: "reviewer",
+      parentRun: rootReviewer,
+      provider: "claude",
+      sessionId: "review-session",
+      now: T0,
+    });
+    store.stampProviderStart(child, T0);
+    store.raw().prepare("UPDATE run SET runner = ?, lease_id = ? WHERE id = ?").run("builder-2", "borrowed", child);
+
+    expect(() =>
+      store.addReviewerComments(
+        {
+          reviewerRunId: child,
+          runId: builtRun,
+          artifactId: diffArtifact,
+          author: "reviewer:claude",
+          comments: [{ path: "src/payouts.ts", line: 2, note: "borrowed", severity: "problem" }],
+        },
+        T0,
+      ),
+    ).toThrow(/bounded lineage/);
+  });
+
+  test("a later correction cannot ingest until every superseded correction is terminal failed", () => {
+    const root = store.startRun({
+      taskRef,
+      leaseId: "review:linear",
+      runner: "builder-1",
+      role: "reviewer",
+      parentRun: builtRun,
+      provider: "claude",
+      sessionId: "review-session",
+      now: T0,
+    });
+    const firstCorrection = store.startRun({
+      taskRef,
+      leaseId: "review:linear",
+      runner: "builder-1",
+      role: "reviewer",
+      parentRun: root,
+      provider: "claude",
+      sessionId: "review-session",
+      now: T0,
+    });
+    const acceptedLeaf = store.startRun({
+      taskRef,
+      leaseId: "review:linear",
+      runner: "builder-1",
+      role: "reviewer",
+      parentRun: firstCorrection,
+      provider: "claude",
+      sessionId: "review-session",
+      now: T0,
+    });
+    for (const run of [root, firstCorrection, acceptedLeaf]) store.stampProviderStart(run, T0);
+    const diffSha = store.getArtifact(diffArtifact)?.sha256;
+    if (diffSha === undefined) throw new Error("missing diff fixture");
+    const review = {
+      reviewerRunId: acceptedLeaf,
+      runId: builtRun,
+      artifactId: diffArtifact,
+      author: "reviewer:claude",
+      comments: [{ path: "src/payouts.ts", line: 2, note: "only the accepted leaf may land", severity: "problem" as const }],
+      judgements: [],
+      bindings: {
+        diffSha,
+        scopeDigest: null,
+        headSha: "head-aaa",
+        proof: null,
+        checkLog: null,
+        screenshots: [],
+      },
+    };
+
+    // root(open) -> correction(open) -> accepted leaf(open) is not a valid
+    // correction history. The proving transaction refuses it before the
+    // comment insert, and leaves every run unchanged.
+    expect(() => store.ingestReview(review, T0)).toThrow(/nothing is ingested/);
+    expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+    expect([root, firstCorrection, acceptedLeaf].map(run => store.getRun(run)?.outcome)).toEqual([null, null, null]);
+
+    // Once the superseded attempt is truthfully terminal failed, the exact
+    // same leaf is a valid lineage and root + leaf finalize atomically.
+    store.finishRun(firstCorrection, { outcome: "failed", reason: "reviewer-malformed-review", now: T0 });
+    expect(store.proveRunnerCustodyForSpawn(acceptedLeaf, T0)).toBe(true);
+    expect(store.ingestReview(review, T0).commentIds).toHaveLength(1);
+    expect(store.getRun(root)).toMatchObject({ outcome: "no-change", reason: "reviewed — 1 comment(s)" });
+    expect(store.getRun(firstCorrection)).toMatchObject({ outcome: "failed", reason: "reviewer-malformed-review" });
+    expect(store.getRun(acceptedLeaf)).toMatchObject({ outcome: "no-change", reason: "structured review repaired" });
+    expect(store.liveDiffComments(builtRun)).toHaveLength(1);
+  });
+
+  test("ingest closes a root-authored review atomically and refuses a crash replay", () => {
+    const reviewer = store.startRun({
+      taskRef,
+      leaseId: "review:atomic-root",
+      runner: "builder-1",
+      role: "reviewer",
+      parentRun: builtRun,
+      provider: "claude",
+      now: T0,
+    });
+    store.stampProviderStart(reviewer, T0);
+    const diffSha = store.getArtifact(diffArtifact)?.sha256;
+    if (diffSha === undefined) throw new Error("missing diff fixture");
+    const review = {
+      reviewerRunId: reviewer,
+      runId: builtRun,
+      artifactId: diffArtifact,
+      author: "reviewer:claude",
+      comments: [{ path: "src/payouts.ts", line: 2, note: "atomic", severity: "problem" as const }],
+      judgements: [],
+      bindings: {
+        diffSha,
+        scopeDigest: null,
+        headSha: "head-aaa",
+        proof: null,
+        checkLog: null,
+        screenshots: [],
+      },
+    };
+
+    expect(store.ingestReview(review, T0).commentIds).toHaveLength(1);
+    expect(store.getRun(reviewer)).toMatchObject({ outcome: "no-change", reason: "reviewed — 1 comment(s)" });
+    expect(store.liveDiffComments(builtRun)).toHaveLength(1);
+
+    // Simulate the process returning after the commit without observing its
+    // result. The closed root is part of that same commit, so replay cannot
+    // duplicate the review even though the caller submits identical bytes.
+    expect(() => store.ingestReview(review, T0)).toThrow(/nothing is ingested/);
+    expect(store.liveDiffComments(builtRun)).toHaveLength(1);
+  });
+
+  test("a root finalization failure rolls the entire review ingest back", () => {
+    const reviewer = store.startRun({
+      taskRef,
+      leaseId: "review:atomic-rollback",
+      runner: "builder-1",
+      role: "reviewer",
+      parentRun: builtRun,
+      provider: "claude",
+      now: T0,
+    });
+    store.stampProviderStart(reviewer, T0);
+    const diffSha = store.getArtifact(diffArtifact)?.sha256;
+    if (diffSha === undefined) throw new Error("missing diff fixture");
+    store.raw().exec(
+      `CREATE TRIGGER refuse_reviewer_finish
+         BEFORE UPDATE OF outcome ON run
+         WHEN OLD.id = ${reviewer}
+         BEGIN
+           SELECT RAISE(ABORT, 'simulated finalization crash');
+         END`,
+    );
+
+    expect(() =>
+      store.ingestReview(
+        {
+          reviewerRunId: reviewer,
+          runId: builtRun,
+          artifactId: diffArtifact,
+          author: "reviewer:claude",
+          comments: [{ path: "src/payouts.ts", line: 2, note: "must roll back", severity: "problem" }],
+          judgements: [],
+          bindings: {
+            diffSha,
+            scopeDigest: null,
+            headSha: "head-aaa",
+            proof: null,
+            checkLog: null,
+            screenshots: [],
+          },
+        },
+        T0,
+      ),
+    ).toThrow(/simulated finalization crash/);
+    expect(store.getRun(reviewer)?.outcome).toBeNull();
+    expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+  });
+
+  test("criterion ingest requires one judgement for every stored matrix id and rolls malformed sets back", () => {
+    const reviewer = store.startRun({
+      taskRef,
+      leaseId: "review:criterion-set",
+      runner: "builder-1",
+      role: "reviewer",
+      parentRun: builtRun,
+      provider: "claude",
+      now: T0,
+    });
+    store.stampProviderStart(reviewer, T0);
+    const diffSha = store.getArtifact(diffArtifact)?.sha256;
+    if (diffSha === undefined) throw new Error("missing diff fixture");
+    const bindings = {
+      diffSha,
+      scopeDigest: null,
+      headSha: "head-aaa",
+      proof: null,
+      checkLog: null,
+      screenshots: [],
+    };
+    const comment = { path: "src/payouts.ts", line: 2, note: "must be atomic", severity: "problem" as const };
+    const ingest = (judgements: readonly { id: string; judgement: "upholds"; note: string }[]) =>
+      store.ingestReview(
+        {
+          reviewerRunId: reviewer,
+          runId: builtRun,
+          artifactId: diffArtifact,
+          author: "reviewer:claude",
+          comments: [comment],
+          judgements,
+          bindings,
+        },
+        T0,
+      );
+
+    expect(() => ingest([{ id: "c1", judgement: "upholds", note: "looks right" }])).toThrow(/no proof verdict/);
+    expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+    expect(store.getRun(reviewer)?.outcome).toBeNull();
+
+    const matrix: CriterionMatrixRow[] = ["c1", "c2"].map(id => ({
+      id,
+      statement: `criterion ${id}`,
+      requiredEvidence: ["manual-review"],
+      state: "manual-review",
+      detail: [],
+      answered: [],
+      review: null,
+    }));
+    store.saveProofVerdict(builtRun, "short", ["needs review"], T0, matrix);
+
+    // An empty caller array is not proof that no rubric exists. The store
+    // re-derives the matrix before its comments-only fast path, so a direct
+    // or replayed caller cannot spend the one review without judging c1/c2.
+    expect(() => ingest([])).toThrow(/exact stored criterion set/);
+    expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+    expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+    expect(store.getRun(reviewer)?.outcome).toBeNull();
+
+    expect(() =>
+      ingest([
+        { id: "c1", judgement: "upholds", note: "first" },
+        { id: "c1", judgement: "upholds", note: "duplicate" },
+      ]),
+    ).toThrow(/more than once/);
+    expect(() =>
+      ingest([
+        { id: "c1", judgement: "upholds", note: "present" },
+        { id: "c3", judgement: "upholds", note: "not signed" },
+      ]),
+    ).toThrow(/exact stored criterion set/);
+    expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+    expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+    expect(store.proofVerdictFor(builtRun)).toMatchObject({ verdict: "short", machineVerdict: null });
+    expect(store.getRun(reviewer)?.outcome).toBeNull();
+
+    expect(
+      ingest([
+        { id: "c1", judgement: "upholds", note: "covered" },
+        { id: "c2", judgement: "upholds", note: "covered" },
+      ]).commentIds,
+    ).toHaveLength(1);
+    expect(store.criterionReviewsFor(builtRun).map(row => row.criterionId)).toEqual(["c1", "c2"]);
+    expect(store.getRun(reviewer)?.outcome).toBe("no-change");
+  });
+
   describe("the pass itself", () => {
     let scratchRoot: string;
     beforeEach(() => {
@@ -403,9 +738,9 @@ describe("the reviewer role in the store", () => {
       // ONE role that holds no task claim — admitReview's synthetic lease
       // id is a marker, and the custody proof's reviewer arm checks
       // identity, liveness, and repo membership WITHOUT lease currency.
-      // The registration is therefore the whole fixture: no claim exists
-      // here, which is exactly the production road.
-      register(store, { name: "builder-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-builder-1" });
+      // The outer fixture already registered builder-1. Registering the same
+      // name again would truthfully be a new runner incarnation and must
+      // fence a review admitted under the old one.
     });
     afterEach(() => {
       rmSync(scratchRoot, { recursive: true, force: true });
@@ -441,6 +776,323 @@ describe("the reviewer role in the store", () => {
       expect(readdirSync(scratchRoot)).toHaveLength(0);
     });
 
+    test("a mutable caller cannot reroute a durably admitted reviewer", async () => {
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("request failed");
+      const admitted = store.admitReview(
+        asked.id,
+        { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: "claude-opus-4-1" },
+        T0,
+      );
+      if (!admitted.ok) throw new Error("admission failed");
+      let calls = 0;
+      const result = await review(store, {
+        sourceRunId: builtRun,
+        reviewerRunId: admitted.reviewerRunId,
+        taskId: "t-1",
+        taskTitle: "wire the payout guard",
+        provider: "codex",
+        model: null,
+        now: T0,
+        evidenceRoot,
+        scratchRoot,
+        agent: async () => {
+          calls += 1;
+          return { ...OK, stdout: SAID };
+        },
+      });
+
+      expect(result).toMatchObject({ ok: false, reason: "review-admission" });
+      expect(calls).toBe(0);
+      expect(store.getRun(admitted.reviewerRunId)?.providerStartedAt).toBeNull();
+    });
+
+    test("accepted correction and its admitted root both close atomically with ingest", async () => {
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("request failed");
+      const admitted = store.admitReview(
+        asked.id,
+        { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null },
+        T0,
+      );
+      if (!admitted.ok) throw new Error("admission failed");
+      let calls = 0;
+      const result = await review(store, {
+        sourceRunId: builtRun,
+        reviewerRunId: admitted.reviewerRunId,
+        taskId: "t-1",
+        taskTitle: "wire the payout guard",
+        provider: "claude",
+        model: null,
+        now: T0,
+        evidenceRoot,
+        scratchRoot,
+        agent: async () => {
+          calls += 1;
+          return {
+            ...OK,
+            stdout:
+              calls === 1
+                ? spokenInSession("not json")
+                : spokenInSession({ version: 1, comments: [{ path: "src/payouts.ts", line: 2, note: "fixed" }] }),
+          };
+        },
+      });
+
+      expect(result).toMatchObject({ ok: true, commentCount: 1 });
+      const reviews = store.runsFor(taskRef).filter(run => run.role === "reviewer").sort((a, b) => a.id - b.id);
+      expect(reviews[0]).toMatchObject({
+        id: admitted.reviewerRunId,
+        outcome: "no-change",
+        reason: "reviewed — 1 comment(s)",
+      });
+      expect(reviews[1]).toMatchObject({ outcome: "no-change", reason: "structured review repaired" });
+      expect(store.liveDiffComments(builtRun)[0]?.reviewerRun).toBe(reviews[1]?.id);
+    });
+
+    test("a malformed reply is corrected in the same session and the child reviewer authors the one ingest", async () => {
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("ask failed");
+      let calls = 0;
+      const argvSeen: string[][] = [];
+      const timeouts: (number | undefined)[] = [];
+      const repairingAgent: Runner = async (_file, args, options) => {
+        calls += 1;
+        argvSeen.push([...args]);
+        timeouts.push(options?.timeoutMs);
+        if (calls === 1) {
+          return { ...OK, stdout: spokenInSession({ version: 1, comments: "not-an-array" }) };
+        }
+        const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+        expect(prompt).toContain("comments must be an array");
+        expect(prompt).toContain("complete signed criterion-id set");
+        expect(prompt).toContain("cannot-tell");
+        return {
+          ...OK,
+          stdout: spokenInSession({
+            version: 1,
+            comments: [{ path: "src/payouts.ts", line: 2, note: "the limiter is never awaited", severity: "problem" }],
+          }),
+        };
+      };
+
+      const reports = await passOnce(repairingAgent);
+      expect(reports).toEqual([{ requestId: asked.id, run: builtRun, outcome: "reviewed", detail: "1 comment(s)" }]);
+      expect(calls).toBe(2);
+      expect(argvSeen[0]).not.toContain("--resume");
+      expect(argvSeen[1]).toEqual(expect.arrayContaining(["--resume", "review-session-1", "--max-turns", "4"]));
+      expect(timeouts).toEqual([undefined, 5 * 60_000]);
+
+      const reviewRuns = store.runsFor(taskRef).filter(run => run.role === "reviewer").sort((a, b) => a.id - b.id);
+      expect(reviewRuns).toHaveLength(2);
+      const rootReview = reviewRuns[0];
+      const correction = reviewRuns[1];
+      expect(rootReview).toMatchObject({ parentRun: builtRun, outcome: "no-change", sessionId: "review-session-1" });
+      expect(correction).toMatchObject({ parentRun: rootReview?.id, outcome: "no-change", reason: "structured review repaired", sessionId: "review-session-1" });
+      const comments = store.liveDiffComments(builtRun);
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.reviewerRun).toBe(correction?.id);
+
+      const firstEvidence = store.artifactsFor(rootReview?.id ?? -1).filter(one => one.kind === "structured-output");
+      const repairedEvidence = store.artifactsFor(correction?.id ?? -1).filter(one => one.kind === "structured-output");
+      expect(firstEvidence).toHaveLength(1);
+      expect(firstEvidence[0]?.capture).toContain("not accepted");
+      expect(repairedEvidence).toHaveLength(1);
+      expect(repairedEvidence[0]?.capture).toContain("accepted");
+    });
+
+    test("syntax-only wrappers normalize without spending a correction turn", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      let calls = 0;
+      const wrapped: Runner = async () => {
+        calls += 1;
+        return {
+          ...OK,
+          stdout: spokenInSession('```json\n{"version":1,"comments":[]}\n```'),
+        };
+      };
+      const reports = await passOnce(wrapped);
+      expect(reports[0]?.outcome).toBe("reviewed");
+      expect(calls).toBe(1);
+      const reviewerRun = store.runsFor(taskRef).find(run => run.role === "reviewer");
+      const attempts = store.artifactsFor(reviewerRun?.id ?? -1).filter(one => one.kind === "structured-output");
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]?.capture).toContain("accepted, syntax normalized");
+    });
+
+    test("two malformed corrections exhaust the bound and leave a truthful linear run/evidence trail", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      let calls = 0;
+      const prompts: string[] = [];
+      const broken: Runner = async (_file, args, options) => {
+        calls += 1;
+        prompts.push(String(args[args.indexOf("-p") + 1] ?? ""));
+        if (calls > 1) {
+          expect(args).toEqual(expect.arrayContaining(["--resume", "review-session-1", "--max-turns", "4"]));
+          expect(options?.timeoutMs).toBe(5 * 60_000);
+        }
+        if (calls === 1) return { ...OK, stdout: spokenInSession("not json") };
+        if (calls === 2) return { ...OK, stdout: spokenInSession({ version: 2, comments: [] }) };
+        return { ...OK, stdout: spokenInSession({ version: 1, comments: [{ path: "outside.ts", note: "guess" }] }) };
+      };
+
+      const reports = await passOnce(broken);
+      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "malformed-review" });
+      expect(calls).toBe(3);
+      expect(prompts[1]).toContain("not JSON");
+      expect(prompts[2]).toContain("version must be 1");
+      expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+
+      const reviewRuns = store.runsFor(taskRef).filter(run => run.role === "reviewer").sort((a, b) => a.id - b.id);
+      expect(reviewRuns).toHaveLength(3);
+      expect(reviewRuns.map(run => run.parentRun)).toEqual([builtRun, reviewRuns[0]?.id, reviewRuns[1]?.id]);
+      expect(reviewRuns.map(run => run.outcome)).toEqual(["failed", "failed", "failed"]);
+      expect(reviewRuns.map(run => store.artifactsFor(run.id).filter(one => one.kind === "structured-output").length)).toEqual([1, 1, 1]);
+    });
+
+    test("provider failure with a session id is not repaired", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      let calls = 0;
+      const failedProviderTurn: Runner = async () => {
+        calls += 1;
+        return { ...OK, code: 1, stdout: spokenInSession("not json") };
+      };
+      const reports = await passOnce(failedProviderTurn);
+      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "agent" });
+      expect(calls).toBe(1);
+      expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(1);
+    });
+
+    test.each([
+      ["does not announce a session", null],
+      ["announces a different session", "review-session-2"],
+    ])("a correction that %s is rejected before review ingestion", async (_label, returnedSession) => {
+      store.requestReview(builtRun, "alex", T0);
+      let calls = 0;
+      const wrongSession: Runner = async () => {
+        calls += 1;
+        if (calls === 1) return { ...OK, stdout: spokenInSession("not json") };
+        const reply = { version: 1, comments: [] };
+        return {
+          ...OK,
+          stdout: returnedSession === null ? spoken(reply) : spokenInSession(reply, returnedSession),
+        };
+      };
+
+      const reports = await passOnce(wrongSession);
+      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "provider-protocol" });
+      expect(calls).toBe(2);
+      expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+      const reviewRuns = store.runsFor(taskRef).filter(run => run.role === "reviewer").sort((a, b) => a.id - b.id);
+      expect(reviewRuns).toHaveLength(2);
+      expect(reviewRuns[1]).toMatchObject({ outcome: "refused", reason: "provider-protocol" });
+      expect(store.artifactsFor(reviewRuns[1]?.id ?? -1).filter(one => one.kind === "structured-output")).toHaveLength(1);
+    });
+
+    test("a correction refused by the provider protocol still seals its exact reply", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      let calls = 0;
+      const conflictingSession: Runner = async () => {
+        calls += 1;
+        if (calls === 1) return { ...OK, stdout: spokenInSession("not json") };
+        return {
+          ...OK,
+          stdout: [
+            JSON.stringify({ type: "system", subtype: "init", session_id: "review-session-1" }),
+            JSON.stringify({ type: "system", subtype: "init", session_id: "review-session-2" }),
+            JSON.stringify({
+              type: "result",
+              subtype: "success",
+              is_error: false,
+              session_id: "review-session-1",
+              result: JSON.stringify({ version: 1, comments: [] }),
+            }),
+          ].join("\n"),
+        };
+      };
+
+      const reports = await passOnce(conflictingSession);
+      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "provider-protocol" });
+      expect(calls).toBe(2);
+      const reviewRuns = store.runsFor(taskRef).filter(run => run.role === "reviewer").sort((a, b) => a.id - b.id);
+      expect(reviewRuns[1]).toMatchObject({ outcome: "refused", reason: "provider-protocol" });
+      const evidence = store.artifactsFor(reviewRuns[1]?.id ?? -1).filter(one => one.kind === "structured-output");
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.capture).toContain("not accepted");
+    });
+
+    test("a runner rotation during the root turn is caught before a correction run is opened", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      let now = T0;
+      let calls = 0;
+      const rotatingAgent: Runner = async () => {
+        calls += 1;
+        register(store, {
+          name: "builder-1",
+          host: "rotated-host",
+          capacity: 9,
+          repos: [REPO],
+          now: new Date(T0.getTime() + 1_000),
+          newToken: () => "tok-rotated",
+        });
+        // The correction row is newer than the rotation. Custody must still
+        // bind to the admitted root reviewer's earlier incarnation.
+        now = new Date(T0.getTime() + 2_000);
+        return { ...OK, stdout: spokenInSession("not json") };
+      };
+      const reports = await reviewPass(store, {
+        runner: "builder-1",
+        token: "tok-builder-1",
+        now: T0,
+        clock: () => now,
+        evidenceRoot,
+        scratchRoot,
+        agent: rotatingAgent,
+      });
+      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "runner-custody" });
+      expect(calls).toBe(1);
+      expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+      const reviewRuns = store.runsFor(taskRef).filter(run => run.role === "reviewer").sort((a, b) => a.id - b.id);
+      expect(reviewRuns).toHaveLength(1);
+      expect(reviewRuns[0]).toMatchObject({ parentRun: builtRun, outcome: "failed", reason: "reviewer-runner-custody" });
+    });
+
+    test("a runner rotation during a valid correction is caught before review ingestion", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      let now = T0;
+      let calls = 0;
+      const rotatingCorrection: Runner = async () => {
+        calls += 1;
+        if (calls === 1) return { ...OK, stdout: spokenInSession("not json") };
+        register(store, {
+          name: "builder-1",
+          host: "rotated-host",
+          capacity: 9,
+          repos: [REPO],
+          now: new Date(T0.getTime() + 1_000),
+          newToken: () => "tok-rotated",
+        });
+        now = new Date(T0.getTime() + 2_000);
+        return { ...OK, stdout: spokenInSession({ version: 1, comments: [] }) };
+      };
+
+      const reports = await reviewPass(store, {
+        runner: "builder-1",
+        token: "tok-builder-1",
+        now: T0,
+        clock: () => now,
+        evidenceRoot,
+        scratchRoot,
+        agent: rotatingCorrection,
+      });
+      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "runner-custody" });
+      expect(calls).toBe(2);
+      expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+      const reviewRuns = store.runsFor(taskRef).filter(run => run.role === "reviewer").sort((a, b) => a.id - b.id);
+      expect(reviewRuns).toHaveLength(2);
+      expect(reviewRuns[1]).toMatchObject({ parentRun: reviewRuns[0]?.id, outcome: "refused", reason: "runner-custody" });
+    });
+
     test("scratch hygiene: an extra file refuses the whole pass, nothing ingested, the attempt is spent", async () => {
       store.requestReview(builtRun, "alex", T0);
       const reports = await passOnce(
@@ -451,8 +1103,13 @@ describe("the reviewer role in the store", () => {
       expect(store.liveDiffComments(builtRun)).toHaveLength(0);
       // One attempt (R4): spent, not retried.
       expect(store.openReviewRequests()).toHaveLength(0);
-      const reviewerRow = store.raw().prepare("SELECT outcome, reason FROM run WHERE role = 'reviewer'").get();
+      const reviewerRow = store.raw().prepare("SELECT id, outcome, reason FROM run WHERE role = 'reviewer'").get() as
+        | { id: number; outcome: string; reason: string }
+        | undefined;
       expect(reviewerRow).toMatchObject({ outcome: "failed", reason: "reviewer-dirty-scratch" });
+      const attempts = store.artifactsFor(reviewerRow?.id ?? -1).filter(one => one.kind === "structured-output");
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]?.capture).toContain("not accepted");
     });
 
     test("a malformed payload is a typed failure, and patch-locality is enforced at the seam", async () => {
@@ -704,7 +1361,6 @@ describe("the reviewer role in the store", () => {
     let scratchRoot: string;
     beforeEach(() => {
       scratchRoot = mkdtempSync(join(tmpdir(), "so-review-scratch-"));
-      register(store, { name: "builder-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-builder-1" });
     });
     afterEach(() => {
       rmSync(scratchRoot, { recursive: true, force: true });
@@ -712,7 +1368,8 @@ describe("the reviewer role in the store", () => {
 
     const CRITERION = { id: "c1", statement: "The payout guard is wired in.", how: null, evidence: ["manual-review"] as const };
     const seedRubric = () => {
-      propose(store, { taskId: "t-1", goal: "wire the payout guard", acceptance: [CRITERION], now: T0 });
+      const scope = propose(store, { taskId: "t-1", goal: "wire the payout guard", acceptance: [CRITERION], now: T0 });
+      store.stampRun(builtRun, { scopeDigest: scope.digest });
     };
     const seedProofArtifact = (runId: number) => {
       const proof = {
@@ -794,6 +1451,29 @@ describe("the reviewer role in the store", () => {
       expect(sawRubric).toBe(false);
       expect(sawProof).toBe(false);
       expect(reports[0]?.outcome).toBe("reviewed");
+    });
+
+    test("a result built under an earlier scope is refused before the reviewer runs", async () => {
+      seedRubric();
+      seedVerdict(builtRun, "short");
+      propose(store, {
+        taskId: "t-1",
+        goal: "wire and alarm the payout guard",
+        acceptance: [{ ...CRITERION, id: "new", statement: "The payout guard is wired in and alarmed." }],
+        now: new Date(T0.getTime() + 1_000),
+      });
+      store.requestReview(builtRun, "alex", T0);
+      let calls = 0;
+
+      const reports = await passOnce(async () => {
+        calls += 1;
+        return { ...OK, stdout: spoken({ version: 1, comments: [] }) };
+      });
+
+      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "scope-changed" });
+      expect(calls).toBe(0);
+      expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+      expect(store.proofVerdictFor(builtRun)?.verdict).toBe("short");
     });
 
     test("a judgement for an id absent from the signed rubric refuses the whole pass — nothing ingested", async () => {
@@ -950,6 +1630,102 @@ describe("the reviewer role in the store", () => {
         expect(saved[0]?.headSha).toBe("head-aaa");
       });
 
+      test("the durable seam refuses omitted proof, check-log, or screenshot inputs and accepts only the exact inventory", () => {
+        seedRubric();
+        seedProofArtifact(builtRun);
+        const checkLogId = seedCheckLog(builtRun);
+        const screenshotId = seedScreenshot(builtRun);
+        seedVerdict(builtRun);
+        const reviewerRun = store.startRun({
+          taskRef,
+          leaseId: "review:exact-inventory",
+          runner: "builder-1",
+          role: "reviewer",
+          parentRun: builtRun,
+          provider: "claude",
+          now: T0,
+        });
+        store.stampProviderStart(reviewerRun, T0);
+
+        const artifacts = store.artifactsFor(builtRun);
+        const diff = artifacts.find(one => one.id === diffArtifact);
+        const proof = artifacts.find(one => one.kind === "proof");
+        const checkLog = artifacts.find(one => one.id === checkLogId);
+        const screenshot = artifacts.find(one => one.id === screenshotId);
+        const scope = store.getScope("t-1");
+        if (diff === undefined || proof === undefined || checkLog === undefined || screenshot === undefined || scope === null) {
+          throw new Error("incomplete exact-inventory fixture");
+        }
+        const base = {
+          reviewerRunId: reviewerRun,
+          runId: builtRun,
+          artifactId: diffArtifact,
+          author: "reviewer:claude",
+          comments: [{ path: "src/payouts.ts", line: 2, note: "the whole review is atomic", severity: "problem" as const }],
+          judgements: [{ id: "c1", judgement: "upholds" as const, note: "the complete sealed evidence supports it" }],
+        };
+        const bindingBase = {
+          diffSha: diff.sha256,
+          scopeDigest: scope.digest,
+          headSha: "head-aaa",
+        };
+
+        expect(() =>
+          store.ingestReview(
+            { ...base, bindings: { ...bindingBase, proof: null, checkLog: null, screenshots: [] } },
+            T0,
+          ),
+        ).toThrow(/proof inventory/);
+        expect(() =>
+          store.ingestReview(
+            {
+              ...base,
+              bindings: {
+                ...bindingBase,
+                proof: { artifactId: proof.id, sha256: proof.sha256 },
+                checkLog: null,
+                screenshots: [],
+              },
+            },
+            T0,
+          ),
+        ).toThrow(/check-log inventory/);
+        expect(() =>
+          store.ingestReview(
+            {
+              ...base,
+              bindings: {
+                ...bindingBase,
+                proof: { artifactId: proof.id, sha256: proof.sha256 },
+                checkLog: { artifactId: checkLog.id, sha256: checkLog.sha256 },
+                screenshots: [],
+              },
+            },
+            T0,
+          ),
+        ).toThrow(/screenshot inventory/);
+        expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+        expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+        expect(store.getRun(reviewerRun)?.outcome).toBeNull();
+
+        expect(
+          store.ingestReview(
+            {
+              ...base,
+              bindings: {
+                ...bindingBase,
+                proof: { artifactId: proof.id, sha256: proof.sha256 },
+                checkLog: { artifactId: checkLog.id, sha256: checkLog.sha256 },
+                screenshots: [{ artifactId: screenshot.id, sha256: screenshot.sha256, path: screenshot.capture }],
+              },
+            },
+            T0,
+          ).commentIds,
+        ).toHaveLength(1);
+        expect(store.criterionReviewsFor(builtRun)).toHaveLength(1);
+        expect(store.getRun(reviewerRun)?.outcome).toBe("no-change");
+      });
+
       test("tamper: overwriting REVIEW-CHECK-LOG.txt refuses the whole pass — nothing ingested", async () => {
         seedRubric();
         seedCheckLog(builtRun);
@@ -1014,6 +1790,28 @@ describe("the reviewer role in the store", () => {
         expect(store.proofVerdictFor(builtRun)?.machineVerdict).toBeNull();
       });
 
+      test("stale: the terminal diff row changing after materialization refuses the whole ingest", async () => {
+        seedRubric();
+        seedVerdict(builtRun);
+        store.requestReview(builtRun, "alex", T0);
+        const staleAgent: Runner = async () => {
+          store.raw().prepare("UPDATE artifact SET sha256 = ? WHERE id = ?").run("e".repeat(64), diffArtifact);
+          return {
+            ...OK,
+            stdout: spoken({
+              version: 1,
+              comments: [{ path: "src/payouts.ts", line: 2, note: "fine" }],
+              criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }],
+            }),
+          };
+        };
+
+        const reports = await passOnce(staleAgent);
+        expect(reports[0]).toMatchObject({ outcome: "failed", detail: "stale-evidence" });
+        expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+        expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+      });
+
       test("stale: a scope revised between materialization and ingestion refuses ingestion", async () => {
         seedRubric();
         seedVerdict(builtRun);
@@ -1028,6 +1826,32 @@ describe("the reviewer role in the store", () => {
         expect(reports[0]?.outcome).toBe("failed");
         expect(reports[0]?.detail).toBe("stale-evidence");
         expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+      });
+
+      test("stale: evidence added after materialization refuses the whole ingest", async () => {
+        seedRubric();
+        seedVerdict(builtRun);
+        store.requestReview(builtRun, "alex", T0);
+        const addingAgent: Runner = async () => {
+          // Materialization saw no screenshots. A late artifact must not be
+          // silently omitted from the durable inventory this review claims
+          // it was shown.
+          seedScreenshot(builtRun);
+          return {
+            ...OK,
+            stdout: spoken({
+              version: 1,
+              comments: [{ path: "src/payouts.ts", line: 2, note: "must roll back with the stale review" }],
+              criteria: [{ id: "c1", judgement: "cannot-tell", note: "the materialized inputs did not include a screenshot" }],
+            }),
+          };
+        };
+
+        const reports = await passOnce(addingAgent);
+        expect(reports[0]).toMatchObject({ outcome: "failed", detail: "stale-evidence" });
+        expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+        expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+        expect(store.proofVerdictFor(builtRun)?.machineVerdict).toBeNull();
       });
     });
 

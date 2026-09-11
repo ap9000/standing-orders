@@ -66,6 +66,13 @@ boundaries, evidence requirements, model, and permissions.
   paused for your accept or reject. The task page and focused chat always
   show the same live progress, the same revision, and the same pending
   decision.
+- **Structured handoffs repair their shape, not their meaning.** A malformed
+  planner or reviewer reply gets conservative syntax normalization, then at
+  most two correction turns in the same session with the exact validation
+  errors. Corrections cannot invent scope or criteria; every reply is sealed
+  for audit, including replies rejected by provider or session checks, and
+  workspace or review-input integrity is re-proved
+  after each turn.
 - **Long-running, recoverable execution.** There is no arbitrary task
   countdown. Installed workers survive terminal closure and reboot, recover
   expired claims, and continue until a terminal result, a real decision, or a

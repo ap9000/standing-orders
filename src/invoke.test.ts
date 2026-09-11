@@ -223,7 +223,7 @@ describe("the invocation gateway", () => {
     expect(result.finalMessage).toBe("done and dusted");
     expect(result.initFailed).toBe(false);
     // cached tokens ride the raw record only — input is input.
-    expect(store.getRun(codexRun)).toMatchObject({ tokensIn: 9_000, tokensOut: 800, costUsd: null });
+    expect(store.getRun(codexRun)).toMatchObject({ sessionId: "thread-abc", tokensIn: 9_000, tokensOut: 800, costUsd: null });
   });
 
   /** M5 provider audit: init failure is observed structurally, never guessed. */
@@ -346,6 +346,258 @@ describe("the invocation gateway", () => {
     });
     expect(result.initFailed).toBe(false);
     expect(result.sessionId).toBe("s-up");
+  });
+
+  test("Claude init/result session disagreement is a typed provider-protocol refusal", async () => {
+    store.createTask({ id: "t-session-conflict", title: "w" }, T0);
+    const conflictRun = store.startRun({
+      taskRef: claimTask(store, "t-session-conflict", "lease-session-conflict"),
+      leaseId: "lease-session-conflict",
+      runner: "builder-1",
+      branch: "b",
+      worktree: "/w",
+      provider: "claude",
+      now: T0,
+    });
+    const stream = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "s-init" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        session_id: "s-result",
+        usage: { input_tokens: 11, output_tokens: 2 },
+      }),
+    ].join("\n");
+    const result = await invokeAgent(store, conflictRun, CLAUDE, ASK, {
+      runner: async (_file, _args, options) => {
+        options?.onSessionId?.("s-init");
+        return { ...OK, stdout: stream };
+      },
+    });
+    expect(result).toMatchObject({
+      kind: "refused",
+      reason: "provider-protocol",
+      diagnostic: expect.stringMatching(/different session ids/),
+    });
+    // Spend and the first announced identity remain durable, but neither
+    // can pass this turn into a handoff or correction.
+    expect(store.getRun(conflictRun)).toMatchObject({ sessionId: "s-init", tokensIn: 11, tokensOut: 2 });
+  });
+
+  test("conflicting Claude init events are a typed provider-protocol refusal", async () => {
+    store.createTask({ id: "t-init-session-conflict", title: "w" }, T0);
+    const conflictRun = store.startRun({
+      taskRef: claimTask(store, "t-init-session-conflict", "lease-init-session-conflict"),
+      leaseId: "lease-init-session-conflict",
+      runner: "builder-1",
+      branch: "b",
+      worktree: "/w",
+      provider: "claude",
+      now: T0,
+    });
+    const stream = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "s-first" }),
+      JSON.stringify({ type: "system", subtype: "init", session_id: "s-second" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        session_id: "s-first",
+        usage: { input_tokens: 17, output_tokens: 4 },
+      }),
+    ].join("\n");
+    const result = await invokeAgent(store, conflictRun, CLAUDE, ASK, {
+      runner: async (_file, _args, options) => {
+        options?.onSessionId?.("s-first");
+        options?.onSessionId?.("s-second");
+        return { ...OK, stdout: stream };
+      },
+    });
+    expect(result).toMatchObject({
+      kind: "refused",
+      reason: "provider-protocol",
+      diagnostic: expect.stringMatching(/conflicting system\/init session ids/),
+    });
+    expect(store.getRun(conflictRun)).toMatchObject({ sessionId: "s-first", tokensIn: 17, tokensOut: 4 });
+  });
+
+  test("the callback and retained envelope reconcile through one trimmed durable identity", async () => {
+    store.createTask({ id: "t-session-canonical", title: "w" }, T0);
+    const canonicalRun = store.startRun({
+      taskRef: claimTask(store, "t-session-canonical", "lease-session-canonical"),
+      leaseId: "lease-session-canonical",
+      runner: "builder-1",
+      branch: "b",
+      worktree: "/w",
+      provider: "claude",
+      now: T0,
+    });
+    const stream = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "\t session-one " }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        session_id: " session-one\n",
+      }),
+    ].join("\n");
+    const result = await invokeAgent(store, canonicalRun, CLAUDE, ASK, {
+      runner: async (_file, _args, options) => {
+        options?.onSessionId?.("  session-one  ");
+        return { ...OK, stdout: stream };
+      },
+    });
+    expect(result).toMatchObject({ kind: "ran", outcome: { sessionId: "session-one" } });
+    expect(store.getRun(canonicalRun)?.sessionId).toBe("session-one");
+  });
+
+  test("a resume must match the session already bound to its run before spawn", async () => {
+    store.stampRun(runId, { sessionId: "session-on-row" });
+    let spawned = false;
+
+    await expect(
+      invokeAgent(store, runId, CLAUDE, { ...ASK, resumeSession: "session-on-argv" }, {
+        runner: async () => {
+          spawned = true;
+          return OK;
+        },
+      }),
+    ).rejects.toThrow(/records session session-on-row but was asked to resume session-on-argv/);
+
+    expect(spawned).toBe(false);
+    expect(store.getRun(runId)).toMatchObject({ sessionId: "session-on-row", providerStartedAt: null });
+  });
+
+  test("a resumed provider must return the exact durable session, never a fork", async () => {
+    store.stampRun(runId, { sessionId: "session-original" });
+    const forked = JSON.stringify({ result: "done", session_id: "session-forked" });
+
+    const result = await invokeAgent(store, runId, CLAUDE, { ...ASK, resumeSession: "session-original" }, {
+      runner: async (_file, _args, options) => {
+        options?.onSessionId?.("session-forked");
+        return { ...OK, stdout: forked };
+      },
+    });
+
+    expect(result).toMatchObject({
+      kind: "refused",
+      reason: "provider-protocol",
+      diagnostic: expect.stringMatching(/different from the exact identity recorded for resume/),
+      finalMessage: "done",
+    });
+    expect(store.getRun(runId)?.sessionId).toBe("session-original");
+  });
+
+  test("a durable callback identity that differs from the retained envelope fails closed", async () => {
+    store.createTask({ id: "t-session-durable-conflict", title: "w" }, T0);
+    const durableRun = store.startRun({
+      taskRef: claimTask(store, "t-session-durable-conflict", "lease-session-durable-conflict"),
+      leaseId: "lease-session-durable-conflict",
+      runner: "builder-1",
+      branch: "b",
+      worktree: "/w",
+      provider: "claude",
+      now: T0,
+    });
+    const stream = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "session-from-envelope" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        session_id: "session-from-envelope",
+        usage: { input_tokens: 7, output_tokens: 3 },
+      }),
+    ].join("\n");
+    const result = await invokeAgent(store, durableRun, CLAUDE, ASK, {
+      runner: async (_file, _args, options) => {
+        options?.onSessionId?.("session-from-callback");
+        return { ...OK, stdout: stream };
+      },
+    });
+    expect(result).toMatchObject({
+      kind: "refused",
+      reason: "provider-protocol",
+      diagnostic: expect.stringMatching(/transport callback/),
+    });
+    expect(store.getRun(durableRun)).toMatchObject({
+      sessionId: "session-from-callback",
+      tokensIn: 7,
+      tokensOut: 3,
+    });
+  });
+
+  test("an explicit failed terminal cannot become success through process exit 0", async () => {
+    store.createTask({ id: "t-zero-failed", title: "w" }, T0);
+    const failedRun = store.startRun({
+      taskRef: claimTask(store, "t-zero-failed", "lease-zero-failed"),
+      leaseId: "lease-zero-failed",
+      runner: "builder-1",
+      branch: "b",
+      worktree: "/w",
+      provider: "claude",
+      now: T0,
+    });
+    const stream = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "failed-session" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        result: "the turn failed",
+        session_id: "failed-session",
+        usage: { input_tokens: 13, output_tokens: 1 },
+      }),
+    ].join("\n");
+    const result = await invokeAgent(store, failedRun, CLAUDE, ASK, {
+      runner: async () => ({ ...OK, stdout: stream }),
+    });
+    expect(result).toMatchObject({
+      kind: "refused",
+      reason: "provider-protocol",
+      diagnostic: expect.stringMatching(/failed terminal/),
+    });
+    expect(store.getRun(failedRun)).toMatchObject({ sessionId: "failed-session", tokensIn: 13, tokensOut: 1 });
+  });
+
+  test("a late Claude transport-overflow witness refuses an otherwise valid result without losing its usage", async () => {
+    const stream = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "s-overflow-order" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        session_id: "s-overflow-order",
+        usage: { input_tokens: 23, output_tokens: 6 },
+      }),
+      JSON.stringify({
+        type: "result",
+        subtype: "standing-orders-stream-event-overflow",
+        is_error: true,
+        result: '{"type":"standing-orders.stream-event-overflow"}',
+      }),
+    ].join("\n");
+
+    const result = await invokeAgent(store, runId, CLAUDE, ASK, {
+      runner: async (_file, _args, options) => {
+        options?.onSessionId?.("s-overflow-order");
+        return { ...OK, stdout: stream };
+      },
+    });
+
+    expect(result).toMatchObject({
+      kind: "refused",
+      reason: "provider-protocol",
+      diagnostic: expect.stringMatching(/failed terminal/),
+      finalMessage: "done",
+    });
+    expect(store.getRun(runId)).toMatchObject({ sessionId: "s-overflow-order", tokensIn: 23, tokensOut: 6 });
   });
 });
 
@@ -495,6 +747,32 @@ describe("the attested gateway (Phase 3): gemini refusals are values", () => {
     expect(good.kind).toBe("ran");
   });
 
+  test("conflicting Gemini init ids are provider-protocol even when the first echoes the minted identity", async () => {
+    fakeGemini("0.57.0");
+    const runId = geminiRun("g-conflicting-init");
+    const minted = "11111111-2222-4333-8444-555555555555";
+    const stream = [
+      JSON.stringify({ type: "init", session_id: minted, model: "m" }),
+      JSON.stringify({ type: "init", session_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", model: "m" }),
+      JSON.stringify({ type: "synthetic_message", content: "done" }),
+      JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 13, output_tokens: 2 } }),
+    ].join("\n");
+
+    const result = await invokeAgent(store, runId, GEMINI, { ...ASK, startSessionId: minted }, {
+      runner: async () => ({ ...OK, stdout: stream }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "refused",
+      reason: "provider-protocol",
+      diagnostic: expect.stringMatching(/conflicting init session ids/),
+      finalMessage: "done",
+    });
+    // The spend and plane-minted identity remain auditable, but neither
+    // contradictory provider id becomes resumable authority.
+    expect(store.getRun(runId)).toMatchObject({ sessionId: minted, tokensIn: 13, tokensOut: 2 });
+  });
+
   test("tier-1 spawns never probe: claude runs with NO gemini on PATH at all", async () => {
     process.env["PATH"] = dir; // gemini absent, everything absent
     store.createTask({ id: "c-1", title: "w" }, T0);
@@ -548,6 +826,19 @@ describe("the fallback taxonomy stamp (E2): honest disposal, fail closed", () =>
     // The safety property spelled out: a definite failure never authorizes a paid fallback.
     expect(run?.terminalClass).not.toBe("usage-exhausted");
     expect(run?.terminalClass).not.toBe("credits-depleted");
+  });
+
+  test("Codex turn.failed plus exit 0 is provider-protocol, never a successful result", async () => {
+    const id = codexRunFor("e2-zero-fail");
+    const jsonl = [
+      JSON.stringify({ type: "thread.started", thread_id: "codex-failed-session" }),
+      JSON.stringify({ type: "turn.failed", error: { message: "the model turn failed", type: "turn_failed" } }),
+    ].join("\n");
+    const result = await invokeAgent(store, id, { provider: "codex", model: null }, ASK, {
+      runner: async () => ({ ...OK, stdout: jsonl }),
+    });
+    expect(result).toMatchObject({ kind: "refused", reason: "provider-protocol" });
+    expect(store.getRun(id)).toMatchObject({ sessionId: "codex-failed-session", terminalClass: "not-exhausted" });
   });
 
   test("a refused-before-spawn attempt is NEVER classified — no process ran, terminal_class stays NULL", async () => {

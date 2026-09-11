@@ -2,9 +2,11 @@ import { describe, test, expect } from "vitest";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
-  run, runStreamJsonl, runGeminiStreamJsonl, terminateLiveProviders, NOT_FOUND_CODE,
+  run, runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl, terminateLiveProviders, NOT_FOUND_CODE,
+  JSONL_EVENT_HARD_CAP,
   retryTransientSpawn, isTransientSpawnFailure, type SpawnAttempt,
 } from "./exec.js";
+import { adapterFor } from "./provider.js";
 
 /** node itself is the one binary guaranteed to exist wherever these tests run. */
 const NODE = process.execPath;
@@ -140,6 +142,272 @@ describe("the provider process group (M6.12)", () => {
   });
 });
 
+describe("bounded provider JSONL replies", () => {
+  const parseLines = (stdout: string): Record<string, unknown>[] =>
+    stdout.split("\n").filter(line => line !== "").map(line => JSON.parse(line) as Record<string, unknown>);
+
+  test("transport callbacks expose trimmed ids and retain bounded conflict witnesses", async () => {
+    const codexIds: string[] = [];
+    const codex = await runStreamJsonl(process.execPath, ["-e", `
+      console.log(JSON.stringify({type:"thread.started",thread_id:"   "}));
+      console.log(JSON.stringify({type:"thread.started",thread_id:"  codex-a  "}));
+      console.log(JSON.stringify({type:"thread.started",thread_id:"  codex-b  "}));
+    `], { timeoutMs: 15_000, onSessionId: id => codexIds.push(id) });
+    expect(codexIds).toEqual(["codex-a", "codex-b"]);
+    expect(parseLines(codex.stdout).filter(event => event["type"] === "thread.started")).toHaveLength(2);
+    expect(adapterFor("codex").parse(codex.stdout)).toMatchObject({ sessionId: null, protocolError: expect.any(String) });
+
+    const claudeIds: string[] = [];
+    const claude = await runClaudeStreamJsonl(process.execPath, ["-e", `
+      console.log(JSON.stringify({type:"system",subtype:"init",session_id:"   "}));
+      console.log(JSON.stringify({type:"system",subtype:"init",session_id:"  claude-a  "}));
+      console.log(JSON.stringify({type:"system",subtype:"init",session_id:"claude-a"}));
+      console.log(JSON.stringify({type:"system",subtype:"init",session_id:"  claude-b  "}));
+      console.log(JSON.stringify({type:"system",subtype:"init",session_id:"claude-c"}));
+      console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,session_id:"claude-a",result:"done"}));
+    `], { timeoutMs: 15_000, onSessionId: id => claudeIds.push(id) });
+    expect(claudeIds).toEqual(["claude-a", "claude-b"]);
+    expect(parseLines(claude.stdout).filter(event => event["type"] === "system")).toHaveLength(3);
+    expect(adapterFor("claude").parse(claude.stdout)).toMatchObject({
+      sessionId: null,
+      initObserved: true,
+      protocolError: expect.stringMatching(/conflicting system\/init session ids/),
+    });
+
+    const geminiIds: string[] = [];
+    const gemini = await runGeminiStreamJsonl(process.execPath, ["-e", `
+      console.log(JSON.stringify({type:"init",session_id:"   ",model:"m"}));
+      console.log(JSON.stringify({type:"init",session_id:"  gemini-a  ",model:"m"}));
+      console.log(JSON.stringify({type:"init",session_id:"gemini-a",model:"m"}));
+      console.log(JSON.stringify({type:"init",session_id:"  gemini-b  ",model:"m"}));
+      console.log(JSON.stringify({type:"init",session_id:"gemini-c",model:"m"}));
+      console.log(JSON.stringify({type:"result",status:"success"}));
+    `], { timeoutMs: 15_000, onSessionId: id => geminiIds.push(id) });
+    expect(geminiIds).toEqual(["gemini-a", "gemini-b"]);
+    expect(parseLines(gemini.stdout).filter(event => event["type"] === "init")).toHaveLength(3);
+    expect(adapterFor("gemini").parse(gemini.stdout)).toMatchObject({
+      sessionId: null,
+      initObserved: true,
+      protocolError: expect.stringMatching(/conflicting init session ids/),
+    });
+  });
+
+  test("codex retains a chunk-split reply whose escaped event is larger than 64 KiB", async () => {
+    // The answer is 64 KiB, but quotes double on the wire. This is the
+    // exact case the former serialized-line cap silently discarded.
+    const answerBytes = 64 * 1024;
+    const expected = "\"".repeat(answerBytes);
+    const script = `
+      const answer = '"'.repeat(${answerBytes});
+      const line = JSON.stringify({type:"item.completed",item:{type:"agent_message",text:answer}});
+      process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"codex-large"}) + "\\n");
+      process.stdout.write(line.slice(0, 19));
+      setTimeout(() => {
+        process.stdout.write(line.slice(19, 70001));
+        setTimeout(() => process.stdout.write(line.slice(70001) + "\\n"), 10);
+      }, 10);
+    `;
+
+    const result = await runStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+    const events = parseLines(result.stdout);
+    const message = events.find(event => event["type"] === "item.completed");
+    const item = message?.["item"] as Record<string, unknown> | undefined;
+
+    expect(result.code).toBe(0);
+    expect(Buffer.byteLength(JSON.stringify(message), "utf8")).toBeGreaterThan(64 * 1024);
+    expect(item?.["text"]).toBe(expected);
+    expect(adapterFor("codex").parse(result.stdout).finalMessage).toBe(expected);
+  });
+
+  test("claude retains an unterminated, chunk-split result larger than 64 KiB", async () => {
+    const answerBytes = 64 * 1024;
+    const expected = "\\".repeat(answerBytes);
+    const script = `
+      const answer = "\\\\".repeat(${answerBytes});
+      const line = JSON.stringify({type:"result",subtype:"success",is_error:false,result:answer,session_id:"claude-large"});
+      process.stdout.write(JSON.stringify({type:"system",subtype:"init",session_id:"claude-large"}) + "\\n");
+      process.stdout.write(line.slice(0, 23));
+      setTimeout(() => {
+        process.stdout.write(line.slice(23, 70003));
+        setTimeout(() => process.stdout.write(line.slice(70003)), 10);
+      }, 10);
+    `;
+
+    const result = await runClaudeStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+    const events = parseLines(result.stdout);
+    const terminal = events.find(event => event["type"] === "result");
+
+    expect(result.code).toBe(0);
+    expect(Buffer.byteLength(JSON.stringify(terminal), "utf8")).toBeGreaterThan(64 * 1024);
+    expect(terminal?.["result"]).toBe(expected);
+    expect(adapterFor("claude").parse(result.stdout).finalMessage).toBe(expected);
+  });
+
+  test("codex latches an event beyond the hard cap as failure even when a later message looks successful", async () => {
+    const answerBytes = JSONL_EVENT_HARD_CAP + 1_337;
+    const original = JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "x".repeat(answerBytes) },
+    });
+    const script = `
+      const line = JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(${answerBytes})}});
+      process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"codex-overflow"}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"earlier"}}) + "\\n");
+      process.stdout.write(line.slice(0, 31));
+      setTimeout(() => {
+        process.stdout.write(line.slice(31) + "\\n");
+        process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"later"}}) + "\\n");
+        process.stdout.write(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,output_tokens:1}}) + "\\n");
+      }, 10);
+    `;
+
+    const result = await runStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+    const events = parseLines(result.stdout);
+    const terminal = events.find(event => event["type"] === "turn.failed");
+    const error = terminal?.["error"] as Record<string, unknown> | undefined;
+    const receipt = JSON.parse(String(error?.["message"] ?? "")) as Record<string, unknown>;
+
+    expect(error?.["type"]).toBe("standing-orders.stream-event-overflow");
+    expect(receipt).toMatchObject({
+      type: "standing-orders.stream-event-overflow",
+      transport: "codex",
+      eventBytesOriginal: Buffer.byteLength(original, "utf8"),
+      hardCapBytes: JSONL_EVENT_HARD_CAP,
+    });
+    expect(receipt["prefix"]).toBe(original.slice(0, Number(receipt["prefixBytes"])));
+    expect(Buffer.from(String(receipt["prefixBase64"]), "base64").toString("utf8")).toBe(receipt["prefix"]);
+    expect(Buffer.byteLength(JSON.stringify(terminal), "utf8")).toBeLessThan(64 * 1024);
+    expect(adapterFor("codex").parse(result.stdout)).toMatchObject({
+      finalMessage: "later",
+      structuralTerminal: { failed: true, code: "standing-orders.stream-event-overflow" },
+    });
+  });
+
+  test("codex drops oversized command telemetry without poisoning a valid result", async () => {
+    const script = `
+      process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"codex-command-noise"}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",aggregated_output:"q".repeat(${JSONL_EVENT_HARD_CAP + 2_000})}}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,output_tokens:1}}) + "\\n");
+    `;
+
+    const result = await runStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+
+    expect(adapterFor("codex").parse(result.stdout)).toMatchObject({
+      sessionId: "codex-command-noise",
+      finalMessage: "done",
+      structuralTerminal: null,
+    });
+  });
+
+  test("codex latches a truncated load-bearing event after init but still tolerates malformed telemetry", async () => {
+    const malformed = '{"type":"turn.failed","error":{"message":"cut off"';
+    const script = `
+      process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"codex-malformed"}) + "\\n");
+      process.stdout.write('{"type":"item.completed","item":{"type":"command_execution"' + "\\n");
+      process.stdout.write(JSON.stringify({type:"turn.completed",usage:{input_tokens:2,output_tokens:1}}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"looks done"}}) + "\\n");
+      process.stdout.write(${JSON.stringify(malformed)});
+    `;
+
+    const result = await runStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+    const parsed = adapterFor("codex").parse(result.stdout);
+    const failure = parseLines(result.stdout).find(event => {
+      const error = event["error"] as Record<string, unknown> | undefined;
+      return error?.["type"] === "standing-orders.stream-event-malformed";
+    });
+    const receipt = JSON.parse(String((failure?.["error"] as Record<string, unknown>)?.["message"] ?? "")) as Record<string, unknown>;
+
+    expect(receipt).toMatchObject({
+      type: "standing-orders.stream-event-malformed",
+      transport: "codex",
+      eventBytesOriginal: Buffer.byteLength(malformed, "utf8"),
+      prefix: malformed,
+    });
+    expect(parsed).toMatchObject({
+      finalMessage: "looks done",
+      tokensIn: 2,
+      structuralTerminal: { failed: true, code: "standing-orders.stream-event-malformed" },
+    });
+  });
+
+  test("claude turns an event beyond the hard cap into an explicit error result", async () => {
+    const answerBytes = JSONL_EVENT_HARD_CAP + 2_111;
+    const original = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "y".repeat(answerBytes),
+      session_id: "claude-overflow",
+    });
+    const script = `
+      const line = JSON.stringify({type:"result",subtype:"success",is_error:false,result:"y".repeat(${answerBytes}),session_id:"claude-overflow"});
+      process.stdout.write(JSON.stringify({type:"system",subtype:"init",session_id:"claude-overflow"}) + "\\n");
+      process.stdout.write(line.slice(0, 29));
+      setTimeout(() => {
+        process.stdout.write(line.slice(29) + "\\n");
+        process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false,result:"later"}) + "\\n");
+      }, 10);
+    `;
+
+    const result = await runClaudeStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+    const events = parseLines(result.stdout);
+    const terminal = events.find(event => event["type"] === "result");
+    const receipt = JSON.parse(String(terminal?.["result"] ?? "")) as Record<string, unknown>;
+
+    expect(terminal).toMatchObject({
+      subtype: "standing-orders-stream-event-overflow",
+      is_error: true,
+    });
+    expect(receipt).toMatchObject({
+      type: "standing-orders.stream-event-overflow",
+      transport: "claude",
+      eventBytesOriginal: Buffer.byteLength(original, "utf8"),
+      hardCapBytes: JSONL_EVENT_HARD_CAP,
+    });
+    expect(receipt["prefix"]).toBe(original.slice(0, Number(receipt["prefixBytes"])));
+    expect(Buffer.byteLength(JSON.stringify(terminal), "utf8")).toBeLessThan(64 * 1024);
+    expect(adapterFor("claude").parse(result.stdout).finalMessage).toBe(terminal?.["result"]);
+  });
+
+  test("claude ignores an oversized non-result event when a valid primary result follows", async () => {
+    const script = `
+      process.stdout.write(JSON.stringify({type:"system",subtype:"init",session_id:"claude-child-noise"}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"assistant",parent_tool_use_id:"tool-1",message:"z".repeat(${JSONL_EVENT_HARD_CAP + 2_000})}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false,result:"done",session_id:"claude-child-noise"}) + "\\n");
+    `;
+
+    const result = await runClaudeStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+
+    expect(adapterFor("claude").parse(result.stdout)).toMatchObject({
+      sessionId: "claude-child-noise",
+      finalMessage: "done",
+      structuralTerminal: null,
+    });
+  });
+
+  test("claude never drops an oversized init that could hide a session conflict, in either event order", async () => {
+    for (const late of [false, true]) {
+      const script = `
+        const init = JSON.stringify({type:"system",subtype:"init",session_id:"session-B",tools:"z".repeat(${JSONL_EVENT_HARD_CAP + 2_000})}) + "\\n";
+        const result = JSON.stringify({type:"result",subtype:"success",is_error:false,result:"done",session_id:"session-A",usage:{input_tokens:7,output_tokens:3}}) + "\\n";
+        process.stdout.write(JSON.stringify({type:"system",subtype:"init",session_id:"session-A"}) + "\\n");
+        process.stdout.write(${late ? "result + init" : "init + result"});
+      `;
+
+      const result = await runClaudeStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+
+      expect(adapterFor("claude").parse(result.stdout)).toMatchObject({
+        sessionId: "session-A",
+        finalMessage: "done",
+        tokensIn: 7,
+        tokensOut: 3,
+        structuralTerminal: { failed: true, code: "standing-orders-stream-event-overflow" },
+      });
+    }
+  });
+});
+
 
 describe("the gemini retention runner (Phase 3 D1/A7)", () => {
   const emit = (lines: unknown[]): string =>
@@ -215,6 +483,70 @@ describe("the gemini retention runner (Phase 3 D1/A7)", () => {
     const errors = kept.filter(one => one["type"] === "error");
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatchObject({ message: "the real failure" });
+  });
+
+  test("an oversized terminal result cannot be hidden by an earlier success", async () => {
+    const original = JSON.stringify({
+      type: "result",
+      status: "error",
+      error: { message: "g".repeat(JSONL_EVENT_HARD_CAP + 1_000) },
+    });
+    const script = `
+      process.stdout.write(JSON.stringify({type:"init",session_id:"gemini-overflow",model:"m"}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"result",status:"success"}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"message",role:"assistant",content:"looks fine",delta:true}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"result",status:"error",error:{message:"g".repeat(${JSONL_EVENT_HARD_CAP + 1_000})}}) + "\\n");
+    `;
+
+    const result = await runGeminiStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+    const parsed = adapterFor("gemini").parse(result.stdout);
+    const terminal = parseOut(result.stdout).filter(event => event["type"] === "result").at(-1);
+    const error = terminal?.["error"] as Record<string, unknown> | undefined;
+    const receipt = JSON.parse(String(error?.["message"] ?? "")) as Record<string, unknown>;
+
+    expect(terminal?.["status"]).toBe("standing-orders-stream-event-overflow");
+    expect(receipt).toMatchObject({
+      type: "standing-orders.stream-event-overflow",
+      transport: "gemini",
+      eventBytesOriginal: Buffer.byteLength(original, "utf8"),
+      hardCapBytes: JSONL_EVENT_HARD_CAP,
+    });
+    expect(parsed).toMatchObject({
+      finalMessage: "looks fine",
+      promptConsumed: false,
+      structuralTerminal: { failed: true, code: "standing-orders-stream-event-overflow" },
+    });
+  });
+
+  test("a truncated result after init cannot be hidden by an earlier success, while malformed tool noise stays ignorable", async () => {
+    const malformed = '{"type":"result","status":"error","error":{"message":"cut"';
+    const script = `
+      process.stdout.write("gemini startup prose\\n");
+      process.stdout.write(JSON.stringify({type:"init",session_id:"gemini-malformed",model:"m"}) + "\\n");
+      process.stdout.write('{"type":"tool_result","tool_id":"noise"' + "\\n");
+      process.stdout.write(JSON.stringify({type:"message",role:"assistant",content:"looks fine",delta:true}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"result",status:"success",stats:{input_tokens:5,output_tokens:2}}) + "\\n");
+      process.stdout.write(${JSON.stringify(malformed)});
+    `;
+
+    const result = await runGeminiStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+    const parsed = adapterFor("gemini").parse(result.stdout);
+    const terminal = parseOut(result.stdout).filter(event => event["type"] === "result").at(-1);
+    const receipt = JSON.parse(String((terminal?.["error"] as Record<string, unknown>)?.["message"] ?? "")) as Record<string, unknown>;
+
+    expect(terminal?.["status"]).toBe("standing-orders-stream-event-malformed");
+    expect(receipt).toMatchObject({
+      type: "standing-orders.stream-event-malformed",
+      transport: "gemini",
+      eventBytesOriginal: Buffer.byteLength(malformed, "utf8"),
+      prefix: malformed,
+    });
+    expect(parsed).toMatchObject({
+      finalMessage: "looks fine",
+      tokensIn: 5,
+      promptConsumed: false,
+      structuralTerminal: { failed: true, code: "standing-orders-stream-event-malformed" },
+    });
   });
 
   test("a delta flood past the cap truncates with the marker and holds the line discipline", async () => {

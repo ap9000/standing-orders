@@ -707,6 +707,73 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
     expect(store.getRun(repair)).toMatchObject({ role: "repair", parentRun: run });
     expect(store.getRun(run)).toMatchObject({ outcome: "parked", reason: "decision:1" });
   });
+
+  test("planner and formatting-repair bookkeeping never masquerade as the task result", () => {
+    const ref = refOf("t-1");
+    store.placeTask(ref, REPO);
+    const built = runOn(ref);
+    store.finishRun(built, { outcome: "built", reason: "completed", now: T0 });
+    store.setTaskState("t-1", "done", T0);
+
+    const planner = store.startRun({
+      taskRef: ref,
+      leaseId: "plan-lease",
+      runner: "builder-1",
+      role: "planner",
+      branch: "standing-orders/t-1",
+      worktree: "/pool/t-1",
+      now: later(1),
+    });
+    store.finishRun(planner, { outcome: "no-change", reason: "structured planner output repaired", now: later(1) });
+    const repair = store.startRun({
+      taskRef: ref,
+      leaseId: "lease-1",
+      runner: "builder-1",
+      role: "repair",
+      parentRun: built,
+      branch: "standing-orders/t-1",
+      worktree: "/pool/t-1",
+      now: later(2),
+    });
+    store.finishRun(repair, { outcome: "built", reason: "repaired-park", now: later(2) });
+
+    expect(store.listCompletedWorkScoped(REPO)[0]?.runId).toBe(built);
+    expect(store.projectPeek(REPO, later(1_000)).doneRecently).toBe(1);
+  });
+
+  test("only a later builder supersedes a parked builder's warm resume", () => {
+    const ref = refOf("t-1");
+    const parked = store.startRun({
+      taskRef: ref,
+      leaseId: "lease-1",
+      runner: "builder-1",
+      provider: "claude",
+      sessionId: "session-1",
+      branch: "standing-orders/t-1",
+      worktree: "/pool/t-1",
+      now: T0,
+    });
+    store.finishRun(parked, { outcome: "parked", reason: "decision:1", now: T0 });
+    const bookkeeping = store.startRun({
+      taskRef: ref,
+      leaseId: "lease-1",
+      runner: "builder-1",
+      provider: "claude",
+      role: "repair",
+      parentRun: parked,
+      sessionId: "session-1",
+      branch: "standing-orders/t-1",
+      worktree: "/pool/t-1",
+      now: later(1),
+    });
+    store.finishRun(bookkeeping, { outcome: "built", reason: "repaired-park", now: later(1) });
+
+    expect(store.resumeCandidate(ref, "claude", "standing-orders/t-1")?.run.id).toBe(parked);
+
+    const delivered = runOn(ref);
+    store.finishRun(delivered, { outcome: "built", reason: "completed", now: later(2) });
+    expect(store.resumeCandidate(ref, "claude", "standing-orders/t-1")).toBeNull();
+  });
 });
 
 describe("migration from an M2 database", () => {

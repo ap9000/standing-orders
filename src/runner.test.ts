@@ -77,6 +77,35 @@ describe("registering a runner", () => {
     expect(authenticate(store, "builder-1", first).ok).toBe(false);
   });
 
+  test("re-registering in the same clock millisecond advances the incarnation fence", () => {
+    const first = register(store, { name: "builder-1", host: "laptop", now: T0 });
+    const second = register(store, { name: "builder-1", host: "laptop", now: T0 });
+
+    expect(Date.parse(second.runner.registeredAt)).toBe(Date.parse(first.runner.registeredAt) + 1);
+    expect(store.getRunner("builder-1")?.runner.registeredAt).toBe(second.runner.registeredAt);
+  });
+
+  test("stale concurrent registration candidates serialize to distinct incarnations", () => {
+    const first = register(store, {
+      name: "builder-1",
+      host: "laptop",
+      now: T0,
+      newToken: () => "first-token",
+    });
+    // Model two registrars that both took their wall-clock snapshot before
+    // either replacement committed. saveRunner must derive from the live row
+    // while holding the write lock, not trust either stale candidate.
+    const stale = { ...first.runner, registeredAt: T0.toISOString(), heartbeatAt: T0.toISOString() };
+    const second = store.saveRunner(stale, hashToken("second-token"));
+    const third = store.saveRunner(stale, hashToken("third-token"));
+
+    expect(Date.parse(second.registeredAt)).toBe(Date.parse(first.runner.registeredAt) + 1);
+    expect(Date.parse(third.registeredAt)).toBe(Date.parse(second.registeredAt) + 1);
+    expect(store.getRunner("builder-1")?.runner.registeredAt).toBe(third.registeredAt);
+    expect(authenticate(store, "builder-1", "third-token").ok).toBe(true);
+    expect(authenticate(store, "builder-1", "second-token").ok).toBe(false);
+  });
+
   test("brings a retired runner back when it registers again", () => {
     const { token } = register(store, { name: "builder-1", host: "laptop", now: T0 });
     store.retireRunner("builder-1", later(1_000));

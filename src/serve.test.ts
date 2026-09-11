@@ -9370,6 +9370,43 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(hostile).toContain("&lt;img src=x&gt;");
   });
 
+  test("structured-output repair bookkeeping never replaces the build on task or review result surfaces", async () => {
+    const ref = seed("t-result-lineage", "show the delivered build");
+    const built = build("t-result-lineage", ref, {
+      patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+      stat: [{ path: "x", additions: 1, deletions: 1 }],
+      verdict: { verdict: "attested" },
+    });
+    const correction = store.startRun({
+      taskRef: ref,
+      leaseId: "lease-structured-correction",
+      runner: "night-shift-1",
+      provider: "claude",
+      role: "repair",
+      parentRun: built,
+      branch: "standing-orders/t-result-lineage",
+      worktree: "/pool/t-result-lineage",
+      now: new Date(T0.getTime() + 1),
+    });
+    store.finishRun(correction, {
+      outcome: "no-change",
+      reason: "structured output repaired",
+      now: new Date(T0.getTime() + 2),
+    });
+
+    await boot();
+    const cookie = await login();
+    const task = await (await fetch(url("/t/t-result-lineage"), { headers: { cookie } })).text();
+    const receipt = /<section class="card completion-receipt"[\s\S]*?<\/section>/.exec(task)?.[0] ?? "";
+    expect(receipt).toContain(`result · build #${built}`);
+    expect(receipt).toContain(`href="/r/${built}"`);
+    expect(receipt).not.toContain(`build #${correction}`);
+
+    const cockpit = await (await fetch(url("/review?result=t-result-lineage"), { headers: { cookie } })).text();
+    expect(cockpit).toContain(`href="/r/${built}">Full build history and evidence`);
+    expect(cockpit).not.toContain(`href="/r/${correction}">Full build history and evidence`);
+  });
+
   test("a manual completion and a legacy result read as exactly what they are; broken artifacts name their problem", async () => {
     // Done by hand: no scope, no run.
     store.createTask({ id: "t-manual", title: "closed by hand" }, T0);
@@ -9540,6 +9577,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       },
     });
     const reviewerRun = store.startRun({ taskRef: richRef, leaseId: "lease-reviewer", runner: "night-shift-1", role: "reviewer", parentRun: rich, provider: "codex", now: T0 });
+    store.stampProviderStart(reviewerRun, T0);
     const richPatch = store.artifactsFor(rich).find(one => one.kind === "terminal-diff");
     if (richPatch === undefined) throw new Error("no patch");
     store.addReviewerComments({ reviewerRunId: reviewerRun, runId: rich, artifactId: richPatch.id, author: "reviewer:codex", comments: [{ path: "x", line: 1, note: "this is not a lock", severity: "problem" }] }, T0);
