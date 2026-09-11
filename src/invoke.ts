@@ -24,9 +24,7 @@ import { attestProvider, type VersionProbe } from "./attest.js";
 import { startClaudeHeldSession } from "./exec.js";
 import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { CHILD_DATABASE_ENV as AGENT_DATABASE_ENV, isolatedChildDatabase, removeChildDatabase as removeAgentDatabase } from "./child-database.js";
 
 export type { ProviderRunner } from "./provider.js";
 
@@ -43,15 +41,8 @@ export const PROVIDER_BINARY = "claude";
  * database while retaining its normal HOME/XDG environment for subscriptions
  * and unrelated developer tools.
  */
-const AGENT_DATABASE_ENV = "STANDING_ORDERS_DB";
-
 function isolatedAgentDatabase(runId: number): { dir: string; file: string } {
-  const dir = mkdtempSync(join(tmpdir(), `standing-orders-agent-${runId}-`));
-  return { dir, file: join(dir, "orders.db") };
-}
-
-function removeAgentDatabase(dir: string): void {
-  rmSync(dir, { recursive: true, force: true });
+  return isolatedChildDatabase(`agent-${runId}`);
 }
 
 /** Defend the durable registry even when a test or alternate transport calls

@@ -47,6 +47,19 @@ Main was still `917bc5b` when this plan was prepared.
 
 ## Execution status
 
+- Assisted integration, September 11: `codex/unattended-reliability` combines
+  the existing repair chain through `3a1424a` with the current plan. Setup,
+  verification, and verification-recovery children now receive disposable
+  database overrides; provider children share the same helper. Graph reports
+  use a SQLite read-only connection and never invoke migrations. Vitest gives
+  every test file isolated database/configuration paths before imports.
+  Real-child sentinel regressions cover successful/failed execution, thrown
+  spawns, concurrency, missing stores, and reporting against an old schema.
+  Typecheck, build, and the full suite pass: 116 files, 2,318 tests, 12 skipped.
+  This is assisted engineering, not an unattended certification or a live
+  runtime upgrade. Canonical proof correction and restart certification remain
+  the next slices.
+
 - P0.0: run 1504 finished at 19:33 UTC with commit `f3590d4`. The worker's
   approved gate passed typecheck, all 2,302 tests (12 skipped), and build.
   A separate post-run check passed 86 focused custody/proof regressions.

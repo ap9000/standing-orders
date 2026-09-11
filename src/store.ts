@@ -5799,6 +5799,28 @@ function addColumn(db: Database, table: string, column: string, definition: stri
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
+/** Reporting never creates, migrates, or repairs a store. SQLite itself
+ * enforces read-only access, including the race where the file disappears. */
+export function openStoreReadOnly(file: string): Store | null {
+  let db: Database | undefined;
+  try {
+    const require = createRequire(import.meta.url);
+    const { DatabaseSync } = require("node:sqlite") as {
+      DatabaseSync: new (path: string, options: { readOnly: boolean }) => Database;
+    };
+    db = new DatabaseSync(file, { readOnly: true });
+    const version = readSchemaVersion(db);
+    if (!version.ok || version.version !== SCHEMA_VERSION) {
+      db.close();
+      return null;
+    }
+    return new Store(db);
+  } catch {
+    db?.close();
+    return null;
+  }
+}
+
 function defaultConnect(file: string): Database {
   const require = createRequire(import.meta.url);
   const { DatabaseSync } = require("node:sqlite") as {

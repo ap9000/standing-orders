@@ -33,6 +33,7 @@ import { unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
+import { runWithIsolatedDatabase } from "./child-database.js";
 import type { Decision, SteerNote, Store } from "./store.js";
 import { approvalOf, digestOf, profileDigestOf, chainDigestOf, entryDigestOf, routeParityProblem, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
 import { legOf, routeDigestOf, routeFromJson, type RouteStamp } from "./phase-routing.js";
@@ -365,6 +366,8 @@ const SETUP_ENV_ALLOWLIST: readonly string[] = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL",
   "TMPDIR", "TMP", "TEMP",
   "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM",
+  "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT",
+  "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
 ];
 
 /** Belt over the allowlist's suspenders: even if these ever appear in `env`, they die here. */
@@ -882,7 +885,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     }
     const runSetup = request.setup ?? run;
     const shell = approvedCommandShell(setupWanted.command);
-    const made = await runSetup(shell.file, shell.args, {
+    const made = await runWithIsolatedDatabase(runSetup, shell.file, shell.args, {
       cwd: worktree,
       timeoutMs: setupWanted.timeoutMs,
       envAllowlist: SETUP_ENV_ALLOWLIST,
@@ -2222,7 +2225,7 @@ async function settleProof(
     const verifyRunner = request.verify ?? run;
     const verifyShell = approvedCommandShell(configured.command);
     const runVerification = async (label: string): Promise<ExecResult> => {
-      const result = await verifyRunner(verifyShell.file, verifyShell.args, {
+      const result = await runWithIsolatedDatabase(verifyRunner, verifyShell.file, verifyShell.args, {
         cwd: worktree,
         timeoutMs: configured.timeoutMs,
         envAllowlist: SETUP_ENV_ALLOWLIST,
@@ -2286,7 +2289,7 @@ async function settleProof(
           } else {
             const setupRunner = request.setup ?? run;
             const setupShell = approvedCommandShell(liveBeforeSetup.command);
-            const restored = await setupRunner(setupShell.file, setupShell.args, {
+            const restored = await runWithIsolatedDatabase(setupRunner, setupShell.file, setupShell.args, {
               cwd: worktree,
               timeoutMs: liveBeforeSetup.timeoutMs,
               envAllowlist: SETUP_ENV_ALLOWLIST,

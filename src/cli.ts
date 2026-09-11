@@ -31,7 +31,7 @@ import {
   LABELS as GRAPH_LABELS,
   type BackendKind,
 } from "./graph.js";
-import { openStore, databasePath, type Store } from "./store.js";
+import { openStore, openStoreReadOnly, databasePath, type Store } from "./store.js";
 import { PACKAGE_VERSION } from "./version.js";
 import type { BackendGrant } from "./grant.js";
 import { runOperate, OPERATE_HELP, type OperateOptions } from "./operate.js";
@@ -913,18 +913,17 @@ async function runGraphCommand(argv: readonly string[], write: Write): Promise<n
  * than take the report down with it.
  */
 function enrolledBackend(repos: readonly string[]): BackendKind | undefined {
-  let store: Store;
-  try {
-    store = openStore(databasePath(process.env, homedir()));
-  } catch {
-    return undefined;
-  }
+  const store = openStoreReadOnly(databasePath(process.env, homedir()));
+  if (store === null) return undefined;
   try {
     const wanted = new Set(repos);
     const grant = store.listGrants().find((one: BackendGrant) => wanted.has(one.repo));
     // A grant may name the built-in store, which detection never reports, so
     // only a backend the graph report knows about is passed through.
     return grant !== undefined && isBackendKind(grant.backend) ? grant.backend : undefined;
+  } catch {
+    // An older or incomplete layout degrades to detection, never a migration.
+    return undefined;
   } finally {
     store.close();
   }

@@ -290,7 +290,9 @@ describe("the builder's gates", () => {
 
     // A failed setup is an environment problem: typed, and the agent never spawns.
     const blocked = await build(store, request({
-      setup: (async (_file: string, args: readonly string[]) => {
+      setup: (async (_file: string, args: readonly string[], options: import("./exec.js").RunOptions) => {
+        expect(options.env?.STANDING_ORDERS_DB).toBeTruthy();
+        expect(options.env?.STANDING_ORDERS_DB).not.toBe(process.env.STANDING_ORDERS_DB);
         setupCalls.push([...args]);
         return { ...OK, code: 1, stderr: "npm ERR! ENOENT" };
       }) as Runner,
@@ -2747,11 +2749,20 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     bindRecoverySetup();
     let setupCalls = 0;
     let verifyCalls = 0;
-    const setup: Runner = async () => {
+    const databases: string[] = [];
+    const recordDatabase = (options: import("./exec.js").RunOptions | undefined) => {
+      const file = options?.env?.STANDING_ORDERS_DB;
+      expect(file).toBeTruthy();
+      expect(file).not.toBe(process.env.STANDING_ORDERS_DB);
+      databases.push(file!);
+    };
+    const setup: Runner = async (_file, _args, options) => {
+      recordDatabase(options);
       setupCalls++;
       return { ...OK };
     };
-    const verify: Runner = async () => {
+    const verify: Runner = async (_file, _args, options) => {
+      recordDatabase(options);
       verifyCalls++;
       return verifyCalls === 1
         ? { ...OK, code: 127, stderr: "tsc: command not found" }
@@ -2764,6 +2775,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     expect(result).toMatchObject({ ok: true, committed: true });
     expect(setupCalls).toBe(1);
     expect(verifyCalls).toBe(2);
+    expect(new Set(databases).size).toBe(3);
     expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
       verdict: "verified",
       reasons: [expect.stringContaining("approved setup command ran")],
