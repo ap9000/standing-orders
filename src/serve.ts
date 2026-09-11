@@ -103,6 +103,7 @@ import {
   chainFromJson,
   profileDigestOf,
   proposeGuarded,
+  scopeAuthorityOf,
   acceptanceLinesToInput,
   acceptanceToLines,
   acceptanceWords,
@@ -7152,6 +7153,20 @@ function consentDoorOf(scope: Scope | null, route: RouteView | null | undefined)
   if (scope === null) return { open: false, title: "There is no scope to approve yet", why: "write the scope first", road: "scope" };
   if (scope.profileState === "unresolved") {
     return { open: false, title: "The agent setup isn’t ready yet", why: scope.unresolvedReason ?? "the scope cannot say exactly what would run", road: "scope" };
+  }
+  // THE SAME STRICT PROJECTION THE SEAL USES (v48 integrity): before any
+  // nonce, password field, or approve action renders, the stored scope
+  // must prove exactly — exact-key profile, chain, and route; safe and
+  // timer-safe numbers; a well-formed auth mode on every chain entry;
+  // build/repair parity; the profile as the chain's entry zero; the
+  // digest re-derived complete. What the seal would refuse, no surface
+  // offers.
+  const authority = scopeAuthorityOf(scope);
+  if (!authority.ok) {
+    if (authority.reason === "unrouted") {
+      return { open: false, title: "This scope predates agent routing", why: "its approval no longer stands, and an approval now must name exactly which agent plans, builds, repairs, and reviews — re-file the scope (edit and save it) to route it under today’s agents, then approve it", road: "scope" };
+    }
+    return { open: false, title: "The agents on file can’t be read", why: `${authority.problem} — re-file the scope (edit and save it) so it is routed again under today’s agents`, road: "scope" };
   }
   if (route === null || route === undefined) return { open: true };
   if (route.kind === "unreadable") {

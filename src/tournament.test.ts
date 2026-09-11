@@ -684,12 +684,21 @@ describe("stage 3b — a whole tournament through the real tick, against real gi
       const holds = store.activeHolds(ref, T0);
       expect(holds.some(hold => hold.reason.includes("compare the results"))).toBe(true);
 
-      // Each agent's run carries its identity and evidence.
+      // Each agent's run carries its identity and evidence — and its route
+      // provenance, written at its insert (v48 integrity): the lane's own
+      // race-approved profile, the exact pair it spent as.
+      const { contestantProfileOf } = await import("./store.js");
+      const { profileDigestOf } = await import("./scope.js");
       for (const racer of agents) {
         const runs = store.runsFor(ref).filter(one => one.branch === racer.branch);
         expect(runs).toHaveLength(1);
         const artifacts = store.artifactsFor(runs[0]!.id);
         expect(artifacts.some(one => one.kind === "terminal-diff")).toBe(true);
+        expect(store.runRoute(runs[0]!.id)).toMatchObject({
+          phase: "build", chosen: "legacy", provider: racer.provider, model: racer.model,
+          routeDigest: `profile:${profileDigestOf(racer.profile ?? contestantProfileOf(racer.provider, racer.model, racer.repairModel))}`,
+        });
+        expect(runs[0]).toMatchObject({ chainCycle: null, contestant: racer.id });
       }
 
       // Both branches exist in the real repository, distinctly named.

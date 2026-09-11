@@ -32,6 +32,7 @@ import {
   NO_READINESS,
   exactModelId,
   isRiskLevel,
+  legOf,
   projectRoute,
   routeDigestOf,
   routeFromJson,
@@ -262,15 +263,23 @@ export function chainFromJson(json: string | null): ChainEntry[] | null {
   if (parsed === null || typeof parsed !== "object") return null;
   const wrapper = parsed as { digestVersion?: unknown; chain?: unknown };
   if (wrapper.digestVersion !== CHAIN_DIGEST_VERSION) return null;
+  // Exact keys on the wrapper and on every entry (v48 integrity): a
+  // snapshot carrying anything this code never writes is not one it wrote.
+  if (!exactKeys(wrapper, ["digestVersion", "chain"], [])) return null;
   if (!Array.isArray(wrapper.chain) || wrapper.chain.length === 0 || wrapper.chain.length > 4) return null;
   const entries: ChainEntry[] = [];
   const seen = new Set<string>();
   for (const raw of wrapper.chain) {
-    if (raw === null || typeof raw !== "object") return null;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
     const e = raw as { profile?: unknown; authMode?: unknown };
+    if (!exactKeys(e, ["profile", "authMode"], [])) return null;
+    // A malformed auth mode is a malformed entry — never a default.
     if (e.authMode !== "subscription" && e.authMode !== "api-key") return null;
+    if (e.profile === null || typeof e.profile !== "object" || Array.isArray(e.profile)) return null;
     // The profile rehydrates through the SAME strict path, wrapped as its
-    // own canonical snapshot so profileFromJson can prove it.
+    // own canonical snapshot so profileFromJson can prove it — and the
+    // canonical bytes must be the stored bytes' own keys (canonicalJson
+    // drops nothing, so an extra key survives into the strict parse).
     const profile = profileFromJson(canonicalProfileJson(e.profile as ExecutionProfile));
     if (profile === null) return null;
     // Duplicate exact entries are rejected (open q i): the key is the
@@ -281,6 +290,36 @@ export function chainFromJson(json: string | null): ChainEntry[] | null {
     entries.push({ profile, authMode: e.authMode });
   }
   return entries;
+}
+
+/**
+ * The longest clock a snapshot may bind, in seconds: a JavaScript timer
+ * holds at most 2^31 − 1 milliseconds, and a bound past that fires at
+ * once instead of never — a "timeout" that is not one. Every stored
+ * clock is proved against this before it is believed (v48 integrity).
+ */
+export const MAX_TIMER_SECONDS = Math.floor(2_147_483_647 / 1000);
+
+/** A positive integer the platform can represent exactly. */
+export function safePositiveInteger(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+}
+
+/** A positive whole number of seconds a timer can actually wait. */
+export function timerSafeSeconds(v: unknown): v is number {
+  return safePositiveInteger(v) && v <= MAX_TIMER_SECONDS;
+}
+
+/**
+ * Whether an object carries exactly the named keys: every required key
+ * present, only optional keys otherwise, nothing unknown. Stored snapshots
+ * are proved this way so a key this code never writes is a refusal, never
+ * an ignorable extra.
+ */
+export function exactKeys(value: object, required: readonly string[], optional: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  if (required.some(key => !keys.includes(key))) return false;
+  return keys.every(key => required.includes(key) || optional.includes(key));
 }
 
 /** Strict re-hydration of a stored snapshot — every field type-proved;
@@ -296,23 +335,33 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
   if (parsed === null || typeof parsed !== "object") return null;
   const wrapper = parsed as { digestVersion?: unknown; profile?: unknown };
   if (wrapper.digestVersion !== PROFILE_DIGEST_VERSION) return null;
+  // EXACT KEYS (v48 integrity): the wrapper carries the version and the
+  // profile and nothing else, and the profile carries exactly its
+  // provider's fields — a snapshot with a key this code never writes was
+  // not written by this code and rehydrates as nothing, never as "the
+  // known part of it".
+  if (!exactKeys(wrapper, ["digestVersion", "profile"], [])) return null;
   const p = wrapper.profile as Record<string, unknown> | null | undefined;
-  if (p === null || p === undefined || typeof p !== "object") return null;
+  if (p === null || p === undefined || typeof p !== "object" || Array.isArray(p)) return null;
   // STRICT fields (v48 authority repair): a model is an exact id (the same shape every
   // provider argv accepts), a repair model is `inherit` or an exact id, a
-  // turn bound is a positive integer, and a clock is a positive whole
-  // number of seconds — a snapshot carrying anything else (a negative
-  // turn count, a fractional second, a model that is not an id) was not
+  // turn bound is a positive SAFE integer, and a clock is a positive whole
+  // number of seconds a timer can actually hold — a snapshot carrying
+  // anything else (a negative turn count, a fractional second, a model
+  // that is not an id, a clock past what setTimeout can wait) was not
   // written by this code and rehydrates as nothing.
   const str = (v: unknown): v is string => exactModelId(v);
   const repairRef = (v: unknown): v is string => v === "inherit" || exactModelId(v);
-  const num = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+  const num = (v: unknown): v is number => safePositiveInteger(v);
+  const clock = (v: unknown): v is number => timerSafeSeconds(v);
+  const PROVIDER_KEYS = ["provider", "model", "maxTurns", "repairMaxTurns", "timeoutSeconds", "repairTimeoutSeconds", "repairModel"] as const;
   if (p["provider"] === "claude") {
     if (
+      exactKeys(p, [...PROVIDER_KEYS, "permissionArgv"], ["timeoutKind"]) &&
       str(p["model"]) &&
       (p["permissionArgv"] === "auto" || p["permissionArgv"] === "acceptEdits" || p["permissionArgv"] === "bypassPermissions") &&
       num(p["maxTurns"]) && num(p["repairMaxTurns"]) &&
-      num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
+      clock(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && clock(p["repairTimeoutSeconds"]) &&
       repairRef(p["repairModel"])
     ) {
       return {
@@ -331,10 +380,11 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
   }
   if (p["provider"] === "codex" || p["provider"] === "openrouter") {
     if (
+      exactKeys(p, [...PROVIDER_KEYS, "sandboxMode"], ["timeoutKind"]) &&
       str(p["model"]) &&
       (p["sandboxMode"] === "workspace-write" || p["sandboxMode"] === "danger-full-access") &&
       p["maxTurns"] === "unsupported" && p["repairMaxTurns"] === "unsupported" &&
-      num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
+      clock(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && clock(p["repairTimeoutSeconds"]) &&
       repairRef(p["repairModel"])
     ) {
       return {
@@ -353,10 +403,11 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
   }
   if (p["provider"] === "gemini") {
     if (
+      exactKeys(p, [...PROVIDER_KEYS, "approvalArgv"], ["timeoutKind"]) &&
       str(p["model"]) &&
       (p["approvalArgv"] === "auto_edit" || p["approvalArgv"] === "yolo") &&
       p["maxTurns"] === "unsupported" && p["repairMaxTurns"] === "unsupported" &&
-      num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
+      clock(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && clock(p["repairTimeoutSeconds"]) &&
       repairRef(p["repairModel"])
     ) {
       return {
@@ -615,6 +666,11 @@ export type Scope = {
   profileState?: "resolved" | "unresolved";
   unresolvedReason?: string | null;
   approvedProfile?: ExecutionProfile | null;
+  /** The raw snapshot bytes the row carries (v48 integrity): what the
+   * strict stored-scope projection proves, exactly, before any seal or
+   * consent surface believes the rehydrated `profile`. */
+  profileJson?: string | null;
+  approvedProfileJson?: string | null;
   digestVersion?: number;
   /** v30 fallback chains. `proposedChainJson` is the WORKING chain snapshot
    * the digest bound (present only when the repo has configured fallbacks);
@@ -1117,6 +1173,72 @@ export function approvalOf(scope: Scope | null): Approval {
   }
   if (scope.approvedDigest !== scope.digest) return { approved: false, reason: "changed" };
   return { approved: true, at: scope.approvedAt, by: scope.approvedBy };
+}
+
+/**
+ * THE STRICT STORED-SCOPE PROJECTION (v48 integrity): the ONE reading of
+ * a filed scope that a seal and every consent surface believe. Nothing
+ * lenient stands in for it — the working profile, chain, and route are
+ * re-parsed from their raw bytes with exact keys, safe integers, and
+ * timer-safe clocks; the chain's entries carry a well-formed auth mode;
+ * the route's build and repair legs ARE the profile's exact pairs; on a
+ * chain filing the profile IS the chain's entry zero; and the row's
+ * digest re-derives, complete, from these very values. A legacy row (no
+ * route era) has no authority a person can newly agree to. One
+ * disagreement is the words, and nothing — no nonce, no password field,
+ * no approve action, no seal — is exposed on it.
+ */
+export type ScopeAuthority =
+  | { ok: true; profile: ExecutionProfile; chain: ChainEntry[] | null; route: PhaseRoute; digest: string }
+  | { ok: false; reason: "unrouted" | "unresolved" | "profile" | "chain" | "route" | "parity" | "digest"; problem: string };
+
+export function scopeAuthorityOf(scope: Scope): ScopeAuthority {
+  if (scope.routeEra == null) {
+    return { ok: false, reason: "unrouted", problem: "this scope predates agent routing — its terms name no agent for any role; re-file it to route it under today's agents" };
+  }
+  if (scope.profileState === "unresolved") {
+    return { ok: false, reason: "unresolved", problem: scope.unresolvedReason ?? "the scope cannot say exactly what would run" };
+  }
+  const profileJson = scope.profileJson === undefined ? (scope.profile == null ? null : canonicalProfileJson(scope.profile)) : scope.profileJson;
+  const profile = profileFromJson(profileJson);
+  if (profile === null) {
+    return { ok: false, reason: "profile", problem: profileJson === null ? "the scope carries no agent profile" : "the scope's agent profile cannot be read exactly (unknown keys, an unsafe number, or a clock no timer can hold)" };
+  }
+  const chainJson = scope.proposedChainJson ?? null;
+  const chain = chainJson === null ? null : chainFromJson(chainJson);
+  if (chainJson !== null && chain === null) {
+    return { ok: false, reason: "chain", problem: "the scope's fallback chain cannot be read exactly (unknown keys, a malformed auth mode, or an entry that is not a whole profile)" };
+  }
+  if (chain !== null) {
+    const base = chain[0];
+    if (base === undefined || profileDigestOf(base.profile) !== profileDigestOf(profile)) {
+      return { ok: false, reason: "parity", problem: "the scope's agent profile is not its fallback chain's first entry" };
+    }
+  }
+  const routeJson = scope.proposedRouteJson ?? null;
+  const route = routeFromJson(routeJson);
+  if (route === null) {
+    return { ok: false, reason: "route", problem: routeJson === null ? "the scope was filed under agent routing but carries no route" : "the scope's agent route cannot be read exactly" };
+  }
+  const buildLeg = legOf(route, "build");
+  const repairLeg = legOf(route, "repair");
+  const repairModel = profile.repairModel === "inherit" ? profile.model : profile.repairModel;
+  if (buildLeg.provider !== profile.provider || buildLeg.model !== profile.model || repairLeg.provider !== profile.provider || repairLeg.model !== repairModel) {
+    return {
+      ok: false,
+      reason: "parity",
+      problem: `the route builds on ${buildLeg.provider} · ${buildLeg.model} (repair ${repairLeg.provider} · ${repairLeg.model}) but the agent profile says ${profile.provider} · ${profile.model} (repair ${profile.provider} · ${repairModel})`,
+    };
+  }
+  const digest = digestOf(
+    { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode: scope.qualityMode ?? "default" },
+    chain !== null ? { chain } : profile,
+    route,
+  );
+  if (digest !== scope.digest) {
+    return { ok: false, reason: "digest", problem: "the scope's reference does not re-derive from its own terms, agents, and route — file it again" };
+  }
+  return { ok: true, profile, chain, route, digest };
 }
 
 /** The rubric's approval-card lines (v39): one per criterion, the id in

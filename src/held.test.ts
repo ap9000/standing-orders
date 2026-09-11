@@ -34,6 +34,12 @@ const PROFILE: ExecutionProfile = {
   repairModel: "inherit",
 };
 
+/** The route provenance an attended session presents at insert (v48
+ * integrity): the authorization's pinned profile, exactly. */
+const attendedRoute = { route: { routeDigest: `profile:${profileDigestOf(PROFILE)}`, phase: "build" as const, provider: "claude" as const, model: PROFILE.model, chosen: "legacy" as const } };
+/** A task with NO scope spends as the bare word. */
+const bareRoute = { route: { routeDigest: "legacy", phase: "build" as const, provider: "claude" as const, model: "sonnet", chosen: "legacy" as const } };
+
 /** A task with a FILED (unapproved) scope and a live attended authorization. */
 const attendedFixture = (
   store: ReturnType<typeof openStore>,
@@ -110,7 +116,7 @@ describe("the attended claim gates (v6 W10/Q4/W1)", () => {
          VALUES ('lease-spent', ?, 1, 'mac-a', ?, ?, ?)`,
       )
       .run(ref.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
-    const run = store.startRun({ taskRef: ref.id, leaseId: "lease-spent", runner: "mac-a", branch: "b", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: ref.id, leaseId: "lease-spent", runner: "mac-a", branch: "b", worktree: "/w", now: T0, ...attendedRoute });
     expect(store.consumeAuthorization("auth-att", run, later(2))).toBe(true);
     store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = 'lease-spent'").run(later(3).toISOString());
     const again = acquireIfReady(store, ref.id, "mac-a", { token: tok("mac-a"), now: later(10) });
@@ -209,8 +215,7 @@ describe("the coordinator: final proof, custody, settlement through the shared m
       runner: "mac-a",
       branch: "so/t-att",
       worktree: worktree.dir,
-      now: T0,
-    });
+      now: T0, ...attendedRoute });
     const scope = store.getScope("t-att");
     const captured: CapturedBuild = {
       store,
@@ -342,7 +347,7 @@ describe("the orphan fence sweep (fence-first, page-not-guess)", () => {
          VALUES ('lease-dead', ?, 1, 'mac-a', ?, ?, ?)`,
       )
       .run(ref.id, T0.toISOString(), later(60).toISOString(), T0.toISOString());
-    const runId = store.startRun({ taskRef: ref.id, leaseId: "lease-dead", runner: "mac-a", branch: "b", worktree: "/w", now: T0 });
+    const runId = store.startRun({ taskRef: ref.id, leaseId: "lease-dead", runner: "mac-a", branch: "b", worktree: "/w", now: T0, ...bareRoute });
     store
       .raw()
       .prepare(
@@ -440,7 +445,7 @@ describe("the round-6 cross-check fixes", () => {
          VALUES ('auth-brf', ?, 'alex', 'mac-a', 1, 'x', '{}', 10, 1000000, ?, ?)`,
       )
       .run(ref.id, T0.toISOString(), later(3600).toISOString());
-    const runId = store.startRun({ taskRef: ref.id, leaseId: "lease-brf", runner: "mac-a", branch: "b", worktree: "/w", now: T0 });
+    const runId = store.startRun({ taskRef: ref.id, leaseId: "lease-brf", runner: "mac-a", branch: "b", worktree: "/w", now: T0, ...bareRoute });
     store.consumeAuthorization("auth-brf", runId, later(1));
     expect(
       store.openHeldSession({
@@ -571,7 +576,7 @@ describe("the conversation loop (Phase 2E.2)", () => {
          VALUES ('lease-att', ?, 1, 'mac-a', ?, ?, ?)`,
       )
       .run(ref.id, T0.toISOString(), new Date(Date.now() + 900_000).toISOString(), T0.toISOString());
-    const runId = store.startRun({ taskRef: ref.id, leaseId: "lease-att", runner: "mac-a", branch: "so/t-att", worktree: dir, now: T0 });
+    const runId = store.startRun({ taskRef: ref.id, leaseId: "lease-att", runner: "mac-a", branch: "so/t-att", worktree: dir, now: T0, ...attendedRoute });
     const scope = store.getScope("t-att");
     let disposed: unknown = null;
     const captured = {
@@ -725,7 +730,7 @@ describe("continuation (Phase 2E, A4): the authorization is the claimable unit; 
          VALUES ('lease-old', ?, 1, 'mac-a', ?, ?, ?, ?)`,
       )
       .run(ref.id, T0.toISOString(), later(60).toISOString(), T0.toISOString(), later(50).toISOString());
-    const parent = store.startRun({ taskRef: ref.id, leaseId: "lease-old", runner: "mac-a", branch: "so/t-done", worktree: "/w", now: T0 });
+    const parent = store.startRun({ taskRef: ref.id, leaseId: "lease-old", runner: "mac-a", branch: "so/t-done", worktree: "/w", now: T0, ...bareRoute });
     store.recordOutcomeFacts(parent, { headRevision: "f".repeat(40) });
     store.finishRun(parent, { outcome: "built", committed: true, now: later(40) });
     const minted = store.mintAttendedAuthorization({
@@ -795,8 +800,7 @@ describe("continuation (Phase 2E, A4): the authorization is the claimable unit; 
     if (!claimed.ok) return;
     const runId = store.startRun({
       taskRef: ref.id, leaseId: claimed.claim.leaseId, runner: "mac-a",
-      branch: "so/t-done", worktree: "/w2", parentRun: parent, now: new Date(),
-    });
+      branch: "so/t-done", worktree: "/w2", parentRun: parent, now: new Date(), ...bareRoute });
     store.consumeAuthorization("auth-cont", runId, new Date());
     // FAILURE: no strikes, no demotion, no holds
     const failed = disposeBuildOutcome(
@@ -947,8 +951,7 @@ describe("parallel attended sessions (v28): two held conversations on one runner
         runner: "mac-a",
         branch: `so/t-par-${tag}`,
         worktree: wt.dir,
-        now: T0,
-      });
+        now: T0, ...attendedRoute });
       const captured: CapturedBuild = {
         store,
         request: { taskId: `t-par-${tag}`, taskRef: fx.ref.id, runner: "mac-a", runId, worktree: wt.dir, branch: `so/t-par-${tag}`, leaseId: `lease-par-${tag}`, now: T0 } as never,
@@ -1099,8 +1102,7 @@ describe("v28 round-1 folds: refusals consume nothing; the cap lives in the cust
   const argsFor = (store: ReturnType<typeof openStore>, tag: string, fx: { ref: { id: number } }, tree: { dir: string; head: string }, cap?: number) => {
     const runId = store.startRun({
       taskRef: fx.ref.id, leaseId: `lease-fold-${tag}`, runner: "mac-a",
-      branch: `so/t-fold-${tag}`, worktree: tree.dir, now: T0,
-    });
+      branch: `so/t-fold-${tag}`, worktree: tree.dir, now: T0, ...attendedRoute });
     const captured: CapturedBuild = {
       store,
       request: { taskId: `t-fold-${tag}`, taskRef: fx.ref.id, runner: "mac-a", runId, worktree: tree.dir, branch: `so/t-fold-${tag}`, leaseId: `lease-fold-${tag}`, now: T0 } as never,

@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
-import { propose, approve, addApprover, approvalOf, authenticateApprover, digestOf, describeScope, profileDigestOf, profileFromJson, canonicalProfileJson, chainDigestOf, chainFromJson, canonicalChainJson } from "./scope.js";
+import { propose, approve, addApprover, approvalOf, authenticateApprover, digestOf, describeScope, profileDigestOf, profileFromJson, canonicalProfileJson, chainDigestOf, chainFromJson, canonicalChainJson, scopeAuthorityOf, MAX_TIMER_SECONDS } from "./scope.js";
 import { routeDigestOf, routeFromJson } from "./phase-routing.js";
 import { proveApprovedProfile } from "./builder.js";
 import { register } from "./runner.js";
@@ -432,6 +432,133 @@ describe("execution profiles (foundations, findings 13/14/17/21)", () => {
   });
 });
 
+
+describe("exact-key, safe-integer, timer-safe rehydration (v48 integrity)", () => {
+  const claude = { provider: "claude" as const, model: "sonnet", permissionArgv: "auto" as const, maxTurns: 40, repairMaxTurns: 4, timeoutSeconds: 1800, repairTimeoutSeconds: 300, repairModel: "inherit" };
+  const codex = { provider: "codex" as const, model: "gpt-5-codex", sandboxMode: "workspace-write" as const, maxTurns: "unsupported" as const, repairMaxTurns: "unsupported" as const, timeoutSeconds: 1200, repairTimeoutSeconds: 300, repairModel: "inherit" };
+  const gemini = { provider: "gemini" as const, model: "gemini-2.5-pro", approvalArgv: "auto_edit" as const, maxTurns: "unsupported" as const, repairMaxTurns: "unsupported" as const, timeoutSeconds: 1200, repairTimeoutSeconds: 300, repairModel: "inherit" };
+  const wrap = (profile: Record<string, unknown>, extra: Record<string, unknown> = {}) => JSON.stringify({ digestVersion: 2, profile, ...extra });
+
+  test("a snapshot carries exactly its provider's keys — an unknown key on the wrapper or the profile, or a missing required key, rehydrates as nothing", () => {
+    for (const sound of [claude, codex, gemini]) {
+      expect(profileFromJson(wrap(sound))).toEqual(sound);
+      expect(profileFromJson(wrap({ ...sound, timeoutKind: "idle" }))).toEqual({ ...sound, timeoutKind: "idle" });
+      expect(profileFromJson(wrap({ ...sound, extra: 1 }))).toBeNull();
+      expect(profileFromJson(wrap({ ...sound, permissionMode: "auto" }))).toBeNull();
+      expect(profileFromJson(wrap(sound, { note: "x" }))).toBeNull();
+      const { repairModel: _dropped, ...missing } = sound;
+      void _dropped;
+      expect(profileFromJson(wrap(missing))).toBeNull();
+    }
+    // A key that belongs to ANOTHER provider's shape is an unknown key here.
+    expect(profileFromJson(wrap({ ...claude, sandboxMode: "workspace-write" }))).toBeNull();
+    expect(profileFromJson(wrap({ ...codex, permissionArgv: "auto" }))).toBeNull();
+    expect(profileFromJson(wrap({ ...gemini, sandboxMode: "workspace-write" }))).toBeNull();
+    expect(profileFromJson(JSON.stringify({ digestVersion: 2, profile: [claude] }))).toBeNull();
+  });
+
+  test("numbers are safe integers and clocks fit a timer: past MAX_SAFE_INTEGER or past 2^31−1 ms rehydrates as nothing", () => {
+    expect(MAX_TIMER_SECONDS).toBe(2_147_483);
+    expect(profileFromJson(wrap({ ...claude, timeoutSeconds: MAX_TIMER_SECONDS }))).not.toBeNull();
+    for (const bad of [MAX_TIMER_SECONDS + 1, 2_147_483_647, Number.MAX_SAFE_INTEGER, 9007199254740993, 1e300]) {
+      expect(profileFromJson(wrap({ ...claude, timeoutSeconds: bad }))).toBeNull();
+      expect(profileFromJson(wrap({ ...claude, repairTimeoutSeconds: bad }))).toBeNull();
+      expect(profileFromJson(wrap({ ...codex, timeoutSeconds: bad }))).toBeNull();
+      expect(profileFromJson(wrap({ ...gemini, repairTimeoutSeconds: bad }))).toBeNull();
+    }
+    for (const bad of [9007199254740993, Number.MAX_SAFE_INTEGER + 2, 1e300]) {
+      expect(profileFromJson(wrap({ ...claude, maxTurns: bad }))).toBeNull();
+      expect(profileFromJson(wrap({ ...claude, repairMaxTurns: bad }))).toBeNull();
+    }
+    expect(profileFromJson(wrap({ ...claude, maxTurns: Number.MAX_SAFE_INTEGER }))).not.toBeNull();
+  });
+
+  test("a chain snapshot is exact too: an extra wrapper or entry key, a malformed auth mode, or an entry profile with an extra key is no chain", () => {
+    const sound = [{ profile: claude, authMode: "subscription" as const }, { profile: codex, authMode: "api-key" as const }];
+    expect(chainFromJson(canonicalChainJson(sound))).toEqual(sound);
+    const wrapped = JSON.parse(canonicalChainJson(sound)) as { digestVersion: number; chain: Record<string, unknown>[] };
+    expect(chainFromJson(JSON.stringify({ ...wrapped, extra: 1 }))).toBeNull();
+    expect(chainFromJson(JSON.stringify({ ...wrapped, chain: [{ ...wrapped.chain[0], note: "x" }] }))).toBeNull();
+    for (const auth of ["whatever", "", null, undefined, 1, "SUBSCRIPTION"]) {
+      expect(chainFromJson(JSON.stringify({ ...wrapped, chain: [{ profile: claude, authMode: auth }] }))).toBeNull();
+    }
+    expect(chainFromJson(JSON.stringify({ ...wrapped, chain: [{ profile: { ...claude, extra: 1 }, authMode: "subscription" }] }))).toBeNull();
+    expect(chainFromJson(JSON.stringify({ ...wrapped, chain: [{ profile: { ...claude, timeoutSeconds: MAX_TIMER_SECONDS + 1 }, authMode: "subscription" }] }))).toBeNull();
+    expect(chainFromJson(JSON.stringify({ ...wrapped, chain: [{ profile: null, authMode: "subscription" }] }))).toBeNull();
+  });
+
+  test("a route snapshot is exact: an extra key on the route, a leg, a recommendation, or an override is no route", () => {
+    const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
+    store.createTask({ id: "r", title: "r" }, T0);
+    const ref = store.refFor("built-in", "r").id;
+    store.placeTask(ref, "/repo/r");
+    expect(store.editTaskRoute(ref, { by: "alex", authenticate: () => ({ ok: true }), override: { phase: "review", provider: "claude", model: "opus" } }, T0).ok).toBe(true);
+    propose(store, { taskId: "r", goal: "g", now: T0 });
+    const json = store.getScope("r")!.proposedRouteJson!;
+    const route = JSON.parse(json) as Record<string, unknown>;
+    expect(routeFromJson(json)).not.toBeNull();
+    expect((route["overrides"] as unknown[]).length).toBe(1);
+    expect(routeFromJson(JSON.stringify({ ...route, extra: 1 }))).toBeNull();
+    expect(routeFromJson(JSON.stringify({ ...route, legs: (route["legs"] as Record<string, unknown>[]).map((leg, i) => (i === 0 ? { ...leg, extra: 1 } : leg)) }))).toBeNull();
+    expect(routeFromJson(JSON.stringify({ ...route, legs: (route["legs"] as Record<string, unknown>[]).map((leg, i) => (i === 0 ? { ...leg, recommended: { ...(leg["recommended"] as object), extra: 1 } } : leg)) }))).toBeNull();
+    expect(routeFromJson(JSON.stringify({ ...route, overrides: (route["overrides"] as Record<string, unknown>[]).map(one => ({ ...one, extra: 1 })) }))).toBeNull();
+    const { demands: _d, ...missing } = route;
+    void _d;
+    expect(routeFromJson(JSON.stringify(missing))).toBeNull();
+    store.close();
+  });
+
+  test("scopeAuthorityOf is the one strict projection: it re-parses the raw bytes, requires parity, entry-zero identity, and a digest that re-derives — and the seal refuses whatever it refuses", () => {
+    const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
+    const alex = addApprover(store, "alex", T0, undefined, () => "tok-alex");
+    if (!alex.ok) throw new Error("bootstrap");
+    store.createTask({ id: "p", title: "p" }, T0);
+    const ref = store.refFor("built-in", "p").id;
+    store.placeTask(ref, "/repo/p");
+    propose(store, { taskId: "p", goal: "g", acceptance: [{ id: "c1", statement: "s", how: null, evidence: ["check"] }], now: T0 });
+    const sound = store.getScope("p")!;
+    const authority = scopeAuthorityOf(sound);
+    expect(authority).toMatchObject({ ok: true, chain: null, digest: sound.digest });
+    const raw = store.raw();
+    const stored = raw.prepare("SELECT profile_json, proposed_route_json, digest FROM task_scope WHERE task_id = 'p'").get() as { profile_json: string; proposed_route_json: string; digest: string };
+    const restore = () => raw.prepare("UPDATE task_scope SET profile_json = ?, proposed_route_json = ?, digest = ?, proposed_chain_json = NULL, route_era = 1 WHERE task_id = 'p'").run(stored.profile_json, stored.proposed_route_json, stored.digest);
+    const profile = JSON.parse(stored.profile_json) as { digestVersion: number; profile: Record<string, unknown> };
+    const route = JSON.parse(stored.proposed_route_json) as Record<string, unknown>;
+    const cases: [string, string, () => void][] = [
+      ["profile", "profile with an extra key", () => raw.prepare("UPDATE task_scope SET profile_json = ? WHERE task_id = 'p'").run(JSON.stringify({ ...profile, profile: { ...profile.profile, extra: 1 } }))],
+      ["profile", "timer-unsafe clock", () => raw.prepare("UPDATE task_scope SET profile_json = ? WHERE task_id = 'p'").run(JSON.stringify({ ...profile, profile: { ...profile.profile, timeoutSeconds: MAX_TIMER_SECONDS + 1 } }))],
+      ["profile", "no profile at all", () => raw.prepare("UPDATE task_scope SET profile_json = NULL WHERE task_id = 'p'").run()],
+      ["route", "route with an extra key", () => raw.prepare("UPDATE task_scope SET proposed_route_json = ? WHERE task_id = 'p'").run(JSON.stringify({ ...route, extra: 1 }))],
+      ["route", "no route on a routed row", () => raw.prepare("UPDATE task_scope SET proposed_route_json = NULL WHERE task_id = 'p'").run()],
+      ["parity", "repair leg not the profile's", () => raw.prepare("UPDATE task_scope SET proposed_route_json = ? WHERE task_id = 'p'").run(JSON.stringify({ ...route, legs: (route["legs"] as Record<string, unknown>[]).map(leg => (leg["phase"] === "repair" ? { ...leg, model: "opus" } : leg)) }))],
+      ["chain", "chain with a malformed auth mode", () => raw.prepare("UPDATE task_scope SET proposed_chain_json = ? WHERE task_id = 'p'").run(JSON.stringify({ digestVersion: 1, chain: [{ profile: profile.profile, authMode: "bogus" }] }))],
+      ["parity", "chain whose entry zero is another profile", () => raw.prepare("UPDATE task_scope SET proposed_chain_json = ? WHERE task_id = 'p'").run(JSON.stringify({ digestVersion: 1, chain: [{ profile: { ...profile.profile, model: "opus" }, authMode: "subscription" }] }))],
+      ["digest", "a chain the digest never bound", () => raw.prepare("UPDATE task_scope SET proposed_chain_json = ? WHERE task_id = 'p'").run(JSON.stringify({ digestVersion: 1, chain: [{ profile: profile.profile, authMode: "subscription" }] }))],
+      ["digest", "a digest that does not re-derive", () => raw.prepare("UPDATE task_scope SET digest = ? WHERE task_id = 'p'").run("f".repeat(32))],
+      ["unrouted", "a pre-routing row", () => raw.prepare("UPDATE task_scope SET route_era = NULL WHERE task_id = 'p'").run()],
+    ];
+    for (const [reason, label, corrupt] of cases) {
+      restore();
+      corrupt();
+      const refused = scopeAuthorityOf(store.getScope("p")!);
+      expect(refused, label).toMatchObject({ ok: false, reason });
+      expect(store.sealScopeApproval("p", "alex", T0), label).toBe(false);
+      const current = store.getScope("p")!;
+      expect(approve(store, "p", "alex", T0, current.digest, "tok-alex").ok, label).toBe(false);
+      expect(current.approvedAt, label).toBeNull();
+    }
+    restore();
+    expect(scopeAuthorityOf(store.getScope("p")!).ok).toBe(true);
+    expect(approve(store, "p", "alex", T0, store.getScope("p")!.digest, "tok-alex").ok).toBe(true);
+    store.close();
+  });
+});
 
 describe("the gemini execution profile (Phase 3)", () => {
   const profile: import("./scope.js").ExecutionProfile = {

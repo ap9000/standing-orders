@@ -495,6 +495,97 @@ describe("firing, inside one proving transaction", () => {
     if (sealed.ok) expect(routeDigestOf(sealed.route)).toBe(routeDigestOf(again.approvedRoute!));
   });
 
+  test("routine-integrity (v48): the projection reads the FULL row and requires working/approved parity — a frozen pair that hashes to the approval while the working pair says something else is not live", () => {
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
+    expect(refreshRoutineAgents(store, routineId, T0).ok).toBe(true);
+    approve(routineId);
+    expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: true, live: true });
+    // The WORKING route rewritten under the same digest column while the
+    // frozen snapshot still hashes to the approval: the working terms no
+    // longer re-derive the digest, so the row is not even approved.
+    const workingJson = String((store.raw().prepare("SELECT route_json AS j FROM routine WHERE id = ?").get(routineId) as { j: string }).j);
+    const rerouted = workingJson.replace('"model":"sonnet","phase":"review"', '"model":"opus","phase":"review"');
+    expect(rerouted).not.toBe(workingJson);
+    store.raw().prepare("UPDATE routine SET route_json = ? WHERE id = ?").run(rerouted, routineId);
+    expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: false, live: false, agents: { state: "unverified", approvable: false } });
+    expect(fireRoutine(store, routineId, later(HOUR))).toMatchObject({ ok: false, reason: "not-approved" });
+    // The working route made UNREADABLE while the frozen one still hashes:
+    // the digest cannot be re-derived from the working columns — unverified.
+    store.raw().prepare("UPDATE routine SET route_json = '{\"version\":1' WHERE id = ?").run(routineId);
+    expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: false, live: false, agents: { state: "unreadable" } });
+    store.raw().prepare("UPDATE routine SET route_json = ? WHERE id = ?").run(workingJson, routineId);
+    // Parity in the other direction: the approval's digest column
+    // rewritten to the frozen pair's own hash while the working pair
+    // differs — the stamp no longer equals the stored digest: not approved.
+    const routine = store.getRoutine(routineId)!;
+    const frozenHash = routineDigestOf(termsOf(routine), routine.approvedProfile!, routine.approvedRoute!);
+    expect(frozenHash).toBe(routine.digest);
+    store.raw().prepare("UPDATE routine SET route_json = ?, digest = ? WHERE id = ?").run(rerouted, routineDigestOf(termsOf(routine), routine.profile!, JSON.parse(rerouted) as never), routineId);
+    const parity = routineIntegrity(store.getRoutine(routineId)!);
+    expect(parity).toMatchObject({ approved: false, live: false });
+    store.raw().prepare("UPDATE routine SET route_json = ?, digest = ? WHERE id = ?").run(workingJson, routine.digest, routineId);
+    expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: true, live: true });
+    // A frozen pair that STILL hashes to the approval but is not the
+    // working pair (the approved digest column and the working digest
+    // column both moved with the working route): unverified, in words.
+    const reroutedRoute = JSON.parse(rerouted) as never;
+    const movedDigest = routineDigestOf(termsOf(routine), routine.profile!, reroutedRoute);
+    store.raw().prepare("UPDATE routine SET route_json = ?, digest = ?, approved_digest = ? WHERE id = ?").run(rerouted, movedDigest, movedDigest, routineId);
+    const drift = routineIntegrity(store.getRoutine(routineId)!);
+    expect(drift).toMatchObject({ approved: true, live: false, agents: { state: "unverified" }, liveProblem: expect.stringContaining("do not hash to the approval") });
+    expect(fireRoutine(store, routineId, later(HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen" });
+    expect(store.listTasks()).toHaveLength(0);
+    expect(store.routineFires(routineId)).toHaveLength(0);
+  });
+
+  test("routine-fire (v48): a not-live approval refuses BEFORE the slot heal, the blocker ledger, the instance, the page-per-blocker, and the next-fire time — even when a stale slot and a live blocker are both present; a manual fire writes nothing at all", () => {
+    approve(routineId);
+    const first = fireRoutine(store, routineId, later(HOUR));
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    // A stale scheduled pointer (the slot already on the ledger) AND a
+    // live blocker (the first instance never finished).
+    const due = store.getRoutine(routineId)!.nextFireAt as string;
+    store.recordRoutineFire({ routineId, scheduledFor: due, outcome: "fired", reason: null, instanceTaskRef: null }, later(HOUR));
+    const before = {
+      fires: store.routineFires(routineId),
+      tasks: store.listTasks().map(one => one.id),
+      nextFireAt: store.getRoutine(routineId)!.nextFireAt,
+      notifications: store.listNotifications("all").length,
+      row: store.raw().prepare("SELECT * FROM routine WHERE id = ?").get(routineId),
+    };
+    // Now the frozen snapshot is corrupted: not live.
+    store.raw().prepare("UPDATE routine SET approved_route_json = '{\"version\":1' WHERE id = ?").run(routineId);
+    expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: true, live: false, agents: { state: "unreadable" } });
+    const corruptRow = store.raw().prepare("SELECT * FROM routine WHERE id = ?").get(routineId);
+    // Scheduled: refused as not-live — not slot-taken, not single-flight —
+    // and the ONLY write is the once-per-episode page at the edge.
+    const refused = fireRoutine(store, routineId, later(2 * HOUR));
+    expect(refused).toMatchObject({ ok: false, reason: "route-unfrozen" });
+    expect(store.routineFires(routineId)).toEqual(before.fires);
+    expect(store.listTasks().map(one => one.id)).toEqual(before.tasks);
+    expect(store.getRoutine(routineId)!.nextFireAt).toBe(before.nextFireAt);
+    expect(store.raw().prepare("SELECT * FROM routine WHERE id = ?").get(routineId)).toEqual(corruptRow);
+    const pages = store.listNotifications("all").filter(one => one.kind === "routine-blocked");
+    expect(pages).toHaveLength(1);
+    expect(pages[0]?.dedupeKey).toMatch(new RegExp(`^routine-route:${routineId}:`));
+    expect(pages[0]?.subject).toContain("cannot be read");
+    // Again: still nothing, and no second page.
+    expect(fireRoutine(store, routineId, later(3 * HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen" });
+    expect(store.routineFires(routineId)).toEqual(before.fires);
+    expect(store.listNotifications("all").length).toBe(before.notifications + 1);
+    // Manual: the refusal to the person's face, and NOTHING written — not a page.
+    const manual = fireRoutine(store, routineId, later(3 * HOUR), { manual: true });
+    expect(manual).toMatchObject({ ok: false, reason: "route-unfrozen" });
+    expect(store.listNotifications("all").length).toBe(before.notifications + 1);
+    expect(store.raw().prepare("SELECT * FROM routine WHERE id = ?").get(routineId)).toEqual(corruptRow);
+    // Consent and approval read the same projection: no yes lands on it.
+    expect(routineAgentsState(store.getRoutine(routineId)!)).toMatchObject({ approvable: false, refresh: true });
+    expect(approveRoutine(store, routineId, "alex", later(3 * HOUR), store.getRoutine(routineId)!.digest, token).ok).toBe(false);
+  });
+
   test("routine-recovery: unreadable snapshot bytes and an unfrozen approval are withdrawn by the refresh the same way, and a LIVE approval under unchanged terms is left alone", () => {
     store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);

@@ -521,6 +521,11 @@ export function routeDigestOf(route: PhaseRoute): string {
 function str(v: unknown): v is string {
   return typeof v === "string" && v !== "";
 }
+/** Exactly these keys, every one present, nothing unknown. */
+function exactKeysOf(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const own = Object.keys(value);
+  return own.length === keys.length && keys.every(key => own.includes(key));
+}
 function strOrNull(v: unknown): v is string | null {
   return v === null || str(v);
 }
@@ -539,8 +544,12 @@ export function routeFromJson(json: string | null): PhaseRoute | null {
   } catch {
     return null;
   }
-  if (parsed === null || typeof parsed !== "object") return null;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const r = parsed as Record<string, unknown>;
+  // Exact keys (v48 integrity): the snapshot carries what canonicalRouteJson
+  // writes and nothing else — on the route, on every leg, on every leg's
+  // recommendation, and on every override.
+  if (!exactKeysOf(r, ["version", "risk", "qualityMode", "publication", "evidence", "posture", "demands", "legs", "overrides"])) return null;
   if (r["version"] !== ROUTE_VERSION) return null;
   if (!isRiskLevel(r["risk"])) return null;
   if (r["qualityMode"] !== "default" && r["qualityMode"] !== "strict") return null;
@@ -552,16 +561,18 @@ export function routeFromJson(json: string | null): PhaseRoute | null {
   if (!Array.isArray(r["legs"]) || r["legs"].length !== PHASES.length) return null;
   const legs: RouteLeg[] = [];
   for (const [index, raw] of (r["legs"] as unknown[]).entries()) {
-    if (raw === null || typeof raw !== "object") return null;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
     const leg = raw as Record<string, unknown>;
+    if (!exactKeysOf(leg, ["phase", "provider", "model", "tier", "chosen", "recommended", "reasons", "problem"])) return null;
     if (leg["phase"] !== PHASES[index]) return null;
     if (!str(leg["provider"]) || !isProviderId(leg["provider"])) return null;
     if (!exactModel(leg["model"])) return null;
     if (leg["tier"] !== "routine" && leg["tier"] !== "strong") return null;
     if (leg["chosen"] !== "recommended" && leg["chosen"] !== "override" && leg["chosen"] !== "pinned") return null;
     const rec = leg["recommended"];
-    if (rec === null || typeof rec !== "object") return null;
+    if (rec === null || typeof rec !== "object" || Array.isArray(rec)) return null;
     const recommended = rec as Record<string, unknown>;
+    if (!exactKeysOf(recommended, ["provider", "model", "tier"])) return null;
     if (!str(recommended["provider"]) || !isProviderId(recommended["provider"])) return null;
     if (!exactModel(recommended["model"])) return null;
     if (recommended["tier"] !== "routine" && recommended["tier"] !== "strong") return null;
@@ -603,8 +614,9 @@ export function parseOverrides(raw: unknown): RouteOverride[] | null {
   const overrides: RouteOverride[] = [];
   const seen = new Set<string>();
   for (const entry of raw) {
-    if (entry === null || typeof entry !== "object") return null;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
     const o = entry as Record<string, unknown>;
+    if (!exactKeysOf(o, ["phase", "provider", "model", "by", "at"])) return null;
     if (!str(o["phase"]) || !PHASES.includes(o["phase"] as Phase)) return null;
     if (seen.has(o["phase"])) return null;
     seen.add(o["phase"]);

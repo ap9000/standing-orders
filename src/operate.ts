@@ -123,7 +123,7 @@ import {
   SYNC_MAX_AGE_MS,
   acquireContinuation,
 } from "./claim.js";
-import { disposeBuildOutcome } from "./dispose.js";
+import { disposeBuildOutcome, holdStaleApproval } from "./dispose.js";
 import { attendedLivenessState } from "./liveness.js";
 import { HeldSessionCoordinator, sweepHeldOrphans } from "./held.js";
 import {
@@ -1681,7 +1681,13 @@ async function buildCommand(
   // The standalone road PRESENTS the route authority it holds (v48 authority repair): the
   // sealed build leg of a routed task, or nothing on a pre-routing row —
   // the same proof the tick's admission wears, refused in words here.
-  const authority = store.routeAuthorityFor(ref.id, "builder");
+  // Every road stamps at insert (v48 integrity): a routed row's sealed
+  // build leg, a pre-routing row's sealed profile, the bare word on a task
+  // with no scope — and a chain approval's base custody rides the same
+  // insert (the standalone road never resumes a parked chain tail; the
+  // tick's proven transfer does that).
+  const standaloneModel = text(flags, "model");
+  const authority = store.routeAuthorityFor(ref.id, "builder", null, { provider: "claude", model: standaloneModel ?? null });
   if (authority !== null && !authority.ok) {
     await worktrees.release(leased.worktree.path, now);
     return fail(write, json, "build", "admission-refused", `${id}: ${authority.problem}`, EXIT.refused);
@@ -1695,7 +1701,8 @@ async function buildCommand(
       branch,
       worktree: leased.worktree.path,
       ...(authority === null ? {} : { provider: authority.stamp.provider, route: authority.stamp }),
-      ...(text(flags, "model") === undefined ? {} : { model: text(flags, "model") as string }),
+      ...(standaloneModel === undefined ? {} : { model: standaloneModel }),
+      ...(store.approvedChainOf(id) === null ? {} : { custody: { kind: "base" as const } }),
       now,
     });
   } catch (error) {
@@ -2041,18 +2048,32 @@ async function tickCommand(
       }
       const [resumeSlot] = store.reserveExecutionSlots(runner, 1, clock());
       const parkedRun = racer.activeRun;
-      const resumeRun = store.startRun({
-        taskRef: waiting.taskRef,
-        leaseId: reclaimed.claim.leaseId,
-        runner,
-        branch: racer.branch,
-        worktree: leased.worktree.path,
-        provider: racer.provider,
-        model: racer.model,
-        contestant: racer.id,
-        ...(parkedRun === null ? {} : { parentRun: parkedRun }),
-        now: clock(),
-      });
+      // A contest lane spends under its race-approved profile and says so
+      // at insert (v48 integrity): the lane's proven profile digest, the
+      // exact pair it will spend as.
+      const laneStamp: RouteStamp = { routeDigest: `profile:${profileDigestOf(racer.profile ?? contestantProfileOf(racer.provider, racer.model, racer.repairModel))}`, phase: "build", provider: racer.provider, model: racer.model, chosen: "legacy" };
+      let resumeRun: number;
+      try {
+        resumeRun = store.startRun({
+          taskRef: waiting.taskRef,
+          leaseId: reclaimed.claim.leaseId,
+          runner,
+          branch: racer.branch,
+          worktree: leased.worktree.path,
+          provider: racer.provider,
+          model: racer.model,
+          contestant: racer.id,
+          ...(parkedRun === null ? {} : { parentRun: parkedRun }),
+          now: clock(),
+          route: laneStamp,
+        });
+      } catch (error) {
+        await worktrees.release(leased.worktree.path, clock());
+        release(store, reclaimed.claim.leaseId, clock());
+        backToParked();
+        resumed.push({ id: taskId, outcome: "failed", reason: "admission-refused", detail: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
       if (parkedRun !== null) store.releaseContestantRun(racer.id, parkedRun);
       const beforeBuild = store.getContestant(racer.id);
       if (beforeBuild === null || !store.claimContestantRun(racer.id, resumeRun, beforeBuild.generation)) {
@@ -2329,12 +2350,12 @@ async function tickCommand(
     // The attended spec comes from the authorization's PINNED terms — the
     // courtesy half of the proof; the coordinator's transaction re-proves
     // byte-for-byte at the actual HEAD (v6 W1).
-    let attendedSpec: { provider: ProviderId; model: string | null } | null = null;
+    let attendedSpec: { provider: ProviderId; model: string | null; digest: string } | null = null;
     if (attendedDispatch !== null) {
       try {
         const terms = JSON.parse(attendedDispatch.termsJson) as { profileJson?: unknown };
         const pinned = profileFromJson(typeof terms.profileJson === "string" ? terms.profileJson : null);
-        if (pinned !== null) attendedSpec = { provider: pinned.provider, model: pinned.model };
+        if (pinned !== null) attendedSpec = { provider: pinned.provider, model: pinned.model, digest: profileDigestOf(pinned) };
       } catch {
         attendedSpec = null;
       }
@@ -2431,15 +2452,41 @@ async function tickCommand(
     // dictates nothing (v48 authority repair). A parked fallback entry's successor presents
     // `fallback` under the sealed route (or the chain digest when no route
     // is sealed, the pre-routing chain road).
+    // Every road presents at insert (v48 integrity): an attended session
+    // its pinned profile; a pre-routing row its sealed profile (or the
+    // bare word on a task with no scope) — the store's own answer, so the
+    // admission proves exactly what the row holds.
     const routeStamp = (phase: "plan" | "build"): RouteStamp | null => {
-      if (governingLeg === null) return null;
+      if (attendedSpec !== null && phase === "build") {
+        return { routeDigest: `profile:${attendedSpec.digest}`, phase, provider: spec.provider, model: spec.model, chosen: "legacy" };
+      }
+      if (governingLeg === null || route === null) {
+        const legacy = store.routeAuthorityFor(ref.id, phase === "plan" ? "planner" : "builder", null, { provider: spec.provider, model: spec.model });
+        return legacy !== null && legacy.ok ? legacy.stamp : null;
+      }
       if (parkedEntry !== null && phase === "build") {
         const chain = store.approvedChainOf(id);
         const digest = route !== null ? routeDigestOf(route.route) : chain === null ? null : `chain:${chainDigestOf(chain)}`;
         return digest === null ? null : { routeDigest: digest, phase, provider: spec.provider, model: spec.model, chosen: "fallback" };
       }
-      return route === null ? null : { routeDigest: routeDigestOf(route.route), phase, provider: spec.provider, model: spec.model, chosen: governingLeg.chosen };
+      return { routeDigest: routeDigestOf(route.route), phase, provider: spec.provider, model: spec.model, chosen: governingLeg.chosen };
     };
+
+    // THE LEGACY STALE CHECK, before any claim or row (v48 integrity): a
+    // pre-routing row's sealed profile is the only authority its build
+    // can present, and what resolved from today's flags and configuration
+    // must BE that pair. A disagreement used to open a row and refuse it
+    // at the dispatch proof; now nothing opens — the task is held under
+    // the same backoff the approval door lifts, and paged once.
+    if (!wantsPlan && !wantsScout && attendedSpec === null && racedAhead === null && route === null) {
+      const legacyStamp = routeStamp("build");
+      if (legacyStamp !== null && (legacyStamp.provider !== spec.provider || legacyStamp.model !== spec.model)) {
+        const message = `${id}: the sealed profile builds on ${legacyStamp.provider} · ${legacyStamp.model ?? "(no model)"} but today's routing resolved ${spec.provider} · ${spec.model ?? "(no model)"} — nothing runs on it (stale-approval)`;
+        holdStaleApproval(store, { taskRef: ref.id, taskId: id, message }, clock());
+        dispatched.push({ id, outcome: "skipped", reason: "stale-approval", detail: message });
+        continue;
+      }
+    }
 
     // THE READINESS HALT (v47): a provider THIS runner has reported
     // unavailable never claims and never spends — no substitution, no
@@ -2644,17 +2691,26 @@ async function tickCommand(
           break;
         }
         store.setContestantWorktree(agent.id, leased.worktree.path);
-        const contestantRun = store.startRun({
-          taskRef: ref.id,
-          leaseId: lease,
-          runner,
-          branch: agent.branch,
-          worktree: leased.worktree.path,
-          provider: agent.provider,
-          model: agent.model,
-          contestant: agent.id,
-          now: clock(),
-        });
+        // The lane's provenance rides its insert (v48 integrity): the
+        // race-approved profile it will be proved against, exactly.
+        let contestantRun: number;
+        try {
+          contestantRun = store.startRun({
+            taskRef: ref.id,
+            leaseId: lease,
+            runner,
+            branch: agent.branch,
+            worktree: leased.worktree.path,
+            provider: agent.provider,
+            model: agent.model,
+            contestant: agent.id,
+            now: clock(),
+            route: { routeDigest: `profile:${profileDigestOf(contestantProfileOf(agent.provider, agent.model, agent.repairModel))}`, phase: "build", provider: agent.provider, model: agent.model, chosen: "legacy" },
+          });
+        } catch {
+          prepFailed = true;
+          break;
+        }
         const freshAgent = store.getContestant(agent.id);
         if (freshAgent === null || !store.claimContestantRun(agent.id, contestantRun, freshAgent.generation)) {
           prepFailed = true;
@@ -3101,18 +3157,53 @@ async function tickCommand(
     const buildStamp = routeStamp("build");
     let runId: number;
     try {
-      runId = store.startRun({
-        taskRef: ref.id,
-        leaseId: lease,
-        runner,
-        branch,
-        worktree: leased.worktree.path,
-        provider: spec.provider,
-        ...(spec.model === null ? {} : { model: spec.model }),
-        now: clock(),
-        ...(buildStamp === null ? {} : { route: buildStamp }),
-        custody: parkedChainTail !== null && liveCycle !== null ? { kind: "resume", parkedRun: parkedChainTail.id } : { kind: "base" },
-      });
+      if (parkedEntry !== null && parkedChainTail !== null && liveCycle !== null && buildStamp !== null) {
+        // A parked FALLBACK tail's successor is admitted by the one
+        // fallback road (v48 integrity): every fact the tail's binding
+        // states is presented and re-proved — cycle, index, digest, auth
+        // mode, provider, exact model, repair binding, the sealed-profile
+        // mirror, the approved chain — with the parked run as the live
+        // tail, before any row exists.
+        const chain = store.approvedChainOf(id);
+        const entry = chain === null ? undefined : chain[parkedEntry.index];
+        const mirror = store.getScope(id)?.approvedProfile ?? null;
+        if (chain === null || entry === undefined || mirror === null || parkedChainTail.entryDigest == null || parkedChainTail.authMode == null || spec.model === null) {
+          throw new Error(`${id}: the parked attempt #${parkedChainTail.id}'s fallback binding cannot be restated against the approved chain — nothing resumes it`);
+        }
+        const admitted = store.admitFallback(
+          {
+            kind: "resume",
+            parkedRun: parkedChainTail.id,
+            cycleId: liveCycle.id,
+            expectCursor: parkedEntry.index,
+            expectTail: parkedChainTail.id,
+            entryDigest: parkedChainTail.entryDigest,
+            authMode: parkedChainTail.authMode,
+            repairModel: entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel,
+            approved: { chainDigest: chainDigestOf(chain), profile: mirror },
+            run: { taskRef: ref.id, leaseId: lease, runner, branch, worktree: leased.worktree.path, provider: spec.provider, model: spec.model },
+            route: buildStamp,
+          },
+          clock(),
+        );
+        if (!admitted.ok) throw new Error(admitted.problem);
+        runId = admitted.runId;
+      } else {
+        runId = store.startRun({
+          taskRef: ref.id,
+          leaseId: lease,
+          runner,
+          branch,
+          worktree: leased.worktree.path,
+          provider: spec.provider,
+          ...(spec.model === null ? {} : { model: spec.model }),
+          now: clock(),
+          ...(buildStamp === null ? {} : { route: buildStamp }),
+          ...(attendedSpec !== null
+            ? {}
+            : { custody: parkedChainTail !== null && liveCycle !== null ? { kind: "resume" as const, parkedRun: parkedChainTail.id } : { kind: "base" as const } }),
+        });
+      }
     } catch (error) {
       await worktrees.release(leased.worktree.path, clock());
       release(store, lease, clock());
@@ -3497,11 +3588,11 @@ async function tickCommand(
       if (parentRef.repo !== null && parentRef.repo !== repo) continue;
       const taskId = parentRef.externalId;
 
-      let pinned: { provider: ProviderId; model: string | null } | null = null;
+      let pinned: { provider: ProviderId; model: string | null; digest: string } | null = null;
       try {
         const terms = JSON.parse(continuation.termsJson) as { profileJson?: unknown };
         const profile = profileFromJson(typeof terms.profileJson === "string" ? terms.profileJson : null);
-        if (profile !== null) pinned = { provider: profile.provider, model: profile.model };
+        if (profile !== null) pinned = { provider: profile.provider, model: profile.model, digest: profileDigestOf(profile) };
       } catch {
         pinned = null;
       }
@@ -3525,16 +3616,28 @@ async function tickCommand(
         broke++;
         continue;
       }
-      const runId = store.startRun({
-        taskRef: parent.taskRef,
-        leaseId: lease,
-        runner,
-        branch: parentBranch,
-        worktree: leased.worktree.path,
-        parentRun: parent.id,
-        ...(pinned.model === null ? {} : { model: pinned.model }),
-        now: clock(),
-      });
+      // The continuation spends under the authorization's pinned profile
+      // and says so at insert (v48 integrity).
+      let runId: number;
+      try {
+        runId = store.startRun({
+          taskRef: parent.taskRef,
+          leaseId: lease,
+          runner,
+          branch: parentBranch,
+          worktree: leased.worktree.path,
+          parentRun: parent.id,
+          provider: pinned.provider,
+          ...(pinned.model === null ? {} : { model: pinned.model }),
+          now: clock(),
+          route: { routeDigest: `profile:${pinned.digest}`, phase: "build", provider: pinned.provider, model: pinned.model, chosen: "legacy" },
+        });
+      } catch (error) {
+        await worktrees.release(leased.worktree.path, clock());
+        release(store, lease, clock());
+        dispatched.push({ id: taskId, outcome: "skipped", reason: "admission-refused", detail: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
       const result = await build(store, {
         taskId,
         taskRef: parent.taskRef,

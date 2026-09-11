@@ -1191,6 +1191,66 @@ describe("the operations console", () => {
     expect(await inboxRow()).toContain("review &amp; approve");
   });
 
+  test("consent-closed (v48 integrity): the ONE strict stored-scope projection gates every surface — an extra key, a timer-unsafe clock, an unsafe integer, a malformed chain auth mode, a route/profile parity break, or a digest mismatch mints no nonce, shows no password, offers no act, and the seal refuses the same row", async () => {
+    store.createTask({ id: "t-s", title: "strict door" }, T0);
+    store.placeTask(store.refFor("built-in", "t-s").id, "/repo/main");
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    await post("/t/t-s/scope", cookie, { csrf, acceptance: "c1: ok | manual-review", sawDigest: "", goal: "the goal", not: "", touches: "" });
+    const filed = store.getScope("t-s")!;
+    const digest = filed.digest;
+    const surfaces = async () => ({
+      task: await (await fetch(url("/t/t-s"), { headers: { cookie } })).text(),
+      chat: await (await fetch(url("/chat?task=t-s"), { headers: { cookie } })).text(),
+      next: await (await fetch(url("/next"), { headers: { cookie } })).text(),
+    });
+    const nonceOf = (html: string) => /name="nonce" value="([0-9a-f]{32})"/.exec(html)?.[1] ?? null;
+    const raw = store.raw();
+    const stored = raw.prepare("SELECT profile_json, proposed_route_json, digest FROM task_scope WHERE task_id = 't-s'").get() as { profile_json: string; proposed_route_json: string; digest: string };
+    const profile = JSON.parse(stored.profile_json) as { digestVersion: number; profile: Record<string, unknown> };
+    const route = JSON.parse(stored.proposed_route_json) as Record<string, unknown>;
+    const restore = () => raw.prepare("UPDATE task_scope SET profile_json = ?, proposed_route_json = ?, digest = ?, proposed_chain_json = NULL WHERE task_id = 't-s'").run(stored.profile_json, stored.proposed_route_json, stored.digest);
+    // Open first.
+    let pages = await surfaces();
+    expect(nonceOf(pages.task)).not.toBeNull();
+    expect(pages.task).toContain('type="password"');
+    const cases: [string, () => void, string][] = [
+      ["a profile with a key this code never writes", () => raw.prepare("UPDATE task_scope SET profile_json = ? WHERE task_id = 't-s'").run(JSON.stringify({ ...profile, profile: { ...profile.profile, extra: true } })), "cannot be read exactly"],
+      ["a wrapper with an extra key", () => raw.prepare("UPDATE task_scope SET profile_json = ? WHERE task_id = 't-s'").run(JSON.stringify({ ...profile, note: "x" })), "cannot be read exactly"],
+      ["a clock no timer can hold", () => raw.prepare("UPDATE task_scope SET profile_json = ? WHERE task_id = 't-s'").run(JSON.stringify({ ...profile, profile: { ...profile.profile, timeoutSeconds: 2_147_484 } })), "cannot be read exactly"],
+      ["an unsafe turn bound", () => raw.prepare("UPDATE task_scope SET profile_json = ? WHERE task_id = 't-s'").run(JSON.stringify({ ...profile, profile: { ...profile.profile, maxTurns: 9007199254740993 } })), "cannot be read exactly"],
+      ["a fractional clock", () => raw.prepare("UPDATE task_scope SET profile_json = ? WHERE task_id = 't-s'").run(JSON.stringify({ ...profile, profile: { ...profile.profile, repairTimeoutSeconds: 1.5 } })), "cannot be read exactly"],
+      ["a route with an extra key", () => raw.prepare("UPDATE task_scope SET proposed_route_json = ? WHERE task_id = 't-s'").run(JSON.stringify({ ...route, extra: 1 })), "cannot be read exactly"],
+      ["a route whose build leg is not the profile", () => raw.prepare("UPDATE task_scope SET proposed_route_json = ? WHERE task_id = 't-s'").run(JSON.stringify({ ...route, legs: (route["legs"] as Record<string, unknown>[]).map(leg => (leg["phase"] === "build" ? { ...leg, model: "somewhere-else" } : leg)) })), "but the agent profile says"],
+      ["a chain with a malformed auth mode", () => raw.prepare("UPDATE task_scope SET proposed_chain_json = ? WHERE task_id = 't-s'").run(JSON.stringify({ digestVersion: 1, chain: [{ profile: profile.profile, authMode: "whatever" }] })), "fallback chain cannot be read exactly"],
+      ["a chain whose entry zero is not the profile", () => raw.prepare("UPDATE task_scope SET proposed_chain_json = ? WHERE task_id = 't-s'").run(JSON.stringify({ digestVersion: 1, chain: [{ profile: { ...profile.profile, model: "somewhere-else" }, authMode: "subscription" }] })), "not its fallback chain&#39;s first entry"],
+      ["a digest that does not re-derive", () => raw.prepare("UPDATE task_scope SET digest = ? WHERE task_id = 't-s'").run("0".repeat(32)), "does not re-derive"],
+    ];
+    for (const [label, corrupt, words] of cases) {
+      restore();
+      corrupt();
+      pages = await surfaces();
+      for (const [surface, html] of Object.entries(pages)) {
+        expect(nonceOf(html), `${label} (${surface})`).toBeNull();
+        expect(html, `${label} (${surface})`).not.toContain('type="password"');
+        expect(html, `${label} (${surface})`).not.toMatch(/approve (&amp; start|this scope)/i);
+        expect(html, `${label} (${surface})`).toContain("consent-closed");
+        expect(html, `${label} (${surface})`).toContain(words);
+      }
+      // The seal refuses the same row, and the forced POST lands nowhere.
+      expect(store.sealScopeApproval("t-s", "alex", T0), label).toBe(false);
+      const current = String((raw.prepare("SELECT digest FROM task_scope WHERE task_id = 't-s'").get() as { digest: string }).digest);
+      const forced = await post("/t/t-s/approve", cookie, { csrf, nonce: "", digest: current, token: approverToken });
+      expect(forced.status, label).toBe(409);
+      expect(store.getScope("t-s")?.approvedAt ?? null, label).toBeNull();
+    }
+    restore();
+    pages = await surfaces();
+    expect(nonceOf(pages.task)).not.toBeNull();
+    expect(pages.task).toContain('type="password"');
+    expect(digest).toBe(store.getScope("t-s")?.digest);
+  });
+
   test("approval is step-up: the session alone never approves", async () => {
     store.createTask({ id: "t-a", title: "approve me" }, T0);
     const cookie = await login();

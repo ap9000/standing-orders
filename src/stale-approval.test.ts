@@ -99,9 +99,9 @@ describe("a stale approval holds the task instead of retrying every pass", () =>
 
     const store = openStore(db);
     const ref = store.refFor("built-in", "dedupe");
-    const runs = store.runsFor(ref.id);
-    expect(runs).toHaveLength(1);
-    expect(runs[0]).toMatchObject({ outcome: "refused", reason: "stale-approval" });
+    // v48 integrity: the refusal happens BEFORE any row — no refused run
+    // exists; the task is held and paged exactly as before.
+    expect(store.runsFor(ref.id)).toHaveLength(0);
     const held = store.activeHolds(ref.id, new Date(T0.getTime() + 60_000));
     expect(held.some(one => one.ownerKind === "backoff" && one.reason.startsWith("stale-approval"))).toBe(true);
     const paged = store.listNotifications("pending").filter(one => one.kind === "stale-approval");
@@ -113,7 +113,7 @@ describe("a stale approval holds the task instead of retrying every pass", () =>
     const second = await tick(new Date(T0.getTime() + 120_000));
     expect(second).toBe(EXIT.refused);
     const again = openStore(db);
-    expect(again.runsFor(ref.id)).toHaveLength(1);
+    expect(again.runsFor(ref.id)).toHaveLength(0);
     expect(again.listNotifications("all").filter(one => one.kind === "stale-approval")).toHaveLength(1);
     again.close();
 

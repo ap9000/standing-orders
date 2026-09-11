@@ -72,8 +72,7 @@ describe("the fault matrix (G)", () => {
     store.placeTask(ref, REPO);
     propose(store, { taskId: id, goal: "a guard", now: T0 });
     expect(approve(store, id, "alex", T0, store.getScope(id)!.digest, alexToken).ok).toBe(true);
-    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref, "builder") });
-    store.openChainCycleForDispatch(ref, id, run, T0);
+    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref, "builder"), custody: { kind: "base" } });
     return { ref, run };
   };
 

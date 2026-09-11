@@ -203,9 +203,8 @@ describe("a routed scope under a fallback chain (v47): the route drives the base
     if (!admitted.ok) return;
     // Provenance: the fallback run spends as `fallback` under the sealed route.
     expect(store.runRoute(admitted.runId)).toMatchObject({ phase: "build", provider: "codex", model: "gpt-5-codex", chosen: "fallback", routeDigest: routeDigestOf(store.approvedRouteOf("u")!) });
-    // Set-once: an identical restamp is idempotent; a conflicting one refuses.
-    expect(store.stampRunRoute(admitted.runId, { routeDigest: routeDigestOf(store.approvedRouteOf("u")!), phase: "build", provider: "codex", model: "gpt-5-codex", chosen: "fallback" }, T0)).toEqual({ ok: true, first: false });
-    expect(store.stampRunRoute(admitted.runId, { routeDigest: routeDigestOf(store.approvedRouteOf("u")!), phase: "build", provider: "claude", model: "opus", chosen: "recommended" }, T0)).toMatchObject({ ok: false });
+    // Written once, at admission: there is no late-stamp road to move it.
+    expect("stampRunRoute" in store).toBe(false);
     expect(store.runRoute(admitted.runId)?.provider).toBe("codex");
   });
 });

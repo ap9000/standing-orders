@@ -53,7 +53,12 @@ const entryArgs = (store: Store, taskId: string, index: number) => {
   if (entry === undefined) throw new Error(`no entry ${index}`);
   const sealed = store.sealedRouteOf(taskId);
   const { routeDigestOf } = routing;
+  const mirror = store.getScope(taskId)?.approvedProfile ?? null;
+  if (mirror === null) throw new Error("no approved profile mirror");
   return {
+    kind: "entry" as const,
+    expectTail: null,
+    approved: { chainDigest: chainDigestOf(chain), profile: mirror },
     entryDigest: entryDigestOf(entry),
     authMode: entry.authMode,
     repairModel: entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel,
@@ -70,8 +75,17 @@ describe("the fallback cycle state machine", () => {
   /** The approved chain's digest — the only chain a cycle may open under. */
   let chainDigest: string;
 
+  // The base run takes the chain's custody INSIDE its insert (v48
+  // integrity): a chain-approved build presents custody or opens nothing,
+  // so the cycle every test below walks was opened by the run's own
+  // admission — `openedCycle` reads it back.
   const openRun = (n: number) =>
-    store.startRun({ taskRef, leaseId: `l-${n}`, runner: "b-1", branch: `b${n}`, worktree: `/w${n}`, provider: "claude", now: T0, ...presented(store, taskRef) });
+    store.startRun({ taskRef, leaseId: `l-${n}`, runner: "b-1", branch: `b${n}`, worktree: `/w${n}`, provider: "claude", now: T0, ...presented(store, taskRef), custody: { kind: "base" } });
+  const openedCycle = (): { ok: true; id: number } => {
+    const live = store.fallbackCycleFor(taskRef);
+    if (live === null) throw new Error("the base run opened no cycle");
+    return { ok: true, id: live.id };
+  };
   /** Entry 1 of the approved chain, as admitFallback must be told it. */
   const entry1 = () => entryArgs(store, "t-1", 1);
 
@@ -97,7 +111,7 @@ describe("the fallback cycle state machine", () => {
   afterEach(() => store.close());
 
   test("the happy walk: open -> sanitizing -> awaiting-release -> pending-admission -> open at i+1", () => {
-    const opened = store.openFallbackCycle(taskRef, chainDigest, baseRun, T0);
+    const opened = openedCycle();
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
     const cycleId = opened.id;
@@ -128,7 +142,7 @@ describe("the fallback cycle state machine", () => {
     // exact pending edge (to_index === cursor 1) with the chain metadata.
     const e1 = entry1();
     const admitted = store.admitFallback(
-      { cycleId, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: { taskRef, leaseId: "l-1", runner: "b-1", branch: "b1", worktree: "/w1", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route },
+      { cycleId, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: { taskRef, leaseId: "l-1", runner: "b-1", branch: "b1", worktree: "/w1", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
       T0,
     );
     expect(admitted.ok).toBe(true);
@@ -143,7 +157,7 @@ describe("the fallback cycle state machine", () => {
   });
 
   test("a stale generation loses every transition (no double-advance)", () => {
-    const { id: cycleId } = store.openFallbackCycle(taskRef, chainDigest, baseRun, T0) as { ok: true; id: number };
+    const { id: cycleId } = openedCycle() as { ok: true; id: number };
     store.beginFallbackSanitize(cycleId, 0, baseRun, T0); // gen -> 1
     // A second begin at the STALE generation 0 loses.
     expect(store.beginFallbackSanitize(cycleId, 0, baseRun, T0)).toBe(false);
@@ -162,7 +176,7 @@ describe("the fallback cycle state machine", () => {
   });
 
   test("the admission is SINGLE-USE: a replayed transition creates NO second run (finding 2)", () => {
-    const { id: cycleId } = store.openFallbackCycle(taskRef, chainDigest, baseRun, T0) as { ok: true; id: number };
+    const { id: cycleId } = openedCycle() as { ok: true; id: number };
     store.beginFallbackSanitize(cycleId, 0, baseRun, T0);
     const adv = store.advanceFallbackFenced(
       { cycleId, expectGeneration: 1, fromIndex: 0, chainLength: 2, predecessorRun: baseRun, terminalClass: "usage-exhausted", evidence: { provider: "claude", version: "1.0.0", authMode: "subscription", fp: "" } },
@@ -172,7 +186,7 @@ describe("the fallback cycle state machine", () => {
     const before = Number((store.raw().prepare("SELECT COUNT(*) n FROM run WHERE task_ref = ?").get(taskRef) as { n: number }).n);
     const e1 = entry1();
     const first = store.admitFallback(
-      { cycleId, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: { taskRef, leaseId: "l-1", runner: "b-1", branch: "b1", worktree: "/w1", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route },
+      { cycleId, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId, run: { taskRef, leaseId: "l-1", runner: "b-1", branch: "b1", worktree: "/w1", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
       T0,
     );
     expect(first.ok).toBe(true);
@@ -181,7 +195,7 @@ describe("the fallback cycle state machine", () => {
     // Replay the consumed transition — the state is open, not
     // pending-admission, and the edge is consumed. NO second run opens.
     const replay = store.admitFallback(
-      { cycleId, expectGeneration: 4, expectCursor: 1, transitionId: adv.transitionId, run: { taskRef, leaseId: "l-2", runner: "b-1", branch: "b2", worktree: "/w2", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route },
+      { cycleId, expectGeneration: 4, expectCursor: 1, transitionId: adv.transitionId, run: { taskRef, leaseId: "l-2", runner: "b-1", branch: "b2", worktree: "/w2", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
       T0,
     );
     expect(replay.ok).toBe(false);
@@ -191,12 +205,12 @@ describe("the fallback cycle state machine", () => {
 
   test("an old unconsumed quota-skip transition cannot authorize an unrelated admission (finding 2)", () => {
     // Skip index 0 (its quota exhausted) to pending-admission at cursor 1.
-    const { id: cycleId } = store.openFallbackCycle(taskRef, chainDigest, baseRun, T0) as { ok: true; id: number };
+    const { id: cycleId } = openedCycle() as { ok: true; id: number };
     const skip = store.quotaSkipFallback({ cycleId, expectGeneration: 0, fromIndex: 0, chainLength: 3, tailRun: baseRun }, T0) as { ok: true; toIndex: number; transitionId: number };
     // Admit at cursor 1 consumes THAT edge (to_index 1 === cursor 1).
     const e1 = entry1();
     const ad = store.admitFallback(
-      { cycleId, expectGeneration: 1, expectCursor: 1, transitionId: skip.transitionId, run: { taskRef, leaseId: "l-1", runner: "b-1", branch: "b1", worktree: "/w1", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route },
+      { cycleId, expectGeneration: 1, expectCursor: 1, transitionId: skip.transitionId, run: { taskRef, leaseId: "l-1", runner: "b-1", branch: "b1", worktree: "/w1", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
       T0,
     );
     expect(ad.ok).toBe(true);
@@ -204,14 +218,14 @@ describe("the fallback cycle state machine", () => {
     // again at any cursor.
     expect(
       store.admitFallback(
-        { cycleId, expectGeneration: 2, expectCursor: 1, transitionId: skip.transitionId, run: { taskRef, leaseId: "l-9", runner: "b-1", branch: "b9", worktree: "/w9", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route },
+        { cycleId, expectGeneration: 2, expectCursor: 1, transitionId: skip.transitionId, run: { taskRef, leaseId: "l-9", runner: "b-1", branch: "b9", worktree: "/w9", provider: e1.provider, model: e1.model }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
         T0,
       ).ok,
     ).toBe(false);
   });
 
   test("the (cycle, from_index) uniqueness backstops even a forced double transition", () => {
-    const { id: cycleId } = store.openFallbackCycle(taskRef, chainDigest, baseRun, T0) as { ok: true; id: number };
+    const { id: cycleId } = openedCycle() as { ok: true; id: number };
     store.beginFallbackSanitize(cycleId, 0, baseRun, T0);
     const adv = store.advanceFallbackFenced(
       { cycleId, expectGeneration: 1, fromIndex: 0, chainLength: 3, predecessorRun: baseRun, terminalClass: "usage-exhausted", evidence: { provider: "claude", version: "1.0.0", authMode: "subscription", fp: "" } },
@@ -232,7 +246,7 @@ describe("the fallback cycle state machine", () => {
   });
 
   test("advancing past the last entry refuses (at-end -> the caller pages exhausted-no-fallback)", () => {
-    const { id: cycleId } = store.openFallbackCycle(taskRef, chainDigest, baseRun, T0) as { ok: true; id: number };
+    const { id: cycleId } = openedCycle() as { ok: true; id: number };
     store.beginFallbackSanitize(cycleId, 0, baseRun, T0);
     // chainLength 1: fromIndex 0 has no next entry.
     const adv = store.advanceFallbackFenced(
@@ -243,7 +257,7 @@ describe("the fallback cycle state machine", () => {
   });
 
   test("quota-skip goes open -> pending-admission (nothing ran), recorded, and refuses at the end", () => {
-    const { id: cycleId } = store.openFallbackCycle(taskRef, chainDigest, baseRun, T0) as { ok: true; id: number };
+    const { id: cycleId } = openedCycle() as { ok: true; id: number };
     const skip = store.quotaSkipFallback({ cycleId, expectGeneration: 0, fromIndex: 0, chainLength: 3, tailRun: baseRun }, T0);
     expect(skip).toMatchObject({ ok: true, toIndex: 1 });
     // pending-admission with the tail cleared — admission is the one road on.
@@ -254,7 +268,7 @@ describe("the fallback cycle state machine", () => {
   });
 
   test("incident and close are terminal; a new cycle can only open when none is live", () => {
-    const { id: cycleId } = store.openFallbackCycle(taskRef, chainDigest, baseRun, T0) as { ok: true; id: number };
+    const { id: cycleId } = openedCycle();
     // A second open refuses while one is live.
     expect(store.openFallbackCycle(taskRef, chainDigest, baseRun, T0)).toEqual({ ok: false });
     // incident CAS on the exact generation: a stale gen loses.
@@ -293,12 +307,15 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     propose(store, { taskId: "t-plain", goal: "a guard", now: T0 });
     const token = bootstrap();
     expect(approve(store, "t-plain", "alex", T0, store.getScope("t-plain")!.digest, token).ok).toBe(true);
-    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref) });
-    expect(store.openChainCycleForDispatch(ref, "t-plain", run, T0)).toBeNull();
+    // Base custody is inert without a chain approval: the row opens, no cycle does.
+    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } });
+    expect(store.getRun(run)).toMatchObject({ chainCycle: null, chainIndex: null, entryDigest: null });
     expect(store.fallbackCycleFor(ref)).toBeNull();
+    // And a single-profile build needs no custody at all.
+    expect(() => store.startRun({ taskRef: ref, leaseId: "l2", runner: "b-1", branch: "b", worktree: "/w2", provider: "claude", now: T0, ...presented(store, ref) })).not.toThrow();
   });
 
-  test("a CHAIN approval opens a cycle at cursor 0, bound to the dispatched run, digest from the snapshot", () => {
+  test("a CHAIN approval opens a cycle at cursor 0 INSIDE the base run's insert, digest from the snapshot — and a build that presents no custody opens no row", () => {
     store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
     store.createTask({ id: "t-chain", title: "w" }, T0);
     const ref = store.refFor("built-in", "t-chain").id;
@@ -307,18 +324,25 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const token = bootstrap();
     const scope = store.getScope("t-chain")!;
     expect(approve(store, "t-chain", "alex", T0, scope.digest, token).ok).toBe(true);
+    const rows = () => Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run WHERE task_ref = ?").get(ref) as { n: number }).n);
+    // No custody presented: the insert refuses in words, and no row exists.
+    expect(() => store.startRun({ taskRef: ref, leaseId: "l0", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref) })).toThrow(/sealed a fallback chain — a build takes the chain's custody/);
+    expect(rows()).toBe(0);
+    expect(store.fallbackCycleFor(ref)).toBeNull();
+    // Custody is a builder's alone.
+    expect(() => store.startRun({ taskRef: ref, leaseId: "lp", runner: "b-1", role: "planner", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref, "planner"), custody: { kind: "base" } })).toThrow(/chain custody is a builder's to take/);
+    expect(rows()).toBe(0);
 
-    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref) });
-    const cycleId = store.openChainCycleForDispatch(ref, "t-chain", run, T0);
-    expect(cycleId).not.toBeNull();
+    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } });
     const c = store.fallbackCycleFor(ref)!;
     expect(c).toMatchObject({ state: "open", cursor: 0, tailRun: run });
+    expect(store.getRun(run)).toMatchObject({ chainCycle: c.id, chainIndex: 0, authMode: "subscription" });
     // The cycle's digest is the one the approved snapshot binds — not config.
     const expected = chainDigestOf(chainFromJson(store.getScope("t-chain")!.approvedChainJson!)!);
     expect(c.chainDigest).toBe(expected);
   });
 
-  test("a second dispatch against a live cycle gets NO binding — custody never moves in passing (finding 5)", () => {
+  test("a second dispatch against a live cycle opens NO row — custody never moves in passing, and there is no post-insert binding road (finding 5)", () => {
     store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
     store.createTask({ id: "t-retry", title: "w" }, T0);
     const ref = store.refFor("built-in", "t-retry").id;
@@ -327,22 +351,23 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const token = bootstrap();
     expect(approve(store, "t-retry", "alex", T0, store.getScope("t-retry")!.digest, token).ok).toBe(true);
 
-    const first = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b-1", branch: "b1", worktree: "/w1", provider: "claude", now: T0, ...presented(store, ref) });
-    const c1 = store.openChainCycleForDispatch(ref, "t-retry", first, T0);
-    expect(c1).not.toBeNull();
+    const first = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b-1", branch: "b1", worktree: "/w1", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } });
+    const c1 = store.fallbackCycleFor(ref)!;
     // The first run is BOUND to entry 0.
-    expect(store.getRun(first)).toMatchObject({ chainCycle: c1, chainIndex: 0, authMode: "subscription" });
-    // A second dispatch while the cycle lives: refused a binding — the
-    // cycle's tail stays with the first run, and the unbound second run
-    // would fail the chain-entry dispatch proof before spending.
-    const second = store.startRun({ taskRef: ref, leaseId: "l2", runner: "b-1", branch: "b2", worktree: "/w2", provider: "claude", now: T0, ...presented(store, ref) });
-    expect(store.openChainCycleForDispatch(ref, "t-retry", second, T0)).toBeNull();
-    const c = store.fallbackCycleFor(ref)!;
-    expect(c.tailRun).toBe(first);
-    expect(store.getRun(second)?.chainCycle ?? null).toBeNull();
+    expect(store.getRun(first)).toMatchObject({ chainCycle: c1.id, chainIndex: 0, authMode: "subscription" });
+    // A second dispatch while the cycle lives: the insert rolls back — the
+    // cycle's tail stays with the first run and no unbound row exists to
+    // spend outside the cycle.
+    expect(() => store.startRun({ taskRef: ref, leaseId: "l2", runner: "b-1", branch: "b2", worktree: "/w2", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } })).toThrow(/base custody cannot open beside it/);
+    expect(store.runsFor(ref)).toHaveLength(1);
+    expect(store.fallbackCycleFor(ref)!.tailRun).toBe(first);
+    // The post-insert roads are gone: nothing binds or re-tags a row after the fact.
+    expect("openChainCycleForDispatch" in store).toBe(false);
+    expect("inheritChainBinding" in store).toBe(false);
+    expect("stampRunRoute" in store).toBe(false);
   });
 
-  test("the PROVEN parked-resume transfer: only a parked tail hands custody to a successor (finding 5)", () => {
+  test("the PROVEN parked-resume transfer: only a parked tail hands custody to a successor, inside the successor's insert (finding 5)", () => {
     store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
     store.createTask({ id: "t-resume", title: "w" }, T0);
     const ref = store.refFor("built-in", "t-resume").id;
@@ -351,22 +376,22 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const token = bootstrap();
     expect(approve(store, "t-resume", "alex", T0, store.getScope("t-resume")!.digest, token).ok).toBe(true);
 
-    const parent = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref) });
-    store.openChainCycleForDispatch(ref, "t-resume", parent, T0);
-    const successor = store.startRun({ taskRef: ref, leaseId: "l2", runner: "b-1", branch: "b", worktree: "/w2", provider: "claude", now: T0, ...presented(store, ref) });
+    const parent = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } });
+    const resume = (lease: string) => store.startRun({ taskRef: ref, leaseId: lease, runner: "b-1", branch: "b", worktree: `/${lease}`, provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "resume", parkedRun: parent } });
     // A LIVE (unconcluded) parent refuses the transfer — the provider may
     // still be alive, and custody is not moved off a possibly-running tail.
-    expect(store.resumeChainCustody(parent, successor, T0)).toBe(false);
+    expect(() => resume("l2")).toThrow(/is not this task's parked chain tail/);
+    expect(store.runsFor(ref)).toHaveLength(1);
     // A PARKED parent is the paused lineage: the transfer proves and moves.
     store.finishRun(parent, { outcome: "parked", reason: "decision", now: T0 });
-    expect(store.resumeChainCustody(parent, successor, T0)).toBe(true);
+    const successor = resume("l3");
     const c = store.fallbackCycleFor(ref)!;
     expect(c).toMatchObject({ state: "open", cursor: 0, tailRun: successor });
     // The successor INHERITED the binding verbatim — pinned auth mode included.
     expect(store.getRun(successor)).toMatchObject({ chainCycle: c.id, chainIndex: 0, authMode: "subscription" });
     // And the transfer is single-use: the parent is no longer the tail.
-    const third = store.startRun({ taskRef: ref, leaseId: "l3", runner: "b-1", branch: "b", worktree: "/w3", provider: "claude", now: T0, ...presented(store, ref) });
-    expect(store.resumeChainCustody(parent, third, T0)).toBe(false);
+    expect(() => resume("l4")).toThrow(/is not the live tail of its fallback cycle/);
+    expect(store.runsFor(ref)).toHaveLength(2);
   });
 
   test("atomic-chain: base and parked-resume custody are proved and written IN the run's insert — a binding that cannot be proved rolls the row back, only a same-task repair inherits, a reviewer after a fallback takes no custody", () => {
@@ -413,7 +438,7 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     expect(store.fallbackCycleFor(ref)).toMatchObject({ state: "open", cursor: 0, tailRun: successor });
     expect(store.getRun(successor)).toMatchObject({ chainCycle: cycle.id, chainIndex: 0, authMode: "subscription" });
     // The transfer is single-use: a second resume off the same parked tail rolls back.
-    expect(() => open({ leaseId: "l5", custody: { kind: "resume", parkedRun: base } })).toThrow(/is not open with it as the parked tail|not this task's parked chain tail/);
+    expect(() => open({ leaseId: "l5", custody: { kind: "resume", parkedRun: base } })).toThrow(/is not the live tail of its fallback cycle|not this task's parked chain tail/);
     expect(store.fallbackCycleFor(ref)?.tailRun).toBe(successor);
   });
 
@@ -441,7 +466,7 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const exact = () => ({
       cycleId: cycle.id, expectGeneration: 3, expectCursor: 1, transitionId: adv.transitionId,
       run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.model },
-      entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route,
+      entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved,
     });
     const rows = () => Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run").get() as { n: number }).n);
     const edgeFree = () => (store.raw().prepare("SELECT consumed_by FROM fallback_transition WHERE id = ?").get(adv.transitionId) as { consumed_by: number | null }).consumed_by === null;
@@ -467,17 +492,121 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     refused({ ...exact(), repairModel: "gemini-2.5-flash" }, /repairs on gemini · gemini-2.5-pro, not gemini-2.5-flash/);
     refused({ ...exact(), route: { ...e1.route, chosen: "recommended" } }, /spends as `fallback`, not `recommended`/);
     refused({ ...exact(), route: { ...e1.route, routeDigest: "f".repeat(32) } }, /is not the approved authority/);
+    // The caller-provided facts the v48 integrity repair added: the exact
+    // model is REQUIRED (never defaulted from the entry), the tail must be
+    // the cycle's, the mirror must be the approval's, the chain digest the
+    // approved one, the phase the run's, and a repair stamp admits no builder.
+    refused({ ...exact(), run: { ...exact().run, model: undefined as unknown as string } }, /names no exact model — nothing is defaulted here/);
+    refused({ ...exact(), run: { ...exact().run, model: "" } }, /names no exact model/);
+    refused({ ...exact(), expectTail: base }, /the cycle's tail is none, not \d+/);
+    refused({ ...exact(), approved: { ...exact().approved, chainDigest: "0".repeat(32) } }, /the caller holds chain 0{32}, but the approved chain is/);
+    refused({ ...exact(), approved: { ...exact().approved, profile: { ...exact().approved.profile, model: "opus" } } }, /the caller's sealed-profile mirror .* is not the approval's/);
+    refused({ ...exact(), route: { ...e1.route, phase: "repair" } }, /a builder run spends as the build leg, but the stamp says repair/);
+    refused({ ...exact(), route: { ...e1.route, phase: "plan" } }, /a builder run spends as the build leg/);
+    // The store's OWN sealed-profile mirror corrupted, or rewritten to
+    // another profile: the chain approval is not downgraded to chain-only
+    // authority — nothing admits, and the chain reads as gone.
+    const mirrorJson = store.raw().prepare("SELECT approved_profile_json AS p FROM task_scope WHERE task_id = 't-bound'").get() as { p: string };
+    for (const corrupt of ["{", "null", JSON.stringify({ digestVersion: 2, profile: { ...exact().approved.profile, model: "opus" } }), JSON.stringify({ digestVersion: 2, profile: { ...exact().approved.profile, extra: 1 } })]) {
+      store.raw().prepare("UPDATE task_scope SET approved_profile_json = ? WHERE task_id = 't-bound'").run(corrupt);
+      expect(store.approvedChainOf("t-bound")).toBeNull();
+      expect(store.sealedRouteOf("t-bound")).toMatchObject({ ok: false, reason: "unreadable" });
+      refused(exact(), /chain approval no longer stands \(or its sealed profile mirror does not verify\)/);
+    }
+    store.raw().prepare("UPDATE task_scope SET approved_profile_json = ? WHERE task_id = 't-bound'").run(mirrorJson.p);
+    expect(store.approvedChainOf("t-bound")).not.toBeNull();
     // The approved chain withdrawn (re-filed without reapproval): nothing admits.
     const snapshot = store.raw().prepare("SELECT approved_chain_json AS c FROM task_scope WHERE task_id = 't-bound'").get() as { c: string };
     store.raw().prepare("UPDATE task_scope SET approved_chain_json = '[{' WHERE task_id = 't-bound'").run();
     refused(exact(), /chain approval no longer stands/);
     store.raw().prepare("UPDATE task_scope SET approved_chain_json = ? WHERE task_id = 't-bound'").run(snapshot.c);
+    // A resume or repair kind against a pending cycle: refused (the cycle is not open).
+    refused({ ...exact(), kind: "resume", parkedRun: base, expectTail: null } as Parameters<Store["admitFallback"]>[0], /is pending-admission, not open/);
+    refused({ ...exact(), kind: "repair", parentRun: base, expectTail: null, route: { ...e1.route, phase: "repair" } } as Parameters<Store["admitFallback"]>[0], /is pending-admission, not open/);
     // The exact statement admits: one run, the edge consumed, the cycle open at 1.
     const admitted = store.admitFallback(exact(), T0);
     expect(admitted.ok).toBe(true);
+    if (!admitted.ok) return;
     expect(rows()).toBe(before + 1);
     expect(edgeFree()).toBe(false);
-    expect(store.fallbackCycleFor(ref)).toMatchObject({ state: "open", cursor: 1 });
+    expect(store.fallbackCycleFor(ref)).toMatchObject({ state: "open", cursor: 1, tailRun: admitted.runId });
+
+    // THE SUCCESSOR KINDS, on the now-open cycle: a repair turn under the
+    // live tail and a parked tail's resume — every mismatch zero rows, the
+    // tail unmoved; the generic admission refuses both outright.
+    const after = rows();
+    const tailStays = (): void => {
+      expect(rows()).toBe(after);
+      expect(store.fallbackCycleFor(ref)).toMatchObject({ state: "open", cursor: 1, tailRun: admitted.runId });
+    };
+    const repairStamp = { ...e1.route, phase: "repair" as const };
+    const repairFacts = (): Parameters<Store["admitFallback"]>[0] => ({
+      kind: "repair", parentRun: admitted.runId, cycleId: cycle.id, expectCursor: 1, expectTail: admitted.runId,
+      run: { taskRef: ref, leaseId: "lr", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel },
+      entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, approved: e1.approved, route: repairStamp,
+    });
+    expect(() => store.startRun({ taskRef: ref, leaseId: "lr", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, role: "repair", parentRun: admitted.runId, now: T0, route: repairStamp })).toThrow(/admitted only through admitFallback/);
+    expect(() => store.startRun({ taskRef: ref, leaseId: "lr", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, role: "repair", parentRun: admitted.runId, now: T0, ...presented(store, ref, "repair") })).toThrow(/admitted only through admitFallback/);
+    tailStays();
+    const refusedRepair = (over: Partial<Parameters<Store["admitFallback"]>[0]>, words: RegExp) => {
+      const result = store.admitFallback({ ...repairFacts(), ...over } as Parameters<Store["admitFallback"]>[0], T0);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.problem).toMatch(words);
+      tailStays();
+    };
+    refusedRepair({ parentRun: base, expectTail: base }, /the cycle's tail is \d+, not \d+/);
+    refusedRepair({ parentRun: base }, /is not the tail the caller names|is not bound to entry 1/);
+    refusedRepair({ expectTail: base }, /the cycle's tail is \d+, not \d+/);
+    refusedRepair({ run: { ...repairFacts().run, model: e1.model === e1.repairModel ? "gemini-2.5-flash" : e1.model } }, /repairs on gemini/);
+    refusedRepair({ route: e1.route }, /a repair run spends as the repair leg, but the stamp says build/);
+    refusedRepair({ route: { ...repairStamp, chosen: "recommended" } }, /spends as `fallback`/);
+    refusedRepair({ run: { ...repairFacts().run, taskRef: elseRef } }, /belongs to task_ref/);
+    const repaired = store.admitFallback(repairFacts(), T0);
+    expect(repaired.ok).toBe(true);
+    if (!repaired.ok) return;
+    expect(store.getRun(repaired.runId)).toMatchObject({ role: "repair", parentRun: admitted.runId, chainCycle: cycle.id, chainIndex: 1, entryDigest: e1.entryDigest, authMode: e1.authMode });
+    expect(store.runRoute(repaired.runId)).toMatchObject({ phase: "repair", chosen: "fallback", provider: e1.provider, model: e1.repairModel });
+    // The parent stays the tail: a repair turn spends under its custody.
+    expect(store.fallbackCycleFor(ref)!.tailRun).toBe(admitted.runId);
+    // A repair under an ENDED parent: refused, zero rows.
+    store.finishRun(repaired.runId, { outcome: "failed", reason: "x", now: T0 });
+    store.finishRun(admitted.runId, { outcome: "parked", reason: "decision", now: T0 });
+    const ended = rows();
+    expect(store.admitFallback({ ...repairFacts(), run: { ...repairFacts().run, leaseId: "lr2" } }, T0)).toMatchObject({ ok: false, problem: expect.stringContaining("has ended — a repair turn mends a live attempt only") });
+    expect(rows()).toBe(ended);
+    // RESUME of the parked fallback tail: only through admitFallback, only
+    // as the parked run, only bound as it was — then the tail moves once.
+    const resumeFacts = (): Parameters<Store["admitFallback"]>[0] => ({
+      kind: "resume", parkedRun: admitted.runId, cycleId: cycle.id, expectCursor: 1, expectTail: admitted.runId,
+      run: { taskRef: ref, leaseId: "ls", runner: "b-1", branch: "bf", worktree: "/ws", provider: e1.provider, model: e1.model },
+      entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, approved: e1.approved, route: e1.route,
+    });
+    expect(() => store.startRun({ taskRef: ref, leaseId: "ls", runner: "b-1", branch: "bf", worktree: "/ws", provider: e1.provider, model: e1.model, now: T0, route: e1.route, custody: { kind: "resume", parkedRun: admitted.runId } })).toThrow(/admitted only through admitFallback/);
+    expect(() => store.startRun({ taskRef: ref, leaseId: "ls", runner: "b-1", branch: "bf", worktree: "/ws", provider: e1.provider, model: e1.model, now: T0, ...presented(store, ref), custody: { kind: "resume", parkedRun: admitted.runId } })).toThrow(/parked on fallback entry 1 — its successor is admitted only through admitFallback/);
+    expect(rows()).toBe(ended);
+    for (const [over, words] of [
+      [{ parkedRun: repaired.runId }, /is not the tail the caller names|did not park|is not bound to entry/],
+      [{ parkedRun: base }, /is not the tail the caller names|did not park/],
+      [{ parkedRun: base, expectTail: base }, /the cycle's tail is \d+, not \d+/],
+      [{ expectCursor: 0 }, /stands at entry 1, not 0/],
+      [{ run: { ...resumeFacts().run, model: "gemini-2.5-flash" }, route: { ...e1.route, model: "gemini-2.5-flash" } }, /runs on gemini · gemini-2.5-pro, not gemini · gemini-2.5-flash/],
+      [{ authMode: "subscription" as const }, /is pinned to api-key, not subscription/],
+    ] as const) {
+      const result = store.admitFallback({ ...resumeFacts(), ...over } as Parameters<Store["admitFallback"]>[0], T0);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.problem).toMatch(words);
+      expect(rows()).toBe(ended);
+      expect(store.fallbackCycleFor(ref)!.tailRun).toBe(admitted.runId);
+    }
+    const resumed = store.admitFallback(resumeFacts(), T0);
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(store.getRun(resumed.runId)).toMatchObject({ role: "builder", chainCycle: cycle.id, chainIndex: 1, entryDigest: e1.entryDigest, authMode: e1.authMode });
+    expect(store.runRoute(resumed.runId)).toMatchObject({ phase: "build", chosen: "fallback" });
+    expect(store.fallbackCycleFor(ref)).toMatchObject({ state: "open", cursor: 1, tailRun: resumed.runId });
+    // Single-use: the parked run is no longer the tail.
+    expect(store.admitFallback({ ...resumeFacts(), run: { ...resumeFacts().run, leaseId: "ls2" } }, T0)).toMatchObject({ ok: false, problem: expect.stringContaining("the cycle's tail is") });
+    expect(store.fallbackCycleFor(ref)!.tailRun).toBe(resumed.runId);
   });
 
   test("a scope REWRITTEN after a chain approval loses fallback authority — no cycle opens (finding 2)", () => {
@@ -521,8 +650,7 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     store.placeTask(ref, REPO);
     propose(store, { taskId: id, goal: "a guard", now: T0 });
     expect(approve(store, id, "alex", T0, store.getScope(id)!.digest, alexToken).ok).toBe(true);
-    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref) });
-    store.openChainCycleForDispatch(ref, id, run, T0);
+    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" } });
     return { ref, run };
   };
 
@@ -644,12 +772,12 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     // entry digest opens nothing.
     const e1 = entryArgs(store, "t-end", 1);
     const forged = store.admitFallback(
-      { cycleId: cyc.id, expectGeneration: cyc.transitionGeneration, expectCursor: 1, transitionId: txId, run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: "gemini", model: "gemini-2.5-pro" }, entryDigest: "e1", authMode: "api-key", repairModel: e1.repairModel, route: e1.route },
+      { cycleId: cyc.id, expectGeneration: cyc.transitionGeneration, expectCursor: 1, transitionId: txId, run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: "gemini", model: "gemini-2.5-pro" }, entryDigest: "e1", authMode: "api-key", repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
       T0,
     );
     expect(forged).toMatchObject({ ok: false, problem: expect.stringContaining("the stated entry digest e1 is not the approved entry 1's") });
     const admitted = store.admitFallback(
-      { cycleId: cyc.id, expectGeneration: cyc.transitionGeneration, expectCursor: 1, transitionId: txId, run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: "gemini", model: "gemini-2.5-pro" }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route },
+      { cycleId: cyc.id, expectGeneration: cyc.transitionGeneration, expectCursor: 1, transitionId: txId, run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: "gemini", model: "gemini-2.5-pro" }, entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, route: e1.route, kind: e1.kind, expectTail: e1.expectTail, approved: e1.approved },
       T0,
     );
     expect(admitted.ok).toBe(true);
@@ -692,12 +820,18 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     });
     expect(store.getRun(repair)).toMatchObject({ chainCycle: store.getRun(run)!.chainCycle, chainIndex: 0 });
     expect(store.proveChainCustodyForSpawn(repair, T0)).toBe(true);
-    // A chain-bound run that is NEITHER the tail nor its repair child refuses.
-    const stranger = store.startRun({
+    // A chain-bound run that is NEITHER the tail nor its repair child
+    // cannot even be opened beside the live cycle (v48 integrity) — and a
+    // row forged with the binding by hand is still not custody.
+    expect(() => store.startRun({
       taskRef: ref, leaseId: "l-s", runner: "b-1", branch: "b", worktree: "/w2",
-      provider: "claude", now: T0, ...presented(store, ref),
-    });
-    store.inheritChainBinding(stranger, run); // binding alone is not custody
+      provider: "claude", now: T0, ...presented(store, ref), custody: { kind: "base" },
+    })).toThrow(/base custody cannot open beside it/);
+    const tail = store.getRun(run)!;
+    const forged = store.raw()
+      .prepare("INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, chain_cycle, chain_index, entry_digest, auth_mode, started_at) VALUES (?, 'l-s', 'b-1', 'b', '/w2', 'sonnet', 'builder', 'claude', ?, ?, ?, ?, ?)")
+      .run(ref, tail.chainCycle, tail.chainIndex, tail.entryDigest, tail.authMode, T0.toISOString());
+    const stranger = Number(forged.lastInsertRowid);
     expect(store.proveChainCustodyForSpawn(stranger, T0)).toBe(false);
     expect(store.getRun(stranger)?.providerStartedAt ?? null).toBeNull();
   });

@@ -389,6 +389,58 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
     if (occurredAt === null || (!manual && occurredAt > now.toISOString())) {
       return { ok: false as const, reason: "not-due" as const };
     }
+    // THE FROZEN ROUTE (v48): the instance runs on exactly the four agents
+    // the approval sealed — planner, builder, repair, reviewer — copied
+    // from the approved snapshot, never recommended afresh. A routine whose
+    // approval predates routing (no sealed route) fires nothing: the slot
+    // stays due, the operator is paged once, and approving the standing
+    // order again — under agents it now names — is the road. No later
+    // `config set` can reach a firing.
+    // THE FROZEN SNAPSHOT IS RE-HASHED (v48, authority repair) by the same projection: the
+    // approved profile and the approved four-role route must read back,
+    // hash with the stored terms to the very digest the approver signed —
+    // a snapshot column rewritten after the yes fires nothing — carry no
+    // stated leg problem, agree with the sealed profile's build and
+    // repair pairs, and BE the working pair. Anything short of live
+    // refuses HERE — before the slot is read, before a stale pointer is
+    // healed, before a blocker is ledgered, before any instance, page, or
+    // next-fire time is written (v48 integrity): the refusal rides out of
+    // the transaction as a rollback, so the only thing a not-live firing
+    // leaves behind is the once-per-episode page at the edge. Two facts
+    // are said apart on the page: a snapshot never taken (approved before
+    // routing froze) and one whose bytes cannot be read (corrupt). The
+    // road is the same — refresh the agents, read them, approve again.
+    if (!integrity.live) {
+      const state = integrity.agents.state;
+      const subject =
+        state === "unreadable"
+          ? `${routine.name} needs filing again: its frozen agents cannot be read`
+          : state === "unfrozen"
+            ? `${routine.name} needs approving again: its agents were never frozen`
+            : `${routine.name} needs approving again: its frozen agents do not verify`;
+      const body =
+        state === "unreadable"
+          ? `The agents this standing order's approval froze cannot be read back. Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`
+          : state === "unfrozen"
+            ? `This standing order was approved before Standing Orders froze which agents plan, build, repair, and review each firing. Open it, refresh its agents, read the agents it now names, and approve it again; until then its firings wait.`
+            : `The agents this standing order's approval froze do not verify (${integrity.liveProblem ?? "the frozen snapshot is not whole"}). Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`;
+      throw new FiringRolledBack(
+        {
+          ok: false,
+          reason: "route-unfrozen",
+          detail:
+            state === "unreadable"
+              ? "the agents this standing order's approval froze cannot be read — refresh its agents and approve it again to fire it"
+              : state === "unfrozen"
+                ? "this standing order was approved before its agents were frozen — refresh its agents and approve it again to fire it"
+                : `${integrity.liveProblem ?? "the approved agents do not verify"} — refresh its agents and approve it again to fire it`,
+        },
+        { subject, body },
+      );
+    }
+    const frozenRoute = routine.approvedRoute as PhaseRoute;
+    const frozenProfile = routine.approvedProfile as ExecutionProfile;
+
     // A manual firing has its own ledger identity: it must never claim a
     // scheduled slot's key, or a run-now landing exactly on the due instant
     // would strand the schedule on that slot forever (Codex review, M1).
@@ -451,58 +503,6 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
       );
     }
 
-    // THE FROZEN ROUTE (v48): the instance runs on exactly the four agents
-    // the approval sealed — planner, builder, repair, reviewer — copied
-    // from the approved snapshot, never recommended afresh. A routine whose
-    // approval predates routing (no sealed route) fires nothing: the slot
-    // stays due, the operator is paged once, and approving the standing
-    // order again — under agents it now names — is the road. No later
-    // `config set` can reach a firing.
-    // THE FROZEN SNAPSHOT IS RE-HASHED (v48, authority repair) by the same projection: the
-    // approved profile and the approved four-role route must read back,
-    // hash with the stored terms to the very digest the approver signed —
-    // a snapshot column rewritten after the yes fires nothing — carry no
-    // stated leg problem, and agree with the sealed profile's build and
-    // repair pairs. Anything short of live fails closed here, before
-    // anything is written; two facts are said apart on the page: a
-    // snapshot never taken (approved before routing froze) and one whose
-    // bytes cannot be read (corrupt). The road is the same — refresh the
-    // agents, read them, approve again.
-    if (!integrity.live) {
-      const state = integrity.agents.state;
-      const subject =
-        state === "unreadable"
-          ? `${routine.name} needs filing again: its frozen agents cannot be read`
-          : state === "unfrozen"
-            ? `${routine.name} needs approving again: its agents were never frozen`
-            : `${routine.name} needs approving again: its frozen agents do not verify`;
-      const body =
-        state === "unreadable"
-          ? `The agents this standing order's approval froze cannot be read back. Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`
-          : state === "unfrozen"
-            ? `This standing order was approved before Standing Orders froze which agents plan, build, repair, and review each firing. Open it, refresh its agents, read the agents it now names, and approve it again; until then its firings wait.`
-            : `The agents this standing order's approval froze do not verify (${integrity.liveProblem ?? "the frozen snapshot is not whole"}). Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`;
-      if (!manual) {
-        store.enqueueRoutineEpisode(
-          `routine-route:${routineId}`,
-          { kind: "routine-blocked", pushClass: "attention", link: `/routines/${routineId}`, subject, body },
-          scheduledFor,
-          now,
-        );
-      }
-      return {
-        ok: false as const,
-        reason: "route-unfrozen" as const,
-        detail:
-          state === "unreadable"
-            ? "the agents this standing order's approval froze cannot be read — refresh its agents and approve it again to fire it"
-            : state === "unfrozen"
-              ? "this standing order was approved before its agents were frozen — refresh its agents and approve it again to fire it"
-              : `${integrity.liveProblem ?? "the approved agents do not verify"} — refresh its agents and approve it again to fire it`,
-      };
-    }
-    const frozenRoute = routine.approvedRoute as PhaseRoute;
-    const frozenProfile = routine.approvedProfile as ExecutionProfile;
     const frozenBuild = legOf(frozenRoute, "build");
     // The instance's agent IS the frozen build leg — never resolved from
     // flags or configuration at fire time (Codex provider review, critical
@@ -695,21 +695,16 @@ export type RoutineIntegrity = {
   agents: RoutineAgentsState;
 };
 
-type IntegrityRow = Pick<Routine, "route" | "approvedRoute" | "profile" | "approvedProfile" | "approvedAt" | "approvedDigest" | "digest" | "routeUnreadable" | "approvedRouteUnreadable" | "approvedProfileUnreadable"> &
-  Partial<Pick<Routine, "goal" | "outOfScope" | "touches" | "acceptance" | "requirements" | "schedule" | "costCeilingUsd" | "budgetPerRunMicrousd">>;
-
-/** Whether the row carries every term the digest binds — a full Routine.
- * A partial projection (older callers) skips the re-derivation and reads
- * the columns alone; the store's own rows always carry the terms. */
-function carriesTerms(routine: IntegrityRow): routine is IntegrityRow & Routine {
-  return typeof routine.goal === "string" && typeof routine.schedule === "string" && Array.isArray(routine.touches);
-}
+/** The FULL row (v48 integrity): every term the digest binds, both
+ * snapshot pairs, and the unreadable flags. There is no partial
+ * projection — a reading that skipped the re-derivation could call a
+ * rewritten row approved. */
+type IntegrityRow = Routine;
 
 export function routineIntegrity(routine: IntegrityRow): RoutineIntegrity {
-  const terms = carriesTerms(routine) ? termsOf(routine) : null;
+  const terms = termsOf(routine);
   const stamped = routine.approvedAt !== null && routine.approvedDigest !== null && routine.approvedDigest === routine.digest;
-  const workingRehashes =
-    terms === null || routineDigestOf(terms, routine.profile ?? null, routine.route ?? null) === routine.digest;
+  const workingRehashes = routineDigestOf(terms, routine.profile ?? null, routine.route ?? null) === routine.digest;
   const approved = stamped && workingRehashes;
   const closed = (state: RoutineAgentsState["state"], problem: string, refresh = true): RoutineIntegrity => ({
     approved,
@@ -724,8 +719,19 @@ export function routineIntegrity(routine: IntegrityRow): RoutineIntegrity {
     const route = routine.approvedRoute ?? null;
     const profile = routine.approvedProfile ?? null;
     if (route === null || profile === null) return closed("unfrozen", "approved before agents were frozen");
-    if (terms !== null && routineDigestOf(terms, profile, route) !== routine.approvedDigest) {
+    if (routineDigestOf(terms, profile, route) !== routine.approvedDigest) {
       return closed("unverified", "the approved agents do not hash to the approval this standing order carries");
+    }
+    // WORKING/APPROVED PARITY (v48 integrity): the approval stands on the
+    // stored digest, and that digest binds the WORKING route and profile —
+    // so the frozen snapshot must BE the working one, byte for byte. A
+    // frozen pair that hashes to the approval while the working pair says
+    // something else is a row two authorities wrote; nothing fires on it.
+    if (routine.routeUnreadable === true || routine.route == null || routine.profile == null) {
+      return closed("unverified", "the approved agents are frozen but the working agents cannot be read back");
+    }
+    if (routeDigestOf(routine.route) !== routeDigestOf(route) || profileDigestOf(routine.profile) !== profileDigestOf(profile)) {
+      return closed("unverified", "the approved agents are not the working agents this standing order files");
     }
     const problems = routeProblems(route);
     if (problems.length > 0) return closed("unresolved", problems.join("; "));
@@ -819,7 +825,7 @@ export function describeRoutine(routine: Routine): string[] {
 
 /** The agents a standing order's approval freezes, in the same words the
  * task page and chat use — or why it cannot say. */
-export function routineAgentsWords(routine: Pick<Routine, "route" | "approvedRoute" | "profile" | "approvedProfile" | "approvedAt" | "approvedDigest" | "digest" | "routeUnreadable" | "approvedRouteUnreadable" | "approvedProfileUnreadable">): string[] {
+export function routineAgentsWords(routine: Routine): string[] {
   const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
   const agents = routineAgentsState(routine);
   const route = approved ? routine.approvedRoute ?? null : routine.route ?? null;

@@ -1978,12 +1978,13 @@ describe("the park", () => {
   });
 
   test("a build without an open run cannot spend at all", async () => {
-    // The invocation gateway is the only door to the provider, and it
-    // refuses a run that is missing or finished — nothing spends without a
-    // record that will outlive it.
-    await expect(
-      build(store, request({ agent: parkingAgent(decision), runId: 999_999 })),
-    ).rejects.toThrow(/not an open attempt/);
+    // A run that does not exist carries no route provenance, and nothing
+    // spends on a row no admission stamped (v48 integrity) — refused in
+    // words before the invocation gateway is even reached.
+    const result = await build(store, request({ agent: parkingAgent(decision), runId: 999_999 }));
+    expect(result).toMatchObject({ ok: false, reason: "stale-approval" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.message).toContain("carries no route provenance");
   });
 });
 
@@ -2144,24 +2145,25 @@ describe("bounded repair", () => {
     // its repair names the same route's repair leg.
     const { agent } = staged([invalid, valid]);
     const sealed = store.approvedRouteOf("t-1")!;
-    // Admission already stamped the run from the sealed route (v48): the
-    // same stamp restated is idempotent, never a second provenance.
-    expect(store.stampRunRoute(runId, { routeDigest: routeDigestOf(sealed), phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" }, T0)).toEqual({ ok: true, first: false });
+    // Admission already stamped the run from the sealed route (v48), and
+    // there is no late-stamp road to restate or move it.
+    expect(store.runRoute(runId)).toMatchObject({ routeDigest: routeDigestOf(sealed), phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" });
+    expect("stampRunRoute" in store).toBe(false);
     const result = await build(store, request({ agent }));
     expect(result).toMatchObject({ ok: true });
     const repair = store.runsFor(taskRef).find(r => r.role === "repair")!;
     expect(store.runRoute(repair.id)).toMatchObject({ phase: "repair", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: routeDigestOf(sealed) });
 
-    // A `fallback` stamp with no approved chain behind it is refused at
-    // admission (v48): no run row, no repair, nothing spends as a fallback
-    // nobody approved. (A real approved fallback and its repair are proved
-    // end to end in fallback-e2e.test.ts.)
+    // A `fallback` stamp never enters the generic admission (v48
+    // integrity): no run row, no repair, nothing spends as a fallback
+    // outside admitFallback. (A real approved fallback and its repair are
+    // proved end to end in fallback-e2e.test.ts.)
     expect(() =>
       store.startRun({
         taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1", branch: "feat/a", worktree, now: T0,
         route: { routeDigest: routeDigestOf(sealed), phase: "build", provider: "claude", model: "sonnet", chosen: "fallback" },
       }),
-    ).toThrow(/no approved fallback chain/);
+    ).toThrow(/admitted only through admitFallback/);
 
     // The route removed from the routed row while the build runs: the
     // repair refuses — no mending under agents nobody can read.

@@ -702,52 +702,50 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       ? { providerVersion: providerVersionOf(provider) as string }
       : {}),
   });
-  // ROUTE PROVENANCE (v47), set-once: admission already stamped the run
-  // with the route and leg it was opened under (dispatch, fallback
-  // admission); what is about to spend must BE that stamp — the same
-  // provider and exact model — or execution is refused before any spawn.
-  // A run admission left unstamped (a contest lane, an attended session, a
-  // legacy road) is stamped here from the proven profile, first write.
+  // ROUTE PROVENANCE (v47), written once at admission: every run — a
+  // routed dispatch, a fallback admission, a contest lane, an attended
+  // session, a pre-routing row's build — was stamped inside its own
+  // insert (v48 integrity: there is no late stamp). What is about to
+  // spend must BE that stamp — the same provider and exact model — or
+  // execution is refused before any spawn; a run that carries none was
+  // opened by no admission this build recognizes, and nothing spends on
+  // it.
   {
     const existing = store.runRoute(request.runId);
     const sealed = request.contestProfile !== undefined || attended !== undefined ? null : store.sealedRouteOf(taskId);
-    if (existing !== null) {
-      if (existing.provider !== provider || existing.model !== effective.model) {
-        return {
-          ok: false,
-          reason: "stale-approval",
-          message: `${taskId}: route provenance conflict — run #${request.runId} was admitted as ${existing.provider} · ${existing.model ?? "(no model)"} but would spend as ${provider} · ${effective.model}; refusing to run (stale-approval)`,
-        };
-      }
-      // The route the run was admitted under must still be the one that
-      // governs (v48): a scope re-sealed since admission is a different
-      // authority, and this attempt spends under none of it.
-      if (existing.chosen !== "legacy" && sealed !== null && sealed.ok && existing.routeDigest !== routeDigestOf(sealed.route)) {
-        return {
-          ok: false,
-          reason: "stale-approval",
-          message: `${taskId}: run #${request.runId} was admitted under route ${existing.routeDigest} but the sealed route is now ${routeDigestOf(sealed.route)} — a fresh attempt is admitted under the current approval (stale-approval)`,
-        };
-      }
-    } else {
-      // A ROUTED task's run was admitted with its authority (v48 authority repair) — an
-      // unstamped one on a routed row is a row nothing admitted, and this
-      // road never dictates the stamp it lacks. Only a pre-routing row (or
-      // a contest lane, an attended session) stamps its proven profile.
-      const scopeRouted = store.getScope(taskId)?.routeEra != null;
-      if (sealed !== null && scopeRouted && store.getRun(request.runId) !== null) {
-        return {
-          ok: false,
-          reason: "stale-approval",
-          message: `${taskId}: run #${request.runId} was opened without route provenance on a task filed under agent routing — nothing spends on it; a fresh attempt is admitted under the sealed route (stale-approval)`,
-        };
-      }
-      const stamped = store.stampRunRoute(
-        request.runId,
-        { routeDigest: `profile:${provenProfileDigest}`, phase: "build", provider, model: effective.model, chosen: "legacy" },
-        now,
-      );
-      if (!stamped.ok) return { ok: false, reason: "stale-approval", message: `${taskId}: ${stamped.conflict} (stale-approval)` };
+    if (existing === null) {
+      return {
+        ok: false,
+        reason: "stale-approval",
+        message: `${taskId}: run #${request.runId} carries no route provenance — nothing spends on a row no admission stamped; a fresh attempt is admitted under the task's authority (stale-approval)`,
+      };
+    }
+    if (existing.provider !== provider || existing.model !== effective.model) {
+      return {
+        ok: false,
+        reason: "stale-approval",
+        message: `${taskId}: route provenance conflict — run #${request.runId} was admitted as ${existing.provider} · ${existing.model ?? "(no model)"} but would spend as ${provider} · ${effective.model}; refusing to run (stale-approval)`,
+      };
+    }
+    // The route the run was admitted under must still be the one that
+    // governs (v48): a scope re-sealed since admission is a different
+    // authority, and this attempt spends under none of it.
+    if (existing.chosen !== "legacy" && sealed !== null && sealed.ok && existing.routeDigest !== routeDigestOf(sealed.route)) {
+      return {
+        ok: false,
+        reason: "stale-approval",
+        message: `${taskId}: run #${request.runId} was admitted under route ${existing.routeDigest} but the sealed route is now ${routeDigestOf(sealed.route)} — a fresh attempt is admitted under the current approval (stale-approval)`,
+      };
+    }
+    // A pre-routing row's legacy stamp names the very profile that was
+    // just proved (v48 integrity): a stamp under another profile digest
+    // is provenance nobody admitted for this spend.
+    if (existing.chosen === "legacy" && existing.routeDigest !== "legacy" && existing.routeDigest !== `profile:${provenProfileDigest}`) {
+      return {
+        ok: false,
+        reason: "stale-approval",
+        message: `${taskId}: run #${request.runId} was admitted under ${existing.routeDigest} but the proven profile is profile:${provenProfileDigest} — refusing to run (stale-approval)`,
+      };
     }
   }
 
@@ -2560,32 +2558,81 @@ async function ingestPark(args: {
       if (!alive.ok) return { fenced: true };
     }
 
-    const repairRun = store.startRun({
-      taskRef: request.taskRef,
-      leaseId: request.leaseId ?? "unclaimed",
-      runner: request.runner,
-      branch: request.branch,
-      worktree,
-      ...(repairModel === null ? {} : { model: repairModel }),
-      role: "repair",
-      // Repair inherits the parent's provider, structurally: the session
-      // id it resumes has no meaning anywhere else (Codex review, Q3).
-      provider: request.provider ?? "claude",
-      parentRun: runId,
-      // Only the resumable road records the inherited session: a fresh-
-      // session repair's identity is minted by the gateway (A5), and a
-      // stale parent id on the row would win the first-write race.
-      ...(resumableRepair && sessionId !== undefined ? { sessionId } : {}),
-      now: clock(),
-      // Route provenance for the repair leg, in the admission transaction.
-      route: {
-        routeDigest: parentRoute?.routeDigest ?? (args.profile === undefined ? "legacy" : `profile:${profileDigestOf(args.profile)}`),
-        phase: "repair",
-        provider: repairProvider,
-        model: repairModel,
-        chosen: repairChosen,
-      },
-    });
+    const repairStamp: RouteStamp = {
+      routeDigest: parentRoute?.routeDigest ?? (args.profile === undefined ? "legacy" : `profile:${profileDigestOf(args.profile)}`),
+      phase: "repair",
+      provider: repairProvider,
+      model: repairModel,
+      chosen: repairChosen,
+    };
+    let repairRun: number;
+    try {
+      if (repairChosen === "fallback") {
+        // A repair turn under an approved FALLBACK entry is admitted by the
+        // one fallback road (v48 integrity): every fact the parent's
+        // binding states — cycle, index, digest, auth mode, provider, the
+        // exact repair model, the sealed-profile mirror — is presented
+        // and re-proved against the approved chain and the live cycle,
+        // with the parent as the live tail, before any row exists.
+        const parentRun = store.getRun(runId);
+        const chain = store.approvedChainOf(request.taskId);
+        const mirror = repairScope?.approvedProfile ?? null;
+        const entry = parentRun !== null && parentRun.chainIndex != null && chain !== null ? chain[parentRun.chainIndex] : undefined;
+        if (parentRun === null || parentRun.chainCycle == null || parentRun.chainIndex == null || parentRun.entryDigest == null || parentRun.authMode == null || chain === null || mirror === null || entry === undefined || repairModel === null) {
+          return { ok: false, problems: [{ reason: "route-unreadable", message: `the repair cannot run: run #${runId}'s fallback binding cannot be restated against the approved chain — nothing mends outside the cycle` }] };
+        }
+        const admitted = store.admitFallback(
+          {
+            kind: "repair",
+            parentRun: runId,
+            cycleId: parentRun.chainCycle,
+            expectCursor: parentRun.chainIndex,
+            expectTail: runId,
+            entryDigest: parentRun.entryDigest,
+            authMode: parentRun.authMode,
+            repairModel: entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel,
+            approved: { chainDigest: chainDigestOf(chain), profile: mirror },
+            run: {
+              taskRef: request.taskRef,
+              leaseId: request.leaseId ?? "unclaimed",
+              runner: request.runner,
+              branch: request.branch,
+              worktree,
+              provider: repairProvider,
+              model: repairModel,
+              ...(resumableRepair && sessionId !== undefined ? { sessionId } : {}),
+            },
+            route: repairStamp,
+          },
+          clock(),
+        );
+        if (!admitted.ok) return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${admitted.problem}` }] };
+        repairRun = admitted.runId;
+      } else {
+        repairRun = store.startRun({
+          taskRef: request.taskRef,
+          leaseId: request.leaseId ?? "unclaimed",
+          runner: request.runner,
+          branch: request.branch,
+          worktree,
+          ...(repairModel === null ? {} : { model: repairModel }),
+          role: "repair",
+          // Repair inherits the parent's provider, structurally: the session
+          // id it resumes has no meaning anywhere else (Codex review, Q3).
+          provider: request.provider ?? "claude",
+          parentRun: runId,
+          // Only the resumable road records the inherited session: a fresh-
+          // session repair's identity is minted by the gateway (A5), and a
+          // stale parent id on the row would win the first-write race.
+          ...(resumableRepair && sessionId !== undefined ? { sessionId } : {}),
+          now: clock(),
+          // Route provenance for the repair leg, in the admission transaction.
+          route: repairStamp,
+        });
+      }
+    } catch (error) {
+      return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${error instanceof Error ? error.message : String(error)}` }] };
+    }
     // A repair turn inherits its parent's chain binding VERBATIM (Codex E3d
     // review, finding 2) — inside its own admission (v48 authority repair), so the pinned
     // entry, auth mode included, follows the custody from the first byte

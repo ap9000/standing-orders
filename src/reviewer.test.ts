@@ -812,6 +812,50 @@ describe("the reviewer role in the store", () => {
       expect(store.runRoute(reviewer.id)).toMatchObject({ phase: "review", provider: "claude", model: "claude-opus-4-1", chosen: "override", routeDigest: routeDigestOf(store.approvedRouteOf("t-1")!) });
     });
 
+    test("requestReview → admitReview → a REAL spawn: the reviewer row and its review-leg provenance land in one admission, the agent is invoked as exactly that leg, and a reviewer after a chain-bound build never inherits the builder's custody (v48 integrity)", async () => {
+      // A chain approval: the build takes the chain's custody in its insert.
+      store.setPhaseConfig("installation", "build", "claude", "claude-sonnet-4", "alex", T0);
+      store.setPhaseConfig("installation", "plan", "claude", "claude-sonnet-4", "alex", T0);
+      store.setPhaseConfig("installation", "review", "claude", "claude-opus-4-1", "alex", T0);
+      store.setFallbackConfig(REPO, [{ provider: "codex", model: "gpt-5-codex", authMode: "subscription" }], "alex", T0);
+      propose(store, { taskId: "t-1", goal: "guard the payouts", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], now: T0 });
+      expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
+      expect(store.approvedChainOf("t-1")).not.toBeNull();
+      const chainBuild = store.startRun({ taskRef, leaseId: "lease-chain", runner: "builder-1", branch: "standing-orders/t-1", worktree: "/pool/t-1", provider: "claude", now: T0, ...presented(store, taskRef, "builder"), custody: { kind: "base" } });
+      const cycle = store.fallbackCycleFor(taskRef)!;
+      expect(cycle).toMatchObject({ state: "open", cursor: 0, tailRun: chainBuild });
+      storeEvidence(store, evidenceRoot, chainBuild, "terminal-diff", "terminal-diff.patch", Buffer.from(PATCH, "utf8"), "git diff (exit 0)", T0, { captureStatus: "ok" });
+      store.recordOutcomeFacts(chainBuild, { headRevision: "head-bbb", handoff: "guarded the payout" });
+      store.finishRun(chainBuild, { outcome: "built", committed: true, now: T0 });
+
+      // requestReview queues under the sealed route; nothing is spawned yet.
+      const asked = store.requestReview(chainBuild, "alex", T0);
+      if (!asked.ok) throw new Error(`request failed: ${asked.reason}`);
+      expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(0);
+      // admitReview opens the reviewer row WITH its review-leg provenance in
+      // one transaction — and the pass then actually invokes the agent.
+      const spawned: { args: string[]; cwd: string }[] = [];
+      const reports = await passOnce(async (_file, args, options) => {
+        spawned.push({ args: [...args], cwd: options?.cwd ?? "" });
+        return reviewingAgent({ version: 1, comments: [] })(_file, args, options);
+      });
+      expect(reports[0]).toMatchObject({ outcome: "reviewed" });
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0]?.args[spawned[0].args.indexOf("--model") + 1]).toBe("claude-opus-4-1");
+      const reviewer = store.runsFor(taskRef).find(run => run.role === "reviewer")!;
+      expect(reviewer).toMatchObject({ parentRun: chainBuild, provider: "claude", model: "claude-opus-4-1", outcome: "no-change", chainCycle: null, chainIndex: null, entryDigest: null });
+      expect(store.runRoute(reviewer.id)).toMatchObject({ phase: "review", provider: "claude", model: "claude-opus-4-1", chosen: "recommended", routeDigest: routeDigestOf(store.approvedRouteOf("t-1")!) });
+      expect(reviewer.providerStartedAt).not.toBeNull();
+      // The chain's custody never moved to the reviewer.
+      expect(store.fallbackCycleFor(taskRef)?.tailRun ?? chainBuild).toBe(chainBuild);
+      expect(store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(asked.id)).toMatchObject({ consumed_reason: "reviewed" });
+      // Exactly one review per source: a second request refuses, a second pass spawns nothing.
+      expect(store.requestReview(chainBuild, "alex", T0)).toMatchObject({ ok: false, reason: "already-reviewed" });
+      const again = await passOnce(async () => { spawned.push({ args: [], cwd: "" }); return { ...OK, stdout: SAID }; });
+      expect(again).toHaveLength(0);
+      expect(spawned).toHaveLength(1);
+    });
+
     test("a reviewer this runner reports unavailable is never substituted: the request stays open, the pass says why (v47)", async () => {
       store.setPhaseConfig("installation", "review", "codex", "gpt-5-codex", "alex", T0);
       store.recordProviderReadiness("builder-1", [{ provider: "codex", state: "unavailable", reason: "`codex login status` says not logged in", probe: "identity" }], T0);

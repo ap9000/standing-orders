@@ -463,33 +463,44 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
     // reconfigures the build agent) and the hold goes with the yes.
     if (leaseId !== undefined) release(store, leaseId, clock());
     store.finishRun(runId, { outcome: "refused", reason: "stale-approval", now: clock() });
-    const now = clock();
-    const scope = store.getScope(taskId);
-    store.holdOwned(
-      {
-        taskRef,
-        ownerKind: "backoff",
-        ownerId: `stale:${taskRef}`,
-        reason: "stale-approval — the approval no longer matches how builds are routed; approve the scope again on its page",
-        until: new Date(now.getTime() + 6 * 60 * 60_000),
-      },
-      now,
-    );
-    store.enqueueNotification(
-      {
-        dedupeKey: `stale-approval:${taskRef}:${scope?.approvedDigest ?? "none"}`,
-        kind: "stale-approval",
-        pushClass: "attention",
-        link: `/t/${encodeURIComponent(taskId)}`,
-        subject: `${taskId}: its approval no longer matches the build routing — approve it again`,
-        body: `${result.message}\nNothing runs on it until the scope is approved again; the hold lifts with the yes.`,
-      },
-      now,
-    );
+    holdStaleApproval(store, { taskRef, taskId, message: result.message }, clock());
     return { kind: "skipped", reason: "stale-approval" as never };
   }
 
   return { kind: "invariant", reason: result.reason };
+}
+
+/**
+ * The stale-approval HOLD, shared by the post-build disposition above and
+ * the tick's pre-admission refusal (v48 integrity): a pre-routing row
+ * whose sealed profile no longer matches what would resolve is refused
+ * BEFORE any run row exists — held under the backoff the approval door
+ * lifts, paged once per approval — so the fail-closed admission never
+ * turns into a refusal every pass.
+ */
+export function holdStaleApproval(store: Store, args: { taskRef: number; taskId: string; message: string }, now: Date): void {
+  const scope = store.getScope(args.taskId);
+  store.holdOwned(
+    {
+      taskRef: args.taskRef,
+      ownerKind: "backoff",
+      ownerId: `stale:${args.taskRef}`,
+      reason: "stale-approval — the approval no longer matches how builds are routed; approve the scope again on its page",
+      until: new Date(now.getTime() + 6 * 60 * 60_000),
+    },
+    now,
+  );
+  store.enqueueNotification(
+    {
+      dedupeKey: `stale-approval:${args.taskRef}:${scope?.approvedDigest ?? "none"}`,
+      kind: "stale-approval",
+      pushClass: "attention",
+      link: `/t/${encodeURIComponent(args.taskId)}`,
+      subject: `${args.taskId}: its approval no longer matches the build routing — approve it again`,
+      body: `${args.message}\nNothing runs on it until the scope is approved again; the hold lifts with the yes.`,
+    },
+    now,
+  );
 }
 
 // ---- the bounded repair loop (v40, evidence-review-v1) --------------------

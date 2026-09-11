@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "certify:provider": "npm run build && node scripts/provider-canary.mjs",
     "prepublishOnly": "npm run typecheck && npm run build",
-    "nul-scan": "node scripts/nul-scan.mjs"
+    "nul-scan": "node scripts/nul-scan.mjs",
+    "fixture:v47": "node scripts/derive-v47-fixture.mjs"
   },
   "repository": {
     "type": "git",
