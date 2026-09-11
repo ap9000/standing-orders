@@ -5830,6 +5830,11 @@ function defaultConnect(file: string): Database {
   return new DatabaseSync(file);
 }
 
+/** A proved review binding changed; database/runtime errors keep their own category. */
+export class ReviewBindingError extends Error {
+  constructor(message: string) { super(message); this.name = "ReviewBindingError"; }
+}
+
 export class Store {
   constructor(private readonly db: Database) {}
 
@@ -8699,24 +8704,24 @@ export class Store {
     return this.transact(() => {
       const reviewer = this.getRun(args.reviewerRunId);
       if (reviewer === null || reviewer.role !== "reviewer") {
-        throw new Error(`run ${args.reviewerRunId} is not a reviewer — only the reviewer role authors criterion judgements`);
+        throw new ReviewBindingError(`run ${args.reviewerRunId} is not a reviewer — only the reviewer role authors criterion judgements`);
       }
       if (!this.reviewerLineageReaches(args.reviewerRunId, args.runId)) {
-        throw new Error(
+        throw new ReviewBindingError(
           `reviewer ${args.reviewerRunId} reviews run outside the bounded lineage for ${args.runId} — judgements bind to the run the review was minted for`,
         );
       }
       const source = this.getRun(args.runId);
       if (source === null || source.taskRef !== reviewer.taskRef) {
-        throw new Error(`reviewer ${args.reviewerRunId} and run ${args.runId} do not share a task — nothing is ingested`);
+        throw new ReviewBindingError(`reviewer ${args.reviewerRunId} and run ${args.runId} do not share a task — nothing is ingested`);
       }
       const runArtifacts = this.artifactsFor(args.runId);
       const artifact = runArtifacts.find(one => one.id === args.artifactId);
       if (artifact === undefined || artifact.kind !== "terminal-diff") {
-        throw new Error(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — judgements bind to the exact bytes reviewed`);
+        throw new ReviewBindingError(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — judgements bind to the exact bytes reviewed`);
       }
       if (artifact.sha256 !== args.bindings.diffSha) {
-        throw new Error(`run ${args.runId}'s terminal diff no longer matches what the reviewer was shown — nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId}'s terminal diff no longer matches what the reviewer was shown — nothing is ingested`);
       }
 
       // The parser normally proves full rubric coverage before this call,
@@ -8728,7 +8733,7 @@ export class Store {
       const expectedIds = existing?.matrix.map(row => row.id) ?? [];
       const expected = new Set(expectedIds);
       if (expected.size !== expectedIds.length) {
-        throw new Error(`run ${args.runId}'s stored criterion matrix contains duplicate ids — nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId}'s stored criterion matrix contains duplicate ids — nothing is ingested`);
       }
 
       // Scope is historical build authority. A digest-bearing run must still
@@ -8740,7 +8745,7 @@ export class Store {
         const taskId = this.externalIdFor(source.taskRef);
         const liveScope = taskId === null ? null : this.getScope(taskId);
         if (liveScope === null || liveScope.digest !== source.scopeDigest) {
-          throw new Error(
+          throw new ReviewBindingError(
             `run ${args.runId}'s scope no longer matches the signed build scope — nothing is ingested`,
           );
         }
@@ -8748,11 +8753,11 @@ export class Store {
       }
       const signed = new Set(signedIds);
       if (signed.size !== signedIds.length) {
-        throw new Error(`run ${args.runId}'s signed rubric contains duplicate ids — nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId}'s signed rubric contains duplicate ids — nothing is ingested`);
       }
       const expectedScopeBinding = signed.size === 0 ? null : source.scopeDigest;
       if (args.bindings.scopeDigest !== expectedScopeBinding) {
-        throw new Error(
+        throw new ReviewBindingError(
           `run ${args.runId}'s build scope does not match the digest the reviewer was shown — nothing is ingested`,
         );
       }
@@ -8760,21 +8765,21 @@ export class Store {
         source.scopeDigest !== null &&
         (expected.size !== signed.size || [...expected].some(id => !signed.has(id)))
       ) {
-        throw new Error(
+        throw new ReviewBindingError(
           `run ${args.runId}'s stored criterion matrix does not match its exact signed criterion set — nothing is ingested`,
         );
       }
       if (existing === null && args.judgements.length > 0) {
-        throw new Error(`run ${args.runId} has no proof verdict to review — nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId} has no proof verdict to review — nothing is ingested`);
       }
 
       const submittedIds = args.judgements.map(judgement => judgement.id);
       const submitted = new Set(submittedIds);
       if (submitted.size !== submittedIds.length) {
-        throw new Error(`reviewer ${args.reviewerRunId} submitted a criterion more than once — nothing is ingested`);
+        throw new ReviewBindingError(`reviewer ${args.reviewerRunId} submitted a criterion more than once — nothing is ingested`);
       }
       if (submitted.size !== expected.size || [...submitted].some(id => !expected.has(id))) {
-        throw new Error(
+        throw new ReviewBindingError(
           `reviewer ${args.reviewerRunId} did not cover the exact stored criterion set for run ${args.runId} — nothing is ingested`,
         );
       }
@@ -8782,7 +8787,7 @@ export class Store {
       // review. This check deliberately comes AFTER deriving both sets: an
       // empty caller array is input, never proof that there was no rubric.
       if (args.judgements.length === 0) return null;
-      if (existing === null) throw new Error("unreachable criterion review without a proof verdict");
+      if (existing === null) throw new ReviewBindingError("unreachable criterion review without a proof verdict");
 
       // Re-derive and re-validate every OTHER input the reviewer was
       // shown — never trust the caller's claim about what it showed the
@@ -8791,7 +8796,7 @@ export class Store {
       const bindings = args.bindings;
       const liveHead = source.headRevision ?? source.baseRevision;
       if (bindings.headSha !== liveHead) {
-        throw new Error(`run ${args.runId}'s head no longer matches what the reviewer was shown — nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId}'s head no longer matches what the reviewer was shown — nothing is ingested`);
       }
 
       // Proof and check-log are singular review inputs. Refuse an ambiguous
@@ -8800,7 +8805,7 @@ export class Store {
       // null. This closes both forged omissions and mid-review additions.
       const proofArtifacts = runArtifacts.filter(one => one.kind === "proof");
       if (proofArtifacts.length > 1) {
-        throw new Error(`run ${args.runId} has more than one proof artifact — the exact review inventory is ambiguous; nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId} has more than one proof artifact — the exact review inventory is ambiguous; nothing is ingested`);
       }
       const liveProof = proofArtifacts[0] ?? null;
       if (
@@ -8809,12 +8814,12 @@ export class Store {
           bindings.proof !== null &&
           (liveProof.id !== bindings.proof.artifactId || liveProof.sha256 !== bindings.proof.sha256))
       ) {
-        throw new Error(`run ${args.runId}'s proof inventory no longer matches what the reviewer was shown — nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId}'s proof inventory no longer matches what the reviewer was shown — nothing is ingested`);
       }
 
       const checkLogArtifacts = runArtifacts.filter(one => one.kind === "check-log");
       if (checkLogArtifacts.length > 1) {
-        throw new Error(`run ${args.runId} has more than one check-log artifact — the exact review inventory is ambiguous; nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId} has more than one check-log artifact — the exact review inventory is ambiguous; nothing is ingested`);
       }
       const liveCheckLog = checkLogArtifacts[0] ?? null;
       if (
@@ -8823,7 +8828,7 @@ export class Store {
           bindings.checkLog !== null &&
           (liveCheckLog.id !== bindings.checkLog.artifactId || liveCheckLog.sha256 !== bindings.checkLog.sha256))
       ) {
-        throw new Error(`run ${args.runId}'s check-log inventory no longer matches what the reviewer was shown — nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId}'s check-log inventory no longer matches what the reviewer was shown — nothing is ingested`);
       }
 
       // Screenshots are plural: equality means the complete id/hash/capture
@@ -8838,7 +8843,7 @@ export class Store {
           return bound === undefined || bound.sha256 !== shot.sha256 || bound.path !== shot.capture;
         })
       ) {
-        throw new Error(`run ${args.runId}'s screenshot inventory no longer matches what the reviewer was shown — nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId}'s screenshot inventory no longer matches what the reviewer was shown — nothing is ingested`);
       }
       const screenshotsJson = JSON.stringify(
         liveScreenshots.map(shot => ({ artifact: shot.id, sha256: shot.sha256, path: shot.capture })),
@@ -8929,7 +8934,7 @@ export class Store {
       const authoringReviewer = this.getRun(args.reviewerRunId);
       const rootReviewer = authoringReviewer === null ? null : this.reviewerRoot(authoringReviewer, true);
       if (rootReviewer === null) {
-        throw new Error(`reviewer ${args.reviewerRunId} no longer has a live, provider-started admitted lineage — nothing is ingested`);
+        throw new ReviewBindingError(`reviewer ${args.reviewerRunId} no longer has a live, provider-started admitted lineage — nothing is ingested`);
       }
       const terminalDiff = this.artifactsFor(args.runId).find(one => one.id === args.artifactId);
       if (
@@ -8937,7 +8942,7 @@ export class Store {
         terminalDiff.kind !== "terminal-diff" ||
         terminalDiff.sha256 !== args.bindings.diffSha
       ) {
-        throw new Error(`run ${args.runId}'s terminal diff no longer matches what the reviewer was shown — nothing is ingested`);
+        throw new ReviewBindingError(`run ${args.runId}'s terminal diff no longer matches what the reviewer was shown — nothing is ingested`);
       }
       const commentIds = this.addReviewerComments(
         { reviewerRunId: args.reviewerRunId, runId: args.runId, artifactId: args.artifactId, author: args.author, comments: args.comments },
@@ -10352,20 +10357,20 @@ export class Store {
     return this.transact(() => {
       const reviewer = this.getRun(args.reviewerRunId);
       if (reviewer === null || reviewer.role !== "reviewer") {
-        throw new Error(`run ${args.reviewerRunId} is not a reviewer — only the reviewer role authors reviewer comments`);
+        throw new ReviewBindingError(`run ${args.reviewerRunId} is not a reviewer — only the reviewer role authors reviewer comments`);
       }
       if (!this.reviewerLineageReaches(args.reviewerRunId, args.runId)) {
-        throw new Error(
+        throw new ReviewBindingError(
           `reviewer ${args.reviewerRunId} reviews run outside the bounded lineage for ${args.runId} — comments bind to the run the review was minted for`,
         );
       }
       const source = this.getRun(args.runId);
       if (source === null || source.taskRef !== reviewer.taskRef) {
-        throw new Error(`reviewer ${args.reviewerRunId} and run ${args.runId} do not share a task — nothing is ingested`);
+        throw new ReviewBindingError(`reviewer ${args.reviewerRunId} and run ${args.runId} do not share a task — nothing is ingested`);
       }
       const artifact = this.artifactsFor(args.runId).find(one => one.id === args.artifactId);
       if (artifact === undefined || artifact.kind !== "terminal-diff") {
-        throw new Error(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — comments bind to the exact bytes reviewed`);
+        throw new ReviewBindingError(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — comments bind to the exact bytes reviewed`);
       }
       const ids: number[] = [];
       for (const comment of args.comments) {

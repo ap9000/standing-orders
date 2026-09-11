@@ -191,6 +191,9 @@ describe("authenticated heartbeats and leases", () => {
     expect(
       heartbeatWatchLeaseAuthed(store, { runner: "w-1", token: first.token, repo: "/repo", owner: "inc-a", ttlMs: 90_000 }, later(30_000)),
     ).toBe(true);
+    expect(store.getRunner("w-1")?.runner.heartbeatAt).toBe(later(30_000).toISOString());
+    expect(heartbeatWatchLeaseAuthed(store, { runner: "w-1", token: first.token, repo: "/repo", owner: "wrong-incarnation", ttlMs: 90_000 }, later(40_000))).toBe(false);
+    expect(store.getRunner("w-1")?.runner.heartbeatAt).toBe(later(30_000).toISOString());
     // The lease must expire before a takeover may rotate.
     const gone = later(DEFAULT_LIVENESS_MS + 120_000);
     const taken = registerRunnerIfIdle(store, { name: "w-1", host: "here", now: gone });

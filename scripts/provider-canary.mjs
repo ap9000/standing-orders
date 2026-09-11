@@ -8,9 +8,9 @@
  * boundaries as a person's task. It never pushes or opens a pull request.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,16 +30,18 @@ function usage() {
     "  --provider claude|codex   subscription CLI to exercise",
     "  --model <model>           exact model sealed into plan and build",
     "  --output <file>           write the final JSON certificate",
+    "  --review                  require an independent review of the result",
     "  --keep                    keep the disposable repo and evidence",
     "  --json                    print only the final JSON certificate",
   ].join("\n");
 }
 
 function parseArgs(argv) {
-  const result = { provider: null, model: null, output: null, keep: false, json: false, help: false };
+  const result = { provider: null, model: null, output: null, keep: false, review: false, json: false, help: false };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === "--keep") result.keep = true;
+    else if (arg === "--review") result.review = true;
     else if (arg === "--json") result.json = true;
     else if (arg === "--help" || arg === "-h") result.help = true;
     else if (arg === "--provider" || arg === "--model" || arg === "--output") {
@@ -95,6 +97,30 @@ function parseEnvelope(answer, label, acceptedCodes = [0]) {
   return envelope;
 }
 
+/** The executable bytes and source identity tested by this run. Each CLI
+ * boundary rechecks them; an in-place build cannot silently change the
+ * implementation halfway through a successful certificate. */
+async function runtimeIdentity() {
+  const hash = createHash("sha256");
+  async function hashDirectory(directory, prefix) {
+    const entries = (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const relative = `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) await hashDirectory(join(directory, entry.name), relative);
+      else if (entry.isFile()) hash.update(relative).update("\0").update(await readFile(join(directory, entry.name))).update("\0");
+      else throw new Error(`unexpected runtime entry ${relative}`);
+    }
+  }
+  await hashDirectory(join(root, "dist"), "dist");
+  for (const file of ["package.json", "scripts/provider-canary.mjs", "scripts/proof-preflight.mjs"]) {
+    hash.update(file).update("\0").update(await readFile(join(root, file))).update("\0");
+  }
+  const revision = await run("git", ["rev-parse", "HEAD"]);
+  const changes = await run("git", ["status", "--porcelain", "--untracked-files=no"]);
+  return { sha256: hash.digest("hex"), sourceCommit: revision.code === 0 ? revision.stdout.trim() : null,
+    trackedChanges: changes.code === 0 ? changes.stdout.trim() !== "" : null };
+}
+
 async function main() {
   let options;
   try {
@@ -117,14 +143,25 @@ async function main() {
   const password = `canary-${randomUUID()}`;
   const common = ["--db", db, "--json"];
   let passed = false;
+  let runtime = null;
+  const steps = [];
+  const assertRuntime = async () => {
+    if (runtime !== null && JSON.stringify(await runtimeIdentity()) !== JSON.stringify(runtime)) {
+      throw new Error("the Standing Orders runtime changed during the canary; rerun against one fixed build");
+    }
+  };
 
   const note = message => {
     if (!options.json) process.stdout.write(`${message}\n`);
     else process.stderr.write(`${message}\n`);
   };
   const cli = async (label, args, acceptedCodes = [0]) => {
+    await assertRuntime();
     note(`  ${label}`);
-    return parseEnvelope(await run(process.execPath, [bin, ...args, ...common]), label, acceptedCodes);
+    const started = Date.now();
+    const answer = await run(process.execPath, [bin, ...args, ...common]);
+    steps.push({ label, durationMs: Date.now() - started, exitCode: answer.code });
+    return parseEnvelope(answer, label, acceptedCodes);
   };
   const git = async (...args) => {
     const answer = await run("git", args, { cwd: repo });
@@ -134,6 +171,7 @@ async function main() {
 
   let certificate;
   try {
+    runtime = await runtimeIdentity();
     note(`Certifying ${options.provider} · ${options.model} through the real workflow`);
     await mkdir(repo, { recursive: true });
     await git("init", "-q", "-b", "main");
@@ -156,7 +194,7 @@ async function main() {
     const runnerToken = registered.token;
     if (typeof runnerToken !== "string" || runnerToken === "") throw new Error("runner registration returned no token");
 
-    for (const phase of ["plan", "build"]) {
+    for (const phase of ["plan", "build", "repair", "review"]) {
       await cli(`route ${phase} to ${options.provider}`, [
         "config", "set", phase,
         "--provider", options.provider,
@@ -208,7 +246,7 @@ async function main() {
       throw new Error(`builder did not complete the task: ${JSON.stringify(built)}`);
     }
 
-    const final = await cli("read the terminal task and proof", ["task", "show", TASK_ID]);
+    let final = await cli("read the terminal task and proof", ["task", "show", TASK_ID]);
     if (final.task?.state !== "done") throw new Error(`task ended ${String(final.task?.state ?? "without a state")}`);
     if (final.proofVerdict !== "verified") {
       throw new Error(`proof verdict was ${String(final.proofVerdict)}: ${JSON.stringify(final.proofReasons ?? [])}`);
@@ -225,16 +263,32 @@ async function main() {
     const expectedText = `standing-orders ${options.provider} canary passed`;
     if (canaryText !== expectedText) throw new Error(`canary.txt contained ${JSON.stringify(canaryText)}`);
     await git("show", `${buildRun.branch}:canary.test.js`);
+    const changed = (await git("diff", "--name-only", baseSha, branchSha)).split("\n").filter(Boolean).sort();
+    if (JSON.stringify(changed) !== JSON.stringify(["canary.test.js", "canary.txt"])) {
+      throw new Error(`the canary changed unexpected paths: ${JSON.stringify(changed)}`);
+    }
+
+    if (options.review) {
+      await cli("request an independent review", ["task", "review", String(buildRun.id), "--as", "canary", "--token", password]);
+      const reviewed = await cli("run the independent review", ["tick", "--runner", "canary-worker", "--token", runnerToken, "--repo", repo, "--pool", pool]);
+      if (!reviewed.dispatched?.some(item => item?.outcome === "reviewed")) throw new Error("the requested independent review did not complete");
+      final = await cli("read the reviewed result", ["task", "show", TASK_ID]);
+      if (final.proofVerdict !== "verified") throw new Error(`review left proof ${final.proofVerdict}: ${JSON.stringify(final.proofReasons ?? [])}`);
+      if (!final.runs?.some(one => one.role === "reviewer" && one.outcome === "no-change" && one.provider === options.provider && one.model === options.model)) {
+        throw new Error("no completed reviewer run proved the requested provider and model");
+      }
+    }
 
     const duplicate = await cli("prove the completed task cannot dispatch twice", [
       "tick", "--runner", "canary-worker", "--token", runnerToken,
       "--repo", repo, "--pool", pool,
     ], [3]);
     if (duplicate.reason !== "empty") throw new Error(`duplicate pass was not empty: ${JSON.stringify(duplicate)}`);
+    await assertRuntime();
 
     const providerRun = final.runs.find(runRow => runRow?.provider === options.provider && runRow?.providerStartedAt != null);
     certificate = {
-      version: 1,
+      version: 2,
       passed: true,
       provider: options.provider,
       model: options.model,
@@ -244,6 +298,8 @@ async function main() {
       platform: process.platform,
       architecture: process.arch,
       node: process.versions.node,
+      runtime,
+      steps,
       workflow: {
         registration: "passed",
         planning: "passed",
@@ -253,6 +309,7 @@ async function main() {
         verificationCommand: "node --test",
         proofVerdict: final.proofVerdict,
         criterionMatrix: final.proofMatrix,
+        independentReview: options.review ? "passed" : "not-requested",
         duplicateDispatch: "refused-empty",
       },
       providerRun: providerRun == null ? null : {
@@ -263,13 +320,17 @@ async function main() {
         tokensOut: providerRun.tokensOut,
         costUsd: providerRun.costUsd,
       },
+      runs: final.runs.map(one => ({ id: one.id, role: one.role, parentRun: one.parentRun,
+        provider: one.provider, model: one.model, version: one.providerVersion, outcome: one.outcome,
+        startedAt: one.startedAt, providerStartedAt: one.providerStartedAt, firstByteAt: one.firstByteAt, finishedAt: one.finishedAt,
+      })),
       retainedAt: options.keep ? base : null,
       note: "This canary never pushed or opened a pull request.",
     };
     passed = true;
   } catch (error) {
     certificate = {
-      version: 1,
+      version: 2,
       passed: false,
       provider: options.provider,
       model: options.model,
@@ -279,6 +340,8 @@ async function main() {
       platform: process.platform,
       architecture: process.arch,
       node: process.versions.node,
+      runtime,
+      steps,
       retainedAt: base,
       error: error instanceof Error ? error.message : String(error),
     };

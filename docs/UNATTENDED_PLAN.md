@@ -47,6 +47,27 @@ Main was still `917bc5b` when this plan was prepared.
 
 ## Execution status
 
+- Assisted review lifecycle slice: reviewers renew the authenticated runner
+  through their paid turn and ingestion, so independent reconciliation cannot
+  mistake a long review for a dead worker. Watch renewals also update the
+  runner heartbeat only when the watch lease still stands. Stop/recovery gates
+  now cover review admissions and correction calls. Explicit binding failures
+  remain `stale-evidence`; database/runtime ingestion errors retain the
+  `ingestion` category and a sanitized diagnostic. A review-only tick reports
+  successful review as work and a failed review as failure, preserving the
+  source build. Regression coverage includes a real SQLite abort that rolls
+  back comments and judgements together. Explicit retry of an already-spent
+  review request remains a separate schema/authority change.
+  The canary now supports independent review, records runtime identity and
+  step timings, and rejects a runtime change during the run.
+
+- Initial September 11 real-provider smoke runs passed without intervention
+  on macOS arm64 / Node 22.22.0: Claude `sonnet` (CLI 2.1.259, 114s) and Codex
+  `gpt-5.6-sol` (CLI 0.145.0, 273s). Both produced verified proof and refused
+  duplicate dispatch. These version-1 canaries did not exercise review or pin
+  the runtime hash, so they are integration evidence, not the complete release
+  certificate. The expanded canary is the next gate.
+
 - Assisted reconciliation slice: watch runs serialized recovery on its own
   cadence during provider calls, with a separate output sink and shutdown that
   drains the active pass. Failed recovery pauses new admissions, retries without

@@ -37,7 +37,8 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditOf, isProviderId, safeDiagnostic, type ProviderId } from "./provider.js";
-import type { Store } from "./store.js";
+import { ReviewBindingError, type Store } from "./store.js";
+import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { invokeAgent } from "./invoke.js";
 import { resolvePhaseAgent } from "./agentconfig.js";
 import { legOf } from "./phase-routing.js";
@@ -474,6 +475,10 @@ export type ReviewRequest = {
   /** Where the scratch directory is minted; tests point it somewhere owned. */
   scratchRoot?: string;
   agent?: Runner;
+  runnerToken?: string;
+  pulseMs?: number;
+  /** Stop new correction calls; the current read-only reply may still settle. */
+  shouldStop?: () => boolean;
 };
 
 export type ReviewResult =
@@ -629,7 +634,21 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
   const headAtReview = source.headRevision ?? source.baseRevision;
 
   const scratch = mkdtempSync(join(request.scratchRoot ?? tmpdir(), "standing-orders-review-"));
+  let pulseLost = false;
+  let pulseTimer: ReturnType<typeof setInterval> | undefined;
   try {
+    if (request.runnerToken !== undefined && (request.pulseMs ?? 60_000) > 0) {
+      const beat = (): void => {
+        try {
+          pulseLost = pulseLost || !store.proveRunnerCustodyForSpawn(request.reviewerRunId, clock()) ||
+            !runnerHeartbeat(store, admittedReviewer.runner, request.runnerToken!, clock()).ok;
+        } catch { pulseLost = true; }
+        if (pulseLost && pulseTimer !== undefined) clearInterval(pulseTimer);
+      };
+      beat();
+      pulseTimer = setInterval(beat, request.pulseMs ?? 60_000);
+      pulseTimer.unref?.();
+    }
     writeFileSync(join(scratch, REVIEW_PATCH_NAME), verified.content, { mode: 0o600 });
     const rubricSealed = rubric.length === 0 ? null : writeSealedText(scratch, REVIEW_RUBRIC_NAME, JSON.stringify(rubric));
     const proofSealed = proofForReview === null ? null : writeSealedText(scratch, REVIEW_PROOF_NAME, proofForReview.bytes);
@@ -724,7 +743,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     // while the provider is working must not let that now-orphaned reply
     // reach review ingestion merely because there is no subsequent spawn.
     const recheckRunnerCustody = (reviewerRunId: number): ReviewResult | null =>
-      store.proveRunnerCustodyForSpawn(reviewerRunId, clock())
+      !pulseLost && store.proveRunnerCustodyForSpawn(reviewerRunId, clock())
         ? null
         : {
             ok: false,
@@ -782,6 +801,8 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
 
     let invoked;
     try {
+      const initialCustody = recheckRunnerCustody(request.reviewerRunId);
+      if (initialCustody !== null) return initialCustody;
       invoked = await invokeAgent(
         store,
         request.reviewerRunId,
@@ -897,6 +918,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
       const rootRoute = store.runRoute(request.reviewerRunId);
       const rootStamp = rootRoute === null ? null : { routeDigest: rootRoute.routeDigest, phase: rootRoute.phase, provider: rootRoute.provider, model: rootRoute.model, chosen: rootRoute.chosen };
       for (let correction = 1; correction <= STRUCTURED_REPAIR_ATTEMPTS; correction += 1) {
+        if (request.shouldStop?.() === true) return { ok: false, reason: "stopped", message: "new review correction calls are paused; the original reply is preserved" };
         // THE CORRECTION ADMISSION (atomic authority closure): the child
         // continues the live root in exactly its session, under its runner
         // and lease — one correction per parent, proved in the store.
@@ -1087,17 +1109,21 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
         clock(),
       ));
     } catch (error) {
+      const reason = error instanceof Error && error.name === "ReviewerCustodyError" ? "runner-custody"
+        : error instanceof ReviewBindingError ? "stale-evidence" : "ingestion";
+      const diagnostic = safeDiagnostic(error instanceof Error ? error.message : String(error));
       if (acceptedChildRunId !== null) {
         store.finishRun(acceptedChildRunId, {
-          outcome: error instanceof Error && error.name === "ReviewerCustodyError" ? "refused" : "failed",
-          reason: error instanceof Error && error.name === "ReviewerCustodyError" ? "runner-custody" : "reviewer-stale-evidence",
+          outcome: reason === "runner-custody" ? "refused" : "failed",
+          reason: reason === "runner-custody" ? reason : `reviewer-${reason}${diagnostic === null ? "" : `: ${diagnostic}`}`,
           now: clock(),
         });
       }
       return {
         ok: false,
-        reason: error instanceof Error && error.name === "ReviewerCustodyError" ? "runner-custody" : "stale-evidence",
-        message: error instanceof Error ? error.message : String(error),
+        reason,
+        message: diagnostic ?? "the review could not be ingested",
+        ...(reason === "ingestion" && diagnostic !== null ? { diagnostic } : {}),
       };
     }
     // The admitted root and any correction child are settled by ingestReview
@@ -1107,6 +1133,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     const verdict: ProofVerdict | null = folded?.verdict ?? null;
     return { ok: true, commentIds, commentCount: commentIds.length, criteriaCount: parsed.criteria.length, verdict };
   } finally {
+    if (pulseTimer !== undefined) clearInterval(pulseTimer);
     rmSync(scratch, { recursive: true, force: true });
   }
 }
@@ -1147,11 +1174,14 @@ export async function reviewPass(
     agent?: Runner;
     timeoutMs?: number;
     maxTurns?: number;
+    pulseMs?: number;
+    shouldStop?: () => boolean;
   },
 ): Promise<ReviewPassReport[]> {
   const clock = options.clock ?? (() => options.now);
   const reports: ReviewPassReport[] = [];
   for (const request of store.openReviewRequests()) {
+    if (options.shouldStop?.() === true) break;
     // THE REVIEW LEG (v47): a task whose approval sealed a route reviews
     // on that route's exact review leg — never on whatever the configuration
     // says today. A row proven to predate routing (no route era), or a task
@@ -1210,6 +1240,9 @@ export async function reviewPass(
       model: resolution.spec.model,
       now: clock(),
       clock,
+      runnerToken: options.token,
+      ...(options.pulseMs === undefined ? {} : { pulseMs: options.pulseMs }),
+      ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.maxTurns === undefined ? {} : { maxTurns: options.maxTurns }),
       ...(options.evidenceRoot === undefined ? {} : { evidenceRoot: options.evidenceRoot }),

@@ -1989,6 +1989,7 @@ async function tickCommand(
   escalateOverdueContests(store, clock());
   const resumed: TickOutcome[] = [];
   for (const waiting of store.contestsInStates(["decision-wait"])) {
+    if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
     // D1 belt-and-braces (external dispatch, finding 41): a mirror and a
     // contest should never coexist; if one ever does, its race resumes
     // NOTHING — no claim, no run, no worktree, no spend.
@@ -2016,6 +2017,10 @@ async function tickCommand(
         const current = store.getContestant(racer.id);
         if (current !== null) store.casContestantState(racer.id, ["ready"], "parked", current.generation);
       };
+      if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) {
+        backToParked();
+        continue;
+      }
       const custody = racer.custody === null ? null : (JSON.parse(racer.custody) as { branch: string; head: string | null; runner: string });
       const taskId = store.externalIdFor(waiting.taskRef);
       if (custody === null || custody.runner !== runner || taskId === null) {
@@ -3893,6 +3898,7 @@ async function tickCommand(
       token,
       now: clock(),
       clock,
+      shouldStop: () => context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true,
       ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),
       ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
     });
@@ -3919,7 +3925,7 @@ async function tickCommand(
         entry.outcome === "built"
           ? entry.committed === true
             ? `committed to ${entry.branch}`
-            : "no-change, stated and verified"
+            : "no changes reported; see the result's proof status"
           : entry.outcome === "parked"
             ? `${entry.reason} — \`standing-orders decide\``
             : entry.reason ?? "";
@@ -3943,10 +3949,16 @@ async function tickCommand(
       routines,
     });
   }
+  const failedReviews = dispatched.filter(one => one.outcome === "review-failed").length;
+  if (failedReviews > 0) {
+    return fail(write, json, "tick", "review-failed", `${failedReviews} review(s) could not complete; built results are preserved`, EXIT.failed, {
+      considered, dispatched, routines,
+    });
+  }
   // A pass whose only events were parks or drafted plans exits 0: nothing
   // broke, nothing needs code — the questions and the plan are in the
   // attention surface where they belong, which is the system working.
-  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned" || one.outcome === "reported" || one.outcome === "held")) {
+  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned" || one.outcome === "reported" || one.outcome === "held" || one.outcome === "reviewed")) {
     return succeed(write, json, "tick", { considered, dispatched, routines }, summary);
   }
   if (considered === 0) {

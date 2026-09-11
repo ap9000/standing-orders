@@ -310,7 +310,9 @@ export function heartbeatWatchLeaseAuthed(
   return store.transact(() => {
     const auth = authenticate(store, args.runner, args.token);
     if (!auth.ok) return false;
-    return store.heartbeatWatchLease(args.runner, args.repo, args.owner, args.ttlMs, now);
+    const renewed = store.heartbeatWatchLease(args.runner, args.repo, args.owner, args.ttlMs, now);
+    if (renewed) store.touchRunner(args.runner, now);
+    return renewed;
   });
 }
 

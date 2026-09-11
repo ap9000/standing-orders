@@ -5,26 +5,37 @@ disposable Git repository and isolated Standing Orders database, then drives
 the public CLI through the same path as a real task:
 
 1. create an approver and a repository-bound worker;
-2. route planning and building to one exact provider/model;
+2. route planning, building, repair, and review to one exact provider/model;
 3. approve a repository verification command;
 4. file a task and ask the provider to inspect the repository and draft its
    scope and acceptance rubric;
 5. approve that exact digest;
 6. build in a leased worktree, commit on a non-default branch, rerun the
    approved check, and adjudicate the evidence;
-7. require a `verified` criterion matrix and prove a second dispatch is empty.
+7. require a `verified` criterion matrix;
+8. with `--review`, request an independent review and require the resulting
+   proof to remain verified;
+9. prove a second dispatch is empty.
 
 It does not push, open a pull request, mutate a real project, synthesize a
 provider response, or accept `short`/`refuted` proof. A failed run keeps its
 database, worktree, evidence, and live log and prints their location.
 
 ```sh
-npm run certify:provider -- --provider claude --model sonnet
-npm run certify:provider -- --provider codex --model gpt-5.6-sol
+npm run certify:provider -- --provider claude --model sonnet --review
+npm run certify:provider -- --provider codex --model gpt-5.6-sol --review
 ```
 
 Use `--keep` to retain a passing sandbox and `--output <file>` to write the
-machine-readable certificate.
+machine-readable certificate. Version 2 records the source revision, a hash of
+the built runtime and canary scripts, each CLI step's elapsed time and exit
+status, and the participating run identities. Every CLI boundary rechecks the
+runtime; changing the build during a canary prevents a passing certificate.
+The exact changed-path set is also checked against the two requested files.
+
+The approver and approval are automated fixture setup inside the disposable
+database. A passing result demonstrates this bounded workflow without a manual
+rescue; it does not measure planning-policy quality across arbitrary projects.
 
 ## Current real-provider baseline
 

@@ -2287,6 +2287,21 @@ describe("watch — the loop, zero tokens idle", () => {
     } finally { adoption.mockRestore(); }
   });
 
+  test.each([true, false])("a review-only tick reports its actual success=%s instead of an empty queue", async succeeds => {
+    const { runnerToken, approverToken } = await setup();
+    await approved("t-reviewed", approverToken);
+    expect(await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool])).toBe(EXIT.ok);
+    await run(["task", "show", "t-reviewed", "--json"]);
+    const source = payload().runs.find((one: { role: string }) => one.role === "builder");
+    expect(await run(["task", "review", String(source.id), "--as", "alex", "--token", approverToken])).toBe(EXIT.ok);
+    const code = await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], async () => succeeds
+      ? { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "cannot-tell", note: "Human judgement is required by the signed criterion." }] }) }) }
+      : { ...OK, code: 1, stderr: "simulated reviewer outage" });
+    expect(code, lines.join("\n")).toBe(succeeds ? EXIT.ok : EXIT.failed);
+    expect(payload().dispatched).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: succeeds ? "reviewed" : "review-failed" })]));
+    if (!succeeds) expect(payload().reason).toBe("review-failed");
+  });
+
   test("a watch is an episode, and the brief can bound itself to exactly one night", async () => {
     const { runnerToken, approverToken } = await setup();
     await approved("t-1", approverToken);

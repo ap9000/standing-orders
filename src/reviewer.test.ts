@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
 import { storeEvidence } from "./evidence.js";
-import { register } from "./runner.js";
+import { register, recoverDead, DEFAULT_LIVENESS_MS } from "./runner.js";
 import { acquire } from "./claim.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { routeDigestOf } from "./phase-routing.js";
@@ -814,6 +814,38 @@ describe("the reviewer role in the store", () => {
 
     const passOnce = (agent: Runner) =>
       reviewPass(store, { runner: "builder-1", token: "tok-builder-1", now: T0, evidenceRoot, scratchRoot, agent });
+
+    test("a stopped pass leaves the request open without spending a review", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      let calls = 0;
+      const reports = await reviewPass(store, { runner: "builder-1", token: "tok-builder-1", now: T0,
+        evidenceRoot, scratchRoot, shouldStop: () => true,
+        agent: async () => { calls++; return { ...OK, stdout: SAID }; },
+      });
+      expect(reports).toEqual([]);
+      expect(calls).toBe(0);
+      expect(store.openReviewRequests()).toHaveLength(1);
+      expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toEqual([]);
+    });
+
+    test("a long review renews its runner through ingestion and stops its pulse afterwards", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      let now = T0;
+      const reports = await reviewPass(store, { runner: "builder-1", token: "tok-builder-1", now, clock: () => now,
+        evidenceRoot, scratchRoot, pulseMs: 5,
+        agent: async () => {
+          now = new Date(T0.getTime() + DEFAULT_LIVENESS_MS + 1_000);
+          await new Promise(resolve => setTimeout(resolve, 30));
+          expect(recoverDead(store, now).filter(one => one.runner === "builder-1")).toEqual([]);
+          return { ...OK, stdout: SAID };
+        },
+      });
+      expect(reports[0]).toMatchObject({ outcome: "reviewed" });
+      const finishedHeartbeat = store.getRunner("builder-1")?.runner.heartbeatAt;
+      now = new Date(now.getTime() + 1_000);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(store.getRunner("builder-1")?.runner.heartbeatAt).toBe(finishedHeartbeat);
+    });
 
     test("the sealed route's review leg governs the reviewer — never today's configuration — and the run names its route (v47)", async () => {
       // The task's scope seals an overridden reviewer; the installation's
@@ -2040,6 +2072,25 @@ describe("the reviewer role in the store", () => {
         expect(store.criterionReviewsFor(builtRun)).toEqual([]);
         expect(store.proofVerdictFor(builtRun)?.verdict).toBe("short");
         expect(store.proofVerdictFor(builtRun)?.machineVerdict).toBeNull();
+      });
+
+      test("a database ingestion failure rolls back review rows and retains its actual diagnostic", async () => {
+        seedRubric();
+        seedVerdict(builtRun);
+        store.requestReview(builtRun, "alex", T0);
+        // A real SQLite failure after comments insert, inside the same
+        // proving transaction. This must neither land partial comments nor
+        // masquerade as a mismatch in the reviewer's evidence.
+        store.raw().exec("CREATE TRIGGER review_disk_fault BEFORE INSERT ON criterion_review BEGIN SELECT RAISE(ABORT, 'simulated disk full during review'); END");
+        const reports = await passOnce(async () => ({ ...OK, stdout: spoken({ version: 1,
+          comments: [{ path: "src/payouts.ts", line: 2, note: "fine" }],
+          criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }],
+        }) }));
+        expect(reports[0]).toMatchObject({ outcome: "failed", detail: "ingestion" });
+        expect(store.runsFor(taskRef).find(run => run.role === "reviewer")?.reason).toContain("reviewer-ingestion: simulated disk full during review");
+        expect(store.liveDiffComments(builtRun)).toEqual([]);
+        expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+        expect(store.proofVerdictFor(builtRun)?.verdict).toBe("short");
       });
 
       test("stale: the terminal diff row changing after materialization refuses the whole ingest", async () => {
