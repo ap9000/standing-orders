@@ -5,6 +5,11 @@
  * proving ingestion transaction, the one-review-per-run invariant, the
  * request roads (manual + reviewAuto), and the workspace-consumer guard
  * that a reviewer run's missing worktree is a typed fact, not a "null".
+ *
+ * Every store here opens FRESH (":memory:") and so always carried the wide
+ * criterion_review table: this is fresh-database coverage of ingestReview.
+ * The UPGRADE of an existing ten-column table to the shape it writes is
+ * proved in src/migration-criterion-review-bindings.test.ts.
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";

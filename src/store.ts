@@ -4114,6 +4114,28 @@ function migrate(db: Database, origin: number | null): void {
   // tables and arrive through the fresh SCHEMA's IF NOT EXISTS on both
   // roads — nothing here rewrites a row that predates this migration.
   addColumn(db, "proof_verdict", "machine_verdict", "TEXT");
+  // The review BINDING columns (audit hardening, still evidence-review-v1):
+  // the fresh criterion_review DDL was widened by seven hash-bound input
+  // columns (scope_digest, head_sha, proof_artifact, proof_sha,
+  // check_log_artifact, check_log_sha, screenshots_json) UNDER THE SAME
+  // schema version — so a database that already carried the ten-column
+  // table kept it through IF NOT EXISTS, and ingestReview's INSERT failed
+  // on it with "table criterion_review has no column named scope_digest"
+  // (run 1507). Additive, in-version, idempotent: every column arrives
+  // exactly as the fresh DDL declares it, every existing row keeps its ten
+  // values byte for byte, and a row from before the hardening reads back
+  // UNBOUND — NULL bindings, an empty screenshot list — which is the truth
+  // about it: nothing is backfilled, because no evidence of what that
+  // reviewer was shown exists to bind. A file already at this build's
+  // version takes the same road on its next plain open; nothing else about
+  // it moves.
+  addColumn(db, "criterion_review", "scope_digest", "TEXT");
+  addColumn(db, "criterion_review", "head_sha", "TEXT");
+  addColumn(db, "criterion_review", "proof_artifact", "INTEGER");
+  addColumn(db, "criterion_review", "proof_sha", "TEXT");
+  addColumn(db, "criterion_review", "check_log_artifact", "INTEGER");
+  addColumn(db, "criterion_review", "check_log_sha", "TEXT");
+  addColumn(db, "criterion_review", "screenshots_json", "TEXT NOT NULL DEFAULT '[]'");
 
   // v41 (two quality modes): additive and backwards-compatible. Default
   // deliberately means the historical workflow; only an explicitly strict

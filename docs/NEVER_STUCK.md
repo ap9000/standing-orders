@@ -78,6 +78,21 @@ breaking automation that branches on the code.
     interrupted attempt successful, never releases a successor's claim,
     run, worktree, or task state, and never closes a run under a live held
     session. A second pass over the same runner settles nothing.
+11. **An existing database is repaired in place, additively.** A column the
+    current writer needs that an older installation's table never gained —
+    the `criterion_review` review binding columns (`scope_digest`,
+    `head_sha`, `proof_artifact`, `proof_sha`, `check_log_artifact`,
+    `check_log_sha`, `screenshots_json`), widened in the fresh DDL under
+    an unchanged schema version — arrives on the next plain open through
+    the same idempotent `addColumn` road every earlier additive migration
+    used, exactly as the fresh DDL declares it. Existing rows keep every
+    value; a row from before the hardening reads back unbound (NULL
+    bindings, an empty screenshot list) and is never backfilled, because no
+    evidence of what that reviewer was shown exists to bind. A reviewer
+    ingest that failed on the old shape with "table criterion_review has no
+    column named scope_digest" (run 1507) is not replayed by the machine:
+    that source run's one review is spent, and the next build's review
+    binds its own evidence on the repaired table.
 
 ## Acceptance scenarios
 
@@ -115,6 +130,13 @@ paths:
 - missing session, provider failure, lost custody, or altered planner/reviewer
   inputs → no structured correction is attempted;
 - completed UI work → criterion matrix plus screenshot/check/diff evidence.
+- existing database whose `criterion_review` still has the original ten
+  columns → plain open adds the binding columns, keeps every row, and a
+  second open changes nothing → a real review ingests through a same-session
+  correction child, and a revised scope or mismatched artifact binding still
+  refuses with no partial comment or judgement
+  (`src/migration-criterion-review-bindings.test.ts`; the reviewer suite's
+  own stores open fresh and never carried the old shape).
 
 `src/dispatch.test.ts` owns the compact lifecycle regression. The larger
 claim, builder, proof, and unattended suites continue to prove fencing,
