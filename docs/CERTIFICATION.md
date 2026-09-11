@@ -45,7 +45,37 @@ The approver and approval are automated fixture setup inside the disposable
 database. A passing result demonstrates this bounded workflow without a manual
 rescue; it does not measure planning-policy quality across arbitrary projects.
 
-## Current real-provider baseline
+## Current crash matrix and real-task pilot
+
+Candidate `a9caf73` passed the September 11 macOS arm64 / Node 22.22.0 run:
+
+| Gate | Result |
+|---|---|
+| Automated regression suite | 120 files; 2,361 passed; 12 existing skips |
+| Actual watch-process SIGKILL matrix | 120/120; 20 each at planning, setup, building, after commit, verification, review |
+| Real-provider pilot | 20/20; Claude `sonnet` 10/10 and Codex `gpt-5.6-sol` 10/10 |
+| Independent acceptance | 44/44 criteria upheld; eight sealed desktop/mobile screenshots |
+| Ownership and completion | Zero overlapping writers, orphan runs, duplicate dispatches, or manual rescues |
+
+One malformed reviewer response was corrected automatically in its existing
+session, with both review rows retaining the same watch ownership. The original
+build was not repeated. The pilot's median total duration was 116s and p95 249s;
+these include setup, checks, and review, without a direct-provider comparison.
+
+The crash matrix took 596s and recorded unchanged runtime/input hash
+`b6343447f624f83d54c328a2a0a5269bf7968535ab92b04de7384298b17d3523`.
+The pilot recorded unchanged executable hash
+`1c20903bfe1645eda0867489a32bb0def0a66860217fe4dabc9fe744ba760147`.
+Local certificates are `output/certification/crash-certified-120.json` and
+`pilot-20.json`; `validation-2026-09-11.md` contains the detailed report and
+links to 169 copied, hash-verified artifacts in `pilot-evidence/`.
+
+Planning recovery safely awaits approval; interrupted review recovery safely
+requires attention. Automatic review retry is not certified. The pilot used
+fixed scopes approved before dispatch, with the exclusions described below.
+The original main checkout and live worker were not upgraded.
+
+## Earlier bounded provider baseline
 
 The latest bounded integration certificate tested `cf328cb` on 2026-09-11,
 macOS arm64 / Node 22.22.0. Both version-3 runs used the clean runtime hash

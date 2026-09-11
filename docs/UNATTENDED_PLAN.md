@@ -47,7 +47,27 @@ Main was still `917bc5b` when this plan was prepared.
 
 ## Execution status
 
-- The integrated code at `cf328cb` passes typecheck/build and the full suite:
+- Candidate `a9caf73` passes typecheck/build, package dry run, and 120 test
+  files / 2,361 tests (12 existing skips). The actual public-CLI SIGKILL matrix
+  passed 120/120 cases: 20 each at planning, setup, building, after commit,
+  verification, and review, with normal 90-second lease expiry. It found and
+  fixed planner reclamation, subprocess/process-group ownership, no-change
+  recovery proof, and watch-owned review recovery. Schema v49 binds claimless
+  reviews and correction children explicitly to a watch incarnation.
+  The real-provider pilot passed 20/20 fixed-contract assignments, split evenly
+  across Claude `sonnet` and Codex `gpt-5.6-sol`, over two successive batches.
+  All 44 criteria were independently upheld; eight desktop/mobile screenshots
+  were sealed; one malformed review was repaired automatically in its existing
+  session. There were no manual rescues, duplicate dispatches, or changed
+  default branches. Median total task time was 116s; p95 was 249s.
+  See [certification](CERTIFICATION.md) and the local report at
+  `output/certification/validation-2026-09-11.md`. This closes the named macOS
+  crash matrix and fixed-contract pilot, not physical Windows, real exhaustion,
+  mid-flight human revisions, or direct-provider latency comparison. Interrupted
+  review now closes with a truthful attention state; bounded explicit retry
+  remains the next lifecycle change. Main and the live worker remain unchanged.
+
+- The previous integrated code at `cf328cb` passed typecheck/build and the full suite:
   119 files, 2,354 tests, 12 existing skips. Version-3 real-provider canaries
   passed without intervention: Claude `sonnet` in 149s and Codex `gpt-5.6-sol`
   in 270s. Both independently upheld every signed criterion, retained verified
