@@ -1121,6 +1121,113 @@ describe("verify — the approved verification command is authenticated authorit
     await run(["verify", "show", "--repo", "/code/thing", "--json"]);
     expect(payload().verify).toBe(null);
   });
+
+  test("--self-heal binds one exact approved setup into the verification authority", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+
+    // Recovery is not permission to invent a dependency command. There must
+    // already be a separately approved setup whose exact digest can be bound.
+    const missingSetup = await run([
+      "verify", "set", "--repo", "/code/thing", "--command", "npm test", "--self-heal",
+      "--as", "alex", "--token", token, "--yes", "--json",
+    ]);
+    expect(missingSetup).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, command: "verify set", reason: "setup-required" });
+
+    expect(await run([
+      "setup", "set", "--repo", "/code/thing", "--command", "npm ci --ignore-scripts",
+      "--as", "alex", "--token", token, "--yes", "--json",
+    ])).toBe(EXIT.ok);
+    const setupDigestA = payload().digest as string;
+
+    // The historical, one-shot authority remains byte-for-byte distinct and
+    // explicitly carries no recovery setup.
+    expect(await run([
+      "verify", "set", "--repo", "/code/thing", "--command", "npm test",
+      "--as", "alex", "--token", token, "--yes", "--json",
+    ])).toBe(EXIT.ok);
+    const ordinaryDigest = payload().digest as string;
+    await run(["verify", "show", "--repo", "/code/thing", "--json"]);
+    expect(payload().verify).toMatchObject({ digest: ordinaryDigest, recoverySetupDigest: null });
+
+    // Before approval, the operator sees the exact extra authority: both the
+    // setup command and the digest that will fence it. The live row is not
+    // changed by this preview.
+    const jsonPreviewA = await run([
+      "verify", "set", "--repo", "/code/thing", "--command", "npm test", "--self-heal",
+      "--as", "alex", "--token", token, "--json",
+    ]);
+    expect(jsonPreviewA).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({
+      ok: false,
+      command: "verify set",
+      reason: "unconfirmed",
+      recoverySetup: { command: "npm ci --ignore-scripts", digest: setupDigestA },
+    });
+    const textPreviewA = await run([
+      "verify", "set", "--repo", "/code/thing", "--command", "npm test", "--self-heal",
+      "--as", "alex", "--token", token,
+    ]);
+    expect(textPreviewA).toBe(EXIT.refused);
+    expect(out()).toContain(`approved setup \`npm ci --ignore-scripts\` (digest ${setupDigestA}) once`);
+    expect(out()).toContain(`Re-run with --setup-digest ${setupDigestA} --yes to approve.`);
+    await run(["verify", "show", "--repo", "/code/thing", "--json"]);
+    expect(payload().verify).toMatchObject({ digest: ordinaryDigest, recoverySetupDigest: null });
+
+    // Confirmation names the previewed setup. Omitting the value fails
+    // closed, and the parser does not mistake the following boolean for it.
+    expect(await run([
+      "verify", "set", "--repo", "/code/thing", "--command", "npm test", "--self-heal",
+      "--as", "alex", "--token", token, "--yes", "--json",
+    ])).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ reason: "setup-digest-required" });
+    expect(await run([
+      "verify", "set", "--repo", "/code/thing", "--command", "npm test", "--self-heal",
+      "--setup-digest", "--yes", "--as", "alex", "--token", token, "--json",
+    ])).toBe(EXIT.usage);
+    expect(payload()).toMatchObject({ reason: "usage", message: "--setup-digest needs a value" });
+
+    // A separately approved setup can change between preview and
+    // confirmation. The old digest cannot authorize the new setup.
+    expect(await run([
+      "setup", "set", "--repo", "/code/thing", "--command", "npm ci --ignore-scripts --prefer-offline",
+      "--as", "alex", "--token", token, "--yes", "--json",
+    ])).toBe(EXIT.ok);
+    const setupDigestB = payload().digest as string;
+    expect(setupDigestB).not.toBe(setupDigestA);
+
+    expect(await run([
+      "verify", "set", "--repo", "/code/thing", "--command", "npm test", "--self-heal",
+      "--setup-digest", setupDigestA, "--as", "alex", "--token", token, "--yes", "--json",
+    ])).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, command: "verify set", reason: "stale-approval" });
+    expect(payload().message).toContain(`expected ${setupDigestA}, current ${setupDigestB}`);
+    await run(["verify", "show", "--repo", "/code/thing", "--json"]);
+    expect(payload().verify).toMatchObject({ digest: ordinaryDigest, recoverySetupDigest: null });
+
+    const jsonPreviewB = await run([
+      "verify", "set", "--repo", "/code/thing", "--command", "npm test", "--self-heal",
+      "--as", "alex", "--token", token, "--json",
+    ]);
+    expect(jsonPreviewB).toBe(EXIT.refused);
+    expect(payload().recoverySetup).toEqual({
+      command: "npm ci --ignore-scripts --prefer-offline",
+      digest: setupDigestB,
+    });
+    expect(await run([
+      "verify", "set", "--repo", "/code/thing", "--command", "npm test", "--self-heal",
+      "--setup-digest", setupDigestB, "--as", "alex", "--token", token, "--yes", "--json",
+    ])).toBe(EXIT.ok);
+    const recoveryDigest = payload().digest as string;
+    expect(recoveryDigest).not.toBe(ordinaryDigest);
+    await run(["verify", "show", "--repo", "/code/thing", "--json"]);
+    expect(payload().verify).toMatchObject({
+      command: "npm test",
+      digest: recoveryDigest,
+      recoverySetupDigest: setupDigestB,
+    });
+  });
 });
 
 describe("task show and task accept speak the machine's own proof verdict (Priority 2)", () => {

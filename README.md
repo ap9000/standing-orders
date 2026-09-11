@@ -179,6 +179,18 @@ for people splitting those parts across machines.
    file in one tap. Publishing to a branch and a pull request happens only
    under a publication grant whose terms you approved on the **system**
    page.
+
+   Verification can recover one common environment failure without hiding it.
+   Run `standing-orders verify set ... --self-heal` without `--yes` first. The
+   preview shows the exact approved setup and its digest; confirm only that
+   preview by rerunning with `--setup-digest <shown> --yes`. If the project
+   check cannot start because a required project executable is missing,
+   Standing Orders may run that setup once and retry the exact check once. It
+   does not recover ordinary test failures, timeouts, or an executable that
+   exists but cannot run. Every step stays in the check log. Recovery stops if
+   the setup or project check changes, setup fails, files change, the checkout
+   moves, unchanged files cannot be confirmed, the worker loses custody, or
+   the executable is still missing.
 7. **Review it without the transcript.** The **review** view of builds is a
    cockpit over completed work: a queue ranked by *review priority* (a
    labeled, deterministic aid — conflicting or missing evidence, reviewer

@@ -11,7 +11,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
-import { realpathSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
+import { realpathSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { delimiter } from "node:path";
 import { resetAttestationCache } from "./attest.js";
 import { tmpdir } from "node:os";
@@ -359,6 +359,91 @@ describe("tick, against real git", () => {
       runner: "builder-1",
     });
     expect(payload().runs[0].finishedAt).not.toBeNull();
+  });
+
+  test("a missing verification executable replays approved setup once, verifies, and never duplicates the build", async () => {
+    const { runnerToken, approverToken } = await credentials();
+    const criterion = "The task records its new dependency declaration.";
+
+    // The setup is intentionally state-sensitive. Before the agent changes
+    // the declaration it has nothing to hydrate; after the commit, replaying
+    // the SAME approved command makes the requested tool available. All
+    // counters live under ignored node_modules so the repair cannot become
+    // part of the agent's commit or its sealed changed-path proof.
+    await mkdir(join(repo, "scripts"), { recursive: true });
+    await writeFile(join(repo, ".gitignore"), "node_modules/\n");
+    await writeFile(join(repo, "scripts", "setup.mjs"), [
+      'import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";',
+      'mkdirSync("node_modules", { recursive: true });',
+      'const counter = "node_modules/setup-count";',
+      'const count = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;',
+      'writeFileSync(counter, String(count + 1));',
+      'if (existsSync("dependency.request")) writeFileSync("node_modules/tool-ready", "ready\\n");',
+      "",
+    ].join("\n"));
+    await writeFile(join(repo, "scripts", "verify.mjs"), [
+      'import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";',
+      'mkdirSync("node_modules", { recursive: true });',
+      'const counter = "node_modules/verify-count";',
+      'const count = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;',
+      'writeFileSync(counter, String(count + 1));',
+      'if (!existsSync("node_modules/tool-ready")) process.exit(127);',
+      "",
+    ].join("\n"));
+    await git(["add", ".gitignore", "scripts/setup.mjs", "scripts/verify.mjs"]);
+    await git(["commit", "-qm", "add dependency repair fixture"]);
+
+    await run([
+      "setup", "set", "--repo", repo, "--command", "node scripts/setup.mjs",
+      "--yes", "--as", "alex", "--token", approverToken, "--json",
+    ]);
+    const setupDigest = payload().digest as string;
+    await run([
+      "verify", "set", "--repo", repo, "--command", "node scripts/verify.mjs",
+      "--self-heal", "--setup-digest", setupDigest,
+      "--yes", "--as", "alex", "--token", approverToken, "--json",
+    ]);
+    await run(["task", "add", "declare the required tool", "--id", "t-heal", "--repo", repo]);
+    await run([
+      "task", "scope", "t-heal", "--goal", "record the dependency declaration",
+      "--acceptance", `${criterion}|changed-path`,
+    ]);
+    await run(["task", "approve", "t-heal", "--json"]);
+    const digest = payload().scope.digest as string;
+    await run([
+      "task", "approve", "t-heal", "--yes", "--digest", digest,
+      "--as", "alex", "--token", approverToken,
+    ]);
+
+    const healingAgent: Runner = async (_file, args, options) => {
+      const cwd = options?.cwd ?? "";
+      agentRan.push(cwd);
+      await writeFile(join(cwd, "dependency.request"), "tool-ready\n");
+      await concludeDone(cwd, args, "completed", "Recorded the dependency declaration.");
+      await proveChangedPath(cwd, args, criterion, "dependency.request");
+      return { ...OK, stdout: JSON.stringify({ result: "Recorded the dependency declaration." }) };
+    };
+
+    expect(await tick(runnerToken, [], healingAgent)).toBe(EXIT.ok);
+    expect(payload().dispatched).toMatchObject([{ id: "t-heal", outcome: "built", committed: true }]);
+    expect(agentRan).toHaveLength(1);
+
+    const worktree = agentRan[0] as string;
+    expect(readFileSync(join(worktree, "node_modules", "setup-count"), "utf8")).toBe("2");
+    expect(readFileSync(join(worktree, "node_modules", "verify-count"), "utf8")).toBe("2");
+
+    await run(["task", "show", "t-heal", "--json"]);
+    expect(payload().task.state).toBe("done");
+    expect(payload().proofVerdict).toBe("verified");
+    expect(payload().runs).toHaveLength(1);
+
+    // The accepted result is terminal. A later scheduler pass is empty and
+    // cannot replay either the agent or the dependency repair.
+    expect(await tick(runnerToken, [], healingAgent)).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "empty" });
+    expect(agentRan).toHaveLength(1);
+    expect(readFileSync(join(worktree, "node_modules", "setup-count"), "utf8")).toBe("2");
+    expect(readFileSync(join(worktree, "node_modules", "verify-count"), "utf8")).toBe("2");
   });
 
   test("a stop fence admits nothing — ready work stays queued, no agent spawns (audit IV-1)", async () => {

@@ -34,13 +34,23 @@ breaking automation that branches on the code.
 4. **Automatic waits are bounded and visible.** Backoff and quota waits carry
    `nextAt` when the system knows it. Unknown reset times become operator work,
    not silent polling.
-5. **Terminal means proven.** A successful terminal task links its immutable
+5. **Environment recovery is explicit and bounded.** `verify set --self-heal`
+   first previews the exact approved setup and its digest. Confirmation must
+   echo it with `--setup-digest <shown> --yes`. Only when the project check
+   cannot start because a required project executable is missing may the worker
+   run that setup once and retry the exact check once. An ordinary failure,
+   timeout, or executable that exists but cannot run does not trigger recovery.
+   The combined check log records every step. Recovery stops if the setup or
+   project check changes, setup fails, files change, the checkout moves,
+   unchanged files cannot be confirmed, worker custody is lost, or the
+   executable remains missing.
+6. **Terminal means proven.** A successful terminal task links its immutable
    evidence and criterion verdict. Missing or contradictory evidence remains
    visible as needs verification.
-6. **Crashes do not create duplicate authority.** Leases expire, generation
+7. **Crashes do not create duplicate authority.** Leases expire, generation
    fences reject late writers, and a replacement runner re-proves readiness
    before taking over.
-7. **One recovery entrance, existing authority.** Operator surfaces derive
+8. **One recovery entrance, existing authority.** Operator surfaces derive
    **Get this task running** from the typed diagnosis and route to the nearest
    guarded action. The entrance never performs a second mutation, bypasses a
    confirmation, or converts diagnosis into permission.
@@ -52,6 +62,11 @@ paths:
 
 - approved task → ready → claimed → running → terminal;
 - failed attempt → timed backoff → eligible retry;
+- missing project executable during verification → one approved setup replay →
+  one verification retry → one combined evidence log → no duplicate build;
+- setup replay changes files, the checkout moves, file safety cannot be
+  confirmed, or the executable remains missing → recovery stops with missing
+  evidence and a concrete reason;
 - question → waiting on a human → answer clears the hold;
 - failed dependency → repair card → retry blocker → edge preserved → claim still refused until the blocker completes;
 - cancelled/failed dependency → repair card → atomic replace or explicit unlink → immediate readiness re-evaluation;

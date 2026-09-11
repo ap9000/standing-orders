@@ -18,6 +18,18 @@ Done means:
 - every blocked state gives one concrete next action;
 - an end-to-end check files, approves, runs, and reaches a terminal outcome.
 
+The first bounded self-healing path is intentionally smaller than a general
+repair agent. `standing-orders verify set --self-heal` previews the exact
+approved setup and its digest; confirmation must echo it with
+`--setup-digest <shown> --yes`. When a project check cannot start because a
+required project executable is missing, the worker may run that setup once and
+retry that exact check once. Ordinary failures, timeouts, and executables that
+exist but cannot run do not trigger recovery. The combined check log is
+evidence of every step. A changed setup or project check, failed setup, file
+changes, a moved checkout, inability to confirm unchanged files, lost custody,
+or a still-missing executable stops recovery as missing evidence rather than
+claiming the product failed.
+
 ### Certification handoff
 
 The implementation and pre-Windows certification are complete. Real Claude

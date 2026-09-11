@@ -266,7 +266,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("config set", "set phase or spend configuration"),
   operator("config clear", "clear phase or spend configuration"),
   operator("setup clear", "clear installation setup"),
-  operator("verify set", "approve the one shell command the plane re-runs, unattended, after every future commit — same ceremony as setup set"),
+  operator("verify set", "approve the one shell command the plane re-runs after every future commit; --self-heal binds one approved-setup replay when a required project executable is missing"),
   operator("verify clear", "revoke a repository's approved verification command"),
   operator("intake grant", "grant an intake source"),
   operator("intake run", "run intake now"),

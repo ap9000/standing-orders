@@ -109,6 +109,26 @@ export function approvedCommandShell(
     : { file: "/bin/sh", args: ["-c", command], display: `sh -c ${command}` };
 }
 
+/**
+ * Whether an approved project check failed at its launch boundary because a
+ * local executable was unavailable. The numeric shell codes are the primary
+ * signal. Windows `cmd.exe` can instead return 1 with one exact diagnostic,
+ * so that spelling is admitted only on Windows. Free-form test output such as
+ * `MODULE_NOT_FOUND` is deliberately not enough: assertions are untrusted and
+ * must not turn an ordinary product failure into environment recovery.
+ */
+export function verificationExecutableMissing(
+  result: ExecResult,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (result.timedOut || result.notFound || result.code === 0) return false;
+  if (result.code === 127 || result.code === 9009) return true;
+  if (platform !== "win32" || result.code !== 1 || result.stdout.trim() !== "") return false;
+  return /^'[^'\r\n]+' is not recognized as an internal or external command,\s+operable program or batch file\.\s*$/i.test(
+    result.stderr.trim(),
+  );
+}
+
 /** The attended dispatch (Parity II Phase 2): the authorization is the
  * authority, the coordinator takes ownership at the spawn point, and the
  * builder returns `held` without settling. */
@@ -1786,7 +1806,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       // committed work; the verdict alone carries the news.
       try {
         store.setRunPhase(request.runId, "verifying-proof");
-        await settleProof(store, request, worktree, root, proof, diffEvidence.statId, clock);
+        await settleProof(store, request, worktree, root, proof, diffEvidence.statId, head, clock);
       } catch {
         // Adjudication itself must never fail the attempt — if even the
         // catch-all inside settleProof somehow throws, the build still
@@ -1973,6 +1993,7 @@ async function settleProof(
   root: string,
   proofFile: string,
   statArtifactId: number,
+  sealedHead: string,
   now: () => Date,
 ): Promise<void> {
   const runId = request.runId;
@@ -2041,38 +2062,197 @@ async function settleProof(
         })
       : [];
 
+  // Keep every attempt reviewable even when a tool emits megabytes. The
+  // evidence store keeps 64 KiB; bounding each stream and placing a compact
+  // outcome index first guarantees the retry result can never be truncated
+  // out of the authoritative log.
+  let checkLogRedacted = false;
+  let checkLogSourceBodyBytes = 0;
+  const boundedAttemptStream = (value: string, cap = 7 * 1024): string => {
+    const hits = scanForSecrets(value);
+    checkLogRedacted ||= hits.length > 0;
+    const safe = hits.length > 0 ? redactSecretLines(value, hits) : value;
+    const bytes = Buffer.from(safe, "utf8");
+    if (bytes.length <= cap) return safe;
+    const marker = Buffer.from("\n… output shortened; ending follows …\n", "utf8");
+    const side = Math.floor((cap - marker.length) / 2);
+    return Buffer.concat([bytes.subarray(0, side), marker, bytes.subarray(bytes.length - side)]).toString("utf8");
+  };
+  const attemptOutcome = (label: string, result: ExecResult): string =>
+    `${label}: (exit ${result.code}${result.notFound ? " · could not start" : ""}${result.timedOut ? " · timed out" : ""})`;
+  const attemptLog = (label: string, command: string, result: ExecResult): string => {
+    const prefix = `=== ${label} ===\n$ ${command}\n(exit ${result.code}${result.notFound ? ", could not start" : ""}${result.timedOut ? ", timed out" : ""})\n\n--- stdout ---\n`;
+    const between = "\n\n--- stderr ---\n";
+    checkLogSourceBodyBytes += Buffer.byteLength(prefix) + Buffer.byteLength(result.stdout) + Buffer.byteLength(between) + Buffer.byteLength(result.stderr);
+    return `${prefix}${boundedAttemptStream(result.stdout)}${between}${boundedAttemptStream(result.stderr)}`;
+  };
+
   // 3. The repository's approved verification command, when one exists —
-  // re-run unattended, exactly once, by the plane itself. Its own custody
-  // is re-proved immediately before the spawn (the setup spawn's own
-  // rule): a takeover between the commit and this instant runs nothing.
+  // normally run unattended exactly once by the plane itself. A NEW verify
+  // grant may bind one approved setup digest for a single recovery replay
+  // and one exact verification retry when the first command cannot find a
+  // required project executable. Legacy grants remain once-only. Custody is
+  // re-proved before every authorized spawn, and tracked post-commit changes
+  // stop recovery rather than being silently certified.
   const repo = store.getWorktree(worktree)?.repo ?? null;
   const configured = repo === null ? null : store.liveVerifyCommand(repo);
   let verifyCommand: VerifyCommandFacts;
+  const checkLog: string[] = [];
+  const checkOutcomes: string[] = [];
+  const recordCheckNote = (note: string): void => {
+    checkLogSourceBodyBytes += Buffer.byteLength(note);
+    checkLog.push(note);
+  };
+  type SealedTreeState = "clean" | "changed" | "head-moved" | "unavailable";
+  const sealedTreeState = async (gitRunner: Runner): Promise<SealedTreeState> => {
+    const head = await gitRunner(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
+    if (head.notFound || head.timedOut || head.code !== 0) return "unavailable";
+    if (head.stdout.trim() !== sealedHead) return "head-moved";
+    const diff = await gitRunner(GIT, ["--no-optional-locks", "diff", "--quiet", sealedHead, "--"], { cwd: worktree });
+    if (diff.notFound || diff.timedOut || (diff.code !== 0 && diff.code !== 1)) return "unavailable";
+    return diff.code === 0 ? "clean" : "changed";
+  };
   if (configured === null) {
     verifyCommand = { configured: false };
   } else if (!store.proveRunnerCustodyForSpawn(runId, now())) {
-    verifyCommand = { configured: true, ran: false, attemptFailed: true };
+    verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "custody-lost" };
+    recordCheckNote("Verification did not start: this worker no longer owned the build.");
   } else {
-    const runner = request.verify ?? run;
-    const shell = approvedCommandShell(configured.command);
-    const made = await runner(shell.file, shell.args, {
-      cwd: worktree,
-      timeoutMs: configured.timeoutMs,
-      envAllowlist: SETUP_ENV_ALLOWLIST,
-      omitEnv: SETUP_ENV_DENYLIST,
-    });
-    if (made.notFound || made.timedOut) {
-      verifyCommand = { configured: true, ran: false, attemptFailed: true };
-    } else {
-      const combined = `$ ${configured.command}\n(exit ${made.code}${made.timedOut ? ", timed out" : ""})\n\n--- stdout ---\n${made.stdout}\n\n--- stderr ---\n${made.stderr}`;
-      const hits = scanForSecrets(combined);
-      const logged = Buffer.from(hits.length > 0 ? redactSecretLines(combined, hits) : combined, "utf8");
-      storeEvidence(store, root, runId, "check-log", "check-log.txt", logged, `${shell.display} (exit ${made.code})`, now(), {
-        redacted: hits.length > 0,
-        captureStatus: "ok",
+    const verifyRunner = request.verify ?? run;
+    const verifyShell = approvedCommandShell(configured.command);
+    const runVerification = async (label: string): Promise<ExecResult> => {
+      const result = await verifyRunner(verifyShell.file, verifyShell.args, {
+        cwd: worktree,
+        timeoutMs: configured.timeoutMs,
+        envAllowlist: SETUP_ENV_ALLOWLIST,
+        omitEnv: SETUP_ENV_DENYLIST,
       });
-      verifyCommand = { configured: true, ran: true, exitCode: made.code };
+      checkOutcomes.push(attemptOutcome(label, result));
+      checkLog.push(attemptLog(label, configured.command, result));
+      return result;
+    };
+    const first = await runVerification("Project check · attempt 1");
+    if (first.notFound || first.timedOut) {
+      verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "spawn-failed" };
+    } else if (!verificationExecutableMissing(first)) {
+      verifyCommand = { configured: true, ran: true, exitCode: first.code };
+    } else {
+      const recoveryDigest = configured.recoverySetupDigest;
+      // Setup and verification are independently revocable authorities. A
+      // recovery may only use the exact pair that was live when this check
+      // began, and re-proves that pair immediately before each later spawn.
+      // This closes the otherwise-large revocation window while `git` and
+      // the setup command are running.
+      const liveRecoverySetup = () => {
+        if (repo === null || recoveryDigest === null) return null;
+        const liveVerify = store.liveVerifyCommand(repo);
+        const liveSetup = store.liveWorktreeSetup(repo);
+        return liveVerify !== null &&
+          liveVerify.digest === configured.digest &&
+          liveVerify.recoverySetupDigest === recoveryDigest &&
+          liveSetup !== null &&
+          liveSetup.digest === recoveryDigest
+          ? liveSetup
+          : null;
+      };
+      const setup = liveRecoverySetup();
+      if (recoveryDigest === null) {
+        verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "dependency-missing" };
+      } else if (setup === null || setup.digest !== recoveryDigest) {
+        verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "setup-stale" };
+      } else if (!store.proveRunnerCustodyForSpawn(runId, now())) {
+        verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "custody-lost" };
+      } else {
+        const gitRunner = request.git ?? run;
+        const beforeSetup = await sealedTreeState(gitRunner);
+        if (beforeSetup === "head-moved") {
+          verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "checkout-moved" };
+          recordCheckNote("Automatic recovery stopped before setup because HEAD no longer matched the built commit.");
+        } else if (beforeSetup === "unavailable") {
+          verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "cleanliness-unavailable" };
+          recordCheckNote("Automatic recovery stopped before setup because checkout cleanliness could not be confirmed.");
+        } else if (beforeSetup === "changed") {
+          verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "tracked-files-changed" };
+          recordCheckNote("Automatic recovery stopped before setup because tracked files no longer matched the built commit.");
+        } else {
+          const liveBeforeSetup = liveRecoverySetup();
+          if (liveBeforeSetup === null) {
+            verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "setup-stale" };
+            recordCheckNote("Automatic recovery stopped before setup because its approval changed.");
+          } else if (!store.proveRunnerCustodyForSpawn(runId, now())) {
+            verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "custody-lost" };
+            recordCheckNote("Automatic recovery stopped before setup: this worker no longer owned the build.");
+          } else {
+            const setupRunner = request.setup ?? run;
+            const setupShell = approvedCommandShell(liveBeforeSetup.command);
+            const restored = await setupRunner(setupShell.file, setupShell.args, {
+              cwd: worktree,
+              timeoutMs: liveBeforeSetup.timeoutMs,
+              envAllowlist: SETUP_ENV_ALLOWLIST,
+              omitEnv: SETUP_ENV_DENYLIST,
+            });
+            checkOutcomes.push(attemptOutcome("Automatic recovery · approved project setup", restored));
+            checkLog.push(attemptLog("Automatic recovery · approved project setup", liveBeforeSetup.command, restored));
+            if (restored.notFound || restored.timedOut || restored.code !== 0) {
+              verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "setup-failed" };
+            } else {
+              const afterSetup = await sealedTreeState(gitRunner);
+              if (afterSetup === "head-moved") {
+                verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "checkout-moved" };
+                recordCheckNote("Automatic recovery stopped: setup moved HEAD away from the built commit.");
+              } else if (afterSetup === "unavailable") {
+                verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "cleanliness-unavailable" };
+                recordCheckNote("Automatic recovery stopped after setup because checkout cleanliness could not be confirmed.");
+              } else if (afterSetup === "changed") {
+                verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "setup-changed-files" };
+                recordCheckNote("Automatic recovery stopped: setup changed tracked files after the build.");
+              } else if (!store.proveRunnerCustodyForSpawn(runId, now())) {
+                verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "custody-lost" };
+                recordCheckNote("Automatic recovery stopped before retry: this worker no longer owned the build.");
+              } else if (liveRecoverySetup() === null) {
+                verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "setup-stale" };
+                recordCheckNote("Automatic recovery stopped before retry because its approval changed.");
+              } else {
+                const retried = await runVerification("Project check · retry after setup");
+                if (retried.timedOut) {
+                  verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "retry-timed-out" };
+                } else if (retried.notFound) {
+                  verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "retry-spawn-failed" };
+                } else if (verificationExecutableMissing(retried)) {
+                  verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "dependency-still-missing" };
+                } else {
+                  verifyCommand = { configured: true, ran: true, exitCode: retried.code, setupReplayed: true };
+                }
+              }
+            }
+          }
+        }
+      }
     }
+  }
+  if (configured !== null && checkLog.length > 0) {
+    const summary = `=== Attempt summary ===\n${checkOutcomes.length === 0 ? "No command started." : checkOutcomes.map(one => `- ${one}`).join("\n")}`;
+    const combined = [
+      summary,
+      ...checkLog,
+    ].join("\n\n");
+    const hits = scanForSecrets(combined);
+    const logged = Buffer.from(hits.length > 0 ? redactSecretLines(combined, hits) : combined, "utf8");
+    storeEvidence(
+      store,
+      root,
+      runId,
+      "check-log",
+      "check-log.txt",
+      logged,
+      `${approvedCommandShell(configured.command).display} (${checkLog.length > 1 ? "bounded recovery recorded" : "attempt recorded"})`,
+      now(),
+      {
+        redacted: checkLogRedacted || hits.length > 0,
+        captureStatus: "ok",
+        sourceBytesOriginal: Buffer.byteLength(summary) + checkLogSourceBodyBytes + (2 * checkLog.length),
+      },
+    );
   }
 
   // 4. The sealed diff-stat, restated for adjudication — a truncated or

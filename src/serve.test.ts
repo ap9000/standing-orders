@@ -7052,6 +7052,49 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(verified).toContain('data-dispatch-status="complete-verified"');
     expect(verified).toContain('data-proof-state="verified"');
 
+    store.saveProofVerdict(run, "verified", ["the approved verification command passed after the approved setup command ran"], T0);
+    const recovered = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(recovered).toContain('data-automatic-recovery="succeeded"');
+    expect(recovered).toContain("Standing Orders ran the approved setup automatically, then the project check passed.");
+
+    store.saveProofVerdict(run, "short", ["automatic recovery stopped because the project setup or check changed"], T0);
+    const recoveryStopped = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(recoveryStopped).toContain("Automatic recovery stopped because the project setup or check changed. Review and reapprove automatic recovery before retrying.");
+
+    store.saveProofVerdict(run, "short", ["the approved verification command could not start because a required project executable was unavailable and no approved recovery was enabled"], T0);
+    const recoveryNotEnabled = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(recoveryNotEnabled).toContain("The project check couldn&#39;t start because a required project executable was missing. Automatic recovery wasn&#39;t enabled for this check.");
+
+    store.saveProofVerdict(run, "short", ["automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged"], T0);
+    const recoveryUnconfirmed = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(recoveryUnconfirmed).toContain("Standing Orders couldn&#39;t confirm that no files changed after the build was saved. Review the build log, then try again.");
+
+    store.saveProofVerdict(run, "short", ["automatic recovery stopped because tracked files no longer matched the built result"], T0);
+    const recoveryFilesChanged = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(recoveryFilesChanged).toContain("Automatic recovery stopped because files changed after the build was saved. Review those changes before retrying.");
+
+    store.saveProofVerdict(run, "short", ["automatic recovery stopped because the checkout moved away from the built commit"], T0);
+    const recoveryCheckoutMoved = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(recoveryCheckoutMoved).toContain("Automatic recovery stopped because Standing Orders found a different project version than the one it built. Review the build log before retrying.");
+
+    store.saveProofVerdict(run, "short", ["automatic recovery stopped because the setup command changed tracked files after the build"], T0);
+    const recoveryChangedFiles = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(recoveryChangedFiles).toContain("Automatic recovery stopped because project setup changed files after the build. Review those changes before retrying.");
+
+    store.saveProofVerdict(run, "short", ["the required project executable was still unavailable after replaying the approved setup command"], T0);
+    const recoveryExecutableStillMissing = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(recoveryExecutableStillMissing).toContain("Automatic recovery ran once, but the required project executable was still missing.");
+
+    store.saveProofVerdict(run, "short", ["the retried verification command timed out after automatic recovery"], T0);
+    const recoveryRetryTimedOut = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(recoveryRetryTimedOut).toContain("Automatic recovery ran the approved setup, but the retried project check timed out.");
+
+    store.saveProofVerdict(run, "short", ["the retried verification command could not be started after automatic recovery"], T0);
+    const recoveryRetryCouldNotStart = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(recoveryRetryCouldNotStart).toContain("Automatic recovery ran the approved setup, but Standing Orders still couldn&#39;t start the project check.");
+
+    store.saveProofVerdict(run, "verified", ["the approved verification command passed after the approved setup command ran"], T0);
+
     // Focused chat is a second lens over the same durable receipt, not a
     // model-authored summary or a separate result record.
     const chat = await (await fetch(url("/chat?task=t-proof"), { headers: { cookie } })).text();
@@ -7114,11 +7157,11 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(html).toContain('data-review-judgement="contradicts"');
     expect(html).toContain("reviewer: contradicted");
     expect(html).toContain("An independent review found conflicting evidence");
-    expect(html).toContain("repair chain");
+    expect(html).toContain("Automatic recovery");
     expect(html).toContain(trigger.draftTaskId);
 
     const draftHtml = await (await fetch(url(`/t/${trigger.draftTaskId}`), { headers: { cookie } })).text();
-    expect(draftHtml).toContain("repair chain");
+    expect(draftHtml).toContain("Automatic recovery");
 
     // The inbox's "needs verification" row carries the SAME chain fact —
     // one more word on the same chip, never a second card.

@@ -243,9 +243,66 @@ describe("adjudicate", () => {
     expect(result.verdict).not.toBe("refuted");
   });
 
+  test("altering a signed criterion remains refuted when verification could not run", () => {
+    const signed = "The button opens the settings panel.";
+    const restated = "The button closes the settings panel.";
+    const altered = parse({
+      ...sound,
+      criteria: [{ id: "c1", statement: restated, verdict: "met", how: "Clicked it in the demo build." }],
+    });
+    const result = adjudicate({
+      ...base,
+      proofParse: altered,
+      approvedCriteria: [{ id: "c1", statement: signed, evidence: [] }],
+      verifyCommand: { configured: true, ran: false, attemptFailed: true, failure: "spawn-failed" },
+    });
+    expect(result).toMatchObject({
+      verdict: "refuted",
+      reasons: [`criterion "c1" was signed as "${signed}" and the proof restates it as "${restated}"`],
+    });
+  });
+
   test("rule 5: an approved verification command that exits non-zero -> refuted", () => {
     const result = adjudicate({ ...base, verifyCommand: { configured: true, ran: true, exitCode: 1 } });
-    expect(result.verdict).toBe("refuted");
+    expect(result).toMatchObject({
+      verdict: "refuted",
+      reasons: ["the repository's approved verification command exited 1"],
+    });
+  });
+
+  test("a check passing after bounded setup replay is verified", () => {
+    const result = adjudicate({ ...base, verifyCommand: { configured: true, ran: true, exitCode: 0, setupReplayed: true } });
+    expect(result).toMatchObject({
+      verdict: "verified",
+      reasons: ["the approved verification command passed after the approved setup command ran"],
+    });
+  });
+
+  test("a check that starts but fails after setup replay is refuted", () => {
+    const result = adjudicate({ ...base, verifyCommand: { configured: true, ran: true, exitCode: 1, setupReplayed: true } });
+    expect(result).toMatchObject({
+      verdict: "refuted",
+      reasons: ["the repository's approved verification command exited 1 after the approved setup command was replayed"],
+    });
+  });
+
+  test.each([
+    ["spawn-failed", "the approved verification command could not be run"],
+    ["dependency-missing", "the approved verification command could not start because a required project executable was unavailable and no approved recovery was enabled"],
+    ["setup-stale", "automatic recovery stopped because the project setup or check changed"],
+    ["setup-failed", "the approved setup command failed during automatic recovery"],
+    ["tracked-files-changed", "automatic recovery stopped because tracked files no longer matched the built result"],
+    ["dependency-still-missing", "the required project executable was still unavailable after replaying the approved setup command"],
+    ["setup-changed-files", "automatic recovery stopped because the setup command changed tracked files after the build"],
+    ["checkout-moved", "automatic recovery stopped because the checkout moved away from the built commit"],
+    ["cleanliness-unavailable", "automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged"],
+    ["custody-lost", "automatic recovery stopped because this worker no longer owned the build"],
+  ] as const)("automatic recovery failure %s stays short", (failure, reason) => {
+    const result = adjudicate({
+      ...base,
+      verifyCommand: { configured: true, ran: false, attemptFailed: true, failure },
+    });
+    expect(result).toMatchObject({ verdict: "short", reasons: [reason] });
   });
 
   test("rule 6: any criterion not-met or not-checked -> short", () => {

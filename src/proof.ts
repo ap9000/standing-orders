@@ -402,8 +402,25 @@ export type DiffStatFacts = {
  * rather than `refuted`: "we could not check" is not "the claim is false". */
 export type VerifyCommandFacts =
   | { configured: false }
-  | { configured: true; ran: false; attemptFailed: true }
-  | { configured: true; ran: true; exitCode: number };
+  | {
+      configured: true;
+      ran: false;
+      attemptFailed: true;
+      failure?:
+        | "spawn-failed"
+        | "dependency-missing"
+        | "setup-stale"
+        | "setup-failed"
+        | "tracked-files-changed"
+        | "setup-changed-files"
+        | "checkout-moved"
+        | "cleanliness-unavailable"
+        | "dependency-still-missing"
+        | "retry-spawn-failed"
+        | "retry-timed-out"
+        | "custody-lost";
+    }
+  | { configured: true; ran: true; exitCode: number; setupReplayed?: true };
 
 export type AdjudicateInput = {
   /** Whether a `proof` artifact was stored at all for this run. */
@@ -664,19 +681,65 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
     }
   }
 
-  if (input.verifyCommand.configured && input.verifyCommand.ran && input.verifyCommand.exitCode !== 0) {
-    return {
-      verdict: "refuted",
-      reasons: [`the repository's approved verification command exited ${input.verifyCommand.exitCode}`],
-      matrix,
-    };
-  }
-
+  // Altering a signed requirement is an integrity contradiction, not an
+  // evidence gap. It outranks an environment failure: an unavailable check
+  // must never downgrade changed authority from refuted to short.
   if (approvedCriteria.length > 0) {
     const restated = matrix.filter(row => row.detail.some(d => d.includes("was signed as")));
     if (restated.length > 0) {
       return { verdict: "refuted", reasons: restated.flatMap(row => row.detail), matrix };
     }
+  }
+
+  // A command that could not exercise the product is missing evidence, not
+  // contradictory evidence. This precedes criterion-state checks so the
+  // actionable environment cause is never buried under a generic gap.
+  if (input.verifyCommand.configured && !input.verifyCommand.ran) {
+    const reason = (() => {
+      switch (input.verifyCommand.failure) {
+        case "dependency-missing":
+          return "the approved verification command could not start because a required project executable was unavailable and no approved recovery was enabled";
+        case "setup-stale":
+          return "automatic recovery stopped because the project setup or check changed";
+        case "setup-failed":
+          return "the approved setup command failed during automatic recovery";
+        case "tracked-files-changed":
+          return "automatic recovery stopped because tracked files no longer matched the built result";
+        case "setup-changed-files":
+          return "automatic recovery stopped because the setup command changed tracked files after the build";
+        case "checkout-moved":
+          return "automatic recovery stopped because the checkout moved away from the built commit";
+        case "cleanliness-unavailable":
+          return "automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged";
+        case "dependency-still-missing":
+          return "the required project executable was still unavailable after replaying the approved setup command";
+        case "retry-spawn-failed":
+          return "the retried verification command could not be started after automatic recovery";
+        case "retry-timed-out":
+          return "the retried verification command timed out after automatic recovery";
+        case "custody-lost":
+          return "automatic recovery stopped because this worker no longer owned the build";
+        case "spawn-failed":
+        default:
+          return "the approved verification command could not be run";
+      }
+    })();
+    return { verdict: "short", reasons: [reason], matrix };
+  }
+
+  if (input.verifyCommand.configured && input.verifyCommand.ran && input.verifyCommand.exitCode !== 0) {
+    return {
+      verdict: "refuted",
+      reasons: [
+        input.verifyCommand.setupReplayed === true
+          ? `the repository's approved verification command exited ${input.verifyCommand.exitCode} after the approved setup command was replayed`
+          : `the repository's approved verification command exited ${input.verifyCommand.exitCode}`,
+      ],
+      matrix,
+    };
+  }
+
+  if (approvedCriteria.length > 0) {
     // manual-review folds in here too (v39 review finding): a row that
     // needs a human's eyes is never machine-verifiable, so it must never
     // reach "verified" or "attested" on its own — it stays "short" until
@@ -707,10 +770,15 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
   }
 
   if (input.verifyCommand.configured && input.verifyCommand.ran && input.verifyCommand.exitCode === 0) {
-    return { verdict: "verified", reasons: ["the approved verification command passed"], matrix };
-  }
-  if (input.verifyCommand.configured && !input.verifyCommand.ran) {
-    return { verdict: "short", reasons: ["the approved verification command could not be run"], matrix };
+    return {
+      verdict: "verified",
+      reasons: [
+        input.verifyCommand.setupReplayed === true
+          ? "the approved verification command passed after the approved setup command ran"
+          : "the approved verification command passed",
+      ],
+      matrix,
+    };
   }
   return { verdict: "attested", reasons: ["the proof agrees with the sealed diff; no verification command is configured to re-run"], matrix };
 }

@@ -1,5 +1,20 @@
 # Progress
 
+**2026-09-10 — Project checks can repair one missing-executable failure.**
+`standing-orders verify set --self-heal` now previews the exact approved setup
+and its digest; confirmation must repeat it with
+`--setup-digest <shown> --yes`. When the first post-commit project check cannot
+start because a required project executable is missing, Standing Orders may
+run that setup once and retry the exact check once—never for an ordinary
+failure, timeout, or executable that exists but cannot run. Recovery stops if
+the setup or project check changes, setup fails, files change, the checkout
+moves, unchanged files cannot be confirmed, custody is lost, or the executable
+remains missing. The first check, setup run, and retry are redacted into one
+hash-verified check log. A successful task says that approved setup ran before
+the check passed; stopped paths give a concise reason, and the older criterion
+repair UI now presents itself as **Automatic recovery** rather than exposing
+the internal “repair chain” name.
+
 **2026-09-10 — Review evidence is calm, plain, and progressively disclosed.**
 The opaque *Proof disagrees* state is now *Conflicting evidence* everywhere;
 incomplete results read *Missing evidence*, and manual sign-off reads

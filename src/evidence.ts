@@ -344,19 +344,24 @@ export function storeEvidence(
   content: Buffer,
   capture: string,
   now: Date,
-  options: { redacted?: boolean; captureStatus?: "ok" | "failed" } = {},
+  options: { redacted?: boolean; captureStatus?: "ok" | "failed"; sourceBytesOriginal?: number } = {},
 ): number {
   const cap = EVIDENCE_CAPS[kind];
   const stored = content.subarray(0, cap);
+  // Some callers that deliberately summarize/bound a source before storage
+  // may still report its true original size. This keeps `truncated` honest
+  // even when the already-bounded representation fits beneath this layer's
+  // cap (for example a three-attempt verification log).
+  const bytesOriginal = Math.max(content.length, options.sourceBytesOriginal ?? content.length);
   const key = writeEvidenceFile(root, runId, name, stored);
   return store.saveArtifact(
     {
       run: runId,
       kind,
       key,
-      bytesOriginal: content.length,
+      bytesOriginal,
       bytesStored: stored.length,
-      truncated: content.length > stored.length,
+      truncated: bytesOriginal > stored.length,
       sha256: createHash("sha256").update(stored).digest("hex"),
       capture,
       ...(options.redacted === true ? { redacted: true } : {}),

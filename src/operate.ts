@@ -409,6 +409,16 @@ Agents — which provider and model each phase runs on
                                         worktree runs before any agent —
                                         a failed setup blocks the build
   standing-orders setup clear --repo <path> --as <you> --token <t>
+  standing-orders verify show --repo <path> what re-runs after each build
+  standing-orders verify set --repo <path> --command "npm test"
+      [--timeout-seconds <n>] [--self-heal [--setup-digest <shown>]]
+      --as <you> --token <t> [--yes]
+                                        --self-heal may replay the exact
+                                        approved setup once when a project
+                                        executable is missing, then retry
+                                        this check once; approval requires
+                                        its previewed setup digest
+  standing-orders verify clear --repo <path> --as <you> --token <t>
   Pass flags still win for one pass: --provider/--model,
   --plan-provider/--plan-model, --repair-model. A routine instance is
   pinned at fire time and ignores all of them.
@@ -512,13 +522,14 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
-  "command", "timeout-seconds", "stop-grace", "title", "name", "every", "lines",
+  "command", "timeout-seconds", "setup-digest", "stop-grace", "title", "name", "every", "lines",
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
   "no-open", "no-verify", "end", "report", "off", "tmux",
+  "self-heal",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -5352,13 +5363,13 @@ async function verifyCommand(
     write(
       live === null
         ? `No verification command for ${repo}. A build's proof lands "attested" at best — nothing re-runs it.`
-        : `${repo} re-runs after every commit:\n  ${live.command}\n  timeout ${Math.round(live.timeoutMs / 1000)}s · digest ${live.digest} · approved by ${live.approvedBy} at ${live.approvedAt}`,
+        : `${repo} re-runs after every commit:\n  ${live.command}\n  timeout ${Math.round(live.timeoutMs / 1000)}s · digest ${live.digest} · approved by ${live.approvedBy} at ${live.approvedAt}${live.recoverySetupDigest === null ? "" : `\n  self-healing on · approved setup ${live.recoverySetupDigest}`}`,
     );
     return EXIT.ok;
   }
 
   if (action !== "set" && action !== "clear") {
-    return fail(write, json, "verify", "usage", "`standing-orders verify [show|set --command <cmd> [--timeout-seconds <n>] --yes|clear] --repo <path> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "verify", "usage", "`standing-orders verify [show|set --command <cmd> [--timeout-seconds <n>] [--self-heal --setup-digest <shown>] --yes|clear] --repo <path> --as <you> --token <t>`", EXIT.usage);
   }
   if (repo === undefined) {
     return fail(write, json, `verify ${action}`, "usage", "which repo? --repo <path>", EXIT.usage);
@@ -5399,10 +5410,35 @@ async function verifyCommand(
   if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 3600) {
     return fail(write, json, "verify set", "invalid", "--timeout-seconds is 1..3600", EXIT.usage);
   }
+  const selfHeal = flags.get("self-heal") === true;
+  const expectedSetupDigest = text(flags, "setup-digest");
+  if (!selfHeal && expectedSetupDigest !== undefined) {
+    return fail(write, json, "verify set", "usage", "--setup-digest is only valid with --self-heal", EXIT.usage);
+  }
+  const recoverySetup = selfHeal ? store.liveWorktreeSetup(repo) : null;
+  if (selfHeal && recoverySetup === null) {
+    return fail(
+      write,
+      json,
+      "verify set",
+      "setup-required",
+      "self-healing needs an approved project setup first — set the exact preparation command, then approve verification again with --self-heal",
+      EXIT.refused,
+    );
+  }
 
   if (flags.get("yes") !== true) {
     if (json) {
-      write(envelopeJson({ ok: false, command: "verify set", reason: "unconfirmed", repo, verifyCommand: command, timeoutSeconds }));
+      write(envelopeJson({
+        ok: false,
+        command: "verify set",
+        reason: "unconfirmed",
+        repo,
+        verifyCommand: command,
+        timeoutSeconds,
+        selfHeal,
+        recoverySetup: recoverySetup === null ? null : { command: recoverySetup.command, digest: recoverySetup.digest },
+      }));
       return EXIT.refused;
     }
     for (const line of [
@@ -5415,19 +5451,58 @@ async function verifyCommand(
       `once, right after it commits — under an ALLOWLISTED environment`,
       `(PATH, HOME, locale, temp — no credentials). A pass lands the`,
       `build "verified"; a failure lands it "refuted", never blocked.`,
-      `Re-run with --yes to approve.`,
+      ...(recoverySetup === null
+        ? []
+        : [
+            ``,
+            `Self-healing, exactly: if this check cannot start because a`,
+            `required project executable is unavailable, Standing Orders may replay`,
+            `the approved setup \`${recoverySetup.command}\` (digest ${recoverySetup.digest}) once,`,
+            `then retry this exact check once. It stops if custody changes,`,
+            `setup fails, or setup changes tracked files after the commit.`,
+          ]),
+      recoverySetup === null
+        ? `Re-run with --yes to approve.`
+        : `Re-run with --setup-digest ${recoverySetup.digest} --yes to approve.`,
     ]) {
       write(line);
     }
     return EXIT.refused;
   }
 
+  if (selfHeal && expectedSetupDigest === undefined) {
+    return fail(
+      write,
+      json,
+      "verify set",
+      "setup-digest-required",
+      `confirm self-healing with --setup-digest ${recoverySetup?.digest} exactly as previewed`,
+      EXIT.refused,
+    );
+  }
+  if (selfHeal && expectedSetupDigest !== recoverySetup?.digest) {
+    return fail(
+      write,
+      json,
+      "verify set",
+      "stale-approval",
+      `the approved setup changed after preview — expected ${expectedSetupDigest}, current ${recoverySetup?.digest}; preview verification again before approving`,
+      EXIT.refused,
+    );
+  }
+
   const saved = store.setVerifyCommand(
-    { repo, command, timeoutMs: timeoutSeconds * 1000, approvedBy: acting.name },
+    {
+      repo,
+      command,
+      timeoutMs: timeoutSeconds * 1000,
+      approvedBy: acting.name,
+      recoverySetupDigest: recoverySetup?.digest ?? null,
+    },
     clock(),
   );
-  return succeed(write, json, "verify set", { repo, digest: saved.digest, timeoutSeconds }, () => [
-    `Approved: builds of ${repo} re-run \`${command}\` (digest ${saved.digest}, ${timeoutSeconds}s) right after commit.`,
+  return succeed(write, json, "verify set", { repo, digest: saved.digest, timeoutSeconds, selfHeal }, () => [
+    `Approved: builds of ${repo} re-run \`${command}\` (digest ${saved.digest}, ${timeoutSeconds}s) right after commit${selfHeal ? "; a missing required project executable gets one bounded approved-setup recovery" : ""}.`,
   ]);
 }
 

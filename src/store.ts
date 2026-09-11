@@ -46,7 +46,7 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 44;
+export const SCHEMA_VERSION = 45;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -2531,6 +2531,10 @@ CREATE TABLE IF NOT EXISTS verify_command (
   command     TEXT NOT NULL,
   timeout_ms  INTEGER NOT NULL,
   digest      TEXT NOT NULL,
+  -- v45: opt-in authority for exactly one post-commit replay of this
+  -- setup digest when the verification command cannot start because a
+  -- required project executable is unavailable. NULL preserves every older grant.
+  recovery_setup_digest TEXT,
   approved_by TEXT NOT NULL,
   approved_at TEXT NOT NULL,
   revoked_at  TEXT,
@@ -3867,6 +3871,11 @@ function migrate(db: Database): void {
      )`,
     ["id", "task_ref", "owner_kind", "owner_id", "reason", "until", "held_at"],
   );
+
+  // v45 (bounded environment recovery): older verification approvals keep
+  // their exact authority. Only a newly confirmed verify row may bind the
+  // digest of an already-approved setup command for one recovery replay.
+  addColumn(db, "verify_command", "recovery_setup_digest", "TEXT");
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -7853,23 +7862,31 @@ export class Store {
    * shape, same revoke-then-insert ceremony.
    */
   setVerifyCommand(
-    args: { repo: string; command: string; timeoutMs: number; approvedBy: string },
+    args: { repo: string; command: string; timeoutMs: number; approvedBy: string; recoverySetupDigest?: string | null },
     now: Date,
   ): VerifyCommand {
-    const digest = createHash("sha256")
+    const legacyDigest = createHash("sha256")
       .update(`${args.repo} ${args.command} ${args.timeoutMs}`, "utf8")
       .digest("hex")
       .slice(0, 16);
+    const recoverySetupDigest = args.recoverySetupDigest ?? null;
+    const digest =
+      recoverySetupDigest === null
+        ? legacyDigest
+        : createHash("sha256")
+            .update(`${legacyDigest}:recovery-setup:${recoverySetupDigest}`, "utf8")
+            .digest("hex")
+            .slice(0, 16);
     return this.transact(() => {
       this.db
         .prepare("UPDATE verify_command SET revoked_at = ?, revoked_by = ? WHERE repo = ? AND revoked_at IS NULL")
         .run(now.toISOString(), args.approvedBy, args.repo);
       const inserted = this.db
         .prepare(
-          `INSERT INTO verify_command (repo, command, timeout_ms, digest, approved_by, approved_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO verify_command (repo, command, timeout_ms, digest, recovery_setup_digest, approved_by, approved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(args.repo, args.command, args.timeoutMs, digest, args.approvedBy, now.toISOString());
+        .run(args.repo, args.command, args.timeoutMs, digest, recoverySetupDigest, args.approvedBy, now.toISOString());
       const row = this.db.prepare("SELECT * FROM verify_command WHERE id = ?").get(Number(inserted.lastInsertRowid));
       return readVerifyCommand(row as Record<string, unknown>);
     });
@@ -17641,6 +17658,8 @@ export type VerifyCommand = {
   command: string;
   timeoutMs: number;
   digest: string;
+  /** Exact approved setup this verification grant may replay once. */
+  recoverySetupDigest: string | null;
   approvedBy: string;
   approvedAt: string;
   revokedAt: string | null;
@@ -17654,6 +17673,10 @@ function readVerifyCommand(row: Record<string, unknown>): VerifyCommand {
     command: String(row["command"]),
     timeoutMs: Number(row["timeout_ms"]),
     digest: String(row["digest"]),
+    recoverySetupDigest:
+      row["recovery_setup_digest"] === null || row["recovery_setup_digest"] === undefined
+        ? null
+        : String(row["recovery_setup_digest"]),
     approvedBy: String(row["approved_by"]),
     approvedAt: String(row["approved_at"]),
     revokedAt: row["revoked_at"] === null ? null : String(row["revoked_at"]),

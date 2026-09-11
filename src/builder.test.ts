@@ -1,10 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { agentExitWords } from "./builder.js";
+import { agentExitWords, build, PROTECTED, verificationExecutableMissing, type Runner } from "./builder.js";
 import { openStore, type Store } from "./store.js";
 import { register, retireRunnerIfCurrent } from "./runner.js";
 import { acquire, currentClaim, reap } from "./claim.js";
 import { propose, approve, addApprover, profileDigestOf, type ExecutionProfile } from "./scope.js";
-import { build, PROTECTED, type Runner } from "./builder.js";
 import { resetAttestationCache } from "./attest.js";
 import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
 import { createHash as sha } from "node:crypto";
@@ -2292,6 +2291,18 @@ describe("agentExitWords: a non-zero agent exit says what ended it", () => {
   });
 });
 
+describe("verificationExecutableMissing", () => {
+  test("cmd.exe's exact command-not-recognized diagnostic is Windows-only", () => {
+    const missing = {
+      ...OK,
+      code: 1,
+      stderr: "'tsc' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n",
+    };
+    expect(verificationExecutableMissing(missing, "win32")).toBe(true);
+    expect(verificationExecutableMissing(missing, "darwin")).toBe(false);
+  });
+});
+
 describe("the proof (Priority 2): a missing or malformed proof never destroys committed work", () => {
   let store: Store;
   let approverToken: string;
@@ -2372,6 +2383,44 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     screenshots: [],
   };
 
+  /** Bind verification to one exact approved setup and mark the checkout as
+   * already prepared. These tests isolate the post-commit recovery replay;
+   * the ordinary pre-agent setup and its digest cache are covered above. */
+  const bindRecoverySetup = () => {
+    const setup = store.setWorktreeSetup(
+      { repo: REPO, command: "npm ci", timeoutMs: 5_000, approvedBy: "alex" },
+      T0,
+    );
+    store.stampWorktreeSetup(wt, setup.digest);
+    store.setVerifyCommand(
+      {
+        repo: REPO,
+        command: "npm test",
+        timeoutMs: 5_000,
+        approvedBy: "alex",
+        recoverySetupDigest: setup.digest,
+      },
+      T0,
+    );
+    return setup;
+  };
+
+  const checkLogFor = (run: number): string => {
+    const logs = store.artifactsFor(run).filter(one => one.kind === "check-log");
+    expect(logs).toHaveLength(1);
+    const read = readVerifiedArtifact(join2(wt, ".evidence"), logs[0]!);
+    expect(read.ok).toBe(true);
+    if (!read.ok) throw new Error(read.problem);
+    return read.content.toString("utf8");
+  };
+
+  /** A bounded log still has to preserve the result of every authorized
+   * spawn. Assert the compact index directly: unlike attempt bodies, it
+   * cannot be crowded out by a noisy command's output. */
+  const expectLoggedExit = (log: string, label: string, code: number): void => {
+    expect(log).toContain(`- ${label}: (exit ${code})`);
+  };
+
   test("no proof at all: the work commits, the verdict is short", async () => {
     claimIt();
     approveScope();
@@ -2437,6 +2486,461 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
 
     expect(result).toMatchObject({ ok: true, committed: true });
     expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "refuted" });
+  });
+
+  test("a missing dependency replays its bound setup once, retries once, and records one combined verified log", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return verifyCalls === 1
+        ? { ...OK, code: 127, stderr: "tsc: command not found" }
+        : { ...OK, stdout: "tests passed" };
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(1);
+    expect(verifyCalls).toBe(2);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "verified",
+      reasons: [expect.stringContaining("approved setup command ran")],
+    });
+    const log = checkLogFor(req.runId as number);
+    expect(log).toContain("Project check · attempt 1");
+    expect(log).toContain("Automatic recovery · approved project setup");
+    expect(log).toContain("Project check · retry after setup");
+    expect(log).toContain("(exit 127)");
+    expect(log).toContain("(exit 0)");
+  });
+
+  test("a dependency still missing after recovery is short after exactly one setup replay and one retry", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return { ...OK, code: 127, stderr: "tsc: command not found" };
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(1);
+    expect(verifyCalls).toBe(2);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "short",
+      reasons: [expect.stringContaining("still unavailable")],
+    });
+    const log = checkLogFor(req.runId as number);
+    expect(log.match(/=== Project check ·/g)).toHaveLength(2);
+    expect(log.match(/=== Automatic recovery ·/g)).toHaveLength(1);
+  });
+
+  test("a failed recovery setup is short and never retries verification", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK, code: 1, stderr: "package install failed\n//registry.example/:_authToken=not-a-real-secret" };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return { ...OK, code: 127, stderr: "tsc: command not found" };
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "short",
+      reasons: [expect.stringContaining("failed during automatic recovery")],
+    });
+    const log = checkLogFor(req.runId as number);
+    expect(log).toContain("Automatic recovery · approved project setup");
+    expect(log).toContain("package install failed");
+    expect(log).not.toContain("not-a-real-secret");
+    expect(store.artifactsFor(req.runId as number).find(one => one.kind === "check-log")?.redacted).toBe(true);
+    expect(log).not.toContain("Project check · retry after setup");
+  });
+
+  test("an ordinary failing check is refuted without replaying setup", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return { ...OK, code: 1, stderr: "one assertion failed" };
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(0);
+    expect(verifyCalls).toBe(1);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "refuted",
+      reasons: ["the repository's approved verification command exited 1"],
+    });
+    const log = checkLogFor(req.runId as number);
+    expect(log).toContain("Project check · attempt 1");
+    expect(log).not.toContain("Automatic recovery");
+  });
+
+  test("setup that changes tracked files stops recovery short and never retries verification", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    let setupChangedTree = false;
+    const setup: Runner = async () => {
+      setupCalls++;
+      setupChangedTree = true;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return { ...OK, code: 127, stderr: "tsc: command not found" };
+    };
+    const dirtyAfterSetupGit: Runner = async (file, args, options) => {
+      if (args.includes("diff") && args.includes("--quiet")) {
+        return setupChangedTree ? { ...OK, code: 1 } : { ...OK };
+      }
+      return git(file, args, options);
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify, git: dirtyAfterSetupGit });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "short",
+      reasons: [expect.stringContaining("changed tracked files")],
+    });
+    const log = checkLogFor(req.runId as number);
+    expect(log).toContain("Automatic recovery · approved project setup");
+    expect(log).toContain("setup changed tracked files after the build");
+    expect(log).not.toContain("Project check · retry after setup");
+  });
+
+  test("a setup that cleanly moves HEAD stops recovery short and never retries verification", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    let setupMovedHead = false;
+    const setup: Runner = async () => {
+      setupCalls++;
+      setupMovedHead = true;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return { ...OK, code: 127, stderr: "tsc: command not found" };
+    };
+    const movingHeadGit: Runner = async (file, args, options) => {
+      if (args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { ...OK, stdout: setupMovedHead ? "post-setup-head\n" : "built-head\n" };
+      }
+      return git(file, args, options);
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify, git: movingHeadGit });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "short",
+      reasons: ["automatic recovery stopped because the checkout moved away from the built commit"],
+    });
+    const log = checkLogFor(req.runId as number);
+    expect(log).toContain("Automatic recovery · approved project setup");
+    expect(log).not.toContain("Project check · retry after setup");
+  });
+
+  test("a noisy first check keeps every bounded-recovery exit outcome in its one stored log", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK, stdout: "dependencies restored" };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return verifyCalls === 1
+        ? {
+            ...OK,
+            code: 127,
+            stdout: "diagnostic noise that must not crowd out later outcomes\n".repeat(2_000),
+            stderr: "tsc: command not found",
+          }
+        : { ...OK, stdout: "tests passed after recovery" };
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(1);
+    expect(verifyCalls).toBe(2);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "verified" });
+    const [artifact] = store.artifactsFor(req.runId as number).filter(one => one.kind === "check-log");
+    expect(artifact).toMatchObject({ truncated: true });
+    expect(artifact!.bytesOriginal).toBeGreaterThan(artifact!.bytesStored);
+    const log = checkLogFor(req.runId as number);
+    expectLoggedExit(log, "Project check · attempt 1", 127);
+    expectLoggedExit(log, "Automatic recovery · approved project setup", 0);
+    expectLoggedExit(log, "Project check · retry after setup", 0);
+    expect(log).toContain("… output shortened; ending follows …");
+  });
+
+  test.each([
+    "the assertion expected stderr to include MODULE_NOT_FOUND",
+    "the UI snapshot says Cannot find module 'example'",
+  ])("an exit-1 test failure mentioning dependency text is refuted without recovery: %s", async stderr => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return { ...OK, code: 1, stderr };
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(0);
+    expect(verifyCalls).toBe(1);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "refuted",
+      reasons: ["the repository's approved verification command exited 1"],
+    });
+    expect(checkLogFor(req.runId as number)).not.toContain("Automatic recovery");
+  });
+
+  test("a git error while checking cleanliness is not misreported as a dirty checkout", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return { ...OK, code: 127, stderr: "tsc: command not found" };
+    };
+    const brokenDiffGit: Runner = async (file, args, options) => {
+      if (args.includes("diff") && args.includes("--quiet")) {
+        return { ...OK, code: 128, stderr: "fatal: could not read index" };
+      }
+      return git(file, args, options);
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify, git: brokenDiffGit });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(0);
+    expect(verifyCalls).toBe(1);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "short",
+      reasons: ["automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged"],
+    });
+    const log = checkLogFor(req.runId as number);
+    expect(log).not.toContain("Automatic recovery · approved project setup");
+    expect(log).not.toContain("Project check · retry after setup");
+  });
+
+  test.each([
+    {
+      name: "times out",
+      retry: { ...OK, code: 124, timedOut: true, stderr: "verification timed out" },
+      reason: "the retried verification command timed out after automatic recovery",
+    },
+    {
+      name: "cannot start",
+      retry: { ...OK, code: 127, notFound: true, stderr: "spawn failed" },
+      reason: "the retried verification command could not be started after automatic recovery",
+    },
+  ])("a verification retry that $name stays short for its truthful reason", async ({ retry, reason }) => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return verifyCalls === 1 ? { ...OK, code: 127, stderr: "tsc: command not found" } : retry;
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(1);
+    expect(verifyCalls).toBe(2);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "short",
+      reasons: [reason],
+    });
+    const log = checkLogFor(req.runId as number);
+    expect(log).toContain("Project check · retry after setup");
+    expect(log).not.toContain("project dependencies were still unavailable");
+  });
+
+  test("POSIX exit 126 is an ordinary refuted check failure and never replays setup", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return { ...OK, code: 126, stderr: "permission denied" };
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(0);
+    expect(verifyCalls).toBe(1);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "refuted",
+      reasons: ["the repository's approved verification command exited 126"],
+    });
+    expect(checkLogFor(req.runId as number)).not.toContain("Automatic recovery");
+  });
+
+  test.each([
+    { name: "POSIX exit 127", code: 127, stderr: "not found" },
+    { name: "Windows exit 9009", code: 9009, stderr: "program not found" },
+  ])("$name receives exactly one bounded setup replay and verification retry", async ({ code, stderr }) => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return verifyCalls === 1 ? { ...OK, code, stderr } : { ...OK, stdout: "tests passed" };
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toBe(1);
+    expect(verifyCalls).toBe(2);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "verified" });
+    const log = checkLogFor(req.runId as number);
+    expect(log.match(/=== Automatic recovery · approved project setup ===/g)).toHaveLength(1);
+    expect(log.match(/=== Project check · retry after setup ===/g)).toHaveLength(1);
+    expectLoggedExit(log, "Project check · attempt 1", code);
+    expectLoggedExit(log, "Project check · retry after setup", 0);
+  });
+
+  test("a changed setup approval during recovery preflight stops before either authorized replay", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let setupCalls = 0;
+    let verifyCalls = 0;
+    let changedAuthority = false;
+    const setup: Runner = async () => {
+      setupCalls++;
+      return { ...OK };
+    };
+    const verify: Runner = async () => {
+      verifyCalls++;
+      return { ...OK, code: 127, stderr: "tsc: command not found" };
+    };
+    const changingGit: Runner = async (file, args, options) => {
+      if (!changedAuthority && args.includes("diff") && args.includes("--quiet")) {
+        changedAuthority = true;
+        store.setWorktreeSetup(
+          { repo: REPO, command: "npm ci --ignore-scripts", timeoutMs: 5_000, approvedBy: "alex" },
+          new Date(T0.getTime() + 1_000),
+        );
+      }
+      return git(file, args, options);
+    };
+    const req = request({ agent: agentWithProof(soundProof), setup, verify, git: changingGit });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(changedAuthority).toBe(true);
+    expect(setupCalls).toBe(0);
+    expect(verifyCalls).toBe(1);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
+      verdict: "short",
+      reasons: [expect.stringContaining("project setup or check changed")],
+    });
+    const log = checkLogFor(req.runId as number);
+    expect(log).toContain("approval changed");
+    expect(log).not.toContain("Automatic recovery · approved project setup");
+    expect(log).not.toContain("Project check · retry after setup");
   });
 
   test("a claimed changed path absent from the sealed diff: refuted", async () => {

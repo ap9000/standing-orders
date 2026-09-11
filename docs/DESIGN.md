@@ -228,6 +228,18 @@ Parking never stalls the loop. A blocked task steps aside and the scheduler retu
 
 **Failure handling, adopted from gnhf rather than reinvented** — including the parts most tools omit: agent-reported failure → next iteration immediately; retryable infrastructure error → exponential backoff; permanent error (exhausted credit, revoked auth) → abort with the run log; **commit failure → preserve the work for repair**, never blanket-reset; complete no-op iteration → counts as a failure; three consecutive → abort. Plus mid-iteration token caps, graceful stop, persisted notes, resume, and a permanent exit summary.
 
+One deterministic environment repair is narrower than that general retry
+policy. `verify set --self-heal` first previews the exact approved setup and
+its digest; confirmation must echo it with `--setup-digest <shown> --yes`. If
+the project check cannot start because a required project executable is
+missing, the worker can run that setup once and retry the exact check once.
+Ordinary failures, timeouts, and executables that exist but cannot run do not
+trigger recovery. It records all three steps in one evidence log and stops if
+the setup or project check changes, setup fails, files change, the checkout
+moves, unchanged files cannot be confirmed, worker custody is lost, or the
+executable remains missing. This is not permission to invent a shell command,
+install system software, or retry without a bound.
+
 Rollback proves worktree cleanliness and base revision first. `git reset --hard` leaves untracked files behind and can destroy repairable work.
 
 **Malformed agent output gets bounded repair, not an instant 422** — the adapter resumes the same session with a compact error so the agent re-emits only the bad payload (sandcastle's mechanism), twice, then emits `malformed-decision` (hyphenated, like every public reason token).

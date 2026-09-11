@@ -6853,25 +6853,27 @@ function matrixStateBadge(state: CriterionMatrixRow["state"]): string {
   return `<span class="badge ${cls}" data-matrix-state="${escape(state)}">${escape(word)}</span>`;
 }
 
-/** v40: the bounded repair chain's own line — one card, one chain, the
- * criterion-by-criterion trajectory named plainly. Renders on the task
- * page and the run page identically (the shared-surface rule, extended). */
+/** v40: the bounded repair chain's own line — presented as the user-facing
+ * recovery it represents, without exposing the internal workflow name.
+ * Renders on the task page and the run page identically. */
 function repairChainHtml(chain: RepairChainRow | null): string {
   if (chain === null) return "";
-  const basisWords = chain.basis === "mode" ? "a signed mode auto-approved" : "awaiting your approval";
-  const unresolvedWords = chain.unresolved.length === 0 ? "" : ` (${chain.unresolved.join(", ")})`;
+  const basisWords = chain.basis === "mode" ? "approved automatically" : "ready for your approval";
   const outcomeWords =
     chain.outcome === "drafted"
-      ? `attempt ${chain.attempt}, ${chain.draftTask === null ? "no draft" : basisWords}`
+      ? chain.draftTask === null ? "No fix could be prepared" : `Targeted fix ${basisWords}`
       : chain.outcome === "resolved"
-        ? `resolved at attempt ${chain.attempt} — the chain is closed`
+        ? `Completed on attempt ${chain.attempt}`
         : chain.outcome === "attempts-spent"
-          ? `stopped: the signed attempt cap is spent at attempt ${chain.attempt}`
+          ? `Stopped after ${chain.attempt} attempt${chain.attempt === 1 ? "" : "s"}`
           : chain.outcome === "no-progress"
-            ? `stopped: two consecutive attempts made no progress (attempt ${chain.attempt})`
-            : `stopped: attempt ${chain.attempt} refused automatic repair — an altered term, not a gap; a human should look`;
+            ? "Stopped because two attempts made no progress"
+            : "Stopped because the evidence may conflict with the approved work";
   const link = chain.draftTask === null ? "" : ` <a href="${taskHref(chain.draftTask)}">${escape(chain.draftTask)}</a>`;
-  return `<div class="card repair-chain" data-repair-outcome="${escape(chain.outcome)}"><p class="row"><strong>repair chain</strong> — ${escape(outcomeWords)}${escape(unresolvedWords)}${link}</p></div>`;
+  const details = chain.unresolved.length === 0
+    ? ""
+    : `<details><summary>What it is fixing</summary><p class="meta">${escape(chain.unresolved.join(", "))}</p></details>`;
+  return `<div class="card repair-chain" data-repair-outcome="${escape(chain.outcome)}"><p class="row"><strong>Automatic recovery</strong> — ${escape(outcomeWords)}${link}</p>${details}</div>`;
 }
 
 /** v40: the independent reviewer's own judgement on one criterion — a
@@ -13869,7 +13871,14 @@ function taskBody(data: {
           : `<details class="dispatch-proof-details"><summary>${proof.proofMatrix.length === 0 ? "Verification details" : `${proof.proofMatrix.length} requirement${proof.proofMatrix.length === 1 ? "" : "s"}`} · View details</summary>` +
             `<div class="dispatch-proof-body">${criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })}${machineNote}${chainHtml}</div></details>`;
       if (proof.proofVerdict === "verified") {
-        return box("ok", "Complete — verified", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`) + proofDetails;
+        const recovered = verificationRecovered(proof.proofReasons);
+        return box(
+          "ok",
+          "Complete — verified",
+          recovered
+            ? `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. <span data-automatic-recovery="succeeded">Standing Orders ran the approved setup automatically, then the project check passed.</span>`
+            : `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`,
+        ) + proofDetails;
       }
       if (proof.proofVerdict === "attested") {
         return box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`) + proofDetails;
@@ -15051,10 +15060,69 @@ function proofStateChip(verdict: ProofVerdict | null, accepted: boolean, run: bo
 }
 
 /** Turn verifier records into one sentence a project owner can act on.
- * Exit 127 is especially important: it means the check could not start,
- * not that the product itself failed. The stored record remains unchanged. */
+ * A command-not-found result means the check could not start, not that the
+ * product itself failed. The stored record remains unchanged. */
 function verificationExplanation(verdict: ProofVerdict | null, reasons: readonly string[]): string {
   const plain = reasons.map(reason => {
+    if (
+      reason === "the approved verification command passed after the approved setup command ran"
+      || reason === "the approved verification command passed after the approved setup command restored project dependencies"
+    ) {
+      return "Standing Orders ran the approved setup automatically, then the project check passed.";
+    }
+    if (
+      reason === "the approved verification command could not start because a required project executable was unavailable and no approved recovery was enabled"
+      || reason === "the approved verification command could not start because a project dependency was unavailable and no approved recovery was enabled"
+    ) {
+      return "The project check couldn't start because a required project executable was missing. Automatic recovery wasn't enabled for this check.";
+    }
+    if (
+      reason === "automatic recovery stopped because the approved setup changed after self-healing was authorized"
+      || reason === "automatic recovery stopped because its approved setup or project-check settings changed"
+      || reason === "automatic recovery stopped because the project setup or check changed"
+    ) {
+      return "Automatic recovery stopped because the project setup or check changed. Review and reapprove automatic recovery before retrying.";
+    }
+    if (
+      reason === "the approved setup command failed during automatic recovery"
+      || reason === "the approved setup command could not restore the project dependencies"
+    ) {
+      return "The approved project setup failed, so automatic recovery stopped before retrying the project check.";
+    }
+    if (reason === "automatic recovery stopped because the setup command changed tracked files after the build") {
+      return "Automatic recovery stopped because project setup changed files after the build. Review those changes before retrying.";
+    }
+    if (reason === "automatic recovery stopped because tracked files no longer matched the built result") {
+      return "Automatic recovery stopped because files changed after the build was saved. Review those changes before retrying.";
+    }
+    if (reason === "automatic recovery stopped because the checkout moved away from the built commit") {
+      return "Automatic recovery stopped because Standing Orders found a different project version than the one it built. Review the build log before retrying.";
+    }
+    if (reason === "automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged") {
+      return "Automatic recovery stopped because Standing Orders couldn't confirm that no files changed after the build was saved. Review the build log, then try again.";
+    }
+    if (
+      reason === "the required project executable was still unavailable after replaying the approved setup command"
+      || reason === "project dependencies were still unavailable after replaying the approved setup command"
+    ) {
+      return "Automatic recovery ran once, but the required project executable was still missing.";
+    }
+    if (reason === "the retried verification command timed out after automatic recovery") {
+      return "Automatic recovery ran the approved setup, but the retried project check timed out.";
+    }
+    if (reason === "the retried verification command could not be started after automatic recovery") {
+      return "Automatic recovery ran the approved setup, but Standing Orders still couldn't start the project check.";
+    }
+    if (reason === "automatic recovery stopped because this worker no longer owned the build") {
+      return "Automatic recovery stopped because this worker no longer owned the build. A current worker can retry safely.";
+    }
+    if (reason === "the approved verification command could not be run") {
+      return "Standing Orders couldn't run the project check.";
+    }
+    const recoveredFailure = /^the repository's approved verification command exited (-?[0-9]+) after the approved setup command was replayed$/.exec(reason);
+    if (recoveredFailure !== null) {
+      return `Automatic recovery ran the approved setup, but the project check still failed (exit ${Number(recoveredFailure[1])}).`;
+    }
     const exit = /^the repository's approved verification command exited (-?[0-9]+)$/.exec(reason);
     if (exit !== null) {
       const code = Number(exit[1]);
@@ -15074,6 +15142,13 @@ function verificationExplanation(verdict: ProofVerdict | null, reasons: readonly
   if (verdict === "short") return "Some approved requirements still need evidence.";
   if (verdict === "refuted") return "Recorded evidence conflicts with this result.";
   return "No verification result is available for this build.";
+}
+
+function verificationRecovered(reasons: readonly string[]): boolean {
+  return reasons.some(reason =>
+    reason === "the approved verification command passed after the approved setup command ran"
+    || reason === "the approved verification command passed after the approved setup command restored project dependencies"
+  );
 }
 
 /** Whether a reviewer can annotate this result's diff here: a build with
