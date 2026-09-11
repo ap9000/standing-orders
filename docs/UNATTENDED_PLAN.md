@@ -47,6 +47,23 @@ Main was still `917bc5b` when this plan was prepared.
 
 ## Execution status
 
+- Assisted handoff slice: builders now receive a canonical rubric JSON input,
+  with statement text separated from evidence kinds. Preflight accepts that
+  full rubric and shares submission validation with final adjudication.
+  Parseable receipt defects can use at most two same-session repairs through
+  the existing signed repair admission. The original reply and each correction
+  are sealed; checks, paths, screenshots and caveats cannot be rewritten, and
+  an unmet answer cannot be upgraded by receipt correction. Checkout/custody
+  changes reject the correction, including after a thrown transport. The
+  commit is kept and the project check runs once afterwards. Missing or
+  unparseable receipts without a recoverable evidence inventory still require
+  verification; this does not promise arbitrary evidence reconstruction.
+  Lease renewal now continues through commit and verification. Public dispatch
+  diagnosis distinguishes missing/refuted proof from completion, including
+  after a newer successful reviewer run. Required preflight tests build their
+  runtime when missing or stale instead of silently skipping. Typecheck and
+  the full suite pass: 117 files, 2,329 tests, 12 existing skips.
+
 - Assisted integration, September 11: `codex/unattended-reliability` combines
   the existing repair chain through `3a1424a` with the current plan. Setup,
   verification, and verification-recovery children now receive disposable

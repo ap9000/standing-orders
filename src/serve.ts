@@ -16161,6 +16161,7 @@ function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boole
 const PHASE_WORDS: Record<string, string> = {
   "agent-running": "agent working",
   "validating-handoff": "checking the handoff",
+  "correcting-proof": "correcting evidence",
   "capturing-evidence": "capturing evidence",
   committing: "committing",
 };

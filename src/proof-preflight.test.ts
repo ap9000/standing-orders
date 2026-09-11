@@ -7,14 +7,13 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(root, "scripts", "proof-preflight.mjs");
-const built = existsSync(join(root, "dist", "proof.js")) && existsSync(join(root, "dist", "decision.js"));
 
 /** The exit preflight, run as the agent runs it, over the run 1497
  * contradictions (atomic authority closure): a criterion marked met while a
  * caveat names it is a blocking caveat the preflight refuses BEFORE the
  * attempt ends; the same caveats against not-met criteria pass. Runs
- * against dist/ — `npm run build` first; skipped, in words, when there is
- * no build to run against. */
+ * against dist/ — `npm run build` first; built by the test setup when
+ * a fresh checkout has no runtime yet. */
 describe("scripts/proof-preflight.mjs refuses a met criterion a caveat admits an exception to", () => {
   const proofOf = (verdict: "met" | "not-met", caveats?: string[]) =>
     JSON.stringify({
@@ -61,7 +60,7 @@ describe("scripts/proof-preflight.mjs refuses a met criterion a caveat admits an
     }
   };
 
-  test.skipIf(!built)("run 1497 pinned: met c1 and c4 beside caveats naming them exit 1 with both contradictions named", () => {
+  test("run 1497 pinned: met c1 and c4 beside caveats naming them exit 1 with both contradictions named", () => {
     const { status, out } = run(proofOf("met"));
     expect(status).toBe(1);
     expect(out).toContain("criterion c1 is marked met, but caveat 1 admits an exception to it");
@@ -69,7 +68,7 @@ describe("scripts/proof-preflight.mjs refuses a met criterion a caveat admits an
     expect(out).toContain("2 problem(s)");
   });
 
-  test.skipIf(!built)("the same caveats against not-met criteria pass: parse-valid, refs resolved, no blocking caveat, every caveat attributed", () => {
+  test("the same caveats against not-met criteria pass: parse-valid, refs resolved, no blocking caveat, every caveat attributed", () => {
     const { status, out } = run(proofOf("not-met"));
     expect(status).toBe(0);
     expect(out).toContain("none blocking");
@@ -80,7 +79,7 @@ describe("scripts/proof-preflight.mjs refuses a met criterion a caveat admits an
     ["run 1497", run1497Caveats],
     ["run 1500", run1500Caveats],
   ] as const) {
-    test.skipIf(!built)(`${label}'s exact stored caveats exit 1: every caveat is unassigned, met or not-met alike`, () => {
+    test(`${label}'s exact stored caveats exit 1: every caveat is unassigned, met or not-met alike`, () => {
       for (const verdict of ["met", "not-met"] as const) {
         const { status, out } = run(proofOf(verdict, [...caveats]));
         expect(status).toBe(1);
@@ -92,7 +91,7 @@ describe("scripts/proof-preflight.mjs refuses a met criterion a caveat admits an
     });
   }
 
-  test.skipIf(!built)("a proof-authored extra id is no signed authority (final admission closure): under --criteria c1,c4 a caveat tagged with the proof's own c7 exits 1 as unknown; with no rubric named, the answered c7 attributes", () => {
+  test("a proof-authored extra id is no signed authority (final admission closure): under --criteria c1,c4 a caveat tagged with the proof's own c7 exits 1 as unknown; with no rubric named, the answered c7 attributes", () => {
     const extra = "c7: the routine page still renders the old words under the extra criterion.";
     const proof = JSON.stringify({
       ...(JSON.parse(proofOf("not-met", [extra])) as { criteria: unknown[] }),
@@ -120,7 +119,7 @@ describe("scripts/proof-preflight.mjs refuses a met criterion a caveat admits an
     }
   });
 
-  test.skipIf(!built)("a caveat tagged with an id nobody signed exits 1 as unknown; once the signed rubric names that id the tag is known and only the unanswered criterion remains", () => {
+  test("a caveat tagged with an id nobody signed exits 1 as unknown; once the signed rubric names that id the tag is known and only the unanswered criterion remains", () => {
     const proof = proofOf("not-met", ["c9: the routine page still renders the old words."]);
     const refused = run(proof);
     expect(refused.status).toBe(1);
@@ -174,14 +173,14 @@ describe("scripts/proof-preflight.mjs refuses a met criterion whose cited check 
     }
   };
 
-  test.skipIf(!built)("a met c1 citing a check that exited 1 exits 1, naming the adjudicator's fact and what to do about it", () => {
+  test("a met c1 citing a check that exited 1 exits 1, naming the adjudicator's fact and what to do about it", () => {
     const { status, out } = run(proofOf("met", 1));
     expect(status).toBe(1);
     expect(out).toContain(`proof: criterion "c1"'s check "${counterexample}" exited 1 — a criterion marked met cites only checks that exited zero; mark it not-met, or cite a durable current-tree command that passed`);
     expect(out).toContain("1 problem(s)");
   });
 
-  test.skipIf(!built)("the same failed check cited by a not-met or not-checked c1 passes: honest reporting, not a claim", () => {
+  test("the same failed check cited by a not-met or not-checked c1 passes: honest reporting, not a claim", () => {
     for (const verdict of ["not-met", "not-checked"] as const) {
       const { status, out } = run(proofOf(verdict, 1));
       expect(status).toBe(0);
@@ -190,7 +189,7 @@ describe("scripts/proof-preflight.mjs refuses a met criterion whose cited check 
     }
   });
 
-  test.skipIf(!built)("a met c1 whose cited checks all exited zero passes", () => {
+  test("a met c1 whose cited checks all exited zero passes", () => {
     const { status, out } = run(proofOf("met", 0));
     expect(status).toBe(0);
     expect(out).toContain("every named file parses and resolves");

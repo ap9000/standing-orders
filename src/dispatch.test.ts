@@ -88,7 +88,29 @@ describe("Never Stuck dispatch diagnosis", () => {
     expect(diagnoseTaskDispatch(store, "t-life", T0)).toMatchObject({ condition: "running", code: "running" });
 
     store.setTaskState("t-life", "done", new Date(T0.getTime() + 1_000));
-    expect(diagnoseTaskDispatch(store, "t-life", new Date(T0.getTime() + 1_000))).toMatchObject({ condition: "terminal", code: "complete" });
+    expect(diagnoseTaskDispatch(store, "t-life", new Date(T0.getTime() + 1_000))).toMatchObject({ condition: "waiting", code: "needs-verification" });
+    store.setTaskState("t-life", "cancelled", new Date(T0.getTime() + 2_000));
+    expect(diagnoseTaskDispatch(store, "t-life", new Date(T0.getTime() + 2_000))).toMatchObject({ condition: "terminal", code: "cancelled" });
+  });
+
+  test("a refuted build stays actionable after a newer successful review; acceptance is explicit", () => {
+    const ref = file(store, "t-proof");
+    enroll(store);
+    expect(acquireIfReady(store, ref, "worker", { token: TOKEN, repo: REPO, now: T0, newLeaseId: () => "lease-proof" }).ok).toBe(true);
+    const authority = store.routeAuthorityFor(ref, "builder");
+    if (!authority?.ok) throw new Error("fixture route missing");
+    const run = store.startRun({ taskRef: ref, leaseId: "lease-proof", runner: "worker", branch: "feat/proof", worktree: REPO,
+      provider: authority.stamp.provider, ...(authority.stamp.model === null ? {} : { model: authority.stamp.model }),
+      route: authority.stamp, now: T0 });
+    store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+    store.saveProofVerdict(run, "refuted", ["signed statement changed"], T0);
+    store.setTaskState("t-proof", "done", T0);
+    // A historical review row must never replace the build's result.
+    store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, outcome, started_at, finished_at) VALUES (?, 'lease-proof', 'worker', 'reviewer', 'claude', ?, 'no-change', ?, ?)").run(ref, run, T0.toISOString(), T0.toISOString());
+    expect(diagnoseTaskDispatch(store, "t-proof", T0)).toMatchObject({ condition: "waiting", code: "proof-refuted", summary: "Proof correction needed", action: "open-result" });
+    expect(diagnosisIsDispatchable(diagnoseTaskDispatch(store, "t-proof", T0))).toBe(false);
+    store.acceptProof(run, "operator", "Reviewed the exact exception", T0);
+    expect(diagnoseTaskDispatch(store, "t-proof", T0)).toMatchObject({ condition: "terminal", code: "complete", summary: "Complete with recorded acceptance" });
   });
 
   test("a cancelled dependency is a repair, never a calm wait or a claim", () => {

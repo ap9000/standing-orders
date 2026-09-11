@@ -1743,6 +1743,28 @@ describe("the pulse", () => {
       newLeaseId: ids("lease-b"),
     });
 
+  test("the lease keeps renewing during verification and stops when settlement finishes", async () => {
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: new Date(), ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
+    store.setVerifyCommand({ repo: REPO, command: "true", timeoutMs: 5_000, approvedBy: "alex" }, T0);
+    let checked = false;
+    const agent: Runner = async (_file, args, options) => {
+      conclude(args, options);
+      return { ...OK, stdout: AGENT_SAID };
+    };
+    const verify: Runner = async () => {
+      const before = currentClaim(store, taskRef, new Date())!.heartbeatAt;
+      await sleep(40);
+      expect(currentClaim(store, taskRef, new Date())!.heartbeatAt).not.toBe(before);
+      checked = true;
+      return { ...OK };
+    };
+    expect(await build(store, request("lease-a", { agent, verify }))).toMatchObject({ ok: true, committed: true });
+    expect(checked).toBe(true);
+    const finished = currentClaim(store, taskRef, new Date())!.heartbeatAt;
+    await sleep(25);
+    expect(currentClaim(store, taskRef, new Date())!.heartbeatAt).toBe(finished);
+  });
+
   test("a build fenced while the agent runs commits nothing", async () => {
     // Acquired at the REAL clock, which the spawn's custody proof reads —
     // and short enough that supersede()'s day-later timestamp finds it
@@ -2668,6 +2690,58 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     if (!read.ok) throw new Error(read.problem);
     return read.content.toString("utf8");
   };
+
+  test.each(["correct", "unchanged", "rewrite-checks", "rewrite-code", "throw-after-write"])("proof-only correction: %s", async behavior => {
+    const criterion = { id: "c1", statement: "the guard exists", evidence: ["check", "changed-path"] as ("check" | "changed-path")[] };
+    propose(store, { taskId: "t-1", goal: "add a guard", acceptance: [criterion], now: T0 });
+    expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
+    claimIt();
+    store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 5_000, approvedBy: "alex" }, T0);
+    const wrong = { ...structuredClone(soundProof), criteria: [{ ...criterion,
+      statement: criterion.statement + " (requires evidence: check, changed-path)", verdict: "met", how: "checked",
+      evidence: [{ kind: "check", ref: "npm test" }, { kind: "changed-path", ref: "src/index.ts" }],
+    }] };
+    let calls = 0;
+    let commits = 0;
+    let checks = 0;
+    let moved = false;
+    const agent: Runner = async (file, args, options) => {
+      calls++;
+      if (calls === 1) {
+        await agentWithProof(wrong)(file, args, options);
+      } else {
+        expect(args).toContain("--resume");
+        const prompt = args[args.indexOf("-p") + 1]!;
+        expect(prompt).toContain("already committed");
+        const name = /STANDING-ORDERS-PROOF-[0-9a-f]{16}\.json/.exec(prompt)![0];
+        const fixed = structuredClone(wrong);
+        if (behavior !== "unchanged") fixed.criteria[0]!.statement = criterion.statement;
+        if (behavior === "rewrite-checks") fixed.checks[0]!.command = "invented test";
+        if (behavior === "rewrite-code" || behavior === "throw-after-write") moved = true;
+        writeSync2(join2(options!.cwd!, name), JSON.stringify(fixed));
+        if (behavior === "throw-after-write") throw new Error("transport failed after writing");
+      }
+      return { ...OK, stdout: JSON.stringify({ result: "receipt", session_id: "proof-session" }) };
+    };
+    const req = request({ leaseId: "test-lease", agent,
+      git: (async (file, args, options) => {
+        if (args.includes("commit")) commits++;
+        if (moved && args.includes("diff") && args.includes("--binary")) return { ...OK, stdout: "unauthorized patch" };
+        return git(file, args, options);
+      }) as Runner,
+      verify: (async () => { checks++; return { ...OK }; }) as Runner,
+    });
+    expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+    expect(commits).toBe(1);
+    expect(calls).toBe(behavior === "unchanged" || behavior === "rewrite-checks" ? 3 : 2);
+    expect(checks).toBe(moved ? 0 : 1);
+    expect(store.proofVerdictFor(req.runId)).toMatchObject({ verdict: behavior === "correct" ? "verified" : "refuted" });
+    const attempts = store.artifactsFor(req.runId).filter(one => one.kind === "structured-output");
+    expect(attempts.length).toBe(calls);
+    const original = readVerifiedArtifact(join2(wt, ".evidence"), attempts.find(one => one.key.endsWith("builder-proof-response-0.txt"))!);
+    expect(original.ok && original.content.toString("utf8")).toContain("requires evidence:");
+    expect(store.runsFor(taskRef).filter(one => one.role === "repair").every(one => one.finishedAt !== null)).toBe(true);
+  });
 
   /** A bounded log still has to preserve the result of every authorized
    * spawn. Assert the compact index directly: unlike attempt bodies, it

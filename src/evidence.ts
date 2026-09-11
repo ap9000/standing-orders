@@ -54,6 +54,7 @@ export const REPORT_PREFIX = "STANDING-ORDERS-REPORT-";
  * the handoff — a completed attempt's proof, never a parking or failure
  * artifact. */
 export const PROOF_PREFIX = "STANDING-ORDERS-PROOF-";
+export const RUBRIC_PREFIX = "STANDING-ORDERS-RUBRIC-";
 /** The running build's atomic milestone checkpoint (adaptive execution
  * plans): overwritten in place — a temp name, then a rename — rather than
  * created once and unlinked, since progress is reported many times across
@@ -121,6 +122,7 @@ export function looksLikeProtocolFile(name: string): boolean {
       name.startsWith(REVIEW_PREFIX) ||
       name.startsWith(REPORT_PREFIX) ||
       name.startsWith(PROOF_PREFIX) ||
+      name.startsWith(RUBRIC_PREFIX) ||
       name.startsWith(PROGRESS_PREFIX) ||
       name.startsWith(PROPOSAL_PREFIX) ||
       name.startsWith("NIGHTORDERS-")) &&
@@ -140,6 +142,10 @@ export function planFileName(): string {
  * every other protocol file — a nonce the agent learns only from its brief. */
 export function proofFileName(): string {
   return `${PROOF_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
+}
+
+export function rubricFileName(): string {
+  return `${RUBRIC_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
 }
 
 export function reportFileName(): string {

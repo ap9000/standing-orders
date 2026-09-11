@@ -35,6 +35,8 @@ export type DispatchAction =
 
 export type DispatchDiagnosisCode =
   | "complete"
+  | "needs-verification"
+  | "proof-refuted"
   | "cancelled"
   | "failed"
   | "running"
@@ -214,7 +216,16 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
   const ref = store.lookupRef(taskId);
   if (task === null || ref === null) return null;
 
-  if (task.state === "done") return answer("complete", "terminal", "Complete", "The task finished; open its result for proof.", { action: "open-result" });
+  if (task.state === "done") {
+    const result = store.runsFor(ref.id).find(run => (run.role === "builder" || run.role === "scout") && (run.outcome === "built" || run.outcome === "no-change") && run.finishedAt !== null);
+    if (result?.role === "scout") return answer("complete", "terminal", "Report ready", "The research report is ready to review.", { action: "open-result" });
+    const proof = result === undefined ? null : store.proofVerdictFor(result.id);
+    const accepted = result !== undefined && store.proofAcceptance(result.id) !== null;
+    if (!accepted && proof?.verdict === "refuted") return answer("proof-refuted", "waiting", "Proof correction needed", "The build finished, but its evidence conflicts with the approved result. Open the proof to correct it or record an explicit acceptance.", { action: "open-result" });
+    if (!accepted && proof?.verdict === "short") return answer("needs-verification", "waiting", "Verification needed", "The build finished with missing evidence. Open the result for the exact criteria still needing verification.", { action: "open-result" });
+    if (!accepted && proof === null) return answer("needs-verification", "waiting", "Result needs verification", "The task is marked done, but no verified completion receipt is available.", { action: "open-result" });
+    return answer("complete", "terminal", accepted ? "Complete with recorded acceptance" : "Complete", "The task finished; open its result for proof.", { action: "open-result" });
+  }
   if (task.state === "cancelled") return answer("cancelled", "terminal", "Cancelled", "Nothing else will run for this task.");
   if (task.state === "failed") return answer("failed", "terminal", "Needs a retry", "The last attempt stopped; review its incident, then retry it.", { action: "retry-task" });
   if (store.hasLiveClaim(ref.id, now)) return answer("running", "running", "Running now", "A worker owns the current live claim.");

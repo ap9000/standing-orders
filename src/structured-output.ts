@@ -74,7 +74,7 @@ export function normalizeStructuredJson(raw: string): StructuredNormalization {
   return { text, changed: changes.length > 0, changes };
 }
 
-export type StructuredAttemptPhase = "planner" | "reviewer";
+export type StructuredAttemptPhase = "planner" | "reviewer" | "builder-proof";
 
 /**
  * Keep the exact emitted payload unless it contains a high-confidence secret

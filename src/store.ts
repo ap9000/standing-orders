@@ -662,6 +662,7 @@ export const RUN_PHASES = [
   "capturing-evidence",
   "committing",
   "verifying-proof",
+  "correcting-proof",
 ] as const;
 export type RunPhase = (typeof RUN_PHASES)[number];
 

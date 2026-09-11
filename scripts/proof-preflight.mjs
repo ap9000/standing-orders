@@ -24,7 +24,7 @@
 // not-met or not-checked criterion may cite a failed check honestly.
 //
 //   node scripts/proof-preflight.mjs [--done <file>] [--proof <file>]
-//        [--park <file>] [--criteria c1,c2,…]
+//        [--park <file>] [--rubric <canonical-json-file>] [--criteria c1,c2,…]
 //
 // Exit 0 when every named file parses and resolves; 1 with the problems
 // listed otherwise; 2 when dist/ is missing (run `npm run build` first).
@@ -38,7 +38,8 @@ if (!existsSync(join(dist, "proof.js")) || !existsSync(join(dist, "decision.js")
   console.error("proof-preflight: dist/ is not built — run `npm run build` first");
   process.exit(2);
 }
-const { parseProof, blockingCaveats, caveatAttributionProblems, caveatAttributionWords, failedMetChecks, failedCheckWords } = await import(pathToFileURL(join(dist, "proof.js")).href);
+const { parseProof, proofSubmissionProblems, failedMetChecks, failedCheckWords, blockingCaveats, caveatAttributionProblems, caveatAttributionWords } = await import(pathToFileURL(join(dist, "proof.js")).href);
+const { parseAcceptanceCriteria } = await import(pathToFileURL(join(dist, "scope.js")).href);
 const { parseHandoff, parseDecision } = await import(pathToFileURL(join(dist, "decision.js")).href);
 
 const args = process.argv.slice(2);
@@ -47,7 +48,25 @@ const flag = name => {
   return at === -1 ? null : (args[at + 1] ?? null);
 };
 const files = { done: flag("done"), proof: flag("proof"), park: flag("park") };
-const signed = (flag("criteria") ?? "").split(",").map(one => one.trim()).filter(one => one !== "");
+let signed = (flag("criteria") ?? "").split(",").map(one => one.trim()).filter(one => one !== "");
+let rubric = null;
+const rubricFile = flag("rubric");
+if (args.includes("--rubric")) {
+  try {
+    if (rubricFile === null) throw new Error("--rubric needs a JSON file");
+    const value = JSON.parse(readFileSync(rubricFile, "utf8"));
+    if (!Array.isArray(value)) throw new Error("the rubric must be an array");
+    const parsed = parseAcceptanceCriteria(value);
+    if (parsed.problems.length > 0) throw new Error(parsed.problems.map(one => one.message).join("; "));
+    rubric = parsed.criteria;
+    const ids = rubric.map(one => one.id);
+    if (signed.length > 0 && (signed.length !== ids.length || signed.some(id => !ids.includes(id)))) throw new Error("--criteria disagrees with --rubric");
+    signed = ids;
+  } catch (error) {
+    console.error(`proof-preflight: invalid rubric (${error.message})`);
+    process.exit(2);
+  }
+}
 if (files.done === null && files.proof === null && files.park === null) {
   console.error("proof-preflight: name at least one file (--done, --proof, --park)");
   process.exit(2);
@@ -89,21 +108,9 @@ if (files.proof !== null) {
       for (const one of parsed.problems) problems.push(`proof: ${one.reason} — ${one.message}`);
     } else {
       const { proof } = parsed;
-      const commands = new Set(proof.checks.map(one => one.command));
-      const changed = new Set(proof.changed);
-      const shots = new Set(proof.screenshots.map(one => one.path));
-      const answered = new Set();
-      for (const criterion of proof.criteria) {
-        answered.add(criterion.id);
-        for (const evidence of criterion.evidence) {
-          const resolves =
-            evidence.kind === "check" ? commands.has(evidence.ref)
-            : evidence.kind === "changed-path" ? changed.has(evidence.ref)
-            : evidence.kind === "screenshot" ? shots.has(evidence.ref)
-            : true;
-          if (!resolves) problems.push(`proof: criterion ${criterion.id} names a ${evidence.kind} ref that resolves to nothing — ${JSON.stringify(evidence.ref)}`);
-        }
-      }
+      const failed = new Set(failedMetChecks(proof).map(failedCheckWords));
+      problems.push(...proofSubmissionProblems(proof, rubric ?? []).map(one => `proof: ${one}${failed.has(one) ? " — a criterion marked met cites only checks that exited zero; mark it not-met, or cite a durable current-tree command that passed" : ""}`));
+      const answered = new Set(proof.criteria.map(one => one.id));
       for (const id of signed) {
         if (!answered.has(id)) problems.push(`proof: signed criterion ${id} is not answered`);
       }
@@ -117,14 +124,6 @@ if (files.proof !== null) {
       // ends. Unrelated ideas go to the handoff's followUps.
       for (const one of caveatAttributionProblems(proof, signed)) {
         problems.push(`proof: ${caveatAttributionWords(one)}`);
-      }
-      // A met criterion cites only checks that exited zero (proof preflight
-      // closure): the same fact the adjudicator fails the row for, said
-      // before the attempt ends — mark the criterion not-met, or cite a
-      // durable current-tree command that passes. Not-met and not-checked
-      // criteria may report a failed check honestly.
-      for (const one of failedMetChecks(proof)) {
-        problems.push(`proof: ${failedCheckWords(one)} — a criterion marked met cites only checks that exited zero; mark it not-met, or cite a durable current-tree command that passed`);
       }
       for (const shot of proof.screenshots) {
         if (!existsSync(resolve(dirname(files.proof), shot.path)) && !existsSync(resolve(shot.path))) problems.push(`proof: screenshot ${shot.path} does not exist beside the proof`);

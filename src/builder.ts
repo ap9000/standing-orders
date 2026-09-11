@@ -29,7 +29,7 @@
  * repair remains narrowly time-bounded because its job is narrowly scoped.
  */
 
-import { unlinkSync } from "node:fs";
+import { unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
@@ -60,6 +60,7 @@ import {
   mailboxName,
   progressFileName,
   proofFileName,
+  rubricFileName,
   proposalFileName,
   quarantineMailboxes,
   readMailbox,
@@ -71,7 +72,8 @@ import {
   imageDimensions,
   SCREENSHOT_BYTE_CAP,
 } from "./evidence.js";
-import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
+import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, proofSubmissionProblems, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
+import { storeStructuredAttempt, normalizeStructuredJson } from "./structured-output.js";
 import {
   authoritySnapshotDigest,
   classifyRevisionAuthority,
@@ -1044,6 +1046,8 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   const progress = progressFileName();
   const proposal = proposalFileName();
   quarantineMailboxes(worktree, root, request.runId);
+  const rubric = rubricFileName();
+  writeFileSync(join(worktree, rubric), JSON.stringify(scope?.acceptance ?? [], null, 2), { flag: "wx", mode: 0o600 });
 
   // The pulse: while the agent runs, the lease is extended and the runner
   // touched on every beat, so a healthy build never looks dead to a reaper on
@@ -1322,7 +1326,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     milestones.length === 0 || planRevisionHash === null
       ? null
       : { revision: planRevisionNumber, hash: planRevisionHash, milestones, progress, proposal },
-  );
+  ) + `\nCanonical signed rubric: ${rubric}. Its statement fields are exact; evidence requirements are separate fields. Do not edit this input. When using scripts/proof-preflight.mjs, pass --rubric ${rubric} with --proof ${proof}. Preflight checks the submission; the worker still checks the committed result.\n`;
 
   // THE HELD BRANCH (Phase 2, v2 S0d + v6 W8): ownership transfers to the
   // coordinator at the spawn point. Everything build() armed that its
@@ -1343,7 +1347,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         : `${briefText}\n\n=== OPERATOR FOLLOW-UP (this session continues finished attempt #${attended.authorization.parentRun ?? "?"}) ===\n${followup}\n=== END OPERATOR FOLLOW-UP ===`;
     const captured: CapturedBuild = {
       store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
-      runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof,
+      runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof, rubric,
       clock, fenced: () => fencedMidBuild,
       plan: { proposal, revision: planRevisionNumber, authority, progress: progressState },
     };
@@ -1425,11 +1429,14 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         clock,
       },
     );
-  } finally {
+  } catch (error) {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
     liveLog?.close();
+    try { unlinkSync(join(worktree, rubric)); } catch { /* already consumed */ }
+    throw error;
   }
 
+  try {
   // The gateway's value-shaped refusals (Phase 3 B5): a race past the
   // pre-claim skip, or the harness breaking its own protocol. Both dispose
   // through the ordinary refusal road — worktree released, run recorded,
@@ -1449,11 +1456,18 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
 
   const captured: CapturedBuild = {
     store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
-    runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof,
+    runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof, rubric,
     clock, fenced: () => fencedMidBuild,
     plan: { proposal, revision: planRevisionNumber, authority, progress: progressState },
   };
-  return settleProviderOutcome(captured, result);
+  return await settleProviderOutcome(captured, result);
+  } finally {
+    try { unlinkSync(join(worktree, rubric)); } catch { /* already consumed */ }
+    // Custody covers commit, proof correction and verification as well as
+    // provider execution. Reconciliation must not reclaim a live check.
+    if (pulseTimer !== undefined) clearInterval(pulseTimer);
+    liveLog?.close();
+  }
 }
 
 /**
@@ -1485,6 +1499,7 @@ export type CapturedBuild = {
   /** The proof manifest's nonce-bound filename (Priority 2) — optional for
    * the agent to write, read the same way as the handoff once it finishes. */
   proof: string;
+  rubric?: string;
   clock: () => Date;
   fenced: () => boolean;
   /** The adaptive-execution-plan binding, when this attempt received a plan
@@ -1595,6 +1610,11 @@ function routeProvenanceOf(store: Store, runId: number): { route: NonNullable<Ha
 }
 
 export async function settleProviderOutcome(captured: CapturedBuild, result: AgentOutcome): Promise<BuildResult> {
+  // The canonical input is consumed before parking, committing, or returning
+  // a no-change result. Leaving it behind would make the next lease dirty.
+  if (captured.rubric !== undefined) {
+    try { unlinkSync(join(captured.worktree, captured.rubric)); } catch { /* The commit gate still excludes it. */ }
+  }
   const { store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef, runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof, clock } = captured;
   if (result.timedOut) {
     // A mailbox cut down mid-write is quarantined, never ingested: whatever
@@ -1910,7 +1930,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       // committed work; the verdict alone carries the news.
       try {
         store.setRunPhase(request.runId, "verifying-proof");
-        await settleProof(store, request, worktree, root, proof, diffEvidence.statId, head, clock);
+        await settleProof(captured, diffEvidence.statId, head);
       } catch {
         // Adjudication itself must never fail the attempt — if even the
         // catch-all inside settleProof somehow throws, the build still
@@ -2090,22 +2110,132 @@ function settleRevisionProposal(captured: CapturedBuild, binding: PlanBinding): 
  * ends in `store.saveProofVerdict`, never in a thrown error that could
  * reach the caller and be mistaken for a build failure.
  */
+/** Correct only a receipt for an already committed tree. Checks, changed
+ * paths, screenshots and caveats are immutable inputs to the correction.
+ * The full project gate runs once afterwards, against the preserved commit. */
+async function correctProofReceipt(
+  captured: CapturedBuild,
+  original: ReturnType<typeof readMailbox>,
+  sealedHead: string,
+): Promise<{ read: ReturnType<typeof readMailbox>; integrityFailure: string | null }> {
+  const { store, request, git, worktree, branch, root, proof: file, clock, effective } = captured;
+  const provider = effective.profile.provider;
+  const unchanged = { read: original, integrityFailure: null };
+  if (!original.ok) return unchanged;
+  const normalized = normalizeStructuredJson(original.raw.toString("utf8"));
+  const initial = parseProof(normalized.text);
+  // Without a parsed original there is no trustworthy inventory of checks
+  // to freeze. Preserve it for inspection rather than manufacture evidence.
+  if (!initial.ok) return unchanged;
+  const rubric = captured.scope?.acceptance ?? [];
+  let problems = proofSubmissionProblems(initial.proof, rubric);
+  if (problems.length === 0 && !normalized.changed) return unchanged;
+  storeStructuredAttempt(store, root, request.runId, {
+    phase: "builder-proof", attempt: 0, authoredRunId: request.runId,
+    raw: original.raw, accepted: problems.length === 0,
+    normalized: normalized.changed, now: clock(),
+  });
+  if (problems.length === 0) return { read: { ...original, raw: Buffer.from(normalized.text) }, integrityFailure: null };
+  const parent = store.getRun(request.runId);
+  const sessionId = parent?.sessionId;
+  if (!sessionId || auditOf(provider).resume !== "native") return unchanged;
+  const fixedEvidence = (proof: import("./proof.js").ParsedProof) => JSON.stringify({
+    checks: proof.checks, changed: proof.changed, screenshots: proof.screenshots, caveats: proof.caveats,
+  });
+  const frozen = fixedEvidence(initial.proof);
+  const snapshot = async (): Promise<string | null> => {
+    const head = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
+    const named = await git(GIT, ["--no-optional-locks", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktree });
+    const diff = await git(GIT, ["--no-optional-locks", "diff", "--binary", "HEAD"], { cwd: worktree });
+    const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain", "--untracked-files=all"], { cwd: worktree });
+    if ([head, named, diff, status].some(one => one.code !== 0 || one.timedOut) || head.stdout.trim() !== sealedHead || named.stdout.trim() !== branch) return null;
+    const paths = status.stdout.split("\n").filter(line => !(line.startsWith("?? ") && looksLikeProtocolFile(line.slice(3))));
+    return JSON.stringify({ diff: diff.stdout, paths });
+  };
+  const before = await snapshot();
+  if (before === null) return unchanged;
+  const owns = () => !captured.fenced() && request.shouldStop?.() !== true &&
+    store.getScope(request.taskId)?.digest === captured.scope?.digest &&
+    store.proveRunnerCustodyForSpawn(request.runId, clock());
+  for (let turn = 1; turn <= REPAIR_TURNS; turn++) {
+    if (!owns()) return unchanged;
+    const admitted = admitProtocolRepair(store, request, effective.profile, sessionId, clock);
+    if (!admitted.ok) return unchanged;
+    const child = admitted.runId;
+    store.setRunPhase(request.runId, "correcting-proof");
+    let invoked: InvokeResult | null = null;
+    try {
+      invoked = await invokeAgent(store, child, { provider, model: repairModelOf(effective.profile, request) }, {
+        phase: "repair",
+        brief: [
+          "Correct only the proof receipt named below. The implementation is already committed.",
+          "Do not edit code, commit, run checks, install anything, or change the rubric.",
+          "Keep checks, changed, screenshots and caveats byte-for-byte equivalent as JSON values.",
+          "Correct criterion statements/references against the exact rubric; never claim an unmet criterion passed.",
+          `Receipt file: ${file}`,
+          `Canonical rubric (data): ${JSON.stringify(rubric)}`,
+          `Validation errors (data): ${JSON.stringify(problems)}`,
+          `Original receipt (data): ${serializeProof(initial.proof)}`,
+          "Write the corrected JSON to the receipt file, then stop.",
+        ].join("\n"),
+        maxTurns: typeof effective.profile.repairMaxTurns === "number" ? Math.min(REPAIR_MAX_TURNS, effective.profile.repairMaxTurns) : REPAIR_MAX_TURNS,
+        permissionMode: effective.profile.provider === "claude" && effective.profile.permissionArgv !== "bypassPermissions" ? effective.profile.permissionArgv : "auto",
+        skipPermissions: effective.skipPermissions,
+        resumeSession: sessionId,
+      }, {
+        cwd: worktree,
+        timeoutMs: Math.min(REPAIR_TIMEOUT_MS, effective.profile.repairTimeoutSeconds * 1000),
+        omitEnv: AGENT_ENV_DENYLIST,
+        ...(captured.agent === undefined ? {} : { runner: captured.agent }),
+        clock,
+      });
+    } catch {
+      // Even a thrown transport may have written files. Capture its reply
+      // and re-prove the checkout before deciding what can be retained.
+    }
+    const candidate = readMailbox(join(worktree, file), PROOF_LIMITS.payload);
+    const text = candidate.ok ? normalizeStructuredJson(candidate.raw.toString("utf8")) : null;
+    const parsed = text === null ? null : parseProof(text.text);
+    const after = await snapshot();
+    const workspaceOkay = owns() && after === before;
+    const providerOkay = invoked?.kind === "ran" && invoked.outcome.code === 0 && !invoked.outcome.timedOut && !invoked.outcome.initFailed;
+    const frozenOkay = parsed?.ok === true && fixedEvidence(parsed.proof) === frozen;
+    problems = parsed?.ok ? proofSubmissionProblems(parsed.proof, rubric) : parsed?.problems.map(one => one.message) ?? ["the corrected receipt is missing"];
+    if (!frozenOkay) problems.push("The original checks, paths, screenshots and caveats must not change.");
+    if (parsed?.ok) {
+      for (const prior of initial.proof.criteria) {
+        if (prior.verdict !== "met" && parsed.proof.criteria.find(one => one.id === prior.id)?.verdict === "met") {
+          problems.push(`criterion ${prior.id} cannot be upgraded by a receipt-only correction`);
+        }
+      }
+    }
+    const accepted = providerOkay && workspaceOkay && frozenOkay && problems.length === 0;
+    if (candidate.ok) storeStructuredAttempt(store, root, request.runId, {
+      phase: "builder-proof", attempt: turn, authoredRunId: child, raw: candidate.raw,
+      accepted, normalized: text?.changed ?? false, now: clock(),
+    });
+    store.finishRun(child, { outcome: accepted ? "no-change" : "failed", reason: accepted ? "proof-corrected" : "proof-correction-rejected", now: clock() });
+    if (!workspaceOkay) return { read: original, integrityFailure: "Proof correction changed the committed checkout or lost its approved custody; the original work and receipt are preserved." };
+    if (!providerOkay) return unchanged;
+    if (accepted && candidate.ok && text !== null) return { read: { ...candidate, raw: Buffer.from(text.text) }, integrityFailure: null };
+  }
+  return unchanged;
+}
+
 async function settleProof(
-  store: Store,
-  request: BuildRequest,
-  worktree: string,
-  root: string,
-  proofFile: string,
+  captured: CapturedBuild,
   statArtifactId: number,
   sealedHead: string,
-  now: () => Date,
 ): Promise<void> {
+  const { store, request, worktree, root, proof: proofFile, clock: now } = captured;
   const runId = request.runId;
 
   // 1. Read the proof file, exactly like the handoff: never let it reach
   // the diff (the commit already ran; this is belt-and-suspenders — the
   // git-add pathspec already excludes every STANDING-ORDERS-* name).
-  const read = readMailbox(join(worktree, proofFile), PROOF_LIMITS.payload);
+  const original = readMailbox(join(worktree, proofFile), PROOF_LIMITS.payload);
+  const correction = await correctProofReceipt(captured, original, sealedHead);
+  const read = correction.read;
   try {
     unlinkSync(join(worktree, proofFile));
   } catch {
@@ -2114,6 +2244,10 @@ async function settleProof(
 
   let proofParse: ReturnType<typeof parseProof> | null = null;
   const proofArtifactPresent = read.ok;
+  if (correction.integrityFailure !== null) {
+    store.saveProofVerdict(runId, "refuted", [correction.integrityFailure], now());
+    return;
+  }
   if (read.ok) {
     proofParse = parseProof(read.raw.toString("utf8"));
     if (proofParse.ok) {
@@ -2549,21 +2683,7 @@ async function ingestPark(args: {
   // fallback repair against the approved chain entry's exact repair model
   // under the parent's route digest, the chain binding inherited verbatim
   // below — so no repair turn can open under a lineage nobody approved.
-  const parentRoute = store.runRoute(runId);
-  const repairScope = store.getScope(request.taskId);
-  const repairSealed = repairScope !== null && repairScope.routeEra != null ? store.sealedRouteOf(request.taskId) : null;
   const repairModel = repairModelOf(args.profile, request);
-  let repairChosen: RouteStamp["chosen"] = parentRoute?.chosen === "fallback" ? "fallback" : "legacy";
-  if (repairSealed !== null && parentRoute?.chosen !== "fallback") {
-    if (!repairSealed.ok) {
-      return { ok: false, problems: [{ reason: "route-unreadable", message: `the repair cannot run: ${repairSealed.detail}` }] };
-    }
-    const leg = legOf(repairSealed.route, "repair");
-    if (leg.provider !== repairProvider || repairModel !== leg.model) {
-      return { ok: false, problems: [{ reason: "route-mismatch", message: `the approved route repairs on ${leg.provider} · ${leg.model} but this repair would run ${repairProvider} · ${repairModel ?? "(no model)"} — nothing substitutes; re-file and approve again` }] };
-    }
-    repairChosen = leg.chosen;
-  }
   for (let turn = 0; turn < REPAIR_TURNS && (resumableRepair ? sessionId !== undefined : true); turn++) {
     // The lease is re-proved around every repair turn: extended going in,
     // proved again coming out. A repair racing a reclaim must lose.
@@ -2572,85 +2692,9 @@ async function ingestPark(args: {
       if (!alive.ok) return { fenced: true };
     }
 
-    const repairStamp: RouteStamp = {
-      routeDigest: parentRoute?.routeDigest ?? (args.profile === undefined ? "legacy" : `profile:${profileDigestOf(args.profile)}`),
-      phase: "repair",
-      provider: repairProvider,
-      model: repairModel,
-      chosen: repairChosen,
-    };
-    let repairRun: number;
-    try {
-      if (repairChosen === "fallback") {
-        // A repair turn under an approved FALLBACK entry is admitted by the
-        // one fallback road (v48 integrity): every fact the parent's
-        // binding states — cycle, index, digest, auth mode, provider, the
-        // exact repair model, the sealed-profile mirror — is presented
-        // and re-proved against the approved chain and the live cycle,
-        // with the parent as the live tail, before any row exists.
-        const parentRun = store.getRun(runId);
-        const chain = store.approvedChainOf(request.taskId);
-        const mirror = repairScope?.approvedProfile ?? null;
-        const entry = parentRun !== null && parentRun.chainIndex != null && chain !== null ? chain[parentRun.chainIndex] : undefined;
-        if (parentRun === null || parentRun.chainCycle == null || parentRun.chainIndex == null || parentRun.entryDigest == null || parentRun.authMode == null || chain === null || mirror === null || entry === undefined || repairModel === null) {
-          return { ok: false, problems: [{ reason: "route-unreadable", message: `the repair cannot run: run #${runId}'s fallback binding cannot be restated against the approved chain — nothing mends outside the cycle` }] };
-        }
-        const admitted = store.admitFallback(
-          {
-            kind: "repair",
-            parentRun: runId,
-            cycleId: parentRun.chainCycle,
-            expectCursor: parentRun.chainIndex,
-            expectTail: runId,
-            entryDigest: parentRun.entryDigest,
-            authMode: parentRun.authMode,
-            repairModel: entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel,
-            approved: { chainDigest: chainDigestOf(chain), profile: mirror },
-            run: {
-              taskRef: request.taskRef,
-              leaseId: request.leaseId ?? "unclaimed",
-              runner: request.runner,
-              branch: request.branch,
-              worktree,
-              provider: repairProvider,
-              model: repairModel,
-              ...(resumableRepair && sessionId !== undefined ? { sessionId } : {}),
-            },
-            route: repairStamp,
-          },
-          clock(),
-        );
-        if (!admitted.ok) return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${admitted.problem}` }] };
-        repairRun = admitted.runId;
-      } else {
-        // THE REPAIR ADMISSION (atomic authority closure): the turn mends
-        // exactly this live build attempt under its own runner and lease —
-        // proved in the store, value-shaped, zero rows on refusal.
-        const admitted = store.admitRepair({
-          taskRef: request.taskRef,
-          leaseId: request.leaseId ?? "unclaimed",
-          runner: request.runner,
-          branch: request.branch,
-          worktree,
-          ...(repairModel === null ? {} : { model: repairModel }),
-          // Repair inherits the parent's provider, structurally: the session
-          // id it resumes has no meaning anywhere else (Codex review, Q3).
-          provider: request.provider ?? "claude",
-          parentRun: runId,
-          // Only the resumable road records the inherited session: a fresh-
-          // session repair's identity is minted by the gateway (A5), and a
-          // stale parent id on the row would win the first-write race.
-          ...(resumableRepair && sessionId !== undefined ? { sessionId } : {}),
-          now: clock(),
-          // Route provenance for the repair leg, in the admission transaction.
-          route: repairStamp,
-        });
-        if (!admitted.ok) return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${admitted.problem}` }] };
-        repairRun = admitted.runId;
-      }
-    } catch (error) {
-      return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${error instanceof Error ? error.message : String(error)}` }] };
-    }
+    const admitted = admitProtocolRepair(store, request, args.profile, sessionId, clock);
+    if (!admitted.ok) return admitted;
+    const repairRun = admitted.runId;
     // A repair turn inherits its parent's chain binding VERBATIM (Codex E3d
     // review, finding 2) — inside its own admission (v48 authority repair), so the pinned
     // entry, auth mode included, follows the custody from the first byte
@@ -2753,6 +2797,118 @@ async function ingestPark(args: {
   return { ok: false, problems };
 }
 
+/** Both protocol repairs use the same signed repair route and atomic admission. */
+function admitProtocolRepair(
+  store: Store, request: BuildRequest, profile: ExecutionProfile | undefined,
+  sessionId: string | undefined, clock: () => Date,
+): { ok: true; runId: number } | { ok: false; problems: Problem[] } {
+  const args = { profile };
+  const runId = request.runId;
+  const worktree = request.worktree;
+  const repairProvider = request.provider ?? "claude";
+  const resumableRepair = auditOf(repairProvider).resume === "native";
+  const parentRoute = store.runRoute(runId);
+  const repairScope = store.getScope(request.taskId);
+  const repairSealed = repairScope !== null && repairScope.routeEra != null ? store.sealedRouteOf(request.taskId) : null;
+  const repairModel = repairModelOf(args.profile, request);
+  let repairChosen: RouteStamp["chosen"] = parentRoute?.chosen === "fallback" ? "fallback" : "legacy";
+  if (repairSealed !== null && parentRoute?.chosen !== "fallback") {
+    if (!repairSealed.ok) {
+      return { ok: false, problems: [{ reason: "route-unreadable", message: `the repair cannot run: ${repairSealed.detail}` }] };
+    }
+    const leg = legOf(repairSealed.route, "repair");
+    if (leg.provider !== repairProvider || repairModel !== leg.model) {
+      return { ok: false, problems: [{ reason: "route-mismatch", message: `the approved route repairs on ${leg.provider} · ${leg.model} but this repair would run ${repairProvider} · ${repairModel ?? "(no model)"} — nothing substitutes; re-file and approve again` }] };
+    }
+    repairChosen = leg.chosen;
+  }
+  return store.transact(() => {
+    // The budget is durable and shared by proof and parked-decision repairs.
+    const used = store.runsFor(request.taskRef).filter(one => one.parentRun === runId && one.role === "repair").length;
+    if (used >= REPAIR_TURNS) return { ok: false as const, problems: [{ reason: "repair-exhausted", message: "the attempt's protocol correction budget is exhausted" }] };
+    const repairStamp: RouteStamp = {
+      routeDigest: parentRoute?.routeDigest ?? (args.profile === undefined ? "legacy" : `profile:${profileDigestOf(args.profile)}`),
+      phase: "repair",
+      provider: repairProvider,
+      model: repairModel,
+      chosen: repairChosen,
+    };
+    let repairRun: number;
+    try {
+      if (repairChosen === "fallback") {
+        // A repair turn under an approved FALLBACK entry is admitted by the
+        // one fallback road (v48 integrity): every fact the parent's
+        // binding states — cycle, index, digest, auth mode, provider, the
+        // exact repair model, the sealed-profile mirror — is presented
+        // and re-proved against the approved chain and the live cycle,
+        // with the parent as the live tail, before any row exists.
+        const parentRun = store.getRun(runId);
+        const chain = store.approvedChainOf(request.taskId);
+        const mirror = repairScope?.approvedProfile ?? null;
+        const entry = parentRun !== null && parentRun.chainIndex != null && chain !== null ? chain[parentRun.chainIndex] : undefined;
+        if (parentRun === null || parentRun.chainCycle == null || parentRun.chainIndex == null || parentRun.entryDigest == null || parentRun.authMode == null || chain === null || mirror === null || entry === undefined || repairModel === null) {
+          return { ok: false, problems: [{ reason: "route-unreadable", message: `the repair cannot run: run #${runId}'s fallback binding cannot be restated against the approved chain — nothing mends outside the cycle` }] };
+        }
+        const admitted = store.admitFallback(
+          {
+            kind: "repair",
+            parentRun: runId,
+            cycleId: parentRun.chainCycle,
+            expectCursor: parentRun.chainIndex,
+            expectTail: runId,
+            entryDigest: parentRun.entryDigest,
+            authMode: parentRun.authMode,
+            repairModel: entry.profile.repairModel === "inherit" ? entry.profile.model : entry.profile.repairModel,
+            approved: { chainDigest: chainDigestOf(chain), profile: mirror },
+            run: {
+              taskRef: request.taskRef,
+              leaseId: request.leaseId ?? "unclaimed",
+              runner: request.runner,
+              branch: request.branch,
+              worktree,
+              provider: repairProvider,
+              model: repairModel,
+              ...(resumableRepair && sessionId !== undefined ? { sessionId } : {}),
+            },
+            route: repairStamp,
+          },
+          clock(),
+        );
+        if (!admitted.ok) return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${admitted.problem}` }] };
+        repairRun = admitted.runId;
+      } else {
+        // THE REPAIR ADMISSION (atomic authority closure): the turn mends
+        // exactly this live build attempt under its own runner and lease —
+        // proved in the store, value-shaped, zero rows on refusal.
+        const admitted = store.admitRepair({
+          taskRef: request.taskRef,
+          leaseId: request.leaseId ?? "unclaimed",
+          runner: request.runner,
+          branch: request.branch,
+          worktree,
+          ...(repairModel === null ? {} : { model: repairModel }),
+          // Repair inherits the parent's provider, structurally: the session
+          // id it resumes has no meaning anywhere else (Codex review, Q3).
+          provider: request.provider ?? "claude",
+          parentRun: runId,
+          // Only the resumable road records the inherited session: a fresh-
+          // session repair's identity is minted by the gateway (A5), and a
+          // stale parent id on the row would win the first-write race.
+          ...(resumableRepair && sessionId !== undefined ? { sessionId } : {}),
+          now: clock(),
+          // Route provenance for the repair leg, in the admission transaction.
+          route: repairStamp,
+        });
+        if (!admitted.ok) return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${admitted.problem}` }] };
+        repairRun = admitted.runId;
+      }
+    } catch (error) {
+      return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${error instanceof Error ? error.message : String(error)}` }] };
+    }
+    return { ok: true as const, runId: repairRun };
+  });
+}
+
 const FRESH_REPAIR_PAYLOAD_CAP = 16 * 1024;
 
 /**
@@ -2830,9 +2986,7 @@ function brief(
           fence(
             "Acceptance criteria — your proof must answer EVERY one of these below, by its exact id, restating its statement verbatim:",
           ),
-          ...scope.acceptance.map(c =>
-            fence(`  ${c.id}: ${c.statement} (requires evidence: ${c.evidence.join(", ")})`),
-          ),
+          ...JSON.stringify(scope.acceptance.map(({ id, statement, evidence }) => ({ id, statement, evidence })), null, 2).split("\n").map(fence),
         ]),
     "--- END AGREED SCOPE ---",
     "",

@@ -50,6 +50,40 @@ export type ParsedCriterion = {
  * byte for byte. */
 export type ApprovedCriterion = { id: string; statement: string; evidence: readonly EvidenceKind[] };
 
+/** Shared by preflight and final adjudication; presentation text is never a rubric. */
+function criterionContractProblems(approved: ApprovedCriterion, answer: ParsedCriterion | undefined): { kind: "missing" | "statement" | "evidence"; message: string }[] {
+  if (answer === undefined) return [{ kind: "missing", message: `the proof does not answer approved criterion "${approved.id}"` }];
+  const problems: { kind: "missing" | "statement" | "evidence"; message: string }[] = [];
+  if (answer.statement.trim() !== approved.statement.trim()) {
+    problems.push({ kind: "statement", message: `criterion "${approved.id}" was signed as "${approved.statement}" and the proof restates it as "${answer.statement}"` });
+  }
+  for (const kind of approved.evidence) {
+    if (!answer.evidence.some(ref => ref.kind === kind)) {
+      problems.push({ kind: "evidence", message: `criterion "${approved.id}" requires ${kind} evidence, which the proof does not reference` });
+    }
+  }
+  return problems;
+}
+
+/** Only submission defects. A truthful not-met answer is not malformed. */
+export function proofSubmissionProblems(proof: ParsedProof, rubric: readonly ApprovedCriterion[]): string[] {
+  const answers = new Map(proof.criteria.map(one => [one.id, one]));
+  const problems = rubric.flatMap(one => criterionContractProblems(one, answers.get(one.id)).map(problem => problem.message));
+  const checks = new Set(proof.checks.map(one => one.command));
+  const changed = new Set(proof.changed);
+  const shots = new Set(proof.screenshots.map(one => one.path));
+  for (const criterion of proof.criteria) {
+    for (const evidence of criterion.evidence) {
+      const resolves = evidence.kind === "check" ? checks.has(evidence.ref)
+        : evidence.kind === "changed-path" ? changed.has(evidence.ref)
+        : evidence.kind === "screenshot" ? shots.has(evidence.ref) : true;
+      if (!resolves) problems.push(`criterion ${criterion.id} names a ${evidence.kind} ref that resolves to nothing — ${JSON.stringify(evidence.ref)}`);
+    }
+  }
+  problems.push(...failedMetChecks(proof).map(failedCheckWords));
+  return problems;
+}
+
 export type ParsedCheck = {
   command: string;
   exitCode: number;
@@ -656,14 +690,15 @@ function criterionMatrix(
   return approvedCriteria.map((approved): CriterionMatrixRow => {
     const base = { id: approved.id, statement: approved.statement, requiredEvidence: approved.evidence, review: null };
     const answer = answers.get(approved.id);
+    const contract = criterionContractProblems(approved, answer);
     if (answer === undefined) {
-      return { ...base, state: "missing", detail: [`the proof does not answer approved criterion "${approved.id}"`], answered: [] };
+      return { ...base, state: "missing", detail: contract.map(one => one.message), answered: [] };
     }
     if (answer.statement.trim() !== approved.statement.trim()) {
       return {
         ...base,
         state: "failed",
-        detail: [`criterion "${approved.id}" was signed as "${approved.statement}" and the proof restates it as "${answer.statement}"`],
+        detail: contract.filter(one => one.kind === "statement").map(one => one.message),
         answered: answer.evidence,
       };
     }
@@ -682,7 +717,7 @@ function criterionMatrix(
       const ref = answer.evidence.find(e => e.kind === kind);
       if (ref === undefined) {
         anyMissing = true;
-        detail.push(`criterion "${approved.id}" requires ${kind} evidence, which the proof does not reference`);
+        detail.push(...contract.filter(one => one.kind === "evidence" && one.message.includes(`requires ${kind} evidence`)).map(one => one.message));
         continue;
       }
       if (kind === "manual-review") {
