@@ -791,6 +791,15 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
     claimAs(ref, "lease-newer", "builder-1", 2);
     expect(() => repairOn(ref, run)).toThrow(/is not this task's current live claim \(lease-newer does\)/);
     store.raw().prepare("DELETE FROM claim WHERE lease_id = 'lease-newer'").run();
+    // THE EXACT CLAIM TUPLE (repair custody closure): the SAME lease, held
+    // by another machine — the parent row still says builder-1, the caller
+    // says builder-1, the lease is current — admits nothing: the claim's
+    // own runner is the fact, and the refusal is the one every fallback
+    // admission gives. No run, no route.
+    store.raw().prepare("UPDATE claim SET runner = 'builder-2' WHERE lease_id = 'lease-1'").run();
+    expect(() => repairOn(ref, run)).toThrow(/this task's live claim lease-1 is held by builder-2 — a repair turn on builder-1 is another machine's/);
+    expect(Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run_route").get() as { n: number }).n)).toBe(Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run_route WHERE run = ?").get(run) as { n: number }).n));
+    store.raw().prepare("UPDATE claim SET runner = 'builder-1' WHERE lease_id = 'lease-1'").run();
     expect(rows()).toBe(before);
     // The generic road opens no repair, with or without a parent.
     expect(() => store.startRun({ taskRef: ref, leaseId: "lease-1", runner: "builder-1", branch: "standing-orders/t-1", worktree: "/pool/t-1", role: "repair", now: later(1), ...presented(store, ref, "repair") } as never)).toThrow(/a repair turn is admitted by admitRepair/);

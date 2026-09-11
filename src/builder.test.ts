@@ -881,6 +881,25 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("criterion marked met; and confirm every");
   });
 
+  test("the brief says in plain language what check evidence for a met criterion is: a durable current-tree command that exited zero, no temporary files, no checkout mutation, negative controls elsewhere (proof preflight closure)", async () => {
+    // A proof once cited a temp-file reproduction that exited 1 as check
+    // evidence for a met criterion — a negative control read as a failed
+    // check, and the plane failed the row. The brief must say what a
+    // check ref on a met criterion is, and where a negative control goes.
+    await build1();
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("Check evidence for a met criterion is a durable current-tree command");
+    expect(prompt).toContain("that exited zero");
+    expect(prompt).toContain("It must not rely on temporary files, and it must not");
+    expect(prompt).toContain("mutate the checkout");
+    expect(prompt).toContain("belongs in a durable test, or in the criterion's");
+    expect(prompt).toContain("how narrative, never as a failing check ref");
+    expect(prompt).toContain("cites a check which exited nonzero is refused, not verified");
+    // And the exit preflight names the same rule beside the caveat rules.
+    expect(prompt).toContain("an exact entry in checks, changed, or screenshots; confirm no");
+    expect(prompt).toContain("criterion marked met cites a check that exited nonzero; confirm every");
+  });
+
   test("the brief states EVERY proof and handoff cap the parsers hold the files to, and tells the agent to preflight each protocol file before it exits (raw authority repair)", async () => {
     await build1();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";

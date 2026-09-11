@@ -10,6 +10,8 @@ import {
   blockingCaveats,
   caveatAttributionProblems,
   caveatAttributionWords,
+  failedMetChecks,
+  failedCheckWords,
   PROOF_LIMITS,
   type AdjudicateInput,
   type AdjudicateResult,
@@ -510,6 +512,44 @@ describe("adjudicate", () => {
     expect(named(["(c1) kept for churn", "c1,c10 both"])).toEqual(["0:c1", "1:c1", "1:c10"]);
     expect(named(["c2: honestly not met"])).toEqual([]);
     expect(named(["ac1 and c1x and c1-ish and c1_ are other words", "The panel does not remember scroll position."])).toEqual([]);
+  });
+
+  test("failedMetChecks names every check a MET criterion cites that exited nonzero, in the adjudicator's own words; not-met and not-checked criteria report failed checks honestly (proof preflight closure)", () => {
+    const checks = [
+      { command: "npx vitest run src/a.test.ts", exitCode: 0, summary: "green" },
+      { command: "npx tsx scripts/counterexample.ts", exitCode: 1, summary: "the counterexample reproduces" },
+      { command: "npm run typecheck", exitCode: 2, summary: "one error" },
+    ];
+    const cite = (...refs: string[]) => refs.map(ref => ({ kind: "check" as const, ref }));
+    const criteria = [
+      { id: "c1", statement: "s", verdict: "met" as const, how: "h", evidence: cite("npx vitest run src/a.test.ts") },
+      { id: "c2", statement: "s", verdict: "met" as const, how: "h", evidence: cite("npx tsx scripts/counterexample.ts", "npm run typecheck") },
+      { id: "c3", statement: "s", verdict: "not-met" as const, how: "h", evidence: cite("npx tsx scripts/counterexample.ts") },
+      { id: "c4", statement: "s", verdict: "not-checked" as const, how: "h", evidence: cite("npm run typecheck") },
+      // A ref that resolves to no check is an unresolved ref, not a failed one.
+      { id: "c5", statement: "s", verdict: "met" as const, how: "h", evidence: cite("npm run build") },
+    ];
+    const found = failedMetChecks({ criteria, checks });
+    expect(found).toEqual([
+      { criterionId: "c2", ref: "npx tsx scripts/counterexample.ts", exitCode: 1 },
+      { criterionId: "c2", ref: "npm run typecheck", exitCode: 2 },
+    ]);
+    expect(found.map(failedCheckWords)).toEqual([
+      'criterion "c2"\'s check "npx tsx scripts/counterexample.ts" exited 1',
+      'criterion "c2"\'s check "npm run typecheck" exited 2',
+    ]);
+    // THE SAME FACT the adjudicator's matrix reports for a signed criterion
+    // whose required check exited nonzero — one sentence, two readers.
+    const proofParse = parse({ ...sound, criteria: [{ ...criteria[1], statement: "The guard rejects a negative payout." }], checks });
+    const result = adjudicate({
+      ...base,
+      proofParse,
+      approvedCriteria: [{ id: "c2", statement: "The guard rejects a negative payout.", evidence: ["check"] }],
+    });
+    expect(result.verdict).toBe("short");
+    expect(result.matrix[0]).toMatchObject({ id: "c2", state: "failed" });
+    expect(result.matrix[0]!.detail).toContain(failedCheckWords(found[0]!));
+    expect(result.reasons).toContain(failedCheckWords(found[0]!));
   });
 
   test("a proof with no criteria and no verify command still attests when the diff agrees", () => {

@@ -390,6 +390,42 @@ export function blockingCaveats(proof: Pick<ParsedProof, "criteria" | "caveats">
   return out;
 }
 
+/** One check a criterion marked `met` cites that exited nonzero — the
+ * criterion's id, the exact cited command, and the exit code the proof
+ * itself reported. */
+export type FailedCheckCitation = { criterionId: string; ref: string; exitCode: number };
+
+/**
+ * Every check a criterion marked `met` cites that the proof's own `checks`
+ * list says exited nonzero (proof preflight closure): a met criterion
+ * resting on a failing command is not evidence, it is a contradiction the
+ * adjudicator fails the row for. A not-met or not-checked criterion may
+ * cite a failed check honestly — it is reporting, not claiming — so only
+ * `met` counts here. A ref that resolves to no check is a different
+ * problem (an unresolved ref), not this one. In criterion order, then
+ * evidence order.
+ */
+export function failedMetChecks(proof: Pick<ParsedProof, "criteria" | "checks">): FailedCheckCitation[] {
+  const checksByCommand = new Map(proof.checks.map(c => [c.command, c] as const));
+  const out: FailedCheckCitation[] = [];
+  for (const criterion of proof.criteria) {
+    if (criterion.verdict !== "met") continue;
+    for (const evidence of criterion.evidence) {
+      if (evidence.kind !== "check") continue;
+      const check = checksByCommand.get(evidence.ref);
+      if (check !== undefined && check.exitCode !== 0) out.push({ criterionId: criterion.id, ref: evidence.ref, exitCode: check.exitCode });
+    }
+  }
+  return out;
+}
+
+/** The one actionable fact a failed check citation is reported as — the
+ * adjudicator's matrix detail and the agent's exit preflight say exactly
+ * this, so what the preflight refuses is what the plane would have said. */
+export function failedCheckWords(one: FailedCheckCitation): string {
+  return `criterion "${one.criterionId}"'s check "${one.ref}" exited ${one.exitCode}`;
+}
+
 /**
  * One caveat the machine cannot attribute (final authority closure): every
  * caveat is an exception to a signed criterion, and it names that
@@ -661,7 +697,7 @@ function criterionMatrix(
           detail.push(`criterion "${approved.id}"'s check evidence "${ref.ref}" does not match any reported check`);
         } else if (check.exitCode !== 0) {
           anyFailed = true;
-          detail.push(`criterion "${approved.id}"'s check "${ref.ref}" exited ${check.exitCode}`);
+          detail.push(failedCheckWords({ criterionId: approved.id, ref: ref.ref, exitCode: check.exitCode }));
         }
         continue;
       }

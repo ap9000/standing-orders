@@ -13569,7 +13569,10 @@ export class Store {
    * THE REPAIR ADMISSION (atomic authority closure): a repair turn mends
    * exactly one LIVE same-task builder attempt — the parent exists, is
    * this task's, is a builder, is still open, and this turn runs under
-   * the parent's own runner and lease. An attended parent's authorization
+   * the parent's own runner and lease — which must be the task's CURRENT
+   * live claim, on the runner that claim names (repair custody closure:
+   * the same tuple invariant every fallback admission proves). An
+   * attended parent's authorization
    * must have spent its one attempt on that parent; a racing lane's
    * parent must be the lane's live run; a chain-bound parent must be the
    * live base tail (a fallback entry's repair is admitFallback's). The
@@ -13894,6 +13897,15 @@ export class Store {
       if (holding !== parent.leaseId) {
         refuse(`run #${parent.id}'s lease ${parent.leaseId} is not this task's current live claim (${holding === null ? "nothing holds it" : `${holding} does`}) — a repair turn mends an attempt still being built under its claim`);
       }
+      // THE EXACT CLAIM TUPLE (repair custody closure): a live lease is
+      // held by ONE runner, and the parent row's runner column is not
+      // that fact — a claim re-taken under the same lease id by another
+      // machine, or a row written beside a claim it never held, would
+      // pass the copy above. The same tuple invariant every fallback
+      // admission proves: this task, this lease, on the runner the claim
+      // names — or no row, in the same words.
+      const claimProblem = this.custodyClaimProblem({ taskRef: run.taskRef, leaseId: run.leaseId, runner: run.runner }, run.now, "a repair turn");
+      if (claimProblem !== null) refuse(claimProblem);
     }
     // THE LIVE AUTHORIZATION (atomic authority closure): an attended
     // attempt opens under exactly the authorization the caller names —
@@ -14175,8 +14187,9 @@ export class Store {
    * on the runner that claim names. A lease nobody holds, one released,
    * expired, or superseded by a newer generation, or a claim another
    * machine holds admits nothing: the words say which, and no cycle,
-   * edge, tail, or claim moves. Shared by the fallback road and the
-   * generic road's custody so both refuse in the same words.
+   * edge, tail, or claim moves. Shared by the fallback road, the primary
+   * repair road, and the generic road's custody so all refuse in the
+   * same words.
    */
   private custodyClaimProblem(run: { taskRef: number; leaseId: string; runner: string }, now: Date, what: string): string | null {
     const holding = this.currentLiveLease(run.taskRef, now);

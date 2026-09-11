@@ -140,3 +140,59 @@ describe("scripts/proof-preflight.mjs refuses a met criterion a caveat admits an
     }
   });
 });
+
+/** THE FAILED CHECK a met criterion cites (proof preflight closure): a
+ * criterion marked met whose cited check exited nonzero is refused before
+ * the attempt ends, in the adjudicator's own words; the same citation on a
+ * not-met or not-checked criterion is honest reporting and passes. */
+describe("scripts/proof-preflight.mjs refuses a met criterion whose cited check exited nonzero", () => {
+  const counterexample = "npx tsx scripts/wrong-runner-counterexample.ts";
+  const proofOf = (verdict: "met" | "not-met" | "not-checked", exitCode: number) =>
+    JSON.stringify({
+      version: 1,
+      criteria: [
+        { id: "c1", statement: "Primary-chain admitRepair proves the exact current claim.", verdict, how: "the counterexample", evidence: [{ kind: "check", ref: counterexample }, { kind: "check", ref: "npx vitest run" }] },
+        { id: "c4", statement: "The brief says check evidence exited zero.", verdict: "met", how: "read it", evidence: [{ kind: "check", ref: "npx vitest run" }] },
+      ],
+      checks: [
+        { command: "npx vitest run", exitCode: 0, summary: "all green" },
+        { command: counterexample, exitCode, summary: exitCode === 0 ? "the repair is refused" : "the repair was admitted" },
+      ],
+      changed: ["src/store.ts"],
+      caveats: [],
+      screenshots: [],
+    });
+  const run = (proof: string): { status: number | null; out: string } => {
+    const dir = mkdtempSync(join(tmpdir(), "so-preflight-test-"));
+    try {
+      const file = join(dir, "PROOF.json");
+      writeFileSync(file, proof);
+      const result = spawnSync(process.execPath, [script, "--proof", file, "--criteria", "c1,c4"], { encoding: "utf8" });
+      return { status: result.status, out: `${result.stdout}${result.stderr}` };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test.skipIf(!built)("a met c1 citing a check that exited 1 exits 1, naming the adjudicator's fact and what to do about it", () => {
+    const { status, out } = run(proofOf("met", 1));
+    expect(status).toBe(1);
+    expect(out).toContain(`proof: criterion "c1"'s check "${counterexample}" exited 1 — a criterion marked met cites only checks that exited zero; mark it not-met, or cite a durable current-tree command that passed`);
+    expect(out).toContain("1 problem(s)");
+  });
+
+  test.skipIf(!built)("the same failed check cited by a not-met or not-checked c1 passes: honest reporting, not a claim", () => {
+    for (const verdict of ["not-met", "not-checked"] as const) {
+      const { status, out } = run(proofOf(verdict, 1));
+      expect(status).toBe(0);
+      expect(out).not.toContain("exited 1");
+      expect(out).toContain("every named file parses and resolves");
+    }
+  });
+
+  test.skipIf(!built)("a met c1 whose cited checks all exited zero passes", () => {
+    const { status, out } = run(proofOf("met", 0));
+    expect(status).toBe(0);
+    expect(out).toContain("every named file parses and resolves");
+  });
+});

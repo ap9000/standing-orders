@@ -17,6 +17,11 @@
 // then), or one the proof answers only when nothing was signed: an
 // unassigned caveat, or one tagged with an unknown id, is refused the same
 // way — unrelated ideas belong in the handoff's followUps.
+// A criterion marked `met` whose cited check exited nonzero is refused in
+// the adjudicator's own words (`criterion "c1"'s check "…" exited 1`): a
+// met criterion rests only on checks that exited zero, so the agent marks
+// it not-met or cites a durable current-tree command that passes. A
+// not-met or not-checked criterion may cite a failed check honestly.
 //
 //   node scripts/proof-preflight.mjs [--done <file>] [--proof <file>]
 //        [--park <file>] [--criteria c1,c2,…]
@@ -33,7 +38,7 @@ if (!existsSync(join(dist, "proof.js")) || !existsSync(join(dist, "decision.js")
   console.error("proof-preflight: dist/ is not built — run `npm run build` first");
   process.exit(2);
 }
-const { parseProof, blockingCaveats, caveatAttributionProblems, caveatAttributionWords } = await import(pathToFileURL(join(dist, "proof.js")).href);
+const { parseProof, blockingCaveats, caveatAttributionProblems, caveatAttributionWords, failedMetChecks, failedCheckWords } = await import(pathToFileURL(join(dist, "proof.js")).href);
 const { parseHandoff, parseDecision } = await import(pathToFileURL(join(dist, "decision.js")).href);
 
 const args = process.argv.slice(2);
@@ -112,6 +117,14 @@ if (files.proof !== null) {
       // ends. Unrelated ideas go to the handoff's followUps.
       for (const one of caveatAttributionProblems(proof, signed)) {
         problems.push(`proof: ${caveatAttributionWords(one)}`);
+      }
+      // A met criterion cites only checks that exited zero (proof preflight
+      // closure): the same fact the adjudicator fails the row for, said
+      // before the attempt ends — mark the criterion not-met, or cite a
+      // durable current-tree command that passes. Not-met and not-checked
+      // criteria may report a failed check honestly.
+      for (const one of failedMetChecks(proof)) {
+        problems.push(`proof: ${failedCheckWords(one)} — a criterion marked met cites only checks that exited zero; mark it not-met, or cite a durable current-tree command that passed`);
       }
       for (const shot of proof.screenshots) {
         if (!existsSync(resolve(dirname(files.proof), shot.path)) && !existsSync(resolve(shot.path))) problems.push(`proof: screenshot ${shot.path} does not exist beside the proof`);
