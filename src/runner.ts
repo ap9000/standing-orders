@@ -53,7 +53,7 @@ export type Registration = {
   runner: Runner;
   token: string;
   /** What the previous holder of this name was still holding, taken back. */
-  reclaimed: Recovery | null;
+  reclaimed: Reclaim | null;
 };
 
 export type AuthResult =
@@ -105,7 +105,7 @@ export function register(store: Store, options: RegisterOptions): Registration {
    * worktrees and they are stranded for good.
    */
   const previous = store.getRunner(name);
-  const reclaimed: Recovery | null =
+  const reclaimed: Reclaim | null =
     previous === null
       ? null
       : {
@@ -262,7 +262,7 @@ export function registerRunnerIfIdle(
     // Recovery BEFORE reclaim (finding 16): the open-run evidence must be
     // read while it still exists; register()'s releaseClaimsOf would
     // otherwise hide it from every later recovery.
-    const recoveredRuns = existing === null ? 0 : store.recoverRunnerWork(name, now);
+    const recoveredRuns = existing === null ? 0 : store.recoverRunnerWork(name, now).runs.length;
     const registration = register(store, options);
     return { ok: true as const, ...registration, recoveredRuns };
   });
@@ -345,7 +345,8 @@ export function deadRunners(store: Store, now: Date, livenessMs = DEFAULT_LIVENE
   return store.listRunners().filter(runner => !isAlive(runner, now, livenessMs));
 }
 
-export type Recovery = {
+/** What a re-registration takes back from the previous holder of its name. */
+export type Reclaim = {
   runner: string;
   /** Lease ids released because the machine holding them is gone. */
   claims: string[];
@@ -353,14 +354,40 @@ export type Recovery = {
   worktrees: string[];
 };
 
+/** What one reconcile pass took back from a proven-dead runner. */
+export type Recovery = Reclaim & {
+  /** Run ids finished as failed/interrupted because the machine that opened
+   * them is gone — including runs whose claim a reaper or the runner itself
+   * had already released (P0.1a). */
+  runs: number[];
+  /** Built-in task ids returned to the queue because no newer live lease
+   * owned them once the dead runner's rows were settled. */
+  requeued: string[];
+};
+
+/** Whether a pass found anything at all to take back. */
+export function recoveredAnything(one: Recovery): boolean {
+  return one.claims.length > 0 || one.worktrees.length > 0 || one.runs.length > 0 || one.requeued.length > 0;
+}
+
 /**
  * Take back everything a dead runner was holding.
  *
- * Claims and worktrees together, in one pass, because they are two halves of
- * the same fact: the machine is gone. Recovering one and not the other leaves
- * a task dispatchable with its working copy still checked out to a process
- * that no longer exists — which fails later, further away, and looks like a
- * git problem rather than a scheduling one.
+ * Claims, open runs, and worktrees together, in one pass, because they are
+ * halves of the same fact: the machine is gone. Recovering one and not the
+ * others leaves a task dispatchable with its working copy still checked out
+ * to a process that no longer exists — which fails later, further away, and
+ * looks like a git problem rather than a scheduling one — or a run record
+ * that stays open forever after its lease was released and a successor
+ * finished the work (P0.1a: the real run 1501).
+ *
+ * Runs settle through the same transactional walk the takeover door uses
+ * (`recoverRunnerWork`), AFTER this runner's claims are released: the walk
+ * finishes every open run recorded against the runner outside a live held
+ * session as failed/interrupted, and requeues its task only when no newer
+ * live lease owns it. A finished outcome is never rewritten; a successor's
+ * claim, run, worktree, and task state are somebody else's rows and stay
+ * exactly as they were.
  *
  * Worktrees are handed back **unverified**. Nobody watched what the dead
  * process was doing when it stopped, so the directory on disk is a claim about
@@ -383,11 +410,13 @@ export function recoverDead(
     const recovery = store.transact(() => {
       const fresh = store.getRunner(candidate.name);
       if (fresh === null || isAlive(fresh.runner, now, livenessMs)) return null;
-      return {
-        runner: candidate.name,
-        claims: store.releaseClaimsOf(candidate.name, now),
-        worktrees: store.releaseWorktreesOf(candidate.name, now),
-      };
+      // Claims and worktrees first, so the report names every path handed
+      // back; the run walk's own per-task worktree release then finds
+      // nothing left to do here.
+      const claims = store.releaseClaimsOf(candidate.name, now);
+      const worktrees = store.releaseWorktreesOf(candidate.name, now);
+      const settled = store.recoverRunnerWork(candidate.name, now);
+      return { runner: candidate.name, claims, worktrees, runs: settled.runs, requeued: settled.requeued };
     });
     if (recovery !== null) recovered.push(recovery);
   }

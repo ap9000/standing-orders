@@ -402,7 +402,7 @@ describe("the orphan fence sweep (fence-first, page-not-guess)", () => {
     expect(store.heldSessionOf(runId)?.endedAt).toBeNull();
     // the run is NOT reclassified — the fence owns it, recovery must skip it
     expect(store.getRun(runId)?.outcome).toBeNull();
-    expect(store.recoverRunnerWork("mac-a", new Date(T0.getTime() + 130_000))).toBe(0);
+    expect(store.recoverRunnerWork("mac-a", new Date(T0.getTime() + 130_000))).toEqual({ runs: [], requeued: [] });
     store.close();
   }, 15_000);
 });

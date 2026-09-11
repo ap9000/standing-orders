@@ -63,6 +63,21 @@ breaking automation that branches on the code.
    branch, HEAD, and tree after each reply; the reviewer re-verifies its sealed
    scratch bundle. No resumable session means no correction. Provider,
    custody, or tamper failures use their own fail-closed paths, never this one.
+10. **A dead runner's open runs close with its claims.** The reconcile pass
+    (`tick`, `runner reap`) re-proves a runner dead inside one write
+    transaction, releases its live claims and worktrees, and then settles its
+    open runs through the same walk the takeover door uses
+    (`recoverRunnerWork`): every run recorded against the runner with no
+    outcome and no live held session finishes as `failed`/`interrupted`, and
+    its task requeues only when no newer live lease owns it. The pass reports
+    the run ids it finished even when there was no claim left to release.
+    What this bounded recovery does **not** guarantee: it never touches a
+    runner that is still heartbeating (a live runner's abandoned run — a
+    restart that released its lease under the same name — is not this
+    pass's business), never rewrites a finished outcome, never marks an
+    interrupted attempt successful, never releases a successor's claim,
+    run, worktree, or task state, and never closes a run under a live held
+    session. A second pass over the same runner settles nothing.
 
 ## Acceptance scenarios
 
@@ -82,6 +97,12 @@ paths:
 - no registered or answering worker → one-command repair;
 - crashed worker with an open run → successor interrupts and recovers it → one
   evidence-backed completion → another dispatch proves no duplicate;
+- dead worker whose lease was already released with its run still open →
+  successor builds the task → the reconcile pass finishes the old run as
+  interrupted, reports it, and leaves the successor's outcome, claim,
+  worktree, and task state untouched; a heartbeat landing before the
+  transaction saves the run, and a repeat pass changes nothing
+  (`src/runner.test.ts`, `src/operate.test.ts`);
 - full worker or exhausted provider quota → retrying with honest capacity or
   reset detail;
 - malformed planner reply → syntax-only normalization or no more than two

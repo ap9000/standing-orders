@@ -7,6 +7,7 @@ import {
   isAlive,
   deadRunners,
   recoverDead,
+  recoveredAnything,
   hashToken,
   addRunnerReposAuthed,
   observeProviderReadiness,
@@ -14,7 +15,7 @@ import {
   DEFAULT_LIVENESS_MS,
   type ReadinessProbe,
 } from "./runner.js";
-import { acquire, currentClaim } from "./claim.js";
+import { acquire, completeFenced, currentClaim, release } from "./claim.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
@@ -265,6 +266,178 @@ describe("recovering a dead runner", () => {
     const recovered = recoverDead(store, later(DEFAULT_LIVENESS_MS + 1_000));
 
     expect(recovered[0]).toMatchObject({ runner: "idle", claims: [], worktrees: [] });
+  });
+});
+
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review" = "build") => ({
+  route: { routeDigest: "legacy", phase, provider: "claude", model: null, chosen: "legacy" as const },
+});
+
+describe("closing abandoned run records during reconciliation (P0.1a)", () => {
+  // The real shape this guards: run 1501 opened under lease gen 1, the
+  // lease was released without the run being finished, a successor took
+  // gen 2, ran 1502 and built — and 1501 stayed open forever, because the
+  // reconcile pass only ever released claims and worktrees. Every test here
+  // drives the PUBLIC reconcile road (`recoverDead`, what `tick` and
+  // `runner reap` call) against an in-memory store — never the user's
+  // database.
+  let store: Store;
+  let task: number;
+  const DEAD = later(DEFAULT_LIVENESS_MS + 60_000);
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    task = store.refFor("built-in", "t-1").id;
+    store.placeTask(task, REPO);
+  });
+
+  afterEach(() => store.close());
+
+  /** Runner `old` opens a run under lease `lease-old`, then hands the lease
+   * back WITHOUT finishing the run — the abandoned record. */
+  const abandonRun = (old: string, token: string): number => {
+    acquire(store, task, old, { token, now: T0, ttlMs: 60_000, newLeaseId: () => "lease-old" });
+    store.setTaskState("t-1", "running", T0);
+    const runId = store.startRun({
+      taskRef: task, leaseId: "lease-old", runner: old, branch: "b", worktree: "/pool/old", ...bareLegacy(), now: T0,
+    });
+    store.saveWorktree({
+      path: "/pool/old", repo: REPO, branch: "b", runner: old, taskRef: task,
+      createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: true,
+    });
+    expect(release(store, "lease-old", later(5_000))).toMatchObject({ ok: true });
+    return runId;
+  };
+
+  test("finishes the released old claim's open run after a successor built the task, touching nothing else", () => {
+    const old = register(store, { name: "old", host: "h", repos: [REPO], now: T0 });
+    const oldRun = abandonRun("old", old.token);
+    // The successor: gen 2 on another runner, run to completion.
+    const next = register(store, { name: "next", host: "h", repos: [REPO], now: T0 });
+    acquire(store, task, "next", { token: next.token, now: later(10_000), ttlMs: 60 * 60_000, newLeaseId: () => "lease-next" });
+    store.setTaskState("t-1", "running", later(10_000));
+    const nextRun = store.startRun({
+      taskRef: task, leaseId: "lease-next", runner: "next", branch: "b", worktree: "/pool/next", ...bareLegacy(), now: later(10_000),
+    });
+    store.finishRun(nextRun, { outcome: "built", committed: true, now: later(20_000) });
+    expect(completeFenced(store, "lease-next", "done", later(20_000))).toMatchObject({ ok: true });
+    heartbeat(store, "next", next.token, DEAD);
+    const before = store.getRun(nextRun);
+
+    // The old runner's lease is long gone, so there is NO claim to release —
+    // exactly the case the reconcile pass used to walk past in silence.
+    const recovered = recoverDead(store, DEAD);
+
+    expect(recovered).toEqual([{ runner: "old", claims: [], worktrees: ["/pool/old"], runs: [oldRun], requeued: [] }]);
+    expect(store.getRun(oldRun)).toMatchObject({ outcome: "failed", reason: "interrupted", finishedAt: DEAD.toISOString() });
+    // The successor's finished outcome and the task's terminal state stand.
+    expect(store.getRun(nextRun)).toEqual(before);
+    expect(store.getTask("t-1")?.state).toBe("done");
+    expect(store.getWorktree("/pool/old")?.verified).toBe(false);
+  });
+
+  test("reports the run through `runner reap` even when no claim was released", () => {
+    // `runner reap` hides passes that took nothing back; an open run alone
+    // is something taken back.
+    const old = register(store, { name: "old", host: "h", repos: [REPO], now: T0 });
+    const oldRun = abandonRun("old", old.token);
+    store.releaseWorktreesOf("old", later(6_000));
+
+    const recovered = recoverDead(store, DEAD).filter(recoveredAnything);
+
+    expect(recovered).toEqual([{ runner: "old", claims: [], worktrees: [], runs: [oldRun], requeued: ["t-1"] }]);
+    expect(store.getTask("t-1")?.state).toBe("queued");
+  });
+
+  test("leaves an active successor's claim, run, worktree, and task state alone", () => {
+    const old = register(store, { name: "old", host: "h", repos: [REPO], now: T0 });
+    const oldRun = abandonRun("old", old.token);
+    const next = register(store, { name: "next", host: "h", repos: [REPO], now: T0 });
+    acquire(store, task, "next", { token: next.token, now: later(10_000), ttlMs: 60 * 60_000, newLeaseId: () => "lease-next" });
+    store.setTaskState("t-1", "running", later(10_000));
+    const nextRun = store.startRun({
+      taskRef: task, leaseId: "lease-next", runner: "next", branch: "b", worktree: "/pool/next", ...bareLegacy(), now: later(10_000),
+    });
+    store.saveWorktree({
+      path: "/pool/next", repo: REPO, branch: "b", runner: "next", taskRef: task,
+      createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: true,
+    });
+    heartbeat(store, "next", next.token, DEAD);
+
+    const recovered = recoverDead(store, DEAD);
+
+    expect(recovered).toEqual([{ runner: "old", claims: [], worktrees: ["/pool/old"], runs: [oldRun], requeued: [] }]);
+    expect(store.getRun(oldRun)).toMatchObject({ outcome: "failed", reason: "interrupted" });
+    expect(store.getRun(nextRun)?.outcome).toBeNull();
+    expect(currentClaim(store, task, DEAD)?.leaseId).toBe("lease-next");
+    expect(store.getTask("t-1")?.state).toBe("running");
+    expect(store.getWorktree("/pool/next")).toMatchObject({ releasedAt: null, verified: true });
+  });
+
+  test("an expired, never-released old claim cannot requeue a task its successor is running", () => {
+    // The lease ran out (nobody released it) and a successor took gen 2. The
+    // dead runner's row is still `released_at IS NULL`, so the reconcile
+    // pass releases it — but the task belongs to the live holder now.
+    const old = register(store, { name: "old", host: "h", repos: [REPO], now: T0 });
+    acquire(store, task, "old", { token: old.token, now: T0, ttlMs: 60_000, newLeaseId: () => "lease-old" });
+    store.setTaskState("t-1", "running", T0);
+    const oldRun = store.startRun({
+      taskRef: task, leaseId: "lease-old", runner: "old", branch: "b", worktree: "/pool/old", ...bareLegacy(), now: T0,
+    });
+    const next = register(store, { name: "next", host: "h", repos: [REPO], now: T0 });
+    expect(acquire(store, task, "next", { token: next.token, now: later(120_000), ttlMs: 60 * 60_000, newLeaseId: () => "lease-next" })).toMatchObject({ ok: true });
+    store.setTaskState("t-1", "running", later(120_000));
+    heartbeat(store, "next", next.token, DEAD);
+
+    const recovered = recoverDead(store, DEAD);
+
+    expect(recovered).toEqual([{ runner: "old", claims: ["lease-old"], worktrees: [], runs: [oldRun], requeued: [] }]);
+    expect(store.getTask("t-1")?.state).toBe("running");
+    expect(currentClaim(store, task, DEAD)?.leaseId).toBe("lease-next");
+  });
+
+  test("a heartbeat landing between the survey and the transaction saves the run", () => {
+    // The survey (`deadRunners`) sees `old` silent; its pulse lands before
+    // the transaction re-reads it. Simulated by making the in-transaction
+    // re-read stamp the heartbeat first — the exact interleaving the
+    // re-proof exists for.
+    const old = register(store, { name: "old", host: "h", repos: [REPO], now: T0 });
+    const oldRun = abandonRun("old", old.token);
+    const realGetRunner = store.getRunner.bind(store);
+    let raced = false;
+    store.getRunner = (name: string) => {
+      if (name === "old" && !raced) {
+        raced = true;
+        store.touchRunner("old", DEAD);
+      }
+      return realGetRunner(name);
+    };
+
+    const recovered = recoverDead(store, DEAD);
+
+    expect(raced).toBe(true);
+    expect(recovered).toEqual([]);
+    expect(store.getRun(oldRun)?.outcome).toBeNull();
+    expect(store.getTask("t-1")?.state).toBe("running");
+  });
+
+  test("a second pass settles nothing and says so", () => {
+    const old = register(store, { name: "old", host: "h", repos: [REPO], now: T0 });
+    const oldRun = abandonRun("old", old.token);
+    const first = recoverDead(store, DEAD);
+    expect(first).toEqual([{ runner: "old", claims: [], worktrees: ["/pool/old"], runs: [oldRun], requeued: ["t-1"] }]);
+    const settled = store.getRun(oldRun);
+    const wake = store.wakeSeq();
+
+    const again = recoverDead(store, later(DEFAULT_LIVENESS_MS + 120_000));
+
+    expect(again).toEqual([{ runner: "old", claims: [], worktrees: [], runs: [], requeued: [] }]);
+    expect(again.filter(recoveredAnything)).toEqual([]);
+    expect(store.getRun(oldRun)).toEqual(settled);
+    expect(store.wakeSeq()).toBe(wake);
   });
 });
 

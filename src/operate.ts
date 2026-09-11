@@ -142,6 +142,7 @@ import {
   heartbeat as heartbeatRunner,
   isAlive,
   recoverDead,
+  recoveredAnything,
   acquireWatchLeaseAuthed,
   heartbeatWatchLeaseAuthed,
   addRunnerReposAuthed,
@@ -1316,12 +1317,13 @@ async function runnerCommand(
   }
 
   if (action === "reap") {
-    // Claims and worktrees together: they are two halves of one fact, and
-    // recovering only one leaves a task dispatchable with its working copy
-    // still checked out to a process that no longer exists.
-    const recovered = recoverDead(store, now).filter(
-      one => one.claims.length > 0 || one.worktrees.length > 0,
-    );
+    // Claims, open runs, and worktrees together: they are halves of one
+    // fact, and recovering only one leaves a task dispatchable with its
+    // working copy still checked out to a process that no longer exists —
+    // or an attempt that reads as still running long after its lease went.
+    // A dead runner whose only leftover is an open run is still reported
+    // (P0.1a): the runs line is the whole point of that pass.
+    const recovered = recoverDead(store, now).filter(recoveredAnything);
 
     if (json) {
       write(envelopeJson({ ok: true, command: "runner reap", recovered }));
@@ -1334,6 +1336,8 @@ async function runnerCommand(
     for (const one of recovered) {
       write(`${one.runner} is not answering — took back:`);
       for (const lease of one.claims) write(`  claim     ${lease}`);
+      for (const id of one.runs) write(`  run       #${id} (finished as interrupted)`);
+      for (const id of one.requeued) write(`  task      ${id} (requeued)`);
       for (const path of one.worktrees) write(`  worktree  ${path} (unverified)`);
     }
     return EXIT.ok;
@@ -4025,6 +4029,23 @@ async function reconcileCommand(
           kind: "runner-recovered",
           subject: `${one.runner} went dead holding work`,
           body: `Its claims were requeued and its worktrees handed back unverified. Lease ${leaseId}.`,
+        },
+        clock(),
+      );
+    }
+    for (const runId of one.runs) {
+      // Run ids are unique forever too (P0.1a): an attempt the dead machine
+      // left open — its lease possibly long released — is finished as
+      // interrupted exactly once, and said so exactly once.
+      store.enqueueNotification(
+        {
+          dedupeKey: `recover-run:${runId}`,
+          kind: "runner-recovered",
+          subject: `${one.runner} went dead mid-attempt`,
+          body: `Run #${runId} was still open with no live lease; it is now finished as interrupted. ${
+            one.requeued.length > 0 ? `Requeued: ${one.requeued.join(", ")}.` : "Nothing was requeued — a newer claim or a finished outcome owns its task."
+          }`,
+          link: `/r/${runId}`,
         },
         clock(),
       );

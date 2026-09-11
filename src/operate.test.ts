@@ -1,6 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { openStore } from "./store.js";
-import { register } from "./runner.js";
+import { DEFAULT_LIVENESS_MS, register } from "./runner.js";
+import { completeFenced } from "./claim.js";
 import { canonicalProject } from "./project.js";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -322,6 +323,38 @@ describe("operating the queue from the command line", () => {
       expect(code).toBe(EXIT.ok);
       expect(payload().count).toBe(1);
       expect(payload().released[0].runner).toBe("r");
+    });
+
+    test("`runner reap` finishes a dead runner's abandoned run and reports it without a claim to release (P0.1a)", async () => {
+      // The 1501 shape: the lease was handed back, the run never finished,
+      // a successor built the task. Nothing left to release — the run is
+      // the only thing taken back, and the pass still says so.
+      await run(["task", "add", "a thing", "--id", "t-1", "--repo", REPO]);
+      await claim(["claim", "t-1", "--runner", "old", "--json"]);
+      const oldLease = payload().lease.leaseId as string;
+      const store = openStore(db);
+      const ref = store.refFor("built-in", "t-1").id;
+      const oldRun = store.startRun({
+        taskRef: ref, leaseId: oldLease, runner: "old", branch: "b", worktree: "/pool/old", ...presented(store, ref), now: T0,
+      });
+      store.close();
+      await run(["release", oldLease], later(1_000));
+      await claim(["claim", "t-1", "--runner", "next", "--json"], later(2_000));
+      const nextLease = payload().lease.leaseId as string;
+      const successor = openStore(db);
+      expect(completeFenced(successor, nextLease, "done", later(3_000))).toMatchObject({ ok: true });
+      successor.close();
+      const dead = later(DEFAULT_LIVENESS_MS + 60_000);
+      await run(["runner", "heartbeat", "next", "--token", await tokenFor("next")], dead);
+
+      const code = await run(["runner", "reap", "--json"], dead);
+
+      expect(code).toBe(EXIT.ok);
+      expect(payload().recovered).toEqual([{ runner: "old", claims: [], worktrees: [], runs: [oldRun], requeued: [] }]);
+      await run(["task", "show", "t-1", "--json"], dead);
+      expect(payload().task.state).toBe("done");
+      expect(await run(["runner", "reap"], later(DEFAULT_LIVENESS_MS + 120_000))).toBe(EXIT.ok);
+      expect(out()).toBe("Every runner is answering, or held nothing.");
     });
 
     test("leaves a held task out of the ready set until the hold lifts", async () => {

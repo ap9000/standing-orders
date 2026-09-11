@@ -558,6 +558,17 @@ export type Notification = {
   resolvedAt: string | null;
 };
 
+/**
+ * What one recovery walk over a gone runner's work settled (P0.1a): the run
+ * ids it finished as failed/interrupted and the built-in task ids it returned
+ * to the queue because no newer live lease owned them. Both empty on a
+ * repeat pass — the walk is idempotent by construction.
+ */
+export type RunnerWorkRecovery = {
+  runs: number[];
+  requeued: string[];
+};
+
 /** One build attempt. `outcome` null means it never finished — also an answer. */
 export type Run = {
   id: number;
@@ -8316,10 +8327,18 @@ export class Store {
     // are only unique within a backend, so requeuing by id alone would let a
     // dead runner's GitHub issue #17 reset a built-in task that happens to be
     // called `17`. Somebody else's work, moved by a coincidence of naming.
+    //
+    // And only when nobody newer owns the task (P0.1a): a lease that ran out
+    // unreleased is still a row under this runner's name after a successor
+    // acquired the next generation. Requeueing on its account would yank the
+    // task out from under the live holder — the one liveness fact the
+    // recovery walks guard on, guarded here too.
     for (const row of held) {
+      const taskRef = Number(row["task_ref"]);
+      if (this.currentLiveLease(taskRef, now) !== null) continue;
       const ref = this.db
         .prepare("SELECT backend, external_id FROM task_ref WHERE id = ?")
-        .get(Number(row["task_ref"]));
+        .get(taskRef);
       if (ref === undefined || String(ref["backend"]) !== BUILT_IN) continue;
 
       this.db
@@ -18566,36 +18585,53 @@ export class Store {
    * some newer live claim owns is that claim's business, not ours. Also
    * sweeps tasks stranded `running` with no open run at all (a prior
    * recovery crashed between finishing the run and requeueing).
+   *
+   * Shared by the takeover door and the dead-runner reconcile pass (P0.1a),
+   * so it answers with WHAT it settled — the run ids it finished and the
+   * built-in task ids it returned to the queue — rather than a bare count.
+   * Nothing here decides liveness: the caller proves the runner is gone (or
+   * is taking its name over) inside the transaction that calls this. What it
+   * never does: touch a run that already has an outcome, a run under a live
+   * held session, another runner's rows, or a task some newer live lease
+   * owns. A second pass over the same runner settles nothing and says so.
    */
-  recoverRunnerWork(runner: string, now: Date): number {
+  recoverRunnerWork(runner: string, now: Date): RunnerWorkRecovery {
     return this.transact(() => {
       const stamp = now.toISOString();
-      let recovered = 0;
+      const runs: number[] = [];
+      const requeued: string[] = [];
+      const requeueUnowned = (taskRef: number): void => {
+        if (this.currentLiveLease(taskRef, now) !== null) return;
+        const ref = this.db
+          .prepare("SELECT external_id FROM task_ref WHERE id = ? AND backend = ?")
+          .get(taskRef, BUILT_IN);
+        if (ref === undefined) return;
+        const { changes } = this.db
+          .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'running'")
+          .run(stamp, String(ref["external_id"]));
+        if (Number(changes) > 0) requeued.push(String(ref["external_id"]));
+      };
       const open = this.db
         .prepare(
           `SELECT id, task_ref FROM run WHERE runner = ? AND outcome IS NULL
-            AND NOT EXISTS (SELECT 1 FROM held_session WHERE held_session.run = run.id AND held_session.ended_at IS NULL)`,
+            AND NOT EXISTS (SELECT 1 FROM held_session WHERE held_session.run = run.id AND held_session.ended_at IS NULL)
+            ORDER BY id`,
         )
         .all(runner);
       for (const row of open) {
         const taskRef = Number(row["task_ref"]);
-        this.db
-          .prepare("UPDATE run SET outcome = 'failed', reason = 'interrupted', finished_at = ? WHERE id = ?")
-          .run(stamp, Number(row["id"]));
-        if (this.currentLiveLease(taskRef, now) === null) {
-          this.db
-            .prepare(
-              `UPDATE task SET state = 'queued', updated_at = ?
-                WHERE state = 'running' AND id = (
-                  SELECT external_id FROM task_ref WHERE id = ? AND backend = ?
-                )`,
-            )
-            .run(stamp, taskRef, BUILT_IN);
-        }
+        const runId = Number(row["id"]);
+        // `outcome IS NULL` again on the write: a finished outcome is never
+        // rewritten, whatever the survey above saw.
+        const { changes } = this.db
+          .prepare("UPDATE run SET outcome = 'failed', reason = 'interrupted', finished_at = ? WHERE id = ? AND outcome IS NULL")
+          .run(stamp, runId);
+        if (Number(changes) === 0) continue;
+        runs.push(runId);
+        requeueUnowned(taskRef);
         this.db
           .prepare("UPDATE worktree SET released_at = ?, verified = 0 WHERE runner = ? AND task_ref = ? AND released_at IS NULL")
           .run(stamp, runner, taskRef);
-        recovered += 1;
       }
       // Stranded `running` tasks whose newest claim was this runner's and
       // whose lease is gone: no open run to finish, still not in the ready
@@ -18613,15 +18649,9 @@ export class Store {
                               WHERE held_run.task_ref = task_ref.id AND held_session.ended_at IS NULL)`,
         )
         .all(BUILT_IN, runner);
-      for (const row of stranded) {
-        if (this.currentLiveLease(Number(row["ref"]), now) !== null) continue;
-        this.db
-          .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'running'")
-          .run(stamp, String(row["task_id"]));
-        recovered += 1;
-      }
-      if (recovered > 0) this.bumpWake();
-      return recovered;
+      for (const row of stranded) requeueUnowned(Number(row["ref"]));
+      if (runs.length > 0 || requeued.length > 0) this.bumpWake();
+      return { runs, requeued };
     });
   }
 
