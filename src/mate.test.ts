@@ -9,6 +9,12 @@ import { MATE_MAX_PROPOSALS_PER_TURN, executeMateTool, redactForMate } from "./m
 import { MATE_CONTRACT, MATE_CONTRACT_VERSION } from "./mate-contract.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-09-02T12:00:00.000Z");
 const INSIDE = "/repo/inside-PATH-CANARY";
 const OTHER = "/repo/other-PATH-CANARY";
@@ -74,7 +80,7 @@ describe("the mate's turn", () => {
     mk("in-3", INSIDE, `see ${INSIDE}/notes by alex, digest ${"d".repeat(64)}`);
     mk("other-1", OTHER, "wire the nightly digest");
     mk("out-1", OUTSIDE, "the confidential acquisition plan");
-    const run = store.startRun({ taskRef: store.refFor("built-in", "in-1").id, leaseId: "l-in", runner: "runner-1", branch: "standing-orders/in-1", worktree: "/pool/in-1", now: T0 });
+    const run = store.startRun({ taskRef: store.refFor("built-in", "in-1").id, leaseId: "l-in", runner: "runner-1", branch: "standing-orders/in-1", worktree: "/pool/in-1", ...bareLegacy("build", "claude", null), now: T0 });
     store.saveDecision(
       {
         run,

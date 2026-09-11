@@ -28,6 +28,8 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypt
 import { hasForbiddenControls } from "./decision.js";
 import type { Store, Mutation } from "./store.js";
 import type { QualityMode } from "./quality.js";
+import type { AuthMode } from "./keys.js";
+import type { ProviderId } from "./provider.js";
 import {
   NO_READINESS,
   exactModelId,
@@ -750,6 +752,11 @@ export type Scope = {
    * non-null verdict, so filtering, defaulting, or coercion can never
    * turn a corrupt row into authority. Undefined on a hand-built scope. */
   termsProblem?: string | null;
+  /** Who wrote the text (mate arc, ruling 2): a confirmed mate proposal,
+   * the coordinator, a scout, or a person (null). Read raw and proved by
+   * `termsProblem` — a word outside these is a stated problem, never a
+   * value that slips past the mate quarantine at a mode seal. */
+  proposedVia?: "mate" | "coordinator" | "scout" | null;
 };
 
 export type Approval =
@@ -1247,10 +1254,50 @@ export function approvalOf(scope: Scope | null): Approval {
  * no approve action, no seal — is exposed on it.
  */
 export type ScopeAuthority =
-  | { ok: true; profile: ExecutionProfile; chain: ChainEntry[] | null; route: PhaseRoute; digest: string }
-  | { ok: false; reason: "terms" | "unrouted" | "unresolved" | "profile" | "chain" | "route" | "parity" | "digest"; problem: string };
+  | { ok: true; profile: ExecutionProfile; chain: ChainEntry[] | null; route: PhaseRoute; digest: string; authMode: AuthMode | null }
+  | { ok: false; reason: "terms" | "unrouted" | "unresolved" | "profile" | "chain" | "route" | "parity" | "digest" | "auth-mode"; problem: string };
 
-export function scopeAuthorityOf(scope: Scope): ScopeAuthority {
+/** What the strict projection reads OUTSIDE the row (atomic authority
+ * closure): the operator's stored auth mode for a provider, strictly — a
+ * present file that says neither word is a stated problem, never the
+ * default a lenient read would coerce it to. Filing, consent, the seal,
+ * and the spawn all hand in the same reader, so one broken file closes
+ * every door in the same words. */
+export type ScopeAuthorityEnv = {
+  authMode?: (provider: ProviderId) => { ok: true; mode: AuthMode } | { ok: false; problem: string };
+};
+
+/**
+ * THE PARITY every projection proves between a route and the profile and
+ * terms it was filed beside (atomic authority closure): the build and
+ * repair legs ARE the profile's exact pairs, and the route's signed risk
+ * and quality ARE the row's — a row whose risk says high over a route
+ * recommended for routine was not filed by this code, and neither the
+ * seal, the consent door, nor the dispatch proof believes it. One
+ * function, so the working side, the sealed side, and the last-mile
+ * dispatch proof cannot drift. Null when everything agrees.
+ */
+export function routeParityProblem(
+  route: PhaseRoute,
+  profile: ExecutionProfile,
+  terms: { riskLevel: RiskLevel; qualityMode: QualityMode },
+): string | null {
+  const buildLeg = legOf(route, "build");
+  const repairLeg = legOf(route, "repair");
+  const repairModel = profile.repairModel === "inherit" ? profile.model : profile.repairModel;
+  if (buildLeg.provider !== profile.provider || buildLeg.model !== profile.model || repairLeg.provider !== profile.provider || repairLeg.model !== repairModel) {
+    return `the route builds on ${buildLeg.provider} · ${buildLeg.model} (repair ${repairLeg.provider} · ${repairLeg.model}) but the agent profile says ${profile.provider} · ${profile.model} (repair ${profile.provider} · ${repairModel})`;
+  }
+  if (route.risk !== terms.riskLevel) {
+    return `the route was recommended for ${route.risk} risk but the scope's risk level is ${terms.riskLevel}`;
+  }
+  if (route.qualityMode !== terms.qualityMode) {
+    return `the route was recommended for ${route.qualityMode} quality but the scope's quality mode is ${terms.qualityMode}`;
+  }
+  return null;
+}
+
+export function scopeAuthorityOf(scope: Scope, env: ScopeAuthorityEnv = {}): ScopeAuthority {
   // THE RAW TERMS FIRST (raw authority repair): a row whose stored terms
   // or metadata do not read back exactly is no authority at all — not
   // the filtered, defaulted, or coerced reading of it.
@@ -1284,16 +1331,8 @@ export function scopeAuthorityOf(scope: Scope): ScopeAuthority {
   if (route === null) {
     return { ok: false, reason: "route", problem: routeJson === null ? "the scope was filed under agent routing but carries no route" : "the scope's agent route cannot be read exactly" };
   }
-  const buildLeg = legOf(route, "build");
-  const repairLeg = legOf(route, "repair");
-  const repairModel = profile.repairModel === "inherit" ? profile.model : profile.repairModel;
-  if (buildLeg.provider !== profile.provider || buildLeg.model !== profile.model || repairLeg.provider !== profile.provider || repairLeg.model !== repairModel) {
-    return {
-      ok: false,
-      reason: "parity",
-      problem: `the route builds on ${buildLeg.provider} · ${buildLeg.model} (repair ${repairLeg.provider} · ${repairLeg.model}) but the agent profile says ${profile.provider} · ${profile.model} (repair ${profile.provider} · ${repairModel})`,
-    };
-  }
+  const parity = routeParityProblem(route, profile, { riskLevel: scope.riskLevel ?? "routine", qualityMode: scope.qualityMode ?? "default" });
+  if (parity !== null) return { ok: false, reason: "parity", problem: parity };
   const digest = digestOf(
     { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode: scope.qualityMode ?? "default" },
     chain !== null ? { chain } : profile,
@@ -1302,7 +1341,20 @@ export function scopeAuthorityOf(scope: Scope): ScopeAuthority {
   if (digest !== scope.digest) {
     return { ok: false, reason: "digest", problem: "the scope's reference does not re-derive from its own terms, agents, and route — file it again" };
   }
-  return { ok: true, profile, chain, route, digest };
+  // THE AUTH MODE, strictly (atomic authority closure): the credential the
+  // profile's provider would spend under is read through the caller's
+  // strict reader — a present mode file that says neither word closes
+  // the door in its words, never the default a lenient read would coerce
+  // it to (the spawn reads the same way, so nothing sealed here spends
+  // on a credential the operator never named). A chain filing carries
+  // its base entry's pinned mode and must agree with the live file too.
+  let authMode: AuthMode | null = null;
+  if (env.authMode !== undefined) {
+    const read = env.authMode(profile.provider);
+    if (!read.ok) return { ok: false, reason: "auth-mode", problem: read.problem };
+    authMode = read.mode;
+  }
+  return { ok: true, profile, chain, route, digest, authMode };
 }
 
 /** The rubric's approval-card lines (v39): one per criterion, the id in

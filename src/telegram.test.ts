@@ -25,6 +25,12 @@ import {
   type TelegramTransport,
 } from "./telegram.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
 const BOT = "777000";
@@ -96,7 +102,7 @@ describe("the telegram bridge", () => {
       runner: "builder-1",
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
-      now: T0,
+      ...bareLegacy("build", "claude", null), now: T0,
     });
     const id = store.saveDecision(
       {
@@ -548,7 +554,7 @@ describe("the follower — on the wire until told to stop", () => {
       runner: "builder-1",
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
-      now: T0,
+      ...bareLegacy("build", "claude", null), now: T0,
     });
     const id = store.saveDecision(
       {
@@ -680,7 +686,7 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
   ): number => {
     const run = store.startRun({
       taskRef, leaseId: `lease-${Math.random()}`, runner: "b",
-      branch: "standing-orders/t-1", worktree: "/pool/t-1", now: T0,
+      branch: "standing-orders/t-1", worktree: "/pool/t-1", ...bareLegacy("build", "claude", null), now: T0,
     });
     const id = store.saveDecision({
       run, urgency: "blocking", recap: "Policy call.", question: "Open or closed?",
@@ -825,7 +831,7 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
   };
 
   const decision = (): number => {
-    const run = store.startRun({ taskRef, leaseId: `lease-${Math.random()}`, runner: "b", branch: "standing-orders/t-1", worktree: "/pool/t-1", now: T0 });
+    const run = store.startRun({ taskRef, leaseId: `lease-${Math.random()}`, runner: "b", branch: "standing-orders/t-1", worktree: "/pool/t-1", ...bareLegacy("build", "claude", null), now: T0 });
     const id = store.saveDecision(
       { run, urgency: "blocking", recap: "r", question: "Open or closed?", options: [{ id: "open", label: "Open", consequence: "c", reversible: true }, { id: "closed", label: "Closed", consequence: "c", reversible: true }], recommendation: "open" },
       T0,

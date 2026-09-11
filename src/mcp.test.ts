@@ -6,6 +6,12 @@ import { register } from "./runner.js";
 import { acquire } from "./claim.js";
 import { PACKAGE_VERSION } from "./version.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-08-30T12:00:00.000Z");
 const REPO = "/repo/mcp-server";
 
@@ -576,7 +582,7 @@ describe("the MCP stdio server", () => {
     const filed = fileCoordinatorProposal(store, token, { repo: REPO, title: "first", idempotencyKey: "key-00000001" }, T0);
     const second = fileCoordinatorProposal(store, token, { repo: REPO, title: "second", idempotencyKey: "key-00000002" }, T0);
     if (!filed.ok || !second.ok) throw new Error("filing failed");
-    const run = store.startRun({ taskRef: store.refFor("built-in", filed.id).id, leaseId: "l-1", runner: "runner-1", branch: "b", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: store.refFor("built-in", filed.id).id, leaseId: "l-1", runner: "runner-1", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0 });
     store.saveDecision(
       {
         run,
@@ -634,7 +640,7 @@ describe("the MCP stdio server", () => {
     h.send({ jsonrpc: "2.0", id: 42, method: "tools/call", params: { _meta: modernMeta, name: "propose_scope", arguments: { ref: filed.id, goal: "g", touches: ["src/a.ts", 3] } } });
     expect(h.last()["error"]).toMatchObject({ code: -32602 });
     // An answer needs get_decision on THIS connection first.
-    const run = store.startRun({ taskRef: store.refFor("built-in", filed.id).id, leaseId: "l-2", runner: "runner-1", branch: "b", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: store.refFor("built-in", filed.id).id, leaseId: "l-2", runner: "runner-1", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0 });
     store.saveDecision({ run, urgency: "blocking", recap: "RECAP", question: "Q?", options: [{ id: "a", label: "A", consequence: "ca", reversible: true }], recommendation: "a" }, T0);
     expect(call(43, "propose_answer", { decision: 1, option: "a", rationale: "fine" }).body).toContain("get_decision");
     expect(call(44, "get_decision", { decision: 1 }).body).toContain("ca");

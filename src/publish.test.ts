@@ -16,6 +16,12 @@ import {
   type PublishExec,
 } from "./publish.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-08-12T06:00:00.000Z");
 const REPO = "/repo/main";
 
@@ -80,7 +86,7 @@ describe("publication", () => {
       runner: "builder-1",
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
-      now: T0,
+      ...bareLegacy("build", "claude", null), now: T0,
     });
     store.stampRun(runId, { baseRevision: "base999" });
     store.recordOutcomeFacts(runId, {
@@ -262,7 +268,7 @@ describe("watching CI on opened PRs", () => {
       runner: "builder-1",
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
-      now: T0,
+      ...bareLegacy("build", "claude", null), now: T0,
     });
     opened();
   });

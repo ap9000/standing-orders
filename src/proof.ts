@@ -362,6 +362,34 @@ export function serializeProof(proof: ParsedProof): string {
   return JSON.stringify(proof, null, 2);
 }
 
+/** One caveat that admits an exception to a criterion the same proof marks
+ * `met` — the proof's own verdict disagreeing with its own words (atomic
+ * authority closure). A caveat NAMES a criterion when the criterion's exact
+ * id appears in it as a standalone token (`c1: …`, `(c1)`, `c1,c4`); a
+ * named criterion must then be `not-met` or `not-checked`. Nothing here is
+ * semantic — the machine cannot read a free-text caveat's meaning, so the
+ * contract is the token, stated in the brief and refused by the preflight
+ * before the attempt ends. */
+export type BlockingCaveat = { caveat: string; index: number; criterionId: string };
+
+function caveatNames(caveat: string, id: string): boolean {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\p{L}\\p{N}_-])${escaped}(?![\\p{L}\\p{N}_-])`, "u").test(caveat);
+}
+
+/** Every (caveat, criterion) pair where the caveat names a criterion the
+ * proof marks `met` — the proof contradicts itself and cannot verify. In
+ * caveat order, then criterion order; `[]` for a proof at peace with its
+ * own caveats. */
+export function blockingCaveats(proof: Pick<ParsedProof, "criteria" | "caveats">): BlockingCaveat[] {
+  const met = proof.criteria.filter(one => one.verdict === "met");
+  const out: BlockingCaveat[] = [];
+  proof.caveats.forEach((caveat, index) => {
+    for (const criterion of met) if (caveatNames(caveat, criterion.id)) out.push({ caveat, index, criterionId: criterion.id });
+  });
+  return out;
+}
+
 /** One claimed screenshot's fate once the caller has read its bytes off the
  * worktree and checked them against the PNG/JPEG signature and size cap. */
 export type ScreenshotOutcome = {
@@ -538,6 +566,13 @@ function criterionMatrix(
     let anyMissing = false;
     let anyFailed = false;
     let anyManual = false;
+    // The proof's own caveats outrank its verdict word: a criterion marked
+    // `met` that a caveat names is not met by the proof's own admission.
+    for (const blocking of proof === null ? [] : blockingCaveats(proof)) {
+      if (blocking.criterionId !== approved.id) continue;
+      anyFailed = true;
+      detail.push(`criterion "${approved.id}" is marked met, but caveat ${blocking.index + 1} admits an exception to it: ${blocking.caveat}`);
+    }
     for (const kind of approved.evidence) {
       const ref = answer.evidence.find(e => e.kind === kind);
       if (ref === undefined) {
@@ -688,6 +723,23 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
     const restated = matrix.filter(row => row.detail.some(d => d.includes("was signed as")));
     if (restated.length > 0) {
       return { verdict: "refuted", reasons: restated.flatMap(row => row.detail), matrix };
+    }
+  }
+
+  // A proof whose caveat admits an exception to a criterion it marks met
+  // contradicts itself (atomic authority closure): the verdict must agree
+  // with the caveats, and a self-disagreeing proof is conflicting
+  // evidence — refuted, never verified, whether or not a rubric was
+  // signed. It ranks with the altered-statement rule above: an
+  // environment failure must never soften a contradiction to short.
+  {
+    const blocking = blockingCaveats(proof);
+    if (blocking.length > 0) {
+      return {
+        verdict: "refuted",
+        reasons: blocking.map(one => `criterion "${one.criterionId}" is marked met, but caveat ${one.index + 1} admits an exception to it: ${one.caveat}`),
+        matrix,
+      };
     }
   }
 

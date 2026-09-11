@@ -9,6 +9,12 @@ import { runOperate, EXIT } from "./operate.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-09-03T01:00:00.000Z");
 
 describe("peek: the terminal view over live agents", () => {
@@ -36,7 +42,7 @@ describe("peek: the terminal view over live agents", () => {
     const ref = store.refFor("built-in", task).id;
     const taken = acquire(store, ref, "night-shift-1", { token: "tok", now: T0, ttlMs: 60 * 60_000 });
     if (!taken.ok) throw new Error("claim failed");
-    return store.startRun({ taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", role, provider, branch: `standing-orders/${task}`, worktree: `/pool/${task}`, now: T0 });
+    return store.startRun({ taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", role, provider, branch: `standing-orders/${task}`, worktree: `/pool/${task}`, ...bareLegacy("build", provider, null), now: T0 });
   };
 
   test("every provider's stream renders transcript lines: text and the kind of tool, never contents", () => {

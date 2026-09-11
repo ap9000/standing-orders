@@ -159,7 +159,7 @@ import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, age
 import { isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
-import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
+import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus } from "./store.js";
@@ -7161,8 +7161,11 @@ function consentDoorOf(scope: Scope | null, route: RouteView | null | undefined)
   // build/repair parity; the profile as the chain's entry zero; the
   // digest re-derived complete. What the seal would refuse, no surface
   // offers.
-  const authority = scopeAuthorityOf(scope);
+  const authority = scopeAuthorityOf(scope, { authMode: provider => readAuthModeStrict(provider) });
   if (!authority.ok) {
+    if (authority.reason === "auth-mode") {
+      return { open: false, title: "The provider’s auth mode can’t be read", why: `${authority.problem} — restate it, then approve`, road: "agents" };
+    }
     if (authority.reason === "unrouted") {
       return { open: false, title: "This scope predates agent routing", why: "its approval no longer stands, and an approval now must name exactly which agent plans, builds, repairs, and reviews — re-file the scope (edit and save it) to route it under today’s agents, then approve it", road: "scope" };
     }

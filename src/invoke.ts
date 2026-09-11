@@ -18,7 +18,7 @@
  */
 
 import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunner, type AgentEnding } from "./provider.js";
-import { readProviderKey, readAuthMode, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
+import { readProviderKey, readAuthModeStrict, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
 import { classifyTerminal } from "./exhaustion.js";
 import { attestProvider, type VersionProbe } from "./attest.js";
 import { startClaudeHeldSession } from "./exec.js";
@@ -108,7 +108,7 @@ export type InvokeResult =
   | { kind: "ran"; outcome: AgentOutcome }
   | {
       kind: "refused";
-      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody";
+      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody" | "auth-mode";
       providerVersion: string | null;
       diagnostic: string | null;
       /** Bounded agent reply when a spawned turn later failed a protocol
@@ -234,8 +234,26 @@ export async function invokeAgent(
     idleTimeoutMs: _idleTimeout,
     ...runOptions
   } = options;
-  const authMode =
-    run.chainCycle != null && run.authMode != null ? run.authMode : readAuthMode(spec.provider, keyHome);
+  // The live setting is read STRICTLY (atomic authority closure): a
+  // present mode file that says neither word is a value-shaped refusal
+  // before any stamp or process — never the subscription default a
+  // lenient read would coerce it to, which would spend on a credential
+  // the seal never proved. The same reader gates filing and the seal.
+  let authMode: "subscription" | "api-key";
+  if (run.chainCycle != null && run.authMode != null) {
+    authMode = run.authMode;
+  } else {
+    const strict = readAuthModeStrict(spec.provider, keyHome);
+    if (!strict.ok) {
+      return {
+        kind: "refused",
+        reason: "auth-mode",
+        providerVersion: attested === null ? null : attested.version,
+        diagnostic: strict.problem,
+      };
+    }
+    authMode = strict.mode;
+  }
   const ownKeyEnv = OWN_KEY_ENV[spec.provider];
   const managedKey =
     authMode === "api-key"
@@ -582,10 +600,16 @@ export async function invokeHeldAgent(
     );
   }
 
+  // The held road reads the mode STRICTLY too (atomic authority closure),
+  // before the start stamp: a mode file that says neither word throws in
+  // its words — the held road's contract — and no spend is claimed.
+  const heldStrict = readAuthModeStrict("claude", keyHome);
+  if (!heldStrict.ok) throw new Error(`run ${runId}: ${heldStrict.problem}`);
+  const heldMode = heldStrict.mode;
+
   // The stamp precedes the spawn — same direction as the one-shot gateway.
   store.stampProviderStart(runId, clock());
 
-  const heldMode = readAuthMode("claude", keyHome);
   const heldKey =
     heldMode === "api-key" ? readProviderKey("claude", keyHome) ?? (process.env[PROVIDER_KEY_ENV.claude] || null) : null;
   const start = starter ?? startClaudeHeldSession;

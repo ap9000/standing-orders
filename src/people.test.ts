@@ -21,6 +21,12 @@ import { register } from "./runner.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { createDecisionServer } from "./serve.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-08-27T12:00:00.000Z");
 const REPO = "/repos/thing";
 const later = (hours: number) => new Date(T0.getTime() + hours * 60 * 60_000);
@@ -201,7 +207,7 @@ describe("the severing revocation (D7)", () => {
   test("merge blocker lifts are stamps with a name — and the block can recur", () => {
     store.createTask({ id: "t-1", title: "the work" }, T0);
     const ref = store.refFor("built-in", "t-1").id;
-    const run = store.startRun({ taskRef: ref, leaseId: "l-1", runner: "b-1", branch: "b", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "l-1", runner: "b-1", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0 });
     const publication = store.createPublicationIntent(
       { run, taskRef: ref, githubRepo: "alex/thing", remote: "origin", base: "main", head: "b", headSha: "s".repeat(40), bodyHash: "x", draft: false },
       T0,

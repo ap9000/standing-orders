@@ -7,6 +7,7 @@ import {
   dispatchStatusToken,
   foldReview,
   passFraction,
+  blockingCaveats,
   PROOF_LIMITS,
   type AdjudicateInput,
   type AdjudicateResult,
@@ -330,6 +331,75 @@ describe("adjudicate", () => {
   test("a configured command that could not be run at all -> short, not refuted", () => {
     const result = adjudicate({ ...base, verifyCommand: { configured: true, ran: false, attemptFailed: true } });
     expect(result.verdict).toBe("short");
+  });
+
+  // The run 1497 contradictions, pinned (atomic authority closure): that
+  // proof marked c1 and c4 met while its own caveats admitted the
+  // no-scope unstamped row and the routine edge page. A caveat that names
+  // a met criterion's id is a blocking exception — the proof disagrees
+  // with itself and is refuted, whether or not a rubric was signed, and
+  // even when the approved verification command could not run.
+  const run1497 = {
+    c1: "Reviewer, contest, attended, base, resume, repair, and no-scope run admission proves its live request, lane or authorization and exact route or custody in the same transaction as insertion, and no generic or post-insert path can bypass it or leave a row.",
+    c4: "Routine integrity validates exact raw stored terms and build or repair parity before consent or approval and before firing, and any corruption leaves the routine, slot, ledger, task, notification, and next-fire rows unchanged.",
+  };
+  const noScopeCaveat = "c1: A task with no scope still opens an unstamped run when nothing is presented (kept to avoid churn across ~250 fixtures); the spend gate refuses such rows.";
+  const routinePageCaveat = "c4: A corrupt routine SNAPSHOT still pages once at the edge (pre-existing pinned behavior); corrupt raw TERMS write nothing at all, not even a page.";
+  const contradicted = (verdict: "met" | "not-met") =>
+    parse({
+      ...sound,
+      criteria: [
+        { id: "c1", statement: run1497.c1, verdict, how: "startRun proves in its insert." },
+        { id: "c4", statement: run1497.c4, verdict, how: "readRoutine sets termsProblem." },
+      ],
+      caveats: [noScopeCaveat, routinePageCaveat, "Reviewer proofs use an injected stubbed reviewer agent, not a live provider."],
+    });
+
+  test("run 1497 pinned: a met c1 whose caveat admits the no-scope row, and a met c4 whose caveat admits the routine page, refute the proof", () => {
+    const result = adjudicate({ ...base, proofParse: contradicted("met"), diffStat: { captured: true, truncated: false, paths: new Set(["src/x.ts"]) } });
+    expect(result.verdict).toBe("refuted");
+    expect(result.reasons).toEqual([
+      `criterion "c1" is marked met, but caveat 1 admits an exception to it: ${noScopeCaveat}`,
+      `criterion "c4" is marked met, but caveat 2 admits an exception to it: ${routinePageCaveat}`,
+    ]);
+    expect(verdictWords(result.verdict, result.reasons).word).toBe("conflicting evidence");
+  });
+
+  test("run 1497 pinned: the same caveats against not-met criteria are honest — short, never refuted", () => {
+    const result = adjudicate({ ...base, proofParse: contradicted("not-met") });
+    expect(result.verdict).toBe("short");
+    expect(result.reasons.every(one => /is not met/.test(one))).toBe(true);
+  });
+
+  test("a blocking caveat outranks an unavailable verification command and fails the signed row in the matrix", () => {
+    const result = adjudicate({
+      ...base,
+      proofParse: contradicted("met"),
+      approvedCriteria: [
+        { id: "c1", statement: run1497.c1, evidence: [] },
+        { id: "c4", statement: run1497.c4, evidence: [] },
+      ],
+      verifyCommand: { configured: true, ran: false, attemptFailed: true, failure: "spawn-failed" },
+    });
+    expect(result.verdict).toBe("refuted");
+    expect(result.matrix.map(row => [row.id, row.state])).toEqual([
+      ["c1", "failed"],
+      ["c4", "failed"],
+    ]);
+    expect(result.matrix[0]!.detail[0]).toBe(`criterion "c1" is marked met, but caveat 1 admits an exception to it: ${noScopeCaveat}`);
+  });
+
+  test("blockingCaveats names a criterion only by its exact standalone id token", () => {
+    const criteria = [
+      { id: "c1", statement: "s", verdict: "met" as const, how: "h", evidence: [] },
+      { id: "c10", statement: "s", verdict: "met" as const, how: "h", evidence: [] },
+      { id: "c2", statement: "s", verdict: "not-met" as const, how: "h", evidence: [] },
+    ];
+    const named = (caveats: string[]) => blockingCaveats({ criteria, caveats }).map(one => `${one.index}:${one.criterionId}`);
+    expect(named(["c10 still pages once"])).toEqual(["0:c10"]);
+    expect(named(["(c1) kept for churn", "c1,c10 both"])).toEqual(["0:c1", "1:c1", "1:c10"]);
+    expect(named(["c2: honestly not met"])).toEqual([]);
+    expect(named(["ac1 and c1x and c1-ish and c1_ are other words", "The panel does not remember scroll position."])).toEqual([]);
   });
 
   test("a proof with no criteria and no verify command still attests when the diff agrees", () => {

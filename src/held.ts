@@ -125,8 +125,11 @@ export class HeldSessionCoordinator {
       if (live === null || live.closedAt !== null) {
         return { ok: false, reason: "attended-only", message: "the authorization closed before dispatch" };
       }
-      if (live.attemptRun !== null) {
-        return { ok: false, reason: "attended-only", message: "the authorization's one attempt is already spent" };
+      // The one attempt was consumed and bound at ADMISSION (atomic
+      // authority closure): the authorization names this very run, or it
+      // was spent elsewhere and nothing here spawns.
+      if (live.attemptRun !== runId) {
+        return { ok: false, reason: "attended-only", message: live.attemptRun === null ? "the authorization's attempt was never bound to this run at admission" : "the authorization's one attempt is already spent" };
       }
       let terms: SignedTerms;
       try {
@@ -176,9 +179,14 @@ export class HeldSessionCoordinator {
       if (!custody.ok) {
         return { ok: false, reason: custody.reason, message: "this run already holds a session" };
       }
-      if (!store.consumeAuthorization(live.id, runId, clock())) {
-        // Roll the custody insert back with the transaction — a raced
-        // consume must leave NOTHING, not an orphan custody row.
+      // The binding is re-proved in this same transaction: the run row
+      // carries the authorization it was admitted under, and the
+      // authorization still names the run. A disagreement rolls the
+      // custody insert back with the transaction — nothing spawns on a
+      // pair that moved.
+      const bound = store.readAuthorization(live.id);
+      const row = store.getRun(runId);
+      if (bound === null || bound.attemptRun !== runId || row === null || (row.attendedAuthorization ?? null) !== live.id) {
         throw new ConsumeRaced();
       }
       return { ok: true };
@@ -190,7 +198,14 @@ export class HeldSessionCoordinator {
         throw error;
       }
     }
-    if (!proof.ok) return proof;
+    if (!proof.ok) {
+      // The one attempt was spent at ADMISSION (atomic authority closure):
+      // a refusal here cannot un-spend it, so the authorization closes in
+      // the refusal's words rather than standing open-and-spent until its
+      // expiry — the operator sees why, and authorizes again if they wish.
+      store.closeAuthorization(args.authorization.id, `refused:${proof.reason}`, clock());
+      return proof;
+    }
 
     // ---- the brief is turn one, recorded before any byte is written.
     const recorded = store.recordSessionTurn({ run: runId, sourceKind: "brief", text: args.brief, now: clock() });

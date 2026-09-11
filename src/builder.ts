@@ -34,7 +34,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Decision, SteerNote, Store } from "./store.js";
-import { approvalOf, digestOf, profileDigestOf, chainDigestOf, entryDigestOf, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
+import { approvalOf, digestOf, profileDigestOf, chainDigestOf, entryDigestOf, routeParityProblem, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
 import { legOf, routeDigestOf, routeFromJson, type RouteStamp } from "./phase-routing.js";
 import { execFileSync } from "node:child_process";
 import { currentClaim, finalizeRevisionFenced, heartbeat, SYNC_MAX_AGE_MS } from "./claim.js";
@@ -311,7 +311,11 @@ export type BuildRefusal =
   | "chain-custody"
   // The runner gate's spawn leg (MCP spec v6): custody lapsed between the
   // claim and the spawn — same no-spend, no-strike disposal.
-  | "runner-custody";
+  | "runner-custody"
+  // The strict auth-mode read at the spawn (atomic authority closure): a
+  // present mode file that says neither word — no spend, no strike, the
+  // words name the file to restate.
+  | "auth-mode";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
@@ -485,14 +489,13 @@ export function proveApprovedProfile(
       if (route === null) {
         return { ok: false, message: "the approval's sealed agent route cannot be read — re-file and approve again (stale-approval)" };
       }
-      const leg = legOf(route, "build");
-      if (leg.provider !== snapshot.provider || leg.model !== snapshot.model) {
-        return { ok: false, message: `the sealed route builds on ${leg.provider} · ${leg.model} but the sealed profile says ${snapshot.provider} · ${snapshot.model} — re-file and approve again (stale-approval)` };
-      }
-      const repairLeg = legOf(route, "repair");
-      const repairModel = snapshot.repairModel === "inherit" ? snapshot.model : snapshot.repairModel;
-      if (repairLeg.provider !== snapshot.provider || repairLeg.model !== repairModel) {
-        return { ok: false, message: `the sealed route repairs on ${repairLeg.provider} · ${repairLeg.model} but the sealed profile says ${snapshot.provider} · ${repairModel} — re-file and approve again (stale-approval)` };
+      // The ONE parity rule (atomic authority closure): the same function
+      // the seal and the sealed-route reader apply — build and repair legs
+      // against the sealed profile, the route's signed risk and quality
+      // against the row's.
+      const parity = routeParityProblem(route, snapshot, { riskLevel: scope.riskLevel ?? "routine", qualityMode: scope.qualityMode ?? "default" });
+      if (parity !== null) {
+        return { ok: false, message: `${parity} — re-file and approve again (stale-approval)` };
       }
     }
   }
@@ -2613,14 +2616,16 @@ async function ingestPark(args: {
         if (!admitted.ok) return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${admitted.problem}` }] };
         repairRun = admitted.runId;
       } else {
-        repairRun = store.startRun({
+        // THE REPAIR ADMISSION (atomic authority closure): the turn mends
+        // exactly this live build attempt under its own runner and lease —
+        // proved in the store, value-shaped, zero rows on refusal.
+        const admitted = store.admitRepair({
           taskRef: request.taskRef,
           leaseId: request.leaseId ?? "unclaimed",
           runner: request.runner,
           branch: request.branch,
           worktree,
           ...(repairModel === null ? {} : { model: repairModel }),
-          role: "repair",
           // Repair inherits the parent's provider, structurally: the session
           // id it resumes has no meaning anywhere else (Codex review, Q3).
           provider: request.provider ?? "claude",
@@ -2633,6 +2638,8 @@ async function ingestPark(args: {
           // Route provenance for the repair leg, in the admission transaction.
           route: repairStamp,
         });
+        if (!admitted.ok) return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${admitted.problem}` }] };
+        repairRun = admitted.runId;
       }
     } catch (error) {
       return { ok: false, problems: [{ reason: "route-mismatch", message: `the repair cannot run: ${error instanceof Error ? error.message : String(error)}` }] };
@@ -3030,6 +3037,12 @@ function brief(
     "  Target 180 bytes or fewer so you have margin; before you finalize the",
     "  file, measure every caveat string's UTF-8 byte length and shorten any",
     "  that run long.",
+    "  A caveat that admits an exception to a criterion must name that",
+    "  criterion's exact id as a standalone token (for example `c1: …`), and",
+    "  that criterion must then be marked not-met: a criterion marked met",
+    "  while a caveat names it is a blocking caveat — the proof contradicts",
+    "  itself and is refuted whole, never verified. Never name a met",
+    "  criterion's id inside a caveat.",
     "  Screenshot evidence must be a real PNG or JPEG, at least 320 by 200",
     "  pixels, of meaningful byte size — the machine reads the actual file at",
     "  each claimed path, checks its signature and dimensions, and stores it",
@@ -3056,7 +3069,8 @@ function brief(
     "  JSON, and measure every capped string's UTF-8 byte length (for",
     "  example with `node -e` and `Buffer.byteLength`) against the caps",
     "  above; count the list lengths; confirm every evidence ref resolves to",
-    "  an exact entry in checks, changed, or screenshots; and confirm every",
+    "  an exact entry in checks, changed, or screenshots; confirm no caveat",
+    "  names a criterion marked met; and confirm every",
     "  signed criterion is answered by its exact id with its statement",
     "  verbatim. Fix anything short, rewrite through a temporary name, and",
     "  only then end. A file that does not parse, or that breaks one cap, is",

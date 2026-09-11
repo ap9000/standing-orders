@@ -7,6 +7,12 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { sweepMerges, mergeTermsHash, type PublishExec } from "./publish.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-08-21T06:00:00.000Z");
 const REPO = "/repo/main";
 const HEAD = "abc123def4567890";
@@ -78,7 +84,7 @@ describe("the merge grant", () => {
       runner: "builder-1",
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
-      now: T0,
+      ...bareLegacy("build", "claude", null), now: T0,
     });
     publicationId = store.createPublicationIntent(
       {

@@ -16,7 +16,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openStore, openStoreNoMigrate, readSchemaVersion, SCHEMA_VERSION, schemaVersionPreflight, type Database, type Store } from "./store.js";
+import { openStore, openStoreNoMigrate, readSchemaVersion, SCHEMA_VERSION, schemaVersionPreflight, Store, type Database } from "./store.js";
 import { routineAgentsState } from "./routine.js";
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "v47-authentic.sql");
@@ -310,6 +310,61 @@ describe("the schema-version preflight reads exactly one safe supported integer 
     const before = snapshot(file);
     openStore(file).close();
     expect(snapshot(file)).toEqual(before);
+  });
+
+  // Persisted header metadata on an unversioned file (atomic authority
+  // closure): a 4096-byte SQLite file with NO objects in sqlite_master but
+  // a non-default user version, application id, or schema cookie was
+  // shaped by something, and it is not a fresh file this build may expand
+  // to schema 48 — every door refuses it in words and moves nothing.
+  for (const [label, shape, words] of [
+    ["a user version of 77", "PRAGMA user_version = 77", /persisted user version of 77/],
+    ["an application id", "PRAGMA application_id = 1398101071", /persisted application id of 1398101071/],
+    ["a schema cookie left by a created-and-dropped table", "CREATE TABLE gone (id INTEGER); DROP TABLE gone", /persisted schema cookie of \d+/],
+  ] as const) {
+    test(`an unversioned file with empty sqlite_master but ${label} refuses at every door — the bytes are untouched`, () => {
+      dir = mkdtempSync(join(tmpdir(), "so-preflight-"));
+      const file = join(dir, "shaped.db");
+      const raw = new sqlite.DatabaseSync(file);
+      raw.exec(shape);
+      expect(raw.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get()).toEqual({ n: 0 });
+      raw.close();
+      const before = readFileSync(file);
+      expect(before.length).toBeGreaterThan(0);
+      expect(() => openStore(file)).toThrow(words);
+      expect(() => openStore(file)).toThrow(/alters nothing it cannot name/);
+      expect(readFileSync(file).equals(before)).toBe(true);
+      const door = openStoreNoMigrate(file);
+      expect(door).toMatchObject({ ok: false, reason: "version" });
+      if (!door.ok) expect(door.message).toMatch(words);
+      expect(readFileSync(file).equals(before)).toBe(true);
+      const again = new sqlite.DatabaseSync(file);
+      const read = readSchemaVersion(again as never);
+      expect(read).toMatchObject({ ok: false, problem: expect.stringMatching(words) });
+      expect(() => schemaVersionPreflight(again as never, file)).toThrow(words);
+      // The live per-unit-of-work check on a connection to such a file
+      // answers false through the same reader.
+      expect(new Store(again as never).schemaCurrent()).toBe(false);
+      again.close();
+      expect(readFileSync(file).equals(before)).toBe(true);
+      // Still no schema_version table, still nothing in sqlite_master:
+      // the file was never expanded.
+      const check = new sqlite.DatabaseSync(file, { readOnly: true });
+      expect(check.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get()).toEqual({ n: 0 });
+      check.close();
+    });
+  }
+
+  test("a genuinely empty new file, a zero-byte file, and :memory: still open fresh at this build's version", () => {
+    dir = mkdtempSync(join(tmpdir(), "so-preflight-"));
+    const created = new sqlite.DatabaseSync(join(dir, "touched.db"));
+    created.close();
+    for (const file of [join(dir, "touched.db"), join(dir, "never.db"), ":memory:"]) {
+      const store = openStore(file);
+      expect(store.schemaCurrent()).toBe(true);
+      expect(readSchemaVersion(store.raw())).toEqual({ ok: true, version: SCHEMA_VERSION });
+      store.close();
+    }
   });
 
   test("the preflight itself: a fresh file answers null, a supported version answers itself, a mid-flight epoch answers its negative", () => {

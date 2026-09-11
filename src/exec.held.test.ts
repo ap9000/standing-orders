@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startClaudeHeldSession, heldSocketPathProblem, HELD_SOCKET_PATH_LIMIT } from "./exec.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 /**
  * The held transport against REAL processes: a fake agent that speaks just
  * enough stream-json, under the real supervisor.mjs, with the real byte
@@ -234,7 +240,7 @@ describe("the held invocation gateway", () => {
       newLeaseId: () => "lease-gw",
     });
     expect(claimed.ok).toBe(true);
-    const run = store.startRun({ taskRef: ref.id, leaseId: "lease-gw", runner: "w", branch: "b", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: ref.id, leaseId: "lease-gw", runner: "w", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0 });
 
     const calls: Array<{ file: string; args: readonly string[] }> = [];
     const starter = ((file: string, args: readonly string[], options: Record<string, unknown>) => {

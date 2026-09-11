@@ -422,7 +422,12 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     expect(rows()).toBe(1);
     // A repair child of the tail inherits IN its insert; a reviewer child
     // (below, once a chain-bound attempt has finished) does not.
-    const repair = open({ role: "repair", parentRun: base, ...presented(store, ref, "repair") });
+    const repairVia = (taskRef: number, parentRun: number) =>
+      store.admitRepair({ taskRef, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", parentRun, now: T0, ...(presented(store, taskRef, "repair") as { route: import("./phase-routing.js").RouteStamp }) });
+    expect(() => open({ role: "repair", parentRun: base, ...presented(store, ref, "repair") })).toThrow(/a repair turn is admitted by admitRepair/);
+    const repaired = repairVia(ref, base);
+    if (!repaired.ok) throw new Error(repaired.problem);
+    const repair = repaired.runId;
     expect(store.getRun(repair)).toMatchObject({ chainCycle: cycle.id, chainIndex: 0, entryDigest: store.getRun(base)!.entryDigest, authMode: "subscription" });
     // A repair whose parent belongs to ANOTHER task is a caller bug: no row.
     store.createTask({ id: "t-other", title: "w" }, T0);
@@ -430,7 +435,7 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     store.placeTask(other, REPO);
     propose(store, { taskId: "t-other", goal: "elsewhere", now: T0 });
     expect(approve(store, "t-other", "alex", T0, store.getScope("t-other")!.digest, token).ok).toBe(true);
-    expect(() => store.startRun({ taskRef: other, leaseId: "lo", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", role: "repair", parentRun: base, now: T0, ...presented(store, other, "repair") })).toThrow(/a repair turn mends its own task's run only/);
+    expect(repairVia(other, base)).toMatchObject({ ok: false, problem: expect.stringMatching(/a repair run continues its own task's run only/) });
     expect(store.runsFor(other)).toHaveLength(0);
     // PARKED-RESUME: the tail parks; the successor takes custody in its insert.
     store.finishRun(repair, { outcome: "failed", reason: "x", now: T0 });
@@ -601,8 +606,9 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
       run: { taskRef: ref, leaseId: "lr", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel },
       entryDigest: e1.entryDigest, authMode: e1.authMode, repairModel: e1.repairModel, approved: e1.approved, route: repairStamp,
     });
-    expect(() => store.startRun({ taskRef: ref, leaseId: "lr", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, role: "repair", parentRun: admitted.runId, now: T0, route: repairStamp })).toThrow(/admitted only through admitFallback/);
-    expect(() => store.startRun({ taskRef: ref, leaseId: "lr", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, role: "repair", parentRun: admitted.runId, now: T0, ...presented(store, ref, "repair") })).toThrow(/admitted only through admitFallback/);
+    expect(() => store.startRun({ taskRef: ref, leaseId: "lr", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, role: "repair", parentRun: admitted.runId, now: T0, route: repairStamp } as never)).toThrow(/a repair turn is admitted by admitRepair/);
+    expect(store.admitRepair({ taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, parentRun: admitted.runId, now: T0, route: repairStamp })).toMatchObject({ ok: false, problem: expect.stringMatching(/admitted only through admitFallback/) });
+    expect(store.admitRepair({ taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: e1.provider, model: e1.repairModel, parentRun: admitted.runId, now: T0, ...(presented(store, ref, "repair") as { route: import("./phase-routing.js").RouteStamp }) })).toMatchObject({ ok: false, problem: expect.stringMatching(/admitted only through admitFallback/) });
     tailStays();
     const refusedRepair = (over: Partial<Parameters<Store["admitFallback"]>[0]>, words: RegExp) => {
       const result = store.admitFallback({ ...repairFacts(), ...over } as Parameters<Store["admitFallback"]>[0], T0);
@@ -871,10 +877,13 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     // A bounded repair child of the tail spends under the parent's custody —
     // the binding inherited IN its admission (v48 authority repair), presenting the entry's
     // repair authority (the base entry: the sealed repair leg).
-    const repair = store.startRun({
-      taskRef: ref, leaseId: "l-r", runner: "b-1", branch: "b", worktree: "/w",
-      provider: "claude", role: "repair", parentRun: run, now: T0, ...presented(store, ref, "repair"),
+    const tailRow = store.getRun(run)!;
+    const repaired = store.admitRepair({
+      taskRef: ref, leaseId: tailRow.leaseId, runner: tailRow.runner, branch: "b", worktree: "/w",
+      provider: "claude", parentRun: run, now: T0, ...(presented(store, ref, "repair") as { route: import("./phase-routing.js").RouteStamp }),
     });
+    if (!repaired.ok) throw new Error(repaired.problem);
+    const repair = repaired.runId;
     expect(store.getRun(repair)).toMatchObject({ chainCycle: store.getRun(run)!.chainCycle, chainIndex: 0 });
     expect(store.proveChainCustodyForSpawn(repair, T0)).toBe(true);
     // A chain-bound run that is NEITHER the tail nor its repair child

@@ -7,6 +7,12 @@ import { proposeAsCoordinator, PER_CID_PENDING_PROPOSALS } from "./coordinator-p
 import { fileCoordinatorProposal } from "./coordinator.js";
 import { confirmCoordinatorProposal, dismissCoordinatorProposal } from "./mate-doors.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-09-02T12:00:00.000Z");
 const REPO = "/repo/gateway";
 const OTHER = "/repo/elsewhere";
@@ -76,7 +82,7 @@ describe("coordinator proposals (mate arc v3): the gateway proposes, an admitted
   });
 
   test("an answer proposal reads the decision's consequences, never the recommendation, and confirms with the irreversible field", () => {
-    const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0 });
     store.saveDecision(
       { run, urgency: "blocking", recap: "RECAP", question: "Which?", options: [{ id: "x", label: "X", consequence: "cx", reversible: true }, { id: "y", label: "Y", consequence: "cy", reversible: false }], recommendation: "x" },
       T0,

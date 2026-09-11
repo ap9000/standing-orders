@@ -29,8 +29,12 @@ const presented = (
   taskRef: number,
   role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
   bound: { index: number; entryDigest: string } | null = null,
+  spend: { provider: string; model: string | null } = { provider: "claude", model: null },
 ): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
-  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  // A task with no scope presents the bare word `legacy` for the pair it
+  // spends as (atomic authority closure): the default claude pair, or the
+  // exact pair a fixture names.
+  const authority = s.routeAuthorityFor(taskRef, role, bound) ?? s.routeAuthorityFor(taskRef, role, bound, spend);
   return authority === null || !authority.ok ? {} : { route: authority.stamp };
 };
 

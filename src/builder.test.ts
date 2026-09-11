@@ -42,8 +42,12 @@ const presented = (
   taskRef: number,
   role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
   bound: { index: number; entryDigest: string } | null = null,
+  spend: { provider: string; model: string | null } = { provider: "claude", model: null },
 ): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
-  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  // A task with no scope presents the bare word `legacy` for the pair it
+  // spends as (atomic authority closure): the default claude pair, or the
+  // exact pair a fixture names.
+  const authority = s.routeAuthorityFor(taskRef, role, bound) ?? s.routeAuthorityFor(taskRef, role, bound, spend);
   return authority === null || !authority.ok ? {} : { route: authority.stamp };
 };
 
@@ -855,6 +859,20 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("Each caveat has a hard cap of 300 bytes UTF-8");
     expect(prompt).toContain("Target 180 bytes or fewer");
     expect(prompt).toContain("measure every caveat string's UTF-8 byte length");
+  });
+
+  test("the brief states the blocking-caveat contract: a caveat naming a criterion's id is an exception the criterion must be marked not-met for, and the exit preflight checks it (atomic authority closure)", async () => {
+    // Run 1497's proof marked c1 and c4 met while its own caveats admitted
+    // the no-scope row and the routine page; the plane now refutes a
+    // met criterion a caveat names, so the brief must say how a caveat
+    // attaches to a criterion and that the preflight refuses the clash.
+    await build1();
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("A caveat that admits an exception to a criterion must name that");
+    expect(prompt).toContain("criterion must then be marked not-met");
+    expect(prompt).toContain("Never name a met");
+    expect(prompt).toContain("confirm no caveat");
+    expect(prompt).toContain("names a criterion marked met");
   });
 
   test("the brief states EVERY proof and handoff cap the parsers hold the files to, and tells the agent to preflight each protocol file before it exits (raw authority repair)", async () => {

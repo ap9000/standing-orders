@@ -2,7 +2,8 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { openStore, type Store } from "./store.js";
+import { openStore, contestantProfileOf, type Store } from "./store.js";
+import { canonicalProfileJson, profileDigestOf } from "./scope.js";
 import {
   raceDigestOf,
   jointApprovalDigest,
@@ -23,6 +24,12 @@ import { classify } from "./board.js";
 import { acquire, release } from "./claim.js";
 import { register } from "./runner.js";
 import { writeFileSync } from "node:fs";
+
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
 
 const T0 = new Date("2026-08-17T12:00:00.000Z");
 
@@ -190,16 +197,44 @@ describe("contest and contestant state moves are compare-and-swap, generation-bu
     if (first === undefined) throw new Error("setup");
     const ref = store.refFor("built-in", "race-me").id;
     const rows = () => Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run").get() as { n: number }).n);
-    const runOf = (lease: string, over: Record<string, unknown> = {}) =>
-      store.startRun({ taskRef: ref, leaseId: lease, runner: "night-shift-1", branch: "standing-orders/race-me", worktree: "/pool/x", contestant: first, route: store.laneAuthorityFor(first)!, now: T0, ...over } as Parameters<Store["startRun"]>[0]);
-    // No stamp, a foreign digest, or the sealed route's leg instead of the
-    // lane's profile: refused before any row.
+    // THE LANE ADMISSION (atomic authority closure): the contest's live
+    // custody — lease, runner, incarnation — is stamped first, exactly as
+    // admitContest does, and every lane run opens through admitContestLane
+    // under it; a refusal is words and zero rows.
+    const runOf = (lease: string, over: Record<string, unknown> = {}) => {
+      store.stampContestLease(contest, lease, "night-shift-1", null);
+      const admitted = store.admitContestLane({ taskRef: ref, leaseId: lease, runner: "night-shift-1", incarnation: null, branch: "standing-orders/race-me", worktree: "/pool/x", contestant: first, route: store.laneAuthorityFor(first)!, now: T0, ...over } as Parameters<Store["admitContestLane"]>[0]);
+      if (!admitted.ok) throw new Error(admitted.problem);
+      return admitted.runId;
+    };
+    // The generic admission opens nothing on a lane; a foreign digest, the
+    // sealed route's leg instead of the lane's profile, a lane that is not
+    // this task's: refused before any row.
     const before = rows();
-    expect(() => store.startRun({ taskRef: ref, leaseId: "l-0", runner: "night-shift-1", branch: "standing-orders/race-me", worktree: "/pool/x", contestant: first, now: T0 })).toThrow(/a contest lane presents its race-approved profile as its authority — none was presented/);
+    expect(() => store.startRun({ taskRef: ref, leaseId: "l-0", runner: "night-shift-1", branch: "standing-orders/race-me", worktree: "/pool/x", contestant: first, route: store.laneAuthorityFor(first)!, now: T0 } as never)).toThrow(/a contest lane's run is admitted by admitContestLane/);
     expect(() => runOf("l-0", { route: { ...store.laneAuthorityFor(first)!, routeDigest: "profile:" + "0".repeat(32) } })).toThrow(/a contest lane spends under its race-approved profile, not profile:0{32}/);
     expect(() => runOf("l-0", { route: { ...store.laneAuthorityFor(first)!, chosen: "recommended" } })).toThrow(/a contest lane spends under its race-approved profile \(a legacy stamp\)/);
     expect(() => runOf("l-0", { contestant: 9999, route: store.laneAuthorityFor(first)! })).toThrow(/contestant 9999 is not one of this task's racing agents/);
+    // Live contest custody, exactly: a foreign runner, a lease the contest
+    // does not hold, or another watch incarnation opens nothing.
+    expect(() => runOf("l-0", { runner: "other-machine" })).toThrow(/the contest runs on night-shift-1 — a lane run on other-machine is another machine's/);
+    expect(() => runOf("l-0", { leaseId: "l-foreign" })).toThrow(/the contest holds lease l-0 — a lane run under lease l-foreign is not its custody/);
+    expect(() => runOf("l-0", { incarnation: "inc-b" })).toThrow(/the contest was dispatched by watch incarnation none, not inc-b/);
+    // The STORED lane profile, exactly: a lane pinned to bypassPermissions
+    // does not spend under the synthesized auto profile, and a lane whose
+    // stored profile is gone has nothing to present.
+    const laneRow = store.getContestant(first)!;
+    const synthesized = `profile:${profileDigestOf(contestantProfileOf(laneRow.provider, laneRow.model, laneRow.repairModel))}`;
+    store.raw().prepare("UPDATE contestant SET profile_json = ? WHERE id = ?").run(canonicalProfileJson(contestantProfileOf(laneRow.provider, laneRow.model, laneRow.repairModel, "bypassPermissions")), first);
+    expect(store.laneAuthorityFor(first)!.routeDigest).not.toBe(synthesized);
+    expect(() => runOf("l-0", { route: { ...store.laneAuthorityFor(first)!, routeDigest: synthesized } })).toThrow(/a contest lane spends under its race-approved profile, not profile:/);
+    const pinnedStamp = store.laneAuthorityFor(first)!;
+    store.raw().prepare("UPDATE contestant SET profile_json = NULL WHERE id = ?").run(first);
+    expect(store.laneAuthorityFor(first)).toBeNull();
+    expect(() => runOf("l-0", { route: pinnedStamp })).toThrow(/carries no sealed profile — nothing spends on the lane/);
+    store.raw().prepare("UPDATE contestant SET profile_json = ? WHERE id = ?").run(canonicalProfileJson(laneRow.profile!), first);
     expect(rows()).toBe(before);
+    expect(store.getContestant(first)).toMatchObject({ activeRun: null, generation: 1 });
     const runA = runOf("l-a");
     expect(store.getContestant(first)).toMatchObject({ activeRun: runA, generation: 2 });
     // The lane is held: a second admission refuses, no row.
@@ -248,7 +283,7 @@ describe("worker-process slots and durable ceremony nonces", () => {
   test("a slot's whole life: reserved before spawn, running with its process group, released on exit", () => {
     store.createTask({ id: "slot-task", title: "work" }, T0);
     const ref = store.refFor("built-in", "slot-task", "ours").id;
-    const run = store.startRun({ taskRef: ref, leaseId: "l-slot", runner: "night-shift-1", branch: "b", worktree: "/pool/s", now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "l-slot", runner: "night-shift-1", branch: "b", worktree: "/pool/s", ...bareLegacy("build", "claude", null), now: T0 });
     const [slot] = store.reserveExecutionSlots("night-shift-1", 1, T0);
     if (slot === undefined) throw new Error("setup");
     expect(store.liveSlotCount("night-shift-1")).toBe(1);
@@ -442,7 +477,7 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
     const { taskRef, leaseId, contestId, slotIds } = raceToRacing(store);
     const [first, second] = store.contestants(contestId);
     if (first === undefined || second === undefined) throw new Error("setup");
-    const run = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: first.branch, worktree: "/pool/c1", now: T0 });
+    const run = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: first.branch, worktree: "/pool/c1", ...bareLegacy("build", "claude", null), now: T0 });
     const one = finalizeContestant(
       store,
       { contestId, contestantId: first.id, runId: run, outcome: "built", measuredMicrousd: 900_000, slotId: slotIds[0] ?? null },
@@ -452,7 +487,7 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
     expect(store.liveClaimByLease(leaseId, T0)).not.toBeNull(); // THE claim survives
     expect(store.getContest(contestId)?.state).toBe("racing");
     // The second finishes: NOW the boundary crosses, once.
-    const run2 = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: second.branch, worktree: "/pool/c2", now: T0 });
+    const run2 = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: second.branch, worktree: "/pool/c2", ...bareLegacy("build", "claude", null), now: T0 });
     const two = finalizeContestant(
       store,
       { contestId, contestantId: second.id, runId: run2, outcome: "failed", measuredMicrousd: 300_000, slotId: slotIds[1] ?? null },
@@ -475,7 +510,7 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
     const { taskRef, leaseId, contestId, slotIds } = raceToRacing(store);
     const agents = store.contestants(contestId);
     for (const [index, agent] of agents.entries()) {
-      const run = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: agent.branch, worktree: `/pool/c${index}`, now: T0 });
+      const run = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: agent.branch, worktree: `/pool/c${index}`, ...bareLegacy("build", "claude", null), now: T0 });
       finalizeContestant(
         store,
         { contestId, contestantId: agent.id, runId: run, outcome: "failed", measuredMicrousd: null, slotId: slotIds[index] ?? null },
@@ -499,7 +534,9 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
     const [first] = store.contestants(contestId);
     if (first === undefined) throw new Error("setup");
     // One agent actually started (run with provider start); the other never did.
-    const run = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: first.branch, worktree: "/pool/c1", contestant: first.id, route: store.laneAuthorityFor(first.id)!, now: T0 });
+    const laneAdmitted = store.admitContestLane({ taskRef, leaseId, runner: "night-shift-1", incarnation: null, branch: first.branch, worktree: "/pool/c1", contestant: first.id, route: store.laneAuthorityFor(first.id)!, now: T0 });
+    if (!laneAdmitted.ok) throw new Error(laneAdmitted.problem);
+    const run = laneAdmitted.runId;
     store.stampProviderStart(run, T0);
     release(store, leaseId, T0); // the daemon died; the reaper let go
     expect(recoverContests(store, T0)).toBe(1);
@@ -897,7 +934,10 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
       { provider: "claude", model: "claude-haiku-4-5", repairModel: "claude-haiku-4-5", branch: "b2", budgetMicrousd: 5_000_000, reserveMicrousd: 1_000_000 },
     ]);
     // c2 already built; c1 parked with an open question → decision-wait.
-    const run1 = store.startRun({ taskRef, leaseId: "l1", runner: "r", branch: "b1", worktree: "/p/1", contestant: ids[0], route: store.laneAuthorityFor(ids[0])!, now: T0 });
+    store.stampContestLease(contest, "l1", "r", null);
+    const lane1 = store.admitContestLane({ taskRef, leaseId: "l1", runner: "r", incarnation: null, branch: "b1", worktree: "/p/1", contestant: ids[0]!, route: store.laneAuthorityFor(ids[0]!)!, now: T0 });
+    if (!lane1.ok) throw new Error(lane1.problem);
+    const run1 = lane1.runId;
     store.saveDecision(
       { run: run1, contestant: ids[0], urgency: "blocking", recap: "r", question: "q?", options: [{ id: "a", label: "A", consequence: "c", reversible: true }], recommendation: "a" },
       T0,
@@ -1079,10 +1119,11 @@ describe("stage 5 — pickability, the tuple digest, and the pick/abandon ceremo
       evidence?: "ok" | "failed-capture" | "none";
     },
   ) => {
-    const runId = store.startRun({
+    const laneAdmitted = store.admitContestLane({
       taskRef: race.taskRef,
       leaseId: race.leaseId,
       runner: "night-shift-1",
+      incarnation: null,
       branch: contestant.branch,
       worktree: `/pool/${contestant.id}`,
       contestant: contestant.id,
@@ -1091,6 +1132,8 @@ describe("stage 5 — pickability, the tuple digest, and the pick/abandon ceremo
       route: store.laneAuthorityFor(contestant.id)!,
       now: T0,
     });
+    if (!laneAdmitted.ok) throw new Error(laneAdmitted.problem);
+    const runId = laneAdmitted.runId;
     if (spec.evidence !== "none") {
       const failed = spec.evidence === "failed-capture";
       storeEvidence(store, root, runId, "terminal-diff", "terminal-diff.patch",

@@ -11,6 +11,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openStore, rebuildArtifactForV46, SCHEMA_VERSION, type Store } from "./store.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const V45_ARTIFACT = `CREATE TABLE artifact (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
@@ -50,7 +56,7 @@ describe("schema v46: structured output attempts are evidence", () => {
       runner: "r",
       branch: "b",
       worktree: "/w",
-      now: new Date("2026-09-10T00:00:00.000Z"),
+      ...bareLegacy("build", "claude", null), now: new Date("2026-09-10T00:00:00.000Z"),
     });
     const first = store.saveArtifact(
       {

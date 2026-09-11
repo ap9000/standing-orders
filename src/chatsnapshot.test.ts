@@ -3,6 +3,12 @@ import { openStore, type Store } from "./store.js";
 import { buildDataDocument } from "./converse.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-08-14T12:00:00.000Z");
 const INSIDE = "/repo/inside";
 const OUTSIDE = "/repo/outside-SECRET-PATH";
@@ -35,7 +41,7 @@ describe("the chat snapshot", () => {
         runner: "runner-1",
         branch: `standing-orders/${task}`,
         worktree: `/pool/${task}`,
-        now: T0,
+        ...bareLegacy("build", "claude", null), now: T0,
       });
     const inRun = run("in-1", "l-in");
     store.saveDecision(

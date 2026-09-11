@@ -8,6 +8,12 @@ import { register } from "./runner.js";
 import { WorktreePool, worktreePath, type Runner } from "./worktree.js";
 import { run } from "./exec.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
@@ -443,7 +449,7 @@ describe("the pool, against real git", () => {
       runner: "builder-1",
       branch: "feat/resume",
       worktree: first.worktree.path,
-      now: T0,
+      ...bareLegacy("build", "claude", null), now: T0,
     });
     await writeFile(join(first.worktree.path, "README.md"), "hello\ncompleted draft\n");
     await writeFile(join(first.worktree.path, "new-file.ts"), "export const recovered = true;\n");
@@ -472,15 +478,20 @@ describe("the pool, against real git", () => {
     // The fresh attempt quarantines the old nonce, then an infrastructure
     // failure must still preserve the inherited draft for attempt three.
     await rm(join(resumed.worktree.path, "STANDING-ORDERS-DONE-0123456789abcdef.json"));
-    const reviewRun = store.startRun({
+    // The recovered draft's lineage rides its own admission (atomic
+    // authority closure): the interrupted attempt in this very worktree.
+    const recovered = store.admitRecoveredBuilder({
       taskRef: ref,
       leaseId: "review-lease",
       runner: "builder-1",
       branch: "feat/resume",
       worktree: resumed.worktree.path,
-      parentRun: runId,
-      now: later(3_100),
+      provider: "claude",
+      recoveredFrom: runId,
+      ...bareLegacy("build", "claude", null), now: later(3_100),
     });
+    if (!recovered.ok) throw new Error(recovered.problem);
+    const reviewRun = recovered.runId;
     await writeFile(join(resumed.worktree.path, "review-note.ts"), "export const reviewed = true;\n");
     store.finishRun(reviewRun, { outcome: "failed", reason: "provider-init", now: later(3_200) });
     expect(await pool.release(resumed.worktree.path, later(3_300))).toMatchObject({ ok: false, reason: "dirty" });
@@ -507,7 +518,7 @@ describe("the pool, against real git", () => {
     const first = await pool.lease({ repo, branch: "feat/partial", base: "main", runner: "builder-1", taskRef: ref, now: T0 });
     expect(first.ok).toBe(true);
     if (!first.ok) return;
-    const runId = store.startRun({ taskRef: ref, leaseId: "partial-lease", runner: "builder-1", branch: "feat/partial", worktree: first.worktree.path, now: T0 });
+    const runId = store.startRun({ taskRef: ref, leaseId: "partial-lease", runner: "builder-1", branch: "feat/partial", worktree: first.worktree.path, ...bareLegacy("build", "claude", null), now: T0 });
     await writeFile(join(first.worktree.path, "partial.ts"), "export const halfDone = true;\n");
     expect(await pool.release(first.worktree.path, later(2_000))).toMatchObject({ ok: false, reason: "dirty" });
 
@@ -538,7 +549,7 @@ describe("the pool, against real git", () => {
     const first = await pool.lease({ repo, branch: "feat/late", base: "main", runner: "builder-1", taskRef: ref, now: T0 });
     expect(first.ok).toBe(true);
     if (!first.ok) return;
-    const runId = store.startRun({ taskRef: ref, leaseId: "late-lease", runner: "builder-1", branch: "feat/late", worktree: first.worktree.path, now: T0 });
+    const runId = store.startRun({ taskRef: ref, leaseId: "late-lease", runner: "builder-1", branch: "feat/late", worktree: first.worktree.path, ...bareLegacy("build", "claude", null), now: T0 });
     expect(await pool.release(first.worktree.path, later(1_000))).toMatchObject({ ok: true });
     expect(store.getWorktree(first.worktree.path)?.verified).toBe(true);
 

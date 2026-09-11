@@ -11,6 +11,12 @@ import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
 import { register } from "./runner.js";
 import { acquire, release } from "./claim.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-08-23T05:00:00Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
 const BUILT_IN = "built-in";
@@ -38,7 +44,7 @@ const openRun = (leaseId: string, at: Date = T0): number =>
     branch: "standing-orders/t-1",
     worktree: "/w",
     provider: "claude",
-    now: at,
+    ...bareLegacy("build", "claude", null), now: at,
   });
 
 const claimIt = (at: Date, lease: string, ttlMs = 60 * 60_000) => {

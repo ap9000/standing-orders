@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gitBlobSha1, looksBinary, diffLines, renderUnified } from "./peek.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 describe("the native reader's pure core (attended finding 7)", () => {
   test("gitBlobSha1 agrees with git hash-object, byte for byte", () => {
     const dir = mkdtempSync(join(tmpdir(), "peek-sha-"));
@@ -375,7 +381,7 @@ describe("the v17 migration", () => {
       let store = openStore(file);
       store.createTask({ id: "held", title: "held" }, new Date("2026-08-17T00:00:00Z"));
       const taskRef = store.refFor("built-in", "held", "ours").id;
-      const runId = store.startRun({ taskRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: new Date("2026-08-17T00:00:00Z") });
+      const runId = store.startRun({ taskRef, leaseId: "l", runner: "r", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: new Date("2026-08-17T00:00:00Z") });
       store.saveArtifact(
         { run: runId, kind: "diff", key: "k", bytesOriginal: 1, bytesStored: 1, truncated: false, sha256: "s", capture: "c", captureStatus: "ok" },
         new Date("2026-08-17T00:00:00Z"),

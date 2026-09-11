@@ -21,6 +21,12 @@ import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 import { runOperate } from "./operate.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const RUBRIC: AcceptanceCriterion[] = [{ id: "c1", statement: "the change is reviewed", how: null, evidence: ["manual-review"] }];
 
 
@@ -198,7 +204,7 @@ function seedRun(store: Store): number {
   store.createTask({ id: "t-x", title: "source" }, T0);
   const ref = store.refFor("built-in", "t-x").id;
   store.placeTask(ref, REPO);
-  const run = store.startRun({ taskRef: ref, leaseId: "l-x", runner: "b-1", branch: "b", worktree: "/w", now: T0 });
+  const run = store.startRun({ taskRef: ref, leaseId: "l-x", runner: "b-1", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0 });
   return run;
 }
 

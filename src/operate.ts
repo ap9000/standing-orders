@@ -190,7 +190,7 @@ import { attachTmux, elapsedWords, openInTmux, PEEK_TAIL_LINES, runPeek, snapsho
 import { scout as scoutTask } from "./scout.js";
 import { profileDigestOf, chainDigestOf, entryDigestOf } from "./scope.js";
 import { reviewPass } from "./reviewer.js";
-import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
+import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, readAuthModeStrict, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import { run, terminateLiveProviders, run as execRun } from "./exec.js";
 import { readPulls } from "./pulls.js";
 import { beads } from "./beads.js";
@@ -1692,6 +1692,14 @@ async function buildCommand(
     await worktrees.release(leased.worktree.path, now);
     return fail(write, json, "build", "admission-refused", `${id}: ${authority.problem}`, EXIT.refused);
   }
+  // The auth mode, strictly, before any row (atomic authority closure):
+  // the standalone road opens nothing under a mode file that says
+  // neither word — the same reader every other door uses.
+  const standaloneMode = readAuthModeStrict(authority === null ? "claude" : (authority.stamp.provider as ProviderId));
+  if (!standaloneMode.ok) {
+    await worktrees.release(leased.worktree.path, now);
+    return fail(write, json, "build", "auth-mode", `${id}: ${standaloneMode.problem}`, EXIT.refused);
+  }
   let runId: number;
   try {
     runId = store.startRun({
@@ -2060,28 +2068,32 @@ async function tickCommand(
         resumed.push({ id: taskId, outcome: "failed", reason: "admission-refused", detail: `contestant ${racer.id} is gone` });
         continue;
       }
-      let resumeRun: number;
-      try {
-        resumeRun = store.startRun({
-          taskRef: waiting.taskRef,
-          leaseId: reclaimed.claim.leaseId,
-          runner,
-          branch: racer.branch,
-          worktree: leased.worktree.path,
-          provider: racer.provider,
-          model: racer.model,
-          contestant: racer.id,
-          ...(parkedRun === null ? {} : { parentRun: parkedRun }),
-          now: clock(),
-          route: laneStamp,
-        });
-      } catch (error) {
+      // THE LANE ADMISSION (atomic authority closure): the resume opens on
+      // the lane under the contest's live custody — this lease, this
+      // runner, this watch incarnation, stamped on the contest just above
+      // — presenting the lane's stored sealed profile; value-shaped.
+      const admittedResume = store.admitContestLane({
+        taskRef: waiting.taskRef,
+        leaseId: reclaimed.claim.leaseId,
+        runner,
+        incarnation: text(flags, "incarnation") ?? null,
+        branch: racer.branch,
+        worktree: leased.worktree.path,
+        provider: racer.provider,
+        model: racer.model,
+        contestant: racer.id,
+        ...(parkedRun === null ? {} : { parentRun: parkedRun }),
+        now: clock(),
+        route: laneStamp,
+      });
+      if (!admittedResume.ok) {
         await worktrees.release(leased.worktree.path, clock());
         release(store, reclaimed.claim.leaseId, clock());
         backToParked();
-        resumed.push({ id: taskId, outcome: "failed", reason: "admission-refused", detail: error instanceof Error ? error.message : String(error) });
+        resumed.push({ id: taskId, outcome: "failed", reason: "admission-refused", detail: admittedResume.problem });
         continue;
       }
+      const resumeRun = admittedResume.runId;
       // The lane's pointer moved to the resume INSIDE its admission (raw
       // authority repair): from the parked attempt it continues, proved
       // there — no release-then-claim window exists any more.
@@ -2443,6 +2455,17 @@ async function tickCommand(
       continue;
     }
     const spec = resolution === null ? (attendedSpec as { provider: ProviderId; model: string | null }) : resolution.spec;
+    // THE AUTH MODE, strictly, before any claim or row (atomic authority
+    // closure): a present mode file for the provider this pass would spend
+    // as that says neither word is a stated problem — the same reader the
+    // filing, the seal, and the spawn use — and the task is skipped in
+    // words with nothing opened, never dispatched to be refused later.
+    const modeProviders: ProviderId[] = racedAhead !== null ? racedAhead.agents.filter(agent => isProviderId(agent.provider)).map(agent => agent.provider as ProviderId) : [spec.provider];
+    const brokenMode = [...new Set(modeProviders)].map(one => readAuthModeStrict(one)).find(one => !one.ok);
+    if (brokenMode !== undefined && !brokenMode.ok) {
+      dispatched.push({ id, outcome: "skipped", reason: "auth-mode", detail: brokenMode.problem });
+      continue;
+    }
     // The leg is the authority: what resolved must BE the leg, exactly —
     // the sealed build leg, or the parked fallback entry's own pair.
     const governingLeg = wantsPlan ? planLeg : parkedEntry !== null ? { provider: parkedEntry.provider, model: parkedEntry.model, chosen: "fallback" as const } : sealedBuildLeg;
@@ -2697,24 +2720,30 @@ async function tickCommand(
         // race-approved profile it will be proved against, exactly — the
         // store's own answer, re-proved and bound to the lane there.
         const laneStamp = store.laneAuthorityFor(agent.id);
-        let contestantRun: number;
-        try {
-          contestantRun = store.startRun({
-            taskRef: ref.id,
-            leaseId: lease,
-            runner,
-            branch: agent.branch,
-            worktree: leased.worktree.path,
-            provider: agent.provider,
-            model: agent.model,
-            contestant: agent.id,
-            now: clock(),
-            ...(laneStamp === null ? {} : { route: laneStamp }),
-          });
-        } catch {
+        if (laneStamp === null) {
           prepFailed = true;
           break;
         }
+        // THE LANE ADMISSION (atomic authority closure): under the custody
+        // admitContest stamped — this lease, runner, and incarnation.
+        const admittedLane = store.admitContestLane({
+          taskRef: ref.id,
+          leaseId: lease,
+          runner,
+          incarnation: text(flags, "incarnation") ?? null,
+          branch: agent.branch,
+          worktree: leased.worktree.path,
+          provider: agent.provider,
+          model: agent.model,
+          contestant: agent.id,
+          now: clock(),
+          route: laneStamp,
+        });
+        if (!admittedLane.ok) {
+          prepFailed = true;
+          break;
+        }
+        const contestantRun = admittedLane.runId;
         // The lane's pointer was bound inside the insert above (raw
         // authority repair); nothing claims it after the fact.
         prepared.push({
@@ -3194,6 +3223,46 @@ async function tickCommand(
         );
         if (!admitted.ok) throw new Error(admitted.problem);
         runId = admitted.runId;
+      } else if (attendedDispatch !== null && attendedSpec !== null) {
+        // THE ATTENDED ADMISSION (atomic authority closure): the one
+        // watched attempt opens under exactly this authorization — named
+        // by id, runner, and generation — and the insert consumes its
+        // attempt and binds the row to it in one transaction.
+        if (buildStamp === null) throw new Error(`${id}: the attended authorization's pinned profile presents no build authority`);
+        const admittedAttended = store.admitAttended({
+          taskRef: ref.id,
+          leaseId: lease,
+          runner,
+          branch,
+          worktree: leased.worktree.path,
+          provider: spec.provider,
+          ...(spec.model === null ? {} : { model: spec.model }),
+          authorization: { id: attendedDispatch.id, runner: attendedDispatch.runner, generation: attendedDispatch.runnerGeneration },
+          now: clock(),
+          route: buildStamp,
+        });
+        if (!admittedAttended.ok) throw new Error(admittedAttended.problem);
+        runId = admittedAttended.runId;
+      } else if (leased.resumedFromRun !== undefined) {
+        // THE RECOVERED-DRAFT ADMISSION (atomic authority closure): the
+        // fresh attempt inherits the interrupted attempt's draft, proved
+        // this task's own interrupted builder in this very worktree.
+        if (buildStamp === null) throw new Error(`${id}: the recovered attempt presents no build authority`);
+        const admittedRecovered = store.admitRecoveredBuilder({
+          taskRef: ref.id,
+          leaseId: lease,
+          runner,
+          branch,
+          worktree: leased.worktree.path,
+          provider: spec.provider,
+          ...(spec.model === null ? {} : { model: spec.model }),
+          recoveredFrom: leased.resumedFromRun,
+          now: clock(),
+          route: buildStamp,
+          custody: parkedChainTail !== null && liveCycle !== null ? { kind: "resume" as const, parkedRun: parkedChainTail.id } : { kind: "base" as const },
+        });
+        if (!admittedRecovered.ok) throw new Error(admittedRecovered.problem);
+        runId = admittedRecovered.runId;
       } else {
         runId = store.startRun({
           taskRef: ref.id,
@@ -3203,14 +3272,9 @@ async function tickCommand(
           worktree: leased.worktree.path,
           provider: spec.provider,
           ...(spec.model === null ? {} : { model: spec.model }),
-          // The recovered draft's lineage rides the insert (raw authority
-          // repair) — proved this task's own run there, never stamped later.
-          ...(leased.resumedFromRun === undefined ? {} : { parentRun: leased.resumedFromRun }),
           now: clock(),
           ...(buildStamp === null ? {} : { route: buildStamp }),
-          ...(attendedSpec !== null
-            ? {}
-            : { custody: parkedChainTail !== null && liveCycle !== null ? { kind: "resume" as const, parkedRun: parkedChainTail.id } : { kind: "base" as const } }),
+          custody: parkedChainTail !== null && liveCycle !== null ? { kind: "resume" as const, parkedRun: parkedChainTail.id } : { kind: "base" as const },
         });
       }
     } catch (error) {
@@ -3625,26 +3689,30 @@ async function tickCommand(
       }
       // The continuation spends under the authorization's pinned profile
       // and says so at insert (v48 integrity).
-      let runId: number;
-      try {
-        runId = store.startRun({
-          taskRef: parent.taskRef,
-          leaseId: lease,
-          runner,
-          branch: parentBranch,
-          worktree: leased.worktree.path,
-          parentRun: parent.id,
-          provider: pinned.provider,
-          ...(pinned.model === null ? {} : { model: pinned.model }),
-          now: clock(),
-          route: { routeDigest: `profile:${pinned.digest}`, phase: "build", provider: pinned.provider, model: pinned.model, chosen: "legacy" },
-        });
-      } catch (error) {
+      // THE ATTENDED ADMISSION (atomic authority closure): the continuation
+      // opens under exactly this authorization — id, runner, generation —
+      // continuing the finished parent it names; the insert consumes the
+      // one attempt and binds the row to it.
+      const admittedContinuation = store.admitAttended({
+        taskRef: parent.taskRef,
+        leaseId: lease,
+        runner,
+        branch: parentBranch,
+        worktree: leased.worktree.path,
+        parentRun: parent.id,
+        provider: pinned.provider,
+        ...(pinned.model === null ? {} : { model: pinned.model }),
+        authorization: { id: continuation.id, runner: continuation.runner, generation: continuation.runnerGeneration },
+        now: clock(),
+        route: { routeDigest: `profile:${pinned.digest}`, phase: "build", provider: pinned.provider, model: pinned.model, chosen: "legacy" },
+      });
+      if (!admittedContinuation.ok) {
         await worktrees.release(leased.worktree.path, clock());
         release(store, lease, clock());
-        dispatched.push({ id: taskId, outcome: "skipped", reason: "admission-refused", detail: error instanceof Error ? error.message : String(error) });
+        dispatched.push({ id: taskId, outcome: "skipped", reason: "admission-refused", detail: admittedContinuation.problem });
         continue;
       }
+      const runId = admittedContinuation.runId;
       const result = await build(store, {
         taskId,
         taskRef: parent.taskRef,

@@ -8,7 +8,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, BUILT_IN, type Store } from "./store.js";
 import { addApprover, approvalOf } from "./scope.js";
-import { legOf, recommendRoute, routeDigestOf, type PhaseRoute } from "./phase-routing.js";
+import { canonicalRouteJson, legOf, recommendRoute, routeDigestOf, type PhaseRoute } from "./phase-routing.js";
 import {
   approveRoutine,
   describeSchedule,
@@ -36,8 +36,12 @@ const presented = (
   taskRef: number,
   role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
   bound: { index: number; entryDigest: string } | null = null,
+  spend: { provider: string; model: string | null } = { provider: "claude", model: null },
 ): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
-  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  // A task with no scope presents the bare word `legacy` for the pair it
+  // spends as (atomic authority closure): the default claude pair, or the
+  // exact pair a fixture names.
+  const authority = s.routeAuthorityFor(taskRef, role, bound) ?? s.routeAuthorityFor(taskRef, role, bound, spend);
   return authority === null || !authority.ok ? {} : { route: authority.stamp };
 };
 
@@ -326,11 +330,14 @@ describe("firing, inside one proving transaction", () => {
     const parity = fireRoutine(store, routineId, later(HOUR));
     expect(parity.ok).toBe(false);
     expect(store.listTasks()).toHaveLength(0);
-    // Corrupt snapshot bytes: fail closed in their own words, paged once.
+    // Corrupt snapshot bytes: fail closed in their own words, and NOTHING
+    // written — not even a page (atomic authority closure): corruption is
+    // not a state a person is asked to act on from the pager; the routine
+    // page says it in words.
     store.raw().prepare("UPDATE routine SET approved_route_json = '{\"version\":1' WHERE id = ?").run(routineId);
     expect(routineAgentsState(store.getRoutine(routineId)!)).toMatchObject({ state: "unreadable", approvable: false, refresh: true });
     expect(fireRoutine(store, routineId, later(HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("cannot be read") });
-    expect(pages()).toBe(1);
+    expect(pages()).toBe(0);
     // Restore the true snapshot; the firing seals, and the instance's
     // sealed route IS the frozen one. Then prove the rollback road: a
     // firing whose instance seal is refused leaves NO instance, NO ledger
@@ -561,25 +568,24 @@ describe("firing, inside one proving transaction", () => {
     expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: true, live: false, agents: { state: "unreadable" } });
     const corruptRow = store.raw().prepare("SELECT * FROM routine WHERE id = ?").get(routineId);
     // Scheduled: refused as not-live — not slot-taken, not single-flight —
-    // and the ONLY write is the once-per-episode page at the edge.
+    // and NOTHING is written, not even a page (atomic authority closure):
+    // a corrupt frozen snapshot is zero-write on the scheduled road too.
     const refused = fireRoutine(store, routineId, later(2 * HOUR));
     expect(refused).toMatchObject({ ok: false, reason: "route-unfrozen" });
     expect(store.routineFires(routineId)).toEqual(before.fires);
     expect(store.listTasks().map(one => one.id)).toEqual(before.tasks);
     expect(store.getRoutine(routineId)!.nextFireAt).toBe(before.nextFireAt);
     expect(store.raw().prepare("SELECT * FROM routine WHERE id = ?").get(routineId)).toEqual(corruptRow);
-    const pages = store.listNotifications("all").filter(one => one.kind === "routine-blocked");
-    expect(pages).toHaveLength(1);
-    expect(pages[0]?.dedupeKey).toMatch(new RegExp(`^routine-route:${routineId}:`));
-    expect(pages[0]?.subject).toContain("cannot be read");
-    // Again: still nothing, and no second page.
+    expect(store.listNotifications("all").filter(one => one.kind === "routine-blocked")).toHaveLength(0);
+    expect(store.listNotifications("all").length).toBe(before.notifications);
+    // Again: still nothing.
     expect(fireRoutine(store, routineId, later(3 * HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen" });
     expect(store.routineFires(routineId)).toEqual(before.fires);
-    expect(store.listNotifications("all").length).toBe(before.notifications + 1);
+    expect(store.listNotifications("all").length).toBe(before.notifications);
     // Manual: the refusal to the person's face, and NOTHING written — not a page.
     const manual = fireRoutine(store, routineId, later(3 * HOUR), { manual: true });
     expect(manual).toMatchObject({ ok: false, reason: "route-unfrozen" });
-    expect(store.listNotifications("all").length).toBe(before.notifications + 1);
+    expect(store.listNotifications("all").length).toBe(before.notifications);
     expect(store.raw().prepare("SELECT * FROM routine WHERE id = ?").get(routineId)).toEqual(corruptRow);
     // Consent and approval read the same projection: no yes lands on it.
     expect(routineAgentsState(store.getRoutine(routineId)!)).toMatchObject({ approvable: false, refresh: true });
@@ -638,6 +644,122 @@ describe("firing, inside one proving transaction", () => {
     restore();
     expect(store.getRoutine(routineId)!.termsProblem).toBeNull();
     expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: true, live: true });
+  });
+
+  test("routine-parity (atomic authority closure): a PENDING profile of claude · sonnet beside a rehashed route that builds on codex is not approvable — no yes, no refresh rewrite, nothing written", () => {
+    // The reproduction: the working columns were rehashed so the digest
+    // re-derives, but the route's build and repair legs name another
+    // agent than the profile. Before this closure only the APPROVED pair
+    // was held to parity; the yes could land on a pending pair that
+    // disagreed.
+    const raw = store.raw();
+    const codexRoute: PhaseRoute = {
+      ...V48_ROUTE,
+      legs: V48_ROUTE.legs.map(leg => (leg.phase === "build" || leg.phase === "repair" ? { ...leg, provider: "codex" as const, model: "gpt-5.6-sol", recommended: { ...leg.recommended, provider: "codex" as const, model: "gpt-5.6-sol" } } : leg)),
+    };
+    const rehashed = routineDigestOf(TERMS, V24_PROFILE, codexRoute);
+    raw.prepare("UPDATE routine SET route_json = ?, digest = ? WHERE id = ?").run(canonicalRouteJson(codexRoute), rehashed, routineId);
+    const before = {
+      row: raw.prepare("SELECT * FROM routine WHERE id = ?").get(routineId),
+      notifications: store.listNotifications("all").length,
+    };
+    const routine = store.getRoutine(routineId)!;
+    expect(routine.termsProblem).toBeNull();
+    expect(routineDigestOf(termsOf(routine), routine.profile, routine.route)).toBe(routine.digest);
+    const integrity = routineIntegrity(routine);
+    expect(integrity).toMatchObject({ approved: false, live: false, agents: { state: "unverified", approvable: false } });
+    expect(integrity.agents.problem).toMatch(/filed agents \(claude · sonnet, repair claude · sonnet\) disagree with the filed route \(codex · gpt-5.6-sol, repair codex · gpt-5.6-sol\)/);
+    expect(approveRoutine(store, routineId, "alex", T0, routine.digest, token)).toMatchObject({ ok: false, reason: "changed" });
+    for (const manual of [false, true]) {
+      expect(fireRoutine(store, routineId, later(2 * HOUR), { manual })).toMatchObject({ ok: false, reason: "not-approved" });
+    }
+    expect(raw.prepare("SELECT * FROM routine WHERE id = ?").get(routineId)).toEqual(before.row);
+    expect(store.routineFires(routineId)).toHaveLength(0);
+    expect(store.listTasks()).toHaveLength(0);
+    expect(store.listNotifications("all").length).toBe(before.notifications);
+    // The recovery road re-files the agents from configuration; under
+    // parity the pair agrees again and the yes lands.
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
+    expect(refreshRoutineAgents(store, routineId, later(HOUR))).toMatchObject({ ok: true, changed: true });
+    expect(routineIntegrity(store.getRoutine(routineId)!).agents).toMatchObject({ state: "pending", approvable: true });
+  });
+
+  test("routine-semantics (atomic authority closure): rehashed terms this code never files — single_flight 0, a −1 cost ceiling, a zero per-run budget, an unparseable schedule — are not approvable, not live, not refreshable, and scheduled or manual firings write nothing, not even a page", () => {
+    approve(routineId);
+    expect(fireRoutine(store, routineId, later(HOUR)).ok).toBe(true);
+    const raw = store.raw();
+    const sound = raw.prepare("SELECT single_flight, cost_ceiling_usd, budget_per_run_microusd, schedule, digest, approved_digest FROM routine WHERE id = ?").get(routineId) as Record<string, unknown>;
+    const restore = () =>
+      raw.prepare("UPDATE routine SET single_flight = ?, cost_ceiling_usd = ?, budget_per_run_microusd = ?, schedule = ?, digest = ?, approved_digest = ? WHERE id = ?")
+        .run(sound["single_flight"], sound["cost_ceiling_usd"], sound["budget_per_run_microusd"], sound["schedule"], sound["digest"], sound["approved_digest"], routineId);
+    // Each corruption is REHASHED — the digest columns re-derive from the
+    // corrupt terms exactly as the raw reader admits them — so only the
+    // semantic validation stands between the row and a yes.
+    const cases: [string, Partial<RoutineTerms>, string, RegExp][] = [
+      ["a single-flight flag of 0", { singleFlight: false }, "single_flight = 0", /singleFlight: v1 routines run one instance at a time/],
+      ["a −1 cost ceiling", { costCeilingUsd: -1 }, "cost_ceiling_usd = -1", /costCeilingUsd: a positive dollar amount/],
+      ["a zero per-run budget", { budgetPerRunMicrousd: 0 }, "budget_per_run_microusd = 0", /budgetPerRunMicrousd: a positive whole micro-dollar amount/],
+      ["a schedule no parser holds", { schedule: "hourly" }, "schedule = 'hourly'", /schedule: `every:<minutes>`/],
+    ];
+    for (const [label, corruption, sql, words] of cases) {
+      restore();
+      const digest = routineDigestOf({ ...TERMS, ...corruption }, V24_PROFILE, V48_ROUTE);
+      raw.exec(`UPDATE routine SET ${sql}, digest = '${digest}', approved_digest = '${digest}' WHERE id = ${routineId}`);
+      const routine = store.getRoutine(routineId)!;
+      expect(routine.termsProblem, label).toBeNull();
+      expect(routineDigestOf(termsOf(routine), routine.profile, routine.route), label).toBe(routine.digest);
+      const before = {
+        row: raw.prepare("SELECT * FROM routine WHERE id = ?").get(routineId),
+        fires: store.routineFires(routineId),
+        tasks: store.listTasks().map(one => one.id),
+        notifications: store.listNotifications("all").length,
+        nextFireAt: routine.nextFireAt,
+      };
+      const integrity = routineIntegrity(routine);
+      expect(integrity, label).toMatchObject({ approved: false, live: false, agents: { state: "unverified", approvable: false, refresh: false } });
+      expect(integrity.agents.problem, label).toMatch(words);
+      expect(routineAgentsState(routine).approvable, label).toBe(false);
+      for (const manual of [false, true]) {
+        const refused = fireRoutine(store, routineId, later(3 * HOUR), { manual });
+        expect(refused, label).toMatchObject({ ok: false, reason: "not-approved" });
+      }
+      expect(approveRoutine(store, routineId, "alex", later(3 * HOUR), routine.digest, token).ok, label).toBe(false);
+      expect(refreshRoutineAgents(store, routineId, later(3 * HOUR)), label).toMatchObject({ ok: false, reason: "unresolved", problem: expect.stringMatching(words) });
+      expect(raw.prepare("SELECT * FROM routine WHERE id = ?").get(routineId), label).toEqual(before.row);
+      expect(store.routineFires(routineId), label).toEqual(before.fires);
+      expect(store.listTasks().map(one => one.id), label).toEqual(before.tasks);
+      expect(store.listNotifications("all").length, label).toBe(before.notifications);
+      expect(store.getRoutine(routineId)!.nextFireAt, label).toBe(before.nextFireAt);
+    }
+    restore();
+    expect(routineIntegrity(store.getRoutine(routineId)!)).toMatchObject({ approved: true, live: true });
+  });
+
+  test("routine-page (atomic authority closure): an approval frozen BEFORE routing still pages once at the edge, while a corrupt or unverifying frozen snapshot pages nobody — scheduled or manual", () => {
+    approve(routineId);
+    const raw = store.raw();
+    const pages = () => store.listNotifications("all").filter(one => one.kind === "routine-blocked").length;
+    const notifications = () => store.listNotifications("all").length;
+    // Corrupt bytes: zero pages, zero notifications of any kind.
+    raw.prepare("UPDATE routine SET approved_route_json = '{\"version\":1' WHERE id = ?").run(routineId);
+    const base = notifications();
+    expect(fireRoutine(store, routineId, later(2 * HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("cannot be read") });
+    expect(fireRoutine(store, routineId, later(2 * HOUR), { manual: true })).toMatchObject({ ok: false, reason: "route-unfrozen" });
+    expect(notifications()).toBe(base);
+    // A snapshot that reads but does not verify: the same silence.
+    const approvedJson = canonicalRouteJson({ ...V48_ROUTE, legs: V48_ROUTE.legs.map(leg => (leg.phase === "review" ? { ...leg, model: "opus" } : leg)) });
+    raw.prepare("UPDATE routine SET approved_route_json = ? WHERE id = ?").run(approvedJson, routineId);
+    expect(fireRoutine(store, routineId, later(2 * HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("do not hash to the approval") });
+    expect(notifications()).toBe(base);
+    // Never frozen (a legitimate pre-routing approval): one page, once.
+    raw.prepare("UPDATE routine SET approved_route_json = NULL, approved_profile_json = NULL WHERE id = ?").run(routineId);
+    expect(routineAgentsState(store.getRoutine(routineId)!).state).toBe("unfrozen");
+    expect(fireRoutine(store, routineId, later(2 * HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen", detail: expect.stringContaining("before its agents were frozen") });
+    expect(fireRoutine(store, routineId, later(3 * HOUR))).toMatchObject({ ok: false, reason: "route-unfrozen" });
+    expect(pages()).toBe(1);
+    expect(notifications()).toBe(base + 1);
   });
 
   test("routine-recovery: unreadable snapshot bytes and an unfrozen approval are withdrawn by the refresh the same way, and a LIVE approval under unchanged terms is left alone", () => {

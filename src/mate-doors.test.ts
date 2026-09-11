@@ -8,6 +8,12 @@ import { executeMateTool } from "./mate-tools.js";
 import { approve, approvalOf, hashToken, propose } from "./scope.js";
 import { routeDigestOf } from "./phase-routing.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-09-02T12:00:00.000Z");
 const REPO = "/repo/doors";
 const CREDENTIAL = credentialKeyOf("anthropic-api", "sk-test");
@@ -167,7 +173,7 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
 
   test("an answer card answers the decision as the operator; an irreversible option needs the explicit field; an answered decision refuses", () => {
     session();
-    const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0 });
     store.saveDecision(
       { run, urgency: "blocking", recap: "r", question: "Which?", options: [{ id: "x", label: "X", consequence: "cx", reversible: true }, { id: "y", label: "Y", consequence: "cy", reversible: false }], recommendation: "x" },
       T0,
@@ -181,14 +187,14 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     const late = pending("answer", { decision: 1, task: "a", option: "x", optionLabel: "X", reversible: true, rationale: "too late" });
     expect(confirmMateProposal(store, who, late, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "already-answered" });
     // The SAME choice landing first elsewhere is not this card's answer either (v3 review, finding 5).
-    const run2 = store.startRun({ taskRef: store.refFor("built-in", "b").id, leaseId: "l2", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    const run2 = store.startRun({ taskRef: store.refFor("built-in", "b").id, leaseId: "l2", runner: "r", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0 });
     store.saveDecision({ run: run2, urgency: "blocking", recap: "r", question: "Again?", options: [{ id: "x", label: "X", consequence: "cx", reversible: true }], recommendation: "x" }, T0);
     const same = pending("answer", { decision: 2, task: "b", option: "x", optionLabel: "X", reversible: true, rationale: "x" });
     store.answerDecision({ id: 2, choice: "x", by: "root", via: "cli" }, clock());
     expect(confirmMateProposal(store, who, same, clock(), { via: "web" })).toMatchObject({ ok: false, reason: "already-answered" });
     expect(store.getDecision(2)).toMatchObject({ answeredBy: "root", answeredVia: "cli" });
     // A decision past its deadline is not "open" for a card, swept or not (finding 7).
-    const run3 = store.startRun({ taskRef: store.refFor("built-in", "c").id, leaseId: "l3", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    const run3 = store.startRun({ taskRef: store.refFor("built-in", "c").id, leaseId: "l3", runner: "r", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0 });
     store.saveDecision({ run: run3, urgency: "blocking", recap: "r", question: "Late?", options: [{ id: "x", label: "X", consequence: "cx", reversible: true }], recommendation: "x", deadline: new Date(clockAt + 60_000).toISOString() }, T0);
     const timed = pending("answer", { decision: 3, task: "c", option: "x", optionLabel: "X", reversible: true, rationale: "x" });
     clockAt += 120_000;

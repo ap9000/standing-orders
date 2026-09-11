@@ -44,8 +44,12 @@ const presented = (
   taskRef: number,
   role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
   bound: { index: number; entryDigest: string } | null = null,
+  spend: { provider: string; model: string | null } = { provider: "claude", model: null },
 ): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
-  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  // A task with no scope presents the bare word `legacy` for the pair it
+  // spends as (atomic authority closure): the default claude pair, or the
+  // exact pair a fixture names.
+  const authority = s.routeAuthorityFor(taskRef, role, bound) ?? s.routeAuthorityFor(taskRef, role, bound, spend);
   return authority === null || !authority.ok ? {} : { route: authority.stamp };
 };
 
@@ -495,17 +499,26 @@ describe("the reviewer role in the store", () => {
       ...askReview(builtRun),
     });
     store.stampProviderStart(rootReviewer, T0);
-    const child = store.startRun({
-      taskRef,
-      leaseId: "review:root",
-      runner: "builder-1",
-      role: "reviewer",
-      parentRun: rootReviewer,
-      provider: "claude",
-      sessionId: "review-session",
-      now: T0,
-      ...presented(store, taskRef, "reviewer"),
-    });
+    // THE CORRECTION ADMISSION (atomic authority closure): the generic road
+    // opens no correction; the dedicated road refuses a foreign runner,
+    // lease, or session, and a parent takes one correction, ever — each
+    // refusal in words, zero rows.
+    const rootStamp = presented(store, taskRef, "reviewer") as { route: import("./phase-routing.js").RouteStamp };
+    const correct = (over: Partial<Parameters<Store["admitCorrection"]>[0]> = {}) =>
+      store.admitCorrection({ taskRef, leaseId: "review:root", runner: "builder-1", parentRun: rootReviewer, provider: "claude", sessionId: "review-session", now: T0, ...rootStamp, ...over });
+    const rows = () => store.runsFor(taskRef).length;
+    const before = rows();
+    expect(() => store.startRun({ taskRef, leaseId: "review:root", runner: "builder-1", role: "reviewer", parentRun: rootReviewer, provider: "claude", sessionId: "review-session", now: T0, ...rootStamp } as never)).toThrow(/a correction child is admitted by admitCorrection/);
+    expect(correct({ runner: "builder-2" })).toMatchObject({ ok: false, problem: expect.stringMatching(/runs on builder-1 — a correction on builder-2 is another machine's/) });
+    expect(correct({ leaseId: "borrowed" })).toMatchObject({ ok: false, problem: expect.stringMatching(/holds lease review:root — a correction under lease borrowed is not its own/) });
+    expect(correct({ sessionId: "another-session" })).toMatchObject({ ok: false, problem: expect.stringMatching(/resumes the root reviewer's session review-session — another-session is another/) });
+    expect(rows()).toBe(before);
+    const admittedChild = correct();
+    if (!admittedChild.ok) throw new Error(admittedChild.problem);
+    const child = admittedChild.runId;
+    expect(store.getRun(child)).toMatchObject({ role: "reviewer", parentRun: rootReviewer, runner: "builder-1", leaseId: "review:root", sessionId: "review-session" });
+    expect(correct()).toMatchObject({ ok: false, problem: expect.stringMatching(/was corrected once already \(run #\d+\) — a correction grant is one-use/) });
+    expect(rows()).toBe(before + 1);
     store.stampProviderStart(child, T0);
     store.raw().prepare("UPDATE run SET runner = ?, lease_id = ? WHERE id = ?").run("builder-2", "borrowed", child);
 
@@ -536,28 +549,22 @@ describe("the reviewer role in the store", () => {
       ...presented(store, taskRef, "reviewer"),
       ...askReview(builtRun),
     });
-    const firstCorrection = store.startRun({
-      taskRef,
-      leaseId: "review:linear",
-      runner: "builder-1",
-      role: "reviewer",
-      parentRun: root,
-      provider: "claude",
-      sessionId: "review-session",
-      now: T0,
-      ...presented(store, taskRef, "reviewer"),
-    });
-    const acceptedLeaf = store.startRun({
-      taskRef,
-      leaseId: "review:linear",
-      runner: "builder-1",
-      role: "reviewer",
-      parentRun: firstCorrection,
-      provider: "claude",
-      sessionId: "review-session",
-      now: T0,
-      ...presented(store, taskRef, "reviewer"),
-    });
+    const linearStamp = presented(store, taskRef, "reviewer") as { route: import("./phase-routing.js").RouteStamp };
+    const correctAfter = (parentRun: number) =>
+      store.admitCorrection({ taskRef, leaseId: "review:linear", runner: "builder-1", parentRun, provider: "claude", sessionId: "review-session", now: T0, ...linearStamp });
+    const first = correctAfter(root);
+    if (!first.ok) throw new Error(first.problem);
+    const firstCorrection = first.runId;
+    // The next correction continues an ENDED one (atomic authority
+    // closure): while the first is open, no leaf opens beneath it.
+    expect(correctAfter(firstCorrection)).toMatchObject({ ok: false, problem: expect.stringMatching(/is still open — the next correction continues an ended one/) });
+    store.finishRun(firstCorrection, { outcome: "failed", reason: "reviewer-malformed-review", now: T0 });
+    const leaf = correctAfter(firstCorrection);
+    if (!leaf.ok) throw new Error(leaf.problem);
+    const acceptedLeaf = leaf.runId;
+    // Forge the invalid history the ingest guard must still refuse: the
+    // superseded correction reopened under the leaf.
+    store.raw().prepare("UPDATE run SET outcome = NULL, reason = NULL, finished_at = NULL WHERE id = ?").run(firstCorrection);
     for (const run of [root, firstCorrection, acceptedLeaf]) store.stampProviderStart(run, T0);
     const diffSha = store.getArtifact(diffArtifact)?.sha256;
     if (diffSha === undefined) throw new Error("missing diff fixture");

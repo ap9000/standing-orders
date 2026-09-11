@@ -56,10 +56,16 @@ const DEMO_PROFILE = {
 /** The exact route authority a demo run presents at admission (v48 authority repair): the
  * store dictates nothing, so every routed row here presents the sealed (or,
  * for a planner, the working) leg exactly as a real dispatch would. */
-function presentedRoute(store: Store, taskRef: number, role: "builder" | "repair" | "planner" | "scout" | "reviewer"): { route: RouteStamp } | Record<string, never> {
-  const authority = store.routeAuthorityFor(taskRef, role);
-  if (authority === null) return {};
-  if (!authority.ok) throw new Error(`demo seed: ${authority.problem}`);
+function presentedRoute(
+  store: Store,
+  taskRef: number,
+  role: "builder" | "repair" | "planner" | "scout" | "reviewer",
+  spend: { provider: string; model: string | null } = { provider: "claude", model: null },
+): { route: RouteStamp } {
+  // A task with no scope presents the bare word `legacy` for the exact
+  // pair it spends as (atomic authority closure) — nothing opens unstamped.
+  const authority = store.routeAuthorityFor(taskRef, role) ?? store.routeAuthorityFor(taskRef, role, null, spend);
+  if (authority === null || !authority.ok) throw new Error(`demo seed: ${authority === null ? "no task" : authority.problem}`);
   return { route: authority.stamp };
 }
 

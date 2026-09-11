@@ -17,6 +17,12 @@ import { register } from "./runner.js";
 import { acquire, release } from "./claim.js";
 import type { RunOptions } from "./exec.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-08-29T12:00:00.000Z");
 /** Long enough that the lease is unexpired at every clock a test uses. */
 const TTL = 10 * 365 * 24 * 3600 * 1000;
@@ -229,7 +235,7 @@ describe("the gateway injection", () => {
       branch: "b",
       worktree: "/w",
       provider: "gemini",
-      now: T0,
+      ...bareLegacy("build", "gemini", null), now: T0,
     });
   });
   afterEach(() => {
@@ -301,7 +307,7 @@ describe("the gateway injection", () => {
       release(store, "l-1", T0);
       claimT1("l-2");
       const ref2 = store.refFor("built-in", "t-1").id;
-      const run2 = store.startRun({ taskRef: ref2, leaseId: "l-2", runner: "b-1", branch: "b2", worktree: "/w2", provider: "gemini", now: T0 });
+      const run2 = store.startRun({ taskRef: ref2, leaseId: "l-2", runner: "b-1", branch: "b2", worktree: "/w2", provider: "gemini", ...bareLegacy("build", "gemini", null), now: T0 });
       await invokeAgent(
         store,
         run2,
@@ -354,7 +360,7 @@ describe("the gateway injection", () => {
     };
     release(store, "l-1", T0); // the new run's lease must be the current claim
     claimT1("l-c");
-    const claudeRun = store.startRun({ taskRef: store.refFor("built-in", "t-1").id, leaseId: "l-c", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0 });
+    const claudeRun = store.startRun({ taskRef: store.refFor("built-in", "t-1").id, leaseId: "l-c", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", ...bareLegacy("build", "claude", null), now: T0 });
     try {
       await invokeAgent(
         store, claudeRun, { provider: "claude", model: "sonnet" },
@@ -379,7 +385,7 @@ describe("the gateway injection", () => {
     };
     release(store, "l-1", T0); // the new run's lease must be the current claim
     claimT1("l-c2");
-    const claudeRun = store.startRun({ taskRef: store.refFor("built-in", "t-1").id, leaseId: "l-c2", runner: "b-1", branch: "b2", worktree: "/w2", provider: "claude", now: T0 });
+    const claudeRun = store.startRun({ taskRef: store.refFor("built-in", "t-1").id, leaseId: "l-c2", runner: "b-1", branch: "b2", worktree: "/w2", provider: "claude", ...bareLegacy("build", "claude", null), now: T0 });
     await invokeAgent(
       store, claudeRun, { provider: "claude", model: "sonnet" },
       { phase: "build", brief: "x", maxTurns: 5, permissionMode: "acceptEdits", skipPermissions: false, resumeSession: null, startSessionId: "s-c2" },
@@ -400,7 +406,7 @@ describe("the gateway injection", () => {
     }) as unknown as Parameters<typeof invokeHeldAgent>[4]["starter"];
     release(store, "l-1", T0); // the new run's lease must be the current claim
     claimT1("l-h");
-    const heldRun = store.startRun({ taskRef: store.refFor("built-in", "t-1").id, leaseId: "l-h", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0 });
+    const heldRun = store.startRun({ taskRef: store.refFor("built-in", "t-1").id, leaseId: "l-h", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", ...bareLegacy("build", "claude", null), now: T0 });
     try {
       await invokeHeldAgent(
         store, heldRun, { provider: "claude", model: "sonnet" }, ["-p"],

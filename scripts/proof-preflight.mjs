@@ -8,6 +8,10 @@
 // ref must be an exact command in `checks`, a changed-path ref an exact
 // path in `changed`, a screenshot ref an exact path in `screenshots` — and
 // every signed criterion id given on the command line must be answered.
+// A caveat that names a criterion the proof marks `met` (its exact id as a
+// standalone token — `c1: …`) is a blocking exception: the proof's verdict
+// disagrees with its own words, the plane refutes it, and this preflight
+// refuses it first so the criterion can be marked not-met before the end.
 //
 //   node scripts/proof-preflight.mjs [--done <file>] [--proof <file>]
 //        [--park <file>] [--criteria c1,c2,…]
@@ -24,7 +28,7 @@ if (!existsSync(join(dist, "proof.js")) || !existsSync(join(dist, "decision.js")
   console.error("proof-preflight: dist/ is not built — run `npm run build` first");
   process.exit(2);
 }
-const { parseProof } = await import(pathToFileURL(join(dist, "proof.js")).href);
+const { parseProof, blockingCaveats } = await import(pathToFileURL(join(dist, "proof.js")).href);
 const { parseHandoff, parseDecision } = await import(pathToFileURL(join(dist, "decision.js")).href);
 
 const args = process.argv.slice(2);
@@ -93,10 +97,13 @@ if (files.proof !== null) {
       for (const id of signed) {
         if (!answered.has(id)) problems.push(`proof: signed criterion ${id} is not answered`);
       }
+      for (const one of blockingCaveats(proof)) {
+        problems.push(`proof: criterion ${one.criterionId} is marked met, but caveat ${one.index + 1} admits an exception to it — mark it not-met or drop the exception: ${JSON.stringify(one.caveat)}`);
+      }
       for (const shot of proof.screenshots) {
         if (!existsSync(resolve(dirname(files.proof), shot.path)) && !existsSync(resolve(shot.path))) problems.push(`proof: screenshot ${shot.path} does not exist beside the proof`);
       }
-      if (problems.length === 0) console.log(`proof: ok (${proof.criteria.length} criteria, ${proof.checks.length} checks, ${proof.changed.length} changed, ${proof.caveats.length} caveat(s), ${proof.screenshots.length} screenshot(s))`);
+      if (problems.length === 0) console.log(`proof: ok (${proof.criteria.length} criteria, ${proof.checks.length} checks, ${proof.changed.length} changed, ${proof.caveats.length} caveat(s), none blocking, ${proof.screenshots.length} screenshot(s))`);
     }
   }
 }

@@ -32,8 +32,12 @@ const presented = (
   taskRef: number,
   role: "builder" | "repair" | "planner" | "scout" | "reviewer" = "builder",
   bound: { index: number; entryDigest: string } | null = null,
+  spend: { provider: string; model: string | null } = { provider: "claude", model: null },
 ): { route: import("./phase-routing.js").RouteStamp } | Record<string, never> => {
-  const authority = s.routeAuthorityFor(taskRef, role, bound);
+  // A task with no scope presents the bare word `legacy` for the pair it
+  // spends as (atomic authority closure): the default claude pair, or the
+  // exact pair a fixture names.
+  const authority = s.routeAuthorityFor(taskRef, role, bound) ?? s.routeAuthorityFor(taskRef, role, bound, spend);
   return authority === null || !authority.ok ? {} : { route: authority.stamp };
 };
 
@@ -778,7 +782,7 @@ describe("the operations console", () => {
     const claudeRun = store.startRun({ taskRef: ref, leaseId: "l-s1", runner: "b-1", branch: "b", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
     store.recordUsage(claudeRun, { tokensIn: 41_000, tokensOut: 3_000, costUsd: 1.23 });
     store.finishRun(claudeRun, { outcome: "built", now: T0 });
-    const codexRun = store.startRun({ taskRef: ref, leaseId: "l-s2", runner: "b-1", branch: "b", worktree: "/w", provider: "codex", now: T0, ...presented(store, ref, "builder") });
+    const codexRun = store.startRun({ taskRef: ref, leaseId: "l-s2", runner: "b-1", branch: "b", worktree: "/w", provider: "codex", now: T0, ...presented(store, ref, "builder", null, { provider: "codex", model: null }) });
     store.recordUsage(codexRun, { tokensIn: 80_000, tokensOut: 9_000 });
     store.finishRun(codexRun, { outcome: "failed", reason: "agent", now: T0 });
 
@@ -3969,7 +3973,7 @@ describe("the fleet — runner lanes as the agents × projects surface", () => {
       taskRef: ref, leaseId: taken.claim.leaseId, runner: "builder-1",
       branch: "standing-orders/t-live", worktree: "/pool/t-live",
       model: "claude", now: new Date(now.getTime() - 5 * 60_000),
-      ...presented(store, ref, "builder"),
+      ...presented(store, ref, "builder", null, { provider: "claude", model: "claude" }),
     });
     // A queued reservation on builder-2.
     store.createTask({ id: "t-queued", title: "reserved work" }, T0);
@@ -4561,10 +4565,11 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     store.casContestState(admitted.contestId, ["dispatching"], "racing", contest.generation);
     for (const agent of store.contestants(admitted.contestId)) {
       store.casContestantState(agent.id, ["ready"], "building", agent.generation);
-      store.startRun({
-        taskRef, leaseId: taken.claim.leaseId, runner: "night-shift-3",
+      const lane = store.admitContestLane({
+        taskRef, leaseId: taken.claim.leaseId, runner: "night-shift-3", incarnation: null,
         branch: agent.branch, worktree: `/pool/int-${agent.id}`, contestant: agent.id, route: store.laneAuthorityFor(agent.id)!, now: new Date(Date.now() - 7_200_000),
       });
+      if (!lane.ok) throw new Error(lane.problem);
     }
     const racing = store.getContest(admitted.contestId);
     if (racing === null) throw new Error("contest");
@@ -4660,10 +4665,12 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     if (first === undefined || second === undefined) throw new Error("agents");
     winnerId = first.id;
     const conclude = (agent: typeof first, committed: boolean, head: string, slot: number | null) => {
-      const runId = store.startRun({
-        taskRef, leaseId: taken.claim.leaseId, runner: "night-shift-1",
+      const lane = store.admitContestLane({
+        taskRef, leaseId: taken.claim.leaseId, runner: "night-shift-1", incarnation: null,
         branch: agent.branch, worktree: `/pool/${agent.id}`, contestant: agent.id, route: store.laneAuthorityFor(agent.id)!, now: T0,
       });
+      if (!lane.ok) throw new Error(lane.problem);
+      const runId = lane.runId;
       storeEvidence(store, evidenceRoot, runId, "terminal-diff", "terminal-diff.patch",
         Buffer.from("diff --git a/x b/x\n+raced\n", "utf8"), "git diff (exit 0)", T0, { captureStatus: "ok" });
       storeEvidence(store, evidenceRoot, runId, "diff-stat", "terminal-diff-stat.json",
@@ -9160,7 +9167,7 @@ describe("/peek: every live agent in the console (peek)", () => {
     register(store, { name: "night-shift-1", host: "host", capacity: 2, repos: ["/repo/main"], now: new Date(), newToken: () => "tok-peek" });
     const taken = acquire(store, ref, "night-shift-1", { token: "tok-peek", now: new Date(), ttlMs: 60 * 60_000 });
     if (!taken.ok) throw new Error("claim failed");
-    const run = store.startRun({ taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", role: "builder", provider: "codex", branch: "standing-orders/t-peek", worktree: "/pool/t-peek", now: new Date(), ...presented(store, ref, "builder") });
+    const run = store.startRun({ taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", role: "builder", provider: "codex", branch: "standing-orders/t-peek", worktree: "/pool/t-peek", now: new Date(), ...presented(store, ref, "builder", null, { provider: "codex", model: null }) });
     store.setRunPhase(run, "agent-running");
     const log = openLiveLog(evidenceRoot, run);
     log?.observe({ type: "item.completed", item: { type: "agent_message", text: "Reading the retry loop now." } });
@@ -9802,18 +9809,25 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       stat: [{ path: "x", additions: 1, deletions: 1 }],
       verdict: { verdict: "attested" },
     });
-    const correction = store.startRun({
+    // The repair turn mends a LIVE attempt under its own lease (atomic
+    // authority closure): the fixture reopens the delivered build for the
+    // admission, then restores the history the surfaces read.
+    const builtRow = store.getRun(built)!;
+    store.raw().prepare("UPDATE run SET outcome = NULL WHERE id = ?").run(built);
+    const admittedCorrection = store.admitRepair({
       taskRef: ref,
-      leaseId: "lease-structured-correction",
+      leaseId: builtRow.leaseId,
       runner: "night-shift-1",
       provider: "claude",
-      role: "repair",
       parentRun: built,
       branch: "standing-orders/t-result-lineage",
       worktree: "/pool/t-result-lineage",
       now: new Date(T0.getTime() + 1),
-      ...presented(store, ref, "repair"),
+      ...(presented(store, ref, "repair") as { route: import("./phase-routing.js").RouteStamp }),
     });
+    store.raw().prepare("UPDATE run SET outcome = ? WHERE id = ?").run(builtRow.outcome, built);
+    if (!admittedCorrection.ok) throw new Error(admittedCorrection.problem);
+    const correction = admittedCorrection.runId;
     store.finishRun(correction, {
       outcome: "no-change",
       reason: "structured output repaired",

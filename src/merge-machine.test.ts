@@ -10,6 +10,12 @@ import { mergeTermsHash } from "./publish.js";
 import { addApprover } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-08-27T06:00:00.000Z");
 const REPO = "/repo/main";
 const HEAD = "abc123def4567890";
@@ -77,7 +83,7 @@ describe("the merge machine (v29, layer 4)", () => {
       runner: "builder-1",
       branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
-      now: T0,
+      ...bareLegacy("build", "claude", null), now: T0,
     });
     publicationId = store.createPublicationIntent(
       { run: runId, taskRef, githubRepo: "alex/thing", remote: "origin", base: "main", head: "standing-orders/t-1", headSha: HEAD, bodyHash: "x", draft: false },

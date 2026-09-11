@@ -22,6 +22,12 @@ import {
 import { acquire } from "./claim.js";
 import { authenticateApprover, hashToken } from "./scope.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 const T0 = new Date("2026-08-24T05:00:00Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
 const DEAD = later(DEFAULT_LIVENESS_MS + 60_000);
@@ -64,7 +70,7 @@ describe("registerRunnerIfIdle — the atomic take-or-refuse door", () => {
     acquire(store, ref, "w-1", { token: first.token, now: T0, ttlMs: 60_000, newLeaseId: () => "lease-a", incarnation: "inc-a" });
     store.setTaskState("t-1", "running", T0);
     const runId = store.startRun({
-      taskRef: ref, leaseId: "lease-a", runner: "w-1", branch: "b", worktree: "/w", now: T0,
+      taskRef: ref, leaseId: "lease-a", runner: "w-1", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0,
     });
 
     const taken = registerRunnerIfIdle(store, { name: "w-1", host: "here", now: DEAD });
@@ -86,7 +92,7 @@ describe("registerRunnerIfIdle — the atomic take-or-refuse door", () => {
     acquire(store, ref, "w-1", { token: reg.token, now: T0, ttlMs: 60_000, newLeaseId: () => "lease-r", incarnation: "inc-r" });
     store.setTaskState("t-r", "running", T0);
     const runId = store.startRun({
-      taskRef: ref, leaseId: "lease-r", runner: "w-1", branch: "b", worktree: "/w", now: T0,
+      taskRef: ref, leaseId: "lease-r", runner: "w-1", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0,
     });
     // The reaper releases the claim WITHOUT finishing the run — the exact
     // evidence-destroying step the takeover must survive.
@@ -134,7 +140,7 @@ describe("authenticated heartbeats and leases", () => {
     acquire(store, ref, "w-1", { token: reg.token, now: T0, ttlMs: 30 * 60_000, newLeaseId: () => "lease-s", incarnation: "inc-a" });
     store.setTaskState("t-s", "running", T0);
     const runId = store.startRun({
-      taskRef: ref, leaseId: "lease-s", runner: "w-1", branch: "b", worktree: "/w", now: T0,
+      taskRef: ref, leaseId: "lease-s", runner: "w-1", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0,
     });
     store.acquireWatchLease("w-1", REPO, "inc-a", 90_000, T0);
 

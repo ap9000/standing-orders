@@ -897,23 +897,27 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
       const rootRoute = store.runRoute(request.reviewerRunId);
       const rootStamp = rootRoute === null ? null : { routeDigest: rootRoute.routeDigest, phase: rootRoute.phase, provider: rootRoute.provider, model: rootRoute.model, chosen: rootRoute.chosen };
       for (let correction = 1; correction <= STRUCTURED_REPAIR_ATTEMPTS; correction += 1) {
-        let childRunId: number;
-        try {
-          childRunId = store.startRun({
-            taskRef: rootReviewer.taskRef,
-            leaseId: rootReviewer.leaseId,
-            runner: rootReviewer.runner,
-            role: "reviewer",
-            parentRun: parentRunId,
-            provider,
-            ...(model === null ? {} : { model }),
-            sessionId,
-            now: clock(),
-            ...(rootStamp === null ? {} : { route: rootStamp }),
-          });
-        } catch (error) {
-          return { ok: false, reason: "agent", message: error instanceof Error ? error.message : String(error) };
+        // THE CORRECTION ADMISSION (atomic authority closure): the child
+        // continues the live root in exactly its session, under its runner
+        // and lease — one correction per parent, proved in the store.
+        if (rootStamp === null) {
+          return { ok: false, reason: "agent", message: `reviewer run #${request.reviewerRunId} carries no route provenance — nothing corrects it` };
         }
+        const admittedCorrection = store.admitCorrection({
+          taskRef: rootReviewer.taskRef,
+          leaseId: rootReviewer.leaseId,
+          runner: rootReviewer.runner,
+          parentRun: parentRunId,
+          provider,
+          ...(model === null ? {} : { model }),
+          sessionId,
+          now: clock(),
+          route: rootStamp,
+        });
+        if (!admittedCorrection.ok) {
+          return { ok: false, reason: "agent", message: admittedCorrection.problem };
+        }
+        const childRunId = admittedCorrection.runId;
 
         let correctionInvocation;
         try {

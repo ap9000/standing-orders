@@ -32,7 +32,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
-import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, scopeAuthorityOf, parseAcceptanceCriteria, exactAcceptance, exactStringList, exactSafeIntegerOrNull, exactKeys, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
+import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, scopeAuthorityOf, routeParityProblem, parseAcceptanceCriteria, exactAcceptance, exactStringList, exactSafeIntegerOrNull, exactKeys, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, exactPinOf, routeOfTask, agentChoicesFor } from "./agentconfig.js";
 import {
   canonicalOverridesJson,
@@ -47,7 +47,6 @@ import {
   routeFromJson,
   routeProblems,
   routeStampProblem,
-  sameSpec,
   ROUTE_ERA,
   type ExactSpec,
   type PhaseRoute,
@@ -1023,6 +1022,24 @@ export type Mutation = {
 };
 
 export const DEFAULT_ACTOR = "operator";
+
+/** A run admission that must not stand (atomic authority closure): thrown
+ * inside the admitting transaction so every write rolls back; the generic
+ * road lets it escape as the error it is, the dedicated roads catch it and
+ * answer in words. Nothing half-admitted survives either way. */
+export class RunAdmissionRefused extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunAdmissionRefused";
+  }
+}
+
+/** A present fallback-chain row carries this many entries after the base
+ * (atomic authority closure) — the same bound `config set fallback`
+ * enforces at the CLI, held again at the store's read and write so a row
+ * outside it is a stated problem, never an empty chain. */
+export const FALLBACK_ENTRIES_MIN = 1;
+export const FALLBACK_ENTRIES_MAX = 3;
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -3291,9 +3308,25 @@ export function readSchemaVersion(db: Database): { ok: true; version: number | n
   const refuse = (problem: string): { ok: false; problem: string } => ({ ok: false, problem });
   const table = db.prepare("SELECT 1 AS hit FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").get();
   if (table === undefined) {
-    // No version table: fresh ONLY when the file holds nothing at all.
+    // No version table: fresh ONLY when the file holds nothing at all —
+    // no objects, AND none of the metadata SQLite persists in the header
+    // (the user version, the application id, the schema cookie). A file
+    // whose sqlite_master is empty but whose header carries a non-default
+    // cookie was shaped by SOMETHING (a `PRAGMA user_version = 77`, a
+    // schema created and dropped) and is not a new file this build may
+    // expand over; it refuses, untouched, at every door.
     const anything = db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get() as { n?: unknown } | undefined;
     if (Number(anything?.n ?? 0) > 0) return refuse("the file carries tables but no schema_version table — it is not a fresh database, and not one this build shaped");
+    for (const [pragma, word] of [
+      ["user_version", "user version"],
+      ["application_id", "application id"],
+      ["schema_version", "schema cookie"],
+    ] as const) {
+      const row = db.prepare(`PRAGMA ${pragma}`).get() as Record<string, unknown> | undefined;
+      const value = row === undefined ? undefined : row[pragma];
+      if (value === undefined) return refuse(`the file's ${word} cannot be read — it is not a fresh database`);
+      if (String(value) !== "0") return refuse(`the file carries no schema_version table but a persisted ${word} of ${String(value)} — it is not a fresh database, and not one this build shaped`);
+    }
     return { ok: true, version: null };
   }
   // The value is read as its storage class and its decimal text, so a
@@ -7288,6 +7321,20 @@ export class Store {
       // surface, never here.
       let proposedChainJson: string | null = null;
       let boundDigest = digest;
+      // THE AUTH MODE AT FILING (atomic authority closure): the credential
+      // the resolved profile's provider would spend under is read strictly
+      // here, on every road — explicit profile or resolved — so a present
+      // mode file that says neither word files the scope UNRESOLVED in its
+      // words rather than sealing a credential nobody chose. The seal, the
+      // consent door, and the spawn read the same way.
+      if (profile !== null) {
+        const filedAuth = readAuthModeStrict(profile.provider);
+        if (!filedAuth.ok) {
+          profile = null;
+          unresolvedReason = filedAuth.problem;
+          boundDigest = digestOf(digestInput, null, route);
+        }
+      }
       if (options.profile === undefined && profile !== null) {
         const chainRef = this.lookupRef(scope.taskId);
         const chainRepo = chainRef?.repo ?? null;
@@ -7450,7 +7497,7 @@ export class Store {
         // mint another). A route with a stated leg problem seals nothing.
         const working = this.db.prepare("SELECT * FROM task_scope WHERE task_id = ?").get(taskId) as Record<string, unknown> | undefined;
         if (working === undefined) return false;
-        const authority = scopeAuthorityOf(readScope(working));
+        const authority = scopeAuthorityOf(readScope(working), { authMode: provider => readAuthModeStrict(provider) });
         if (!authority.ok) return false;
         if (routeProblems(authority.route).length > 0) return false;
         const changed = this.db
@@ -11178,6 +11225,14 @@ export class Store {
       return { ok: false, problem: `the fallback configuration for ${scope} is not valid JSON — set it again with \`config set fallback\`, or clear it` };
     }
     if (!Array.isArray(parsed)) return { ok: false, problem: `the fallback configuration for ${scope} is not a list of entries — set it again with \`config set fallback\`, or clear it` };
+    // A PRESENT row carries one to three entries (atomic authority
+    // closure) — the very bound `config set fallback` enforces. An empty
+    // list is not "no fallback": it is a row this code never wrote, and
+    // the chain the operator believes they set must not shrink to nothing
+    // behind their back; too many entries is the same corruption.
+    if (parsed.length < FALLBACK_ENTRIES_MIN || parsed.length > FALLBACK_ENTRIES_MAX) {
+      return { ok: false, problem: `the fallback configuration for ${scope} carries ${parsed.length} entries, not ${FALLBACK_ENTRIES_MIN} to ${FALLBACK_ENTRIES_MAX} — set it again with \`config set fallback\`, or clear it` };
+    }
     const entries: { provider: string; model: string; authMode: "subscription" | "api-key"; repairModel?: string }[] = [];
     for (const [index, entry] of parsed.entries()) {
       if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return { ok: false, problem: `fallback entry ${index + 1} for ${scope} is not an object — set the chain again with \`config set fallback\`` };
@@ -11213,6 +11268,11 @@ export class Store {
     by: string,
     now: Date,
   ): void {
+    // The store writes only what it will read back (atomic authority
+    // closure): a present row carries one to three entries, never none.
+    if (entries.length < FALLBACK_ENTRIES_MIN || entries.length > FALLBACK_ENTRIES_MAX) {
+      throw new Error(`a fallback chain carries ${FALLBACK_ENTRIES_MIN} to ${FALLBACK_ENTRIES_MAX} entries, not ${entries.length} — clear the configuration to have none`);
+    }
     this.db
       .prepare(
         `INSERT INTO fallback_config (scope, phase, entries_json, updated_at, updated_by)
@@ -11588,11 +11648,10 @@ export class Store {
       const lane = this.getContestant(run.contestant);
       const contest = lane === null ? null : this.getContest(lane.contest);
       if (lane === null || contest === null || contest.taskRef !== run.taskRef) return `contestant ${run.contestant} is not one of this task's racing agents`;
-      const accepted = new Set([
-        `profile:${profileDigestOf(contestantProfileOf(lane.provider, lane.model, lane.repairModel))}`,
-        ...(lane.profile == null ? [] : [`profile:${profileDigestOf(lane.profile)}`]),
-      ]);
-      if (!accepted.has(leg.routeDigest)) return `a contest lane spends under its race-approved profile, not ${leg.routeDigest}`;
+      // The STORED sealed profile alone (atomic authority closure): no
+      // synthesized profile is accepted beside it.
+      if (lane.profile == null) return `contestant ${lane.id} carries no sealed profile — nothing spends on the lane`;
+      if (leg.routeDigest !== `profile:${profileDigestOf(lane.profile)}`) return `a contest lane spends under its race-approved profile, not ${leg.routeDigest}`;
       if ((phase === "build" || phase === "repair") && (leg.provider !== lane.provider || leg.model !== (phase === "repair" ? lane.repairModel : lane.model))) {
         return `the racing agent is ${lane.provider} · ${phase === "repair" ? lane.repairModel : lane.model}, not ${leg.provider} · ${leg.model ?? "(none)"}`;
       }
@@ -11727,11 +11786,13 @@ export class Store {
     if (mirrored === null || profileDigestOf(mirrored) !== profileDigestOf(sealedProfile)) {
       return { ok: false, reason: "unreadable", detail: "the approval's sealed agent profile cannot be read or does not match its sealed chain — re-file the scope and approve it again" };
     }
-    const buildLeg = legOf(route, "build");
-    const repairLeg = legOf(route, "repair");
-    const repairModel = sealedProfile.repairModel === "inherit" ? sealedProfile.model : sealedProfile.repairModel;
-    if (!sameSpec(buildLeg, sealedProfile) || repairLeg.provider !== sealedProfile.provider || repairLeg.model !== repairModel) {
-      return { ok: false, reason: "unreadable", detail: `the sealed route builds on ${buildLeg.provider} · ${buildLeg.model} (repair ${repairLeg.model}) but the sealed profile says ${sealedProfile.provider} · ${sealedProfile.model} (repair ${repairModel}) — re-file the scope and approve it again` };
+    // The ONE parity rule (atomic authority closure): build and repair
+    // legs against the sealed profile, and the route's signed risk and
+    // quality against the row's — the same function the working-side
+    // projection and the last-mile dispatch proof apply.
+    const parity = routeParityProblem(route, sealedProfile, { riskLevel: scope.riskLevel ?? "routine", qualityMode: scope.qualityMode ?? "default" });
+    if (parity !== null) {
+      return { ok: false, reason: "unreadable", detail: `${parity} — re-file the scope and approve it again` };
     }
     return { ok: true, route };
   }
@@ -12155,8 +12216,11 @@ export class Store {
    */
   laneAuthorityFor(contestantId: number, phase: "build" | "repair" = "build"): RouteStamp | null {
     const lane = this.getContestant(contestantId);
-    if (lane === null) return null;
-    const profile = lane.profile ?? contestantProfileOf(lane.provider, lane.model, lane.repairModel);
+    // The STORED sealed profile, or nothing (atomic authority closure): a
+    // lane with no readable profile has no authority to present, and no
+    // synthesized profile stands in for the one the race approved.
+    if (lane === null || lane.profile == null) return null;
+    const profile = lane.profile;
     return { routeDigest: `profile:${profileDigestOf(profile)}`, phase, provider: lane.provider, model: phase === "repair" ? lane.repairModel : lane.model, chosen: "legacy" };
   }
 
@@ -13378,6 +13442,18 @@ export class Store {
    * Open the record before the money is spent. If the process dies with the
    * agent, the row survives with outcome NULL — an attempt that was cut down
    * mid-flight, visible the next morning instead of vanished.
+   *
+   * THE GENERIC ADMISSION (atomic authority closure) opens exactly four
+   * shapes: an ordinary builder (no parent, no lane, no open attended
+   * authorization on its task), a planner (optionally continuing its own
+   * same-task planner run), a scout, and a ROOT reviewer answering an open
+   * review request. Every other shape has its own admission that proves
+   * and consumes or binds its exact authority in one transaction —
+   * `admitRepair`, `admitAttended`, `admitCorrection`, `admitContestLane`,
+   * `admitRecoveredBuilder`, `admitFallback` — and this road refuses it in
+   * words before any row exists. Every run PRESENTS its route authority: a
+   * task with no scope presents the bare word `legacy` for the exact pair
+   * it spends as; nothing opens unstamped anywhere.
    */
   startRun(
     run: {
@@ -13387,30 +13463,34 @@ export class Store {
       model?: string;
       provider?: string;
       sessionId?: string;
-      /** Which racing agent this run belongs to (v14); absent = ordinary. */
-      contestant?: number;
       /** v47: the run's route provenance, written in this same admission
-       * transaction so provenance can never lag authority. A task filed
-       * under agent routing REQUIRES it (v48 authority repair): the caller presents the
-       * exact authority it holds, or no row opens. */
+       * transaction so provenance can never lag authority. REQUIRED on
+       * every road (atomic authority closure): the caller presents the
+       * exact authority it holds — a sealed leg, a working plan leg, a
+       * pre-routing row's sealed profile, or the bare word `legacy` on a
+       * task with no scope — or no row opens. Optional in the TYPE only so
+       * a caller can spread the authority it resolved; absent at runtime
+       * it refuses in words. */
       route?: RouteStamp;
       /** v48 authority repair: how this run takes fallback-chain custody, proved and
        * persisted in this same insert — `base` opens the task's cycle at
        * the approved chain's first entry (inert without a chain approval),
        * `resume` takes a parked BASE tail's custody through the proven
        * transfer. A binding that cannot be proved rolls the insert back.
-       * Builder-only: no other role takes custody. A repair turn inherits
-       * its same-task parent's binding only while that parent is the
-       * cycle's live tail; every run bound to a NON-primary entry — the
-       * entry's own admission, a parked tail's successor, a repair turn —
-       * is admitted by admitFallback alone, never here. */
+       * Builder-only: no other role takes custody. Every run bound to a
+       * NON-primary entry — the entry's own admission, a parked tail's
+       * successor, a repair turn — is admitted by admitFallback alone. */
       custody?: { kind: "base" } | { kind: "resume"; parkedRun: number };
       now: Date;
     } & (
       | {
-          role?: "builder" | "repair" | "planner" | "scout";
+          role?: "builder" | "planner" | "scout";
           branch: string;
           worktree: string;
+          /** A planner correction continues its own same-task planner run
+           * (the nonce-bound protocol repair). A builder never names one
+           * here: a recovered draft is admitted by admitRecoveredBuilder,
+           * a warm resume binds through bindWarmResume. */
           parentRun?: number;
         }
       // The reviewer (v29, D5): an artifact-only pass over a sealed diff.
@@ -13425,16 +13505,196 @@ export class Store {
           /** The LIVE review request this root reviewer answers (raw
            * authority repair): proved open for exactly the parent run and
            * consumed as `dispatched` inside this same admission. A
-           * correction child (its parent is itself a reviewer) presents
-           * none — it continues a live root. */
-          request?: number;
+           * correction child is admitted by admitCorrection, never here. */
+          request: number;
         }
     ),
   ): number {
-    return this.transact(() => this.startRunInTransaction(run));
+    return this.transact(() => this.admitRun(run, { road: "generic" }));
   }
 
-  private startRunInTransaction(run: Parameters<Store["startRun"]>[0]): number {
+  /**
+   * THE REPAIR ADMISSION (atomic authority closure): a repair turn mends
+   * exactly one LIVE same-task builder attempt — the parent exists, is
+   * this task's, is a builder, is still open, and this turn runs under
+   * the parent's own runner and lease. An attended parent's authorization
+   * must have spent its one attempt on that parent; a racing lane's
+   * parent must be the lane's live run; a chain-bound parent must be the
+   * live base tail (a fallback entry's repair is admitFallback's). The
+   * stamp is the repair leg of the authority the parent spent under.
+   * Value-shaped: a refusal names its reason and leaves zero rows.
+   */
+  admitRepair(
+    run: {
+      taskRef: number;
+      leaseId: string;
+      runner: string;
+      branch: string;
+      worktree: string;
+      provider: string;
+      model?: string;
+      sessionId?: string;
+      parentRun: number;
+      route: RouteStamp;
+      now: Date;
+    },
+  ): { ok: true; runId: number } | { ok: false; problem: string } {
+    return this.admission(() => this.admitRun({ ...run, role: "repair" }, { road: "repair" }));
+  }
+
+  /**
+   * THE ATTENDED ADMISSION (atomic authority closure): one watched attempt
+   * opens under exactly ONE live authorization the caller names — open on
+   * this task, unexpired, unspent, minted for this runner at this
+   * generation, pinning a readable profile the stamp restates as its
+   * legacy authority; a continuation names the finished parent the
+   * authorization continues, nothing else names a parent. The insert
+   * binds the row to the authorization and CONSUMES its one attempt in
+   * the same transaction: `run.attended_authorization` and
+   * `authorization.attempt_run` move together or not at all.
+   */
+  admitAttended(
+    run: {
+      taskRef: number;
+      leaseId: string;
+      runner: string;
+      branch: string;
+      worktree: string;
+      provider: string;
+      model?: string;
+      sessionId?: string;
+      parentRun?: number;
+      authorization: { id: string; runner: string; generation: number };
+      route: RouteStamp;
+      now: Date;
+    },
+  ): { ok: true; runId: number } | { ok: false; problem: string } {
+    const { authorization, ...rest } = run;
+    return this.admission(() => this.admitRun({ ...rest, role: "builder" }, { road: "attended", authorization }));
+  }
+
+  /**
+   * THE CORRECTION ADMISSION (atomic authority closure): a reviewer
+   * correction continues a LIVE root review in the SAME session — the
+   * parent is a same-task reviewer (the root, or a finished correction of
+   * it), the root is still open and carries a session id, and this child
+   * runs under the root's runner, lease, and exactly that session. One
+   * use: a parent takes exactly one correction child, ever. Nothing
+   * answers a review request here — the root spent it.
+   */
+  admitCorrection(
+    run: {
+      taskRef: number;
+      leaseId: string;
+      runner: string;
+      provider: string;
+      model?: string;
+      sessionId: string;
+      parentRun: number;
+      route: RouteStamp;
+      now: Date;
+    },
+  ): { ok: true; runId: number } | { ok: false; problem: string } {
+    return this.admission(() => this.admitRun({ ...run, role: "reviewer" }, { road: "correction" }));
+  }
+
+  /**
+   * THE CONTEST LANE ADMISSION (atomic authority closure): a racing agent's
+   * run opens on ITS lane, in a contest still dispatching or racing, under
+   * the contest's live custody — the caller's lease, runner, and watch
+   * incarnation are exactly the ones the contest was stamped with — and it
+   * presents the lane's STORED sealed profile as its legacy authority: no
+   * synthesized profile, no other digest. The lane's pointer moves to the
+   * row inside the insert (from free, or from the parked attempt this run
+   * resumes); a lane that moved rolls the row back.
+   */
+  admitContestLane(
+    run: {
+      taskRef: number;
+      leaseId: string;
+      runner: string;
+      incarnation: string | null;
+      branch: string;
+      worktree: string;
+      provider: string;
+      model?: string;
+      sessionId?: string;
+      contestant: number;
+      parentRun?: number;
+      route: RouteStamp;
+      now: Date;
+    },
+  ): { ok: true; runId: number } | { ok: false; problem: string } {
+    const { incarnation, ...rest } = run;
+    return this.admission(() => this.admitRun({ ...rest, role: "builder" }, { road: "contest", incarnation }));
+  }
+
+  /**
+   * THE RECOVERED-DRAFT ADMISSION (atomic authority closure): a fresh
+   * builder attempt that inherits an INTERRUPTED attempt's draft names it
+   * as its parent — this task's own builder (or its repair turn), left in
+   * this very worktree and branch, either still open with a lease nobody
+   * holds any more or ended as `failed` for `interrupted`. A planner, a
+   * scout, a reviewer, a parked or built run, or an attempt still being
+   * built is no recovery grant, and nothing opens over it.
+   */
+  admitRecoveredBuilder(
+    run: {
+      taskRef: number;
+      leaseId: string;
+      runner: string;
+      branch: string;
+      worktree: string;
+      provider: string;
+      model?: string;
+      sessionId?: string;
+      recoveredFrom: number;
+      custody?: { kind: "base" } | { kind: "resume"; parkedRun: number };
+      route: RouteStamp;
+      now: Date;
+    },
+  ): { ok: true; runId: number } | { ok: false; problem: string } {
+    const { recoveredFrom, ...rest } = run;
+    return this.admission(() => this.admitRun({ ...rest, role: "builder", parentRun: recoveredFrom }, { road: "recovered" }));
+  }
+
+  /** A dedicated admission's transaction: a refusal thrown inside rolls
+   * every write back and comes out as words; anything else propagates. */
+  private admission(body: () => number): { ok: true; runId: number } | { ok: false; problem: string } {
+    try {
+      return { ok: true, runId: this.transact(body) };
+    } catch (error) {
+      if (error instanceof RunAdmissionRefused) return { ok: false, problem: error.message };
+      throw error;
+    }
+  }
+
+  private admitRun(
+    run: {
+      taskRef: number;
+      leaseId: string;
+      runner: string;
+      model?: string;
+      provider?: string;
+      sessionId?: string;
+      contestant?: number;
+      route?: RouteStamp;
+      custody?: { kind: "base" } | { kind: "resume"; parkedRun: number };
+      now: Date;
+      role?: "builder" | "repair" | "planner" | "scout" | "reviewer";
+      branch?: string | undefined;
+      worktree?: string | undefined;
+      parentRun?: number | undefined;
+      request?: number | undefined;
+    },
+    road:
+      | { road: "generic" }
+      | { road: "repair" }
+      | { road: "attended"; authorization: { id: string; runner: string; generation: number } }
+      | { road: "correction" }
+      | { road: "contest"; incarnation: string | null }
+      | { road: "recovered" },
+  ): number {
     const role = run.role ?? "builder";
     // THE ADMISSION PROOF (v48, authority repair): a run's route provenance is held to
     // the authority the task holds BEFORE the row exists — the stamp's
@@ -13449,53 +13709,87 @@ export class Store {
     // The store DICTATES nothing (v48 authority repair): the caller PRESENTS the exact
     // route authority it holds — the sealed leg for its phase, the working
     // plan leg before approval, the sealed profile of a pre-routing row, a
-    // contest lane's or attended session's pinned profile — or no row
-    // opens, in words. A task that has a scope never opens unstamped
-    // (v48 integrity); only a task with no scope at all may, and nothing
-    // ever spends on such a row.
+    // contest lane's or attended session's pinned profile, the bare word
+    // `legacy` on a task with no scope — or no row opens, in words.
     //
     // `fallback` provenance NEVER enters here (v48 integrity): a run bound
     // to a non-primary chain entry is admitted by admitFallback alone,
     // which re-proves the live cycle, tail, index, digest, auth mode,
     // provider, model, repair binding, and approved mirror in one body.
     const refuse: (problem: string) => never = problem => {
-      throw new Error(`run admission refused for task_ref ${run.taskRef} (${role}): ${problem}`);
+      throw new RunAdmissionRefused(`run admission refused for task_ref ${run.taskRef} (${role}): ${problem}`);
     };
     let provider = run.provider ?? null;
     let model = run.model ?? null;
     const ref = this.refForId(run.taskRef);
-    if (ref === null) throw new Error(`run admission refused: task_ref ${run.taskRef} is not a task`);
+    if (ref === null) throw new RunAdmissionRefused(`run admission refused: task_ref ${run.taskRef} is not a task`);
     const taskId = ref.externalId;
     const scope = this.getScope(taskId);
     const contestant = run.contestant ?? null;
-    const authorization = contestant === null ? this.openAuthorizationFor(run.taskRef) : null;
-    const attended = authorization !== null;
+    // THE ROAD (atomic authority closure): every shape with its own
+    // admission is refused here in words when it arrives by any other
+    // door — the generic road opens nothing a dedicated road proves.
+    if (role === "repair" && road.road !== "repair") refuse("a repair turn is admitted by admitRepair — the generic admission opens no repair");
+    if (contestant !== null && road.road !== "contest") refuse("a contest lane's run is admitted by admitContestLane — the generic admission opens nothing on a lane");
+    if (road.road === "contest" && contestant === null) refuse("a contest lane admission names its lane");
+    if (road.road === "correction" && role !== "reviewer") refuse("a correction child is a reviewer");
+    if (road.road === "recovered" && role !== "builder") refuse("a recovered draft is a builder's");
+    if (road.road === "attended" && role !== "builder") refuse("an attended attempt is a builder's");
+    if (road.road === "repair" && run.parentRun === undefined) refuse("a repair turn mends exactly one live builder attempt — none was named");
+    const openAuthorization = this.openAuthorizationFor(run.taskRef);
+    if (road.road === "generic" && openAuthorization !== null && role === "builder") {
+      refuse(`the task holds an open attended authorization ${openAuthorization.id} — an attended attempt is admitted by admitAttended, and nothing else builds beside it`);
+    }
+    if (road.road === "attended" && openAuthorization === null) refuse("this task holds no open attended authorization — nothing opens as an attended attempt");
     if (run.route !== undefined && (run.route as { chosen?: unknown }).chosen === "fallback") {
       refuse("an approved fallback entry is admitted only through admitFallback — the generic admission opens nothing as `fallback`");
     }
+    // EVERY run presents (atomic authority closure): a task with no scope
+    // presents the bare word `legacy` for the pair it spends as; a task
+    // with a scope presents the leg its authority names. Nothing opens
+    // unstamped — the words say what the caller would have had to hold.
+    if (run.route === undefined) {
+      const could = this.routeAuthorityFor(run.taskRef, role, null, { provider: provider ?? "claude", model });
+      refuse(
+        scope === null
+          ? "this task has no scope and the caller presented no route authority — a run on such a task presents the bare word legacy for the exact pair it spends as"
+          : `this task has a scope and the caller presented no route authority — ${
+              could !== null && !could.ok ? could.problem : `nothing opens unstamped on it (present its ${phaseOfRole(role)} leg)`
+            }`,
+      );
+    }
     const custody = run.custody ?? null;
     if (custody !== null && role !== "builder") refuse(`chain custody is a builder's to take — a ${role} run takes none`);
-    if (custody !== null && (contestant !== null || attended)) refuse("a contest lane or attended session spends under its own authority — it takes no chain custody");
+    if (custody !== null && (contestant !== null || road.road === "attended")) refuse("a contest lane or attended session spends under its own authority — it takes no chain custody");
     const parent = run.parentRun === undefined ? null : this.getRun(run.parentRun);
     if (run.parentRun !== undefined && parent === null) refuse(`run #${run.parentRun} does not exist — nothing continues it`);
-    // A parent is this task's own (raw authority repair): a builder that
-    // recovers an interrupted attempt's draft, a repair turn, a reviewer,
-    // a correction child — every lineage is proved here, in the insert,
-    // and no later stamp can bind one.
-    if (parent !== null && parent.taskRef !== run.taskRef && role !== "repair") {
+    // A parent is this task's own (raw authority repair): every lineage is
+    // proved here, in the insert, and no later stamp can bind one. Which
+    // lineages the generic road admits at all is narrow (atomic authority
+    // closure): a planner continuing its own planner run. A builder's
+    // parent is a recovered draft (admitRecoveredBuilder) or a
+    // continuation's finished attempt (admitAttended); a scout has none.
+    if (parent !== null && parent.taskRef !== run.taskRef) {
       refuse(`run #${parent.id} belongs to task_ref ${parent.taskRef} — a ${role} run continues its own task's run only`);
+    }
+    if (road.road === "generic" && parent !== null) {
+      if (role === "builder") refuse(`a builder names no parent here — a recovered draft is admitted by admitRecoveredBuilder (run #${parent.id})`);
+      if (role === "scout") refuse("a scout continues nothing");
+      if (role === "planner" && parent.role !== "planner") refuse(`run #${parent.id} is a ${parent.role} run — a planner correction continues its own planner run only`);
     }
     // THE LIVE REVIEW REQUEST (raw authority repair): a root reviewer
     // answers exactly one OPEN request for its parent run, consumed as
     // `dispatched` in this same transaction below; a correction child —
-    // its parent is itself a reviewer — continues a LIVE root and answers
-    // no request of its own. Nothing else opens as a reviewer.
+    // admitted by admitCorrection — continues a LIVE root in its exact
+    // session and answers no request of its own. Nothing else opens as a
+    // reviewer.
     let requestToConsume: number | null = null;
     if (role === "reviewer") {
       if (parent === null) refuse("a review reviews a run — none was named");
-      const request = (run as { request?: number }).request;
-      if (parent.role === "reviewer") {
+      const request = run.request;
+      if (road.road === "correction") {
         if (request !== undefined) refuse(`reviewer run #${parent.id} is a review already — a correction child continues it and answers no request of its own`);
+        if (parent.role !== "reviewer") refuse(`run #${parent.id} is a ${parent.role} run — a correction continues a review`);
         // The lineage is linear — each correction continues the previous
         // (already-ended) one — and it is live only while its ROOT
         // reviewer, the run that spent the request, is still open.
@@ -13510,27 +13804,54 @@ export class Store {
         }
         if (root.taskRef !== run.taskRef) refuse(`reviewer run #${root.id} belongs to task_ref ${root.taskRef} — a correction continues its own task's review only`);
         if (root.outcome !== null) refuse(`the root reviewer run #${root.id} has ended — a correction child continues a live review only`);
+        if (parent.id !== root.id && parent.outcome === null) refuse(`correction run #${parent.id} is still open — the next correction continues an ended one`);
+        // THE ONE-USE SAME-SESSION GRANT (atomic authority closure): the
+        // root's announced session is the only authority for a correction,
+        // and this child runs as the root does — same runner, same lease,
+        // exactly that session. A parent takes one correction, ever.
+        if (root.sessionId === null) refuse(`the root reviewer run #${root.id} announced no session — nothing corrects it in one`);
+        if (run.sessionId === undefined || run.sessionId !== root.sessionId) refuse(`a correction resumes the root reviewer's session ${root.sessionId} — ${run.sessionId === undefined ? "none was named" : `${run.sessionId} is another`}`);
+        if (run.runner !== root.runner) refuse(`the root reviewer run #${root.id} runs on ${root.runner} — a correction on ${run.runner} is another machine's`);
+        if (run.leaseId !== root.leaseId) refuse(`the root reviewer run #${root.id} holds lease ${root.leaseId} — a correction under lease ${run.leaseId} is not its own`);
+        const taken = this.db.prepare("SELECT id FROM run WHERE parent_run = ? AND role = 'reviewer' LIMIT 1").get(parent.id) as { id: number } | undefined;
+        if (taken !== undefined) refuse(`reviewer run #${parent.id} was corrected once already (run #${Number(taken.id)}) — a correction grant is one-use`);
       } else {
+        if (parent.role === "reviewer") refuse(`reviewer run #${parent.id} is a review already — a correction child is admitted by admitCorrection`);
         if (request === undefined) refuse(`run #${parent.id} is reviewed only through its open review request — none was presented`);
         const open = this.db.prepare("SELECT 1 AS hit FROM review_request WHERE id = ? AND run = ? AND consumed_at IS NULL").get(request, parent.id);
         if (open === undefined) refuse(`review request #${request} is not run #${parent.id}'s open request — nothing reviews without one`);
         requestToConsume = request;
       }
-    } else if ((run as { request?: number }).request !== undefined) {
+    } else if (run.request !== undefined) {
       refuse(`a ${role} run answers no review request`);
     }
-    // THE LIVE AUTHORIZATION (raw authority repair): a build or repair on a
-    // task with an open attended authorization spends under it, and the
-    // authorization must be LIVE here — unexpired by its own clock, its
-    // one attempt unspent (or spent on exactly the parent this repair turn
-    // mends), its pinned profile readable — and the run presents that
-    // profile as its `legacy` authority, never the sealed route's leg.
-    if (attended && (role === "builder" || role === "repair")) {
-      const live = authorization as AttendedAuthorization;
+    // THE REPAIR PARENT (atomic authority closure): exactly one live
+    // same-task builder attempt, mended under its own runner and lease.
+    if (road.road === "repair") {
+      if (parent === null) refuse("a repair turn mends exactly one live builder attempt — none was named");
+      if (parent.role !== "builder") refuse(`run #${parent.id} is a ${parent.role} run — a repair turn mends a builder attempt`);
+      if (parent.outcome !== null) refuse(`run #${parent.id} ended as ${parent.outcome} — a repair turn mends a live attempt only`);
+      if (parent.runner !== run.runner) refuse(`run #${parent.id} runs on ${parent.runner} — its repair turn on ${run.runner} is another machine's`);
+      if (parent.leaseId !== run.leaseId) refuse(`run #${parent.id} holds lease ${parent.leaseId} — a repair turn under lease ${run.leaseId} is not its own`);
+    }
+    // THE LIVE AUTHORIZATION (atomic authority closure): an attended
+    // attempt opens under exactly the authorization the caller names —
+    // open on this task, unexpired by its own clock, its one attempt
+    // unspent, minted for THIS runner at THIS generation, pinning a
+    // readable profile the run presents as its `legacy` authority. A
+    // repair turn on an attended parent runs under the authorization that
+    // spent its attempt on that parent. Any other road on a task with an
+    // open authorization refused above.
+    let authorizationToConsume: AttendedAuthorization | null = null;
+    if (road.road === "attended") {
+      const live = openAuthorization as AttendedAuthorization;
+      const named = road.authorization;
+      if (live.id !== named.id) refuse(`the task's open attended authorization is ${live.id}, not ${named.id}`);
+      if (live.closedAt !== null) refuse(`the attended authorization ${live.id} is closed — nothing spends under it`);
       if (Date.parse(live.absoluteExpiry) <= run.now.getTime()) refuse(`the attended authorization ${live.id} expired at ${live.absoluteExpiry} — nothing spends under it`);
-      if (live.attemptRun !== null && !(role === "repair" && parent !== null && live.attemptRun === parent.id)) {
-        refuse(`the attended authorization ${live.id} already spent its one attempt on run #${live.attemptRun} — nothing else opens under it`);
-      }
+      if (live.attemptRun !== null) refuse(`the attended authorization ${live.id} already spent its one attempt on run #${live.attemptRun} — nothing else opens under it`);
+      if (live.runner !== run.runner || named.runner !== run.runner) refuse(`the attended authorization ${live.id} names runner ${live.runner} — an attempt on ${run.runner}${named.runner !== run.runner ? ` presented as ${named.runner}` : ""} is not its own`);
+      if (live.runnerGeneration !== named.generation) refuse(`the attended authorization ${live.id} was minted for ${live.runner} at generation ${live.runnerGeneration}, not ${named.generation}`);
       let pinned: ExecutionProfile | null = null;
       try {
         const terms = JSON.parse(live.termsJson) as { profileJson?: unknown };
@@ -13538,47 +13859,69 @@ export class Store {
       } catch {
         pinned = null;
       }
-      // An authorization that pins no readable profile admits a row under
-      // the ordinary rules and spends nothing (the dispatch proof refuses
-      // it); one that pins a profile is presented as exactly that.
-      if (pinned !== null) {
-        if (run.route === undefined) refuse(`an attended ${role} presents the authorization's pinned profile profile:${profileDigestOf(pinned)} as its authority — none was presented`);
-        if ((run.route as { chosen?: unknown }).chosen !== "legacy") refuse(`an attended ${role} spends under the authorization's pinned profile (a legacy stamp), not as a ${String((run.route as { chosen?: unknown }).chosen)} leg`);
+      if (pinned === null) refuse(`the attended authorization ${live.id} pins no readable profile — nothing spends under it`);
+      if ((run.route as { chosen?: unknown }).chosen !== "legacy") refuse(`an attended builder spends under the authorization's pinned profile (a legacy stamp), not as a ${String((run.route as { chosen?: unknown }).chosen)} leg`);
+      if (live.parentRun === null) {
+        if (parent !== null) refuse(`the attended authorization ${live.id} continues nothing — an attempt under it names no parent`);
+      } else {
+        if (parent === null || parent.id !== live.parentRun) refuse(`the attended authorization ${live.id} continues run #${live.parentRun} — ${parent === null ? "no parent was named" : `run #${parent.id} is not it`}`);
+        if (parent.outcome === null) refuse(`run #${parent.id} is still open — a continuation continues a finished attempt`);
       }
+      authorizationToConsume = live;
+    } else if (road.road === "repair" && openAuthorization !== null) {
+      const live = openAuthorization;
+      if (Date.parse(live.absoluteExpiry) <= run.now.getTime()) refuse(`the attended authorization ${live.id} expired at ${live.absoluteExpiry} — nothing spends under it`);
+      if (parent === null || live.attemptRun !== parent.id) refuse(`the attended authorization ${live.id} spent its attempt on run #${live.attemptRun ?? "none"} — a repair turn mends that attempt only`);
+      if ((run.route as { chosen?: unknown }).chosen !== "legacy") refuse(`an attended repair spends under the authorization's pinned profile (a legacy stamp), not as a ${String((run.route as { chosen?: unknown }).chosen)} leg`);
     }
-    // THE LANE (raw authority repair): a contest lane's run is one of THIS
-    // task's racing agents, in a contest still dispatching or racing, on a
-    // lane whose custody is free — or held by exactly the parked attempt
-    // this run resumes — and it presents the lane's race-approved profile
-    // as its `legacy` authority. The lane's pointer moves to the row in
-    // this same transaction, below; no later claim binds one.
+    // THE LANE (atomic authority closure): a contest lane's run is one of
+    // THIS task's racing agents, in a contest still dispatching or racing,
+    // under the contest's live custody — the lease, runner, and watch
+    // incarnation the contest was stamped with — on a lane whose pointer
+    // is free or held by exactly the parked attempt this run resumes, and
+    // it presents the lane's STORED sealed profile as its `legacy`
+    // authority. The pointer moves to the row below, in this transaction.
     let lane: Contestant | null = null;
-    if (contestant !== null) {
-      lane = this.getContestant(contestant);
+    if (road.road === "contest") {
+      lane = this.getContestant(contestant as number);
       const contest = lane === null ? null : this.getContest(lane.contest);
       if (lane === null || contest === null || contest.taskRef !== run.taskRef) refuse(`contestant ${contestant} is not one of this task's racing agents`);
-      if (role !== "builder" && role !== "repair") refuse(`a ${role} run is no racing agent's — a lane builds and repairs`);
       if (contest.state !== "dispatching" && contest.state !== "racing") refuse(`the contest is ${contest.state} — its lanes admit nothing`);
+      if (contest.currentLeaseId === null || contest.currentLeaseId !== run.leaseId) refuse(`the contest holds lease ${contest.currentLeaseId ?? "none"} — a lane run under lease ${run.leaseId} is not its custody`);
+      if (contest.runner === null || contest.runner !== run.runner) refuse(`the contest runs on ${contest.runner ?? "no runner"} — a lane run on ${run.runner} is another machine's`);
+      if ((contest.incarnation ?? null) !== (road.incarnation ?? null)) refuse(`the contest was dispatched by watch incarnation ${contest.incarnation ?? "none"}, not ${road.incarnation ?? "none"}`);
+      if (lane.profile == null) refuse(`contestant ${lane.id} carries no sealed profile — nothing spends on the lane`);
       if (lane.activeRun !== null && !(parent !== null && lane.activeRun === parent.id && parent.outcome === "parked")) {
         refuse(`contestant ${contestant} already holds run #${lane.activeRun} — one live run per racing agent`);
       }
-      if (run.route === undefined) refuse(`a contest lane presents its race-approved profile as its authority — none was presented`);
-      if ((run.route as { chosen?: unknown }).chosen !== "legacy") refuse(`a contest lane spends under its race-approved profile (a legacy stamp), not as a ${String((run.route as { chosen?: unknown }).chosen)} leg`);
+      if (parent !== null && (parent.contestant !== lane.id || parent.outcome !== "parked")) refuse(`run #${parent.id} is not this lane's parked attempt — nothing resumes it`);
+      const leg = run.route as RouteStamp;
+      if (leg.chosen !== "legacy") refuse(`a contest lane spends under its race-approved profile (a legacy stamp), not as a ${String(leg.chosen)} leg`);
+      const expected = `profile:${profileDigestOf(lane.profile)}`;
+      if (leg.routeDigest !== expected) refuse(`a contest lane spends under its race-approved profile, not ${leg.routeDigest}`);
+    }
+    // THE RECOVERY GRANT (atomic authority closure): the interrupted
+    // attempt whose draft this builder inherits — this task's own builder
+    // or repair turn, left in this very worktree on this branch, either
+    // ended as `failed` for `interrupted` or still open under a lease
+    // nobody holds any more.
+    if (road.road === "recovered") {
+      if (parent === null) refuse("a recovered draft names the interrupted attempt it inherits — none was named");
+      if (parent.role !== "builder" && parent.role !== "repair") refuse(`run #${parent.id} is a ${parent.role} run — a recovered draft is a builder's or its repair turn's`);
+      if (parent.worktree !== run.worktree || parent.branch !== run.branch) refuse(`run #${parent.id} left its draft in ${parent.worktree ?? "no worktree"} on ${parent.branch ?? "no branch"}, not ${run.worktree} on ${run.branch}`);
+      const interrupted = parent.outcome === null || (parent.outcome === "failed" && parent.reason === "interrupted");
+      if (!interrupted) refuse(`run #${parent.id} ended as ${parent.outcome}${parent.reason === null ? "" : ` (${parent.reason})`} — only an interrupted attempt's draft is recovered`);
+      if (parent.outcome === null && this.liveClaimByLease(parent.leaseId, run.now) !== null) refuse(`run #${parent.id} is still being built under lease ${parent.leaseId} — nothing recovers a live attempt's draft`);
     }
     // CHAIN CUSTODY, decided before the row (v48 authority repair): a repair turn inherits
-    // exactly its SAME-TASK parent's binding — a parent on another task is
-    // a caller bug, refused — and only while that parent IS the live tail
-    // of the task's open cycle under the approved chain (v48 integrity): a
-    // parent whose custody has moved, ended, or never existed vouches for
-    // nothing. A reviewer, planner, or builder child never inherits (a
-    // review after a fallback reviews under the review leg, it does not
-    // take the chain's custody). Base and parked-resume custody are
-    // proved here and written below, in this transaction.
+    // exactly its SAME-TASK parent's binding — and only while that parent IS
+    // the live tail of the task's open cycle under the approved chain (v48
+    // integrity): a parent whose custody has moved, ended, or never existed
+    // vouches for nothing. A reviewer, planner, or builder child never
+    // inherits. Base and parked-resume custody are proved here and
+    // written below, in this transaction.
     let binding: { cycle: number | null; index: number; entryDigest: string; authMode: "subscription" | "api-key" | null } | null = null;
     if (role === "repair" && parent !== null) {
-      if (parent.taskRef !== run.taskRef) {
-        refuse(`run #${parent.id} belongs to task_ref ${parent.taskRef} — a repair turn mends its own task's run only`);
-      }
       if (parent.chainCycle != null || parent.chainIndex != null || parent.entryDigest != null) {
         if (parent.chainCycle == null || parent.chainIndex == null || parent.entryDigest == null) {
           refuse(`run #${parent.id}'s chain binding is not whole — nothing repairs under it`);
@@ -13591,7 +13934,7 @@ export class Store {
         binding = { cycle: parent.chainCycle, index: parent.chainIndex, entryDigest: parent.entryDigest, authMode: parent.authMode ?? null };
       }
     }
-    const chain = role === "builder" && contestant === null && !attended ? this.approvedChainOf(taskId) : null;
+    const chain = role === "builder" && contestant === null && road.road !== "attended" ? this.approvedChainOf(taskId) : null;
     // A CHAIN approval dispatches only through its cycle (v48 integrity):
     // a builder on such a task PRESENTS its custody — the base, or the
     // parked base tail it resumes — or no row opens. A row outside the
@@ -13622,29 +13965,28 @@ export class Store {
       binding = { cycle: null, index: 0, entryDigest: entryDigestOf(base), authMode: base.authMode };
     }
     const bound = binding === null ? null : { index: binding.index, entryDigest: binding.entryDigest };
-    let stamp: RouteStamp | null = null;
-    if (run.route !== undefined) {
-      const stampProvider = typeof (run.route as { provider?: unknown }).provider === "string" ? (run.route as { provider: string }).provider : null;
-      const stampModel = (run.route as { model?: unknown }).model;
-      provider = provider ?? stampProvider;
-      model = model ?? (typeof stampModel === "string" ? stampModel : null);
-      const problem = this.routeAdmissionProblem(
-        { taskRef: run.taskRef, role, provider: provider ?? "claude", model, contestant, chain: bound },
-        run.route,
-        run.now,
-      );
-      if (problem !== null) refuse(problem);
-      stamp = run.route;
-    } else if (scope !== null) {
-      // Nothing is dictated — but the refusal says what the caller would
-      // have had to present, or why nothing could govern the run at all.
-      const could = this.routeAuthorityFor(run.taskRef, role, bound, { provider: provider ?? "claude", model });
-      refuse(
-        `this task has a scope and the caller presented no route authority — ${
-          could !== null && !could.ok ? could.problem : `nothing opens unstamped on it (present its ${phaseOfRole(role)} leg)`
-        }`,
-      );
+    const stampProvider = typeof (run.route as { provider?: unknown }).provider === "string" ? (run.route as { provider: string }).provider : null;
+    const stampModel = (run.route as { model?: unknown }).model;
+    provider = provider ?? stampProvider;
+    model = model ?? (typeof stampModel === "string" ? stampModel : null);
+    // A racing lane's repair turn is proved against the lane exactly as
+    // its build was (atomic authority closure): the parent's lane is the
+    // authority the repair leg spends under.
+    const proofLane = contestant ?? (road.road === "repair" && parent !== null ? parent.contestant : null);
+    if (proofLane !== null && contestant === null) {
+      const parentLane = this.getContestant(proofLane);
+      const parentContest = parentLane === null ? null : this.getContest(parentLane.contest);
+      if (parentLane === null || parentContest === null || parentContest.taskRef !== run.taskRef) refuse(`contestant ${proofLane} is not one of this task's racing agents`);
+      if (parentContest.state !== "dispatching" && parentContest.state !== "racing") refuse(`the contest is ${parentContest.state} — its lanes admit nothing`);
+      if (parentLane.activeRun !== (parent as Run).id) refuse(`contestant ${proofLane} holds run #${parentLane.activeRun ?? "none"} — a repair turn mends the lane's live attempt only`);
     }
+    const problem = this.routeAdmissionProblem(
+      { taskRef: run.taskRef, role, provider: provider ?? "claude", model, contestant: proofLane, chain: bound },
+      run.route,
+      run.now,
+    );
+    if (problem !== null) refuse(problem);
+    const stamp = run.route as RouteStamp;
     const qualityMode: QualityMode =
       role === "reviewer" && parent !== null
         ? parent.qualityMode ?? "default"
@@ -13671,8 +14013,8 @@ export class Store {
     const inserted = this.db
       .prepare(
         `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, parent_run, session_id, contestant, quality_mode,
-                          chain_cycle, chain_index, entry_digest, auth_mode, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          chain_cycle, chain_index, entry_digest, auth_mode, attended_authorization, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.taskRef,
@@ -13691,14 +14033,15 @@ export class Store {
         binding === null || cycleId === null ? null : binding.index,
         binding === null || cycleId === null ? null : binding.entryDigest,
         binding === null || cycleId === null ? null : binding.authMode,
+        // The attended binding rides the insert (atomic authority closure):
+        // a row admitted under an authorization is bound to it from birth.
+        authorizationToConsume === null ? null : authorizationToConsume.id,
         run.now.toISOString(),
       );
     const id = Number(inserted.lastInsertRowid);
-    if (stamp !== null) {
-      // The provenance row lands in the same transaction as the run row —
-      // proved above, written here; a run and its route are one fact.
-      this.writeRunRoute(id, stamp, run.now);
-    }
+    // The provenance row lands in the same transaction as the run row —
+    // proved above, written here; a run and its route are one fact.
+    this.writeRunRoute(id, stamp, run.now);
     if (requestToConsume !== null) {
       // The request is spent by the very row that answers it — a CAS on the
       // open request proved above; a request consumed under us rolls the
@@ -13707,6 +14050,20 @@ export class Store {
         .prepare("UPDATE review_request SET consumed_at = ?, consumed_reason = 'dispatched' WHERE id = ? AND run = ? AND consumed_at IS NULL")
         .run(run.now.toISOString(), requestToConsume, run.parentRun ?? null);
       if (Number(consumed.changes) !== 1) refuse(`review request #${requestToConsume} was consumed under this admission — nothing reviews without it`);
+    }
+    if (authorizationToConsume !== null) {
+      // THE ONE ATTEMPT, consumed by the very row that spends it (atomic
+      // authority closure): a CAS on the open, unspent authorization
+      // proved above — one that moved under us rolls the row back, and
+      // `run.attended_authorization` and `authorization.attempt_run` can
+      // never disagree.
+      const consumed = this.db
+        .prepare(
+          `UPDATE attended_authorization SET attempt_run = ?, consumed_at = ?
+            WHERE id = ? AND closed_at IS NULL AND attempt_run IS NULL AND runner = ? AND runner_generation = ?`,
+        )
+        .run(id, run.now.toISOString(), authorizationToConsume.id, run.runner, authorizationToConsume.runnerGeneration);
+      if (Number(consumed.changes) !== 1) refuse(`the attended authorization ${authorizationToConsume.id} moved under this admission — its attempt did not bind`);
     }
     if (lane !== null) {
       // The lane's pointer moves to this row — from free, or from the parked
@@ -19966,6 +20323,12 @@ function scopeTermsProblem(row: Record<string, unknown>): string | null {
   if (row["approval_kind"] !== "profile" && row["approval_kind"] !== "chain") return "the approval kind is not one this code writes";
   if (row["profile_state"] !== "resolved" && row["profile_state"] !== "unresolved") return "the profile state is not one this code writes";
   if (row["digest_version"] !== 1 && row["digest_version"] !== 2) return "the digest version is not one this code writes";
+  // Who wrote the text is a term the mate quarantine reads (atomic
+  // authority closure): a word outside the three this code writes (or
+  // null for a person) is corruption, never a value that slips past the
+  // quarantine because it is not literally 'mate'.
+  const via = row["proposed_via"];
+  if (via !== null && via !== undefined && via !== "mate" && via !== "coordinator" && via !== "scout") return "the proposed-via marker is not one this code writes";
   const era = row["route_era"];
   if (era !== null && era !== undefined && (typeof era !== "number" || !Number.isSafeInteger(era) || era < 1 || era > ROUTE_ERA)) return "the route era is not one this code writes";
   for (const column of ["digest", "proposed_at"]) {
@@ -20020,6 +20383,7 @@ function readScope(row: Record<string, unknown>): Scope {
     approvedRouteJson:
       row["approved_route_json"] === null || row["approved_route_json"] === undefined ? null : String(row["approved_route_json"]),
     routeEra: row["route_era"] === null || row["route_era"] === undefined ? null : Number(row["route_era"]),
+    proposedVia: row["proposed_via"] === "mate" || row["proposed_via"] === "coordinator" || row["proposed_via"] === "scout" ? row["proposed_via"] : null,
   };
 }
 

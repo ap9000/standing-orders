@@ -5,6 +5,10 @@ import { routeDigestOf, routeFromJson } from "./phase-routing.js";
 import { proveApprovedProfile } from "./builder.js";
 import { register } from "./runner.js";
 import { acquire } from "./claim.js";
+import { readAuthModeStrict } from "./keys.js";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
@@ -927,5 +931,162 @@ describe("the phase route is a signed term (v47): the digest binds it, the seal 
     expect(cleared.ok).toBe(true);
     expect(store.refForId(ref)).toMatchObject({ planProvider: null, planModel: null });
     expect(routeFromJson(store.getScope("t-plan")!.proposedRouteJson ?? null)!.legs[0]).toMatchObject({ phase: "plan", provider: "claude", model: "sonnet", chosen: "recommended" });
+  });
+});
+
+describe("one strict projection gates filing, consent, the seal, and dispatch (atomic authority closure)", () => {
+  let store: Store;
+  const REPO = "/repos/strict";
+  const savedHome = process.env["HOME"];
+  let home: string;
+  const authFile = () => join(home, ".standing-orders", "keys", "claude.auth");
+  beforeEach(() => {
+    // Every auth-mode read in the store goes through the operator's home;
+    // the test owns one, so the real machine's files never decide a case.
+    home = mkdtempSync(join(tmpdir(), "so-strict-scope-"));
+    mkdirSync(join(home, ".standing-orders", "keys"), { recursive: true });
+    process.env["HOME"] = home;
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
+    store.setPhaseTierConfig("installation", "build", "strong", "claude", "opus", "alex", T0);
+    const alex = addApprover(store, "alex", T0, undefined, () => "tok-alex");
+    if (!alex.ok) throw new Error("bootstrap");
+  });
+  afterEach(() => {
+    store.close();
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const file = (id: string) => {
+    store.createTask({ id, title: id }, T0);
+    const ref = store.refFor("built-in", id).id;
+    store.placeTask(ref, REPO);
+    propose(store, { taskId: id, goal: "a guard", acceptance: [{ id: "c1", statement: "guarded", how: null, evidence: ["check"] }], now: T0 });
+    return { ref, scope: store.getScope(id)! };
+  };
+  const runs = () => Number((store.raw().prepare("SELECT COUNT(*) AS n FROM run").get() as { n: number }).n);
+  const strictEnv = { authMode: (provider: "claude" | "codex" | "gemini" | "openrouter") => readAuthModeStrict(provider) };
+
+  /** Every door, on a scope that must not open: the projection names the
+   * reason, no seal lands (password or mode), the row stays unapproved,
+   * no builder can present a stamp, and no run row exists. */
+  const everyDoorClosed = (id: string, ref: number, reason: string, words: RegExp) => {
+    const scope = store.getScope(id)!;
+    expect(scopeAuthorityOf(scope, strictEnv)).toMatchObject({ ok: false, reason, problem: expect.stringMatching(words) });
+    expect(store.sealScopeApproval(id, "mode nightly", T0, {}, { kind: "mode", modeDigest: "m".repeat(32) })).toBe(false);
+    expect(store.sealScopeApproval(id, "alex", T0)).toBe(false);
+    expect(approve(store, id, "alex", T0, scope.digest, "tok-alex").ok).toBe(false);
+    expect(store.getScope(id)!.approvedAt).toBeNull();
+    expect(store.sealedRouteOf(id).ok).toBe(false);
+    const authority = store.routeAuthorityFor(ref, "builder");
+    expect(authority === null || authority.ok === false).toBe(true);
+    expect(() =>
+      store.startRun({ taskRef: ref, leaseId: "lease", runner: "r", branch: "b", worktree: "/w", provider: "claude", model: "sonnet", now: T0, route: { routeDigest: "legacy", phase: "build", provider: "claude", model: "sonnet", chosen: "legacy" } }),
+    ).toThrow(/run admission refused/);
+    expect(runs()).toBe(0);
+  };
+
+  test("a proposed-via marker outside mate, coordinator, scout, or null is a stated term problem — the mate quarantine cannot be bypassed by a word it does not list", () => {
+    const { ref } = file("t-via");
+    const raw = store.raw();
+    // The quarantine as written: a mate's text never takes a mode seal.
+    raw.prepare("UPDATE task_scope SET proposed_via = 'mate' WHERE task_id = 't-via'").run();
+    expect(store.getScope("t-via")!.proposedVia).toBe("mate");
+    expect(store.sealScopeApproval("t-via", "mode nightly", T0, {}, { kind: "mode", modeDigest: "m".repeat(32) })).toBe(false);
+    // The reproduction: `bogus` used to fall outside the IN-list and seal.
+    raw.prepare("UPDATE task_scope SET proposed_via = 'bogus' WHERE task_id = 't-via'").run();
+    expect(store.getScope("t-via")!.termsProblem).toBe("the proposed-via marker is not one this code writes");
+    expect(store.getScope("t-via")!.proposedVia).toBeNull();
+    everyDoorClosed("t-via", ref, "terms", /proposed-via marker/);
+    // A person's text (null) seals under a mode as before.
+    raw.prepare("UPDATE task_scope SET proposed_via = NULL WHERE task_id = 't-via'").run();
+    expect(store.getScope("t-via")!.termsProblem).toBeNull();
+    expect(store.sealScopeApproval("t-via", "mode nightly", T0, {}, { kind: "mode", modeDigest: "m".repeat(32) })).toBe(true);
+  });
+
+  test("a present auth-mode file that says neither word closes filing, consent, and the seal in its words — never the lenient subscription default", () => {
+    // Filed while the mode is well-formed: the projection proves and
+    // reports the mode it read.
+    const { ref, scope } = file("t-auth");
+    expect(scope.profileState).toBe("resolved");
+    expect(scopeAuthorityOf(scope, strictEnv)).toMatchObject({ ok: true, authMode: "subscription" });
+    // The reproduction: claude.auth says `not-a-mode`.
+    writeFileSync(authFile(), "not-a-mode");
+    everyDoorClosed("t-auth", ref, "auth-mode", /says "not-a-mode", not subscription or api-key/);
+    // Without the strict reader in hand the pure projection still proves
+    // the row — the reader is the door's, and every door hands it in.
+    expect(scopeAuthorityOf(store.getScope("t-auth")!)).toMatchObject({ ok: true, authMode: null });
+    // Filing under the broken file goes UNRESOLVED in the same words.
+    store.createTask({ id: "t-auth-2", title: "t" }, T0);
+    const ref2 = store.refFor("built-in", "t-auth-2").id;
+    store.placeTask(ref2, REPO);
+    propose(store, { taskId: "t-auth-2", goal: "a guard", now: T0 });
+    const unresolved = store.getScope("t-auth-2")!;
+    expect(unresolved.profileState).toBe("unresolved");
+    expect(unresolved.unresolvedReason).toMatch(/says "not-a-mode", not subscription or api-key/);
+    expect(scopeAuthorityOf(unresolved, strictEnv)).toMatchObject({ ok: false, reason: "unresolved" });
+    expect(approve(store, "t-auth-2", "alex", T0, unresolved.digest, "tok-alex")).toMatchObject({ ok: false, reason: "profile-unresolved" });
+    // Restated, the first scope seals; api-key is a mode too.
+    writeFileSync(authFile(), "api-key");
+    expect(scopeAuthorityOf(store.getScope("t-auth")!, strictEnv)).toMatchObject({ ok: true, authMode: "api-key" });
+    expect(approve(store, "t-auth", "alex", T0, store.getScope("t-auth")!.digest, "tok-alex").ok).toBe(true);
+  });
+
+  test("a present fallback row outside one to three exact entries is a stated problem — an empty list never shrinks a configured chain to no fallback", () => {
+    const raw = store.raw();
+    const write = (entries: string) =>
+      raw.prepare("INSERT INTO fallback_config (scope, phase, entries_json, updated_at, updated_by) VALUES (?, 'build', ?, ?, 'alex') ON CONFLICT (scope, phase) DO UPDATE SET entries_json = excluded.entries_json").run(REPO, entries, T0.toISOString());
+    const entry = (model: string) => ({ provider: "gemini", model, authMode: "api-key" });
+    // The store refuses to write what it would not read back.
+    expect(() => store.setFallbackConfig(REPO, [], "alex", T0)).toThrow(/1 to 3 entries, not 0/);
+    expect(() => store.setFallbackConfig(REPO, [entry("a"), entry("b"), entry("c"), entry("d")], "alex", T0)).toThrow(/1 to 3 entries, not 4/);
+    expect(store.fallbackConfigProblem(REPO)).toBeNull();
+    // The reproduction: a present row whose list is empty.
+    write("[]");
+    expect(store.fallbackConfigProblem(REPO)).toMatch(/carries 0 entries, not 1 to 3/);
+    expect(store.fallbackConfig(REPO)).toEqual([]);
+    const { ref, scope } = file("t-empty-chain");
+    expect(scope.profileState).toBe("unresolved");
+    expect(scope.unresolvedReason).toMatch(/the configured fallback chain cannot file: .*carries 0 entries, not 1 to 3/);
+    expect(scope.proposedChainJson ?? null).toBeNull();
+    everyDoorClosed("t-empty-chain", ref, "unresolved", /carries 0 entries/);
+    // Four entries is the same corruption.
+    write(JSON.stringify([entry("a"), entry("b"), entry("c"), entry("d")]));
+    expect(store.fallbackConfigProblem(REPO)).toMatch(/carries 4 entries, not 1 to 3/);
+    // One well-formed entry files a chain as before.
+    store.setFallbackConfig(REPO, [entry("gemini-2.5-pro")], "alex", T0);
+    expect(store.fallbackConfigProblem(REPO)).toBeNull();
+    const { scope: chained } = file("t-chain-ok");
+    expect(chained.profileState).toBe("resolved");
+    expect(chainFromJson(chained.proposedChainJson!)).toHaveLength(2);
+  });
+
+  test("a risk level or quality mode that disagrees with the route it was filed beside is a parity problem on the working side, the sealed side, and the dispatch proof", () => {
+    const { ref, scope } = file("t-risk");
+    expect(routeFromJson(scope.proposedRouteJson ?? null)!.risk).toBe("routine");
+    const raw = store.raw();
+    // Working side: `high` over a route recommended for `routine`.
+    raw.prepare("UPDATE task_scope SET risk_level = 'high' WHERE task_id = 't-risk'").run();
+    everyDoorClosed("t-risk", ref, "parity", /recommended for routine risk but the scope's risk level is high/);
+    raw.prepare("UPDATE task_scope SET risk_level = 'routine', quality_mode = 'strict' WHERE task_id = 't-risk'").run();
+    expect(scopeAuthorityOf(store.getScope("t-risk")!, strictEnv)).toMatchObject({ ok: false, reason: "parity", problem: expect.stringMatching(/recommended for default quality but the scope's quality mode is strict/) });
+    raw.prepare("UPDATE task_scope SET quality_mode = 'default' WHERE task_id = 't-risk'").run();
+    // Sealed side: approve honestly, then corrupt the column under the seal.
+    expect(approve(store, "t-risk", "alex", T0, store.getScope("t-risk")!.digest, "tok-alex").ok).toBe(true);
+    expect(store.sealedRouteOf("t-risk").ok).toBe(true);
+    raw.prepare("UPDATE task_scope SET risk_level = 'high' WHERE task_id = 't-risk'").run();
+    expect(store.sealedRouteOf("t-risk")).toMatchObject({ ok: false, reason: "unreadable", detail: expect.stringMatching(/recommended for routine risk but the scope's risk level is high/) });
+    expect(proveApprovedProfile(store.getScope("t-risk"), null, { provider: "claude", model: "sonnet", maxTurns: undefined, timeoutMs: undefined, skipPermissions: false })).toMatchObject({ ok: false, message: expect.stringMatching(/recommended for routine risk .* \(stale-approval\)/) });
+    expect(store.routeAuthorityFor(ref, "builder")).toMatchObject({ ok: false });
+    expect(() =>
+      store.startRun({ taskRef: ref, leaseId: "lease", runner: "r", branch: "b", worktree: "/w", provider: "claude", model: "sonnet", now: T0, route: { routeDigest: routeDigestOf(routeFromJson(scope.proposedRouteJson ?? null)!), phase: "build", provider: "claude", model: "sonnet", chosen: "recommended" } }),
+    ).toThrow(/run admission refused/);
+    expect(runs()).toBe(0);
+    raw.prepare("UPDATE task_scope SET risk_level = 'routine' WHERE task_id = 't-risk'").run();
+    expect(store.sealedRouteOf("t-risk").ok).toBe(true);
   });
 });

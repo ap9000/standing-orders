@@ -167,7 +167,16 @@ export const ROUTINE_NAME = /^[a-z0-9][a-z0-9-]{0,40}$/;
  * Fail closed on every field at once, like plan parsing: an operator fixing
  * a routine definition should learn everything wrong in one round.
  */
-export function validateRoutineTerms(terms: RoutineTerms): RoutineProblem[] {
+export function validateRoutineTerms(
+  terms: RoutineTerms,
+  options: {
+    /** The integrity projection's reading of a STORED row (atomic
+     * authority closure): its rubric's shape was proved by the raw reader,
+     * and a routine filed before rubrics existed carries none — the
+     * filing door alone demands at least one criterion. */
+    storedRubric?: boolean;
+  } = {},
+): RoutineProblem[] {
   const problems: RoutineProblem[] = [];
   if (terms.goal.trim() === "" || terms.goal.length > 2_000 || hasForbiddenControls(terms.goal)) {
     problems.push({ field: "goal", problem: "required, at most 2000 characters, no control characters" });
@@ -188,7 +197,7 @@ export function validateRoutineTerms(terms: RoutineTerms): RoutineProblem[] {
   const acceptanceParse = parseAcceptanceCriteria(terms.acceptance);
   if (acceptanceParse.problems.length > 0) {
     problems.push({ field: "acceptance", problem: acceptanceParse.problems.map(p => p.message).join("; ") });
-  } else if (acceptanceParse.criteria.length === 0) {
+  } else if (acceptanceParse.criteria.length === 0 && options.storedRubric !== true) {
     problems.push({ field: "acceptance", problem: "a standing order needs at least one signed acceptance criterion" });
   }
   if (parseSchedule(terms.schedule) === null) {
@@ -199,6 +208,9 @@ export function validateRoutineTerms(terms: RoutineTerms): RoutineProblem[] {
   }
   if (terms.costCeilingUsd !== null && (!Number.isFinite(terms.costCeilingUsd) || terms.costCeilingUsd <= 0)) {
     problems.push({ field: "costCeilingUsd", problem: "a positive dollar amount, or absent for no ceiling" });
+  }
+  if (terms.budgetPerRunMicrousd != null && (!Number.isSafeInteger(terms.budgetPerRunMicrousd) || terms.budgetPerRunMicrousd <= 0)) {
+    problems.push({ field: "budgetPerRunMicrousd", problem: "a positive whole micro-dollar amount, or absent for no per-run cap" });
   }
   // v1 is one-at-a-time, period: every approval surface SAYS so, and a
   // stored false would make the ceremony describe behavior the firing does
@@ -430,6 +442,11 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
           : state === "unfrozen"
             ? `This standing order was approved before Standing Orders froze which agents plan, build, repair, and review each firing. Open it, refresh its agents, read the agents it now names, and approve it again; until then its firings wait.`
             : `The agents this standing order's approval froze do not verify (${integrity.liveProblem ?? "the frozen snapshot is not whole"}). Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`;
+      // A snapshot never taken (approved before routing froze) is a real
+      // state a person must act on, and it pages once at the edge. A
+      // snapshot whose bytes cannot be read or do not verify is CORRUPTION
+      // (atomic authority closure): scheduled or manual, it writes nothing
+      // at all — not a page — and the routine page says so in its words.
       throw new FiringRolledBack(
         {
           ok: false,
@@ -441,7 +458,7 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
                 ? "this standing order was approved before its agents were frozen — refresh its agents and approve it again to fire it"
                 : `${integrity.liveProblem ?? "the approved agents do not verify"} — refresh its agents and approve it again to fire it`,
         },
-        { subject, body },
+        state === "unfrozen" ? { subject, body } : null,
       );
     }
     const frozenRoute = routine.approvedRoute as PhaseRoute;
@@ -720,6 +737,17 @@ export function routineIntegrity(routine: IntegrityRow): RoutineIntegrity {
     return { approved: false, live: false, liveProblem: null, agents: { state: "unverified", approvable: false, refresh: false, problem } };
   }
   const terms = termsOf(routine);
+  // THE SEMANTIC TERMS NEXT (atomic authority closure): terms that read
+  // back exactly can still say something this code never files — a
+  // single-flight flag of 0, a cost ceiling of −1, a schedule no parser
+  // holds, an empty rubric. Every filing door validates these; the
+  // projection validates them AGAIN so a rehashed row is never approvable
+  // or live on terms the filing door would have refused.
+  const semantic = validateRoutineTerms(terms, { storedRubric: true });
+  if (semantic.length > 0) {
+    const problem = `the stored terms are not ones this code files (${semantic.map(one => `${one.field}: ${one.problem}`).join("; ")}) — file this standing order again`;
+    return { approved: false, live: false, liveProblem: null, agents: { state: "unverified", approvable: false, refresh: false, problem } };
+  }
   const stamped = routine.approvedAt !== null && routine.approvedDigest !== null && routine.approvedDigest === routine.digest;
   const workingRehashes = routineDigestOf(terms, routine.profile ?? null, routine.route ?? null) === routine.digest;
   const approved = stamped && workingRehashes;
@@ -770,6 +798,19 @@ export function routineIntegrity(routine: IntegrityRow): RoutineIntegrity {
   const problems = routeProblems(route);
   if (problems.length > 0) return closed("unresolved", problems.join("; "));
   if (!workingRehashes) return closed("unverified", "the filed terms do not hash to this standing order's reference — file it again");
+  // BUILD/REPAIR PARITY BEFORE THE YES (atomic authority closure): the
+  // pending pair must agree exactly as the approved pair must — a working
+  // profile of claude · sonnet beside a rehashed route that builds on
+  // codex is a row two authorities wrote, and no yes lands on it.
+  const build = legOf(route, "build");
+  const repair = legOf(route, "repair");
+  const repairModel = profile.repairModel === "inherit" ? profile.model : profile.repairModel;
+  if (build.provider !== profile.provider || build.model !== profile.model || repair.provider !== profile.provider || repair.model !== repairModel) {
+    return closed(
+      "unverified",
+      `the filed agents (${profile.provider} · ${profile.model}, repair ${profile.provider} · ${repairModel}) disagree with the filed route (${build.provider} · ${build.model}, repair ${repair.provider} · ${repair.model}) — refresh the agents and file again`,
+    );
+  }
   return { approved: false, live: false, liveProblem: null, agents: { state: "pending", approvable: true, refresh: false, problem: null } };
 }
 
@@ -803,6 +844,14 @@ export function refreshRoutineAgents(store: Store, routineId: number, now: Date)
     // words and writes nothing.
     if (routine.termsProblem != null) {
       return { ok: false as const, reason: "unresolved" as const, problem: `the stored terms cannot be read exactly (${routine.termsProblem}) — file this standing order again` };
+    }
+    // Terms this code never files (a single-flight flag of 0, a negative
+    // ceiling) are not re-filed either (atomic authority closure): the
+    // refresh cannot mend terms, and rehashing them would only launder
+    // the corruption into a digest a person could sign.
+    const semantic = validateRoutineTerms(termsOf(routine), { storedRubric: true });
+    if (semantic.length > 0) {
+      return { ok: false as const, reason: "unresolved" as const, problem: `the stored terms are not ones this code files (${semantic.map(one => `${one.field}: ${one.problem}`).join("; ")}) — file this standing order again` };
     }
     const authority = resolveRoutineAuthority(store, routine.repo, routine.acceptance, now);
     if (!authority.ok) return { ok: false as const, reason: "unresolved" as const, problem: authority.problem };

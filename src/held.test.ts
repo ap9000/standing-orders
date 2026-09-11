@@ -39,6 +39,29 @@ const PROFILE: ExecutionProfile = {
 const attendedRoute = { route: { routeDigest: `profile:${profileDigestOf(PROFILE)}`, phase: "build" as const, provider: "claude" as const, model: PROFILE.model, chosen: "legacy" as const } };
 /** A task with NO scope spends as the bare word. */
 const bareRoute = { route: { routeDigest: "legacy", phase: "build" as const, provider: "claude" as const, model: "sonnet", chosen: "legacy" as const } };
+/** The terms an authorization pins in these fixtures — the profile, so the
+ * attended admission can read the pin (atomic authority closure). */
+const pinnedTermsJson = (extra: Record<string, unknown> = {}): string => JSON.stringify({ profileJson: canonicalProfileJson(PROFILE), ...extra });
+/** An attended attempt through its own admission: the authorization named
+ * by id, runner, and generation; the attempt consumed and bound in the
+ * insert. Throws the refusal's words. */
+const attendedRun = (
+  store: ReturnType<typeof openStore>,
+  run: { taskRef: number; leaseId: string; branch: string; worktree: string; authorization: string; generation?: number; now?: Date; parentRun?: number },
+): number => {
+  const { authorization, generation, ...rest } = run;
+  const admitted = store.admitAttended({
+    ...rest,
+    runner: "mac-a",
+    provider: "claude",
+    model: PROFILE.model,
+    authorization: { id: authorization, runner: "mac-a", generation: generation ?? 1 },
+    now: run.now ?? T0,
+    ...attendedRoute,
+  });
+  if (!admitted.ok) throw new Error(admitted.problem);
+  return admitted.runId;
+};
 
 /** A task with a FILED (unapproved) scope and a live attended authorization. */
 const attendedFixture = (
@@ -116,8 +139,8 @@ describe("the attended claim gates (v6 W10/Q4/W1)", () => {
          VALUES ('lease-spent', ?, 1, 'mac-a', ?, ?, ?)`,
       )
       .run(ref.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
-    const run = store.startRun({ taskRef: ref.id, leaseId: "lease-spent", runner: "mac-a", branch: "b", worktree: "/w", now: T0, ...attendedRoute });
-    expect(store.consumeAuthorization("auth-att", run, later(2))).toBe(true);
+    const run = attendedRun(store, { taskRef: ref.id, leaseId: "lease-spent", branch: "b", worktree: "/w", authorization: "auth-att" });
+    expect(store.readAuthorization("auth-att")?.attemptRun).toBe(run);
     store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = 'lease-spent'").run(later(3).toISOString());
     const again = acquireIfReady(store, ref.id, "mac-a", { token: tok("mac-a"), now: later(10) });
     expect(again).toMatchObject({ ok: false, reason: "not-ready" });
@@ -209,13 +232,7 @@ describe("the coordinator: final proof, custody, settlement through the shared m
          VALUES ('lease-att', ?, 1, 'mac-a', ?, ?, ?)`,
       )
       .run(ref.id, T0.toISOString(), new Date(Date.now() + 900_000).toISOString(), T0.toISOString());
-    const runId = store.startRun({
-      taskRef: ref.id,
-      leaseId: "lease-att",
-      runner: "mac-a",
-      branch: "so/t-att",
-      worktree: worktree.dir,
-      now: T0, ...attendedRoute });
+    const runId = attendedRun(store, { taskRef: ref.id, leaseId: "lease-att", branch: "so/t-att", worktree: worktree.dir, authorization: "auth-att" });
     const scope = store.getScope("t-att");
     const captured: CapturedBuild = {
       store,
@@ -317,7 +334,7 @@ describe("the coordinator: final proof, custody, settlement through the shared m
     store.close();
   }, 20_000);
 
-  test("the final proof refuses a moved head, typed, consuming NOTHING", async () => {
+  test("the final proof refuses a moved head, typed — the attempt admission bound stays bound, no custody row lands, and the authorization closes in the refusal's words", async () => {
     const store = openStore(":memory:");
     const coordinator = new HeldSessionCoordinator();
     const worktree = await gitWorktree();
@@ -327,7 +344,11 @@ describe("the coordinator: final proof, custody, settlement through the shared m
     (args.captured as { baseRevision: string }).baseRevision = "e".repeat(40);
     const launched = await coordinator.launch(args as never);
     expect(launched).toMatchObject({ ok: false, reason: "stale-authorization" });
-    expect(store.readAuthorization("auth-att")?.attemptRun).toBeNull();
+    // The one attempt was spent at ADMISSION (atomic authority closure):
+    // the refusal cannot un-spend it, so the authorization closes typed
+    // rather than standing open-and-spent until expiry.
+    expect(store.readAuthorization("auth-att")).toMatchObject({ attemptRun: args.runId, endReason: "refused:stale-authorization" });
+    expect(store.readAuthorization("auth-att")?.closedAt).not.toBeNull();
     expect(store.heldSessionOf(args.runId)).toBeNull();
     rmSync(worktree.dir, { recursive: true, force: true });
     store.close();
@@ -442,11 +463,10 @@ describe("the round-6 cross-check fixes", () => {
         `INSERT INTO attended_authorization
            (id, task_ref, approver, runner, runner_generation, composite_digest, terms_json,
             max_session_turns, budget_microusd, created_at, absolute_expiry)
-         VALUES ('auth-brf', ?, 'alex', 'mac-a', 1, 'x', '{}', 10, 1000000, ?, ?)`,
+         VALUES ('auth-brf', ?, 'alex', 'mac-a', 1, 'x', ?, 10, 1000000, ?, ?)`,
       )
-      .run(ref.id, T0.toISOString(), later(3600).toISOString());
-    const runId = store.startRun({ taskRef: ref.id, leaseId: "lease-brf", runner: "mac-a", branch: "b", worktree: "/w", now: T0, ...bareRoute });
-    store.consumeAuthorization("auth-brf", runId, later(1));
+      .run(ref.id, pinnedTermsJson(), T0.toISOString(), later(3600).toISOString());
+    const runId = attendedRun(store, { taskRef: ref.id, leaseId: "lease-brf", branch: "b", worktree: "/w", authorization: "auth-brf" });
     expect(
       store.openHeldSession({
         run: runId,
@@ -576,7 +596,7 @@ describe("the conversation loop (Phase 2E.2)", () => {
          VALUES ('lease-att', ?, 1, 'mac-a', ?, ?, ?)`,
       )
       .run(ref.id, T0.toISOString(), new Date(Date.now() + 900_000).toISOString(), T0.toISOString());
-    const runId = store.startRun({ taskRef: ref.id, leaseId: "lease-att", runner: "mac-a", branch: "so/t-att", worktree: dir, now: T0, ...attendedRoute });
+    const runId = attendedRun(store, { taskRef: ref.id, leaseId: "lease-att", branch: "so/t-att", worktree: dir, authorization: "auth-att" });
     const scope = store.getScope("t-att");
     let disposed: unknown = null;
     const captured = {
@@ -740,7 +760,7 @@ describe("continuation (Phase 2E, A4): the authorization is the claimable unit; 
       runner: "mac-a",
       runnerGeneration: 0,
       compositeDigest: "c".repeat(32),
-      termsJson: JSON.stringify({ head: "f".repeat(40) }),
+      termsJson: pinnedTermsJson({ head: "f".repeat(40) }),
       maxSessionTurns: 10,
       budgetMicrousd: 1_000_000,
       parentRun: parent,
@@ -798,10 +818,8 @@ describe("continuation (Phase 2E, A4): the authorization is the claimable unit; 
     const claimed = acquireContinuation(store, store.readAuthorization("auth-cont")!, "mac-a", { token: tok("mac-a"), now: new Date() });
     expect(claimed.ok).toBe(true);
     if (!claimed.ok) return;
-    const runId = store.startRun({
-      taskRef: ref.id, leaseId: claimed.claim.leaseId, runner: "mac-a",
-      branch: "so/t-done", worktree: "/w2", parentRun: parent, now: new Date(), ...bareRoute });
-    store.consumeAuthorization("auth-cont", runId, new Date());
+    const runId = attendedRun(store, { taskRef: ref.id, leaseId: claimed.claim.leaseId, branch: "so/t-done", worktree: "/w2", parentRun: parent, authorization: "auth-cont", generation: 0, now: new Date() });
+    expect(store.readAuthorization("auth-cont")?.attemptRun).toBe(runId);
     // FAILURE: no strikes, no demotion, no holds
     const failed = disposeBuildOutcome(
       {
@@ -945,13 +963,7 @@ describe("parallel attended sessions (v28): two held conversations on one runner
     const disposals: string[] = [];
 
     const argsFor = (tag: string, fx: { ref: { id: number } }, wt: { dir: string; head: string }) => {
-      const runId = store.startRun({
-        taskRef: fx.ref.id,
-        leaseId: `lease-par-${tag}`,
-        runner: "mac-a",
-        branch: `so/t-par-${tag}`,
-        worktree: wt.dir,
-        now: T0, ...attendedRoute });
+      const runId = attendedRun(store, { taskRef: fx.ref.id, leaseId: `lease-par-${tag}`, branch: `so/t-par-${tag}`, worktree: wt.dir, authorization: `auth-par-${tag}` });
       const captured: CapturedBuild = {
         store,
         request: { taskId: `t-par-${tag}`, taskRef: fx.ref.id, runner: "mac-a", runId, worktree: wt.dir, branch: `so/t-par-${tag}`, leaseId: `lease-par-${tag}`, now: T0 } as never,
@@ -1047,7 +1059,7 @@ describe("parallel attended sessions (v28): two held conversations on one runner
 });
 
 
-describe("v28 round-1 folds: refusals consume nothing; the cap lives in the custody transaction", () => {
+describe("v28 round-1 folds: a refused launch closes its admission-bound authorization typed; the cap lives in the custody transaction", () => {
   const wt = async (branch: string) => {
     const dir = mkdtempSync(join(tmpdir(), "so-v28f-wt-"));
     const git = async (...args: string[]) => {
@@ -1100,9 +1112,7 @@ describe("v28 round-1 folds: refusals consume nothing; the cap lives in the cust
   };
 
   const argsFor = (store: ReturnType<typeof openStore>, tag: string, fx: { ref: { id: number } }, tree: { dir: string; head: string }, cap?: number) => {
-    const runId = store.startRun({
-      taskRef: fx.ref.id, leaseId: `lease-fold-${tag}`, runner: "mac-a",
-      branch: `so/t-fold-${tag}`, worktree: tree.dir, now: T0, ...attendedRoute });
+    const runId = attendedRun(store, { taskRef: fx.ref.id, leaseId: `lease-fold-${tag}`, branch: `so/t-fold-${tag}`, worktree: tree.dir, authorization: `auth-fold-${tag}` });
     const captured: CapturedBuild = {
       store,
       request: { taskId: `t-fold-${tag}`, taskRef: fx.ref.id, runner: "mac-a", runId, worktree: tree.dir, branch: `so/t-fold-${tag}`, leaseId: `lease-fold-${tag}`, now: T0 } as never,
@@ -1136,8 +1146,9 @@ describe("v28 round-1 folds: refusals consume nothing; the cap lives in the cust
     ).run(args.runId, "c".repeat(32), T0.toISOString());
     const launched = await coordinator.launch(args as never);
     expect(launched).toMatchObject({ ok: false, reason: "run-held" });
-    // the one attempt survives — the OLD order consumed it here
-    expect(store.readAuthorization("auth-fold-rh")?.attemptRun).toBeNull();
+    // The attempt was bound at admission and stays bound to THIS run; the
+    // refusal closes the authorization typed (atomic authority closure).
+    expect(store.readAuthorization("auth-fold-rh")).toMatchObject({ attemptRun: args.runId, endReason: "refused:run-held" });
     rmSync(tree.dir, { recursive: true, force: true });
     store.close();
   }, 20_000);
@@ -1155,7 +1166,9 @@ describe("v28 round-1 folds: refusals consume nothing; the cap lives in the cust
     expect(first).toMatchObject({ ok: true });
     const second = await coordinator.launch(argsFor(store, "c2", b, treeB, 1) as never);
     expect(second).toMatchObject({ ok: false, reason: "session-cap" });
-    expect(store.readAuthorization("auth-fold-c2")?.attemptRun).toBeNull();
+    // Bound at admission, closed typed by the refusal; no custody row.
+    expect(store.readAuthorization("auth-fold-c2")).toMatchObject({ endReason: "refused:session-cap" });
+    expect(store.readAuthorization("auth-fold-c2")?.attemptRun).not.toBeNull();
     expect(store.openHeldSessionCount("mac-a")).toBe(1);
     rmSync(treeA.dir, { recursive: true, force: true });
     rmSync(treeB.dir, { recursive: true, force: true });

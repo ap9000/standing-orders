@@ -10,6 +10,12 @@ import {
   validationErrorsJson,
 } from "./structured-output.js";
 
+/** A task with no scope presents the bare word `legacy` for the exact pair
+ * it spends as (atomic authority closure): nothing opens unstamped. */
+const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: string = "claude", model: string | null = null) => ({
+  route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
+});
+
 describe("structured JSON normalization is syntax-only", () => {
   test("removes one leading BOM and leaves the JSON values untouched", () => {
     const raw = '\uFEFF { "title": "keep \\\"quoted\\\" text", "ids": ["a", "b"], "enabled": false } ';
@@ -125,7 +131,7 @@ describe("structured response attempt evidence", () => {
       role: "planner",
       branch: "standing-orders/task-1",
       worktree: "/work/task-1",
-      now: NOW,
+      ...bareLegacy("plan", "claude", null), now: NOW,
     });
   });
 
