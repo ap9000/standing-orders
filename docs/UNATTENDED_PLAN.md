@@ -55,17 +55,82 @@ Main was still `917bc5b` when this plan was prepared.
   The original preflight command used consumed protocol input files: it is a
   recorded check, not a standalone command that can still be replayed without
   reconstructing those inputs. Durable preflight regression tests pass.
-- P0.1a: task `reconcile-abandoned-run-records`, run 1505, started through
-  Standing Orders at 19:48 UTC on Claude Opus, based on `f3590d4`. Its scope is
-  limited to normal dead-runner reconciliation, preserving successors, and
-  regression coverage. It uses automated acceptance criteria. This isolated
-  follow-up proceeds while the preceding human acceptance is outstanding;
-  neither branch is being treated as merged or release-certified.
+- P0.1a: task `reconcile-abandoned-run-records`, run 1505, completed through
+  Standing Orders on Claude Opus at 20:06 UTC, commit `8bfbafa` based on
+  `f3590d4`. All four automated criteria pass. The worker's gate passed
+  typecheck, 2,309 tests (12 skipped), and build. An independent isolated
+  public-CLI regression fails on the old runtime and passes on this commit:
+  an abandoned attempt is interrupted, its completed successor and task stay
+  unchanged, and a repeat reconcile does nothing. This is deterministic
+  recovery coverage, not a real process-crash or Windows certification.
+- The independent review of run 1505 did **not** complete: root 1506 and its
+  same-session format-correction child 1507 failed during ingestion. A replay
+  on a database backup identified a missing additive migration: existing
+  `criterion_review` tables lack seven binding columns used by the writer.
+  The reviewer mislabels this SQLite error as stale evidence. Its raw findings
+  remain available; they are not counted as accepted review judgements.
+- A bounded follow-up, `repair-existing-review-database-upgrade` (run 1508),
+  finished at 20:25 UTC on Claude Opus, commit `3a1424a` based on `8bfbafa`.
+  Its worker gate passed typecheck, 2,313 tests (12 skipped), and build.
+  Independent replay using this runtime on a fresh backup of the real database
+  successfully ingested the formerly failed
+  correction and retained verified proof. The old runtime failed the identical
+  replay with a missing-column error. Historical failed review outcomes were
+  not rewritten in the live database.
+- A fresh live review of 1508 through the repaired runtime completed at 20:30
+  UTC: root 1509 and same-session correction 1510 both settled, with three
+  saved `upholds` judgements. The missing-column failure is fixed. The reviewer
+  asked whether new artifact columns need foreign keys; checking the complete
+  fresh DDL confirmed both are also bare INTEGER there, so no parity gap exists.
+- **The 1508 completion handoff is still refuted, not accepted.** Its proof
+  restated every signed criterion with the prompt's display-only suffix
+  `(requires evidence: check, changed-path)`. Preflight accepted that wording
+  because it receives criterion IDs, while final adjudication compares exact
+  statements. A positive review correctly does not erase the machine failure.
+  The task nevertheless projects `done` / `Complete`: that inconsistency and
+  bounded proof-only correction are the next slice, not another full rebuild.
+- **Verification isolation remains a P0 gap.** The live database already had
+  the additive columns by the 20:26 backup, before the planned fixed-runtime
+  CLI step. The worker's full gate runs outside the provider child's database
+  override. `cli.test.ts` invokes `graph --json` without an isolated store;
+  `enrolledBackend()` opens the default database with migrations despite being
+  described as read-only. An independent temporary-database witness reproduced
+  that reporting command changing the old ten-column layout to seventeen.
+  No historical review rows were present at backup time. A backup is retained
+  under the local state directory's `backups/`; it is **not** a pre-upgrade
+  backup. Fix verification/setup isolation before the next self-hosted gate.
+- These isolated follow-ups proceed while the preceding human acceptance is
+  outstanding; no implementation branch is being treated as merged or
+  release-certified.
 - Remaining P0.1 work (process fencing at every crash boundary, session/dirty
   work recovery, interrupted verification, and broader platform certification)
   is still pending. P0.1a does not claim the whole restart workstream is done.
 
 ## Prioritized implementation
+
+### Immediate follow-ups from the first two slices
+
+Run these bounded fixes before the remaining restart work or a release claim:
+
+1. **Keep checks away from the live control plane.** Apply a dedicated database
+   override to approved verification/setup children as well as provider children;
+   make CLI tests isolate their state; use a non-migrating read path for reports.
+   Test from a real-home sentinel fixture and prove schema, rows, and filesystem
+   state stay unchanged across the full approved gate. The gate must not depend
+   on the operator remembering an environment variable. Preserve native Windows
+   environment/shell behavior. Do not introduce a new isolation framework.
+2. **Finish good work without rebuilding it for a malformed receipt.** Pass the
+   canonical signed rubric separately from presentation text. Preflight and
+   adjudication must agree about IDs, exact statements, required evidence, and
+   failed checks. Use one bounded same-session or proof-only correction through
+   existing recovery machinery, preserving the commit, check receipt, and failed
+   attempt. Never silently accept changed criteria or overwrite sealed evidence.
+   Task/chat/CLI must say proof correction is needed, not simply Complete, while
+   the verdict is refuted. Reproduce run 1508's suffix mistake in regression tests.
+
+Then close the pending human acceptance/integration, reconcile audited orphaned
+records through the normal recovery path, and continue P0.1. Do not add another
+open-ended "fix everything" task or count operator diagnosis as unattended success.
 
 ### P0.0 — Close the current repair and establish the baseline
 
@@ -110,6 +175,10 @@ paths. Do not introduce a second scheduler.
   cannot be persisted is unfinished. Preserve artifacts for reconciliation.
   Pin runtime identity for an in-flight attempt; upgrades must not replace its
   executable or migrate its state underneath it.
+- Exercise upgrades from real supported table layouts, including databases
+  already stamped with the current version. Fresh-store tests alone missed
+  the review-binding migration. Keep a backup before a live upgrade and
+  preserve unbound historical evidence as unbound.
 - Cancellation stops the entire owned process tree on each supported platform.
   For publishing, reconcile an uncertain remote response before retrying it;
   do not promise exactly-once external effects from a local transaction.
@@ -202,6 +271,12 @@ cannot create an unlimited repair loop.
   completion, run the approved project gate. Reuse its sealed receipt for review
   and display within that attempt; rerun after relevant code, configuration,
   environment, or evidence changes. Record why a rerun was needed.
+- Make the prerequisites for required tests explicit. The first P0.1a suite
+  skipped nine preflight tests because `dist/` did not exist yet, then repeated
+  the suite after building. Required tests must not silently disappear on a
+  fresh checkout. Allow the worker's post-build check to supply its own evidence
+  after the agent exits; the builder should not need to run the whole gate
+  merely to claim it has passed in a pre-exit proof manifest.
 - Keep the existing lightweight/careful execution choices. Careful work gets
   the configured independent reviewer over sealed inputs and the bounded repair
   loop. Do not add compulsory reviewer-of-reviewer stages.
@@ -228,6 +303,14 @@ Done. Waiting and recovery explain what happens next.
   the timeline; do not send repeated unchanged alerts.
 - Provide Stop, Continue after fixing the issue, and Ask for changes where
   applicable. Task page, chat, inbox, and CLI must agree.
+- Preserve the actual review-ingestion failure category and a safe diagnostic;
+  a database error is not stale evidence. A failed ingestion must not silently
+  exhaust the only possible review forever: provide a bounded explicit retry
+  with retained failed history and newly sealed inputs. Report review-only
+  dispatch accurately, and show reviewer progress while it owns a live session.
+- Report actual requeues across the complete reconcile transaction. Releasing
+  a claim can requeue first; a later recovery helper must not then announce
+  "nothing requeued" merely because it performed no second state change.
 - Group repair attempts under the original requested outcome. Internal child
   records must not flood the project with apparently unrelated new tasks.
 - A person returning after hours can immediately tell whether work finished,

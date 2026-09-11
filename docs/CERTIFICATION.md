@@ -28,6 +28,11 @@ machine-readable certificate.
 
 ## Current real-provider baseline
 
+This is the September 8 baseline, not certification of every later change.
+September 11 real work exposed additional recovery and handoff gaps. The
+[unattended completion plan](UNATTENDED_PLAN.md) tracks their fixes and the
+broader release pilot; those gates remain open alongside the Windows checks.
+
 Certified on 2026-09-08 on macOS arm64, Node 22.22.0:
 
 | Provider | Model | Result | Elapsed | Proof |
@@ -55,8 +60,8 @@ proven at spawn. See [fallback-fixtures.md](fallback-fixtures.md).
 
 ## Physical Windows checklist
 
-**Handoff status:** pending the physical Windows PC. All pre-Windows work is
-complete: the same canary passes both subscription providers on macOS, and
+**Handoff status:** pending the physical Windows PC. The original pre-Windows
+baseline passed: the same canary passes both subscription providers on macOS, and
 Windows CI passes Task Scheduler/link/dispatch plus the native `cmd.exe`
 command seam on Node 22 and 24.
 
@@ -90,8 +95,9 @@ Then certify Task Scheduler with a real connected repository:
 6. Reboot, confirm the scheduled worker returns, then run another small task.
 7. Run `daemon uninstall --runner <name> --repo <repo>` when the test is done.
 
-Only those physical Task Scheduler and post-reboot checks remain outside the
-automated and macOS real-provider baseline.
+Those physical Task Scheduler and post-reboot checks remain outside the
+automated and macOS real-provider baseline. Later reliability changes also
+need the regression and unattended-work certification described above.
 
 The separate automatic-fallback claim also remains intentionally unarmed until
 a real exhausted-account terminal is captured for the exact installed CLI
