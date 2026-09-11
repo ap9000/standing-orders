@@ -352,6 +352,16 @@ describe("closing abandoned run records during reconciliation (P0.1a)", () => {
     expect(store.getTask("t-1")?.state).toBe("queued");
   });
 
+  test("counts tasks requeued while releasing claims, even when the run walk finds them already queued", () => {
+    const old = register(store, { name: "old", host: "h", repos: [REPO], now: T0 });
+    expect(acquire(store, task, "old", { token: old.token, now: T0, ttlMs: 60_000, newLeaseId: () => "lease-old" })).toMatchObject({ ok: true });
+    store.setTaskState("t-1", "running", T0);
+    const oldRun = store.startRun({ taskRef: task, leaseId: "lease-old", runner: "old", branch: "b", worktree: "/pool/old", ...bareLegacy(), now: T0 });
+
+    expect(recoverDead(store, DEAD)).toEqual([{ runner: "old", claims: ["lease-old"], worktrees: [], runs: [oldRun], requeued: ["t-1"] }]);
+    expect(recoverDead(store, DEAD).filter(recoveredAnything)).toEqual([]);
+  });
+
   test("leaves an active successor's claim, run, worktree, and task state alone", () => {
     const old = register(store, { name: "old", host: "h", repos: [REPO], now: T0 });
     const oldRun = abandonRun("old", old.token);

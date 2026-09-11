@@ -413,10 +413,11 @@ export function recoverDead(
       // Claims and worktrees first, so the report names every path handed
       // back; the run walk's own per-task worktree release then finds
       // nothing left to do here.
-      const claims = store.releaseClaimsOf(candidate.name, now);
+      const requeued: string[] = [];
+      const claims = store.releaseClaimsOf(candidate.name, now, requeued);
       const worktrees = store.releaseWorktreesOf(candidate.name, now);
       const settled = store.recoverRunnerWork(candidate.name, now);
-      return { runner: candidate.name, claims, worktrees, runs: settled.runs, requeued: settled.requeued };
+      return { runner: candidate.name, claims, worktrees, runs: settled.runs, requeued: [...new Set([...requeued, ...settled.requeued])] };
     });
     if (recovery !== null) recovered.push(recovery);
   }

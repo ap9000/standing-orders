@@ -9,7 +9,7 @@
  * gates, and the commit.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { realpathSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { delimiter } from "node:path";
@@ -22,6 +22,7 @@ import { openStore } from "./store.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 import { HeldSessionCoordinator } from "./held.js";
+import { WorktreePool } from "./worktree.js";
 import { canonicalProfileJson, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import type { Runner } from "./builder.js";
 
@@ -2214,6 +2215,76 @@ describe("watch — the loop, zero tokens idle", () => {
     expect(payload().task.state).toBe("done");
     await run(["task", "show", "t-2", "--json"]);
     expect(payload().task.state).toBe("done");
+  });
+
+  test("reconciliation recovers an unrelated abandoned run while a live provider is still busy", async () => {
+    const { runnerToken, approverToken } = await setup();
+    await approved("t-live", approverToken);
+    await approved("t-orphan", approverToken);
+    let spawns = 0;
+    let recoveredDuringBuild = false;
+    const busyAgent: Runner = async (_file, args, options) => {
+      spawns++;
+      const started = Date.now();
+      const oldToken = registerRunner(db, "abandoned-worker", repo, new Date());
+      const observer = openStore(db);
+      try {
+        const ref = observer.refFor("built-in", "t-orphan").id;
+        const now = new Date();
+        expect(acquire(observer, ref, "abandoned-worker", { token: oldToken, now, newLeaseId: () => "orphan-lease" }).ok).toBe(true);
+        const orphan = observer.startRun({ taskRef: ref, runner: "abandoned-worker", leaseId: "orphan-lease", branch: "standing-orders/t-orphan", worktree: join(pool, "orphan"), now, ...presented(observer, ref, "builder") });
+        observer.touchRunner("abandoned-worker", new Date(Date.now() - 10 * 60_000));
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline && observer.getRun(orphan)?.outcome === null) await new Promise(resolve => setTimeout(resolve, 10));
+        expect(observer.getRun(orphan)).toMatchObject({ outcome: "failed", reason: "interrupted" });
+        expect(observer.getTask("t-orphan")?.state).toBe("queued");
+        const liveRef = observer.refFor("built-in", "t-live").id;
+        expect(observer.runsFor(liveRef), JSON.stringify(observer.getTask("t-live"))).toEqual(expect.arrayContaining([expect.objectContaining({ runner: "builder-1", outcome: null })]));
+        recoveredDuringBuild = true;
+        // End the bounded watch after its current task, not by cancelling it.
+        while (Date.now() - started < 500) await new Promise(resolve => setTimeout(resolve, 10));
+      } finally {
+        observer.close();
+      }
+      await writeFile(join(options!.cwd!, "guard.ts"), "export const guarded = true;\n");
+      await concludeDone(options!.cwd!, args, "completed", "Built while maintenance recovered another task.");
+      return { ...OK, stdout: JSON.stringify({ result: "built" }) };
+    };
+    const code = await run(["watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
+      "--for", "450", "--max", "1", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "25", "--json"], busyAgent);
+    expect(code, lines.join("\n")).toBe(EXIT.ok);
+    expect(recoveredDuringBuild).toBe(true);
+    expect(spawns).toBe(1);
+    expect(() => JSON.parse(lines.join("\n"))).not.toThrow();
+  });
+
+  test.each([true, false])("failed startup reconciliation pauses dispatch and reports recovery=%s truthfully", async recover => {
+    const { runnerToken, approverToken } = await setup();
+    await approved("t-paused", approverToken);
+    let passes = 0;
+    let recovered = false;
+    let spawns = 0;
+    const original = WorktreePool.prototype.adopt;
+    const adoption = vi.spyOn(WorktreePool.prototype, "adopt").mockImplementation(async function (...args) {
+      passes++;
+      if (!recover || passes === 1) throw new Error("simulated unavailable recovery store");
+      const result = await original.apply(this, args);
+      recovered = result.ok;
+      return result;
+    });
+    try {
+      const code = await run(["watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
+        "--for", "650", "--max", "1", "--reconcile-every", "25", "--json"], async (...args) => {
+        expect(recovered).toBe(true);
+        spawns++;
+        return agent(...args);
+      });
+      expect(code, lines.join("\n")).toBe(recover ? EXIT.ok : EXIT.failed);
+      expect(spawns).toBe(recover ? 1 : 0);
+      expect(passes).toBeGreaterThan(1);
+      const report = JSON.parse(lines.join("\n"));
+      if (!recover) expect(report).toMatchObject({ reason: "reconciliation-failed", ticks: 0 });
+    } finally { adoption.mockRestore(); }
   });
 
   test("a watch is an episode, and the brief can bound itself to exactly one night", async () => {

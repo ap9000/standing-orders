@@ -8350,7 +8350,7 @@ export class Store {
    * out by the next acquire — which is exactly the behaviour that made the
    * fence worth having.
    */
-  releaseClaimsOf(runner: string, now: Date): string[] {
+  releaseClaimsOf(runner: string, now: Date, requeued?: string[]): string[] {
     const held = this.db
       .prepare("SELECT lease_id, task_ref FROM claim WHERE runner = ? AND released_at IS NULL")
       .all(runner);
@@ -8386,9 +8386,10 @@ export class Store {
         .get(taskRef);
       if (ref === undefined || String(ref["backend"]) !== BUILT_IN) continue;
 
-      this.db
+      const { changes } = this.db
         .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'running'")
         .run(now.toISOString(), String(ref["external_id"]));
+      if (Number(changes) > 0) requeued?.push(String(ref["external_id"]));
     }
 
     return held.map(row => String(row["lease_id"]));

@@ -47,6 +47,18 @@ Main was still `917bc5b` when this plan was prepared.
 
 ## Execution status
 
+- Assisted reconciliation slice: watch runs serialized recovery on its own
+  cadence during provider calls, with a separate output sink and shutdown that
+  drains the active pass. Failed recovery pauses new admissions, retries without
+  agent calls, and resumes only after a successful pass; a persistently failed
+  bounded watch reports `reconciliation-failed`. Lease renewal errors stop new
+  work. Adoption rechecks custody transactionally so a stale worktree survey
+  cannot overwrite a new lease or forget a live checkout. Recovery reports now
+  include tasks requeued during claim release. Typecheck and the focused
+  recovery/watch/worktree suite pass (130 tests); the full suite also passes.
+  These are deterministic fault tests, including recovery while a live provider
+  is busy, not proof of process fencing at every crash boundary.
+
 - Assisted handoff slice: builders now receive a canonical rubric JSON input,
   with statement text separated from evidence kinds. Preflight accepts that
   full rubric and shares submission validation with final adjudication.
@@ -74,8 +86,8 @@ Main was still `917bc5b` when this plan was prepared.
   spawns, concurrency, missing stores, and reporting against an old schema.
   Typecheck, build, and the full suite pass: 116 files, 2,318 tests, 12 skipped.
   This is assisted engineering, not an unattended certification or a live
-  runtime upgrade. Canonical proof correction and restart certification remain
-  the next slices.
+  runtime upgrade. Proof correction is covered by the later slice above;
+  process-restart certification remains pending.
 
 - P0.0: run 1504 finished at 19:33 UTC with commit `f3590d4`. The worker's
   approved gate passed typecheck, all 2,302 tests (12 skipped), and build.

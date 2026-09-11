@@ -567,25 +567,38 @@ export class WorktreePool {
     const root = normalisePath(real(this.options.root)) + "/";
     const adoptable = found.untracked.filter(path => normalisePath(real(path)).startsWith(root));
 
-    for (const path of adoptable) {
-      this.store.saveWorktree({
-        path,
-        repo,
-        // The branch is not knowable from the listing alone, and inventing one
-        // would be worse than admitting it: whoever verifies this will look.
-        branch: "unknown",
-        runner: null,
-        taskRef: null,
-        createdAt: now.toISOString(),
-        leasedAt: null,
-        releasedAt: now.toISOString(),
-        verified: false,
-      });
-    }
-
-    for (const path of found.missing) this.store.forgetWorktree(path);
-
-    return { ok: true, adopted: adoptable, forgotten: found.missing };
+    // Git's listing is a survey, not permission to overwrite custody. A
+    // builder may create and record a worktree while the listing is in
+    // flight. Recheck under the writer transaction, and never forget an
+    // owned checkout or a directory that appeared after the listing.
+    return this.store.transact(() => {
+      const adopted: string[] = [];
+      const forgotten: string[] = [];
+      for (const path of adoptable) {
+        if (this.store.getWorktree(path) !== null || this.inUse(path).held) continue;
+        this.store.saveWorktree({
+          path,
+          repo,
+          // The branch is not knowable from the listing alone, and inventing one
+          // would be worse than admitting it: whoever verifies this will look.
+          branch: "unknown",
+          runner: null,
+          taskRef: null,
+          createdAt: now.toISOString(),
+          leasedAt: null,
+          releasedAt: now.toISOString(),
+          verified: false,
+        });
+        adopted.push(path);
+      }
+      for (const path of found.missing) {
+        const current = this.store.getWorktree(path);
+        if (current === null || current.repo !== repo || (current.runner !== null && current.releasedAt === null) || existsSync(path)) continue;
+        this.store.forgetWorktree(path);
+        forgotten.push(path);
+      }
+      return { ok: true as const, adopted, forgotten };
+    });
   }
 
   /**

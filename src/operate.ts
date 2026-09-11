@@ -194,6 +194,7 @@ import { reviewPass } from "./reviewer.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, readAuthModeStrict, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import { run, terminateLiveProviders, run as execRun } from "./exec.js";
 import { readPulls } from "./pulls.js";
+import { startMaintenance } from "./maintenance.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
 
@@ -713,6 +714,8 @@ type Context = {
    * its own bounds (or the grace kill); admission is what stops.
    */
   shouldStop?: () => boolean;
+  /** A failed recovery pass pauses new admissions without stopping an owned build. */
+  shouldPauseAdmission?: () => boolean;
   /** The held-session coordinator (Phase 2, attended road) — co-located
    * `up` only; its absence means attended tasks stay attended-only skips. */
   heldCoordinator?: import("./held.js").HeldSessionCoordinator;
@@ -1957,7 +1960,7 @@ async function tickCommand(
   for (const routine of store.dueRoutines(repo, clock())) {
     // The stop fence (audit IV-1): a signal that landed mid-pass stops
     // every further admission — a routine not yet fired stays unfired.
-    if (context.shouldStop?.() === true) break;
+    if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
     const outcome = fireRoutine(store, routine.id, clock());
     routines.push(
       outcome.ok
@@ -2292,7 +2295,7 @@ async function tickCommand(
     // The stop fence (audit IV-1): checked before every claim. The build
     // already in flight finishes under its own bounds; nothing NEW is
     // admitted once the operator has said stop.
-    if (context.shouldStop?.() === true) break;
+    if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
     const id = ref.externalId;
 
     // A task placed in another repository is not this pass's to build.
@@ -3524,7 +3527,7 @@ async function tickCommand(
   // only claim, worktree, and rail, and its run then re-proves the
   // chain-entry dispatch proof inside build() before any money moves.
   for (const pending of store.pendingChainAdmissions(repo)) {
-    if (context.shouldStop?.() === true) break;
+    if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
     if (built >= max) break;
     const railed = store.reserveModeRail(repo, 1, clock());
     if (!railed.ok) {
@@ -3700,7 +3703,7 @@ async function tickCommand(
   // head) is re-proved on the way in.
   if (context.heldCoordinator !== undefined) {
     for (const continuation of store.openContinuationAuthorizations(runner)) {
-      if (context.shouldStop?.() === true) break;
+      if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
       const watching = attendedLivenessState(
         continuation.lastBeatAt === null ? null : Date.parse(continuation.lastBeatAt),
         clock().getTime(),
@@ -7125,7 +7128,7 @@ const WATCH_HEARTBEAT_MS = 30_000;
  */
 type WatchLoopResult =
   | { ok: true; ticks: number; built: number; broke: number; incarnation: string }
-  | { ok: false; reason: "watch-busy" | "lease-lost"; detail: string; ticks: number; built: number; broke: number };
+  | { ok: false; reason: "watch-busy" | "lease-lost" | "reconciliation-failed" | "loop-failed"; detail: string; ticks: number; built: number; broke: number };
 
 async function runWatchLoop(args: {
   flags: Map<string, string | true>;
@@ -7148,6 +7151,9 @@ async function runWatchLoop(args: {
   const bridgeEveryMs = Number(text(flags, "bridge-every") ?? 45_000);
   const reconcileEveryMs = Number(text(flags, "reconcile-every") ?? 5 * 60_000);
   const runFor = text(flags, "for") === undefined ? null : Number(text(flags, "for"));
+  if (!Number.isSafeInteger(reconcileEveryMs) || reconcileEveryMs < 1 || reconcileEveryMs > 2_147_483_647) {
+    throw new Error("--reconcile-every must be an integer from 1 to 2147483647 milliseconds");
+  }
 
   const incarnation = randomUUID();
   const lease = acquireWatchLeaseAuthed(
@@ -7187,15 +7193,21 @@ async function runWatchLoop(args: {
   const stopping = (): boolean => args.isStopping() || leaseLost;
 
   const heartbeat = setInterval(() => {
-    const renewed = heartbeatWatchLeaseAuthed(
-      store,
-      { runner, token, repo, owner: incarnation, ttlMs: WATCH_LEASE_MS },
-      new Date(),
-    );
+    let renewed = false;
+    let problem = "the lease or credential was taken";
+    try {
+      renewed = heartbeatWatchLeaseAuthed(
+        store,
+        { runner, token, repo, owner: incarnation, ttlMs: WATCH_LEASE_MS },
+        new Date(),
+      );
+    } catch (error) {
+      problem = `renewal could not be proved: ${describe(error)}`;
+    }
     if (!renewed && !leaseLost) {
       leaseLost = true;
       followController.abort();
-      progress(`watch: the lease or credential for ${runner} on ${repo} was taken — stopping without admitting more work`);
+      progress(`watch: ${runner} on ${repo}: ${problem} — stopping without admitting more work`);
     }
   }, WATCH_HEARTBEAT_MS);
   heartbeat.unref?.();
@@ -7241,39 +7253,63 @@ async function runWatchLoop(args: {
     for (const [key, value] of Object.entries(extra)) copy.set(key, value);
     return copy;
   };
-  const quietContext: Context = { ...context, write: sink, json: true, shouldStop: stopping };
-
+  let reconciliationReady = false;
+  let reconciliationFailure: string | null = null;
+  const admissionStopped = (): boolean => stopping() || !reconciliationReady;
+  const quietContext: Context = { ...context, write: sink, json: true, shouldStop: stopping, shouldPauseAdmission: () => !reconciliationReady };
 
   const startedAt = Date.now();
   const deadline = runFor === null ? null : startedAt + runFor;
   let lastTick = 0;
   let lastBridge = 0;
-  let lastReconcile = 0;
   let lastPush = 0;
   let ticks = 0;
   let built = 0;
   let brokeCount = 0;
 
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-  try {
-    while (!stopping() && (deadline === null || Date.now() < deadline)) {
-      const seqBefore = store.wakeSeq();
-      const now = Date.now();
-
-      if (now - lastReconcile >= reconcileEveryMs) {
-        lastReconcile = now;
-        quiet.length = 0;
-        await reconcileCommand(passFlags(), quietContext);
-        // CI on the same slow cadence: red heads page once, superseded and
-        // greened heads resolve their episodes, unread rollups say so.
-        if (store.openedPublications().length > 0) {
+  // Reconciliation has its own cadence and sink. Sharing tick's sink would
+  // interleave envelopes while a build awaits its provider or project check.
+  const maintenance = startMaintenance({
+    intervalMs: reconcileEveryMs,
+    shouldStop: stopping,
+    onError: error => {
+      reconciliationReady = false;
+      const detail = describe(error);
+      if (detail !== reconciliationFailure) progress(`watch: reconciliation failed — ${detail}; new work is paused until a recovery pass succeeds`);
+      reconciliationFailure = detail;
+    },
+    run: async () => {
+      const maintenanceLines: string[] = [];
+      const maintenanceContext: Context = { ...quietContext, write: line => maintenanceLines.push(line) };
+      const code = await reconcileCommand(passFlags(), maintenanceContext);
+      if (code !== EXIT.ok) throw new Error(maintenanceLines.join(" "));
+      if (reconciliationFailure !== null) progress("watch: reconciliation recovered — new work may resume");
+      reconciliationFailure = null;
+      reconciliationReady = true;
+      if (!stopping() && store.openedPublications().length > 0) {
+        try {
           const checks = await observeChecks(store, {
             ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
           });
           if (checks.failing > 0) progress(`watch: CI is red on ${checks.failing} published PR(s) — the outbox has it`);
+        } catch (error) {
+          progress(`watch: CI observation failed — ${describe(error)}; retrying on its next interval`);
         }
       }
+    },
+  });
+
+  try {
+    // Startup recovery still precedes the first dispatch.
+    await maintenance.runNow();
+    while (!stopping() && (deadline === null || Date.now() < deadline)) {
+      if (!reconciliationReady) {
+        await sleep(50);
+        continue;
+      }
+      const seqBefore = store.wakeSeq();
+      const now = Date.now();
 
       // The tick pass runs whenever the loop spins — and the loop only
       // spins when the sequence moved, a timer came due, or work just
@@ -7305,7 +7341,7 @@ async function runWatchLoop(args: {
       // Except under a stop (audit IV-1): once the signal lands, nothing
       // more is published this incarnation — the durable intent keeps the
       // work safe for the successor.
-      if (!stopping() && store.pendingPublications().length > 0) {
+      if (!admissionStopped() && store.pendingPublications().length > 0) {
         const published = await publishPass(store, {
           repo,
           ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
@@ -7372,7 +7408,6 @@ async function runWatchLoop(args: {
         Math.min(
           lastTick + tickEveryMs,
           lastBridge + bridgeEveryMs,
-          lastReconcile + reconcileEveryMs,
           deadline ?? Number.MAX_SAFE_INTEGER,
         ) - Date.now();
       // Doze for the WHOLE idle window, waking early only for a signal or a
@@ -7386,6 +7421,7 @@ async function runWatchLoop(args: {
       }
     }
   } finally {
+    await maintenance.stop();
     clearInterval(heartbeat);
     followController.abort();
     if (follower !== null) await follower;
@@ -7395,6 +7431,9 @@ async function runWatchLoop(args: {
 
   if (leaseLost) {
     return { ok: false, reason: "lease-lost", detail: `the watch lease for ${runner} on ${repo} stopped renewing — another process may have taken this worker over`, ticks, built, broke: brokeCount };
+  }
+  if (reconciliationFailure !== null) {
+    return { ok: false, reason: "reconciliation-failed", detail: reconciliationFailure, ticks, built, broke: brokeCount };
   }
   return { ok: true, ticks, built, broke: brokeCount, incarnation };
 }
@@ -7487,7 +7526,7 @@ async function watchCommand(
   }
 
   if (!result.ok) {
-    return fail(write, json, "watch", result.reason, result.detail, EXIT.refused, {
+    return fail(write, json, "watch", result.reason, result.detail, result.reason === "reconciliation-failed" || result.reason === "loop-failed" ? EXIT.failed : EXIT.refused, {
       ticks: result.ticks,
       built: result.built,
       broke: result.broke,
@@ -8048,7 +8087,7 @@ async function upCommand(
       },
     }).then(
       result => ({ repo, result }),
-      error => ({ repo, result: { ok: false as const, reason: "lease-lost" as const, detail: describe(error), ticks: 0, built: 0, broke: 0 } }),
+      error => ({ repo, result: { ok: false as const, reason: "loop-failed" as const, detail: describe(error), ticks: 0, built: 0, broke: 0 } }),
     );
     loopResults.set(repo, loop);
     void loop.then(({ repo: endedRepo, result }) => {

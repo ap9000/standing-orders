@@ -326,6 +326,35 @@ describe("the pool, against a stubbed git", () => {
     expect(store.getWorktree("/pool/thing/real")).not.toBeNull();
   });
 
+  test("an orphan survey cannot overwrite a lease recorded before adoption commits", async () => {
+    const it = pool();
+    const path = worktreePath(root, "/code/thing", "feat/race");
+    it.orphans = async () => {
+      const found = { ok: true as const, untracked: [path], missing: [] };
+      expect(await it.lease({ repo: "/code/thing", branch: "feat/race", runner: "builder-1", now: T0 })).toMatchObject({ ok: true });
+      return found;
+    };
+    expect(await it.adopt("/code/thing", later(1_000))).toEqual({ ok: true, adopted: [], forgotten: [] });
+    expect(store.getWorktree(path)).toMatchObject({ runner: "builder-1", branch: "feat/race", releasedAt: null, verified: true });
+  });
+
+  test("a stale listing cannot forget an owned or newly created checkout", async () => {
+    const it = pool();
+    const owned = await it.lease({ repo: "/code/thing", branch: "feat/owned", runner: "builder-1", now: T0 });
+    const released = await it.lease({ repo: "/code/thing", branch: "feat/released", runner: "builder-2", now: T0 });
+    expect(owned.ok && released.ok).toBe(true);
+    if (!owned.ok || !released.ok) return;
+    const gone = join(root, "gone");
+    store.saveWorktree({ ...released.worktree, path: gone, runner: null, releasedAt: T0.toISOString() });
+    store.saveWorktree({ ...released.worktree, runner: null, releasedAt: T0.toISOString() });
+    // A missing owned path is still custody; recovery settles its owner first.
+    rmSync(owned.worktree.path, { recursive: true });
+    it.orphans = async () => ({ ok: true, untracked: [], missing: [owned.worktree.path, released.worktree.path, gone] });
+    expect(await it.adopt("/code/thing", later(1_000))).toEqual({ ok: true, adopted: [], forgotten: [gone] });
+    expect(store.getWorktree(owned.worktree.path)).not.toBeNull();
+    expect(store.getWorktree(released.worktree.path)).not.toBeNull();
+  });
+
   test("adopts only what lives under its own root", async () => {
     // The operator's hand-made worktree is named by orphans() and left alone;
     // only a directory inside the pool becomes the pool's responsibility.
