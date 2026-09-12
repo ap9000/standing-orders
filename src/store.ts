@@ -920,7 +920,8 @@ export type Artifact = {
     /** v51 (contract handoff, task 1): the planner's recorded SOURCE —
      * the filed request quoted into its brief — and the ingestion record
      * of what it proposed against those terms. */
-    | "plan-contract";
+    | "plan-contract"
+    | "review-context";
   key: string;
   bytesOriginal: number;
   bytesStored: number;
@@ -1986,7 +1987,7 @@ CREATE TABLE IF NOT EXISTS decision (
 CREATE TABLE IF NOT EXISTS artifact (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report','proof','check-log','screenshot','structured-output','plan-contract')),
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report','proof','check-log','screenshot','structured-output','plan-contract','review-context')),
   key            TEXT NOT NULL,
   bytes_original INTEGER NOT NULL,
   bytes_stored   INTEGER NOT NULL,
@@ -2816,7 +2817,13 @@ CREATE TABLE IF NOT EXISTS criterion_review (
   proof_sha          TEXT,
   check_log_artifact INTEGER,
   check_log_sha      TEXT,
-  screenshots_json   TEXT NOT NULL DEFAULT '[]'
+  screenshots_json   TEXT NOT NULL DEFAULT '[]',
+  -- v51 (inherited review context): the sealed context inventory the
+  -- reviewer was shown, hash-bound and re-validated at ingest exactly like
+  -- the proof. NULL exactly when the run captured no inventory (every run
+  -- that is not a revision, and every run before v51).
+  context_artifact   INTEGER,
+  context_sha        TEXT
 );
 
 -- The bounded repair loop's ledger (v40, evidence-review-v1): one row per
@@ -4228,6 +4235,10 @@ function migrate(db: Database, origin: number | null): void {
   addColumn(db, "criterion_review", "check_log_artifact", "INTEGER");
   addColumn(db, "criterion_review", "check_log_sha", "TEXT");
   addColumn(db, "criterion_review", "screenshots_json", "TEXT NOT NULL DEFAULT '[]'");
+  // v51 (inherited review context): the context inventory binding, additive
+  // and NULL on every judgement recorded before a run could carry one.
+  addColumn(db, "criterion_review", "context_artifact", "INTEGER");
+  addColumn(db, "criterion_review", "context_sha", "TEXT");
 
   // v41 (two quality modes): additive and backwards-compatible. Default
   // deliberately means the historical workflow; only an explicitly strict
@@ -4523,7 +4534,7 @@ function V46_ARTIFACT_DDL(name: string): string {
 
 /** v51: the planner's recorded source and plan-contract record are evidence. */
 function V51_ARTIFACT_DDL(name: string): string {
-  return V46_ARTIFACT_DDL(name).replace("'screenshot','structured-output'", "'screenshot','structured-output','plan-contract'");
+  return V46_ARTIFACT_DDL(name).replace("'screenshot','structured-output'", "'screenshot','structured-output','plan-contract','review-context'");
 }
 
 /** v38: incident.kind additionally admits 'malformed-proof'. */
@@ -4556,11 +4567,27 @@ function rebuildExact(
   try {
     db.exec("BEGIN IMMEDIATE");
     try {
+      // The AUTOINCREMENT bookkeeping, read before the copy (v51): a
+      // drop-and-rename moves the table's sqlite_sequence row to the end
+      // and resets its counter to the surviving max id. Both are restored
+      // below — the original counter (never reusing an id a deleted row
+      // once held) in the original row order — so an upgraded file's
+      // bookkeeping is byte for byte what the predecessor wrote.
+      const sequenceBefore = tableExists(db, "sqlite_sequence")
+        ? (db.prepare("SELECT name, seq FROM sqlite_sequence ORDER BY rowid").all() as { name: string; seq: number | bigint }[])
+        : [];
       db.exec(targetDdl(`${table}_next`));
       const names = columns.join(", ");
       db.exec(`INSERT INTO ${table}_next (${names}) SELECT ${names} FROM ${table}`);
       db.exec(`DROP TABLE ${table}`);
       db.exec(`ALTER TABLE ${table}_next RENAME TO ${table}`);
+      if (sequenceBefore.some(row => row.name === table)) {
+        db.exec("DELETE FROM sqlite_sequence");
+        const restore = db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)");
+        // Bound as INTEGER (a JS number would land as REAL in this untyped
+        // system table and read back as a different type).
+        for (const row of sequenceBefore) restore.run(row.name, typeof row.seq === "bigint" ? row.seq : BigInt(row.seq));
+      }
       const broken = db.prepare("PRAGMA foreign_key_check").all();
       if (broken.length > 0) throw new Error(`foreign keys did not survive the ${table} rebuild`);
       db.exec("COMMIT");
@@ -4613,7 +4640,7 @@ export function rebuildArtifactForV46(db: Database): void {
   rebuildExact(db, "artifact", V38_ARTIFACT_DDL, V46_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
 
-/** v51: artifact.kind additionally admits plan-contract. */
+/** v51: artifact.kind additionally admits plan-contract and review-context. */
 export function rebuildArtifactForV51(db: Database): void {
   rebuildExact(db, "artifact", V46_ARTIFACT_DDL, V51_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
@@ -8980,6 +9007,10 @@ export class Store {
         proof: { artifactId: number; sha256: string } | null;
         checkLog: { artifactId: number; sha256: string } | null;
         screenshots: readonly { artifactId: number; sha256: string; path?: string }[];
+        /** v51: the sealed review-context inventory, or null when the run
+         * captured none. Absent (undefined) reads as null — every caller
+         * before v51 showed the reviewer no inventory. */
+        context?: { artifactId: number; sha256: string } | null;
       };
     },
     now: Date,
@@ -9132,13 +9163,33 @@ export class Store {
         liveScreenshots.map(shot => ({ artifact: shot.id, sha256: shot.sha256, path: shot.capture })),
       );
 
+      // v51: the review-context inventory is singular like the proof, and
+      // its binding is proved both ways — a caller that showed none while
+      // the run now carries one (empty-to-added), or showed one the run no
+      // longer carries at that exact hash, is refused whole.
+      const contextArtifacts = runArtifacts.filter(one => one.kind === "review-context");
+      if (contextArtifacts.length > 1) {
+        throw new ReviewBindingError(`run ${args.runId} has more than one review-context artifact — the exact review inventory is ambiguous; nothing is ingested`);
+      }
+      const liveContext = contextArtifacts[0] ?? null;
+      const boundContext = bindings.context ?? null;
+      if (
+        (liveContext === null) !== (boundContext === null) ||
+        (liveContext !== null &&
+          boundContext !== null &&
+          (liveContext.id !== boundContext.artifactId || liveContext.sha256 !== boundContext.sha256))
+      ) {
+        throw new ReviewBindingError(`run ${args.runId}'s review-context inventory no longer matches what the reviewer was shown — nothing is ingested`);
+      }
+
       for (const judgement of args.judgements) {
         this.db
           .prepare(
             `INSERT INTO criterion_review
                (reviewer_run, source_run, criterion_id, judgement, note, artifact, artifact_sha, author, created_at,
-                scope_digest, head_sha, proof_artifact, proof_sha, check_log_artifact, check_log_sha, screenshots_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                scope_digest, head_sha, proof_artifact, proof_sha, check_log_artifact, check_log_sha, screenshots_json,
+                context_artifact, context_sha)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             args.reviewerRunId,
@@ -9157,6 +9208,8 @@ export class Store {
             bindings.checkLog?.artifactId ?? null,
             bindings.checkLog?.sha256 ?? null,
             screenshotsJson,
+            boundContext?.artifactId ?? null,
+            boundContext?.sha256 ?? null,
           );
       }
       const folded = foldReview(
@@ -9197,6 +9250,7 @@ export class Store {
         proof: { artifactId: number; sha256: string } | null;
         checkLog: { artifactId: number; sha256: string } | null;
         screenshots: readonly { artifactId: number; sha256: string; path?: string }[];
+        context?: { artifactId: number; sha256: string } | null;
       };
     },
     now: Date,
@@ -10927,6 +10981,22 @@ export class Store {
       cursor = parent;
     }
     return null;
+  }
+
+  /**
+   * The lineage a revision task carries (v51, inherited review context):
+   * the source task it revises and the exact source run its sealed brief
+   * was written against — the brief artifact's own `run` column, the one
+   * durable fact every revision road (annotation, CI repair, criterion
+   * repair) writes. null for a task that is not a revision, or whose brief
+   * artifact row is gone: lineage is read, never inferred from a title.
+   */
+  revisionSourceOf(taskRef: number): { sourceTask: string; sourceRun: number; briefArtifact: Artifact } | null {
+    const ref = this.refForId(taskRef);
+    if (ref === null || ref.revisionOf === null || ref.revisionBriefArtifact === null) return null;
+    const briefArtifact = this.getArtifact(ref.revisionBriefArtifact);
+    if (briefArtifact === null || briefArtifact.kind !== "revision-brief") return null;
+    return { sourceTask: ref.revisionOf, sourceRun: briefArtifact.run, briefArtifact };
   }
 
   /** Stamp a task as the revision it is: source task + immutable brief. */
@@ -21264,6 +21334,9 @@ export type CriterionReviewRow = {
   proof: ReviewBindingArtifact | null;
   checkLog: ReviewBindingArtifact | null;
   screenshots: ReviewBindingArtifact[];
+  /** v51: the sealed inherited-review-context inventory the reviewer was
+   * shown; null when the run captured none (not a revision, or pre-v51). */
+  context: ReviewBindingArtifact | null;
 };
 
 function readReviewBindingList(raw: unknown): ReviewBindingArtifact[] {
@@ -21308,6 +21381,10 @@ function readCriterionReview(row: Record<string, unknown>): CriterionReviewRow {
         ? null
         : { artifact: Number(checkLogArtifact), sha256: String(row["check_log_sha"]) },
     screenshots: readReviewBindingList(row["screenshots_json"]),
+    context:
+      row["context_artifact"] === null || row["context_artifact"] === undefined
+        ? null
+        : { artifact: Number(row["context_artifact"]), sha256: String(row["context_sha"]) },
   };
 }
 

@@ -60,6 +60,63 @@ tests), the build, and the six-stage crash canary on the rebuilt runtime
 `f6eec868…`) pass. Not in this change: revision-term inheritance, inherited
 review context, and the integrated request-to-review journey with a real
 provider.
+**2026-09-12 — Inherited review context (schema v51).** A small revision to a
+larger feature used to hand its reviewer only its own patch, so every
+criterion the earlier build implemented could honestly be judged only
+`cannot-tell` (run 1518 said so three times over work run 1514 had upheld).
+A revision run's settlement now seals one more verified artifact,
+`review-context` (`src/review-context.ts`): the source files relevant to
+the signed criteria, read from git objects at the revision's exact sealed
+head by `ls-tree` and `cat-file blob` — no lazy fetch, replace refs,
+filters, textconv, or diff drivers, and never the working tree — with each
+item bound to the source run, the commit, the path, git's blob id, and a
+SHA-256 of the stored bytes. Relevance comes from verified ancestor
+artifacts only (the source run's sealed proof — its changed paths and the
+changed-path evidence it cited per criterion — and its sealed diff-stat);
+lineage is the revision brief artifact's own run (`store.revisionSourceOf`).
+Bounds are explicit (48 KiB per item, 192 KiB aggregate, 24 items, 200
+candidate paths) and never truncate: an oversized, binary, non-UTF-8,
+missing, non-file, or over-aggregate path is a named gap; a secret-shaped
+line is redacted before storage and the redaction is a gap too. Ancestry is
+checked (`merge-base --is-ancestor`), the source scope must still carry the
+digest the source run built under, and each earlier reviewer judgement on
+the source is carried as `priorReview` CONTEXT with its own proof —
+same criterion text, verified ancestry, relevant code byte-identical at
+both heads, the source review's evidence bindings intact — marked
+`eligible` or `invalid` with reasons, and never folded as this run's
+verdict. Per criterion the inventory records `coverage`: `patch` (new to
+this rubric, or its relevant code is in the revision's own diff), `context`
+(inherited and every relevant path sealed), or `gap` (inherited and
+something is missing — the reasons listed); `adjudicate` copies it onto the
+stored matrix rows, where changed criterion text, changed code, stale or
+unproven ancestry, tampered ancestors, and limits all read as gaps or
+invalid support. The reviewer pass materializes `REVIEW-CONTEXT.json`
+(re-serialized from the strict reader) beside the patch, rubric, proof,
+check log, and screenshots — the same bytes in Claude's scratch and Codex's
+inline bundle, with one aggregate text limit now measured identically for
+every provider — seals and re-hashes it after the agent ran, re-verifies
+the whole inventory before spend, and binds it at atomic ingestion
+(`criterion_review.context_artifact`/`context_sha`, refused both ways: an
+inventory added after materialization or removed before ingest is
+`stale-evidence`, a tampered scratch is `dirty-scratch`, and every failed
+attempt stays on record under the unchanged three-attempt cap). Judgements
+must cite supplied provenance: an `upholds` or `contradicts` on a criterion
+not judged from the patch whose note cites no `ctx-<n>` item, patch path,
+or sealed file name is refused whole (the same-session correction names
+the id). Semantic coverage is a distinct projection (`semanticCoverage`,
+`coverageWords` in `proof.ts`) rendered beside — never inside — the machine
+verdict on the task page, run page, chat receipt, and `task show`: under
+`default` quality an independent review is optional and the words say so;
+under `strict` it is required and only `upholds` satisfies it — `cannot-tell`
+never counts, under either policy — with every context gap named in the
+same words the inventory used. The verdict fold itself is unchanged. Schema
+v51 widens `artifact.kind` by the same exact-recognizer copy/rename as
+v34/v38/v46 and adds the two binding columns additively; every historical
+row reads back byte for byte. Revision branches still grow from the
+project's checked-out branch (revision creation is a separate bounded
+task): a source head that is not an ancestor of the revision's head is
+reported as `stale-ancestry` on every inherited criterion rather than
+trusted.
 
 **2026-09-11 — Bounded explicit review retries (schema v50).** A finished
 build's independent review that failed or was interrupted can now be retried

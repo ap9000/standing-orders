@@ -607,6 +607,11 @@ export type AdjudicateInput = {
    * every rule below that reads this is skipped whole, and adjudication
    * runs exactly the v1 rules that follow it. */
   approvedCriteria?: readonly ApprovedCriterion[];
+  /** v51: the sealed review-context inventory's per-criterion coverage,
+   * when this run captured one. Attached to the matrix rows verbatim; it
+   * never moves the verdict — context is for the reviewer, the verdict is
+   * the machine's. Absent = no coverage key on any row. */
+  reviewContext?: readonly ({ id: string } & CriterionCoverage)[];
 };
 
 export type AdjudicateResult = { verdict: ProofVerdict; reasons: string[]; matrix: CriterionMatrixRow[] };
@@ -638,6 +643,28 @@ export type CriterionMatrixRow = {
    * by `foldReview` after `adjudicate` has already run — `null` until a
    * review has settled, and for every criterion no review addressed. */
   review: { judgement: CriterionJudgementWord; note: string; author: string } | null;
+  /** v51 (inherited review context): where an independent reviewer's
+   * evidence for this criterion comes from — this run's own patch, a
+   * sealed context inventory, or nowhere (a named gap). Present only on
+   * runs that captured an inventory (revisions); absent on every other
+   * run, which reads exactly as before: judged from the patch. */
+  coverage?: CriterionCoverage;
+};
+
+/** The per-criterion context projection stored on the matrix row (v51),
+ * copied from the sealed inventory's coverage at adjudication. */
+export type CriterionCoverage = {
+  state: "patch" | "context" | "gap";
+  /** Same id AND statement as the source run's signed rubric. */
+  inherited: boolean;
+  /** Provenance tokens (`ctx-<n>`) sealed for this criterion. */
+  items: string[];
+  /** Why context is missing or partial — empty for `patch` and `context`. */
+  gaps: string[];
+  /** Whether an earlier review of the source run may be weighed as
+   * context: eligible only with the same text, verified ancestry, and
+   * byte-identical relevant code. Never a judgement on this run. */
+  priorSupport: "eligible" | "invalid" | "none";
 };
 
 /** v40: the three words an evidence reviewer can say about one signed
@@ -798,8 +825,18 @@ function criterionMatrix(
  */
 export function adjudicate(input: AdjudicateInput): AdjudicateResult {
   const approvedCriteria = input.approvedCriteria ?? [];
+  const coverageById = new Map((input.reviewContext ?? []).map(one => [one.id, one] as const));
   const matrixOf = (proof: ParsedProof | null): CriterionMatrixRow[] =>
-    criterionMatrix(approvedCriteria, proof, input.diffStat, input.screenshots);
+    criterionMatrix(approvedCriteria, proof, input.diffStat, input.screenshots).map(row => {
+      if (input.reviewContext === undefined) return row;
+      const found = coverageById.get(row.id);
+      // A criterion the inventory never covered is a gap the surfaces
+      // must show, never a silent "judged from the patch".
+      const coverage: CriterionCoverage = found === undefined
+        ? { state: "gap", inherited: false, items: [], gaps: ["the sealed review context carries no coverage entry for this criterion"], priorSupport: "none" }
+        : { state: found.state, inherited: found.inherited, items: [...found.items], gaps: [...found.gaps], priorSupport: found.priorSupport };
+      return { ...row, coverage };
+    });
 
   if (!input.proofArtifactPresent) {
     return { verdict: "short", reasons: ["no proof was written"], matrix: matrixOf(null) };
@@ -1036,6 +1073,82 @@ export function foldReview(base: AdjudicateResult, judgements: readonly Criterio
   };
 }
 
+/**
+ * SEMANTIC coverage (v51): what an INDEPENDENT reviewer actually settled,
+ * shown distinctly from the machine proof the matrix `state` records. One
+ * projection for the task page, run page, receipt, chat card, and CLI —
+ * never a second status engine: it reads the stored matrix and the run's
+ * signed quality mode and moves nothing.
+ *
+ * The policy is explicit and unchanged from v41: under `default` an
+ * independent review is optional, so absent or uncertain judgements are
+ * reported and nothing is "unsatisfied"; under `strict` (Strict / release)
+ * independent coverage is REQUIRED, and only `upholds` satisfies it — a
+ * `cannot-tell` is an honest answer that leaves the criterion uncovered,
+ * a `contradicts` is a failure, and an unreviewed criterion is uncovered.
+ * `cannot-tell` never satisfies required coverage under either policy.
+ * Context gaps (`coverage.state === "gap"`) are listed so a reader sees
+ * WHY a reviewer could not tell, in the same words the inventory used.
+ */
+export type SemanticCoverage = {
+  policy: "default" | "strict";
+  /** Independent coverage is required by the signed policy. */
+  required: boolean;
+  total: number;
+  upheld: string[];
+  contradicted: string[];
+  uncertain: string[];
+  unreviewed: string[];
+  /** Criterion ids with a named context gap, with the reasons — every
+   * row that carries one, whether or not the patch still judges it. */
+  contextGaps: { id: string; gaps: string[] }[];
+  /** null when no review has folded at all (nothing to satisfy or fail);
+   * otherwise whether every criterion is upheld — the only reading under
+   * which required coverage counts as satisfied. */
+  satisfied: boolean | null;
+};
+
+export function semanticCoverage(matrix: readonly CriterionMatrixRow[], policy: "default" | "strict"): SemanticCoverage {
+  const judged = (word: CriterionJudgementWord): string[] => matrix.filter(row => row.review?.judgement === word).map(row => row.id);
+  const upheld = judged("upholds");
+  const contradicted = judged("contradicts");
+  const uncertain = judged("cannot-tell");
+  const unreviewed = matrix.filter(row => row.review === null).map(row => row.id);
+  // Every named gap is listed, including one on a row the patch still
+  // judges: what could not be sealed is said, whatever else was.
+  const contextGaps = matrix.flatMap(row => (row.coverage !== undefined && row.coverage.gaps.length > 0 ? [{ id: row.id, gaps: [...row.coverage.gaps] }] : []));
+  const reviewed = matrix.length - unreviewed.length;
+  return {
+    policy,
+    required: policy === "strict",
+    total: matrix.length,
+    upheld,
+    contradicted,
+    uncertain,
+    unreviewed,
+    contextGaps,
+    satisfied: matrix.length === 0 || reviewed === 0 ? null : upheld.length === matrix.length,
+  };
+}
+
+/** The coverage in plain words — one line every surface prints the same
+ * way. `[]` for a run with no rubric: nothing to cover. */
+export function coverageWords(coverage: SemanticCoverage): string[] {
+  if (coverage.total === 0) return [];
+  const lines: string[] = [];
+  const standing =
+    coverage.satisfied === null
+      ? coverage.required ? "required under strict quality — no independent review has settled yet" : "independent review is optional under default quality — none has settled"
+      : coverage.satisfied
+        ? coverage.required ? "required under strict quality — satisfied" : "optional under default quality — every criterion upheld"
+        : coverage.required
+          ? `required under strict quality — NOT satisfied (${[...(coverage.uncertain.length > 0 ? [`cannot-tell never counts: ${coverage.uncertain.join(", ")}`] : []), ...(coverage.contradicted.length > 0 ? [`contradicted: ${coverage.contradicted.join(", ")}`] : []), ...(coverage.unreviewed.length > 0 ? [`unreviewed: ${coverage.unreviewed.join(", ")}`] : [])].join("; ")})`
+          : `optional under default quality — ${coverage.upheld.length}/${coverage.total} upheld${coverage.uncertain.length > 0 ? `, cannot-tell: ${coverage.uncertain.join(", ")}` : ""}${coverage.contradicted.length > 0 ? `, contradicted: ${coverage.contradicted.join(", ")}` : ""}`;
+  lines.push(`semantic coverage: ${coverage.upheld.length}/${coverage.total} upheld by an independent reviewer — ${standing}`);
+  for (const gap of coverage.contextGaps) lines.push(`context gap ${gap.id}: ${gap.gaps.join("; ")}`);
+  return lines;
+}
+
 /** The pass fraction of a criterion matrix — the one number every list
  * surface (board, chat) needs, shared so "N/M criteria" is computed in
  * exactly one place (v40 closes the two hand-rolled copies). */
@@ -1058,8 +1171,25 @@ export function matrixWords(matrix: readonly CriterionMatrixRow[]): string[] {
     if (row.review !== null) {
       lines.push(`      review (${row.review.author}): ${row.review.judgement} — ${row.review.note}`);
     }
+    if (row.coverage !== undefined) {
+      lines.push(`      context: ${coverageStateWords(row.coverage)}`);
+    }
   }
   return lines;
+}
+
+/** One criterion's context standing in words — shared by the CLI matrix
+ * and the console badge title so the two never drift. */
+export function coverageStateWords(coverage: CriterionCoverage): string {
+  const prior = coverage.priorSupport === "eligible" ? "; an earlier review of the source may be weighed as context (never as this run's verdict)" : coverage.priorSupport === "invalid" ? "; the earlier source review no longer supports it" : "";
+  switch (coverage.state) {
+    case "patch":
+      return `judged from this run's own patch${coverage.gaps.length > 0 ? ` (${coverage.gaps.join("; ")})` : ""}${prior}`;
+    case "context":
+      return `inherited — sealed context ${coverage.items.join(", ")}${prior}`;
+    case "gap":
+      return `GAP — inherited context is missing: ${coverage.gaps.join("; ")}${coverage.items.length > 0 ? ` (partial: ${coverage.items.join(", ")})` : ""}${prior}`;
+  }
 }
 
 /** Plain words for a verdict, shared by every surface (the `summary.ts`

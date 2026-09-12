@@ -7669,6 +7669,78 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(inbox).toContain("repair drafted, awaiting approval");
   });
 
+  test("semantic coverage and context gaps (v51) read the same on the task page, the run page, and the chat receipt — and cannot-tell never satisfies strict coverage", async () => {
+    store.createTask({ id: "t-ctx", title: "revised work" }, T0);
+    const ref = store.refFor("built-in", "t-ctx", "ours").id;
+    store.placeTask(ref, "/repo/main");
+    propose(store, {
+      taskId: "t-ctx",
+      goal: "revise the limiter",
+      acceptance: [
+        { id: "c1", statement: "the limiter caps retries", how: null, evidence: ["check"] },
+        { id: "c2", statement: "the guard refuses a fourth attempt", how: null, evidence: ["check"] },
+      ],
+      qualityMode: "strict",
+      now: T0,
+    });
+    sign("t-ctx");
+    const run = store.startRun({ taskRef: ref, leaseId: "l-ctx", runner: "night-shift-1", provider: "claude", branch: "b", worktree: "/wt", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+    expect(store.getRun(run)?.qualityMode).toBe("strict");
+    // The matrix a revision's settlement stores: machine proof PASSES both
+    // rows; the reviewer upheld c1 from sealed context and could not tell
+    // c2, whose context is a named gap.
+    store.saveProofVerdict(run, "verified", ["the approved verification command passed"], T0, [
+      {
+        id: "c1", statement: "the limiter caps retries", requiredEvidence: ["check"], state: "pass", detail: [], answered: [{ kind: "check", ref: "npm test" }],
+        review: { judgement: "upholds", note: "ctx-1 returns 3", author: "reviewer:codex" },
+        coverage: { state: "context", inherited: true, items: ["ctx-1"], gaps: [], priorSupport: "eligible" },
+      },
+      {
+        id: "c2", statement: "the guard refuses a fourth attempt", requiredEvidence: ["check"], state: "pass", detail: [], answered: [{ kind: "check", ref: "npm test" }],
+        review: { judgement: "cannot-tell", note: "the guard file could not be sealed", author: "reviewer:codex" },
+        coverage: { state: "gap", inherited: true, items: [], gaps: ["src/guard.ts: 70000 bytes exceeds the 49152-byte item limit"], priorSupport: "invalid" },
+      },
+    ]);
+    store.setTaskState("t-ctx", "done", T0);
+    await boot();
+    const cookie = await login();
+
+    const expectCoverage = (html: string): void => {
+      expect(html).toContain('data-context-coverage="context"');
+      expect(html).toContain('data-context-coverage="gap"');
+      expect(html).toContain("context gap");
+      expect(html).toContain("src/guard.ts: 70000 bytes exceeds the 49152-byte item limit");
+      expect(html).toContain("semantic coverage: 1/2 upheld by an independent reviewer — required under strict quality — NOT satisfied (cannot-tell never counts: c2)");
+    };
+    // The task page: the machine verdict stays verified; the coverage line
+    // sits beside it and says the required review is NOT satisfied.
+    const task = await (await fetch(url("/t/t-ctx"), { headers: { cookie } })).text();
+    expect(task).toContain('data-dispatch-status="complete-verified"');
+    expect(task).toContain('data-semantic-coverage="unsatisfied"');
+    expect(task).toContain('data-coverage-policy="strict"');
+    expectCoverage(task);
+    expect(task).toContain('data-review-judgement="cannot-tell"');
+    // The run page: the same projection under the evidence bundle.
+    const runPage = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
+    expect(runPage).toContain('data-semantic-coverage="unsatisfied"');
+    expectCoverage(runPage);
+    // The chat receipt: the same lines, verbatim.
+    const chat = await (await fetch(url("/chat?task=t-ctx"), { headers: { cookie } })).text();
+    expect(chat).toContain('data-card-kind="result-receipt"');
+    expect(chat).toContain("Independent review");
+    expect(chat).toContain("semantic coverage: 1/2 upheld by an independent reviewer — required under strict quality — NOT satisfied (cannot-tell never counts: c2)");
+    expect(chat).toContain("context gap c2: src/guard.ts: 70000 bytes exceeds the 49152-byte item limit");
+
+    // Under default quality the SAME judgements read as optional coverage —
+    // the policy is explicit in the words, never inferred from the verdict.
+    store.raw().prepare("UPDATE run SET quality_mode = 'default' WHERE id = ?").run(run);
+    const relaxed = await (await fetch(url("/t/t-ctx"), { headers: { cookie } })).text();
+    expect(relaxed).toContain('data-coverage-policy="default"');
+    expect(relaxed).toContain("optional under default quality — 1/2 upheld, cannot-tell: c2");
+    expect(relaxed).toContain("context gap c2: src/guard.ts");
+  });
+
   test("the inbox surfaces a completed task with an unaccepted short or refuted verdict, and drops it once accepted", async () => {
     const ref = seed("t-proof", "show me the proof");
     const run = finished("t-proof", ref, "built", 0.25);

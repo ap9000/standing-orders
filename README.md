@@ -85,7 +85,17 @@ boundaries, evidence requirements, model, and permissions.
   provider permission mode is sealed into the approved scope.
 - **Two quality paths.** **Default** returns deterministic proof quickly.
   **Strict / release** adds isolated semantic review and a bounded repair loop
-  without silently widening scope or authority.
+  without silently widening scope or authority. Semantic coverage is reported
+  apart from the machine proof: under strict it is required and only an
+  independent *upholds* satisfies it — a reviewer's *cannot-tell* never counts
+  as covered.
+- **Revisions carry sealed context.** A revision's reviewer sees, beside the
+  revision's own patch, the source files relevant to the inherited criteria —
+  read from git at the exact sealed head, bound to the source run, commit,
+  path, and digest — and must cite that provenance. Anything that could not be
+  sealed (oversized, binary, redacted, stale ancestry, changed criterion) is a
+  named context gap on the task, result, chat, and CLI; an earlier review is
+  context, never an inherited verdict.
 - **Evidence-backed completion.** Every signed criterion resolves to checks,
   changed paths, screenshots, or manual review. Missing or contradictory proof
   says **needs verification** instead of pretending the task is done.

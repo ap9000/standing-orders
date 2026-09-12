@@ -86,7 +86,7 @@ function planContractLines(store: Store, evidenceRoot: string, taskId: string): 
     ...describeContractChanges(record.changes).map(line => `    ${line}`),
   ];
 }
-import { verdictWords as proofVerdictWords, matrixWords } from "./proof.js";
+import { verdictWords as proofVerdictWords, matrixWords, semanticCoverage, coverageWords } from "./proof.js";
 import { probeRepo, isVerified } from "./probe.js";
 import {
   diagnoseTaskDispatch,
@@ -3318,13 +3318,38 @@ async function tickCommand(
       { cwd: repo },
     );
 
+    let buildBase = base;
+    if (ref.revisionOf !== null) {
+      const source = store.revisionSourceOf(ref.id);
+      const sourceRun = source === null ? null : store.getRun(source.sourceRun);
+      let problem: string | null = null;
+      if (source === null || sourceRun === null || store.externalIdFor(sourceRun.taskRef) !== ref.revisionOf || sourceRun.headRevision === null) problem = "the revision source has no matching sealed head";
+      else {
+        try {
+          const verified = readVerifiedArtifact(context.evidenceRoot, source.briefArtifact);
+          const brief = verified.ok ? JSON.parse(verified.content.toString("utf8")) as { head?: unknown; sourceScopeDigest?: unknown } : null;
+          if (brief === null || brief.head !== sourceRun.headRevision || brief.sourceScopeDigest !== sourceRun.scopeDigest) problem = "the revision brief no longer binds the source head and scope";
+          else if (exists.code !== 0 && text(flags, "base") === undefined) buildBase = sourceRun.headRevision;
+          else {
+            const descendant = exists.code === 0 ? branch : base;
+            const ancestry = await git("git", ["--no-lazy-fetch", "--no-replace-objects", "merge-base", "--is-ancestor", sourceRun.headRevision, descendant], { cwd: repo });
+            if (ancestry.code !== 0) problem = "the requested revision base does not contain its source head";
+          }
+        } catch { problem = "the revision source brief cannot be verified"; }
+      }
+      if (problem !== null) {
+        release(store, lease, clock());
+        dispatched.push({ id, outcome: "skipped", reason: "revision-brief", detail: problem });
+        continue;
+      }
+    }
     const leased = await worktrees.lease({
       repo,
       branch,
       runner,
       taskRef: ref.id,
       now: clock(),
-      ...(exists.code === 0 ? {} : { base }),
+      ...(exists.code === 0 ? {} : { base: buildBase }),
       reclaim: { evidenceRoot: context.evidenceRoot },
     });
     if (!leased.ok) {
@@ -9744,6 +9769,10 @@ function showTask(positional: readonly string[], context: Context): number {
     proofReasons: proofVerdict?.reasons ?? [],
     proofMatrix: proofVerdict?.matrix ?? [],
     proofAccepted,
+    // v51: semantic coverage — what an independent reviewer settled under
+    // the run's signed policy, with every context gap named — the same
+    // projection the console prints, never re-derived here.
+    semanticCoverage: latestFinished === null ? null : semanticCoverage(proofVerdict?.matrix ?? [], latestFinished.qualityMode ?? "default"),
     // v50: the latest build's bounded review history — every root attempt
     // in order, the open request, and the one state they add up to.
     review: latestFinished === null ? null : store.reviewRetryStateOf(latestFinished.id),
@@ -9762,6 +9791,7 @@ function showTask(positional: readonly string[], context: Context): number {
           `  proof: ${proofVerdictWords(detail.proofVerdict, detail.proofReasons).word}${detail.proofAccepted ? " (accepted)" : ""}`,
           ...(detail.proofReasons.length > 0 ? [`    ${detail.proofReasons.join("; ")}`] : []),
           ...matrixWords(detail.proofMatrix),
+          ...(detail.semanticCoverage === null ? [] : coverageWords(detail.semanticCoverage).map(line => `  ${line}`)),
         ]),
     ...(detail.report === null
       ? []
