@@ -2,7 +2,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { openStore, openStoreNoMigrate, databasePath } from "./store.js";
 import { authenticateApprover, hashPassword } from "./scope.js";
@@ -11,11 +11,13 @@ import { updateRepos, addRepos } from "./repos.js";
 import { projectSelection } from "./project.js";
 import type { Store } from "./store.js";
 import { superviseController } from "./controller-supervisor.js";
+import { normalizeRunnerName, validRunnerName } from "./runner.js";
 
-export type DesktopConfig = { version: 1; databaseFile: string; repos: string[]; port: number; identity: string };
+export type DesktopConfig = { version: 1; databaseFile: string; repos: string[]; port: number; identity: string; runnerName?: string };
 export function readDesktopConfig(stateDir: string): DesktopConfig {
   const config = JSON.parse(readFileSync(join(stateDir, "desktop.json"), "utf8")) as DesktopConfig;
   if (config.version !== 1 || typeof config.databaseFile !== "string" || !Array.isArray(config.repos) || config.repos.some(repo => typeof repo !== "string") || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535 || !/^[a-f0-9]{64}$/.test(config.identity)) throw new Error("Desktop configuration is invalid.");
+  if (config.runnerName !== undefined && (typeof config.runnerName !== "string" || !validRunnerName(config.runnerName))) throw new Error("Desktop worker identity is invalid.");
   config.repos = [...new Set(config.repos.map(repo => {
     try { return realpathSync(repo); }
     catch (error) {
@@ -52,7 +54,7 @@ export async function addDesktopProjects(stateDir: string, store: Store, paths: 
 }
 export function loadOrCreateDesktopConfig(stateDir: string, isolated = false): DesktopConfig {
   if (existsSync(join(stateDir, "desktop.json"))) return readDesktopConfig(stateDir);
-  const config: DesktopConfig = { version: 1, databaseFile: isolated ? join(stateDir, "orders.db") : databasePath(process.env, homedir()), repos: [], port: 4187, identity: randomBytes(32).toString("hex") };
+  const config: DesktopConfig = { version: 1, databaseFile: isolated ? join(stateDir, "orders.db") : databasePath(process.env, homedir()), repos: [], port: 4187, identity: randomBytes(32).toString("hex"), runnerName: normalizeRunnerName(hostname()) };
   writeDesktopConfig(stateDir, config);
   return config;
 }
@@ -145,13 +147,23 @@ export async function desktopMain(argv: string[]): Promise<void> {
   }
 
   if (config.repos.length === 0) { store.close(); throw new Error("Choose a repository in the desktop app first."); }
+  // Persist the legacy default once, under the same lock as project edits.
+  // Explicit identity makes a restart await its predecessor's real liveness
+  // fences instead of creating hostname-2 and stranding the old worker's work.
+  if (config.runnerName === undefined) {
+    config = store.transact(() => {
+      const latest = readDesktopConfig(stateDir);
+      if (latest.runnerName === undefined) { latest.runnerName = normalizeRunnerName(hostname()); writeDesktopConfig(stateDir, latest); }
+      return latest;
+    });
+  }
   store.close();
   // Reuse the same registry supervisor, worker, custody, and recovery paths as
   // the CLI. The service parent owns this controller; closing the web view
   // owns nothing here. `serve-controller` is its child entry, never a new engine.
   const remembered = legacyLogin(legacyFile);
   const exit = await runOperate("up", ["--db", config.databaseFile, ...(remembered === null ? [] : ["--as", remembered.name]),
-    "--host", "127.0.0.1", "--port", String(config.port), "--no-open", "--json"], line => console.log(line), {
+    "--runner", config.runnerName!, "--host", "127.0.0.1", "--port", String(config.port), "--no-open", "--json"], line => console.log(line), {
       desktopIdentity: config.identity, inferProjectFromCwd: false, openDatabase: openDesktopStore,
       additionalProjectRepos: () => readDesktopConfig(stateDir).repos,
     });
