@@ -168,7 +168,7 @@ import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf,
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, readProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
-import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus, ReviewRetryState } from "./store.js";
+import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus, ReviewRetryState, RevisionLineage } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
 import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
@@ -2927,11 +2927,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       const parsed = JSON.parse(read.content.toString("utf8")) as {
         sourceTask?: unknown;
         sourceRun?: unknown;
+        kind?: unknown;
         comments?: { path?: unknown; line?: unknown; note?: unknown; author?: unknown }[];
       };
       return {
         sourceTask: String(parsed.sourceTask ?? "?"),
         sourceRun: Number(parsed.sourceRun ?? 0),
+        kind: parsed.kind === "ci-repair" ? "ci-repair" : parsed.kind === "criterion-repair" ? "criterion-repair" : "annotations",
+        lineage: store.revisionLineageOf(ref.externalId, clock()),
         comments: (parsed.comments ?? []).slice(0, 100).map(one => ({
           path: one.path === null || one.path === undefined ? null : String(one.path),
           line: one.line === null || one.line === undefined ? null : Number(one.line),
@@ -5379,37 +5382,24 @@ export function createDecisionServer(options: ServeOptions): Server {
         // posture ride the FILING so the digest binds them (surfaces
         // round 1, finding 2) — never a stamp after the fact.
         const coverage = who.via === "cookie" ? modeFilingCoverage(store, repo, who.name, now) : null;
+        // ONE revision boundary (contract handoff task 2): the source's
+        // goal, exclusions, touches, rubric, risk, quality, posture,
+        // budget, overrides and pins are read from the SOURCE ROWS inside
+        // the seal, which re-proves the task/run/scope-digest binding and
+        // the brief's custody first — the scope read above only names the
+        // digest this batch was drafted against.
         const result = store.sealRevision(
-        {
-          task: {
-            title: `Revise ${sourceTaskId} from ${comments.length} annotation${comments.length === 1 ? "" : "s"} on build #${id}`,
-            ...(repo === null ? {} : { repo }),
-            goal:
-              `${sourceScope?.goal ?? `revise ${sourceTaskId}`}` +
-              ` — apply the annotations recorded on build #${id}; the revision brief carries the exact batch`,
-            outOfScope: sourceScope?.outOfScope ?? null,
-            touches: sourceScope?.touches ?? [],
-            acceptance: sourceScope !== null && sourceScope.acceptance.length > 0
-              ? sourceScope.acceptance
-              : [{ id: "c1", statement: "The operator has reviewed this revision and written a real rubric before approving it.", how: null, evidence: ["manual-review"] as const }],
-            ...(coverage?.defaultBudgetMicrousd != null ? { budgetMicrousd: coverage.defaultBudgetMicrousd } : {}),
-            ...(coverage?.escalated === true ? { posture: "escalated" as const } : {}),
+          {
+            source: { task: sourceTaskId, run: id, scopeDigest: sourceScope?.digest ?? null },
+            brief: { evidenceRoot, key, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "machine-authored revision brief (exit 0)" },
+            child: {
+              title: `Revise ${sourceTaskId} from ${comments.length} annotation${comments.length === 1 ? "" : "s"} on build #${id}`,
+              repair: `apply the annotations recorded on build #${id}; the revision brief carries the exact batch`,
+            },
+            commentIds: comments.map(one => one.id),
+            coverage,
           },
-          artifact: {
-            run: id,
-            kind: "revision-brief",
-            key,
-            bytesOriginal: briefBytes.length,
-            bytesStored: briefBytes.length,
-            truncated: false,
-            sha256: createHash("sha256").update(briefBytes).digest("hex"),
-            capture: "machine-authored revision brief (exit 0)",
-          },
-          revisionOf: sourceTaskId,
-          commentIds: comments.map(one => one.id),
-          sourceRun: id,
-        },
-        now,
+          now,
         );
         if (result.ok && coverage !== null) {
           // A scope whose profile could not resolve is unapprovable by the
@@ -5424,7 +5414,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return result;
       });
-      if (!sealed.ok) return refuse(response, who, 409, `could not seal the revision: ${sealed.reason}`, `/r/${id}`);
+      if (!sealed.ok) return refuse(response, who, 409, `could not seal the revision: ${sealed.detail}`, `/r/${id}`);
       return redirect(response, taskHref(sealed.id));
     }
 
@@ -5448,7 +5438,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
       const sourceScope = store.getScope(sourceTaskId);
-      const repo = taskRepoOf(found.taskRef);
       // The observed episode, not the click: the brief binds the head the
       // failure was SEEN on and when (audit C-2) — a PR that advanced since
       // is a different failure, and the click time is not an observation.
@@ -5471,35 +5460,22 @@ export function createDecisionServer(options: ServeOptions): Server {
       const briefBytes = Buffer.from(JSON.stringify(brief, null, 2), "utf8");
       const briefName = `ci-repair-brief-${randomBytes(6).toString("hex")}.json`;
       const key = writeEvidenceFile(evidenceRoot, id, briefName, briefBytes);
+      // The SAME revision boundary the annotation road and the criterion
+      // repair use (contract handoff task 2): the inherited terms come from
+      // the source rows inside the seal; the scope read above only names
+      // the digest this draft was composed against.
       const sealed = store.sealRevision(
         {
-          task: {
+          source: { task: sourceTaskId, run: id, scopeDigest: sourceScope?.digest ?? null },
+          brief: { evidenceRoot, key, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "machine-authored ci-repair brief (exit 0)" },
+          child: {
             id: draftId,
             title: `repair ${sourceTaskId}: CI failing on PR #${publication.prNumber}`,
-            ...(repo === null ? {} : { repo }),
-            goal:
-              `${sourceScope?.goal ?? `repair ${sourceTaskId}`}` +
-              ` — repair the failing CI on PR #${publication.prNumber} (failing head ${(episode?.headSha ?? publication.headSha).slice(0, 12)}). ` +
+            repair:
+              `repair the failing CI on PR #${publication.prNumber} (failing head ${(episode?.headSha ?? publication.headSha).slice(0, 12)}). ` +
               `Read the failing checks on GitHub before approving; this draft carries no log content.`,
-            outOfScope: sourceScope?.outOfScope ?? null,
-            touches: sourceScope?.touches ?? [],
-            acceptance: sourceScope !== null && sourceScope.acceptance.length > 0
-              ? sourceScope.acceptance
-              : [{ id: "c1", statement: "The operator has reviewed this revision and written a real rubric before approving it.", how: null, evidence: ["manual-review"] as const }],
           },
-          artifact: {
-            run: id,
-            kind: "revision-brief",
-            key,
-            bytesOriginal: briefBytes.length,
-            bytesStored: briefBytes.length,
-            truncated: false,
-            sha256: createHash("sha256").update(briefBytes).digest("hex"),
-            capture: "machine-authored ci-repair brief (exit 0)",
-          },
-          revisionOf: sourceTaskId,
           commentIds: null,
-          sourceRun: id,
         },
         now,
       );
@@ -5507,8 +5483,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(
           response,
           who,
-          sealed.reason === "duplicate" ? 409 : 400,
-          sealed.reason === "duplicate" ? `already drafted as ${draftId}` : `could not draft: ${sealed.reason}`,
+          sealed.reason === "duplicate" ? 409 : sealed.reason === "stale-source" || sealed.reason === "comments-taken" ? 409 : 400,
+          sealed.reason === "duplicate" ? `already drafted as ${draftId}` : `could not draft: ${sealed.detail}`,
           `/r/${id}`,
         );
       }
@@ -11395,7 +11371,10 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
           : profile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
   const revision = approval.revision === null
     ? ""
-    : `<div class="chat-approval-section"><span class="approval-label">revision notes</span><ul class="recap">${approval.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul></div>`;
+    : `<div class="chat-approval-section"><span class="approval-label">${approval.revision.kind === "ci-repair" ? "CI repair" : approval.revision.kind === "criterion-repair" ? "criterion repair" : "revision notes"}</span>` +
+      (approval.revision.comments.length === 0 ? "" : `<ul class="recap">${approval.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul>`) +
+      revisionLineageHtml(approval.revision.lineage) +
+      `</div>`;
   const race = approval.raceTerms === null
     ? ""
     : `<div class="chat-approval-section"><span class="approval-label">${approval.raceTerms.kind === "comparison" ? "comparison" : "tournament"}</span>` +
@@ -14389,8 +14368,61 @@ type MilestoneProgressView = { id: string; description: string; state: Milestone
 
 /** The revision batch a task's approval screen restates, or the named reason it cannot. */
 type RevisionView =
-  | { sourceTask: string; sourceRun: number; comments: { path: string | null; line: number | null; note: string; author: string }[] }
+  | {
+      sourceTask: string;
+      sourceRun: number;
+      /** What kind of brief this is — annotations, a CI repair, a criterion repair. */
+      kind: "annotations" | "ci-repair" | "criterion-repair";
+      comments: { path: string | null; line: number | null; note: string; author: string }[];
+      /** The lineage and ACTUAL terms (contract handoff task 2), read from
+       * the child's own rows — the same projection chat and the approval
+       * card restate. */
+      lineage: RevisionLineage | null;
+    }
   | { problem: string };
+
+/**
+ * A revision's lineage and ACTUAL terms, in the same words on the task
+ * page, the approval card, and chat (contract handoff task 2): which
+ * source and build it revises, the ancestry to its root, the terms the
+ * child really carries (read from its own scope — never restated from the
+ * brief), what is re-resolved for THIS approval, what never inherits, and
+ * — when the task continues a repair chain — the attempts used against
+ * the signed cap.
+ */
+export function revisionLineageWords(lineage: RevisionLineage): string[] {
+  const words: string[] = [];
+  const chain = lineage.ancestors.length > 1 ? ` · lineage ${lineage.ancestors.join(" → ")}` : "";
+  words.push(`revises ${lineage.sourceTask}${lineage.sourceRun === null ? "" : ` (build #${lineage.sourceRun})`}${chain}`);
+  if (!lineage.sourceHadScope) {
+    words.push("the source had no scope — nothing was inherited; the placeholder rubric waits for a real one");
+  } else if (lineage.terms !== null) {
+    const terms = lineage.terms;
+    words.push(
+      `inherited terms, as they stand now: ${riskTitle(terms.riskLevel)} · ${qualityModeTitle(terms.qualityMode)} quality · ` +
+        `${terms.permissionMode === "bypassPermissions" ? "full access" : "auto permissions"} · ` +
+        `${terms.budgetMicrousd === null ? "no attempt cap" : `$${(terms.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap`} · ` +
+        `${terms.exclusions ? "its exclusions" : "no exclusions"} · ${terms.touches === 0 ? "any path" : `${terms.touches} path limit${terms.touches === 1 ? "" : "s"}`} · ` +
+        `${terms.criteria} criteri${terms.criteria === 1 ? "on" : "a"}${terms.routeOverrides === 0 ? "" : ` · ${terms.routeOverrides} agent override${terms.routeOverrides === 1 ? "" : "s"}`}`,
+    );
+  }
+  words.push("re-resolved for this approval: the agents route and the fallback chain — a yes on the source never covers them");
+  words.push("never inherited: the source's approval, attended sessions, publication and merge grants");
+  if (lineage.repair !== null) {
+    const repair = lineage.repair;
+    words.push(
+      `repair chain rooted at ${repair.rootTask}: ${repair.attemptsUsed} attempt${repair.attemptsUsed === 1 ? "" : "s"} used` +
+        `${repair.cap === null ? " — each further attempt needs your yes" : ` of ${repair.cap} automatic · ${repair.remaining} remaining`}` +
+        `${repair.thisAttempt === null ? "" : ` · this is attempt ${repair.thisAttempt}`}${repair.via === null ? "" : ` · continued through ${repair.via}`}`,
+    );
+  }
+  return words;
+}
+
+function revisionLineageHtml(lineage: RevisionLineage | null): string {
+  if (lineage === null) return "";
+  return `<ul class="meta revision-lineage">${revisionLineageWords(lineage).map(one => `<li>${escape(one)}</li>`).join("")}</ul>`;
+}
 
 function taskBody(data: {
   task: Task;
@@ -14932,16 +14964,17 @@ function taskBody(data: {
       : "problem" in data.revision
         ? `<div class="card"><p><strong>revision brief</strong></p><p class="meta">${escape(data.revision.problem)}</p></div>`
         : [
-            `<div class="card">`,
-            `<p><strong>the review batch</strong> <span class="meta">this task revises ` +
+            `<div class="card revision-card">`,
+            `<p><strong>${data.revision.kind === "ci-repair" ? "the CI repair" : data.revision.kind === "criterion-repair" ? "the criterion repair" : "the review batch"}</strong> <span class="meta">this task revises ` +
               `<a href="${taskHref(data.revision.sourceTask)}" class="mono">${escape(data.revision.sourceTask)}</a>` +
-              ` after review of <a href="/r/${data.revision.sourceRun}">build #${data.revision.sourceRun}</a> — approving the scope approves applying exactly these</span></p>`,
+              ` after review of <a href="/r/${data.revision.sourceRun}">build #${data.revision.sourceRun}</a> — ${data.revision.kind === "annotations" ? "approving the scope approves applying exactly these" : "approving the scope approves exactly the repair the brief names"}</span></p>`,
             ...data.revision.comments.map(
               one =>
                 `<p class="row"><span class="meta">${escape(one.author)}</span> ` +
                 `${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}` +
                 `${escape(one.note)}</p>`,
             ),
+            revisionLineageHtml(data.revision.lineage),
             `</div>`,
           ].join("\n");
 
@@ -15004,6 +15037,11 @@ function taskBody(data: {
           `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
             (approvalPermission === null ? "" : `<span class="approval-chip">${escape(approvalPermission)}</span>`) +
             `</div>`,
+          // A revision's lineage INSIDE the ceremony (contract handoff task
+          // 2): the yes is given knowing which source these terms came
+          // from, which were carried, which were re-resolved for THIS
+          // approval, and that none of the source's grants came along.
+          data.revision === null || data.revision === undefined || "problem" in data.revision ? "" : revisionLineageHtml(data.revision.lineage),
           // The AGENTS inside the ceremony (v47/v48): who plans, builds,
           // repairs, and reviews, and why — said where the yes is given, in
           // the same block chat and /next show. Availability is volatile and

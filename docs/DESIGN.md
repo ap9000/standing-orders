@@ -268,6 +268,19 @@ work. A reviewer can judge only the exact scope digest and complete criterion
 matrix attached to the source build; later scope revisions never apply
 retroactively.
 
+**A revision inherits the contract, never the grants.** Annotation
+revisions, CI repair drafts, and criterion repair drafts all file through
+one boundary that proves the source task, run, scope digest, and brief
+custody inside its transaction, then carries the source's goal, exclusions,
+touches, exact rubric, declared risk, quality, posture, budget ceiling,
+route overrides, and pins verbatim — the installation's defaults of the day
+never downgrade or widen them. The route, profile, and fallback chain are
+re-resolved for a fresh approval; the approval stamp, attended
+authorizations, publication and merge grants, and the plan never inherit. A
+detour through an annotation or CI revision keeps the repair chain's root
+and remaining automatic bound. The full field-by-field policy is
+[docs/REVISION_TERMS.md](REVISION_TERMS.md).
+
 **Irreversible options never auto-apply**, regardless of stated confidence.
 
 ### The morning

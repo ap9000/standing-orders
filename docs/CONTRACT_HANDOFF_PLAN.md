@@ -1,7 +1,8 @@
 # Preserve the task contract through every handoff
 
 Assessed 2026-09-12 UTC against `b96d53e`, now integrated into local main.
-This is proposed implementation scope; the work below has not started.
+This is proposed implementation scope; task 2 below is implemented, tasks 1
+and 3 have not started.
 
 ## Why this is next
 
@@ -50,6 +51,10 @@ amendment is visible; stale source terms refuse; malformed-output correction
 does not drop context. Include empty/legacy input and byte-limit cases.
 
 ### 2. Preserve revision terms with explicit approval semantics
+
+*Implemented 2026-09-11 on `standing-orders/preserve-revision-contract-terms`;
+the policy and its coverage are recorded in [REVISION_TERMS.md](REVISION_TERMS.md).
+Tasks 1 and 3 remain open.*
 
 Define one field-by-field policy at the existing revision creation boundary,
 used by annotation revisions, CI repair, and semantic repair. Bind the source
