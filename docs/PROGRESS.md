@@ -1,5 +1,34 @@
 # Progress
 
+**2026-09-12 — OS process containment and login recovery (schema 53).**
+Built on `standing-orders/os-process-containment-and-login-recovery`, not
+yet integrated or installed. One spawn road for the buffered, streaming and
+held provider transports and the builder's setup/check legs places the
+target inside a native OS object BEFORE it executes — a delegated cgroup v2
+leaf on Linux (real-process tests, run against the kernel in a delegated
+leaf on CI and in a privileged disposable container here: setsid escape,
+natural root exit, exact-run stop with a surviving sibling, worker death
+through a detached janitor, the held supervisor; no writes after
+settlement), a kill-on-close Job Object on Windows through a PowerShell
+helper outside the job (exercised by the Windows CI job; not run on a
+physical machine by this wave). `--containment observed|preferred|required`
+is pinned once per process, a corrupt word refuses to start, and `required`
+refuses every containable spawn on macOS or an undelegated cgroup in the
+policy's own words — never a silent downgrade; macOS stays observational
+and says so. Custody (v53: `boot_id`, `containment`, `container`,
+`container_empty_at` on `run_process`) settles a native witness only on the
+OS's empty proof; a verified boot change on the same host settles what the
+old boot left (incomplete spawns, reused pids, unproven objects) while
+same-boot, legacy, foreign-host and unknown cases stay conservative. The
+CLI daemon and the desktop service share one lifecycle (launchd
+`KeepAlive=true`, systemd `Restart=always`, a cmd restart loop; idempotent
+start; real reload of a changed definition after the bootout is awaited;
+explicit stop disables; status with runtime/disabled diagnostics and a
+fresh-heartbeat gate). `certify:restart` records/verifies a boot-runtime-
+service-custody baseline without rebooting; `certify:launchd` is a
+disposable relaunch certificate (not run here). Details and boundaries:
+[PROCESS_CONTAINMENT.md](PROCESS_CONTAINMENT.md).
+
 **2026-09-12 09:40 UTC — Installed controller upgraded and verified.**
 Main includes PR #2 (`4c70a8c`), and the live desktop runs the certified
 `82d0d28` runtime on schema 52. Both real providers passed Stop/Resume without

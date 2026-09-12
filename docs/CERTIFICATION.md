@@ -216,6 +216,33 @@ and Codex. The state machine fails closed until a real exhausted-account
 terminal is captured, reviewed for its exact CLI version, and that version is
 proven at spawn. See [fallback-fixtures.md](fallback-fixtures.md).
 
+## OS containment and restart certificates
+
+Three bounded, disposable checks accompany the OS containment and login
+recovery wave ([PROCESS_CONTAINMENT.md](PROCESS_CONTAINMENT.md)):
+
+```sh
+npm run test:native-containment                       # kernel-backed cgroup2 tests; explicit skip where the facility is missing
+SO_EXPECT_NATIVE_CONTAINMENT=1 npm run test:native-containment   # a skip is a failure (what CI's delegated-cgroup job runs)
+npm run certify:restart -- baseline --db ~/.config/standing-orders/orders.db --label com.standing-orders.watch.<slug>
+#   … log out and in, or reboot — the tool never does — then:
+npm run certify:restart -- verify --db ~/.config/standing-orders/orders.db --baseline output/certification/restart-baseline.json --expect reboot
+npm run certify:launchd                               # macOS only: a DISPOSABLE LaunchAgent, relaunch after exit 0 and SIGKILL, ≥ 60 s
+```
+
+The restart certificate records boot identity (the kernel's own token),
+runtime, service state, containment status and live custody without a
+credential, and verifies a fresh heartbeat (a loaded service is not a
+working controller), settlement of what the old boot left pending by the
+controller's own rules, and task completion. Its output lists the exact
+limits: LaunchAgents resume at user login after a reboot, Linux user
+services depend on login or linger, the Windows logon trigger is not a boot
+service, and a reboot that did not happen is never claimed. The launchd
+certificate installs a throwaway label and removes it; run it only where a
+disposable install is acceptable. Neither has been run against this
+machine's live installation by the task builder — the supervising operator
+owns that.
+
 ## Physical Windows checklist
 
 **Handoff status:** pending the physical Windows PC. The original pre-Windows

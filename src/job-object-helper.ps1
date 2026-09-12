@@ -171,15 +171,15 @@ function Send([string] $line) { try { $writer.Write($line + "`n") } catch { } }
 $job = [IntPtr]::Zero
 $pi = $null
 try {
-  $argv = @([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Encoded)) | ConvertFrom-Json)
-  if ($argv.Count -lt 1) { throw "the target argv is empty" }
+  [string[]]$targetArguments = ConvertFrom-Json -InputObject ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Encoded)))
+  if ($targetArguments.Count -lt 1) { throw "the target argv is empty" }
   # Admission arrives only after the controller durably records this helper.
   $job = [SoJob]::MakeJob($JobName)
   Send "ready"
   $admission = $reader.ReadLineAsync()
   if (-not $admission.Wait(15000) -or $admission.Result -cne "go") { throw "job admission refused" }
   $parts = @()
-  foreach ($arg in $argv) { $parts += [SoJob]::Quote([string]$arg) }
+  foreach ($arg in $targetArguments) { $parts += [SoJob]::Quote([string]$arg) }
   $pi = [SoJob]::StartSuspended(($parts -join " "))
   if (-not [SoJob]::AssignProcessToJobObject($job, $pi.hProcess)) {
     $code = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()

@@ -480,9 +480,10 @@ export function jobObjectContainer(capability: ContainmentCapability, label: str
   let state: "pending" | "ready" | "attached" | "empty" | "lost" = "pending";
   let failure: string | null = null;
   let authorized = false;
+  let cancelled = false;
   const fail = (detail: string): void => { failure ??= detail; if (state !== "empty") state = "lost"; connection?.destroy(); };
   const authorize = (): void => {
-    if (authorized && state === "ready") connection?.write("go\n");
+    if (authorized && state === "ready") connection?.write(cancelled ? "kill\n" : "go\n");
   };
   const server: Server = createServer(socket => {
     if (connection !== null || failure !== null) { socket.destroy(); return; }
@@ -539,6 +540,7 @@ export function jobObjectContainer(capability: ContainmentCapability, label: str
       };
     },
     async kill(timeoutMs = 5_000) {
+      cancelled = true;
       try { connection?.write("kill\n"); } catch { fail("containment control channel unavailable"); }
       return waitEmpty(timeoutMs);
     },

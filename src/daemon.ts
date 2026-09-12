@@ -39,6 +39,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import type { ExecResult, RunOptions } from "./exec.js";
 import { isAlive } from "./runner.js";
@@ -235,7 +236,7 @@ export function planDaemon(args: {
       platform,
       label,
       unitPath: join(home, "Library", "LaunchAgents", `${label}.plist`),
-      unitContent: launchdPlist({ label, command, workingDirectory: repo, pathEnv, logPath }),
+      unitContent: launchdPlist({ label, command: [process.execPath, fileURLToPath(new URL("./controller-service.js", import.meta.url)), ...command], workingDirectory: repo, pathEnv, logPath }),
       logPath,
       tokenFile,
       bin,

@@ -86,7 +86,8 @@ describe("scout tasks, against real git", () => {
   const reportingAgent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     options?.onSpawn?.(1_000_001);
-    expect(readFileSync(join(cwd, ".standing-orders-lease"), "utf8")).toBe("1000001 builder-1 group\n");
+    // The note may also carry this host's boot identity (v53).
+    expect(readFileSync(join(cwd, ".standing-orders-lease"), "utf8")).toMatch(/^1000001 builder-1 group ([0-9a-f-]{36}|unknown) \S+\n$/);
     const prompt = String(args[args.indexOf("-p") + 1] ?? "");
     prompts.push(prompt);
     const name = REPORT_FILE.exec(prompt)?.[0];

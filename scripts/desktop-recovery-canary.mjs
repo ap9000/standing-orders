@@ -23,7 +23,8 @@ const runtimeHash=hashTree(runtimeRoot);
 const nodeHash=createHash('sha256').update(readFileSync(node)).digest('hex');
 const root=realpathSync(mkdtempSync(join(tmpdir(),'standing-orders-controller-cert-')));
 const state=join(root,'state');mkdirSync(state,{mode:0o700});
-const repo=join(root,'repo');mkdirSync(repo);
+const projectParent=option('--project-parent');
+const repo=projectParent?realpathSync(mkdtempSync(join(resolve(projectParent),'standing-orders-recovery-project-'))):join(root,'repo');if(!projectParent)mkdirSync(repo);
 execFileSync('git',['init','-q',repo]);writeFileSync(join(repo,'README.md'),'Retained recovery fixture.\n');
 execFileSync('git',['-C',repo,'add','README.md']);execFileSync('git',['-C',repo,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','baseline']);
 const revision=execFileSync('git',['-C',repo,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
@@ -34,13 +35,13 @@ let store=openDesktopStore(config.databaseFile);
 pairDesktopLogin(store,join(state,'up-login.txt'),login);await addDesktopProjects(state,store,[repo]);store.close();
 const filed=[];const code=await runOperate('task',['add','Retained unsigned task','--id','retained-restart-task','--db',config.databaseFile,'--repo',repo,'--json'],line=>filed.push(line));assert.equal(code,0);
 const uid=process.getuid();const label='com.standing-orders.cert.'+randomBytes(8).toString('hex');const service=`gui/${uid}/${label}`;
-const xml=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 const plist=join(root,`${label}.plist`);
 const env={PATH:[dirname(node),'/usr/bin','/bin','/usr/sbin','/sbin'].join(':'),XDG_CONFIG_HOME:join(root,'config')};
-writeFileSync(plist,`<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Label</key><string>${label}</string><key>ProgramArguments</key><array>${[node,join(runtimeRoot,'desktop-host.js'),'serve','--state',state].map(s=>`<string>${xml(s)}</string>`).join('')}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer><key>ExitTimeOut</key><integer>60</integer><key>WorkingDirectory</key><string>${xml(state)}</string><key>EnvironmentVariables</key><dict>${Object.entries(env).map(([k,v])=>`<key>${k}</key><string>${xml(v)}</string>`).join('')}</dict><key>StandardOutPath</key><string>${xml(join(root,'service.log'))}</string><key>StandardErrorPath</key><string>${xml(join(root,'service.log'))}</string></dict></plist>`,{mode:0o600});
+const {launchdPlist}=await import(pathToFileURL(join(runtimeRoot,'daemon.js')));
+writeFileSync(plist,launchdPlist({label,command:[node,join(runtimeRoot,'desktop-host.js'),'serve','--state',state],workingDirectory:state,pathEnv:env.PATH,environment:env,logPath:join(root,'service.log')}),{mode:0o600});
 const launch=(...a)=>execFileSync('/bin/launchctl',a,{encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:75000});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const report={version:1,root,service,runtimeHash,nodeHash,nodeVersion:execFileSync(node,['--version'],{encoding:'utf8'}).trim(),bootId:execFileSync('/usr/sbin/sysctl',['-n','kern.bootsessionuuid'],{encoding:'utf8'}).trim(),scriptHash:createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex'),sourceRevision:execFileSync('git',['-C',source,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),startedAt:new Date().toISOString(),cases:[],manualRescues:0,limits:['Controller crash recovery under an already activated LaunchAgent.','Initial activation uses explicit kickstart; no claim of automatic launchd relaunch, login or physical reboot.','A retained unsigned task proves persistence; this fixture does not invoke a provider.']};
+const report={version:1,root,repo,service,runtimeHash,nodeHash,nodeVersion:execFileSync(node,['--version'],{encoding:'utf8'}).trim(),bootId:execFileSync('/usr/sbin/sysctl',['-n','kern.bootsessionuuid'],{encoding:'utf8'}).trim(),scriptHash:createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex'),sourceRevision:execFileSync('git',['-C',source,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),startedAt:new Date().toISOString(),cases:[],manualRescues:0,limits:['Controller crash recovery under an already activated LaunchAgent.','Initial activation uses explicit kickstart; no claim of automatic launchd relaunch, login or physical reboot.','A retained unsigned task proves persistence; this fixture does not invoke a provider.']};
 const statusFile=join(state,'controller-supervisor.json');
 function status(){return JSON.parse(readFileSync(statusFile,'utf8'));}
 function lease(){const db=openDesktopStore(config.databaseFile);try{return db.handle.prepare('SELECT owner,heartbeat_at,expires_at FROM watch_lease WHERE repo=?').get(repo);}finally{db.close();}}
@@ -62,7 +63,7 @@ try{
   unchanged();report.cases.push({fault:signal==='SIGTERM'?'clean-controller-exit':'controller-sigkill',elapsedMs:Date.now()-at,generation:after.status.generation,controllerPid:after.status.controllerPid,lease:after.lease});beforeLease=after.lease;console.log(JSON.stringify(report.cases.at(-1)));
  }
  launch('bootout',service);loaded=false;await waitFor(()=>status().phase==='stopped');assert.equal(await health(),false);report.explicitStop=true;report.passed=true;
-}catch(error){report.passed=false;report.error=error instanceof Error?error.message:String(error);process.exitCode=1;}
+}catch(error){report.passed=false;report.error=error instanceof Error?error.message:String(error);try{writeFileSync(join(root,"launchctl-failure.txt"),launch("print",service),{mode:0o600});}catch{}process.exitCode=1;}
 finally{
  if(loaded){try{launch('bootout',service);}catch{}}
  report.finishedAt=new Date().toISOString();mkdirSync(dirname(output),{recursive:true});writeFileSync(output,JSON.stringify(report,null,2),{mode:0o600});console.log(JSON.stringify({passed:report.passed,output,root,error:report.error}));

@@ -387,6 +387,16 @@ External trackers — build what a tracker nominates, under local approvals
                                         to VS Code on the device you browse
                                         from (turn on per device, in the
                                         build page's review section).
+                                        --containment observed|preferred|required
+                                        (or STANDING_ORDERS_CONTAINMENT)
+                                        bounds every provider, setup and
+                                        check process in a native OS object
+                                        (delegated cgroup v2 on Linux, a
+                                        Job Object on Windows); required
+                                        refuses to spawn where none exists
+                                        (macOS) instead of downgrading.
+                                        Also read by watch, tick and
+                                        daemon install.
   standing-orders reconcile --repo <path>   the morning sweep: recover dead
                                         runners, reap expired leases, adopt
                                         or forget orphaned worktrees. Run it
@@ -7188,6 +7198,7 @@ async function daemonCommand(
       if (value !== undefined) watchFlags.push(`--${name}`, value);
     }
 
+    if (!watchFlags.includes("--containment")) watchFlags.push("--containment", currentContainment().policy);
     const plan = planDaemon({
       platform: process.platform,
       bin: located.bin,

@@ -28,7 +28,13 @@ const native = capability !== null && capability.available;
 const expected = process.env["SO_EXPECT_NATIVE_CONTAINMENT"] === "1";
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
-const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; } };
+/** Alive = exists and is not a zombie: a killed orphan stays a zombie until
+ * its reaper collects it (a container without an init never does), and a
+ * zombie can neither run nor write — the cgroup already reported it gone. */
+const alive = (pid: number): boolean => {
+  try { process.kill(pid, 0); } catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+  try { return !/\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8")); } catch { return false; }
+};
 async function waitFor(predicate: () => boolean, ms: number): Promise<boolean> {
   const until = Date.now() + ms;
   while (Date.now() < until) { if (predicate()) return true; await sleep(25); }
@@ -83,7 +89,7 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
     expect(result.code).toBe(0);
     expect(result.containment).toEqual({ backend: "cgroup2", id, empty: true });
     const pids = JSON.parse(readFileSync(join(dir, "pids.json"), "utf8")) as { root: number; escaped: number };
-    expect(alive(pids.escaped)).toBe(false);
+    expect(await waitFor(() => !alive(pids.escaped), 5_000)).toBe(true);
     expect(await stableAfterSettlement(join(dir, "ticks.log"))).toBe(true);
     // The object itself is gone (only an empty cgroup can be removed).
     expect(existsSync(id)).toBe(false);
@@ -124,8 +130,7 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
     expect(terminateOwnedProcesses("run:A")).toBe(1);
     const stopped = await runA;
     expect(stopped.containment).toEqual({ backend: "cgroup2", id: ids["a"], empty: true });
-    expect(alive(pidsA.root)).toBe(false);
-    expect(alive(pidsA.escaped)).toBe(false);
+    expect(await waitFor(() => !alive(pidsA.root) && !alive(pidsA.escaped), 5_000)).toBe(true);
     expect(await stableAfterSettlement(join(a, "ticks.log"))).toBe(true);
 
     // The sibling is untouched: root and escaped helper alive, still writing.
@@ -137,7 +142,7 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
     expect(terminateOwnedProcesses("run:B")).toBe(1);
     const stoppedB = await runB;
     expect(stoppedB.containment).toMatchObject({ empty: true });
-    expect(alive(pidsB.escaped)).toBe(false);
+    expect(await waitFor(() => !alive(pidsB.escaped), 5_000)).toBe(true);
   });
 
   test.skipIf(!native)("c2: the WORKER's death takes its objects with it — the janitor kills and removes the cgroup", async () => {
