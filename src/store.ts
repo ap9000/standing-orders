@@ -82,8 +82,9 @@ import type { ProgressSnapshot } from "./plan.js";
 import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type ProjectAccess } from "./project-access.js";
 import { LEDGER_SCHEMA, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
+import { RECIPE_SCHEMA } from "./recipes.js";
 
-export const SCHEMA_VERSION = 55;
+export const SCHEMA_VERSION = 56;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -3385,8 +3386,13 @@ function initializeStore(db: Database, file: string): Store {
       }
     }
   }
-  if (preflight === SCHEMA_VERSION && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_authorization'").get() === undefined) {
+  if (preflight !== null && Math.abs(preflight) >= 55 && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_authorization'").get() === undefined) {
     throw new Error(`${file}: plan authorization metadata is missing; refusing to recreate authority`);
+  }
+  if (preflight !== null && Math.abs(preflight) >= 56) {
+    for (const table of ["workflow_recipe", "workflow_preview"]) {
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table) === undefined) throw new Error(`${file}: workflow recipe metadata is missing; refusing to recreate launch history`);
+    }
   }
   // THE SENTINEL IS A CHECKED COMPARE-AND-SET (raw authority repair): the
   // row moves from exactly the version the preflight read to its negative,
@@ -3404,6 +3410,7 @@ function initializeStore(db: Database, file: string): Store {
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
   db.exec(LEDGER_SCHEMA);
+  db.exec(RECIPE_SCHEMA);
   db.exec(PLAN_AUTO_SCHEMA);
   installLedgerTriggers(db);
   // Attention/history indexes come AFTER migration: on a database whose

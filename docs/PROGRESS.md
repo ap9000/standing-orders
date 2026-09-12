@@ -1,5 +1,17 @@
 # Progress
 
+**2026-09-12 — Guided workflow recipes (schema 56).** Six starters now lead
+through choose, customize, and preview into the existing task/routine engine.
+Project recipes are reusable immutable copies with JSON import/export; task
+scopes can be copied into the editor. The preview exposes scope, success checks,
+schedule, and readiness. Durable launch receipts make retries return the same
+work across restarts, with atomic filing, policy application, and ledger
+recording. Existing project grants and approval boundaries remain enforced.
+Typecheck/build and 2,663 local tests passed; browser checks cover desktop,
+phone, saving, export, and scheduled creation. The live Mac upgrade remains
+behind its previously recorded OS recovery gate. See the
+[guide](WORKFLOW_RECIPES.md) and [assessment](assessments/WORKFLOW_RECIPES_2026-09-12.md).
+
 **2026-09-12 — OS process containment and controller recovery (schema 53).**
 Integrated the self-hosted builder's commit with independent operator fixes in
 PR #3. Native Linux cgroup v2 and Windows Job Objects admit a target only after

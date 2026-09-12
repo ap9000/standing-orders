@@ -45,6 +45,11 @@ boundaries, evidence requirements, model, and permissions.
 
 ### What is in the current build
 
+- **Guided workflow recipes.** Choose a starter, customize its outcome and
+  success checks, and preview the steps before creating one-time or scheduled
+  work. Save project recipes for teammates, reuse a task's scope, or share a
+  portable JSON definition. Creation retries return the same work; existing
+  approval and recovery rules apply. [Get started](docs/WORKFLOW_RECIPES.md).
 - **Unified portfolio chat.** Read every project, prioritize queues, answer
   decisions, repair failed or cancelled dependencies, and confirm rich action
   cards from one conversation. The chat proposes; durable workflow state
