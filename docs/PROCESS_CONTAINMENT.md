@@ -131,7 +131,8 @@ instead of writing its own plist):
   `/End` + `/Delete`); install re-enables;
 - status: `running` / `loaded` / `disabled` / `not-installed`, with
   `problems` naming a missing runtime or entry and `stale` when the
-  installed unit differs from what this build would write. `daemon
+  installed unit differs from what this build would write, or the loaded
+  launchd fingerprint is missing/different. `daemon
   install` and the certificate demand a FRESH runner heartbeat — a loaded
   service is not a working controller; the desktop `service-status` verb
   additionally answers the identity challenge on the configured port.
@@ -144,7 +145,11 @@ Its app bundle includes the official Node runtime and license, preserves its
 original code signature, and remembers the provider executable search path.
 Install the bundle in Applications; a Documents-located bundle failed the
 launchd startup check on the development host. Project access is a separate
-installed-app check.
+installed-app check. Fresh disposable launchd services using both the existing
+NVM Node and the bundled Node blocked while reading a Documents fixture on
+the development host. This does not establish a bundled-runtime defect.
+Resolve the OS folder-access gate and verify a fresh project heartbeat before
+replacing a working installation; do not bypass privacy controls.
 
 CLI daemon installation persists the resolved containment policy, including an
 environment-supplied policy. Desktop policy is retained in private configuration;
@@ -158,7 +163,7 @@ remain observed unless configured otherwise.
   the exact reason and skip where the facility is missing, and
   `SO_EXPECT_NATIVE_CONTAINMENT=1` turns a skip into a failure (CI:
   `linux-native-containment` delegates a leaf to the runner and runs them;
-  `windows-baseline` runs the Job Object tests).
+  `native-windows` runs the Job Object tests).
 - `npm run certify:restart -- baseline --db <file> [--label <label>]` then,
   after YOU log out/in or reboot, `… verify --db <file> --baseline <file>
   --expect reboot|login`: boot identity as the OS reports it, runtime,

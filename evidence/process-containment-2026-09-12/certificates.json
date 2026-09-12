@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "date": "2026-09-12",
+  "runtimeSourceCommit": "2cda503cb997fe7993e98bf5bb3498f938d9e82d",
+  "executableSha256": "6c207f33dfff2ec9f5bb00d0489281ef8b8574fc0318e7f9511914d956b650bf",
+  "certificates": [
+    {
+      "artifact": "claude-final.json",
+      "sha256": "b82d8af37126d7ed11bfffedcfc3aca479be7573a20824cfe1f90493c2a422a4",
+      "passed": true,
+      "provider": "claude",
+      "model": "opus",
+      "manualInterventions": 0,
+      "runtimeUnchanged": true,
+      "checks": {
+        "draftSha256": "52a0df5401a9013382eeba83a03eb3c55f95f33953344bc50d18f290be4651ef",
+        "stopSettlementMs": 1244,
+        "unsentChatDraftPreserved": true,
+        "resumeReplayStatus": 409,
+        "duplicateDispatch": "refused-empty",
+        "retainedDraft": true,
+        "noLateWrites": true,
+        "freshProof": "verified"
+      }
+    },
+    {
+      "artifact": "codex-final.json",
+      "sha256": "dd2f672dbf9e4f4ad4dec58d3366d2e5cb384fe696d96af7160ba83015372e39",
+      "passed": true,
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "manualInterventions": 0,
+      "runtimeUnchanged": true,
+      "checks": {
+        "draftSha256": "d62fc83076d5c58ab4caa6424e9a2b0a31e1c81dd089a3fc2496fc6760f348eb",
+        "stopSettlementMs": 641,
+        "unsentChatDraftPreserved": true,
+        "resumeReplayStatus": 409,
+        "duplicateDispatch": "refused-empty",
+        "retainedDraft": true,
+        "noLateWrites": true,
+        "freshProof": "verified"
+      }
+    },
+    {
+      "artifact": "crash-final.json",
+      "sha256": "47b9f1589507c6bb4c9ae719188343db6ae6393b88da05ade4c538c3cdd00af1",
+      "passed": true,
+      "cases": [
+        {
+          "stage": "planning",
+          "passed": true
+        },
+        {
+          "stage": "verification",
+          "passed": true
+        },
+        {
+          "stage": "building",
+          "passed": true
+        },
+        {
+          "stage": "setup",
+          "passed": true
+        },
+        {
+          "stage": "after-commit",
+          "passed": true
+        },
+        {
+          "stage": "review",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "artifact": "stop-crash-final.json",
+      "sha256": "b28cd1cbf1462220e21a9119aa035624866d0755c1695b21acb1acb0edc87b68",
+      "passed": true,
+      "cases": [
+        {
+          "stage": "building",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "artifact": "desktop-final.json",
+      "sha256": "e5adcd4497db34e44ed42c261ad333f04f39c47c611d3869679d74f74f2a7731",
+      "passed": true,
+      "cases": [
+        {
+          "fault": "clean-controller-exit",
+          "elapsedMs": 1746,
+          "generation": 2
+        },
+        {
+          "fault": "controller-sigkill",
+          "elapsedMs": 182288,
+          "generation": 11
+        }
+      ],
+      "runtimeHash": "6c207f33dfff2ec9f5bb00d0489281ef8b8574fc0318e7f9511914d956b650bf",
+      "nodeHash": "913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4",
+      "manualRescues": 0,
+      "explicitStop": true
+    },
+    {
+      "artifact": "migration-preview-comparison.json",
+      "sha256": "3d85136aee21f9955f3b28946111a1d881b4ce2585cd7aae3fe5e0cbccfe66c8",
+      "passed": true,
+      "comparison": {
+        "historicalTables": 95,
+        "changedHistoricalTables": [],
+        "integrity": [
+          [
+            "ok"
+          ]
+        ],
+        "foreignKeyViolations": 0,
+        "schema": [
+          [
+            53
+          ]
+        ],
+        "passed": true
+      }
+    }
+  ],
+  "liveDeploymentPerformed": false,
+  "physicalRebootPerformed": false,
+  "physicalLoginPerformed": false,
+  "nativeWindows": {
+    "sourceCommit": "07cbc099c2d6542b62487a41a38587d80571a10c",
+    "conclusion": "SUCCESS",
+    "tests": 5,
+    "url": "https://github.com/ap9000/standing-orders/actions/runs/34708869428/job/103593825850"
+  }
+}
