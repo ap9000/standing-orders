@@ -20,6 +20,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // The held-session supervisor ships as plain .mjs — tsc ignores it, and
 // exec.ts resolves it as a sibling, so dist needs its own copy.
 await copyFile(resolve(root, "src", "supervisor.mjs"), resolve(root, "dist", "supervisor.mjs"));
+// The Windows Job Object helper is PowerShell — containment.ts resolves it as
+// a sibling the same way, so dist needs its own copy too.
+await copyFile(resolve(root, "src", "job-object-helper.ps1"), resolve(root, "dist", "job-object-helper.ps1"));
 
 if (process.platform !== "win32") {
   for (const name of ["bin.js", "cli.js"]) {

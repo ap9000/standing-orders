@@ -102,6 +102,7 @@ import {
   planDaemon,
   uninstallDaemon,
   type SupervisorRunner,
+  awaitFreshHeartbeat,
 } from "./daemon.js";
 import {
   bridgePass,
@@ -229,6 +230,7 @@ import { profileDigestOf, chainDigestOf, entryDigestOf } from "./scope.js";
 import { reviewPass } from "./reviewer.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, readAuthModeStrict, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import { run, terminateLiveProviders, run as execRun } from "./exec.js";
+import { containmentStatus, currentContainment, describeContainment, resolveContainment } from "./containment.js";
 import { readPulls } from "./pulls.js";
 import { startMaintenance } from "./maintenance.js";
 import { beads } from "./beads.js";
@@ -594,7 +596,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "command", "timeout-seconds", "setup-digest", "stop-grace", "title", "name", "every", "lines",
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   "phase", "risk", "tier", "clear-phase",
-  "run",
+  "run", "containment",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
@@ -684,6 +686,18 @@ export async function runOperate(
 
   const file = text(flags, "db") ?? options.databaseFile ?? databasePath(process.env, homedir());
   const now = options.now ?? new Date();
+
+  // THE CONTAINMENT POLICY, pinned for this process before any database
+  // opens (OS containment plan): `--containment observed|preferred|required`,
+  // else STANDING_ORDERS_CONTAINMENT, else observed. A word that is none of
+  // the three refuses here — nothing is assumed from a corrupt value, and a
+  // pinned requirement is never weakened by a later flag.
+  try {
+    const containment = resolveContainment(text(flags, "containment"));
+    if (!containment.ok) return fail(write, json, command, "usage", containment.problem, EXIT.usage);
+  } catch (error) {
+    return fail(write, json, command, "usage", describe(error), EXIT.usage);
+  }
 
   // The MCP server never touches the migrating open below — it goes
   // through the non-migrating door with its own refusal words (spec v6).
@@ -7169,7 +7183,7 @@ async function daemonCommand(
     }
 
     const watchFlags: string[] = [];
-    for (const name of ["pool", "model", "repair-model", "provider", "plan-model", "plan-provider", "max", "turns", "tick-every", "bridge-every", "reconcile-every", "max-open-decisions"]) {
+    for (const name of ["pool", "model", "repair-model", "provider", "plan-model", "plan-provider", "max", "turns", "tick-every", "bridge-every", "reconcile-every", "max-open-decisions", "containment"]) {
       const value = text(flags, name);
       if (value !== undefined) watchFlags.push(`--${name}`, value);
     }
@@ -7216,17 +7230,12 @@ async function daemonCommand(
     // A supervisor PID is necessary but not sufficient: macOS can leave a
     // process stuck behind a protected-folder access check before it ever
     // opens the queue. The credentialed runner heartbeat is the end-to-end
-    // readiness receipt that proves this service reached the work loop.
-    const readyDeadline = Date.now() + 5_000;
-    let liveRunner = store.getRunner(runnerName)?.runner ?? null;
-    while (
-      Date.now() < readyDeadline &&
-      (liveRunner === null || liveRunner.heartbeatAt === heartbeatBefore || !isAlive(liveRunner, new Date()))
-    ) {
-      await new Promise(resolveReady => setTimeout(resolveReady, 100));
-      liveRunner = store.getRunner(runnerName)?.runner ?? null;
-    }
-    if (liveRunner === null || liveRunner.heartbeatAt === heartbeatBefore || !isAlive(liveRunner, new Date())) {
+    // readiness receipt that proves this service reached the work loop —
+    // a FRESH one when the service was (re)started; the one already
+    // standing when a healthy running service was left alone.
+    const fresh = await awaitFreshHeartbeat(store, runnerName, installed.action === "running" ? null : heartbeatBefore);
+    const liveRunner = fresh.ok ? store.getRunner(runnerName)?.runner ?? null : null;
+    if (liveRunner === null) {
       const macHint = process.platform === "darwin" && repo.startsWith(join(homedir(), "Documents"))
         ? " macOS may be blocking background access to Documents; grant the Node executable Full Disk Access, move the repository outside a protected folder, or keep `standing-orders up` running from your terminal."
         : "";
@@ -7239,8 +7248,8 @@ async function daemonCommand(
         EXIT.failed,
       );
     }
-    return succeed(write, json, "daemon install", { label: plan.label, unit: plan.unitPath, logs: plan.logPath, state: started.state, pid: started.pid, heartbeatAt: liveRunner.heartbeatAt }, () => [
-      `Installed and started ${plan.label}.`,
+    return succeed(write, json, "daemon install", { label: plan.label, unit: plan.unitPath, logs: plan.logPath, state: started.state, pid: started.pid, heartbeatAt: liveRunner.heartbeatAt, action: installed.action, changed: installed.changed, containment: containmentStatus(currentContainment()) }, () => [
+      installed.action === "running" ? `${plan.label} was already running under this exact definition; left alone.` : installed.action === "reloaded" ? `Reloaded ${plan.label} under its changed definition.` : `Installed and started ${plan.label}.`,
       `  verified ${started.detail}`,
       `  worker   ${runnerName} answered at ${liveRunner.heartbeatAt}`,
       `  unit    ${plan.unitPath}`,
@@ -7267,13 +7276,16 @@ async function daemonCommand(
 
   if (action === "status") {
     const state = await daemonStatus(plan, supervise);
+    const containment = currentContainment();
     if (json) {
-      write(envelopeJson({ ok: true, command: "daemon status", ...state, label: plan.label, logs: plan.logPath }));
+      write(envelopeJson({ ok: true, command: "daemon status", ...state, label: plan.label, logs: plan.logPath, containment: containmentStatus(containment) }));
       return state.state === "running" ? EXIT.ok : EXIT.refused;
     }
     write(`${plan.label}: ${state.detail}`);
     write(`  logs  ${plan.logPath}`);
+    write(`  ${describeContainment(containment)}`);
     if (state.state === "not-installed") write("  → standing-orders daemon install --runner <name> --token <t> --repo <path>");
+    if (state.state === "disabled") write("  → the service is disabled: `standing-orders daemon install` re-enables and loads it");
     return state.state === "running" ? EXIT.ok : EXIT.refused;
   }
 
@@ -7388,6 +7400,9 @@ async function runWatchLoop(args: {
   if (lease.superseded !== null && lease.recovered > 0) {
     progress(`Recovered ${lease.recovered} claim(s) from the previous watch (${lease.superseded.slice(0, 8)}…) before dispatching anything.`);
   }
+  // What this runner's spawns actually get, in one honest line: native
+  // and which backend, observed, or a required policy that will refuse.
+  progress(`watch: ${describeContainment(currentContainment())}`);
 
   // The night is a row, not "the last 24 hours": everything this watch does
   // attributes to this episode by runner and window, and `brief

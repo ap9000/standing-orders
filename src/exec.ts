@@ -12,6 +12,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { observeProcessTree, stopProcessTree, type ProcessTreeObserver } from "./process-tree.js";
 import { jsonlDiscriminants } from "./jsonl-discriminants.js";
+import { createContainer, currentContainment, type AttachOutcome, type Container, type ContainmentBackendId } from "./containment.js";
 import type { Store } from "./store.js";
 
 export type ExecResult = {
@@ -23,7 +24,22 @@ export type ExecResult = {
   timedOut: boolean;
   /** Binary is not on PATH — distinct from "ran and failed", and worth saying so. */
   notFound: boolean;
+  /**
+   * The OS containment this spawn had (OS containment plan). Absent under
+   * observed containment. `refused` = required containment could not be
+   * established and the target NEVER ran. Otherwise the backend, the exact
+   * OS object, and whether the OS proved it empty before this result was
+   * returned — a transport exit alone never proves that.
+   */
+  containment?: ContainmentOutcome;
 };
+
+export type ContainmentOutcome =
+  | { refused: string }
+  | { backend: ContainmentBackendId; id: string; empty: boolean };
+
+/** Shell convention for "could not be executed": the refusal before any target ran. */
+export const CONTAINMENT_REFUSED_CODE = 126;
 
 export type RunOptions = ProcessTreeObserver & {
   cwd?: string;
@@ -91,6 +107,13 @@ export type RunOptions = ProcessTreeObserver & {
   /** Fires once the child exists, with its pid (the process-group id when
    * processGroup is set) — the slot ledger records it (v14 finding 26). */
   onSpawn?: (pid: number) => void;
+  /** Fires before any target spawn, so a crash cannot lose its OS object. */
+  onContainer?: (info: { backend: ContainmentBackendId; id: string; identity?: string }) => void;
+  /** Fires once the OS proved this spawn's object empty (every member
+   * gone, including detached helpers). Never fires on a transport exit
+   * alone; a spawn whose object could not be proven empty reports
+   * onUnknown instead and its custody stays unproven. */
+  onContainerEmpty?: () => void;
   /**
    * Every parsed stream event, as it arrives (claude's streaming transport
    * only). Purely observational: exceptions are caught and counted, and
@@ -130,6 +153,163 @@ function registerOwned(owner: string | undefined, child: import("node:child_proc
     owned.delete(child);
     if (owned.size === 0) ownedChildren.delete(owner);
   });
+}
+
+/** The native OS object behind a live child, when it has one. */
+const containers = new WeakMap<import("node:child_process").ChildProcess, Container>();
+
+/** Thrown BEFORE any spawn when required containment cannot be had. */
+export class ContainmentRefusal extends Error {
+  override readonly name = "ContainmentRefusal";
+}
+
+/** A spawn callback refused custody AFTER the child existed: the caller
+ * must reap exactly this child before answering. */
+class SpawnCustodyFailure extends Error {
+  override readonly name = "SpawnCustodyFailure";
+  constructor(readonly child: import("node:child_process").ChildProcess, readonly reason: unknown) {
+    super(String(reason));
+  }
+}
+
+/** The child a failed spawn road left behind, if any. */
+function rejectedChild(error: unknown, child: import("node:child_process").ChildProcess | undefined): import("node:child_process").ChildProcess | undefined {
+  return error instanceof SpawnCustodyFailure ? error.child : child;
+}
+
+type ContainedSpawn = {
+  child: import("node:child_process").ChildProcess;
+  container: Container | null;
+  /** Settles once the target is inside its object (before it executes) or the prelude failed (the target never ran). */
+  attached: Promise<AttachOutcome>;
+};
+
+/**
+ * The ONE spawn road for containable children (buffered, streaming and
+ * held transports): consult the pinned policy, make this spawn's OS
+ * object, spawn the target INSIDE it, and register the object beside the
+ * handle. Under observed containment this is exactly the old spawn. A
+ * required policy that cannot be met throws ContainmentRefusal here —
+ * nothing has been spawned, so the caller's reap is a no-op and its
+ * result says `refused` in the policy's words.
+ */
+function spawnContained(
+  file: string,
+  args: readonly string[],
+  spawnOptions: { cwd?: string | undefined; env?: Record<string, string | undefined> | undefined; stdio: ("pipe" | "ignore")[]; detached: boolean },
+  label: string,
+  bag: { beforeSpawn?: (() => boolean) | undefined; onSpawn?: ((pid: number) => void) | undefined; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"]; onUnknown?: RunOptions["onUnknown"] },
+  contain = true,
+): ContainedSpawn {
+  // The policy refusal comes first: nothing is reserved, recorded or
+  // spawned for a spawn that cannot be contained as required.
+  const effective = contain ? currentContainment() : null;
+  if (effective !== null && effective.refusal !== null) throw new ContainmentRefusal(effective.refusal);
+  if (bag.beforeSpawn?.() === false) throw new Error("the attempt stopped before this process could spawn");
+  const made = effective === null ? { container: null } : createContainer(effective, label);
+  if ("refused" in made) throw new ContainmentRefusal(made.refused);
+  const container = made.container;
+  try { if (container !== null) bag.onContainer?.({ backend: container.backend, id: container.id, ...(container.identity ? { identity: container.identity } : {}) }); }
+  catch (error) { container?.release(); throw error; }
+  let launch: ReturnType<Container["launch"]> | null;
+  try { launch = container === null ? null : container.launch(file, args); }
+  catch (error) { container?.release(); throw error; }
+  let child: import("node:child_process").ChildProcess;
+  try {
+    child = spawn(launch === null ? file : launch.file, launch === null ? [...args] : launch.args, {
+      shell: false,
+      windowsHide: true,
+      detached: spawnOptions.detached,
+      stdio: [...spawnOptions.stdio, ...(launch === null ? [] : launch.extraStdio)],
+      ...(spawnOptions.cwd === undefined ? {} : { cwd: spawnOptions.cwd }),
+      ...(spawnOptions.env === undefined ? {} : { env: spawnOptions.env }),
+    });
+  } catch (error) {
+    // The OS spawn itself threw: this invocation made no target process.
+    try { if (container !== null) bag.onContainerEmpty?.(); } catch {}
+    container?.release();
+    throw error;
+  }
+  if (container !== null) {
+    containers.set(child, container);
+    // A descendant may keep stdout/stderr open after the root exits. Begin
+    // cleanup at root exit; waiting for `close` would wait for that descendant.
+    child.once("exit", () => { void settleContainer(container, bag).then(empty => {
+      if (!empty) { child.stdout?.destroy(); child.stderr?.destroy(); }
+    }); });
+    child.once("error", () => { void settleContainer(container, bag); });
+  }
+  try {
+    if (child.pid !== undefined) {
+      bag.onSpawn?.(child.pid);
+    }
+  } catch (error) {
+    throw new SpawnCustodyFailure(child, error);
+  }
+  const attached = launch === null || child.pid === undefined ? Promise.resolve<AttachOutcome>({ ok: true }) : launch.attach(child);
+  return { child, container, attached };
+}
+
+/**
+ * The settlement every containable transport runs at the root's exit:
+ * members that outlived the root (a setsid'd helper, a double fork) are
+ * killed and the OS asked for its empty state, bounded. The answer is
+ * the proof the custody record keeps — `false` leaves the record
+ * unproven and every stop/resume fence closed.
+ */
+const containerSettlements = new WeakMap<Container, Promise<boolean>>();
+function settleContainer(container: Container, bag: { onContainerEmpty?: (() => void) | undefined; onUnknown?: (() => void) | undefined }, timeoutMs = 5_000): Promise<boolean> {
+  const existing = containerSettlements.get(container);
+  if (existing !== undefined) return existing;
+  const settling = finishContainer(container, bag, timeoutMs);
+  containerSettlements.set(container, settling);
+  return settling;
+}
+async function finishContainer(container: Container, bag: { onContainerEmpty?: (() => void) | undefined; onUnknown?: (() => void) | undefined }, timeoutMs: number): Promise<boolean> {
+  let empty = container.populated() === false;
+  try { if (!empty) empty = await container.kill(timeoutMs); } catch { empty = false; }
+  try {
+    if (empty) bag.onContainerEmpty?.();
+    else bag.onUnknown?.();
+  } catch {
+    // Custody that cannot be written stays unproven; the fences hold.
+    empty = false;
+  }
+  try { container.release(); } catch { /* proof already determines the result */ }
+  return empty;
+}
+
+/** The result's containment field for a spawn that ran inside an object. */
+function containmentOf(container: Container | null, empty: boolean | null, attachFailure: string | null): { containment?: ContainmentOutcome } {
+  if (attachFailure !== null) return { containment: { refused: attachFailure } };
+  if (container === null || empty === null) return {};
+  return { containment: { backend: container.backend, id: container.id, empty } };
+}
+
+/** The streaming transports' spawn: contained when the spawn is a provider (process group), plain otherwise. */
+function spawnStream(
+  file: string,
+  args: readonly string[],
+  options: RunOptions,
+  stdio: ("pipe" | "ignore")[],
+  childEnv: Record<string, string | undefined> | undefined,
+): ContainedSpawn {
+  return spawnContained(
+    file,
+    args,
+    { cwd: options.cwd, env: childEnv, stdio, detached: options.processGroup === true && process.platform !== "win32" },
+    options.owner ?? "stream",
+    { beforeSpawn: options.beforeSpawn, onSpawn: options.onSpawn, onContainer: options.onContainer, onContainerEmpty: options.onContainerEmpty, onUnknown: options.onUnknown },
+    options.processGroup === true,
+  );
+}
+
+/** The refusal-before-spawn shape shared by every containable transport. */
+function refusedResult(error: unknown): ExecResult {
+  if (error instanceof ContainmentRefusal) {
+    return { code: CONTAINMENT_REFUSED_CODE, stdout: "", stderr: error.message, timedOut: false, notFound: false, containment: { refused: error.message } };
+  }
+  return { code: 1, stdout: "", stderr: String(error instanceof SpawnCustodyFailure ? error.reason : error), timedOut: false, notFound: false };
 }
 
 const databaseOwners = new WeakMap<object, string>();
@@ -184,6 +364,18 @@ const heldSupervisors = new Map<import("node:child_process").ChildProcess, "fres
 
 /** SIGKILL the child's whole process group; fall back to the child alone. */
 function killGroup(child: import("node:child_process").ChildProcess): void {
+  const container = containers.get(child);
+  if (container !== undefined) {
+    // The OS object reaches every member at once — detached helpers
+    // included — and its empty state is awaited by the transport's
+    // settlement, never assumed here.
+    void container.kill().catch(() => {});
+    // The Windows helper is the job's owner and reporter: it terminates the
+    // job on the order above and answers "empty"; killing it instead would
+    // close the handle (kill-on-close still ends the job) but lose the proof.
+    if (container.backend !== "job-object") { try { child.kill("SIGKILL"); } catch { /* already gone */ } }
+    return;
+  }
   if (stopProcessTree(child)) return;
   const pid = child.pid;
   if (pid !== undefined && process.platform === "win32") {
@@ -236,7 +428,9 @@ export function terminateLiveProviders(): number {
         supervisor.kill("SIGTERM");
         heldSupervisors.set(supervisor, "termed");
       } else {
-        if (!stopProcessTree(supervisor)) supervisor.kill("SIGKILL");
+        // With a native OS object the escalation reaches the agent too:
+        // the object's kill is the one road that cannot orphan it.
+        killGroup(supervisor);
       }
     } catch {
       // Already gone.
@@ -292,7 +486,12 @@ function reapRejectedSpawn(child: ReturnType<typeof spawn> | undefined, group: b
   if (child === undefined) return Promise.resolve();
   return new Promise(resolve => {
     if (group) liveProviders.add(child);
-    child.once("close", () => { liveProviders.delete(child); resolve(); });
+    child.once("close", () => {
+      liveProviders.delete(child);
+      const container = containers.get(child);
+      if (container === undefined) resolve();
+      else void settleContainer(container, {}).then(() => resolve());
+    });
     child.on("error", () => {});
     child.stdout?.resume();
     child.stderr?.resume();
@@ -413,6 +612,8 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         ...(options.beforeSpawn === undefined ? {} : { beforeSpawn: options.beforeSpawn }),
         ...(options.onDescendant === undefined ? {} : { onDescendant: options.onDescendant }),
         ...(options.onUnknown === undefined ? {} : { onUnknown: options.onUnknown }),
+        ...(options.onContainer === undefined ? {} : { onContainer: options.onContainer }),
+        ...(options.onContainerEmpty === undefined ? {} : { onContainerEmpty: options.onContainerEmpty }),
       }),
     );
   }
@@ -456,39 +657,44 @@ export function run(file: string, args: readonly string[], options: RunOptions =
 function runBufferedGroup(
   file: string,
   args: readonly string[],
-  bag: ProcessTreeObserver & { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean },
+  bag: ProcessTreeObserver & { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"] },
 ): Promise<SpawnAttempt> {
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
+    let container: Container | null = null;
+    let attached: Promise<AttachOutcome>;
     try {
-      if (bag.beforeSpawn?.() === false) throw new Error("the attempt stopped before this process could spawn");
-      child = spawn(file, [...args], {
-        cwd: bag.cwd,
-        shell: false,
-        windowsHide: true,
-        detached: process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
-        ...(bag.childEnv === undefined ? {} : { env: bag.childEnv }),
-      });
-      if (child.pid !== undefined) bag.onSpawn?.(child.pid);
+      const spawned = spawnContained(
+        file,
+        args,
+        { cwd: bag.cwd, env: bag.childEnv, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" },
+        bag.owner ?? "buffered",
+        { beforeSpawn: bag.beforeSpawn, onSpawn: bag.onSpawn, onContainer: bag.onContainer, onContainerEmpty: bag.onContainerEmpty, onUnknown: bag.onUnknown },
+      );
+      child = spawned.child;
+      container = spawned.container;
+      attached = spawned.attached;
     } catch (error) {
-      void reapRejectedSpawn(child, true).then(() => {
+      const left = rejectedChild(error, child);
+      void reapRejectedSpawn(left, true).then(() => {
         resolve({
-          result: { code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false },
-          transient: child === undefined && isTransientSpawnFailure(error as ExecError),
+          result: refusedResult(error),
+          transient: left === undefined && isTransientSpawnFailure(error as ExecError),
         });
       });
       return;
     }
     liveProviders.add(child);
     registerOwned(bag.owner, child);
-    observeProcessTree(child, bag);
+    if (container === null) observeProcessTree(child, bag);
 
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let overflowed = false;
     let notFound = false;
+    let attachFailure: string | null = null;
+    void attached.then(outcome => { if (!outcome.ok) attachFailure = outcome.detail; });
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -515,16 +721,22 @@ function runBufferedGroup(
       settled = true;
       clearTimeout(timer);
       liveProviders.delete(child);
-      resolve({
-        result: {
-          code: notFound ? NOT_FOUND_CODE : overflowed ? OVERFLOW_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
-          stdout,
-          stderr,
-          // Overflow also killed the child; it is not a timeout and must not read as one.
-          timedOut: timedOut && !overflowed,
-          notFound,
-        },
-        transient,
+      // The OS object is settled BEFORE the answer: a root that exited is
+      // not an empty container until the OS says so.
+      const settlement = container === null ? Promise.resolve<boolean | null>(null) : settleContainer(container, bag);
+      void settlement.then(empty => {
+        resolve({
+          result: {
+            code: notFound ? NOT_FOUND_CODE : overflowed ? OVERFLOW_CODE : timedOut ? TIMEOUT_CODE : attachFailure !== null || empty === false ? CONTAINMENT_REFUSED_CODE : (code ?? 1),
+            stdout,
+            stderr: empty === false ? `${stderr}\nNative process containment could not prove all descendants exited.`.trim() : attachFailure !== null && stderr === "" ? attachFailure : stderr,
+            // Overflow also killed the child; it is not a timeout and must not read as one.
+            timedOut: timedOut && !overflowed,
+            notFound,
+            ...containmentOf(container, empty, attachFailure),
+          },
+          transient,
+        });
       });
     };
     child.on("error", error => {
@@ -810,26 +1022,20 @@ export function runStreamJsonl(
 
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
+    let container: Container | null = null;
+    let attachFailure: string | null = null;
     try {
-      if (options.beforeSpawn?.() === false) throw new Error("the attempt stopped before this process could spawn");
-      child = spawn(file, [...args], {
-        cwd,
-        shell: false,
-        windowsHide: true,
-        detached: options.processGroup === true && process.platform !== "win32",
-        stdio: [options.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-        ...(childEnv === undefined ? {} : { env: childEnv }),
-      });
-      if (child.pid !== undefined) options.onSpawn?.(child.pid);
+      const spawned = spawnStream(file, args, options, [options.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"], childEnv);
+      child = spawned.child;
+      container = spawned.container;
+      void spawned.attached.then(outcome => { if (!outcome.ok) attachFailure = outcome.detail; });
     } catch (error) {
-      void reapRejectedSpawn(child, options.processGroup === true).then(() => {
-        resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
-      });
+      void reapRejectedSpawn(rejectedChild(error, child), options.processGroup === true).then(() => resolve(refusedResult(error)));
       return;
     }
     if (options.processGroup === true) liveProviders.add(child);
     registerOwned(options.owner, child);
-    if (options.processGroup === true) observeProcessTree(child, options);
+    if (options.processGroup === true && container === null) observeProcessTree(child, options);
 
     let startedLine: string | null = null;
     let startedIdentityLine: string | null = null;
@@ -960,13 +1166,15 @@ export function runStreamJsonl(
       ]
         .filter((line): line is string => line !== null)
         .filter((line, index, all) => all.indexOf(line) === index);
-      resolve({
-        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : inputFailed ? 1 : (code ?? 1),
+      const settlement = container === null ? Promise.resolve<boolean | null>(null) : settleContainer(container, options);
+      void settlement.then(empty => resolve({
+        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : inputFailed ? 1 : attachFailure !== null || empty === false ? CONTAINMENT_REFUSED_CODE : (code ?? 1),
         stdout: lines.join("\n"),
-        stderr,
+        stderr: empty === false ? `${stderr}\nNative process containment could not prove all descendants exited.`.trim() : attachFailure !== null && stderr === "" ? attachFailure : stderr,
         timedOut,
         notFound,
-      });
+        ...containmentOf(container, empty, attachFailure),
+      }));
     };
 
     // A failed spawn fires 'error' and may never fire 'close' — both routes
@@ -1023,26 +1231,20 @@ export function runGeminiStreamJsonl(
 
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
+    let container: Container | null = null;
+    let attachFailure: string | null = null;
     try {
-      if (options.beforeSpawn?.() === false) throw new Error("the attempt stopped before this process could spawn");
-      child = spawn(file, [...args], {
-        cwd,
-        shell: false,
-        windowsHide: true,
-        detached: options.processGroup === true && process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
-        ...(childEnv === undefined ? {} : { env: childEnv }),
-      });
-      if (child.pid !== undefined) options.onSpawn?.(child.pid);
+      const spawned = spawnStream(file, args, options, ["ignore", "pipe", "pipe"], childEnv);
+      child = spawned.child;
+      container = spawned.container;
+      void spawned.attached.then(outcome => { if (!outcome.ok) attachFailure = outcome.detail; });
     } catch (error) {
-      void reapRejectedSpawn(child, options.processGroup === true).then(() => {
-        resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
-      });
+      void reapRejectedSpawn(rejectedChild(error, child), options.processGroup === true).then(() => resolve(refusedResult(error)));
       return;
     }
     if (options.processGroup === true) liveProviders.add(child);
     registerOwned(options.owner, child);
-    if (options.processGroup === true) observeProcessTree(child, options);
+    if (options.processGroup === true && container === null) observeProcessTree(child, options);
 
     let initLine: string | null = null;
     let initIdentityLine: string | null = null;
@@ -1170,13 +1372,15 @@ export function runGeminiStreamJsonl(
       // A recognizable, malformed terminal is just as conclusive as an
       // oversized one. Keep it last so last-result-wins cannot erase it.
       if (malformedLine !== null) lines.push(malformedLine);
-      resolve({
-        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
+      const settlement = container === null ? Promise.resolve<boolean | null>(null) : settleContainer(container, options);
+      void settlement.then(empty => resolve({
+        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : attachFailure !== null || empty === false ? CONTAINMENT_REFUSED_CODE : (code ?? 1),
         stdout: lines.join("\n"),
-        stderr,
+        stderr: empty === false ? `${stderr}\nNative process containment could not prove all descendants exited.`.trim() : attachFailure !== null && stderr === "" ? attachFailure : stderr,
         timedOut,
         notFound,
-      });
+        ...containmentOf(container, empty, attachFailure),
+      }));
     };
 
     child.on("error", error => {
@@ -1252,26 +1456,20 @@ export function runClaudeStreamJsonl(
 
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
+    let container: Container | null = null;
+    let attachFailure: string | null = null;
     try {
-      if (options.beforeSpawn?.() === false) throw new Error("the attempt stopped before this process could spawn");
-      child = spawn(file, [...args], {
-        cwd,
-        shell: false,
-        windowsHide: true,
-        detached: options.processGroup === true && process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
-        ...(childEnv === undefined ? {} : { env: childEnv }),
-      });
-      if (child.pid !== undefined) options.onSpawn?.(child.pid);
+      const spawned = spawnStream(file, args, options, ["ignore", "pipe", "pipe"], childEnv);
+      child = spawned.child;
+      container = spawned.container;
+      void spawned.attached.then(outcome => { if (!outcome.ok) attachFailure = outcome.detail; });
     } catch (error) {
-      void reapRejectedSpawn(child, options.processGroup === true).then(() => {
-        resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
-      });
+      void reapRejectedSpawn(rejectedChild(error, child), options.processGroup === true).then(() => resolve(refusedResult(error)));
       return;
     }
     if (options.processGroup === true) liveProviders.add(child);
     registerOwned(options.owner, child);
-    if (options.processGroup === true) observeProcessTree(child, options);
+    if (options.processGroup === true && container === null) observeProcessTree(child, options);
 
     let initLine: string | null = null;
     let initIdentityLine: string | null = null;
@@ -1405,13 +1603,15 @@ export function runClaudeStreamJsonl(
       const lines = [initLine, initIdentityLine, conflictingInitLine, resultLine, overflowLine]
         .filter((one): one is string => one !== null)
         .filter((line, index, all) => all.indexOf(line) === index);
-      resolve({
-        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
+      const settlement = container === null ? Promise.resolve<boolean | null>(null) : settleContainer(container, options);
+      void settlement.then(empty => resolve({
+        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : attachFailure !== null || empty === false ? CONTAINMENT_REFUSED_CODE : (code ?? 1),
         stdout: lines.join("\n"),
-        stderr,
+        stderr: empty === false ? `${stderr}\nNative process containment could not prove all descendants exited.`.trim() : attachFailure !== null && stderr === "" ? attachFailure : stderr,
         timedOut,
         notFound,
-      });
+        ...containmentOf(container, empty, attachFailure),
+      }));
     };
 
     child.on("error", error => {
@@ -1507,29 +1707,47 @@ export function startClaudeHeldSession(
 
   return new Promise(resolveStart => {
     let supervisor!: ReturnType<typeof spawn>;
+    let container: Container | null = null;
+    let attachFailure: string | null = null;
     try {
-      if (options.beforeSpawn?.() === false) throw new Error("the attempt stopped before its supervisor could spawn");
-      supervisor = spawn(process.execPath, [supervisorPath(), file, ...args], {
-        cwd: options.cwd,
-        shell: false,
-        windowsHide: true,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...childEnv,
-          SO_HELD_SOCKET: options.socketPath,
-          SO_HELD_COOKIE: options.cookie,
-          SO_HELD_GRACE_MS: String(options.graceMs ?? 10_000),
+      // The supervisor spawns INSIDE the OS object, so the agent it holds
+      // and every tool the agent launches are members too: one kill reaches
+      // the whole hold, and the object's empty state proves the hold over.
+      const spawned = spawnContained(
+        process.execPath,
+        [supervisorPath(), file, ...args],
+        {
+          cwd: options.cwd,
+          env: {
+            ...childEnv,
+            SO_HELD_SOCKET: options.socketPath,
+            SO_HELD_COOKIE: options.cookie,
+            SO_HELD_GRACE_MS: String(options.graceMs ?? 10_000),
+          },
+          stdio: ["pipe", "pipe", "pipe"],
+          detached: false,
         },
-      });
-      observeProcessTree(supervisor, options);
-      if (supervisor.pid !== undefined) options.onSpawn?.(supervisor.pid);
+        options.owner ?? "held",
+        {
+          beforeSpawn: options.beforeSpawn,
+          onSpawn: options.onSpawn,
+          onContainer: options.onContainer,
+          onContainerEmpty: options.onContainerEmpty,
+          onUnknown: options.onUnknown,
+        },
+      );
+      supervisor = spawned.child;
+      container = spawned.container;
+      void spawned.attached.then(outcome => { if (!outcome.ok) attachFailure = outcome.detail; });
+      if (container === null) observeProcessTree(supervisor, options);
     } catch (error) {
-      const refused = (): void => resolveStart({ ok: false, reason: "spawn-failed", message: String(error) });
-      if (supervisor === undefined) refused();
+      const left = rejectedChild(error, supervisor);
+      const refused = (): void => resolveStart({ ok: false, reason: "spawn-failed", message: String(error instanceof SpawnCustodyFailure ? error.reason : error) });
+      if (left === undefined) refused();
       else {
-        supervisor.once("close", refused);
-        supervisor.on("error", () => {});
-        if (!stopProcessTree(supervisor)) supervisor.kill("SIGTERM");
+        left.once("close", refused);
+        left.on("error", () => {});
+        killGroup(left);
       }
       return;
     }
@@ -1551,7 +1769,7 @@ export function startClaudeHeldSession(
       if (settledStart) return;
       settledStart = true;
       try {
-        if (!stopProcessTree(supervisor)) supervisor.kill("SIGKILL");
+        killGroup(supervisor);
       } catch {
         // Already gone.
       }
@@ -1588,7 +1806,7 @@ export function startClaudeHeldSession(
       },
       killHard(): void {
         try {
-          if (!stopProcessTree(supervisor)) supervisor.kill("SIGKILL");
+          killGroup(supervisor);
         } catch {
           // Already gone.
         }
@@ -1683,17 +1901,20 @@ export function startClaudeHeldSession(
     supervisor.on("close", code => {
       heldSupervisors.delete(supervisor);
       if (partial.trim() !== "") keep(partial);
-      if (!settledStart) {
-        settledStart = true;
-        clearTimeout(readyTimer);
-        resolveStart({ ok: false, reason: "spawn-failed", message: "the supervisor exited before its control frame" });
-      }
-      try {
-        events.onExit?.({ code });
-      } catch {
-        // Observational.
-      }
-      exitResolve({ code });
+      const settlement = container === null ? Promise.resolve(true) : settleContainer(container, options);
+      void settlement.then(empty => {
+        if (!settledStart) {
+          settledStart = true;
+          clearTimeout(readyTimer);
+          resolveStart({ ok: false, reason: "spawn-failed", message: attachFailure ?? "the supervisor exited before its control frame" });
+        }
+        try {
+          events.onExit?.({ code: empty ? code : CONTAINMENT_REFUSED_CODE });
+        } catch {
+          // Observational.
+        }
+        exitResolve({ code: empty ? code : CONTAINMENT_REFUSED_CODE });
+      });
     });
   });
 }

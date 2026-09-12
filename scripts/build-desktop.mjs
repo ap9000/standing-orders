@@ -11,11 +11,6 @@ const destination = resolve(process.argv[2] ?? join(homedir(), "Applications", "
 if (existsSync(destination)) {
   if (lstatSync(destination).isSymbolicLink() || !lstatSync(destination).isDirectory() || !existsSync(join(destination, "Contents", "Resources", "standing-orders-bundle"))) throw new Error("Output exists and is not a Standing Orders build.");
 }
-mkdirSync(dirname(destination), { recursive: true });
-const staging = mkdtempSync(join(dirname(destination), ".standing-orders-build-"));
-const app = join(staging, "Standing Orders.app");
-const previous = join(staging, "previous.app");
-let published = false;
 // A login service must not depend on a removable nvm version or Homebrew
 // symlink. Bundle the actual runtime and its redistribution notices. Refuse
 // a dynamically linked package-manager build we cannot make self-contained.
@@ -27,7 +22,13 @@ if (libraries.some(path => !path.startsWith("/usr/lib/") && !path.startsWith("/S
 }
 const nodeLicense = join(dirname(sourceNode), "..", "LICENSE");
 if (!existsSync(nodeLicense)) throw new Error("The Node distribution's LICENSE is missing. Build with an official Node distribution so its redistribution notices can be included.");
+execFileSync("/usr/bin/codesign", ["--verify", "--strict", sourceNode]);
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+mkdirSync(dirname(destination), { recursive: true });
+const staging = mkdtempSync(join(dirname(destination), ".standing-orders-build-"));
+const app = join(staging, "Standing Orders.app");
+const previous = join(staging, "previous.app");
+let published = false;
 try {
 const contents = join(app, "Contents"), resources = join(contents, "Resources"), macos = join(contents, "MacOS");
 mkdirSync(macos, { recursive: true }); mkdirSync(resources, { recursive: true });
@@ -50,7 +51,10 @@ writeFileSync(join(contents, "Info.plist"), `<?xml version="1.0" encoding="UTF-8
 </dict></plist>`);
 execFileSync("/usr/bin/swiftc", ["-O", "-target", `${process.arch === "arm64" ? "arm64" : "x86_64"}-apple-macosx13.0`, "-parse-as-library", "-swift-version", "5", "-framework", "AppKit", "-framework", "WebKit", "-framework", "Security", join(root, "desktop", "StandingOrders.swift"), "-o", join(macos, "StandingOrders")], { stdio: "inherit" });
 execFileSync("/usr/bin/xattr", ["-cr", app]);
-execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", bundledNode], { stdio: "inherit" });
+// Preserve Node's original Developer ID, entitlements and hardened runtime.
+// Re-signing it ad hoc changes its OS identity and can strand unattended
+// access behind a new privacy approval. The outer app seals the signed copy.
+execFileSync("/usr/bin/codesign", ["--verify", "--strict", bundledNode], { stdio: "inherit" });
 execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", app], { stdio: "inherit" });
 execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", app], { stdio: "inherit" });
 if (existsSync(destination)) renameSync(destination, previous);
