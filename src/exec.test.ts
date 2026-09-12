@@ -297,7 +297,7 @@ describe("bounded provider JSONL replies", () => {
   test.each(["type-first", "id-first", "type-last", "outer-last"])("codex drops oversized command telemetry with %s object keys", async (order) => {
     const script = `
       process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"codex-command-noise"}) + "\\n");
-      const output="q".repeat(${JSONL_EVENT_HARD_CAP + 2_000});
+      const output='{"type":"item.completed","item":{"type":"agent_message"}}' + "q".repeat(${JSONL_EVENT_HARD_CAP + 2_000});
       const item=${JSON.stringify(order)}==='type-first'?{type:'command_execution',aggregated_output:output}:
         ${JSON.stringify(order)}==='id-first'?{id:'item_17',type:'command_execution',aggregated_output:output}:
         {id:'item_17',aggregated_output:output,type:'command_execution'};
