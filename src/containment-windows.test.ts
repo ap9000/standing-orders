@@ -17,7 +17,7 @@ import { pathToFileURL } from "node:url";
 import { containerEmptiness } from "./container-state.js";
 import { join, resolve } from "node:path";
 import { effectiveContainment, pinContainment, probeContainmentCapability, resetContainmentForTests } from "./containment.js";
-import { run, terminateOwnedProcesses } from "./exec.js";
+import { run, runStreamJsonl, terminateOwnedProcesses } from "./exec.js";
 
 const capability = process.platform === "win32" ? probeContainmentCapability() : null;
 const native = capability !== null && capability.available;
@@ -66,7 +66,13 @@ describe("native containment (Windows Job Object)", { timeout: 40_000 }, () => {
 
   test.skipIf(!native)("c2: a detached grandchild dies with the root's natural exit; the job is reported empty; no writes after settlement", async () => {
     let id = "";
-    const result = await run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, timeoutMs: 8_000, env: { SO_DIR: dir, SO_MODE: "exit" }, onContainer: info => { id = info.id; } });
+    const pending = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, timeoutMs: 30_000, env: { SO_DIR: dir, SO_MODE: "exit" }, onContainer: info => { id = info.id; } });
+    // Cold PowerShell/Add-Type startup varies on hosted runners. Bound the
+    // actual target-to-settlement interval independently of helper startup.
+    expect(await waitFor(() => existsSync(join(dir, "pids.json")), 20_000)).toBe(true);
+    const targetStarted = Date.now();
+    const result = await pending;
+    expect(Date.now() - targetStarted).toBeLessThan(6_000);
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     expect(result.timedOut).toBe(false);
@@ -80,13 +86,14 @@ describe("native containment (Windows Job Object)", { timeout: 40_000 }, () => {
     const { mkdirSync } = await import("node:fs");
     const a = join(dir, "a"); const b = join(dir, "b");
     mkdirSync(a); mkdirSync(b);
-    const runA = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:A", timeoutMs: 8_000, env: { SO_DIR: a, SO_MODE: "linger" } });
-    const runB = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:B", timeoutMs: 8_000, env: { SO_DIR: b, SO_MODE: "linger" } });
+    const runA = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:A", timeoutMs: 30_000, env: { SO_DIR: a, SO_MODE: "linger" } });
+    const runB = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:B", timeoutMs: 30_000, env: { SO_DIR: b, SO_MODE: "linger" } });
     expect(await waitFor(() => existsSync(join(a, "pids.json")) && existsSync(join(b, "pids.json")) && existsSync(join(a, "ticks.log")) && existsSync(join(b, "ticks.log")), 30_000)).toBe(true);
     const pidsA = JSON.parse(readFileSync(join(a, "pids.json"), "utf8")) as { root: number; escaped: number };
     const pidsB = JSON.parse(readFileSync(join(b, "pids.json"), "utf8")) as { root: number; escaped: number };
     expect(terminateOwnedProcesses("run:A")).toBe(1);
     const stopped = await runA;
+    expect(stopped.timedOut).toBe(false);
     expect(stopped.containment).toMatchObject({ backend: "job-object", empty: true });
     expect(await waitFor(() => !alive(pidsA.root) && !alive(pidsA.escaped), 5_000)).toBe(true);
     expect(await stableAfterSettlement(join(a, "ticks.log"))).toBe(true);
@@ -95,19 +102,22 @@ describe("native containment (Windows Job Object)", { timeout: 40_000 }, () => {
     expect(await stableAfterSettlement(join(b, "ticks.log"))).toBe(false);
     expect(terminateOwnedProcesses("run:B")).toBe(1);
     const stoppedB = await runB;
+    expect(stoppedB.timedOut).toBe(false);
     expect(stoppedB.containment).toMatchObject({ empty: true });
     expect(await waitFor(() => !alive(pidsB.escaped), 5_000)).toBe(true);
   });
 
   test.skipIf(!native)("c1: argv, environment and cwd reach the target verbatim through the helper", async () => {
     const script = join(dir, "echo.mjs");
-    writeFileSync(script, `let input=""; process.stdin.setEncoding("utf8"); process.stdin.on("data",chunk=>input+=chunk); process.stdin.on("end",()=>process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), env: process.env.SO_PROBE, cwd: process.cwd(), input })));`);
+    writeFileSync(script, `import {writeFileSync} from "node:fs"; let input=""; process.stdin.setEncoding("utf8"); process.stdin.on("data",chunk=>input+=chunk); process.stdin.on("end",()=>{writeFileSync("echo.json",JSON.stringify({ argv: process.argv.slice(2), env: process.env.SO_PROBE, cwd: process.cwd(), input })); console.log(JSON.stringify({type:"thread.started",thread_id:"native-fixture"})); console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:0,output_tokens:0}}));});`);
     const args = ["--flag", "a value with spaces", 'quotes "inside"', "trailing\\", "", "%PATH%", "unicode ✓"];
-    const result = await run(process.execPath, [script, ...args], { processGroup: true, cwd: dir, timeoutMs: 8_000, stdin: "prompt\nsecond line\n", env: { SO_PROBE: "probe-value" } });
+    // This is the transport that supports prompt stdin; buffered run() has
+    // always used ignored stdin and is covered by the lifecycle tests above.
+    const result = await runStreamJsonl(process.execPath, [script, ...args], { processGroup: true, cwd: dir, timeoutMs: 30_000, stdin: "prompt\nsecond line\n", env: { SO_PROBE: "probe-value" } });
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     expect(result.timedOut).toBe(false);
-    expect(JSON.parse(result.stdout)).toEqual({ argv: args, env: "probe-value", cwd: dir, input: "prompt\nsecond line\n" });
+    expect(JSON.parse(readFileSync(join(dir, "echo.json"), "utf8"))).toEqual({ argv: args, env: "probe-value", cwd: dir, input: "prompt\nsecond line\n" });
   });
   test.skipIf(!native)("worker death closes its job and a new controller can prove it empty", async () => {
     const worker = join(dir, "worker.mjs"), note = join(dir, "object.json");
