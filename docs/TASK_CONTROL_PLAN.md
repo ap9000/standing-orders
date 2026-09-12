@@ -122,7 +122,7 @@ Delivered on `standing-orders/safe-task-stop-and-resume` as schema 52.
   `resolveChainOnRunEnd` (a stopped tail ends the cycle without advancing),
   and in the recovered-draft grant (an unresumed stop admits no successor).
 - **Process ownership.** `exec.ts` registers children under an `owner` tag
-  (`run:<id>`); `terminateOwnedProcesses` kills only that tag's process
+  (database identity plus run ID); `terminateOwnedProcesses` kills only that tag's process
   groups. `underStopWatch` re-reads the stop row every 1.5 s while a provider,
   setup, or check child runs. The held coordinator fences a stopped session
   through its supervisor (`HeldSessionCoordinator.stop`, and the lapse
@@ -130,12 +130,16 @@ Delivered on `standing-orders/safe-task-stop-and-resume` as schema 52.
 - **Settlement.** `finalizeInterruptedFenced` (claim.ts) releases the claim
   as `interrupted`, ends the run and its owned descendants as
   `failed / interrupted`, keeps a commit already made, requeues the task
-  under the stop's hold, and settles the stop. `finishRun` settles any still
-  pending stop with the road's word (`recovered` from both recovery passes,
-  `held` from the held fence, `finished` when another ending came first).
+  under the stop's hold. Settlement separately requires every owned run to
+  end and every retained process witness to establish exit. Worker death
+  alone is insufficient. Each OS spawn first reserves a durable `run_process`
+  row, then attaches its PID; a crash in between stays visibly Stopping.
+  Reconcile revisits pending stops after orphan processes exit. Saved PIDs
+  are read-only liveness witnesses and never authorize signals.
 - **Resume.** `Store.resumeRunStop` refuses `stopping`, `already-resumed`,
   `superseded` (a newer attempt head), `busy` (a live claim), `review`; the
-  domain door adds `occupied` (the worktree pool's marker read) and reports
+  store always checks retained process witnesses and workspace occupancy,
+  including web callers without a configured pool; the domain door reports
   the concrete gate (`diagnoseTaskDispatch`) when work cannot start yet.
 - **Surfaces.** `src/task-control.ts` is the shared domain API and the one
   projection (`taskControlOf`: stop / stopping / paused / review-stopped).
@@ -154,6 +158,16 @@ Delivered on `standing-orders/safe-task-stop-and-resume` as schema 52.
   `task-control-console.test.ts` (auth, viewer, bearer, stale nonce, changed
   approval, foreign project, finished run, stopped review), plus held and
   reviewer cases in their own suites.
-- **Not claimed here.** Independent operator review, real-provider
-  certification, and the live upgrade of the installed controller remain
-  the supervising operator's, as the plan says.
+- **Independent hardening.** Self-hosted build #1520 and review #1521
+  produced and assessed the initial implementation. Operator review then
+  reproduced and fixed cross-database process collisions, a late-spawn stop
+  race, an unlocked completion window, orphan recovery/resume, and review
+  retry over a live orphan. Completion and stop disposition share one write
+  transaction. CLI, task page, and focused chat derive the same state.
+  `task-control-adversarial.test.ts` exercises these boundaries with real
+  database connections and subprocesses. The provider review covers its
+  original commit only; it is not evidence for later operator changes.
+- **Certification gates.** The frozen candidate must pass the full suite,
+  platform CI, six-stage crash canary plus stop-before-crash, and ordinary
+  authenticated real-provider Stop/Resume journeys before live deployment.
+  The journey also verifies that live chat polling preserves unsent text.

@@ -6,9 +6,9 @@
  * The contract, in the operator's words: a stop names one exact active
  * attempt. The first answer is "stop requested", never "stopped" — the
  * request is durable before any process is signalled, and the attempt is
- * SETTLED only once its own processes are established gone (the owning
- * worker's fenced interruption seal, the held supervisor's fence, or
- * dead-incarnation recovery). Other tasks keep running. The task stays
+ * SETTLED only once all owned runs ended and retained process witnesses
+ * establish exit. A dead worker can leave live subprocesses; recovery
+ * keeps that stop pending. Other tasks keep running. The task stays
  * paused across restarts under a hold this stop owns, beside — never over —
  * any hold that already stood. Resume names the same exact attempt, refuses
  * until it is quiescent, lifts only that hold, approves nothing, and lets
@@ -55,14 +55,14 @@ export function stopWords(store: Store, runId: number, worktree: string | null, 
  */
 export function terminateStoppedAttempt(store: Store, runId: number): number {
   let terminated = 0;
-  for (const owned of store.ownedRunsOf(runId)) terminated += terminateOwnedProcesses(runOwnerTag(owned));
+  for (const owned of store.ownedRunsOf(runId)) terminated += terminateOwnedProcesses(runOwnerTag(store, owned));
   return terminated;
 }
 
 /** Whether this process still tracks a live child for the attempt or any
  * run it owns — the in-process half of "quiescent". */
 export function attemptHasLiveChildren(store: Store, runId: number): boolean {
-  return store.ownedRunsOf(runId).some(owned => ownedProcessCount(runOwnerTag(owned)) > 0);
+  return store.ownedRunsOf(runId).some(owned => ownedProcessCount(runOwnerTag(store, owned)) > 0);
 }
 
 /**
@@ -81,7 +81,6 @@ export async function underStopWatch<T>(
 ): Promise<T> {
   let fired = false;
   const look = (): void => {
-    if (fired) return;
     let applies = false;
     try {
       applies = store.applicableStopFor(runId) !== null;
@@ -91,8 +90,11 @@ export async function underStopWatch<T>(
       return;
     }
     if (!applies) return;
-    fired = true;
     terminateStoppedAttempt(store, runId);
+    // A later asynchronous step may have spawned since the previous beat.
+    // Keep stopping children; only the notification is one-shot.
+    if (fired) return;
+    fired = true;
     try {
       options.onStop?.();
     } catch {
@@ -213,7 +215,7 @@ export function resumeTaskStop(store: Store, request: ResumeRequest, now: Date):
 export type TaskControlView =
   | { kind: "none" }
   | { kind: "stop"; run: number; role: Run["role"] }
-  | { kind: "stopping"; run: number; role: Run["role"]; stop: RunStop; unsettledRun: boolean }
+  | { kind: "stopping"; run: number; role: Run["role"]; stop: RunStop; unsettledRun: boolean; detail?: string | null }
   | { kind: "paused"; run: number; role: Run["role"]; stop: RunStop; outcome: Run["outcome"]; committed: boolean; worktree: string | null }
   | { kind: "review-stopped"; run: number; sourceRun: number | null; stop: RunStop };
 
@@ -243,7 +245,7 @@ export function taskControlOf(store: Store, taskRef: number, now: Date): TaskCon
   const pending = store.stopsForTask(taskRef).find(stop => stop.settledAt === null) ?? null;
   if (pending !== null) {
     const run = store.getRun(pending.run);
-    return { kind: "stopping", run: pending.run, role: run?.role ?? "builder", stop: pending, unsettledRun: run?.outcome === null };
+    return { kind: "stopping", run: pending.run, role: run?.role ?? "builder", stop: pending, unsettledRun: run?.outcome === null, detail: store.stopQuiescenceProblem(pending.run) };
   }
   const newest = runs.find(run => run.role !== "reviewer" && isAttemptRoot(store, run)) ?? null;
   if (newest !== null) {

@@ -631,7 +631,8 @@ describe("tick, against real git", () => {
       return { ...OK, stdout: JSON.stringify({ result: "Recorded the dependency declaration." }) };
     };
 
-    expect(await tick(runnerToken, [], healingAgent)).toBe(EXIT.ok);
+    const healingExit = await tick(runnerToken, [], healingAgent);
+    expect(healingExit, JSON.stringify(payload())).toBe(EXIT.ok);
     expect(payload().dispatched).toMatchObject([{ id: "t-heal", outcome: "built", committed: true }]);
     expect(agentRan).toHaveLength(1);
 

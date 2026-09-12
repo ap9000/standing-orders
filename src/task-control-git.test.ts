@@ -110,6 +110,7 @@ describe("safe task stop and resume against real git (v52)", () => {
     const draftingAgent: Runner = async (_file, _args, options) => {
       draftingWorktree = options?.cwd ?? "";
       return exec(process.execPath, [join(base, "drafting-agent.mjs")], {
+        ...options,
         cwd: draftingWorktree,
         processGroup: true,
         ...(options?.owner === undefined ? {} : { owner: options.owner }),

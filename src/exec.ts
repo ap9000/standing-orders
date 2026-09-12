@@ -8,8 +8,10 @@
  */
 
 import { execFile, spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { jsonlDiscriminants } from "./jsonl-discriminants.js";
+import type { Store } from "./store.js";
 
 export type ExecResult = {
   /** Process exit code, or one of the synthetic codes below. */
@@ -77,6 +79,8 @@ export type RunOptions = {
    * tracks: never a pid read back from durable state.
    */
   owner?: string;
+  /** Rechecked at each actual spawn, including transient spawn retries. */
+  beforeSpawn?: () => boolean;
   /**
    * Called the moment the stream announces its session (codex:
    * thread.started), so a crash mid-turn cannot lose the id (M6.9 —
@@ -127,9 +131,20 @@ function registerOwned(owner: string | undefined, child: import("node:child_proc
   });
 }
 
-/** The tag under which one run's children are registered. */
-export function runOwnerTag(runId: number): string {
-  return `run:${runId}`;
+const databaseOwners = new WeakMap<object, string>();
+let memoryDatabaseOwner = 0;
+
+/** Run IDs are local to a database. Connections to the same file share
+ * custody; separate files and separate in-memory databases never do. */
+export function runOwnerTag(store: Store, runId: number): string {
+  let owner = databaseOwners.get(store.handle);
+  if (owner === undefined) {
+    const main = store.handle.prepare("PRAGMA database_list").all().find(row => row["name"] === "main");
+    const file = main?.["file"];
+    owner = typeof file === "string" && file !== "" ? `file:${realpathSync(file)}` : `memory:${++memoryDatabaseOwner}`;
+    databaseOwners.set(store.handle, owner);
+  }
+  return JSON.stringify([owner, runId]);
 }
 
 /** How many live children this process still tracks under an owner tag. */
@@ -393,6 +408,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         ...(childEnv === undefined ? {} : { childEnv }),
         ...(options.onSpawn === undefined ? {} : { onSpawn: options.onSpawn }),
         ...(options.owner === undefined ? {} : { owner: options.owner }),
+        ...(options.beforeSpawn === undefined ? {} : { beforeSpawn: options.beforeSpawn }),
       }),
     );
   }
@@ -436,11 +452,12 @@ export function run(file: string, args: readonly string[], options: RunOptions =
 function runBufferedGroup(
   file: string,
   args: readonly string[],
-  bag: { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string },
+  bag: { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean },
 ): Promise<SpawnAttempt> {
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
     try {
+      if (bag.beforeSpawn?.() === false) throw new Error("the attempt stopped before this process could spawn");
       child = spawn(file, [...args], {
         cwd: bag.cwd,
         shell: false,
@@ -789,6 +806,7 @@ export function runStreamJsonl(
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
     try {
+      if (options.beforeSpawn?.() === false) throw new Error("the attempt stopped before this process could spawn");
       child = spawn(file, [...args], {
         cwd,
         shell: false,
@@ -1000,6 +1018,7 @@ export function runGeminiStreamJsonl(
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
     try {
+      if (options.beforeSpawn?.() === false) throw new Error("the attempt stopped before this process could spawn");
       child = spawn(file, [...args], {
         cwd,
         shell: false,
@@ -1227,6 +1246,7 @@ export function runClaudeStreamJsonl(
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
     try {
+      if (options.beforeSpawn?.() === false) throw new Error("the attempt stopped before this process could spawn");
       child = spawn(file, [...args], {
         cwd,
         shell: false,

@@ -4216,6 +4216,7 @@ async function reconcileCommand(
   }
 
   const recovered = recoverDead(store, clock());
+  store.settleQuiescentStops(clock());
   for (const one of recovered) {
     for (const leaseId of one.claims) {
       // Lease ids are unique forever, so each recovery is its own episode.

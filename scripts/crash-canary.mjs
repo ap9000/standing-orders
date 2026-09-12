@@ -22,19 +22,22 @@ const stages = ["planning", "setup", "building", "after-commit", "verification",
 let selected = stages;
 let rounds = 1;
 let concurrency = 6;
+let stopBeforeCrash = false;
 let output = resolve("output/certification/crash.json");
 for (let i = 2; i < process.argv.length; i++) {
   const arg = process.argv[i];
   if (arg === "--stage") selected = [process.argv[++i]];
   else if (arg === "--rounds") rounds = Number(process.argv[++i]);
   else if (arg === "--concurrency") concurrency = Number(process.argv[++i]);
+  else if (arg === "--stop-before-crash") stopBeforeCrash = true;
   else if (arg === "--output") output = resolve(process.argv[++i]);
-  else if (arg === "--help") { console.log("npm run certify:crash -- [--stage planning|setup|building|after-commit|verification|review] [--rounds 1] [--concurrency 6] [--output file]"); process.exit(0); }
+  else if (arg === "--help") { console.log("npm run certify:crash -- [--stage planning|setup|building|after-commit|verification|review] [--stop-before-crash (building only)] [--rounds 1] [--concurrency 6] [--output file]"); process.exit(0); }
   else throw new Error(`unknown argument ${arg}`);
 }
 assert(process.platform !== "win32", "SIGKILL fixture requires macOS or Linux; physical Windows remains a separate gate");
 assert(selected.every(stage => stages.includes(stage)) && Number.isInteger(rounds) && rounds >= 1 && rounds <= 20, "invalid stages/rounds");
 assert(Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 20, "concurrency is 1..20");
+assert(!stopBeforeCrash || selected.length === 1 && selected[0] === "building", "--stop-before-crash requires --stage building");
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const base = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-crash-canary-")));
 const gitBinary = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
@@ -138,6 +141,17 @@ async function one(stage, round) {
     if (["after-commit", "verification"].includes(stage)) record.checks.committedBeforeCrash = execFileSync(gitBinary, ["rev-parse", "HEAD"], { cwd: checkpoint.cwd, encoding: "utf8" }).trim();
     // The review stage's build committed BEFORE the crash; the retry below must retain exactly it.
     if (stage === "review") record.checks.committedBeforeCrash = execFileSync(gitBinary, ["rev-parse", "standing-orders/work"], { cwd: repo, encoding: "utf8" }).trim();
+    if (stopBeforeCrash) {
+      // Freeze only the known worker handle: the independent provider keeps
+      // writing, while the public CLI can save stop intent in SQLite. The
+      // worker cannot observe or act on the stop before the deliberate crash.
+      worker.child.kill("SIGSTOP");
+      const target = record.checks.preCrashRuns.find(run => run.role === "builder" && run.outcome === null);
+      assert(target, "no exact builder attempt at checkpoint");
+      record.checks.stopTarget = target.id;
+      await cli(["task", "stop", "work", "--run", String(target.id), ...auth]);
+      assert.equal(rows("SELECT settled_at FROM run_stop")[0]?.settled_at, null, "an unobserved stop was already called settled");
+    }
     worker.child.kill("SIGKILL");
     const killed = await worker.done;
     assert.equal(killed.signal, "SIGKILL");
@@ -158,10 +172,25 @@ async function one(stage, round) {
     if (probe === null) { successor.child.kill("SIGTERM"); await successor.done; }
     writeFileSync(join(control,"takeover-result.json"), JSON.stringify(await successor.done));
     record.checks.overlappingWriters = events().filter(e => e.name === "overlapping-writer");
+    if (stopBeforeCrash) {
+      assert(alive(checkpoint.pid), "orphan must remain live while testing recovery");
+      assert.equal(rows("SELECT settled_at FROM run_stop")[0]?.settled_at, null, "dead worker was mistaken for dead provider");
+      const refused = await cli(["task", "resume", "work", "--run", String(record.checks.stopTarget), ...auth], [3]);
+      assert.equal(refused.ok, false, "resume admitted work over the live orphan");
+      record.checks.resumeWhileOrphanLives = refused.reason;
+      assert.equal(rows("SELECT resumed_at FROM run_stop")[0]?.resumed_at, null);
+    }
     writeFileSync(join(control,"released"), "release fixture process\n");
     await until(() => !alive(checkpoint.pid), 5000, `${stage} external process exit`);
     const before = await cli(["task", "show", "work"]);
     record.checks.afterTakeover = { state: before.task.state, dispatch: before.dispatch, runs: before.runs.map(r => ({ id:r.id,role:r.role,outcome:r.outcome,reason:r.reason })) };
+    if (stopBeforeCrash) {
+      // A normal recovery pass can now establish quiescence. Only the
+      // operator's subsequent exact-attempt resume clears the stop hold.
+      writeFileSync(join(control,"quiescent-recovery.json"), JSON.stringify(await start([...workerArgs, "--for", "800"], opts).done));
+      await cli(["task", "resume", "work", "--run", String(record.checks.stopTarget), ...auth]);
+      assert.notEqual(rows("SELECT resumed_at FROM run_stop")[0]?.resumed_at, null);
+    }
     if (stage !== "review") writeFileSync(join(control,"recovery-result.json"), JSON.stringify(await start([...workerArgs, "--for", "2500"], opts).done));
     let after = await cli(["task", "show", "work"]);
     const runsBeforeDuplicate = rows("SELECT id FROM run ORDER BY id");
@@ -278,6 +307,7 @@ await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, 
   while (pending.length) { const next = pending.shift(); await one(next.stage, next.round); }
 }));
 const certificate = { version:1, passed: cases.every(c=>c.passed) && hash()===runtime, sourceCommit:revision, runtimeSha256:runtime, runtimeUnchanged:hash()===runtime,
+  stopBeforeCrash,
   platform:process.platform, node:process.versions.node, durationSeconds:(Date.now()-started)/1000, cases, retainedAt:base,
   scope:"Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage replays the automatic review producer over the interrupted attempt under a live reviewAuto mode (it queues nothing: explicit-only retries), then continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
   exclusions:["real-provider recovery", "real-provider review retry", "Windows", "reboot", "detached descendants", "power-loss filesystem durability"] };

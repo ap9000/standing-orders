@@ -34,6 +34,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { run, runOwnerTag, type ExecResult, type RunOptions } from "./exec.js";
 import { stopRequestedFor, stopWords, underStopWatch } from "./task-control.js";
+import { witnessedRunner } from "./process-custody.js";
 import { runWithIsolatedDatabase } from "./child-database.js";
 import { recordWorktreeProcess } from "./worktree.js";
 import type { Decision, SteerNote, Store } from "./store.js";
@@ -898,12 +899,16 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     // Setup runs under the stop watch (v52), owned by this run: an
     // operator's stop ends the setup's process group and the attempt
     // settles as interrupted below, never as a setup failure.
-    const made = await underStopWatch(store, request.runId, () => runWithIsolatedDatabase(runSetup, shell.file, shell.args, {
+    const made = await underStopWatch(store, request.runId, () => runWithIsolatedDatabase(witnessedRunner(store, request.runId, request.clock ?? (() => now), runSetup), shell.file, shell.args, {
       cwd: worktree,
       timeoutMs: setupWanted.timeoutMs,
       processGroup: true,
-      owner: runOwnerTag(request.runId),
-      onSpawn: pid => request.onProviderSpawn?.(pid),
+      owner: runOwnerTag(store, request.runId),
+      beforeSpawn: () => !stopRequestedFor(store, request.runId, request.shouldStop),
+      onSpawn: pid => {
+        request.onProviderSpawn?.(pid);
+        if (stopRequestedFor(store, request.runId, request.shouldStop)) throw new Error("the attempt was stopped before spawn custody completed");
+      },
       envAllowlist: SETUP_ENV_ALLOWLIST,
       omitEnv: SETUP_ENV_DENYLIST,
     }));
@@ -2402,12 +2407,16 @@ async function settleProof(
     const verifyShell = approvedCommandShell(configured.command);
     const runVerification = async (label: string): Promise<ExecResult> => {
       // The check runs under the stop watch (v52), owned by this run.
-      const result = await underStopWatch(store, runId, () => runWithIsolatedDatabase(verifyRunner, verifyShell.file, verifyShell.args, {
+      const result = await underStopWatch(store, runId, () => runWithIsolatedDatabase(witnessedRunner(store, runId, now, verifyRunner), verifyShell.file, verifyShell.args, {
         cwd: worktree,
         timeoutMs: configured.timeoutMs,
         processGroup: true,
-        owner: runOwnerTag(runId),
-        onSpawn: pid => request.onProviderSpawn?.(pid),
+        owner: runOwnerTag(store, runId),
+        beforeSpawn: () => !stopRequestedFor(store, runId, request.shouldStop),
+        onSpawn: pid => {
+          request.onProviderSpawn?.(pid);
+          if (stopRequestedFor(store, runId, request.shouldStop)) throw new Error("the attempt was stopped before spawn custody completed");
+        },
         envAllowlist: SETUP_ENV_ALLOWLIST,
         omitEnv: SETUP_ENV_DENYLIST,
       }));
@@ -2469,12 +2478,16 @@ async function settleProof(
           } else {
             const setupRunner = request.setup ?? run;
             const setupShell = approvedCommandShell(liveBeforeSetup.command);
-            const restored = await underStopWatch(store, runId, () => runWithIsolatedDatabase(setupRunner, setupShell.file, setupShell.args, {
+            const restored = await underStopWatch(store, runId, () => runWithIsolatedDatabase(witnessedRunner(store, runId, now, setupRunner), setupShell.file, setupShell.args, {
               cwd: worktree,
               timeoutMs: liveBeforeSetup.timeoutMs,
               processGroup: true,
-              owner: runOwnerTag(runId),
-              onSpawn: pid => request.onProviderSpawn?.(pid),
+              owner: runOwnerTag(store, runId),
+              beforeSpawn: () => !stopRequestedFor(store, runId, request.shouldStop),
+              onSpawn: pid => {
+                request.onProviderSpawn?.(pid);
+                if (stopRequestedFor(store, runId, request.shouldStop)) throw new Error("the attempt was stopped before spawn custody completed");
+              },
               envAllowlist: SETUP_ENV_ALLOWLIST,
               omitEnv: SETUP_ENV_DENYLIST,
             }));

@@ -836,6 +836,14 @@ export function completeFenced(
   const db = store.handle;
 
   return inTransaction(store, () => {
+    const stoppedRun = db.prepare("SELECT r.id FROM run r JOIN run_stop s ON s.run = r.id WHERE r.lease_id = ? AND r.outcome IS NULL LIMIT 1").get(leaseId);
+    if (stoppedRun !== undefined) {
+      const runId = Number(stoppedRun["id"]);
+      const run = store.getRun(runId)!;
+      const task = store.refForId(run.taskRef);
+      if (task !== null) interruptIfStopped(store, { leaseId, runId, taskId: task.externalId, now });
+      return { ok: false as const, reason: "stopped" as const };
+    }
     const { changes } = db
       .prepare(
         `UPDATE claim SET released_at = ?, released_by = 'completed'

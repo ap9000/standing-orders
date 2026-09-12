@@ -773,6 +773,7 @@ export class HeldSessionCoordinator {
     await args.releaseWorktree(args.cwd);
     args.liveLog?.close();
     args.onDisposed?.({ kind: "interrupted", reason });
+    store.settleRunStop(args.runId, "held", args.clock());
     this.drop(args.runId);
   }
 

@@ -121,11 +121,12 @@ describe("safe task stop against real subprocesses (v52)", () => {
     const prompt = args[args.indexOf("-p") + 1] ?? "";
     const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0] ?? "";
     return exec(process.execPath, [join(base, script)], {
+      ...options,
       cwd: options?.cwd ?? base,
       processGroup: true,
       ...(options?.owner === undefined ? {} : { owner: options.owner }),
       timeoutMs: 60_000,
-      env: { SO_TEST_DONE: done },
+      env: { ...options?.env, SO_TEST_DONE: done },
     });
   };
 
@@ -158,7 +159,7 @@ describe("safe task stop against real subprocesses (v52)", () => {
     const pids = JSON.parse(readFileSync(join(a.worktree, "pids.json"), "utf8")) as { parent: number; child: number };
     expect(alive(pids.parent)).toBe(true);
     expect(alive(pids.child)).toBe(true);
-    expect(ownedProcessCount(runOwnerTag(a.runId))).toBe(1);
+    expect(ownedProcessCount(runOwnerTag(store, a.runId))).toBe(1);
 
     // The stop: durable first, then the owned tree — and only that tree.
     const asked = requestTaskStop(store, { taskId: "t-long", runId: a.runId, by: "alex", via: "cli" }, clock());

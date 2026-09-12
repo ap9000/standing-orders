@@ -30,6 +30,10 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { hostname } from "node:os";
+import { ownedProcessCount, runOwnerTag } from "./exec.js";
+import { worktreeProcessOccupancy } from "./worktree.js";
+import { processMayBeAlive } from "./process-liveness.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
 import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
@@ -3245,6 +3249,20 @@ CREATE TABLE IF NOT EXISTS run_stop (
   CHECK (resumed_at IS NULL OR settled_at IS NOT NULL),
   CHECK ((resumed_at IS NULL) = (resumed_by IS NULL))
 );
+
+-- Retained spawn witnesses also cover reviewers and setup/check children,
+-- which need not have an execution slot or a persistent worktree marker.
+-- PIDs are only queried for liveness; they never authorize a signal.
+CREATE TABLE IF NOT EXISTS run_process (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  pid INTEGER CHECK (pid > 0),
+  host TEXT NOT NULL,
+  process_group INTEGER NOT NULL CHECK (process_group IN (0,1)),
+  observed_at TEXT NOT NULL,
+  exited_at TEXT
+);
+CREATE INDEX IF NOT EXISTS run_process_by_run ON run_process(run, exited_at);
 
 CREATE INDEX IF NOT EXISTS task_by_state ON task (state);
 CREATE INDEX IF NOT EXISTS edge_by_blocker ON task_edge (blocker);
@@ -10636,6 +10654,13 @@ export class Store {
     if (succeeded !== undefined) return { reason: "already-reviewed", detail: `run #${sourceRunId} already has its review (reviewer run #${Number(succeeded.id)}) — a successful review is never retried` };
     const live = roots.find(one => one.outcome === null);
     if (live !== undefined) return { reason: "review-running", detail: `reviewer run #${Number(live.id)} is still open on run #${sourceRunId} — one review attempt at a time` };
+    for (const root of roots) {
+      const id = Number(root.id);
+      const stop = this.stopOf(id);
+      if (stop !== null && (stop.settledAt === null || this.stopQuiescenceProblem(id) !== null)) {
+        return { reason: "review-running", detail: `reviewer run #${id} is still stopping; its processes must exit before another review can start` };
+      }
+    }
     if (roots.length >= REVIEW_ROOT_ATTEMPTS) return { reason: "retries-exhausted", detail: `run #${sourceRunId} has spent all ${REVIEW_ROOT_ATTEMPTS} review attempts — the failed attempts remain on record; nothing retries a fourth time` };
     return null;
   }
@@ -15622,13 +15647,10 @@ export class Store {
         result.now.toISOString(),
         id,
       );
-    // A run's ending is the ONE place its owned processes are established
-    // gone (every road awaits its provider, repair, and check children
-    // before it writes an outcome), so a pending stop settles here — CAS
-    // on the unsettled row; an already-settled stop keeps its first word.
-    this.db
-      .prepare("UPDATE run_stop SET settled_at = ?, settlement = ? WHERE run = ? AND settled_at IS NULL")
-      .run(result.now.toISOString(), result.stopSettlement ?? "finished", id);
+    // An outcome alone does not prove subprocess exit. Settlement checks
+    // retained witnesses and every owned run; recovery revisits a pending
+    // stop after an orphan or held supervisor finishes shutdown.
+    this.settleRunStop(id, result.stopSettlement ?? "finished", result.now);
     // The park rate is *measured* — parked over concluded builder attempts —
     // and maintained where attempts conclude, because the attention budget's
     // gate reads it inside a claim transaction and must never trust a number
@@ -16861,10 +16883,15 @@ export class Store {
 
   /** Stamp pids after spawn. False = the row closed underneath the spawn — kill the child. */
   stampHeldSession(run: number, supervisorPid: number, agentPgid: number): boolean {
-    const { changes } = this.db
-      .prepare("UPDATE held_session SET supervisor_pid = ?, agent_pgid = ? WHERE run = ? AND ended_at IS NULL")
-      .run(supervisorPid, agentPgid, run);
-    return Number(changes) > 0;
+    return this.transact(() => {
+      const { changes } = this.db
+        .prepare("UPDATE held_session SET supervisor_pid = ?, agent_pgid = ? WHERE run = ? AND ended_at IS NULL")
+        .run(supervisorPid, agentPgid, run);
+      if (Number(changes) === 0) return false;
+      this.recordRunProcess(run, supervisorPid, new Date(), false);
+      this.recordRunProcess(run, agentPgid, new Date());
+      return true;
+    });
   }
 
   heldSessionOf(run: number): HeldSession | null {
@@ -19764,10 +19791,10 @@ export class Store {
         )
         .all(BUILT_IN, runner);
       for (const row of stranded) requeueUnowned(Number(row["ref"]));
-      // A pending stop on a run this pass finished settles as `recovered`
-      // (v52): the runner is proven gone, so nothing of the attempt still
-      // runs — and the stop's own hold keeps the requeued task paused.
-      this.settleRecoveredStops(stamp);
+      // Closing the runner does not prove subprocess exit. Only exact stops
+      // whose retained process witnesses are absent can settle; their own
+      // holds keep every other recovered attempt paused.
+      this.settleQuiescentStops(now);
       if (runs.length > 0 || requeued.length > 0) this.bumpWake();
       return { runs, requeued };
     });
@@ -19889,24 +19916,28 @@ export class Store {
       this.db.prepare(
         "UPDATE review_request SET consumed_reason = 'interrupted' WHERE consumed_reason = 'dispatched' AND reviewer_run IN (SELECT id FROM run WHERE runner = ? AND watch_incarnation = ? AND role = 'reviewer' AND review_attempt IS NOT NULL AND reason = 'interrupted')",
       ).run(runner, incarnation);
-      // Pending stops on the runs this pass finished settle as `recovered`
-      // (v52) — the dead incarnation's processes are gone by definition.
-      this.settleRecoveredStops(stamp);
+      // A dead incarnation can leave live descendants. Keep its stop pending
+      // until the separate process-witness check establishes quiescence.
+      this.settleQuiescentStops(now);
       if (claims.length + extra > 0) this.bumpWake();
       return claims.length + extra;
     });
   }
 
-  /** Settle every pending stop whose run a recovery pass finished as
-   * interrupted at exactly `stamp` — the pass's own writes, nothing else. */
-  private settleRecoveredStops(stamp: string): void {
-    this.db
-      .prepare(
-        `UPDATE run_stop SET settled_at = ?, settlement = 'recovered'
-          WHERE settled_at IS NULL
-            AND run IN (SELECT id FROM run WHERE outcome = 'failed' AND reason = 'interrupted' AND finished_at = ?)`,
-      )
-      .run(stamp, stamp);
+  /** Recovery closing a run does not establish provider death. Reconcile
+   * each exact pending stop against the retained process witnesses. */
+  settleQuiescentStops(now: Date): number {
+    return this.transact(() => {
+      let settled = 0;
+      const pending = this.db.prepare("SELECT run FROM run_stop WHERE settled_at IS NULL ORDER BY run").all();
+      for (const row of pending) {
+        const id = Number(row["run"]);
+        const kind = this.heldSessionOf(id) === null ? "recovered" : "held";
+        if (this.settleRunStop(id, kind, now)) settled++;
+      }
+      if (settled > 0) this.bumpWake();
+      return settled;
+    });
   }
 
   // ---- safe task stop and resume (v52) -------------------------------------
@@ -19982,6 +20013,9 @@ export class Store {
       if (run.taskRef !== args.taskRef) return { ok: false as const, reason: "wrong-task" as const, detail: `run #${args.runId} is not one of this task's attempts` };
       const existing = this.stopOf(args.runId);
       if (existing !== null) return { ok: true as const, stop: existing, repeated: true };
+      if (run.parentRun !== null && this.getRun(run.parentRun)?.leaseId === run.leaseId) {
+        return { ok: false as const, reason: "not-live" as const, detail: `run #${run.id} belongs to attempt #${run.parentRun}; stop the owning attempt` };
+      }
       if (run.outcome !== null) {
         return { ok: false as const, reason: "finished" as const, detail: `run #${args.runId} already ended (${run.outcome}${run.reason === null ? "" : ` · ${run.reason}`}) — a finished attempt is never rewritten by a stop` };
       }
@@ -20017,10 +20051,71 @@ export class Store {
   /** Settle a stop — compare-and-set on the unsettled row. True when THIS
    * call settled it; false when it was already settled or never asked. */
   settleRunStop(runId: number, settlement: StopSettlement, now: Date): boolean {
-    const { changes } = this.db
-      .prepare("UPDATE run_stop SET settled_at = ?, settlement = ? WHERE run = ? AND settled_at IS NULL")
-      .run(now.toISOString(), settlement, runId);
-    return Number(changes) > 0;
+    const stop = this.stopOf(runId);
+    if (stop === null || stop.settledAt !== null) return false;
+    return this.transact(() => {
+      if (this.stopQuiescenceProblem(runId) !== null) return false;
+      const recordExit = this.db.prepare("UPDATE run_process SET exited_at = ? WHERE run = ? AND exited_at IS NULL");
+      for (const owned of this.ownedRunsOf(runId)) recordExit.run(now.toISOString(), owned);
+      const { changes } = this.db
+        .prepare("UPDATE run_stop SET settled_at = ?, settlement = ? WHERE run = ? AND settled_at IS NULL")
+        .run(now.toISOString(), settlement, runId);
+      return Number(changes) > 0;
+    });
+  }
+
+  /** Every owned run must have ended, and every retained local process
+   * witness must be absent. Read-only probes never authorize PID kills. */
+  stopQuiescenceProblem(runId: number): string | null {
+    const ids = this.ownedRunsOf(runId);
+    if (ids.length === 0) return `run #${runId} does not exist`;
+    for (const id of ids) {
+      const run = this.getRun(id)!;
+      if (run.outcome === null) return `run #${id} is still open`;
+      if (ownedProcessCount(runOwnerTag(this, id)) > 0) return `run #${id} still has an owned subprocess`;
+      const held = this.heldSessionOf(id);
+      if (held !== null && held.endedAt === null) return `run #${id}'s held supervisor has not finished shutdown`;
+      const witnesses = this.db.prepare("SELECT * FROM run_process WHERE run = ? ORDER BY id").all(id);
+      if (run.providerStartedAt !== null && witnesses.length === 0) {
+        return `run #${id} may have spawned before its process witness was recorded; exit is unproven`;
+      }
+      for (const witness of witnesses) {
+        if (witness["exited_at"] !== null) continue;
+        if (witness["pid"] === null) return `run #${id} has an incomplete spawn witness; exit is unproven`;
+        if (witness["host"] !== hostname()) return `run #${id}'s process belongs to another host; exit is unproven here`;
+        const pid = Number(witness["pid"]);
+        if (processMayBeAlive(pid, witness["process_group"] === 1)) return `run #${id}'s process ${pid} may still be running`;
+      }
+      if (run.worktree !== null) {
+        try {
+          const occupied = worktreeProcessOccupancy(run.worktree);
+          if (occupied.held) return `run #${id}'s workspace is still held by process ${occupied.by}`;
+        } catch { return `run #${id}'s workspace occupancy could not be established`; }
+      }
+    }
+    return null;
+  }
+
+  reserveRunProcess(runId: number, now: Date, group = true): number {
+    return Number(this.db.prepare("INSERT INTO run_process (run,host,process_group,observed_at) VALUES (?,?,?,?)")
+      .run(runId, hostname(), group ? 1 : 0, now.toISOString()).lastInsertRowid);
+  }
+
+  finishUnspawnedProcess(witness: number, now: Date): void {
+    this.db.prepare("UPDATE run_process SET exited_at = ? WHERE id = ? AND pid IS NULL")
+      .run(now.toISOString(), witness);
+  }
+
+  recordRunProcess(runId: number, pid: number, now: Date, group = true, witness?: number): void {
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("a process witness needs a valid spawned PID");
+    if (witness !== undefined) {
+      const changed = this.db.prepare("UPDATE run_process SET pid = ? WHERE id = ? AND run = ? AND pid IS NULL AND exited_at IS NULL")
+        .run(pid, witness, runId);
+      if (Number(changed.changes) !== 1) throw new Error("spawn witness custody changed");
+      return;
+    }
+    this.db.prepare("INSERT INTO run_process (run,pid,host,process_group,observed_at) VALUES (?,?,?,?,?)")
+      .run(runId, pid, hostname(), group ? 1 : 0, now.toISOString());
   }
 
   /**
@@ -20052,6 +20147,8 @@ export class Store {
       if (stop.settledAt === null || run.outcome === null) {
         return { ok: false as const, reason: "stopping" as const, detail: `run #${args.runId} is still stopping — its processes have not been established gone yet` };
       }
+      const quiescence = this.stopQuiescenceProblem(args.runId);
+      if (quiescence !== null) return { ok: false as const, reason: "stopping" as const, detail: quiescence };
       const openOwned = this.db
         .prepare(
           `WITH RECURSIVE owned(id, lease_id) AS (

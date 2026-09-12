@@ -6588,7 +6588,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         // consumed INSIDE the store's resume transaction against the digest
         // re-derived from live state. A replay finds the nonce spent; a
         // changed approval finds the digest moved; a successor attempt finds
-        // the run superseded — each refuses in words and spends nothing.
+        // the run superseded — each refuses without starting work; a submitted nonce remains one-shot.
         if (who.via !== "cookie") return refuse(response, who, 403, "resuming a task is a browser session's act");
         if (who.role !== "approver") return taskScreen(response, who, taskId, "your login can watch — resuming an attempt is an approver's act", 403);
         if (store.isDemo()) return taskScreen(response, who, taskId, "the demo authorizes nothing", 403);
@@ -6608,7 +6608,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           if (!store.consumeCeremonyNonce(nonceHashOf(nonceValue), who.name, "run-resume", runId, digest, now)) {
             return { ok: false as const, reason: "stale" as const, detail: "that confirmation is stale, already used, or the approval changed since you read it — start again from the task" };
           }
-          return resumeTaskStop(store, { taskId, runId, by: verifiedAuthor(who.name), via: "web", ...(options.attended === undefined ? {} : { occupied: (path: string) => worktreeOccupancy(path) }) }, now);
+          return resumeTaskStop(store, { taskId, runId, by: verifiedAuthor(who.name), via: "web" }, now);
         });
         if (!resumed.ok) {
           const words: Record<string, string> = {
@@ -6621,24 +6621,13 @@ export function createDecisionServer(options: ServeOptions): Server {
             busy: resumed.detail,
             review: `run #${runId} is a review — use Review again, which keeps its bounded attempts`,
           };
-          return taskScreen(response, who, taskId, words[resumed.reason] ?? resumed.detail, resumed.reason === "stale" ? 409 : 409);
+          return taskScreen(response, who, taskId, words[resumed.reason] ?? resumed.detail, 409);
         }
         const back = body.get("return") ?? "";
         return redirect(response, back === "chat" ? `${taskChatHref(taskId)}#task-control` : `${taskHref(taskId)}#task-control`);
       }
       default:
         return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
-    }
-  }
-
-  /** The workspace occupancy probe the resume gate consults: the pool's
-   * own marker read (a live pid or process group), never durable state. */
-  function worktreeOccupancy(path: string): { held: boolean; by?: number } {
-    if (options.poolRoot === undefined) return { held: false };
-    try {
-      return new WorktreePool(store, { root: options.poolRoot }).inUse(path);
-    } catch {
-      return { held: false };
     }
   }
 
@@ -11634,6 +11623,14 @@ const stopWhen = (iso: string): string => iso.replace("T", " ").replace(/\.\d{3}
  * the password ceremony; a stopped review points at Review again. Forms
  * carry the CSRF token and the exact run id, nothing else.
  */
+function taskControlState(state: string, control?: TaskControlView): string {
+  if (control?.kind === "stopping") return "stopping";
+  if (control?.kind === "paused") return "paused";
+  if (control?.kind === "review-stopped") return "review-stopped";
+  if (control?.kind === "stop") return control.role === "reviewer" ? "reviewing" : "running";
+  return state;
+}
+
 function taskControlHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false): string {
   if (control.kind === "none") return "";
   const back = `<input type="hidden" name="return" value="${surface}">`;
@@ -11654,7 +11651,7 @@ function taskControlHtml(control: TaskControlView, taskId: string, csrf: string,
     return (
       `<section class="card task-control" id="task-control" data-task-control="stopping" data-control-run="${control.run}" aria-label="stopping this attempt" aria-busy="true">` +
       `<div class="task-control-copy"><span class="eyebrow">stop requested</span><strong><span class="live-dot" aria-hidden="true"></span>Stopping ${escape(role(control))} #${control.run}…</strong>` +
-      `<span class="meta">Asked by <span class="mono">${escape(control.stop.requestedBy)}</span> at ${escape(stopWhen(control.stop.requestedAt))}. ${control.unsettledRun ? "Its own processes are being ended; this reads Paused once they are established gone." : "The run ended but the stop is not yet settled — a recovery pass settles it; this needs attention if it stays."}</span></div>` +
+      `<span class="meta">Asked by <span class="mono">${escape(control.stop.requestedBy)}</span> at ${escape(stopWhen(control.stop.requestedAt))}. ${control.unsettledRun ? "Its own processes are being ended; this reads Paused once they are established gone." : escape(control.detail ?? "The run ended; a recovery pass still needs to establish that its processes exited.")}</span></div>` +
       `<button type="button" class="task-control-button" disabled aria-disabled="true">Stopping…</button>` +
       `</section>`
     );
@@ -11832,15 +11829,16 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     const state = index < active || (index === 4 && hasResult) ? "complete" : index === active ? "active" : "upcoming";
     return `<li class="${state}"><i aria-hidden="true">${state === "complete" ? "✓" : index + 1}</i><span>${label}</span></li>`;
   }).join("");
+  const displayState = taskControlState(focus.state, focus.control);
   const summary = focus.dispatch?.summary ?? (hasResult ? "Result ready" : "Checking task status");
   const detail = focus.dispatch?.detail ?? "This status comes from the task scheduler.";
-  const fallback = focus.state === "done" || focus.state === "cancelled" || focus.approval !== null
+  const fallback = focus.state === "done" || focus.state === "cancelled" || focus.approval !== null || ["stopping", "paused", "review-stopped"].includes(focus.control.kind)
     ? null
     : taskRecoveryHref(focus.id, focus.dispatch);
   const polling = !inert && ((focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled" || focus.control.kind === "stopping" || focus.control.kind === "stop");
   return (
     `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}">` +
-    `<section class="card task-journey" aria-label="task progress"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div><span class="badge badge-${escape(focus.state)}">${escape(focus.state)}</span></div>` +
+    `<section class="card task-journey" aria-label="task progress"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div><span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span></div>` +
     `<ol>${steps}</ol><p class="meta">${escape(detail)}</p>` +
     (focus.liveRun === null ? "" : `<p class="task-live-build"><span class="live-dot" aria-hidden="true"></span><strong>Build #${focus.liveRun.id}</strong> · ${escape(focus.liveRun.runner)} · <time data-elapsed-since="${escape(focus.liveRun.startedAt)}"></time> <a href="/r/${focus.liveRun.id}">watch details →</a></p>`) +
     (fallback === null ? "" : `<a class="button-link task-journey-action" href="${fallback}">Open the next step →</a>`) +
@@ -14972,6 +14970,8 @@ function taskBody(data: {
   now: Date;
 }): string {
   const { task, scope } = data;
+  const displayState = taskControlState(task.state, data.control);
+  const stopControlsActive = data.control !== undefined && ["stopping", "paused", "review-stopped"].includes(data.control.kind);
   const act = (verb: string, label: string, extra = ""): string =>
     [
       `<form method="post" action="${taskHref(task.id)}/${verb}" class="inline">`,
@@ -15076,7 +15076,7 @@ function taskBody(data: {
         return `<div class="dependency-repair-actions" aria-label="ways to continue this task"><p class="meta dependency-repair-help">Choose another task that must finish first, or let this task continue without it.</p>${retry}${replace}${unlink}</div>`;
       })();
       const recoveryControl = (() => {
-        if (diagnosis.action === null || diagnosis.action === "repair-dependency") return "";
+        if (stopControlsActive || diagnosis.action === null || diagnosis.action === "repair-dependency") return "";
         if (diagnosis.action === "start-worker") {
           const firstConnection = diagnosis.code === "no-worker-registered";
           return (
@@ -15757,7 +15757,7 @@ function taskBody(data: {
     liveRun !== undefined
       ? prop("worker", `${escape(liveRun.runner)} · <a href="/r/${liveRun.id}">build #${liveRun.id}</a> running`)
       : data.runs[0] !== undefined
-        ? prop("last attempt", `<a href="/r/${data.runs[0].id}">${runNoun(data.runs[0])} #${data.runs[0].id}</a> · ${escape(data.runs[0].role === "planner" && data.runs[0].reason === "plan-drafted" ? "planned" : data.runs[0].outcome ?? "never finished")} · ${escape(data.runs[0].runner)}`)
+        ? prop("last attempt", `<a href="/r/${data.runs[0].id}">${runNoun(data.runs[0])} #${data.runs[0].id}</a> · ${escape(data.runs[0].role === "planner" && data.runs[0].reason === "plan-drafted" ? "planned" : data.runs[0].reason === "interrupted" ? "interrupted" : data.runs[0].outcome ?? "never finished")} · ${escape(data.runs[0].runner)}`)
         : "";
   const queueRow =
     data.position !== null && data.position !== undefined && task.state === "queued"
@@ -15903,7 +15903,7 @@ function taskBody(data: {
   // claim is live — so the words say exactly when each becomes real.
   const canPlan = data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined);
   const primaryAct =
-    stalled && !data.claimed
+    stopControlsActive ? null : stalled && !data.claimed
       ? { html: act("requeue", "retry — branch and workspace kept"), why: "resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased", whyClass: "retry" }
       : canPlan
         ? { html: act("plan", "plan first"), why: "plan first sends an agent to read the repository, ask you questions, and propose a scope — nothing builds until you approve it", whyClass: "plan" }
@@ -15928,11 +15928,11 @@ function taskBody(data: {
     // A task with no scope is already unable to start. Showing a hold next
     // to "plan first" adds a second, unnecessary decision at the exact
     // moment the page should have one obvious action.
-    canPlan || !canHold ? "" : holdAct,
+    stopControlsActive || canPlan || !canHold ? "" : holdAct,
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
     `</div>`,
     primaryAct === null ? "" : `<p class="meta acts-why acts-why-${primaryAct.whyClass}">${primaryAct.why}</p>`,
-    data.claimed
+    data.claimed && !stopControlsActive
       ? `<p class="meta acts-why">a worker is building this right now — <em>hold next attempt</em> stops the one after it; cancel waits for the current build to finish${
           stalled ? "; retry becomes available after this attempt finishes" : ""
         }</p>`
@@ -15971,7 +15971,7 @@ function taskBody(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
-    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
+    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span></h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
     // The planner and approval cards already answer "what now?". Avoid a
     // second status box above the one action the operator came here for.
     (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested" ? dispatchStatus : "",
@@ -16986,6 +16986,7 @@ function runOutcomeBadge(run: Run, live: boolean): string {
   if (!live && run.role === "planner" && run.reason === "plan-drafted") {
     return `<span class="badge">planned</span>`;
   }
+  if (!live && run.reason === "interrupted") return `<span class="badge">interrupted</span>`;
   return live
     ? `<span class="badge badge-running">running</span>`
     : `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>`;

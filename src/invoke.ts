@@ -24,6 +24,7 @@ import { attestProvider, type VersionProbe } from "./attest.js";
 import { runOwnerTag, startClaudeHeldSession } from "./exec.js";
 import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
+import { witnessedRunner } from "./process-custody.js";
 import { underStopWatch } from "./task-control.js";
 import { CHILD_DATABASE_ENV as AGENT_DATABASE_ENV, isolatedChildDatabase, removeChildDatabase as removeAgentDatabase } from "./child-database.js";
 
@@ -350,7 +351,7 @@ export async function invokeAgent(
   } else if (attested !== null) store.stampProviderStart(runId, clock(), attested.version);
   else store.stampProviderStart(runId, clock());
 
-  const spawn = runner ?? adapter.defaultRunner;
+  const spawn = witnessedRunner(store, runId, clock, runner ?? adapter.defaultRunner);
   let transportAnnouncedSessionId: string | null = null;
   let transportSessionConflict = false;
   // B3: the attested executable IS the spawned executable — one resolution.
@@ -368,7 +369,12 @@ export async function invokeAgent(
     // never the global sweep. Settlement then reads the same row.
     result = await underStopWatch(store, runId, () => spawn(attested !== null ? attested.executable : adapter.binary, argv, {
       ...runOptions,
-      owner: runOwnerTag(runId),
+      owner: runOwnerTag(store, runId),
+      beforeSpawn: () => store.applicableStopFor(runId) === null && store.getRun(runId)?.outcome === null,
+      onSpawn: pid => {
+        runOptions.onSpawn?.(pid);
+        if (store.applicableStopFor(runId) !== null) throw new Error("the attempt was stopped before spawn custody completed");
+      },
       ...(stdin === undefined ? {} : { stdin }),
       ...(hardTimeoutMs === undefined ? {} : { timeoutMs: hardTimeoutMs }),
       ...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),

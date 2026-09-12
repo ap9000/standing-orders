@@ -157,6 +157,12 @@ export function maybeRequestAutoReview(store: Store, repo: string, runId: number
 }
 
 export function disposeBuildOutcome(context: DisposeContext, result: BuildResult): Disposition {
+  // Stop and every terminal side effect compete under the same SQLite
+  // write lock. A separate preliminary transaction leaves a completion gap.
+  return context.store.transact(() => disposeBuildOutcomeLocked(context, result));
+}
+
+function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult): Disposition {
   const { store, policy, leaseId, runId, taskId, taskRef, runner, repo, branch, origin, provider, model, worktreePath, clock } =
     context;
 

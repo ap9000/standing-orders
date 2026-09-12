@@ -25,6 +25,7 @@ import { routeDigestOf } from "./phase-routing.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { maybeRequestAutoReview } from "./dispose.js";
 import { requestTaskStop, resumeTaskStop } from "./task-control.js";
+import { run as runCommand } from "./exec.js";
 import {
   diffPathsOf,
   parseReview,
@@ -1152,6 +1153,9 @@ describe("the reviewer role in the store", () => {
           const root = store.runsFor(taskRef).find(run => run.role === "reviewer" && run.outcome === null);
           if (root === undefined) throw new Error("no live reviewer root");
           stoppedRoot = root.id;
+          // Exercise the real spawn-custody callback before injecting the
+          // stop between process completion and review ingestion.
+          await runCommand(process.execPath, ["-e", "process.exit(0)"], { ...options, timeoutMs: 1_000 });
           const asked = requestTaskStop(store, { taskId: "t-1", runId: root.id, by: "alex", via: "cli" }, T0);
           expect(asked).toMatchObject({ ok: true, repeated: false });
           expect(store.activeHolds(taskRef, T0)).toEqual([]);
