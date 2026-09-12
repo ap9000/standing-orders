@@ -14,7 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -39,7 +39,7 @@ async function waitFor(predicate: () => boolean, ms: number): Promise<boolean> {
  * group, reparented to init the moment the root exits) which writes a tick
  * file forever, records both pids, then behaves as the test asks. */
 const ESCAPING_ROOT = `
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 const dir = process.env.SO_DIR;
 const child = spawn("/bin/sh", ["-c", 'while true; do echo tick >> "' + dir + '/ticks.log"; sleep 0.02; done'], { stdio: "ignore", detached: true });
@@ -60,6 +60,9 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
   });
 
   let dir: string;
+  const identities = new Map<string, string>();
+  const state = (id: string) => containerEmptiness("cgroup2", id, process.platform, identities.get(id));
+  const remember = (info: { id: string; identity?: string }) => { if (info.identity) identities.set(info.id, info.identity); };
   beforeEach(() => {
     dir = realpathSync(mkdtempSync(join(tmpdir(), "so-native-")));
     writeFileSync(join(dir, "root.mjs"), ESCAPING_ROOT);
@@ -76,7 +79,7 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
 
   test.skipIf(!native)("c2: a setsid'd double-fork helper dies with the root's NATURAL exit; the object is proven empty; no writes after settlement", async () => {
     let id = "";
-    const result = await run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, timeoutMs: 20_000, env: { SO_DIR: dir, SO_MODE: "exit" }, onContainer: info => { id = info.id; } });
+    const result = await run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, timeoutMs: 20_000, env: { SO_DIR: dir, SO_MODE: "exit" }, onContainer: info => { id = info.id; remember(info); } });
     expect(result.code).toBe(0);
     expect(result.containment).toEqual({ backend: "cgroup2", id, empty: true });
     const pids = JSON.parse(readFileSync(join(dir, "pids.json"), "utf8")) as { root: number; escaped: number };
@@ -84,7 +87,25 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
     expect(await stableAfterSettlement(join(dir, "ticks.log"))).toBe(true);
     // The object itself is gone (only an empty cgroup can be removed).
     expect(existsSync(id)).toBe(false);
-    expect(containerEmptiness("cgroup2", id)).toBe("empty");
+    expect(state(id)).toBe("empty");
+  });
+
+  test.skipIf(!native)("immediate double fork retaining stdio settles at root exit, before the transport timeout", async () => {
+    const binary = join(dir, "escape");
+    const compiled = spawnSync("cc", [resolve("scripts/fixtures/containment-escape.c"), "-o", binary], { encoding: "utf8" });
+    expect(compiled.status, compiled.stderr).toBe(0);
+    const result = await run(binary, [dir, "root-exit"], { processGroup: true, timeoutMs: 1500 });
+    expect(result).toMatchObject({ code: 0, timedOut: false, containment: { empty: true } });
+    expect(await stableAfterSettlement(join(dir, "writes"))).toBe(true);
+  });
+
+  test.skipIf(!native)("failed durable spawn custody cannot release a target from admission", async () => {
+    const mark = join(dir, "unauthorized");
+    const result = await run(process.execPath, ["-e", `require("node:fs").writeFileSync(${JSON.stringify(mark)}, "ran")`], {
+      processGroup: true, timeoutMs: 5000, onSpawn: () => { throw new Error("custody refused"); },
+    });
+    expect(result.code).not.toBe(0);
+    expect(existsSync(mark)).toBe(false);
   });
 
   test.skipIf(!native)("c2: an exact-run stop ends one run's whole object — escaped helper included — while an independent sibling keeps running", async () => {
@@ -93,8 +114,8 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
     const { mkdirSync } = await import("node:fs");
     mkdirSync(a); mkdirSync(b);
     const ids: Record<string, string> = {};
-    const runA = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:A", timeoutMs: 30_000, env: { SO_DIR: a, SO_MODE: "linger" }, onContainer: info => { ids["a"] = info.id; } });
-    const runB = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:B", timeoutMs: 30_000, env: { SO_DIR: b, SO_MODE: "linger" }, onContainer: info => { ids["b"] = info.id; } });
+    const runA = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:A", timeoutMs: 30_000, env: { SO_DIR: a, SO_MODE: "linger" }, onContainer: info => { ids["a"] = info.id; remember(info); } });
+    const runB = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:B", timeoutMs: 30_000, env: { SO_DIR: b, SO_MODE: "linger" }, onContainer: info => { ids["b"] = info.id; remember(info); } });
     expect(await waitFor(() => existsSync(join(a, "pids.json")) && existsSync(join(b, "pids.json")) && existsSync(join(a, "ticks.log")) && existsSync(join(b, "ticks.log")), 10_000)).toBe(true);
     const pidsA = JSON.parse(readFileSync(join(a, "pids.json"), "utf8")) as { root: number; escaped: number };
     const pidsB = JSON.parse(readFileSync(join(b, "pids.json"), "utf8")) as { root: number; escaped: number };
@@ -128,7 +149,7 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
       const { run } = await import(${JSON.stringify(pathToFileURL(resolve("dist/exec.js")).href)});
       import { writeFileSync } from "node:fs";
       pinContainment(effectiveContainment("required", probeContainmentCapability()));
-      void run(process.execPath, [${JSON.stringify(join(dir, "root.mjs"))}], { processGroup: true, timeoutMs: 60_000, env: { ...process.env, SO_DIR: ${JSON.stringify(dir)}, SO_MODE: "linger" }, onContainer: info => writeFileSync(${JSON.stringify(join(dir, "object.txt"))}, info.id) });
+      void run(process.execPath, [${JSON.stringify(join(dir, "root.mjs"))}], { processGroup: true, timeoutMs: 60_000, env: { ...process.env, SO_DIR: ${JSON.stringify(dir)}, SO_MODE: "linger" }, onContainer: info => writeFileSync(${JSON.stringify(join(dir, "object.txt"))}, JSON.stringify(info)) });
       setInterval(() => {}, 1000);
     `);
     const child = spawn(process.execPath, [worker], { stdio: ["ignore", "pipe", "pipe"] });
@@ -138,13 +159,14 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
     try {
       expect(await waitFor(() => existsSync(join(dir, "pids.json")) && existsSync(join(dir, "object.txt")), 15_000), output).toBe(true);
       const pids = JSON.parse(readFileSync(join(dir, "pids.json"), "utf8")) as { root: number; escaped: number };
-      const id = readFileSync(join(dir, "object.txt"), "utf8");
-      expect(containerEmptiness("cgroup2", id)).toBe("populated");
+      const info = JSON.parse(readFileSync(join(dir, "object.txt"), "utf8"));
+      const id = info.id; remember(info);
+      expect(state(id)).toBe("populated");
       child.kill("SIGKILL");
       await new Promise(resolve => child.once("exit", resolve));
       expect(await waitFor(() => !alive(pids.root) && !alive(pids.escaped), 10_000)).toBe(true);
       expect(await waitFor(() => !existsSync(id), 10_000)).toBe(true);
-      expect(containerEmptiness("cgroup2", id)).toBe("empty");
+      expect(state(id)).toBe("empty");
       expect(await stableAfterSettlement(join(dir, "ticks.log"))).toBe(true);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -154,7 +176,7 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
   test.skipIf(!native)("c2: the held supervisor road runs inside the object: killHard ends the agent's escaped helper and proves the object empty", async () => {
     const agent = join(dir, "agent.mjs");
     writeFileSync(agent, `
-      import { spawn } from "node:child_process";
+      import { spawn, spawnSync } from "node:child_process";
       import { writeFileSync } from "node:fs";
       const dir = ${JSON.stringify(dir)};
       const child = spawn("/bin/sh", ["-c", 'while true; do echo tick >> "' + dir + '/held-ticks.log"; sleep 0.02; done'], { stdio: "ignore", detached: true });
@@ -170,19 +192,19 @@ describe("native containment (Linux, delegated cgroup v2)", () => {
       cookie: "cookie",
       graceMs: 1000,
       readyTimeoutMs: 10_000,
-      onContainer: info => { id = info.id; },
+      onContainer: info => { id = info.id; remember(info); },
       onContainerEmpty: () => { empties += 1; },
     });
     expect(started.ok, started.ok ? "" : started.message).toBe(true);
     if (!started.ok) return;
     expect(await waitFor(() => existsSync(join(dir, "held-pids.json")), 10_000)).toBe(true);
     const pids = JSON.parse(readFileSync(join(dir, "held-pids.json"), "utf8")) as { agent: number; escaped: number };
-    expect(containerEmptiness("cgroup2", id)).toBe("populated");
+    expect(state(id)).toBe("populated");
     started.handle.killHard();
     await started.handle.exited;
     expect(await waitFor(() => !alive(pids.agent) && !alive(pids.escaped), 10_000)).toBe(true);
     expect(empties).toBe(1);
-    expect(containerEmptiness("cgroup2", id)).toBe("empty");
+    expect(state(id)).toBe("empty");
     expect(await stableAfterSettlement(join(dir, "held-ticks.log"))).toBe(true);
   });
 

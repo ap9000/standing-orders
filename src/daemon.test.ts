@@ -43,6 +43,8 @@ function scripted(answers: Record<string, { code?: number; stdout?: string }> = 
   return { run, calls };
 }
 
+const loadedDigest = (unit: string) => `STANDING_ORDERS_SERVICE_DIGEST => ${/<key>STANDING_ORDERS_SERVICE_DIGEST<\/key>\s*<string>([a-f0-9]{64})/.exec(unit)?.[1]}\n`;
+
 const portablePath = (path: string): string => path.replaceAll("\\", "/");
 
 /** POSIX mode bits are not an access-control assertion on Windows. */
@@ -172,7 +174,7 @@ describe("the daemon plan", () => {
     const first = scripted({ "launchctl print": { code: 113 }, launchctl: { code: 0 } });
     await installDaemon(made, "secret-token", first.run);
 
-    const again = scripted({ "launchctl print": { code: 0, stdout: "state = running\n\tpid = 4242\n" }, launchctl: { code: 0 } });
+    const again = scripted({ "launchctl print": { code: 0, stdout: "state = running\n\tpid = 4242\n" + loadedDigest(made.unitContent) }, launchctl: { code: 0 } });
     const installed = await installDaemon(made, "secret-token", again.run);
 
     expect(installed).toMatchObject({ ok: true, changed: false, action: "started" });
@@ -201,6 +203,34 @@ describe("the daemon plan", () => {
     expect(await installDaemon(changed, "secret-token", run)).toMatchObject({ ok: true, changed: true, action: "reloaded" });
     expect(calls).toEqual(["print", "bootout", "print", "print", "print", "enable", "bootstrap", "kickstart"]);
     expect(readFileSync(changed.unitPath, "utf8")).toContain("30000");
+  });
+
+  test("a failed reload cannot make the new disk file masquerade as the loaded generation on retry", async () => {
+    const old = plan("darwin");
+    const next = plan("darwin", ["--tick-every", "30000"]);
+    await installDaemon(old, "t", scripted({ "launchctl print": { code: 113 } }).run);
+    const refused = scripted({ "launchctl print": { code: 0, stdout: loadedDigest(old.unitContent) }, "launchctl bootout": { code: 5 } });
+    expect(await installLaunchdService(next, refused.run)).toMatchObject({ ok: false });
+    expect(readFileSync(next.unitPath, "utf8")).toBe(next.unitContent);
+    let loaded = true;
+    const calls: string[] = [];
+    const retried = await installLaunchdService(next, async (_file, args) => {
+      calls.push(args[0]!);
+      if (args[0] === "print") return { ...OK, code: loaded ? 0 : 113, stdout: loadedDigest(old.unitContent) };
+      if (args[0] === "bootout") loaded = false;
+      return OK;
+    });
+    expect(retried).toMatchObject({ ok: true, changed: true, action: "reloaded" });
+    expect(calls).toContain("bootout");
+  });
+
+  test("failed explicit disable is reported and does not remove the installed unit", async () => {
+    const made = plan("darwin");
+    await installDaemon(made, "t", scripted({ "launchctl print": { code: 113 } }).run);
+    const script = scripted({ "launchctl disable": { code: 5 } });
+    expect(await stopLaunchdService(made, script.run)).toMatchObject({ ok: false });
+    await expect(uninstallDaemon(made, script.run)).rejects.toThrow(/disable/);
+    expect(readFileSync(made.unitPath, "utf8")).toBe(made.unitContent);
   });
 
   test("modern launchctl failing falls back to the legacy verb", async () => {
@@ -286,12 +316,12 @@ describe("the daemon plan", () => {
 
     const stopped = await stopLaunchdService(made, script.run);
     expect(stopped).toMatchObject({ ok: true, wasLoaded: true });
-    expect(script.calls.map(call => call.args.slice(0, 2).join(" "))).toEqual([`bootout gui/${uid}/${made.label}`, `disable gui/${uid}/${made.label}`]);
+    expect(script.calls.map(call => call.args.slice(0, 2).join(" "))).toEqual([`disable gui/${uid}/${made.label}`, `bootout gui/${uid}/${made.label}`, `print gui/${uid}/${made.label}`]);
 
     script.calls.length = 0;
     const removed = await uninstallDaemon(made, script.run);
     expect(removed).toMatchObject({ ok: true, existed: true });
-    expect(script.calls.map(call => call.args[0])).toEqual(["bootout", "disable"]);
+    expect(script.calls.map(call => call.args[0])).toEqual(["disable", "bootout", "print"]);
     expect(() => statSync(made.unitPath)).toThrow();
     // The token file survives — it is the database's neighbor, not the unit's.
     expectPrivateMode(made.tokenFile);
@@ -319,7 +349,7 @@ describe("the daemon plan", () => {
     const desktop = planDesktopService({ node: process.execPath, helper: "/x/desktop-host.js", stateDir: dir, label: "com.standing-orders.desktop.preview.abc", home: dir, pathEnv: "/usr/bin" });
     const first = scripted({ "launchctl print": { code: 113 }, launchctl: { code: 0 } });
     expect(await installLaunchdService(desktop, first.run)).toMatchObject({ ok: true, action: "bootstrapped" });
-    const again = scripted({ "launchctl print": { code: 0, stdout: "pid = 9\n" }, launchctl: { code: 0 } });
+    const again = scripted({ "launchctl print": { code: 0, stdout: "pid = 9\n" + loadedDigest(desktop.unitContent) }, launchctl: { code: 0 } });
     expect(await installLaunchdService(desktop, again.run)).toMatchObject({ ok: true, action: "started", changed: false });
     expect(again.calls.map(call => call.args[0])).toEqual(["print", "kickstart"]);
   });

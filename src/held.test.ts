@@ -6,6 +6,8 @@ import { openStore } from "./store.js";
 import { register } from "./runner.js";
 import { acquire, acquireIfReady } from "./claim.js";
 import { canonicalProfileJson, profileDigestOf, type ExecutionProfile } from "./scope.js";
+import { injectBootIdentity } from "./boot-identity.js";
+import { hostname } from "node:os";
 import { HeldSessionCoordinator, sweepHeldOrphans } from "./held.js";
 import { run as runExec } from "./exec.js";
 import { requestTaskStop, resumeTaskStop } from "./task-control.js";
@@ -453,7 +455,18 @@ describe("the orphan fence sweep (fence-first, page-not-guess)", () => {
     // the run is NOT reclassified — the fence owns it, recovery must skip it
     expect(store.getRun(runId)?.outcome).toBeNull();
     expect(store.recoverRunnerWork("mac-a", new Date(T0.getTime() + 130_000))).toEqual({ runs: [], requeued: [] });
-    store.close();
+    // A verified boot change settles even a reused PID and the missing
+    // socket, without guessing or signaling the new boot's process.
+    store.raw().prepare("INSERT INTO run_process (run,pid,host,process_group,observed_at,boot_id) VALUES (?,?,?,?,?,?)")
+      .run(runId, process.pid, hostname(), 0, T0.toISOString(), "11111111-1111-4111-8111-111111111111");
+    injectBootIdentity({ ok: true, id: "22222222-2222-4222-8222-222222222222", source: "injected" });
+    try {
+      const rebooted = await sweepHeldOrphans(store, "new-boot-fencer", () => new Date(T0.getTime() + 400_000));
+      expect(rebooted).toEqual({ fenced: 1, paged: 0 });
+      expect(store.heldSessionOf(runId)?.endedAt).not.toBeNull();
+      expect(store.getRun(runId)?.outcome).toBe("interrupted");
+      expect(store.sessionTurnsOf(runId)[0]?.state).toBe("uncertain");
+    } finally { injectBootIdentity(null); store.close(); }
   }, 15_000);
 });
 

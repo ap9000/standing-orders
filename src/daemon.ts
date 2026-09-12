@@ -36,10 +36,10 @@
  * and never touch the machine's real supervision.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExecResult, RunOptions } from "./exec.js";
 import { isAlive } from "./runner.js";
 import type { Store } from "./store.js";
@@ -132,15 +132,24 @@ function launchdUid(): number {
 
 /**
  * The launchd unit shared by the CLI daemon and the desktop service.
- * KeepAlive=true: launchd relaunches after ANY exit — a crash, a signal,
- * and an unexpected clean exit alike — throttled to ThrottleInterval; the
- * only way it stays down is an explicit bootout (stop) or disable. A
- * SuccessfulExit/Crashed dictionary would leave a clean exit down, which
- * an always-on controller must not do.
+ * KeepAlive requests relaunch after either clean exit or crash. macOS may
+ * defer nondemand launches; the desktop's live controller supervisor covers
+ * controller exits independently. Login/OS-service recovery requires the
+ * physical certification, not just a valid plist.
  */
 export function launchdPlist(args: { label: string; command: readonly string[]; workingDirectory: string; pathEnv: string; logPath: string; environment?: Record<string, string> }): string {
   const escaped = args.command.map(part => `    <string>${xml(part)}</string>`).join("\n");
-  const environment = Object.entries({ PATH: args.pathEnv, ...(args.environment ?? {}) })
+  const digest = createHash("sha256").update(JSON.stringify(args));
+  // Include executable and package code identity so an update at the same
+  // path reloads the service. Files are only read; credentials are excluded.
+  for (const file of args.command.slice(0, 2)) {
+    try { if (file && existsSync(file)) digest.update(readFileSync(file)); } catch { digest.update("unreadable-runtime"); }
+  }
+  const entry = args.command[1];
+  if (entry?.endsWith(".js")) {
+    try { for (const file of readdirSync(dirname(entry)).filter(name => /\.(js|ps1)$/.test(name)).sort()) digest.update(file).update(readFileSync(join(dirname(entry), file))); } catch { digest.update("unreadable-package"); }
+  }
+  const environment = Object.entries({ PATH: args.pathEnv, ...(args.environment ?? {}), STANDING_ORDERS_SERVICE_DIGEST: digest.digest("hex") })
     .map(([key, value]) => `    <key>${xml(key)}</key>\n    <string>${xml(value)}</string>`)
     .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -365,12 +374,16 @@ export async function installLaunchdService(definition: ServiceDefinition, run: 
   const uid = launchdUid();
   const service = `gui/${uid}/${definition.label}`;
   const before = existsSync(definition.unitPath) ? readFileSync(definition.unitPath, "utf8") : null;
-  const changed = before !== definition.unitContent;
+  let changed = before !== definition.unitContent;
   mkdirSync(join(definition.logPath, ".."), { recursive: true });
   mkdirSync(join(definition.unitPath, ".."), { recursive: true });
   writeFileSync(definition.unitPath, definition.unitContent, { mode: 0o644 });
 
-  const loaded = (await run("launchctl", ["print", service])).code === 0;
+  const status = await run("launchctl", ["print", service]);
+  const loaded = status.code === 0;
+  const wanted = /<key>STANDING_ORDERS_SERVICE_DIGEST<\/key>\s*<string>([a-f0-9]{64})<\/string>/.exec(definition.unitContent)?.[1];
+  const actual = /STANDING_ORDERS_SERVICE_DIGEST\s*=>\s*([a-f0-9]{64})/.exec(status.stdout)?.[1];
+  if (loaded) changed ||= wanted === undefined || actual !== wanted;
   if (loaded && !changed) {
     const started = await run("launchctl", ["kickstart", service]);
     if (started.code !== 0) return { ok: false, message: `loaded, but launchctl could not start the worker: ${firstLine(started.stderr) || `exit ${started.code}`}` };
@@ -384,7 +397,8 @@ export async function installLaunchdService(definition: ServiceDefinition, run: 
     }
   }
   // An explicit stop disables the label; installing again is the only road back.
-  await run("launchctl", ["enable", service]);
+  const enabled = await run("launchctl", ["enable", service]);
+  if (enabled.code !== 0) return { ok: false, message: `launchctl could not enable the service: ${firstLine(enabled.stderr) || enabled.code}` };
   const modern = await run("launchctl", ["bootstrap", `gui/${uid}`, definition.unitPath]);
   if (modern.code === 0) {
     // RunAtLoad starts the job; the kickstart (no -k: never a restart) gives
@@ -401,11 +415,13 @@ export async function installLaunchdService(definition: ServiceDefinition, run: 
 }
 
 /** Explicit stop: unload AND disable, so nothing relaunches it until a person installs again. */
-export async function stopLaunchdService(definition: ServiceDefinition, run: SupervisorRunner): Promise<{ ok: true; wasLoaded: boolean }> {
+export async function stopLaunchdService(definition: ServiceDefinition, run: SupervisorRunner): Promise<{ ok: true; wasLoaded: boolean } | { ok: false; message: string }> {
   const service = `gui/${launchdUid()}/${definition.label}`;
+  const disabled = await run("launchctl", ["disable", service]);
+  if (disabled.code !== 0) return { ok: false, message: `launchctl could not disable ${definition.label}: ${firstLine(disabled.stderr) || disabled.code}` };
   const modern = await run("launchctl", ["bootout", service]);
   if (modern.code !== 0) await run("launchctl", ["unload", definition.unitPath]);
-  await run("launchctl", ["disable", service]);
+  if (!(await waitForLaunchdBootout(run, service))) return { ok: false, message: `launchctl did not stop ${definition.label}; the service is still loaded` };
   return { ok: true, wasLoaded: modern.code === 0 };
 }
 
@@ -468,7 +484,8 @@ export async function uninstallDaemon(
   run: SupervisorRunner,
 ): Promise<{ ok: true; existed: boolean }> {
   if (plan.platform === "darwin") {
-    await stopLaunchdService(plan, run);
+    const stopped = await stopLaunchdService(plan, run);
+    if (!stopped.ok) throw new Error(stopped.message);
   } else if (plan.platform === "win32") {
     await run("schtasks", ["/End", "/TN", plan.label]);
     await run("schtasks", ["/Delete", "/TN", plan.label, "/F"]);
