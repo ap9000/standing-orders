@@ -10,6 +10,7 @@
 import { execFile, spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { observeProcessTree, stopProcessTree, type ProcessTreeObserver } from "./process-tree.js";
 import { jsonlDiscriminants } from "./jsonl-discriminants.js";
 import type { Store } from "./store.js";
 
@@ -24,7 +25,7 @@ export type ExecResult = {
   notFound: boolean;
 };
 
-export type RunOptions = {
+export type RunOptions = ProcessTreeObserver & {
   cwd?: string;
   /** Complete UTF-8 prompt for the Codex JSONL transport; closed after delivery. */
   stdin?: string;
@@ -183,6 +184,7 @@ const heldSupervisors = new Map<import("node:child_process").ChildProcess, "fres
 
 /** SIGKILL the child's whole process group; fall back to the child alone. */
 function killGroup(child: import("node:child_process").ChildProcess): void {
+  if (stopProcessTree(child)) return;
   const pid = child.pid;
   if (pid !== undefined && process.platform === "win32") {
     // Windows has no process groups to signal (Codex M5-M8 audit, IV-6):
@@ -234,7 +236,7 @@ export function terminateLiveProviders(): number {
         supervisor.kill("SIGTERM");
         heldSupervisors.set(supervisor, "termed");
       } else {
-        supervisor.kill("SIGKILL");
+        if (!stopProcessTree(supervisor)) supervisor.kill("SIGKILL");
       }
     } catch {
       // Already gone.
@@ -409,6 +411,8 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         ...(options.onSpawn === undefined ? {} : { onSpawn: options.onSpawn }),
         ...(options.owner === undefined ? {} : { owner: options.owner }),
         ...(options.beforeSpawn === undefined ? {} : { beforeSpawn: options.beforeSpawn }),
+        ...(options.onDescendant === undefined ? {} : { onDescendant: options.onDescendant }),
+        ...(options.onUnknown === undefined ? {} : { onUnknown: options.onUnknown }),
       }),
     );
   }
@@ -452,7 +456,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
 function runBufferedGroup(
   file: string,
   args: readonly string[],
-  bag: { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean },
+  bag: ProcessTreeObserver & { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean },
 ): Promise<SpawnAttempt> {
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
@@ -478,6 +482,7 @@ function runBufferedGroup(
     }
     liveProviders.add(child);
     registerOwned(bag.owner, child);
+    observeProcessTree(child, bag);
 
     let stdout = "";
     let stderr = "";
@@ -824,6 +829,7 @@ export function runStreamJsonl(
     }
     if (options.processGroup === true) liveProviders.add(child);
     registerOwned(options.owner, child);
+    if (options.processGroup === true) observeProcessTree(child, options);
 
     let startedLine: string | null = null;
     let startedIdentityLine: string | null = null;
@@ -1036,6 +1042,7 @@ export function runGeminiStreamJsonl(
     }
     if (options.processGroup === true) liveProviders.add(child);
     registerOwned(options.owner, child);
+    if (options.processGroup === true) observeProcessTree(child, options);
 
     let initLine: string | null = null;
     let initIdentityLine: string | null = null;
@@ -1264,6 +1271,7 @@ export function runClaudeStreamJsonl(
     }
     if (options.processGroup === true) liveProviders.add(child);
     registerOwned(options.owner, child);
+    if (options.processGroup === true) observeProcessTree(child, options);
 
     let initLine: string | null = null;
     let initIdentityLine: string | null = null;
@@ -1498,8 +1506,9 @@ export function startClaudeHeldSession(
   const events = options.events ?? {};
 
   return new Promise(resolveStart => {
-    let supervisor: ReturnType<typeof spawn>;
+    let supervisor!: ReturnType<typeof spawn>;
     try {
+      if (options.beforeSpawn?.() === false) throw new Error("the attempt stopped before its supervisor could spawn");
       supervisor = spawn(process.execPath, [supervisorPath(), file, ...args], {
         cwd: options.cwd,
         shell: false,
@@ -1512,8 +1521,16 @@ export function startClaudeHeldSession(
           SO_HELD_GRACE_MS: String(options.graceMs ?? 10_000),
         },
       });
+      observeProcessTree(supervisor, options);
+      if (supervisor.pid !== undefined) options.onSpawn?.(supervisor.pid);
     } catch (error) {
-      resolveStart({ ok: false, reason: "spawn-failed", message: String(error) });
+      const refused = (): void => resolveStart({ ok: false, reason: "spawn-failed", message: String(error) });
+      if (supervisor === undefined) refused();
+      else {
+        supervisor.once("close", refused);
+        supervisor.on("error", () => {});
+        if (!stopProcessTree(supervisor)) supervisor.kill("SIGTERM");
+      }
       return;
     }
 
@@ -1534,7 +1551,7 @@ export function startClaudeHeldSession(
       if (settledStart) return;
       settledStart = true;
       try {
-        supervisor.kill("SIGKILL");
+        if (!stopProcessTree(supervisor)) supervisor.kill("SIGKILL");
       } catch {
         // Already gone.
       }
@@ -1571,7 +1588,7 @@ export function startClaudeHeldSession(
       },
       killHard(): void {
         try {
-          supervisor.kill("SIGKILL");
+          if (!stopProcessTree(supervisor)) supervisor.kill("SIGKILL");
         } catch {
           // Already gone.
         }

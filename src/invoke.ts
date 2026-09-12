@@ -653,9 +653,28 @@ export async function invokeHeldAgent(
   const start = starter ?? startClaudeHeldSession;
   const isolatedDb = isolatedAgentDatabase(runId);
   let started: import("./exec.js").HeldSessionStart;
+  let heldWitness: number | undefined;
+  let unknownTree = false;
   try {
     started = await start(adapter.binary, argv, {
       ...runOptions,
+      beforeSpawn: () => {
+        if (store.applicableStopFor(runId) !== null) return false;
+        heldWitness = store.reserveRunProcess(runId, clock(), false);
+        return true;
+      },
+      onSpawn: pid => {
+        store.recordRunProcess(runId, pid, clock(), false, heldWitness);
+        runOptions.onSpawn?.(pid);
+      },
+      onDescendant: (pid, group) => {
+        store.recordRunProcess(runId, pid, clock(), group);
+        runOptions.onDescendant?.(pid, group);
+      },
+      onUnknown: () => {
+        if (!unknownTree) { store.reserveRunProcess(runId, clock()); unknownTree = true; }
+        runOptions.onUnknown?.();
+      },
       env: {
         ...(runOptions.env ?? {}),
         ...(heldKey === null ? {} : { [PROVIDER_KEY_ENV.claude]: heldKey }),

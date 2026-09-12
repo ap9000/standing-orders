@@ -16,7 +16,7 @@ if(!existsSync(state)) {
  const line='Preserved draft '+randomUUID();appendFileSync('result.txt',line+'\\n');
  const draft=readFileSync('result.txt','utf8');
  writeFileSync(state,JSON.stringify({pid:process.pid,draft,line,sha256:createHash('sha256').update(draft).digest('hex')}));
- const beat=()=>{appendFileSync('output/heartbeat.log','beat\\n');console.log('Waiting for the operator stop/resume checkpoint');};
+ const beat=()=>{if(existsSync('output/certification-cleanup'))process.exit(0);appendFileSync('output/heartbeat.log','beat\\n');console.log('Waiting for the operator stop/resume checkpoint');};
  beat();setInterval(beat,1000);
 } else {
  const original=JSON.parse(readFileSync(state,'utf8'));

@@ -123,7 +123,13 @@ Delivered on `standing-orders/safe-task-stop-and-resume` as schema 52.
   and in the recovered-draft grant (an unresumed stop admits no successor).
 - **Process ownership.** `exec.ts` registers children under an `owner` tag
   (database identity plus run ID); `terminateOwnedProcesses` kills only that tag's process
-  groups. `underStopWatch` re-reads the stop row every 1.5 s while a provider,
+  trees. POSIX cancellation freezes the owned process and its current
+  descendants, re-scans before killing, and includes tool shells that created
+  their own groups. A shared observer retains descendant liveness witnesses
+  while their ancestry is still visible; recovery never signals those saved
+  PIDs. Held supervisors use the same tree cancellation. Unknown process
+  observations remain blocked. `underStopWatch` re-reads the stop row every
+  1.5 s while a provider,
   setup, or check child runs. The held coordinator fences a stopped session
   through its supervisor (`HeldSessionCoordinator.stop`, and the lapse
   interval for stops filed elsewhere). No global sweep is used for a task act.

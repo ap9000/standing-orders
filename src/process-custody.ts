@@ -10,8 +10,17 @@ type Runner = (file: string, args: readonly string[], options?: RunOptions) => P
 export function witnessedRunner(store: Store, runId: number, clock: () => Date, runner: Runner): Runner {
   return async (file, args, options = {}) => {
     const witnesses: number[] = [];
+    let unknown = false;
     const result = await runner(file, args, {
       ...options,
+      onDescendant: (pid, group) => {
+        store.recordRunProcess(runId, pid, clock(), group);
+        options.onDescendant?.(pid, group);
+      },
+      onUnknown: () => {
+        if (!unknown) { store.reserveRunProcess(runId, clock(), true); unknown = true; }
+        options.onUnknown?.();
+      },
       beforeSpawn: () => {
         if (options.beforeSpawn?.() === false) return false;
         witnesses.push(store.reserveRunProcess(runId, clock(), options.processGroup === true));

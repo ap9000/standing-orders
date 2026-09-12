@@ -206,9 +206,12 @@ describe("the coordinator: final proof, custody, settlement through the shared m
       },
       exited,
     };
-    const starter = ((_file: string, _args: readonly string[], options: { events?: typeof state.events }) => {
+    const starter = (async (_file: string, _args: readonly string[], options: { events?: typeof state.events }) => {
+      // Use an actually reaped fixture process. Fixed fake PIDs can collide
+      // with a real CI process and correctly fail the quiescence check.
+      await runExec(process.execPath, ["-e", ""], { processGroup: true, onSpawn: pid => { handle.supervisorPid = pid; handle.agentPgid = pid; } });
       state.events = options.events;
-      return Promise.resolve({ ok: true, handle } as HeldSessionStart);
+      return { ok: true, handle } as HeldSessionStart;
     }) as typeof import("./exec.js").startClaudeHeldSession;
     return starter;
   };
@@ -990,9 +993,12 @@ describe("parallel attended sessions (v28): two held conversations on one runner
       killHard(): void { exitResolve({ code: null }); },
       exited,
     };
-    const starter = ((_file: string, _args: readonly string[], options: { events?: typeof state.events }) => {
+    const starter = (async (_file: string, _args: readonly string[], options: { events?: typeof state.events }) => {
+      // Use an actually reaped fixture process. Fixed fake PIDs can collide
+      // with a real CI process and correctly fail the quiescence check.
+      await runExec(process.execPath, ["-e", ""], { processGroup: true, onSpawn: pid => { handle.supervisorPid = pid; handle.agentPgid = pid; } });
       state.events = options.events;
-      return Promise.resolve({ ok: true, handle } as HeldSessionStart);
+      return { ok: true, handle } as HeldSessionStart;
     }) as typeof import("./exec.js").startClaudeHeldSession;
     return starter;
   };

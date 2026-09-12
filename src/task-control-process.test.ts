@@ -32,12 +32,12 @@ const presented = (store: Store, taskRef: number) => {
 };
 
 /** A real process tree: the node parent writes on a timer and spawns a
- * shell grandchild in the same process group that writes on its own. */
+ * shell grandchild in a separate process group that writes on its own. */
 const LONG_AGENT = `
 import { spawn } from "node:child_process";
 import { writeFileSync, appendFileSync } from "node:fs";
 const cwd = process.cwd();
-const child = spawn("sh", ["-c", 'while true; do echo tick >> "' + cwd + '/grandchild.log"; sleep 0.02; done'], { stdio: "ignore" });
+const child = spawn("sh", ["-c", 'while true; do echo tick >> "' + cwd + '/grandchild.log"; sleep 0.02; done'], { stdio: "ignore", detached: true });
 writeFileSync(cwd + "/pids.json", JSON.stringify({ parent: process.pid, child: child.pid }));
 setInterval(() => appendFileSync(cwd + "/parent.log", "tick\\n"), 20);
 setTimeout(() => process.exit(0), 30000);

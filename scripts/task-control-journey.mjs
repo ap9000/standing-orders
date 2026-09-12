@@ -180,6 +180,9 @@ try{
   }
 }catch(error){record.error=redact(error.stack??error);}
 finally{
+  // Cleanup is outside every assertion: a failed fixture releases its own
+  // checkpoint loop without treating a saved PID as permission to kill.
+  if(store){const ref=store.lookupRef('draft');if(ref)for(const run of store.runsFor(ref.id))if(run.worktree&&existsSync(join(run.worktree,'output/checkpoint.json')))await writeFile(join(run.worktree,'output/certification-cleanup'),'fixture cleanup\n');}
   try{await stopWatch();}catch(error){record.cleanupError=redact(error);record.passed=false;}
   await browser?.close();if(server)await new Promise(done=>server.close(done));store?.close();
 }

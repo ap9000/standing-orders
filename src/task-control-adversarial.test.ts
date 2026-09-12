@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
@@ -202,6 +202,43 @@ describe("operator review: cancellation cannot cross custody boundaries", () => 
     expect(f.store.settleQuiescentStops(new Date())).toBe(1);
     expect(f.store.stopOf(f.id)?.settledAt).not.toBeNull();
     expect(resumeTaskStop(f.store, { taskId: "draft", runId: f.id, by: "operator", via: "cli" }, new Date()).ok).toBe(true);
+  });
+
+  test.skipIf(process.platform === "win32")("recovery retains an observed detached descendant after its harness dies", async () => {
+    const f = fixture();
+    const ready = join(f.root, "detached.json"), release = join(f.root, "release");
+    const helper = "const fs=require('node:fs');fs.writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{if(fs.existsSync(process.argv[2]))process.exit(0)},20)";
+    const parent = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(helper)},process.argv[1],process.argv[2]],{detached:true,stdio:'ignore'}).unref();setInterval(()=>{},50)`;
+    let rootPid = 0;
+    const execution = witnessedRunner(f.store, f.id, () => new Date(), run)(process.execPath, ["-e", parent, ready, release], {
+      processGroup: true, owner: runOwnerTag(f.store, f.id), timeoutMs: 10_000, onSpawn: pid => { rootPid = pid; },
+    });
+    try {
+      const end = Date.now() + 5000;
+      let helperPid = 0;
+      while (Date.now() < end) {
+        if (existsSync(ready)) helperPid = Number(readFileSync(ready, "utf8"));
+        if (helperPid && f.store.raw().prepare("SELECT id FROM run_process WHERE run = ? AND pid = ?").get(f.id, helperPid)) break;
+        await delay(25);
+      }
+      expect(helperPid).toBeGreaterThan(0);
+      expect(f.store.raw().prepare("SELECT id FROM run_process WHERE run = ? AND pid = ?").get(f.id, helperPid)).toBeDefined();
+      // Deliberately kill only the known harness handle's PID. Its separately
+      // grouped child survives exactly as it does after an external crash.
+      process.kill(rootPid, "SIGKILL");
+      await execution;
+      requestTaskStop(f.store, { taskId: "draft", runId: f.id, by: "operator", via: "cli" }, new Date());
+      f.store.recoverIncarnation("worker", "dead-watch", new Date());
+      expect(f.store.stopOf(f.id)?.settledAt).toBeNull();
+      expect(f.store.stopQuiescenceProblem(f.id)).toContain(String(helperPid));
+      writeFileSync(release, "release owned fixture");
+      const exitedBy = Date.now() + 3000;
+      while (Date.now() < exitedBy && f.store.stopQuiescenceProblem(f.id) !== null) await delay(25);
+      expect(f.store.settleQuiescentStops(new Date())).toBe(1);
+    } finally {
+      writeFileSync(release, "fixture cleanup");
+      await execution;
+    }
   });
 
   test("review retry waits for an orphan even when that reviewer has no worktree", async () => {
