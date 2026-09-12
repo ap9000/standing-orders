@@ -111,7 +111,8 @@ describe("restart certification", () => {
     injectBootIdentity({ ok: true, id: BOOT_B, source: "injected" });
     store.touchRunner("r", later);
 
-    const verified = await verifyRestartRecovery({ store, baseline, now: later, expect: "reboot", service: { definition: plan, run: scripted({ "launchctl print gui": { code: 0, stdout: "pid = 43\n" } }) } });
+    const digest = /<key>STANDING_ORDERS_SERVICE_DIGEST<\/key>\s*<string>([a-f0-9]{64})/.exec(plan.unitContent)?.[1];
+    const verified = await verifyRestartRecovery({ store, baseline, now: later, expect: "reboot", service: { definition: plan, run: scripted({ "launchctl print gui": { code: 0, stdout: `pid = 43\nSTANDING_ORDERS_SERVICE_DIGEST => ${digest}\n` } }) } });
     const byName = Object.fromEntries(verified.checks.map(check => [check.name, check]));
     expect(verified.bootChanged).toBe(true);
     expect(byName["boot-identity"]).toMatchObject({ ok: true, detail: expect.stringContaining(`${BOOT_A} → ${BOOT_B}`) });
@@ -124,6 +125,9 @@ describe("restart certification", () => {
     expect(verified.ok).toBe(true);
     expect(store.stopOf(runId)?.settledAt).not.toBeNull();
     expect(store.stopOf(runId)?.settlement).toBe("recovered");
+    const oldLoaded = await verifyRestartRecovery({ store, baseline, now: later, expect: "reboot", service: { definition: plan, run: scripted({ "launchctl print gui": { code: 0, stdout: "pid = 43\n" } }) } });
+    expect(oldLoaded.checks.find(check => check.name === "service")?.ok).toBe(false);
+    expect(oldLoaded.ok).toBe(false);
   });
 
   test("c6: the same boot is reported as such — a reboot expectation fails honestly, a login expectation passes — and a live pid keeps the stop pending, unforced", async () => {

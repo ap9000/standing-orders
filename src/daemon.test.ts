@@ -296,7 +296,7 @@ describe("the daemon plan", () => {
       expect.stringContaining("entry"),
     ]);
     // A previously installed unit that no longer matches this build's is stale.
-    const loaded = scripted({ "launchctl print gui": { code: 0, stdout: "state = running\n\tpid = 7\n" } });
+    const loaded = scripted({ "launchctl print gui": { code: 0, stdout: "state = running\n\tpid = 7\n" + loadedDigest(made.unitContent) } });
     const fresh = await daemonStatus(made, loaded.run);
     expect(fresh).toMatchObject({ state: "running", installedDigest: null, stale: false });
     expect(fresh.problems).toHaveLength(2);
@@ -304,6 +304,10 @@ describe("the daemon plan", () => {
     const script = scripted({ "launchctl print": { code: 113 }, launchctl: { code: 0 } });
     await installDaemon(made, "t", script.run);
     expect((await daemonStatus(made, loaded.run))).toMatchObject({ installedDigest: definitionDigest(made.unitContent), stale: false });
+    const oldGeneration = scripted({ "launchctl print gui": { code: 0, stdout: "state = running\n\tpid = 7\n" } });
+    expect((await daemonStatus(made, oldGeneration.run))).toMatchObject({ state: "running", stale: true });
+    const wrongGeneration = scripted({ "launchctl print gui": { code: 0, stdout: "state = running\n\tpid = 7\nSTANDING_ORDERS_SERVICE_DIGEST => " + "0".repeat(64) } });
+    expect((await daemonStatus(made, wrongGeneration.run))).toMatchObject({ state: "running", stale: true });
     writeFileSync(made.unitPath, made.unitContent.replace("watch", "watch-old"));
     expect((await daemonStatus(made, loaded.run))).toMatchObject({ stale: true });
   });

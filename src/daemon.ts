@@ -363,6 +363,13 @@ export function planDesktopService(args: {
 
 export type ServiceStart = { ok: true; changed: boolean; action: "bootstrapped" | "reloaded" | "started" | "running" } | { ok: false; message: string };
 
+/** The file on disk does not identify the definition launchd has loaded. */
+function loadedLaunchdMatches(unit: string, status: string): boolean {
+  const wanted = /<key>STANDING_ORDERS_SERVICE_DIGEST<\/key>\s*<string>([a-f0-9]{64})<\/string>/.exec(unit)?.[1];
+  const actual = /STANDING_ORDERS_SERVICE_DIGEST\s*=>\s*([a-f0-9]{64})/.exec(status)?.[1];
+  return wanted !== undefined && actual === wanted;
+}
+
 /**
  * The shared launchd road. Idempotent start: a loaded job whose definition
  * is unchanged is kickstarted WITHOUT -k (a running one is left alone; a
@@ -382,9 +389,7 @@ export async function installLaunchdService(definition: ServiceDefinition, run: 
 
   const status = await run("launchctl", ["print", service]);
   const loaded = status.code === 0;
-  const wanted = /<key>STANDING_ORDERS_SERVICE_DIGEST<\/key>\s*<string>([a-f0-9]{64})<\/string>/.exec(definition.unitContent)?.[1];
-  const actual = /STANDING_ORDERS_SERVICE_DIGEST\s*=>\s*([a-f0-9]{64})/.exec(status.stdout)?.[1];
-  if (loaded) changed ||= wanted === undefined || actual !== wanted;
+  if (loaded) changed ||= !loadedLaunchdMatches(definition.unitContent, status.stdout);
   if (loaded && !changed) {
     const started = await run("launchctl", ["kickstart", service]);
     if (started.code !== 0) return { ok: false, message: `loaded, but launchctl could not start the worker: ${firstLine(started.stderr) || `exit ${started.code}`}` };
@@ -578,6 +583,7 @@ export async function daemonStatus(
       }
       return { state: "not-installed", pid: null, detail: "launchd does not know the label", ...facts };
     }
+    facts.stale ||= !loadedLaunchdMatches(plan.unitContent, answer.stdout);
     const pid = /pid = (\d+)/.exec(answer.stdout)?.[1];
     return pid === undefined
       ? { state: "loaded", pid: null, detail: "loaded, not currently running", ...facts }

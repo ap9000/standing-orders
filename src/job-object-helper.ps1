@@ -160,7 +160,10 @@ if ($QueryName) {
 if ($JobName -cnotmatch '^Global\\so-[A-Za-z0-9._-]+-[a-f0-9]{64}$') { throw "invalid job custody name" }
 $name = $Pipe
 if ($name.StartsWith("\\.\pipe\")) { $name = $name.Substring(9) }
-$client = New-Object System.IO.Pipes.NamedPipeClientStream(".", $name, [System.IO.Pipes.PipeDirection]::InOut)
+# Duplex control requires an overlapped handle: on .NET Framework a pending
+# asynchronous read on a synchronous PipeStream can serialize a concurrent
+# write. That would delay the empty reply until another order arrives.
+$client = New-Object System.IO.Pipes.NamedPipeClientStream(".", $name, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
 $client.Connect(5000)
 $writer = New-Object System.IO.StreamWriter($client)
 $writer.AutoFlush = $true
@@ -238,9 +241,12 @@ while ($true) {
   }
   Start-Sleep -Milliseconds 50
 }
-try { $writer.Dispose() } catch { }
-try { $client.Dispose() } catch { }
 [void][SoJob]::CloseHandle($pi.hThread)
 [void][SoJob]::CloseHandle($pi.hProcess)
 [void][SoJob]::CloseHandle($job)
-exit $exitCode
+# This is a dedicated helper process. A pending .NET pipe read can prevent
+# PowerShell's normal host shutdown, and disposing its shared stream can
+# wait for that read. The kernel has already proved the job empty and all
+# owned process/job handles are closed. Exit the helper process directly;
+# Windows closes the pipe and cancels pending IO without a disposal wait.
+[Environment]::Exit($exitCode)
