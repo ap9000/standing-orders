@@ -1,6 +1,6 @@
 # Progress
 
-**2026-09-12 UTC — Contract handoffs integrated; certification in progress.**
+**2026-09-12 UTC — Contract handoffs integrated and certified in bounded workflows.**
 All three implementation tasks completed through Standing Orders, followed by
 operator-led integration hardening. This is assisted implementation. The Agor
 source assessment supports using existing task/run/artifact records, explicit
@@ -19,9 +19,11 @@ Mixed patch/inherited coverage and missing context are represented explicitly.
 
 A private backup of the live schema-49 database upgraded to 51 twice-opened
 successfully, with all table counts preserved and clean integrity/foreign-key
-checks. The live controller remains on schema 49. Full integrated and real
-provider evidence will be recorded in the final handoff assessment; the earlier
-per-task certificates below describe their own source snapshots.
+checks. The live controller remains on schema 49. The full suite passes 132 files / 2,507 tests (12 existing skips). Both real
+provider handoff journeys and the broader 20-case pilot pass without rescue
+interventions. See [the integration report](assessments/CONTRACT_HANDOFF_RESULT.md)
+and its compact certificate. Earlier per-task certificates below describe their
+own source snapshots.
 
 
 **2026-09-11 — Revision terms preserved through one boundary (contract
