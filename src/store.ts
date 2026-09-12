@@ -4333,24 +4333,55 @@ function migrate(db: Database, origin: number | null): void {
   if (origin !== null && origin < 50) migrateToV50(db);
   db.exec("DROP INDEX IF EXISTS one_review_per_source");
   // v50 (explicit-only retries): `review_request.origin` says how an ask
-  // was produced. On a file from before the column, a mode-basis row was
-  // by definition automatic; a human-basis row was either an operator's
-  // ask or the Strict / release producer's, and the two are byte-identical
-  // — so an OPEN human-basis ask that would already be a retry (its
-  // source carries a root attempt) cannot be proved to be a fresh
-  // operator act, and is spent as 'legacy-origin' rather than admitted
-  // on a guess (the v29 legacy-untyped precedent: a person simply asks
-  // again). Consumed rows keep their words; nothing is ever admitted
-  // from them.
-  const preOriginRequests = tableExists(db, "review_request") && !hasColumn(db, "review_request", "origin");
-  addColumn(db, "review_request", "origin", "TEXT NOT NULL DEFAULT 'operator' CHECK (origin IN ('operator','automatic'))");
-  if (preOriginRequests) {
-    db.exec("UPDATE review_request SET origin = 'automatic' WHERE basis = 'mode'");
-    db.exec(
-      `UPDATE review_request SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), consumed_reason = 'legacy-origin'
-        WHERE consumed_at IS NULL AND basis = 'human'
-          AND EXISTS (SELECT 1 FROM run WHERE run.parent_run = review_request.run AND run.role = 'reviewer' AND run.review_attempt IS NOT NULL)`,
-    );
+  // was produced — the column and its one classification pass arrive
+  // together, in one write transaction (migrateReviewRequestOrigin).
+  migrateReviewRequestOrigin(db);
+}
+
+/** The origin CHECK, verbatim from the fresh review_request DDL. */
+const REVIEW_REQUEST_ORIGIN_DEFINITION = "TEXT NOT NULL DEFAULT 'operator' CHECK (origin IN ('operator','automatic'))";
+
+/**
+ * The v50 provenance pass (explicit-only retries): `review_request.origin`
+ * arrives together with its one classification, atomically. On a file from
+ * before the column, a mode-basis row was by definition automatic; a
+ * human-basis row was either an operator's ask or the Strict / release
+ * producer's, and the two are byte-identical — so an OPEN human-basis ask
+ * that would already be a retry (its source carries a root attempt) cannot
+ * be proved to be a fresh operator act, and is spent as 'legacy-origin'
+ * rather than admitted on a guess (the v29 legacy-untyped precedent: a
+ * person simply asks again). Consumed rows keep their words; nothing is
+ * ever admitted from them.
+ *
+ * THE COLUMN IS THE MARK THAT THE PASS RAN, so the ALTER and the two
+ * UPDATEs commit as one unit or not at all: an interruption after the
+ * column was added, between the classification writes, or before the
+ * commit rolls the column back with them, and the next open runs the whole
+ * pass again (fault injection, review-retry dogfood: an ALTER committed on
+ * its own left a replayed Strict retry open as an operator's ask, and it
+ * admitted attempt 2). The presence check is repeated INSIDE the write
+ * lock: a second opener that waited on BEGIN IMMEDIATE for the first
+ * migrator finds the column already there and classifies nothing — an
+ * operator ask queued after the first migrator committed is not a legacy
+ * row, and a repeated pass would have spent it as one.
+ */
+function migrateReviewRequestOrigin(db: Database): void {
+  if (!tableExists(db, "review_request") || hasColumn(db, "review_request", "origin")) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (!hasColumn(db, "review_request", "origin")) {
+      db.exec(`ALTER TABLE review_request ADD COLUMN origin ${REVIEW_REQUEST_ORIGIN_DEFINITION}`);
+      db.exec("UPDATE review_request SET origin = 'automatic' WHERE basis = 'mode'");
+      db.exec(
+        `UPDATE review_request SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), consumed_reason = 'legacy-origin'
+          WHERE consumed_at IS NULL AND basis = 'human'
+            AND EXISTS (SELECT 1 FROM run WHERE run.parent_run = review_request.run AND run.role = 'reviewer' AND run.review_attempt IS NOT NULL)`,
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
   }
 }
 

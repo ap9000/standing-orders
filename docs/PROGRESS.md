@@ -55,9 +55,17 @@ runs to success; the typed dispatch view, `task show`, and the console panel
 name who asked for a queued retry. On a file from before the column, mode
 rows read `automatic`, and an open human-basis ask that would already be a
 retry — the exact row a replayed Strict producer wrote — is spent
-`legacy-origin` rather than admitted on a guess; a person asks again. The
-crash canary's review stage now also replays the automatic producer over the
-interrupted attempt and proves it queues nothing before the explicit retry.
+`legacy-origin` rather than admitted on a guess; a person asks again. That
+provenance pass is atomic and restart-safe: the column and its classification
+commit as one write transaction (fault injection found an `ALTER` committed
+on its own left the replayed Strict retry open as an operator's ask and it
+admitted attempt 2), an interruption after the column, between the writes, or
+before the commit rolls all of it back for the next open to redo, and a second
+opener that waited on the lock re-checks the column inside the transaction so
+an operator ask queued after the first migrator committed is never spent as
+legacy. The crash canary's review stage now also replays the automatic
+producer over the interrupted attempt and proves it queues nothing before the
+explicit retry.
 
 **2026-09-11 — Plan-first and routed execution fail closed without getting
 stuck.** A real Codex plan-first run now finishes: `codex exec resume` has no

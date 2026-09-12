@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { openStore, REVIEW_ROOT_ATTEMPTS, SCHEMA_VERSION, type Store } from "./store.js";
+import { openStore, REVIEW_ROOT_ATTEMPTS, SCHEMA_VERSION, type Database, type Store } from "./store.js";
 import { storeEvidence } from "./evidence.js";
 import { register } from "./runner.js";
 import { addApprover } from "./scope.js";
@@ -281,6 +281,160 @@ describe("schema v50: bounded review retries upgrade a v49 database without rewr
       const again = openStore(file);
       expect(rows(file, "SELECT id, origin, consumed_reason FROM review_request ORDER BY id")).toEqual(settled);
       again.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** A connection that dies at one exact statement of the origin pass:
+   * the statement `at` runs (or, for COMMIT, does not), then the process
+   * is gone — nothing else it would have said reaches the file, its
+   * ROLLBACK included; closing the raw handle is what a crash leaves
+   * SQLite to do. */
+  const dyingAt = (at: "alter" | "classify" | "commit"): { connect: (path: string) => Database; died: () => boolean; raw: () => DatabaseSync | undefined } => {
+    let real: DatabaseSync | undefined;
+    let died = false;
+    let armed = false;
+    const matches = (sql: string): boolean => {
+      if (at === "alter") return /ALTER TABLE review_request ADD COLUMN origin /.test(sql);
+      if (at === "classify") return /UPDATE review_request SET origin = 'automatic' WHERE basis = 'mode'/.test(sql);
+      return armed && /^COMMIT$/.test(sql.trim());
+    };
+    return {
+      connect: (path: string): Database => {
+        real = new DatabaseSync(path);
+        return {
+          prepare: sql => real!.prepare(sql) as never,
+          exec: sql => {
+            if (died) return; // a dead process says nothing more
+            if (/ALTER TABLE review_request ADD COLUMN origin /.test(sql)) armed = true;
+            if (matches(sql)) {
+              died = true;
+              if (at !== "commit") real!.exec(sql);
+              throw new Error(`injected interruption at ${at}`);
+            }
+            real!.exec(sql);
+          },
+          close: () => real!.close(),
+        } as Database;
+      },
+      died: () => died,
+      raw: () => real,
+    };
+  };
+
+  for (const shape of ["v49", "v50 before origin"] as const) for (const at of ["alter", "classify", "commit"] as const) test(`an interruption at ${at} on a ${shape} file leaves no origin column and the next open runs the whole pass: the replayed automatic retry is spent, never admitted`, () => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v50-origin-crash-"));
+    const file = join(dir, "orders.db");
+    try {
+      const store = openStore(file);
+      const seeded = seed(store, join(dir, "evidence"));
+      store.close();
+      if (shape === "v49") windBackToV49(file, 49);
+      else windBackToPreOrigin(file);
+      const raw = new DatabaseSync(file);
+      // Build 1513's replayed Strict producer wrote exactly this row: an
+      // OPEN human-basis ask on a source whose root already failed.
+      const stale = Number(raw.prepare("INSERT INTO review_request (run, requested_by, basis, requested_at) VALUES (?, 'alex', 'human', ?)").run(seeded.failed, T0.toISOString()).lastInsertRowid);
+      const fresh = Number(raw.prepare("INSERT INTO review_request (run, requested_by, basis, requested_at) VALUES (?, 'alex', 'human', ?)").run(seeded.unrun, T0.toISOString()).lastInsertRowid);
+      raw.prepare("INSERT INTO review_request (run, requested_by, basis, mode_digest, requested_at, consumed_at, consumed_reason) VALUES (?, 'mode standard', 'mode', 'deadbeef', ?, ?, 'mode-ended')").run(seeded.reviewed, T0.toISOString(), T0.toISOString());
+      raw.close();
+      const before = rows(file, "SELECT * FROM review_request ORDER BY id");
+
+      const dying = dyingAt(at);
+      expect(() => openStore(file, { connect: dying.connect })).toThrow(new RegExp(`injected interruption at ${at}`));
+      expect(dying.died()).toBe(true);
+      dying.raw()?.close();
+      // The column and the classification went together: none of it is
+      // on disk, every request row reads exactly as it did (the v49 road's
+      // own reviewer_run binding aside — that pass commits on its own and
+      // is idempotent), and the file says the upgrade is unfinished (v49:
+      // the sentinel; a build-1513 file: current, as it always was).
+      expect(rows(file, "SELECT COUNT(*) AS n FROM pragma_table_info('review_request') WHERE name = 'origin'")).toEqual([{ n: 0 }]);
+      expect(strip(rows(file, "SELECT * FROM review_request ORDER BY id"), "reviewer_run")).toEqual(strip(before, "reviewer_run"));
+      expect(rows(file, "SELECT id, consumed_at, consumed_reason FROM review_request ORDER BY id")).toEqual(before.map(row => ({ id: row["id"], consumed_at: row["consumed_at"], consumed_reason: row["consumed_reason"] })));
+      expect(rows(file, "SELECT version FROM schema_version")).toEqual([{ version: shape === "v49" ? -49 : SCHEMA_VERSION }]);
+
+      // The next open runs the WHOLE pass: the replayed automatic retry is
+      // spent before any admission could see it, the first ask keeps its
+      // authority, a fresh operator act can still retry.
+      const upgraded = openStore(file);
+      expect(upgraded.raw().prepare("SELECT version FROM schema_version").get()).toMatchObject({ version: SCHEMA_VERSION });
+      const origins = new Map(rows(file, "SELECT id, basis, origin, consumed_reason FROM review_request ORDER BY id").map(row => [Number(row["id"]), row]));
+      expect(origins.get(stale)).toMatchObject({ origin: "operator", consumed_reason: "legacy-origin" });
+      expect(origins.get(fresh)).toMatchObject({ origin: "operator", consumed_reason: null });
+      expect([...origins.values()].find(row => row["basis"] === "mode")).toMatchObject({ origin: "automatic", consumed_reason: "mode-ended" });
+      expect(upgraded.openReviewRequests().some(open => open.id === stale)).toBe(false);
+      expect(upgraded.admitReview(stale, { runner: "worker", token: "tok-worker", provider: "claude", model: null }, T0)).toMatchObject({ ok: false, reason: "gone" });
+      expect(upgraded.reviewRetryStateOf(seeded.failed)).toMatchObject({ state: "retryable", openRequest: null, retriesRemaining: 2 });
+      expect(upgraded.admitReview(fresh, { runner: "worker", token: "tok-worker", provider: "claude", model: null }, T0)).toMatchObject({ ok: true, attempt: 1 });
+      expect(upgraded.requestReview(seeded.failed, "alex", T0)).toMatchObject({ ok: true, attempt: 2 });
+      expect(upgraded.raw().prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      upgraded.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a second opener that waited on the write lock finds the column inside the transaction and classifies nothing — an operator ask queued after the first migrator committed stays open", () => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v50-origin-wait-"));
+    const file = join(dir, "orders.db");
+    try {
+      const store = openStore(file);
+      const seeded = seed(store, join(dir, "evidence"));
+      store.close();
+      windBackToPreOrigin(file);
+      const raw = new DatabaseSync(file);
+      const stale = Number(raw.prepare("INSERT INTO review_request (run, requested_by, basis, requested_at) VALUES (?, 'alex', 'human', ?)").run(seeded.failed, T0.toISOString()).lastInsertRowid);
+      raw.close();
+
+      // The waiting opener: its BEGIN IMMEDIATE is where it would block
+      // behind the first migrator. Here the first migrator runs to
+      // completion at exactly that point — and, before the second opener
+      // gets the lock, an operator queues a retry of the failed source:
+      // an OPEN human-basis ask on a source with a root attempt, the very
+      // row a repeated classification would spend as legacy.
+      let waited = 0;
+      let queued: number | null = null;
+      let columnAtWait: boolean | null = null;
+      let real: DatabaseSync | undefined;
+      let opening = true;
+      const waiting = (path: string): Database => {
+        real = new DatabaseSync(path);
+        return {
+          prepare: sql => real!.prepare(sql) as never,
+          exec: sql => {
+            if (opening && /^BEGIN IMMEDIATE$/.test(sql.trim())) {
+              waited += 1;
+              columnAtWait = Number((real!.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('review_request') WHERE name = 'origin'").get() as { n: number }).n) === 1;
+              const first = openStore(path);
+              expect(first.reviewRetryStateOf(seeded.failed)).toMatchObject({ state: "retryable", openRequest: null });
+              const retry = first.requestReview(seeded.failed, "alex", T0);
+              if (!retry.ok) throw new Error(retry.reason);
+              queued = retry.id;
+              first.close();
+            }
+            real!.exec(sql);
+          },
+          close: () => real!.close(),
+        } as Database;
+      };
+      const second = openStore(file, { connect: waiting });
+      opening = false;
+      // Exactly one write transaction in the open — the origin pass — and
+      // the column was still absent when it queued for the lock.
+      expect(waited).toBe(1);
+      expect(columnAtWait).toBe(false);
+      expect(queued).not.toBeNull();
+      // The first migrator's pass spent the replayed row; the second
+      // opener left the operator's fresh retry exactly as queued.
+      const origins = new Map(rows(file, "SELECT id, origin, consumed_reason FROM review_request ORDER BY id").map(row => [Number(row["id"]), row]));
+      expect(origins.get(stale)).toMatchObject({ origin: "operator", consumed_reason: "legacy-origin" });
+      expect(origins.get(queued!)).toMatchObject({ origin: "operator", consumed_reason: null });
+      expect(second.reviewRetryStateOf(seeded.failed)).toMatchObject({ state: "queued", openRequest: { id: queued, origin: "operator" }, nextAttempt: 2 });
+      expect(second.admitReview(queued!, { runner: "worker", token: "tok-worker", provider: "claude", model: null }, T0)).toMatchObject({ ok: true, attempt: 2 });
+      expect(second.raw().prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      second.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
