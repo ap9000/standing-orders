@@ -1,0 +1,502 @@
+{
+  "version": 1,
+  "recordedAt": "2026-09-12T19:53:08.405264+00:00",
+  "implementationSource": "4352044e1e60d2e15515e00b8a43f099d52e5727",
+  "runtime": {
+    "passed": true,
+    "executableTreeSha256": "b2683219f5570c5ae4c278f7c9883221c0d49dcccbff03e2784d38bb91e518a1",
+    "stagedAppMatchesCLI": true,
+    "implementationSource": "4352044e1e60d2e15515e00b8a43f099d52e5727"
+  },
+  "validation": {
+    "testFiles": 150,
+    "passedTests": 2643,
+    "skippedTests": 23,
+    "suiteSha256": "a156a043372f85a80408c00269741b5576859d2315c172878fd4a87231def9d9",
+    "ciForImplementation": [
+      {
+        "link": "https://github.com/ap9000/standing-orders/actions/runs/34715176339/job/103611031274",
+        "name": "node 22 \u00b7 macos-latest",
+        "state": "SUCCESS"
+      },
+      {
+        "link": "https://github.com/ap9000/standing-orders/actions/runs/34715176339/job/103611031204",
+        "name": "node 24 \u00b7 macos-latest",
+        "state": "SUCCESS"
+      },
+      {
+        "link": "https://github.com/ap9000/standing-orders/actions/runs/34715176339/job/103611031118",
+        "name": "node 24 \u00b7 ubuntu-latest",
+        "state": "SUCCESS"
+      },
+      {
+        "link": "https://github.com/ap9000/standing-orders/actions/runs/34715176339/job/103611031212",
+        "name": "node 22 \u00b7 ubuntu-latest",
+        "state": "SUCCESS"
+      },
+      {
+        "link": "https://github.com/ap9000/standing-orders/actions/runs/34715176339/job/103611031292",
+        "name": "linux native containment \u00b7 delegated cgroup v2",
+        "state": "SUCCESS"
+      },
+      {
+        "link": "https://github.com/ap9000/standing-orders/actions/runs/34715176339/job/103611031214",
+        "name": "windows baseline \u00b7 node 22",
+        "state": "SUCCESS"
+      },
+      {
+        "link": "https://github.com/ap9000/standing-orders/actions/runs/34715176339/job/103611031236",
+        "name": "windows baseline \u00b7 node 24",
+        "state": "SUCCESS"
+      },
+      {
+        "link": "https://github.com/ap9000/standing-orders/actions/runs/34715176339/job/103611031194",
+        "name": "Windows Job Object containment",
+        "state": "SUCCESS"
+      }
+    ]
+  },
+  "providers": [
+    {
+      "provider": "claude",
+      "model": "sonnet",
+      "passed": true,
+      "durationSeconds": 145,
+      "runtime": {
+        "sha256": "10f12fb19fcdf730139f6b564b71e2bf4361e3865ceae8f6e2ccb3cfa37cc6b4",
+        "sourceCommit": "4352044e1e60d2e15515e00b8a43f099d52e5727",
+        "trackedChanges": false
+      },
+      "approval": "unchanged-plan-under-signed-mode",
+      "scopeDigest": "e3cd5fe4ef5cb95ecd22739150c39bbb",
+      "humanActionsAfterPlanningStarted": 0,
+      "commit": "2bae72d1cc91c5e1d9593b2186ae1fd2b311288e",
+      "proofVerdict": "verified",
+      "independentReview": "passed",
+      "duplicateDispatch": "refused-empty",
+      "criteria": [
+        {
+          "id": "c1",
+          "state": "pass",
+          "judgement": "upholds",
+          "reviewer": "reviewer:claude\u00b7sonnet"
+        },
+        {
+          "id": "c2",
+          "state": "pass",
+          "judgement": "upholds",
+          "reviewer": "reviewer:claude\u00b7sonnet"
+        }
+      ]
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "passed": true,
+      "durationSeconds": 292,
+      "runtime": {
+        "sha256": "10f12fb19fcdf730139f6b564b71e2bf4361e3865ceae8f6e2ccb3cfa37cc6b4",
+        "sourceCommit": "4352044e1e60d2e15515e00b8a43f099d52e5727",
+        "trackedChanges": false
+      },
+      "approval": "unchanged-plan-under-signed-mode",
+      "scopeDigest": "c79a852f5205558dcf3fed0f0ab0e5ba",
+      "humanActionsAfterPlanningStarted": 0,
+      "commit": "afcba3759875ae8f1114cd2b638774c1eb86c757",
+      "proofVerdict": "verified",
+      "independentReview": "passed",
+      "duplicateDispatch": "refused-empty",
+      "criteria": [
+        {
+          "id": "c1",
+          "state": "pass",
+          "judgement": "upholds",
+          "reviewer": "reviewer:codex\u00b7gpt-5.6-sol"
+        },
+        {
+          "id": "c2",
+          "state": "pass",
+          "judgement": "upholds",
+          "reviewer": "reviewer:codex\u00b7gpt-5.6-sol"
+        }
+      ]
+    }
+  ],
+  "crashCertification": [
+    {
+      "passed": true,
+      "sourceCommit": "4352044e1e60d2e15515e00b8a43f099d52e5727",
+      "runtimeSha256": "91d31796cb43c2d5166031ea0c6c0de8dde15feb3ebbc1f7e760ddd5da571a7a",
+      "runtimeUnchanged": true,
+      "stopBeforeCrash": false,
+      "autoApprove": false,
+      "durationSeconds": 197.49,
+      "scope": "Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage replays the automatic review producer over the interrupted attempt under a live reviewAuto mode (it queues nothing: explicit-only retries), then continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
+      "exclusions": [
+        "real-provider recovery",
+        "real-provider review retry",
+        "Windows",
+        "reboot",
+        "detached descendants",
+        "power-loss filesystem durability"
+      ],
+      "cases": [
+        {
+          "stage": "planning",
+          "round": 1,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-unapproved",
+          "state": "queued",
+          "proof": null,
+          "dispatch": "needs-approval",
+          "finalHead": null,
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "building",
+          "round": 1,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "dcecfbb4c07deddb653f8a3960d42ae32ad49131",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "verification",
+          "round": 1,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "bf5512b824001d45796120a87d2de82d5137db45",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "setup",
+          "round": 1,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "dcecfbb4c07deddb653f8a3960d42ae32ad49131",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "after-commit",
+          "round": 1,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "bf5512b824001d45796120a87d2de82d5137db45",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "review",
+          "round": 1,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "bf5512b824001d45796120a87d2de82d5137db45",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": 2
+        },
+        {
+          "stage": "planning",
+          "round": 2,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-unapproved",
+          "state": "queued",
+          "proof": null,
+          "dispatch": "needs-approval",
+          "finalHead": null,
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "setup",
+          "round": 2,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "45da49becc5452040d17f0b2d0dca9d6e3c6f82a",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "building",
+          "round": 2,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "45da49becc5452040d17f0b2d0dca9d6e3c6f82a",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "verification",
+          "round": 2,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "5004e9008092dadb2f907b12f091c1ea87d1fcc6",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "after-commit",
+          "round": 2,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "ad9e36b444774ba0e4452b4aab53a5d288c896c7",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "review",
+          "round": 2,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "8849f8b99cedae20cfe7d2d481d30c6a4074cb99",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": 2
+        }
+      ]
+    },
+    {
+      "passed": true,
+      "sourceCommit": "4352044e1e60d2e15515e00b8a43f099d52e5727",
+      "runtimeSha256": "91d31796cb43c2d5166031ea0c6c0de8dde15feb3ebbc1f7e760ddd5da571a7a",
+      "runtimeUnchanged": true,
+      "stopBeforeCrash": false,
+      "autoApprove": true,
+      "durationSeconds": 110.019,
+      "scope": "Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage replays the automatic review producer over the interrupted attempt under a live reviewAuto mode (it queues nothing: explicit-only retries), then continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
+      "exclusions": [
+        "real-provider recovery",
+        "real-provider review retry",
+        "Windows",
+        "reboot",
+        "detached descendants",
+        "power-loss filesystem durability"
+      ],
+      "cases": [
+        {
+          "stage": "planning",
+          "round": 1,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "b03ff3904943e1f5babe4cc44cd90c92e496d390",
+          "autoApprovals": 1,
+          "humanActionsAfterPlanningStarted": 0,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        },
+        {
+          "stage": "planning",
+          "round": 2,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "dcecfbb4c07deddb653f8a3960d42ae32ad49131",
+          "autoApprovals": 1,
+          "humanActionsAfterPlanningStarted": 0,
+          "resumeWhileOrphanLives": null,
+          "reviewRetryProviderStarts": null
+        }
+      ]
+    },
+    {
+      "passed": true,
+      "sourceCommit": "4352044e1e60d2e15515e00b8a43f099d52e5727",
+      "runtimeSha256": "91d31796cb43c2d5166031ea0c6c0de8dde15feb3ebbc1f7e760ddd5da571a7a",
+      "runtimeUnchanged": true,
+      "stopBeforeCrash": true,
+      "autoApprove": false,
+      "durationSeconds": 98.414,
+      "scope": "Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage replays the automatic review producer over the interrupted attempt under a live reviewAuto mode (it queues nothing: explicit-only retries), then continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
+      "exclusions": [
+        "real-provider recovery",
+        "real-provider review retry",
+        "Windows",
+        "reboot",
+        "detached descendants",
+        "power-loss filesystem durability"
+      ],
+      "cases": [
+        {
+          "stage": "building",
+          "round": 1,
+          "passed": true,
+          "beforeExpiry": "refused",
+          "overlappingWriters": 0,
+          "openRuns": 0,
+          "duplicateDispatch": "refused-empty",
+          "state": "done",
+          "proof": "verified",
+          "dispatch": "complete",
+          "finalHead": "dcecfbb4c07deddb653f8a3960d42ae32ad49131",
+          "autoApprovals": 0,
+          "humanActionsAfterPlanningStarted": null,
+          "resumeWhileOrphanLives": "occupied",
+          "reviewRetryProviderStarts": null
+        }
+      ]
+    }
+  ],
+  "desktopRecovery": {
+    "passed": true,
+    "sourceRevision": "4352044e1e60d2e15515e00b8a43f099d52e5727",
+    "runtimeHash": "b2683219f5570c5ae4c278f7c9883221c0d49dcccbff03e2784d38bb91e518a1",
+    "nodeHash": "913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4",
+    "nodeVersion": "v22.22.0",
+    "scriptHash": "f33a76c0003b6e5946e9458749b5f902ea535282d6d4b4102ba05c19bb1126c0",
+    "manualRescues": 0,
+    "limits": [
+      "Controller crash recovery under an already activated LaunchAgent.",
+      "Initial activation uses explicit kickstart; no claim of automatic launchd relaunch, login or physical reboot.",
+      "A retained unsigned task proves persistence; this fixture does not invoke a provider."
+    ],
+    "explicitStop": true,
+    "cases": [
+      {
+        "fault": "clean-controller-exit",
+        "elapsedMs": 1761,
+        "generation": 2
+      },
+      {
+        "fault": "controller-sigkill",
+        "elapsedMs": 182912,
+        "generation": 11
+      }
+    ]
+  },
+  "migrationRehearsal": {
+    "passed": true,
+    "scope": "Consistent read-only live snapshot migrated in a private copy; live database untouched.",
+    "implementationSource": "4352044e1e60d2e15515e00b8a43f099d52e5727",
+    "fromSchema": 52,
+    "toSchema": 55,
+    "tablesCompared": 94,
+    "historicalRowsCompared": 345510,
+    "integrity": "ok",
+    "foreignKeyViolations": 0
+  },
+  "rawCertificateHashes": {
+    "completion-claude": "e4e0443c4eb06b79199b4b65181756d1c856e47891a92ce083153122c8fd7526",
+    "completion-codex": "def2133915f7e61ec3782fda8144eca9b6c136d6f627e498c702269068301228",
+    "completion-final-crash-matrix": "566b4c7cabb1705b0b417b97fa4b8e50b8a20d04cb1c5957f2135ccebb508a78",
+    "completion-final-auto-crash": "2a6cc6a074b8e4bc3d875bc4d7c4d88ea770a918fbd53636a7c321e0396e466b",
+    "completion-final-stop-crash": "c1effa53e1fad216e4e3473dcdd09b5dd4c91e545a35e898b17fb943386973d2",
+    "completion-desktop-recovery": "4f9139ca71d674a9c5c4abaa3a6dac9785c481968afa43650ad215edef36b211",
+    "completion-migration": "d24f41627c1f78e2bed5d8e3bc7c7b623a65267d5372cb586a1415b5da43cf0e",
+    "completion-runtime-binding": "bb36b4155f7529831b81494dc362db485959a5be1bc5e175d7ee66dec9d20834"
+  },
+  "initialFindings": [
+    "The original supervisor failed both deterministic custody regression cases by disappearing before descendant settlement.",
+    "The shutdown-observation regression failed on the intermediate implementation: a fast parent could exit before periodic observation captured its tool. The final runtime samples ancestry before EOF.",
+    "The initial auto-review canary incorrectly required another tick after the build tick had completed automatic review; the corrected final canaries passed.",
+    "One suite run raced a 350ms sleep in held.test.ts; the test now waits for causal state transitions with bounded deadlines."
+  ],
+  "releaseLimitations": [
+    "The existing live controller and schema52 database have not been replaced; macOS Documents access remains an unresolved deployment gate.",
+    "The migration used a consistent private snapshot, not the live database.",
+    "The desktop canary used an isolated temporary project and explicit LaunchAgent activation, not the protected Documents projects or a physical logout/reboot.",
+    "macOS process containment remains observational; native containment is covered separately by Linux cgroup and Windows Job Object CI."
+  ]
+}

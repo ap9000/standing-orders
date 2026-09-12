@@ -51,6 +51,10 @@ Provider output in this crash case is deterministic fixture output. The two
 provider canaries use real models but do not kill them; these are separate
 certification claims.
 
+The [completion and recovery release result](assessments/COMPLETION_RECOVERY_2026-09-12.md)
+records the final provider journeys, 15 crash cases, controller recovery,
+migration rehearsal and the remaining desktop deployment gate.
+
 Use `--keep` to retain a passing sandbox and `--output <file>` to write the
 machine-readable certificate. Version 3 records the source revision, a hash of
 the built runtime and canary scripts, each CLI step's elapsed time and exit
