@@ -1,5 +1,12 @@
 # Product priorities
 
+Current milestone (2026-09-12): contract handoffs passed both real-provider
+journeys and the 20-case pilot, merged to main, and reached the live desktop
+controller. See [deployment evidence](assessments/LIVE_UPGRADE_2026-09-12.md).
+The next distinct wave is [per-task stop and resume](TASK_CONTROL_PLAN.md),
+followed by Telegram conversation/media over the existing mate engine.
+Earlier milestone narratives below remain implementation history.
+
 Standing Orders should be the place where a person can hand off an outcome,
 leave, and return to a result they can trust. These priorities are ordered by
 the weakest link in that promise: execution first, proof second, breadth third.

@@ -1,7 +1,7 @@
 # Preserve the task contract through every handoff
 
 Assessed 2026-09-12 UTC. All three bounded tasks ran through Standing Orders
-and are integrated on `codex/contract-handoffs`, with additional operator-led
+and are merged on main as `7b9bebe`, with additional operator-led
 hardening. Both real-provider handoff journeys pass with zero rescue
 interventions, and the broader release pilot passed 20/20. See the
 [integration evidence](assessments/CONTRACT_HANDOFF_RESULT.md).
@@ -177,6 +177,6 @@ the merge did not rerun the real-provider release pilot.
 | `standing-orders/nightly-deps-20260812-1534` (`f2f0985`) | Only adds `docs/DEPS.md`. Its upstream claims were explicitly not checked against a registry. Retain as historical notes; regenerate from current manifests and primary sources if dependency review becomes a priority. |
 | `origin/codex/control-app` (`15a1d9c`) | Assessed and selectively integrated over current main. Native shell, setup, provider/model discovery, and calendar schedules are adapted; superseded engines are omitted. See [the full disposition and remaining forward ports](CONTROL_APP_INTEGRATION.md). |
 
-No branches or worktrees were deleted. Main through `68ff7eb` has been pushed to GitHub. Upgrading the live
-schema-v49 controller remains a separate delivery step. The live
-controller remains on its stable reliability worktree.
+No branches or worktrees were deleted. Main through `7b9bebe` is on GitHub.
+The authorized live upgrade to schema 51 and the installed desktop controller
+is recorded in [the deployment evidence](assessments/LIVE_UPGRADE_2026-09-12.md).
