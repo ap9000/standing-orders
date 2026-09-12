@@ -2,6 +2,14 @@
 
 ## Current installation: schema 52
 
+The subsequent schema-55 completion release is staged at
+`~/Applications/Standing Orders Completion Preview.app`, with its exact runtime,
+provider journeys, crash recovery and private migration rehearsal recorded in
+[the completion/recovery result](COMPLETION_RECOVERY_2026-09-12.md). The live
+controller has not been replaced: the existing macOS Documents-access gate
+remains unresolved and live work is active. Use a fresh backup after that gate
+passes and work drains; the rehearsal snapshot must not replace newer work.
+
 At 2026-09-12 09:38:50 UTC, the installed desktop controller was upgraded to
 schema 52 after [PR #2](https://github.com/ap9000/standing-orders/pull/2) merged
 to main as `4c70a8c`. The production source is `82d0d28`; subsequent changes

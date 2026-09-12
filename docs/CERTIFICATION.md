@@ -28,6 +28,33 @@ npm run certify:provider -- --provider claude --model sonnet --review
 npm run certify:provider -- --provider codex --model gpt-5.6-sol --review
 ```
 
+To certify the signed auto-approval path, use `--auto-approve` (which also
+requires independent review). The canary files a fixed contract, signs a
+project mode, and pre-authorizes planning through the public CLI. From the
+first planning pass onward it issues no approval or review request. It requires
+the same scope digest to be sealed under that mode, a verified build and
+independent review, one work commit, an unchanged default branch, and refusal
+of a duplicate dispatch:
+
+```sh
+npm run certify:provider -- --provider claude --model sonnet --auto-approve
+npm run certify:provider -- --provider codex --model gpt-5.6-sol --auto-approve
+npm run certify:crash -- --stage planning --auto-approve --rounds 2
+```
+
+The last command kills actual watch processes while a fixture planner is
+running. Recovery waits for normal lease expiry and the surviving process;
+then the unchanged plan must automatically approve, build, verify, and receive
+an independent review. Its ledger must contain exactly one automatic approval,
+with no overlapping writer, open run, duplicate commit, or duplicate dispatch.
+Provider output in this crash case is deterministic fixture output. The two
+provider canaries use real models but do not kill them; these are separate
+certification claims.
+
+The [completion and recovery release result](assessments/COMPLETION_RECOVERY_2026-09-12.md)
+records the final provider journeys, 15 crash cases, controller recovery,
+migration rehearsal and the remaining desktop deployment gate.
+
 Use `--keep` to retain a passing sandbox and `--output <file>` to write the
 machine-readable certificate. Version 3 records the source revision, a hash of
 the built runtime and canary scripts, each CLI step's elapsed time and exit

@@ -705,8 +705,10 @@ describe("the conversation loop (Phase 2E.2)", () => {
     } as never);
     expect(launched).toMatchObject({ ok: true });
 
+    // Observe causal state transitions; wall-clock sleeps race real git
+    // subprocesses under load and can read a decision before it is filed.
     // 1. the brief settles and the session IDLES — held, nothing concluded
-    await new Promise(pass => setTimeout(pass, 250));
+    await expect.poll(() => store.sessionTurnsOf(runId).find(one => one.sourceKind === "brief")?.state, { timeout: 5000 }).toBe("settled");
     expect(sent).toBe(1);
     expect(store.getRun(runId)?.outcome).toBeNull();
     expect(store.heldSessionOf(runId)?.endedAt).toBeNull();
@@ -714,8 +716,9 @@ describe("the conversation loop (Phase 2E.2)", () => {
     // 2. the operator speaks; the agent parks a question; the session STAYS held
     const spoke = coordinator.injectOperatorTurn(runId, "alex", "make it teal");
     expect(spoke).toMatchObject({ ok: true });
-    await new Promise(pass => setTimeout(pass, 350));
-    const parked = store.raw().prepare("SELECT id, state, session_turn FROM decision WHERE run = ?").get(runId)!;
+    const parkedQuery = store.raw().prepare("SELECT id, state, session_turn FROM decision WHERE run = ?");
+    await expect.poll(() => parkedQuery.get(runId)?.["state"], { timeout: 5000 }).toBe("open");
+    const parked = parkedQuery.get(runId)!;
     expect(String(parked["state"])).toBe("open");
     // causal: the decision names the turn that produced it
     const operatorTurn = store.sessionTurnsOf(runId).find(one => one.sourceKind === "operator");
@@ -728,7 +731,7 @@ describe("the conversation loop (Phase 2E.2)", () => {
     const answered = store.answerDecision({ id: Number(parked["id"]), choice: "a", by: "alex", via: "web" }, new Date());
     expect(answered.ok).toBe(true);
     coordinator.poke(runId);
-    await new Promise(pass => setTimeout(pass, 400));
+    await expect.poll(() => store.sessionTurnsOf(runId).find(one => one.sourceKind === "answer")?.state, { timeout: 5000 }).toBe("settled");
     const turns = store.sessionTurnsOf(runId);
     const answerTurn = turns.find(one => one.sourceKind === "answer");
     expect(answerTurn).toBeDefined();
@@ -738,8 +741,7 @@ describe("the conversation loop (Phase 2E.2)", () => {
     expect(Number(store.raw().prepare("SELECT COUNT(*) AS n FROM run_decision WHERE decision = ?").get(Number(parked["id"]))!["n"])).toBe(1);
 
     // 4. the handoff written on the answer turn CONCLUDES through the shared machinery
-    await new Promise(pass => setTimeout(pass, 300));
-    expect(disposed).not.toBeNull();
+    await expect.poll(() => disposed, { timeout: 5000 }).not.toBeNull();
     expect(store.getRun(runId)?.outcome).toBe("no-change");
     expect(store.heldSessionOf(runId)?.endedAt).not.toBeNull();
     expect(store.readAuthorization("auth-att")?.endReason).toBe("finished");
