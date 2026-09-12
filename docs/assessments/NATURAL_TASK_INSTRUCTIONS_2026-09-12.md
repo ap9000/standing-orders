@@ -1,8 +1,10 @@
 # Natural task instructions in the builder brief — 2026-09-12
 
-A source-only fix for one prompt regression, prepared for separate review.
-Nothing here was pushed, merged, installed, or applied to a live service or
-database.
+This prompt fix is included in the final branch integration and rebuilt
+schema-55 preview. The original evidence below records the source-only review;
+current integration and deployment status are in
+[the rollout record](FINAL_ROLLOUT_2026-09-12.md). The live schema-52 controller
+still needs the gated desktop upgrade.
 
 ## The regression
 

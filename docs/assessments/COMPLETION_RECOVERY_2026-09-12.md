@@ -1,5 +1,8 @@
 # Completion and recovery certification — 2026-09-12
 
+The subsequent [final rollout record](FINAL_ROLLOUT_2026-09-12.md) supersedes
+the deployment-gate status below and records the newer prompt-fix preview.
+
 The project-access, action-ledger, CSV and bounded auto-approval wave merged in
 [PR #4](https://github.com/ap9000/standing-orders/pull/4). The completion and
 recovery follow-up is [PR #5](https://github.com/ap9000/standing-orders/pull/5).
