@@ -10,6 +10,7 @@ import { runOperate, writeLoginFileDurably } from "./operate.js";
 import { updateRepos, addRepos } from "./repos.js";
 import { projectSelection } from "./project.js";
 import type { Store } from "./store.js";
+import { superviseController } from "./controller-supervisor.js";
 
 export type DesktopConfig = { version: 1; databaseFile: string; repos: string[]; port: number; identity: string };
 export function readDesktopConfig(stateDir: string): DesktopConfig {
@@ -101,10 +102,27 @@ export async function desktopMain(argv: string[]): Promise<void> {
   const defaultState = join(homedir(), "Library", "Application Support", "Standing Orders");
   const stateDir = resolve(stateArg >= 0 ? argv[stateArg + 1]! : defaultState);
   let config = loadOrCreateDesktopConfig(stateDir, stateDir !== defaultState);
+  if (argv[0] === "serve") {
+    const stopping = new AbortController();
+    const stop = (): void => stopping.abort();
+    process.on("SIGTERM", stop); process.on("SIGINT", stop);
+    try {
+      await superviseController({ file: process.execPath, argv: [fileURLToPath(import.meta.url), "serve-controller", "--state", stateDir], signal: stopping.signal,
+        onState: state => {
+          const path = join(stateDir, "controller-supervisor.json");
+          const temp = `${path}.${process.pid}.tmp`;
+          writeFileSync(temp, JSON.stringify({ version: 1, supervisorPid: process.pid, updatedAt: new Date().toISOString(), ...state }), { mode: 0o600 });
+          renameSync(temp, path);
+          if (state.phase === "backoff") console.error(`Controller exited (${state.exit?.signal ?? state.exit?.code ?? "unknown"}); restart in ${state.retryMs} ms.`);
+        },
+      });
+    } finally { process.off("SIGTERM", stop); process.off("SIGINT", stop); }
+    return;
+  }
   // Inspection and launch must never migrate another running controller.
   const store = openDesktopStore(config.databaseFile);
   const legacyFile = join(dirname(config.databaseFile), "up-login.txt");
-  if (argv[0] !== "serve") {
+  if (argv[0] !== "serve-controller") {
     try {
       if (argv[0] === "inspect") {
         const legacy = legacyLogin(legacyFile);
@@ -129,7 +147,8 @@ export async function desktopMain(argv: string[]): Promise<void> {
   if (config.repos.length === 0) { store.close(); throw new Error("Choose a repository in the desktop app first."); }
   store.close();
   // Reuse the same registry supervisor, worker, custody, and recovery paths as
-  // the CLI. launchd owns the process; closing the web view owns nothing here.
+  // the CLI. The service parent owns this controller; closing the web view
+  // owns nothing here. `serve-controller` is its child entry, never a new engine.
   const remembered = legacyLogin(legacyFile);
   const exit = await runOperate("up", ["--db", config.databaseFile, ...(remembered === null ? [] : ["--as", remembered.name]),
     "--host", "127.0.0.1", "--port", String(config.port), "--no-open", "--json"], line => console.log(line), {

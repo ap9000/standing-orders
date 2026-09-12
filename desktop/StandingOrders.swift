@@ -17,6 +17,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
     var attemptedLogin = false
     var stateDir: URL!
     var node: String = ""
+    var providerBin: String = ""
     var helper: String = ""
     var label = "com.standing-orders.desktop"
     let keychainService = "com.standing-orders.desktop.login"
@@ -35,7 +36,9 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         do {
             let resources = Bundle.main.resourceURL!
             let runtime = try JSONSerialization.jsonObject(with: Data(contentsOf: resources.appendingPathComponent("runtime.json"))) as! [String: String]
-            node = runtime["node"]!
+            let configuredNode = runtime["node"]!
+            node = configuredNode.hasPrefix("/") ? configuredNode : resources.appendingPathComponent(configuredNode).standardizedFileURL.path
+            providerBin = runtime["providerBin"] ?? URL(fileURLWithPath: node).deletingLastPathComponent().path
             helper = resources.appendingPathComponent("dist/desktop-host.js").path
             try FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             makeWindow()
@@ -108,10 +111,11 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
 
     func process(_ executable: String, _ args: [String], input: Data? = nil) async throws -> Data {
         let runtimeDirectory = URL(fileURLWithPath: node).deletingLastPathComponent().path
+        let providerDirectory = providerBin
         return try await Task.detached {
             let task = Process(); task.executableURL = URL(fileURLWithPath: executable); task.arguments = args
             var environment = ProcessInfo.processInfo.environment
-            environment["PATH"] = [runtimeDirectory, FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
+            environment["PATH"] = [runtimeDirectory, providerDirectory, FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
             task.environment = environment
             // Private files prevent pipe deadlock and keep credential output off logs.
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("standing-orders-" + UUID().uuidString)
@@ -225,7 +229,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
             let plist: [String: Any] = ["Label": label, "ProgramArguments": [node, helper, "serve", "--state", stateDir.path], "RunAtLoad": true,
                 "KeepAlive": ["SuccessfulExit": false], "ThrottleInterval": 15, "ExitTimeOut": 60,
                 "WorkingDirectory": stateDir.path, "StandardOutPath": log, "StandardErrorPath": log,
-                "EnvironmentVariables": ["PATH": [URL(fileURLWithPath: node).deletingLastPathComponent().path, FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")]]
+                "EnvironmentVariables": ["PATH": [URL(fileURLWithPath: node).deletingLastPathComponent().path, providerBin, FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")]]
             let path = agentDir.appendingPathComponent("\(label).plist")
             try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: path, options: .atomic)
             if (try? await process("/bin/launchctl", ["print", "gui/\(getuid())/\(label)"])) == nil { _ = try await process("/bin/launchctl", ["bootstrap", "gui/\(getuid())", path.path]) }
