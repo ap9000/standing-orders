@@ -87,6 +87,15 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   "check-log": 64 * 1024,
   screenshot: SCREENSHOT_BYTE_CAP,
   "structured-output": 64 * 1024,
+  // The planner's recorded source is bounded BEFORE it is written (the
+  // planner-source cap IS this value), so a stored record is never a
+  // truncated one: what the record holds is exactly what the planner read.
+  "plan-contract": 128 * 1024,
+  // The inherited review-context inventory (v51): structured JSON that is
+  // never byte-truncated — the capture sheds whole items against its own
+  // aggregate content limit (REVIEW_CONTEXT_LIMITS) and this cap only has
+  // to hold the JSON-escaped form of that bounded content plus provenance.
+  "review-context": 768 * 1024,
 };
 
 export function evidenceRoot(home: string): string {

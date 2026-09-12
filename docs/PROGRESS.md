@@ -1,5 +1,149 @@
 # Progress
 
+**2026-09-12 UTC — Contract handoffs integrated and certified in bounded workflows.**
+All three implementation tasks completed through Standing Orders, followed by
+operator-led integration hardening. This is assisted implementation. The Agor
+source assessment supports using existing task/run/artifact records, explicit
+ancestry, and bounded context instead of adding a memory platform.
+
+Planning now proves the recorded source bytes and full contract again at
+atomic finalization; stale identity releases the claim, and lost evidence or
+undeclared amendments cannot land a plan. Decision history beyond the explicit
+five-answer limit refuses visibly. Revision creation binds the actual source
+run/scope/head and full annotation batch, retains permission and budget ceilings,
+and preserves bounded repair ancestry. New revision builds start at the verified
+source head. Review inventories retain paths across successive revisions, bind
+ancestor evidence and reviewer lineage, verify Git blob identities, require
+criterion-relevant citations, and recheck input custody at atomic ingestion.
+Mixed patch/inherited coverage and missing context are represented explicitly.
+
+A private backup of the live schema-49 database upgraded to 51 twice-opened
+successfully, with all table counts preserved and clean integrity/foreign-key
+checks. The live controller remains on schema 49. The full suite passes 132 files / 2,507 tests (12 existing skips). Both real
+provider handoff journeys and the broader 20-case pilot pass without rescue
+interventions. See [the integration report](assessments/CONTRACT_HANDOFF_RESULT.md)
+and its compact certificate. Earlier per-task certificates below describe their
+own source snapshots.
+
+
+**2026-09-11 — Revision terms preserved through one boundary (contract
+handoff task 2).** Annotation revisions, CI repair drafts, and criterion
+repair drafts now file through one `Store.sealRevision` under one
+field-by-field policy. The seal proves the source binding inside its own
+savepoint before creating anything — source task, source run belongs to it,
+the scope digest the caller read still stands, the stored terms read back
+exactly, and the brief file re-hashes and names that exact source — and
+refuses `source-task` / `source-run` / `stale-source` / `source-terms` /
+`brief-custody` / `comments-taken` / `duplicate` with zero rows, nested or
+not. The child carries the source's goal (plus the described repair),
+exclusions, touches, exact rubric, declared risk (never below the signed
+level), quality (strict stays strict), permission posture (never wider), budget
+ceiling (a mode default may only tighten it), route overrides, and pins —
+read from the source rows, never a caller's copy — so a changed installation
+default cannot downgrade, widen, or uncap a revision. The route, profile, and
+fallback chain are re-resolved for a fresh approval; the approval stamp,
+attended authorizations, publication and merge grants, and the plan never
+inherit. The repair loop finds the chain a task continues through its
+revision ancestry (`repairLineageOf`), so an annotation or CI detour keeps
+the root, the attempts spent, and the remaining automatic bound across a
+restart; no new retry engine and no schema change. The task page's revision
+card, the approval card, and the task chat card show the actual terms and
+lineage (`revisionLineageOf`). Policy: [REVISION_TERMS.md](REVISION_TERMS.md);
+coverage in `src/revision-terms.test.ts` and `src/serve.test.ts`.
+**2026-09-11 — Preserve the filed planning contract (schema v51).** The
+planner now receives exactly what the operator filed, as quoted data: the
+scope's goal, exclusions, touches, and the whole rubric (ids, statements,
+evidence kinds, advisory `how`), the execution terms (risk, quality, budget,
+resolved agent, task-level permission), the revision brief by verified read
+when the task revises reviewed work, and the earlier answers — assembled per
+attempt by `src/planner-source.ts`, bounded by one explicit 128 KiB cap, and
+refused in words before any workspace, run, or provider spend when over it or
+when the brief cannot be verified (the task page's dispatch diagnosis says the
+same). The record is sealed on the planner run as a `plan-contract` artifact
+before the brief is composed, the run is stamped with the filed scope digest,
+and the brief carries the record between markers with its source identity.
+Filed intent is data, never authorization. A drafted plan must reproduce the
+filed contract exactly or state an `amendment`: a silent change is a
+`silent-amendment` malformed plan, corrected in the same session by adding the
+note (goal/outOfScope/touches/acceptance stay frozen) or sealed as a durable
+incident when no session can be resumed. `finalizePlanFenced` re-derives the
+source identity inside its transaction and refuses a draft whose source moved
+— scope rewritten, approval changed, terms re-termed — as `stale-source`
+(claim released, no strike, the newer scope untouched, the task still
+requested); on ingestion it seals `plan-contract.json` with the filed terms,
+the proposed terms, the amendment, and every mechanical addition, change, and
+removal. The task page, the approval ceremony, `/next`, the chat approval
+card, `task show`, and the `task approve` preview show the contract as
+preserved exactly, amended (every change beside the planner's reason, and the
+plain consequence that the yes binds the amended terms), or drafted with no
+scope filed; the ordinary approval binds the scope row's digest as before.
+Corrections inherit the root's record; a resumed decision re-derives the same
+identity and quotes the whole request again. The v50→v51 upgrade widens
+`artifact.kind` by the v46 copy-rename recipe, byte for byte, refusing any
+predecessor shape it cannot prove. Typecheck, the full suite (129 files, 2,444
+tests), the build, and the six-stage crash canary on the rebuilt runtime
+(`evidence/preserve-filed-planning-contract/crash-canary.json`, runtime
+`f6eec868…`) pass. Not in this change: revision-term inheritance, inherited
+review context, and the integrated request-to-review journey with a real
+provider.
+**2026-09-12 — Inherited review context (schema v51).** A small revision to a
+larger feature used to hand its reviewer only its own patch, so every
+criterion the earlier build implemented could honestly be judged only
+`cannot-tell` (run 1518 said so three times over work run 1514 had upheld).
+A revision run's settlement now seals one more verified artifact,
+`review-context` (`src/review-context.ts`): the source files relevant to
+the signed criteria, read from git objects at the revision's exact sealed
+head by `ls-tree` and `cat-file blob` — no lazy fetch, replace refs,
+filters, textconv, or diff drivers, and never the working tree — with each
+item bound to the source run, the commit, the path, git's blob id, and a
+SHA-256 of the stored bytes. Relevance comes from verified ancestor
+artifacts only (the source run's sealed proof — its changed paths and the
+changed-path evidence it cited per criterion — and its sealed diff-stat);
+lineage is the revision brief artifact's own run (`store.revisionSourceOf`).
+Bounds are explicit (48 KiB per item, 192 KiB aggregate, 24 items, 200
+candidate paths) and never truncate: an oversized, binary, non-UTF-8,
+missing, non-file, or over-aggregate path is a named gap; a secret-shaped
+line is redacted before storage and the redaction is a gap too. Ancestry is
+checked (`merge-base --is-ancestor`), the source scope must still carry the
+digest the source run built under, and each earlier reviewer judgement on
+the source is carried as `priorReview` CONTEXT with its own proof —
+same criterion text, verified ancestry, relevant code byte-identical at
+both heads, the source review's evidence bindings intact — marked
+`eligible` or `invalid` with reasons, and never folded as this run's
+verdict. Per criterion the inventory records `coverage`: `patch` (new to
+this rubric, or its relevant code is in the revision's own diff), `context`
+(inherited and every relevant path sealed), or `gap` (inherited and
+something is missing — the reasons listed); `adjudicate` copies it onto the
+stored matrix rows, where changed criterion text, changed code, stale or
+unproven ancestry, tampered ancestors, and limits all read as gaps or
+invalid support. The reviewer pass materializes `REVIEW-CONTEXT.json`
+(re-serialized from the strict reader) beside the patch, rubric, proof,
+check log, and screenshots — the same bytes in Claude's scratch and Codex's
+inline bundle, with one aggregate text limit now measured identically for
+every provider — seals and re-hashes it after the agent ran, re-verifies
+the whole inventory before spend, and binds it at atomic ingestion
+(`criterion_review.context_artifact`/`context_sha`, refused both ways: an
+inventory added after materialization or removed before ingest is
+`stale-evidence`, a tampered scratch is `dirty-scratch`, and every failed
+attempt stays on record under the unchanged three-attempt cap). Judgements
+must cite supplied provenance: an `upholds` or `contradicts` on a criterion
+not judged from the patch whose note cites no `ctx-<n>` item, patch path,
+or sealed file name is refused whole (the same-session correction names
+the id). Semantic coverage is a distinct projection (`semanticCoverage`,
+`coverageWords` in `proof.ts`) rendered beside — never inside — the machine
+verdict on the task page, run page, chat receipt, and `task show`: under
+`default` quality an independent review is optional and the words say so;
+under `strict` it is required and only `upholds` satisfies it — `cannot-tell`
+never counts, under either policy — with every context gap named in the
+same words the inventory used. The verdict fold itself is unchanged. Schema
+v51 widens `artifact.kind` by the same exact-recognizer copy/rename as
+v34/v38/v46 and adds the two binding columns additively; every historical
+row reads back byte for byte. Revision branches still grow from the
+project's checked-out branch (revision creation is a separate bounded
+task): a source head that is not an ancestor of the revision's head is
+reported as `stale-ancestry` on every inherited criterion rather than
+trusted.
+
 **2026-09-11 — Bounded explicit review retries (schema v50).** A finished
 build's independent review that failed or was interrupted can now be retried
 by an operator — `standing-orders task review <run> --as <you> --token <t>`

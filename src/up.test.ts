@@ -245,6 +245,25 @@ describe("standing-orders up", () => {
 });
 
 describe("parser compatibility (finding 22)", () => {
+  test("minted tokens beginning with -- remain credentials without swallowing flags", () => {
+    const token = "--" + "a".repeat(41);
+    const parsed = parseOperateArgs(["--token", token, "--json"]);
+    if ("error" in parsed) throw new Error(parsed.error);
+    expect(parsed.flags.get("token")).toBe(token);
+    expect(parsed.flags.get("json")).toBe(true);
+    expect(parseOperateArgs(["--token", "--json"])).toEqual({ error: "--token needs a value" });
+  });
+
+  test("explicit value syntax preserves literals, repeated repos and safe errors", () => {
+    const parsed = parseOperateArgs(["--token=--literal=password", "--repo=/a", "--repo=/b,/c"]);
+    if ("error" in parsed) throw new Error(parsed.error);
+    expect(parsed.flags.get("token")).toBe("--literal=password");
+    expect(parsed.flags.get("repo")).toBe("/b,/c");
+    expect(parsed.repoList).toEqual(["/a", "/b", "/c"]);
+    expect(parseOperateArgs(["--json=secret"])).toEqual({ error: "--json does not take a value" });
+    expect(parseOperateArgs(["--unknown=secret"])).toEqual({ error: "unknown option --unknown — add --help to any queue command for the whole surface" });
+  });
+
   test("repeated --repo: the Map keeps last-wins for existing verbs; the list keeps every one", () => {
     const parsed = parseOperateArgs(["--repo", "/a", "--repo", "/b,/c"]);
     if ("error" in parsed) throw new Error(parsed.error);

@@ -52,8 +52,9 @@ const V40_CRITERION_REVIEW_DDL = `CREATE TABLE criterion_review (
   created_at    TEXT NOT NULL
 )`;
 const V40_COLUMNS = ["id", "reviewer_run", "source_run", "criterion_id", "judgement", "note", "artifact", "artifact_sha", "author", "created_at"] as const;
-/** The seven binding columns the current writer (ingestReview) needs. */
-const BINDING_COLUMNS = ["scope_digest", "head_sha", "proof_artifact", "proof_sha", "check_log_artifact", "check_log_sha", "screenshots_json"] as const;
+/** The binding columns the current writer (ingestReview) needs: the seven
+ * audit-hardening bindings, then the v51 review-context pair. */
+const BINDING_COLUMNS = ["scope_digest", "head_sha", "proof_artifact", "proof_sha", "check_log_artifact", "check_log_sha", "screenshots_json", "context_artifact", "context_sha"] as const;
 
 type ColumnInfo = { name: string; type: string; notnull: number; dflt_value: unknown; pk: number };
 function columnsOf(file: string): ColumnInfo[] {
@@ -231,7 +232,7 @@ describe("an existing ten-column criterion_review table gains the review binding
     const after = reviewRowsOf(file);
     expect(after).toHaveLength(1);
     for (const column of V40_COLUMNS) expect(after[0]![column]).toEqual(historical[column]);
-    expect(after[0]).toMatchObject({ scope_digest: null, head_sha: null, proof_artifact: null, proof_sha: null, check_log_artifact: null, check_log_sha: null, screenshots_json: "[]" });
+    expect(after[0]).toMatchObject({ scope_digest: null, head_sha: null, proof_artifact: null, proof_sha: null, check_log_artifact: null, check_log_sha: null, screenshots_json: "[]", context_artifact: null, context_sha: null });
     expect(before).toEqual([historical]);
 
     // The store's own reader sees the same unbound row.

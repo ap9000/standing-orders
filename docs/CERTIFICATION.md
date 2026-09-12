@@ -45,7 +45,25 @@ The approver and approval are automated fixture setup inside the disposable
 database. A passing result demonstrates this bounded workflow without a manual
 rescue; it does not measure planning-policy quality across arbitrary projects.
 
-## Current crash matrix and real-task pilot
+## Contract handoff integration (2026-09-12 UTC)
+
+Runtime source `1b3a2ba` passed the full regression suite (132 files, 2,507
+passed, 12 skipped), typecheck/build, and two complete real-provider journeys:
+detailed filing → planning → exact approval → build → independent review →
+narrow revision → fresh approval → review of inherited code. Claude `opus` and
+Codex `gpt-5.6-sol` preserved the high-risk/strict contract, left the helper
+unchanged, upheld all three criteria after each build, and needed no rescue.
+The subsequent broader pilot passed 20/20, with 44/44 criteria independently
+upheld and eight screenshot artifacts verified. The executable hash stayed
+`bb56ddbee14dec222d131fb65483d27aec51858ebb559571bfdd7bc38edc9d5c`.
+
+See [the integration report](assessments/CONTRACT_HANDOFF_RESULT.md) and
+[compact machine-readable evidence](assessments/evidence/contract-handoffs.json).
+Implementation included operator-led hardening. The live controller remains
+on schema 49. The earlier crash matrix below has a different runtime identity;
+it has not been relabeled as a crash certificate for this integration.
+
+## Earlier crash matrix and real-task pilot
 
 Candidate `a9caf73` passed the September 11 macOS arm64 / Node 22.22.0 run:
 

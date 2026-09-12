@@ -52,8 +52,41 @@ import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
 import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
-import { readVerifiedArtifact, readVerifiedReport } from "./evidence.js";
-import { verdictWords as proofVerdictWords, matrixWords } from "./proof.js";
+import { readVerifiedArtifact, readVerifiedReport, storeEvidence } from "./evidence.js";
+import { contractChangesOf, decodePlanContractRecord, describeContractChanges, encodePlannerSource, plannerSourceOf } from "./planner-source.js";
+
+/**
+ * The drafted plan's contract standing, in terminal lines (contract
+ * handoff, task 1): preserved exactly, amended (every change and the
+ * planner's reason), or drafted with nothing filed — the same facts the
+ * task page and approval ceremony show, so a yes at a terminal reads the
+ * amendment too. Nothing when no draft record exists.
+ */
+function planContractLines(store: Store, evidenceRoot: string, taskId: string): string[] {
+  const ref = store.lookupRef(taskId);
+  if (ref === null || ref.plan !== "drafted") return [];
+  const artifact = store.latestPlanContractArtifact(ref.id);
+  if (artifact === null) return [];
+  let record: ReturnType<typeof decodePlanContractRecord>;
+  try {
+    const verified = readVerifiedArtifact(evidenceRoot, artifact);
+    if (!verified.ok) return [`  filed contract: record does not verify — ${verified.problem} (run ${artifact.run})`];
+    record = decodePlanContractRecord(verified.content);
+  } catch {
+    return [`  filed contract: record could not be read (run ${artifact.run})`];
+  }
+  if (record === null) return [`  filed contract: record is not the JSON it was sealed as (run ${artifact.run})`];
+  const scope = store.getScope(taskId);
+  const stale = scope !== null && contractChangesOf(record.proposed, scope).length > 0 ? " (the scope was edited after this draft)" : "";
+  if (record.filed === null) return [`  filed contract: none — the planner drafted every term from the title and repository${stale}`];
+  if (record.changes.length === 0) return [`  filed contract: preserved exactly by the plan — approval binds the terms you filed${stale}`];
+  return [
+    `  filed contract: AMENDED by the plan — ${record.changes.length} change${record.changes.length === 1 ? "" : "s"}; approval binds the amended terms${stale}`,
+    `    why: ${record.amendment ?? "(the planner stated no reason)"}`,
+    ...describeContractChanges(record.changes).map(line => `    ${line}`),
+  ];
+}
+import { verdictWords as proofVerdictWords, matrixWords, semanticCoverage, coverageWords } from "./proof.js";
 import { probeRepo, isVerified } from "./probe.js";
 import {
   diagnoseTaskDispatch,
@@ -592,18 +625,24 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
       positional.push(argument);
       continue;
     }
-    const name = argument.slice(2);
+    const equals = argument.indexOf("=");
+    const name = argument.slice(2, equals === -1 ? undefined : equals);
     if (booleans.has(name)) {
+      if (equals !== -1) return { error: `--${name} does not take a value` };
       flags.set(name, true);
       continue;
     }
     if (!wantsValue.has(name)) {
       return { error: `unknown option --${name} — add --help to any queue command for the whole surface` };
     }
-    const value = argv[++index];
+    const value = equals === -1 ? argv[++index] : argument.slice(equals + 1);
     // A following --flag is not a value — consuming it would swallow a real
     // flag and leave this one holding a name-shaped lie.
-    if (value === undefined || value.startsWith("--")) return { error: `--${name} needs a value` };
+    // Minted 32-byte base64url credentials may begin with two hyphens.
+    // Accept that exact token shape without swallowing a following flag.
+    // Explicit --name=value also carries arbitrary literal leading hyphens.
+    const mintedToken = name === "token" && value !== undefined && /^[A-Za-z0-9_-]{43}$/.test(value);
+    if (value === undefined || (equals === -1 && value.startsWith("--") && !mintedToken)) return { error: `--${name} needs a value` };
     flags.set(name, value);
     if (name === "repo") {
       for (const one of value.split(",").map(part => part.trim()).filter(part => part !== "")) repoList.push(one);
@@ -2960,6 +2999,21 @@ async function tickCommand(
     }
 
     if (wantsPlan) {
+      // THE FILED REQUEST, FIRST (contract handoff, task 1): everything the
+      // operator filed — scope, rubric, terms, revision brief, earlier
+      // answers — assembled and measured against its byte cap BEFORE a
+      // workspace is leased or a provider spends. Over the cap, or a brief
+      // that cannot be read, is a refusal in words here: nothing trims a
+      // criterion silently, and nothing plans against half a contract.
+      const answers = store
+        .answeredDecisionsFor(id, 6)
+        .map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
+      const sourced = plannerSourceOf(store, context.evidenceRoot, id, answers);
+      if (!sourced.ok) {
+        release(store, lease, clock());
+        dispatched.push({ id, outcome: "skipped", reason: `planner-source-${sourced.reason}`, detail: sourced.message });
+        continue;
+      }
       // The planner's workspace is disposable and its branch namespace is
       // its own — never the builder's, so a later build starts from base
       // with nothing a planning session could have left as an ancestor
@@ -2996,9 +3050,40 @@ async function tickCommand(
         now: clock(),
         ...(planStamp === null ? {} : { route: planStamp }),
       });
-      const answers = store
-        .answeredDecisionsFor(id, 5)
-        .map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
+      // The source is RECORDED on the attempt before the brief is even
+      // composed: the exact bytes the planner reads, sealed as evidence,
+      // and the filed scope's digest stamped as what this run was proved
+      // against. A record that cannot be written ends the attempt here —
+      // an unrecorded input is the loss this road exists to prevent.
+      let sourceArtifact: number;
+      try {
+        sourceArtifact = storeEvidence(
+          store,
+          context.evidenceRoot,
+          planRunId,
+          "plan-contract",
+          "planner-source.json",
+          encodePlannerSource(sourced.source),
+          `planner source ${sourced.source.sourceDigest.slice(0, 12)} — the filed request quoted into the brief, recorded before spend (${sourced.bytes} bytes)`,
+          clock(),
+          { captureStatus: "ok" },
+        );
+      } catch (error) {
+        await worktrees.release(planLeased.worktree.path, clock());
+        const unrecorded = finalizePlanFailureFenced(store, {
+          leaseId: lease,
+          runId: planRunId,
+          taskId: id,
+          kind: "failure",
+          message: `the planner's source could not be recorded: ${error instanceof Error ? error.message : String(error)}`,
+          now: clock(),
+        });
+        dispatched.push({ id, outcome: "failed", reason: "evidence" });
+        if (!unrecorded.ok) release(store, lease, clock());
+        broke++;
+        continue;
+      }
+      store.stampRun(planRunId, { scopeDigest: sourced.source.contract.scope?.digest ?? "" });
       const outcome = await planTask(store, {
         taskId: id,
         taskTitle: store.getTask(id)?.title ?? id,
@@ -3014,6 +3099,7 @@ async function tickCommand(
         onProviderSpawn: pid => { worktrees.recordProviderOccupancy(planLeased.worktree.path, runner, pid, planLeased.worktree.leaseEpoch); },
         evidenceRoot: context.evidenceRoot,
         answers,
+        source: sourced.source,
         provider: spec.provider,
         ...(spec.model === null ? {} : { model: spec.model }),
         ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
@@ -3049,11 +3135,19 @@ async function tickCommand(
           plan: outcome.drafted.plan,
           artifact: outcome.drafted.artifact,
           repairRunId: outcome.drafted.repairRunId,
+          source: sourced.source,
+          sourceArtifact,
+          evidenceRoot: context.evidenceRoot,
           now: clock(),
         });
         if (sealed.ok) {
           store.clearQuota(runner, spec.provider, spec.model ?? "");
-          dispatched.push({ id, outcome: "planned" });
+          dispatched.push({ id, outcome: "planned", ...(sealed.changes === 0 ? {} : { detail: `${sealed.changes} contract change${sealed.changes === 1 ? "" : "s"} proposed${sealed.amendment === null ? "" : " with an amendment"}` }) });
+        } else if (sealed.reason === "stale-source" || sealed.reason === "source-invalid") {
+          // The newer source stands; the draft is not ingested and the
+          // task stays requested — the next pass plans against what is
+          // filed now. Not a strike: the planner did nothing wrong.
+          dispatched.push({ id, outcome: "skipped", reason: sealed.reason, detail: sealed.detail });
         } else {
           dispatched.push({ id, outcome: "failed", reason: "fenced" });
           broke++;
@@ -3130,7 +3224,7 @@ async function tickCommand(
       });
       store.stampRun(scoutRunId, { scopeDigest: scopeRow?.approvedDigest ?? "", profileDigest: profileDigestOf(proof.effective.profile) });
       const scoutAnswers = store
-        .answeredDecisionsFor(id, 5)
+        .answeredDecisionsFor(id, 6)
         .map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
       const scouted = await scoutTask(store, {
         taskId: id,
@@ -3224,13 +3318,38 @@ async function tickCommand(
       { cwd: repo },
     );
 
+    let buildBase = base;
+    if (ref.revisionOf !== null) {
+      const source = store.revisionSourceOf(ref.id);
+      const sourceRun = source === null ? null : store.getRun(source.sourceRun);
+      let problem: string | null = null;
+      if (source === null || sourceRun === null || store.externalIdFor(sourceRun.taskRef) !== ref.revisionOf || sourceRun.headRevision === null) problem = "the revision source has no matching sealed head";
+      else {
+        try {
+          const verified = readVerifiedArtifact(context.evidenceRoot, source.briefArtifact);
+          const brief = verified.ok ? JSON.parse(verified.content.toString("utf8")) as { head?: unknown; sourceScopeDigest?: unknown } : null;
+          if (brief === null || brief.head !== sourceRun.headRevision || brief.sourceScopeDigest !== sourceRun.scopeDigest) problem = "the revision brief no longer binds the source head and scope";
+          else if (exists.code !== 0 && text(flags, "base") === undefined) buildBase = sourceRun.headRevision;
+          else {
+            const descendant = exists.code === 0 ? branch : base;
+            const ancestry = await git("git", ["--no-lazy-fetch", "--no-replace-objects", "merge-base", "--is-ancestor", sourceRun.headRevision, descendant], { cwd: repo });
+            if (ancestry.code !== 0) problem = "the requested revision base does not contain its source head";
+          }
+        } catch { problem = "the revision source brief cannot be verified"; }
+      }
+      if (problem !== null) {
+        release(store, lease, clock());
+        dispatched.push({ id, outcome: "skipped", reason: "revision-brief", detail: problem });
+        continue;
+      }
+    }
     const leased = await worktrees.lease({
       repo,
       branch,
       runner,
       taskRef: ref.id,
       now: clock(),
-      ...(exists.code === 0 ? {} : { base }),
+      ...(exists.code === 0 ? {} : { base: buildBase }),
       reclaim: { evidenceRoot: context.evidenceRoot },
     });
     if (!leased.ok) {
@@ -9650,6 +9769,10 @@ function showTask(positional: readonly string[], context: Context): number {
     proofReasons: proofVerdict?.reasons ?? [],
     proofMatrix: proofVerdict?.matrix ?? [],
     proofAccepted,
+    // v51: semantic coverage — what an independent reviewer settled under
+    // the run's signed policy, with every context gap named — the same
+    // projection the console prints, never re-derived here.
+    semanticCoverage: latestFinished === null ? null : semanticCoverage(proofVerdict?.matrix ?? [], latestFinished.qualityMode ?? "default"),
     // v50: the latest build's bounded review history — every root attempt
     // in order, the open request, and the one state they add up to.
     review: latestFinished === null ? null : store.reviewRetryStateOf(latestFinished.id),
@@ -9668,6 +9791,7 @@ function showTask(positional: readonly string[], context: Context): number {
           `  proof: ${proofVerdictWords(detail.proofVerdict, detail.proofReasons).word}${detail.proofAccepted ? " (accepted)" : ""}`,
           ...(detail.proofReasons.length > 0 ? [`    ${detail.proofReasons.join("; ")}`] : []),
           ...matrixWords(detail.proofMatrix),
+          ...(detail.semanticCoverage === null ? [] : coverageWords(detail.semanticCoverage).map(line => `  ${line}`)),
         ]),
     ...(detail.report === null
       ? []
@@ -9689,6 +9813,7 @@ function showTask(positional: readonly string[], context: Context): number {
     ...(scope === null
       ? ["  no scope — nothing will build this until one is written and approved"]
       : describeScope(scope, readiness)),
+    ...planContractLines(store, context.evidenceRoot, id),
     // The route's standing (v47): sealed, proposed, legacy, or unreadable —
     // the projection itself is in describeScope's lines above.
     ...taskRouteStandingLines(id, routed),
@@ -10652,6 +10777,7 @@ async function approveTask(
     write(`Approving lets a builder work on ${id}, within exactly this:`);
     write("");
     for (const line of describeScope(scope)) write(line);
+    for (const line of planContractLines(store, context.evidenceRoot, id)) write(line);
     const interactiveRace = store.activeTournamentTerms(store.refFor(BUILT_IN, id).id);
     if (interactiveRace !== null) {
       write("");
@@ -10685,6 +10811,7 @@ async function approveTask(
     write(`Would approve this, and let a builder work on ${id}:`);
     write("");
     for (const line of describeScope(scope)) write(line);
+    for (const line of planContractLines(store, context.evidenceRoot, id)) write(line);
     write("");
     const previewRace = store.activeTournamentTerms(store.refFor(BUILT_IN, id).id);
     if (previewRace !== null) {

@@ -57,7 +57,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
-import { dispatchStatusToken, passFraction, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
+import { dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
   buildDataDocument,
@@ -122,6 +122,7 @@ import {
 import { isQualityMode, qualityModeTitle, type QualityMode } from "./quality.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { parseExecutionPlanDocument, PLAN_LIMITS, milestonesOf, type MilestoneState } from "./plan.js";
+import { contractChangesOf, decodePlanContractRecord, describeContractChanges, type ContractChange } from "./planner-source.js";
 import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
 import { readLiveWindow } from "./live.js";
 import { dirname } from "node:path";
@@ -168,7 +169,7 @@ import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf,
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, readProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
-import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus, ReviewRetryState } from "./store.js";
+import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus, ReviewRetryState, RevisionLineage } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
 import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
@@ -1112,6 +1113,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response, 200, nextPage(chromeFor(project, "inbox"), {
           item, scope,
           planDocument: planView?.document ?? null,
+          planContract: ref === null || planView === null ? null : planContractViewOf(ref.id, scope),
           approvalDigest,
           raceTerms,
           deliverable: ref?.deliverable ?? "branch",
@@ -1120,7 +1122,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         }));
       }
       return sendScreen(response, 200, nextPage(chromeFor(project, "inbox"), {
-        item, scope: null, planDocument: null, csrf, nonce: "",
+        item, scope: null, planDocument: null, planContract: null, csrf, nonce: "",
         approvalDigest: null, raceTerms: null, route: null,
         remaining: remaining.length, skipped: [...skipped], now,
       }));
@@ -2927,11 +2929,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       const parsed = JSON.parse(read.content.toString("utf8")) as {
         sourceTask?: unknown;
         sourceRun?: unknown;
+        kind?: unknown;
         comments?: { path?: unknown; line?: unknown; note?: unknown; author?: unknown }[];
       };
       return {
         sourceTask: String(parsed.sourceTask ?? "?"),
         sourceRun: Number(parsed.sourceRun ?? 0),
+        kind: parsed.kind === "ci-repair" ? "ci-repair" : parsed.kind === "criterion-repair" ? "criterion-repair" : "annotations",
+        lineage: store.revisionLineageOf(ref.externalId, clock()),
         comments: (parsed.comments ?? []).slice(0, 100).map(one => ({
           path: one.path === null || one.path === undefined ? null : String(one.path),
           line: one.line === null || one.line === undefined ? null : Number(one.line),
@@ -2999,6 +3004,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         proofMatrix: verdict?.matrix ?? [],
         proofMatrixLinks: evidenceLinksFor(artifacts),
         proofAccepted: store.proofAcceptance(latest.id) !== null,
+        qualityMode: latest.qualityMode ?? "default",
         // Either direction: the ORIGINAL task's page finds the chain by
         // its own latest run (the one that triggered a draft); a DRAFT
         // task's page finds the SAME chain by being named as the draft.
@@ -3026,6 +3032,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         plan: ref?.plan ?? null,
         planDocument: planView?.document ?? null,
         planSha: planView?.sha256 ?? null,
+        planContract: ref === null || planView === null ? null : planContractViewOf(ref.id, scope),
         deliverable: ref?.deliverable ?? "branch",
         report: ref === null ? null : readVerifiedReport(store, evidenceRoot, ref.id),
         revision,
@@ -3280,6 +3287,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               nonce: view.nonce,
               digest: view.approvalDigest ?? scope.digest,
               planDocument: view.planDocument,
+              planContract: view.planContract ?? null,
               deliverable: view.deliverable ?? "branch",
               raceTerms: view.raceTerms ?? null,
               revision: view.revision ?? null,
@@ -5347,6 +5355,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         schema: 1 as const,
         sourceTask: sourceTaskId,
         sourceRun: id,
+        sourceScopeDigest: sourceScope?.digest ?? null,
         head: found.headRevision,
         diffArtifactSha: terminal?.sha256 ?? null,
         comments: comments.map(one => ({
@@ -5379,37 +5388,24 @@ export function createDecisionServer(options: ServeOptions): Server {
         // posture ride the FILING so the digest binds them (surfaces
         // round 1, finding 2) — never a stamp after the fact.
         const coverage = who.via === "cookie" ? modeFilingCoverage(store, repo, who.name, now) : null;
+        // ONE revision boundary (contract handoff task 2): the source's
+        // goal, exclusions, touches, rubric, risk, quality, posture,
+        // budget, overrides and pins are read from the SOURCE ROWS inside
+        // the seal, which re-proves the task/run/scope-digest binding and
+        // the brief's custody first — the scope read above only names the
+        // digest this batch was drafted against.
         const result = store.sealRevision(
-        {
-          task: {
-            title: `Revise ${sourceTaskId} from ${comments.length} annotation${comments.length === 1 ? "" : "s"} on build #${id}`,
-            ...(repo === null ? {} : { repo }),
-            goal:
-              `${sourceScope?.goal ?? `revise ${sourceTaskId}`}` +
-              ` — apply the annotations recorded on build #${id}; the revision brief carries the exact batch`,
-            outOfScope: sourceScope?.outOfScope ?? null,
-            touches: sourceScope?.touches ?? [],
-            acceptance: sourceScope !== null && sourceScope.acceptance.length > 0
-              ? sourceScope.acceptance
-              : [{ id: "c1", statement: "The operator has reviewed this revision and written a real rubric before approving it.", how: null, evidence: ["manual-review"] as const }],
-            ...(coverage?.defaultBudgetMicrousd != null ? { budgetMicrousd: coverage.defaultBudgetMicrousd } : {}),
-            ...(coverage?.escalated === true ? { posture: "escalated" as const } : {}),
+          {
+            source: { task: sourceTaskId, run: id, scopeDigest: sourceScope?.digest ?? null },
+            brief: { evidenceRoot, key, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "machine-authored revision brief (exit 0)" },
+            child: {
+              title: `Revise ${sourceTaskId} from ${comments.length} annotation${comments.length === 1 ? "" : "s"} on build #${id}`,
+              repair: `apply the annotations recorded on build #${id}; the revision brief carries the exact batch`,
+            },
+            commentIds: comments.map(one => one.id),
+            coverage,
           },
-          artifact: {
-            run: id,
-            kind: "revision-brief",
-            key,
-            bytesOriginal: briefBytes.length,
-            bytesStored: briefBytes.length,
-            truncated: false,
-            sha256: createHash("sha256").update(briefBytes).digest("hex"),
-            capture: "machine-authored revision brief (exit 0)",
-          },
-          revisionOf: sourceTaskId,
-          commentIds: comments.map(one => one.id),
-          sourceRun: id,
-        },
-        now,
+          now,
         );
         if (result.ok && coverage !== null) {
           // A scope whose profile could not resolve is unapprovable by the
@@ -5424,7 +5420,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return result;
       });
-      if (!sealed.ok) return refuse(response, who, 409, `could not seal the revision: ${sealed.reason}`, `/r/${id}`);
+      if (!sealed.ok) return refuse(response, who, 409, `could not seal the revision: ${sealed.detail}`, `/r/${id}`);
       return redirect(response, taskHref(sealed.id));
     }
 
@@ -5448,7 +5444,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
       const sourceScope = store.getScope(sourceTaskId);
-      const repo = taskRepoOf(found.taskRef);
       // The observed episode, not the click: the brief binds the head the
       // failure was SEEN on and when (audit C-2) — a PR that advanced since
       // is a different failure, and the click time is not an observation.
@@ -5462,6 +5457,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         kind: "ci-repair" as const,
         sourceTask: sourceTaskId,
         sourceRun: id,
+        sourceScopeDigest: sourceScope?.digest ?? null,
+        head: found.headRevision,
         pr: publication.prNumber,
         prUrl: publication.prUrl,
         publishedHeadSha: publication.headSha,
@@ -5471,35 +5468,22 @@ export function createDecisionServer(options: ServeOptions): Server {
       const briefBytes = Buffer.from(JSON.stringify(brief, null, 2), "utf8");
       const briefName = `ci-repair-brief-${randomBytes(6).toString("hex")}.json`;
       const key = writeEvidenceFile(evidenceRoot, id, briefName, briefBytes);
+      // The SAME revision boundary the annotation road and the criterion
+      // repair use (contract handoff task 2): the inherited terms come from
+      // the source rows inside the seal; the scope read above only names
+      // the digest this draft was composed against.
       const sealed = store.sealRevision(
         {
-          task: {
+          source: { task: sourceTaskId, run: id, scopeDigest: sourceScope?.digest ?? null },
+          brief: { evidenceRoot, key, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "machine-authored ci-repair brief (exit 0)" },
+          child: {
             id: draftId,
             title: `repair ${sourceTaskId}: CI failing on PR #${publication.prNumber}`,
-            ...(repo === null ? {} : { repo }),
-            goal:
-              `${sourceScope?.goal ?? `repair ${sourceTaskId}`}` +
-              ` — repair the failing CI on PR #${publication.prNumber} (failing head ${(episode?.headSha ?? publication.headSha).slice(0, 12)}). ` +
+            repair:
+              `repair the failing CI on PR #${publication.prNumber} (failing head ${(episode?.headSha ?? publication.headSha).slice(0, 12)}). ` +
               `Read the failing checks on GitHub before approving; this draft carries no log content.`,
-            outOfScope: sourceScope?.outOfScope ?? null,
-            touches: sourceScope?.touches ?? [],
-            acceptance: sourceScope !== null && sourceScope.acceptance.length > 0
-              ? sourceScope.acceptance
-              : [{ id: "c1", statement: "The operator has reviewed this revision and written a real rubric before approving it.", how: null, evidence: ["manual-review"] as const }],
           },
-          artifact: {
-            run: id,
-            kind: "revision-brief",
-            key,
-            bytesOriginal: briefBytes.length,
-            bytesStored: briefBytes.length,
-            truncated: false,
-            sha256: createHash("sha256").update(briefBytes).digest("hex"),
-            capture: "machine-authored ci-repair brief (exit 0)",
-          },
-          revisionOf: sourceTaskId,
           commentIds: null,
-          sourceRun: id,
         },
         now,
       );
@@ -5507,8 +5491,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(
           response,
           who,
-          sealed.reason === "duplicate" ? 409 : 400,
-          sealed.reason === "duplicate" ? `already drafted as ${draftId}` : `could not draft: ${sealed.reason}`,
+          sealed.reason === "duplicate" ? 409 : sealed.reason === "stale-source" || sealed.reason === "comments-taken" ? 409 : 400,
+          sealed.reason === "duplicate" ? `already drafted as ${draftId}` : `could not draft: ${sealed.detail}`,
           `/r/${id}`,
         );
       }
@@ -6616,6 +6600,36 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
   }
 
+  /**
+   * The plan-contract record of the newest drafted plan (contract handoff,
+   * task 1): what the planner was filed, what it proposed, its explicit
+   * amendment, and every mechanical change between the two — verified
+   * before a byte renders, and marked `current` only while the proposed
+   * terms are still exactly the scope row (an operator's later edit turns
+   * the record into history, never a claim about the row).
+   */
+  function planContractViewOf(taskRef: number, scope: Scope | null): PlanContractView | null {
+    const artifact = store.latestPlanContractArtifact(taskRef);
+    if (artifact === null) return null;
+    try {
+      const verified = readVerifiedArtifact(evidenceRoot, artifact);
+      if (!verified.ok) return { run: artifact.run, problem: `the contract record no longer verifies — ${verified.problem}` };
+      const record = decodePlanContractRecord(verified.content);
+      if (record === null) return { run: artifact.run, problem: "the contract record is not the JSON it was sealed as" };
+      return {
+        run: artifact.run,
+        sourceDigest: record.sourceDigest,
+        filed: record.filed !== null,
+        amendment: record.amendment,
+        changes: record.changes,
+        changeWords: describeContractChanges(record.changes),
+        current: scope !== null && contractChangesOf(record.proposed, scope).length === 0,
+      };
+    } catch {
+      return { run: artifact.run, problem: "the contract record could not be read" };
+    }
+  }
+
   function revisionDocOf(row: PlanRevision): RevisionDocView | null {
     const artifact = store.getArtifact(row.artifact);
     if (artifact === null) return null;
@@ -7333,14 +7347,115 @@ function criterionMatrixHtml(
     matrix
       .map(
         row =>
-          `<li>${matrixStateBadge(row.state)}${reviewJudgementBadge(row.review)} <code>${escape(row.id)}</code> ${escape(row.statement)}` +
+          `<li>${matrixStateBadge(row.state)}${reviewJudgementBadge(row.review)}${coverageBadge(row.coverage)} <code>${escape(row.id)}</code> ${escape(row.statement)}` +
           ` <span class="meta">[requires: ${row.requiredEvidence.map(escape).join(", ")}]</span>` +
           answeredHtml(row) +
           (compact || row.detail.length === 0 ? "" : `<br><span class="meta">${row.detail.map(escape).join("; ")}</span>`) +
+          // A context GAP is never folded into the compact view: the words
+          // that say what is missing are the point (v51).
+          (row.coverage === undefined || (compact && row.coverage.state !== "gap") ? "" : `<br><span class="meta" data-context-coverage="${escape(row.coverage.state)}">context: ${escape(coverageStateWords(row.coverage))}</span>`) +
           `</li>`,
       )
       .join("") +
     `</ul></div>`
+  );
+}
+
+/** What the task and approval views show about a drafted plan's contract
+ * (contract handoff, task 1). A problem is a named problem, never a blank. */
+type PlanContractView =
+  | { run: number; problem: string }
+  | {
+      run: number;
+      sourceDigest: string;
+      /** Whether a scope was filed before planning (false: legacy road). */
+      filed: boolean;
+      amendment: string | null;
+      changes: ContractChange[];
+      changeWords: string[];
+      /** The proposed terms are still exactly the scope row. */
+      current: boolean;
+    };
+
+function contractChangeHtml(change: ContractChange): string {
+  const tag = `<span class="contract-change-kind contract-change-${change.kind}">${change.kind}</span>`;
+  switch (change.field) {
+    case "goal":
+      return `<li>${tag} <strong>goal</strong><div class="contract-before">was: ${escape(change.before)}</div><div class="contract-after">now: ${escape(change.after)}</div></li>`;
+    case "outOfScope":
+      return `<li>${tag} <strong>not this</strong>${change.before === null ? "" : `<div class="contract-before">was: ${escape(change.before)}</div>`}${change.after === null ? `<div class="contract-after">now: <em>no exclusions</em></div>` : `<div class="contract-after">now: ${escape(change.after)}</div>`}</li>`;
+    case "touches":
+      return `<li>${tag} <strong>touches</strong> <span class="mono">${escape(change.path)}</span></li>`;
+    case "acceptance": {
+      const criterion = (one: { statement: string; evidence: readonly string[]; how: string | null } | null): string =>
+        one === null ? "" : `${escape(one.statement)} <span class="meta">[requires: ${one.evidence.map(escape).join(", ")}]</span>${one.how === null ? "" : `<div class="meta">how: ${escape(one.how)}</div>`}`;
+      return (
+        `<li>${tag} <strong>criterion <code>${escape(change.id)}</code></strong>${change.kind === "changed" ? ` <span class="meta">(${change.moved.map(escape).join(", ")})</span>` : ""}` +
+        (change.before === null ? "" : `<div class="contract-before">${change.kind === "removed" ? "removed: " : "was: "}${criterion(change.before)}</div>`) +
+        (change.after === null ? "" : `<div class="contract-after">${change.kind === "added" ? "added: " : "now: "}${criterion(change.after)}</div>`) +
+        `</li>`
+      );
+    }
+  }
+}
+
+/**
+ * The contract panel (contract handoff, task 1): whether the drafted plan
+ * reproduced the filed goal, exclusions, touches, and rubric exactly, or
+ * proposes an amendment — every addition, change, and removal listed, the
+ * planner's stated reason beside them, and the plain consequence that
+ * approving binds the AMENDED terms. "full" is the task page's card;
+ * "ceremony" is the restatement inside the approval form and /next.
+ */
+function planContractHtml(view: PlanContractView | null, mode: "full" | "ceremony"): string {
+  if (view === null) {
+    return mode === "full" ? "" : `<p class="meta contract-note">no contract record for this draft — compare the scope above against what you filed before signing</p>`;
+  }
+  if ("problem" in view) {
+    return `<div class="contract-panel contract-problem"><p class="approval-label">filed contract</p><p class="meta">${escape(view.problem)} · <a href="/r/${view.run}">run ${view.run}</a></p></div>`;
+  }
+  const stale = view.current ? "" : `<p class="meta">the scope was edited after this draft landed — the record below describes the draft as the planner proposed it</p>`;
+  if (!view.filed) {
+    return mode === "full"
+      ? `<div class="contract-panel contract-drafted"><p class="approval-label">filed contract</p><p class="meta">no scope was filed before planning — the planner drafted this contract from the title and the repository; review every term as new</p>${stale}</div>`
+      : `<p class="meta contract-note">no scope was filed before planning — every term above is the planner's proposal</p>`;
+  }
+  if (view.changes.length === 0) {
+    return `<div class="contract-panel contract-preserved"><p class="approval-label">filed contract</p><p><strong>preserved exactly</strong> <span class="meta">the plan reproduces the filed goal, exclusions, touches, and acceptance criteria — approving binds the terms you filed · <a href="/r/${view.run}">run ${view.run}</a></span></p>${stale}</div>`;
+  }
+  return (
+    `<div class="contract-panel contract-amended"${mode === "full" ? ` id="contract-amendment"` : ""}><p class="approval-label">filed contract · amendment proposed</p>` +
+    `<p><strong>${view.changes.length} change${view.changes.length === 1 ? "" : "s"} to what you filed</strong> <span class="meta">— approving binds the AMENDED terms shown ${mode === "full" ? "in the scope" : "above"}, not the ones you filed · <a href="/r/${view.run}">run ${view.run}</a></span></p>` +
+    (view.amendment === null
+      ? `<p class="meta">the planner stated no reason for the amendment</p>`
+      : `<p class="recap contract-reason"><strong>why:</strong> ${escape(view.amendment)}</p>`) +
+    `<ul class="recap contract-changes">${view.changes.map(contractChangeHtml).join("")}</ul>` +
+    stale +
+    `</div>`
+  );
+}
+
+/** v51: where a reviewer's evidence for a criterion comes from — the
+ * revision's own patch, sealed inherited context, or a named gap. Absent
+ * on every run that captured no inventory, so nothing older changes. */
+function coverageBadge(coverage: CriterionMatrixRow["coverage"]): string {
+  if (coverage === undefined) return "";
+  const cls = coverage.state === "gap" ? "badge-failed" : coverage.state === "context" ? "badge-manual-review" : "badge";
+  const word = coverage.state === "gap" ? "context gap" : coverage.state === "context" ? "sealed context" : "in patch";
+  return ` <span class="badge ${cls}" data-context-coverage="${escape(coverage.state)}" title="${escape(coverageStateWords(coverage))}">${escape(word)}</span>`;
+}
+
+/** The semantic-coverage line (v51): what an independent reviewer settled,
+ * under which policy, shown apart from the machine proof — the same
+ * `coverageWords` the CLI prints. Empty for a run with no rubric. */
+function semanticCoverageHtml(matrix: readonly CriterionMatrixRow[], qualityMode: "default" | "strict"): string {
+  const coverage = semanticCoverage(matrix, qualityMode);
+  const lines = coverageWords(coverage);
+  if (lines.length === 0) return "";
+  return (
+    `<div class="result-section semantic-coverage" data-semantic-coverage="${coverage.satisfied === null ? "unsettled" : coverage.satisfied ? "satisfied" : "unsatisfied"}" data-coverage-policy="${coverage.policy}">` +
+    lines.map((line, index) => `<p class="meta"${index === 0 ? "" : ' data-context-gap=""'}>${escape(line)}</p>`).join("") +
+    `</div>`
   );
 }
 
@@ -8201,8 +8316,9 @@ const STYLE = `
   .receipt-shot { display: grid; gap: .35rem; color: var(--muted-foreground); font-size: .7rem; text-decoration: none; }
   .receipt-shot img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: var(--muted); }
   .receipt-shot:hover { color: var(--foreground); }
-  .receipt-caveats { margin-top: .8rem; padding: .7rem .8rem; border-left: 2px solid var(--border); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: color-mix(in srgb, var(--muted) 62%, transparent); font-size: .78rem; }
-  .receipt-caveats ul { margin: .3rem 0 0; padding-left: 1.15rem; }
+  .receipt-caveats, .receipt-coverage { margin-top: .8rem; padding: .7rem .8rem; border-left: 2px solid var(--border); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: color-mix(in srgb, var(--muted) 62%, transparent); font-size: .78rem; }
+  .receipt-caveats ul, .receipt-coverage ul { margin: .3rem 0 0; padding-left: 1.15rem; }
+  .semantic-coverage p { margin: .2rem 0; }
   .receipt-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem 1rem; margin-top: .9rem; }
   .receipt-actions > a:not(.button-link) { font-size: .78rem; font-weight: 550; }
   /* The review cockpit (Priority 5): a master/detail over completed work.
@@ -8764,6 +8880,24 @@ const STYLE = `
   .approval-boundary .approval-label { margin: 0 0 .2rem; }
   .approval-boundary p { margin: 0; color: var(--muted-foreground); font-size: .8rem; overflow-wrap: anywhere; }
   .approval-chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .8rem 0 .3rem; }
+  /* The filed contract (contract handoff, task 1): preserved, amended, or
+     drafted from nothing — the same panel on the task page, in the
+     ceremony, and on /next, so an amendment is never a surprise after the
+     yes. An amendment is the one state that asks for a second look. */
+  .contract-panel { margin-top: .8rem; padding: .7rem .85rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--muted) 45%, transparent); }
+  .contract-panel .approval-label { margin: 0 0 .25rem; }
+  .contract-panel p { margin: .2rem 0; }
+  .contract-amended { border-color: color-mix(in srgb, var(--warning, #c98a1b) 55%, var(--glass-border)); background: color-mix(in srgb, var(--warning, #c98a1b) 9%, transparent); }
+  .contract-reason { font-size: .9rem; }
+  .contract-changes { margin: .5rem 0 0; padding-left: 1.1rem; display: grid; gap: .45rem; }
+  .contract-changes li { overflow-wrap: anywhere; }
+  .contract-change-kind { display: inline-block; margin-right: .3rem; padding: .05rem .4rem; border-radius: 999px; font: 600 .62rem/1.5 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; background: color-mix(in srgb, var(--muted) 70%, transparent); }
+  .contract-change-added { background: color-mix(in srgb, var(--success, #2f9e5f) 18%, transparent); }
+  .contract-change-removed { background: color-mix(in srgb, var(--danger, #c8453d) 18%, transparent); }
+  .contract-change-changed { background: color-mix(in srgb, var(--warning, #c98a1b) 22%, transparent); }
+  .contract-before, .contract-after { margin-top: .15rem; font-size: .85rem; }
+  .contract-before { color: var(--muted-foreground); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--muted-foreground) 55%, transparent); }
+  .contract-note { margin-top: .5rem; }
   /* The agents (v47): one compact summary, rendered identically on the task
      page, in the approval ceremony, and in the focused chat; reasons and
      change controls stay closed until asked for. */
@@ -11290,6 +11424,9 @@ type TaskChatFocus = {
     nonce: string;
     digest: string;
     planDocument: string | null;
+    /** The drafted plan's contract record (contract handoff, task 1): the
+     * same panel the task page and /next show inside the ceremony. */
+    planContract: PlanContractView | null;
     deliverable: "branch" | "report";
     raceTerms: TournamentTerms | null;
     revision: RevisionView | null;
@@ -11395,7 +11532,10 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
           : profile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
   const revision = approval.revision === null
     ? ""
-    : `<div class="chat-approval-section"><span class="approval-label">revision notes</span><ul class="recap">${approval.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul></div>`;
+    : `<div class="chat-approval-section"><span class="approval-label">${approval.revision.kind === "ci-repair" ? "CI repair" : approval.revision.kind === "criterion-repair" ? "criterion repair" : "revision notes"}</span>` +
+      (approval.revision.comments.length === 0 ? "" : `<ul class="recap">${approval.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul>`) +
+      revisionLineageHtml(approval.revision.lineage) +
+      `</div>`;
   const race = approval.raceTerms === null
     ? ""
     : `<div class="chat-approval-section"><span class="approval-label">${approval.raceTerms.kind === "comparison" ? "comparison" : "tournament"}</span>` +
@@ -11413,7 +11553,7 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
     `<input type="hidden" name="digest" value="${escape(approval.digest)}">` +
     `<input type="hidden" name="return" value="${escape(returnTo)}">` +
     `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">` +
-    (approval.planDocument === null ? "" : `<div class="chat-approval-section"><span class="approval-label">proposed plan</span>${executionPlanHtml(approval.planDocument, true)}</div>`) +
+    (approval.planDocument === null ? "" : `<div class="chat-approval-section"><span class="approval-label">proposed plan</span>${executionPlanHtml(approval.planDocument, true)}${planContractHtml(approval.planContract, "ceremony")}</div>`) +
     (approval.deliverable === "report" ? `<p class="meta"><span class="badge">report only</span> This investigates and reports back without changing the repository.</p>` : "") +
     (approval.coordinator === null ? "" : `<p class="meta">Filed by <span class="mono">${escape(approval.coordinator.label)}</span>${approval.coordinator.filedAgo === null ? "" : ` · ${escape(approval.coordinator.filedAgo)}`}.</p>`) +
     `<div class="chat-approval-section"><span class="approval-label">goal</span><p class="approval-goal">${escape(scope.goal)}</p></div>` +
@@ -14389,8 +14529,62 @@ type MilestoneProgressView = { id: string; description: string; state: Milestone
 
 /** The revision batch a task's approval screen restates, or the named reason it cannot. */
 type RevisionView =
-  | { sourceTask: string; sourceRun: number; comments: { path: string | null; line: number | null; note: string; author: string }[] }
+  | {
+      sourceTask: string;
+      sourceRun: number;
+      /** What kind of brief this is — annotations, a CI repair, a criterion repair. */
+      kind: "annotations" | "ci-repair" | "criterion-repair";
+      comments: { path: string | null; line: number | null; note: string; author: string }[];
+      /** The lineage and ACTUAL terms (contract handoff task 2), read from
+       * the child's own rows — the same projection chat and the approval
+       * card restate. */
+      lineage: RevisionLineage | null;
+    }
   | { problem: string };
+
+/**
+ * A revision's lineage and ACTUAL terms, in the same words on the task
+ * page, the approval card, and chat (contract handoff task 2): which
+ * source and build it revises, the ancestry to its root, the terms the
+ * child really carries (read from its own scope — never restated from the
+ * brief), what is re-resolved for THIS approval, what never inherits, and
+ * — when the task continues a repair chain — the attempts used against
+ * the signed cap.
+ */
+export function revisionLineageWords(lineage: RevisionLineage): string[] {
+  const words: string[] = [];
+  if (lineage.problem !== undefined) words.push(`lineage verification gap: ${lineage.problem}; no automatic repair allowance can be inferred`);
+  const chain = lineage.ancestors.length > 1 ? ` · lineage ${lineage.ancestors.join(" → ")}` : "";
+  words.push(`revises ${lineage.sourceTask}${lineage.sourceRun === null ? "" : ` (build #${lineage.sourceRun})`}${chain}`);
+  if (!lineage.sourceHadScope) {
+    words.push("the source had no scope — nothing was inherited; the placeholder rubric waits for a real one");
+  } else if (lineage.terms !== null) {
+    const terms = lineage.terms;
+    words.push(
+      `inherited terms, as they stand now: ${riskTitle(terms.riskLevel)} · ${qualityModeTitle(terms.qualityMode)} quality · ` +
+        `${terms.permissionMode === "bypassPermissions" ? "full access" : "auto permissions"} · ` +
+        `${terms.budgetMicrousd === null ? "no attempt cap" : `$${(terms.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap`} · ` +
+        `${terms.exclusions ? "its exclusions" : "no exclusions"} · ${terms.touches === 0 ? "any path" : `${terms.touches} path limit${terms.touches === 1 ? "" : "s"}`} · ` +
+        `${terms.criteria} criteri${terms.criteria === 1 ? "on" : "a"}${terms.routeOverrides === 0 ? "" : ` · ${terms.routeOverrides} agent override${terms.routeOverrides === 1 ? "" : "s"}`}`,
+    );
+  }
+  words.push("re-resolved for this approval: the agents route and the fallback chain — a yes on the source never covers them");
+  words.push("never inherited: the source's approval, attended sessions, publication and merge grants");
+  if (lineage.repair !== null) {
+    const repair = lineage.repair;
+    words.push(
+      `repair chain rooted at ${repair.rootTask}: ${repair.attemptsUsed} attempt${repair.attemptsUsed === 1 ? "" : "s"} used` +
+        `${repair.cap === null ? " — each further attempt needs your yes" : ` of ${repair.cap} automatic · ${repair.remaining} remaining`}` +
+        `${repair.thisAttempt === null ? "" : ` · this is attempt ${repair.thisAttempt}`}${repair.via === null ? "" : ` · continued through ${repair.via}`}`,
+    );
+  }
+  return words;
+}
+
+function revisionLineageHtml(lineage: RevisionLineage | null): string {
+  if (lineage === null) return "";
+  return `<ul class="meta revision-lineage">${revisionLineageWords(lineage).map(one => `<li>${escape(one)}</li>`).join("")}</ul>`;
+}
 
 function taskBody(data: {
   task: Task;
@@ -14401,6 +14595,8 @@ function taskBody(data: {
   planDocument: string | null;
   /** Hash of the verified plan artifact currently shown. */
   planSha?: string | null;
+  /** The drafted plan's contract record (contract handoff, task 1). */
+  planContract?: PlanContractView | null;
   /** Adaptive execution plans (v44): the revision ledger and live milestone
    * projection — null for a task with no plan at all. */
   planRevisions?: PlanRevisionLedgerView | null;
@@ -14479,6 +14675,9 @@ function taskBody(data: {
     proofMatrix: CriterionMatrixRow[];
     proofMatrixLinks: EvidenceLinkMap;
     proofAccepted: boolean;
+    /** v51: the run's signed quality mode — the policy semantic coverage is
+     * read under (default: review optional; strict: review required). */
+    qualityMode?: "default" | "strict";
     /** v40: this run's own place in a bounded repair chain, if any. */
     repairChain: RepairChainRow | null;
     /** v50: every root review attempt of this result and what the
@@ -14714,11 +14913,15 @@ function taskBody(data: {
           ? ""
           : `<p class="meta">An independent review found conflicting evidence.</p>`;
       const chainHtml = repairChainHtml(proof.repairChain);
+      // v51: semantic coverage sits beside the matrix, never inside the
+      // verdict word — what the independent reviewer settled, under the
+      // signed policy, with every context gap named.
+      const coverageHtml = semanticCoverageHtml(proof.proofMatrix, proof.qualityMode ?? "default");
       const proofDetails =
         proof.proofMatrix.length === 0 && machineNote === "" && chainHtml === ""
           ? ""
           : `<details class="dispatch-proof-details"><summary>${proof.proofMatrix.length === 0 ? "Verification details" : `${proof.proofMatrix.length} requirement${proof.proofMatrix.length === 1 ? "" : "s"}`} · View details</summary>` +
-            `<div class="dispatch-proof-body">${criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })}${machineNote}${chainHtml}</div></details>`;
+            `<div class="dispatch-proof-body">${criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })}${coverageHtml}${machineNote}${chainHtml}</div></details>`;
       if (proof.proofVerdict === "verified") {
         const recovered = verificationRecovered(proof.proofReasons);
         return withReview(box(
@@ -14911,6 +15114,7 @@ function taskBody(data: {
         (approval.approved ? `<p class="meta">The agent can adapt this route when evidence changes; your approved outcome stays fixed.</p>` : "") +
         `</div><span class="plan-lock">${planStanding}</span>${approval.approved ? `</summary><div class="planner-plan-body">` : `</div>`}` +
         executionPlanHtml(displayedPlanDocument ?? data.planDocument) +
+        (approval.approved ? "" : planContractHtml(data.planContract ?? null, "full")) +
         (data.csrf === "" || data.planSha == null || approval.approved
           ? ""
           : `<details class="plan-editor"><summary>Edit plan</summary><form method="post" action="${taskHref(task.id)}/plan-edit">` +
@@ -14932,16 +15136,17 @@ function taskBody(data: {
       : "problem" in data.revision
         ? `<div class="card"><p><strong>revision brief</strong></p><p class="meta">${escape(data.revision.problem)}</p></div>`
         : [
-            `<div class="card">`,
-            `<p><strong>the review batch</strong> <span class="meta">this task revises ` +
+            `<div class="card revision-card">`,
+            `<p><strong>${data.revision.kind === "ci-repair" ? "the CI repair" : data.revision.kind === "criterion-repair" ? "the criterion repair" : "the review batch"}</strong> <span class="meta">this task revises ` +
               `<a href="${taskHref(data.revision.sourceTask)}" class="mono">${escape(data.revision.sourceTask)}</a>` +
-              ` after review of <a href="/r/${data.revision.sourceRun}">build #${data.revision.sourceRun}</a> — approving the scope approves applying exactly these</span></p>`,
+              ` after review of <a href="/r/${data.revision.sourceRun}">build #${data.revision.sourceRun}</a> — ${data.revision.kind === "annotations" ? "approving the scope approves applying exactly these" : "approving the scope approves exactly the repair the brief names"}</span></p>`,
             ...data.revision.comments.map(
               one =>
                 `<p class="row"><span class="meta">${escape(one.author)}</span> ` +
                 `${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}` +
                 `${escape(one.note)}</p>`,
             ),
+            revisionLineageHtml(data.revision.lineage),
             `</div>`,
           ].join("\n");
 
@@ -15001,9 +15206,17 @@ function taskBody(data: {
           `<div class="approval-boundary"><p class="approval-label">touches</p><p>${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p></div>`,
           `</div>`,
           acceptanceCeremonyHtml(scope.acceptance),
+          // The contract amendment INSIDE the ceremony (contract handoff,
+          // task 1): what the yes accepts that the operator did not file.
+          data.plan === "drafted" ? planContractHtml(data.planContract ?? null, "ceremony") : "",
           `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
             (approvalPermission === null ? "" : `<span class="approval-chip">${escape(approvalPermission)}</span>`) +
             `</div>`,
+          // A revision's lineage INSIDE the ceremony (contract handoff task
+          // 2): the yes is given knowing which source these terms came
+          // from, which were carried, which were re-resolved for THIS
+          // approval, and that none of the source's grants came along.
+          data.revision === null || data.revision === undefined || "problem" in data.revision ? "" : revisionLineageHtml(data.revision.lineage),
           // The AGENTS inside the ceremony (v47/v48): who plans, builds,
           // repairs, and reviews, and why — said where the yes is given, in
           // the same block chat and /next show. Availability is volatile and
@@ -16496,6 +16709,8 @@ const EVIDENCE_WORDS: Record<string, string> = {
   "check-log": "the plane's re-run check",
   screenshot: "a screenshot",
   "structured-output": "an agent response",
+  "plan-contract": "the planner's filed request and contract record",
+  "review-context": "the sealed inherited review context",
 };
 
 function evidenceWords(kind: string): string {
@@ -16633,6 +16848,8 @@ type ProofBundleView = {
   machineVerdict: ProofVerdict | null;
   /** v40: this run's own place in a bounded repair chain, if any. */
   repairChain: RepairChainRow | null;
+  /** v51: the policy semantic coverage is read under. */
+  qualityMode: "default" | "strict";
 };
 
 /** The smallest complete answer to "what did this task deliver?". It is a
@@ -16645,6 +16862,10 @@ type CompletionReceiptView = {
   verdict: ProofVerdict | null;
   accepted: boolean;
   matrix: CriterionMatrixRow[];
+  /** v51: the semantic-coverage lines (`coverageWords`) — independent
+   * review standing under the run's policy, plus every named context gap.
+   * Rendered beside the machine verdict on the task and chat receipts. */
+  coverage: string[];
   diff:
     | { fileCount: number; additions: number; deletions: number; binaryCount: number; filesTruncated: boolean }
     | { problem: string }
@@ -16700,6 +16921,7 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
     matrix: verdictRow?.matrix ?? [],
     matrixLinks: evidenceLinksFor(artifacts),
     machineVerdict: verdictRow?.machineVerdict ?? null,
+    qualityMode: run.qualityMode ?? "default",
     repairChain: store.repairChainFor(run.id) ?? (() => {
       const ref = store.refById(run.taskRef);
       return ref === null ? null : store.repairChainForDraft(ref.externalId);
@@ -16731,6 +16953,7 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
           },
     screenshots: proof?.screenshots ?? [],
     caveats: proof?.proof?.caveats ?? [],
+    coverage: coverageWords(semanticCoverage(proof?.matrix ?? [], run.qualityMode ?? "default")),
   };
 }
 
@@ -17047,6 +17270,7 @@ function evidenceBundleCard(view: ProofBundleView | null, runId: number): string
   }
 
   parts.push(criterionMatrixHtml(view.matrix, { runId, links: view.matrixLinks }));
+  parts.push(semanticCoverageHtml(view.matrix, view.qualityMode));
   if (view.machineVerdict !== null && view.machineVerdict !== view.verdict) {
     parts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
   }
@@ -17153,6 +17377,12 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     view.caveats.length === 0
       ? ""
       : `<div class="receipt-caveats"><strong>Before you move on</strong><ul>${view.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+  // v51: semantic coverage, distinct from the machine proof word above —
+  // the same lines the CLI prints, so chat and terminal cannot disagree.
+  const coverage =
+    view.coverage.length === 0
+      ? ""
+      : `<div class="receipt-coverage" data-semantic-coverage=""><strong>Independent review</strong><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
   return (
     `<section class="card completion-receipt" data-card-kind="result-receipt">` +
     `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>What shipped</h2></div>` +
@@ -17161,7 +17391,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>against the approved scope</small></span>` +
     `<span><strong>${escape(diff)}</strong><small>from the sealed final diff</small></span>` +
     `<span><strong>${view.screenshots.length} screenshot${view.screenshots.length === 1 ? "" : "s"}</strong><small>${view.screenshots.length === 0 ? "none required or captured" : "validated visual proof"}</small></span></div>` +
-    shots + caveats +
+    shots + coverage + caveats +
     `<div class="receipt-actions"><a class="button-link" href="/r/${view.runId}">${place === "chat" ? "Review & annotate" : "Review full evidence"}</a>` +
     (place === "task"
       ? `<a href="${taskChatHref(taskId)}">Discuss or request changes →</a>`
@@ -17841,6 +18071,7 @@ function nextPage(chrome: Chrome, data: {
     | null;
   scope: Scope | null;
   planDocument: string | null;
+  planContract?: PlanContractView | null;
   approvalDigest: string | null;
   raceTerms: TournamentTerms | null;
   /** v34: said inside the ceremony when the yes buys a report, not a branch. */
@@ -17892,7 +18123,7 @@ function nextPage(chrome: Chrome, data: {
       `<p>${escape(item.approval.title)}</p>` +
       (data.planDocument === null
         ? ""
-        : `<div class="card"><p><strong>the plan</strong> <span class="meta">drafted by a planning session</span></p>${executionPlanHtml(data.planDocument, true)}</div>`) +
+        : `<div class="card"><p><strong>the plan</strong> <span class="meta">drafted by a planning session</span></p>${executionPlanHtml(data.planDocument, true)}${planContractHtml(data.planContract ?? null, "ceremony")}</div>`) +
       `<form method="post" action="${taskHref(item.approval.taskId)}/approve" class="card approve-form">` +
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
       `<input type="hidden" name="nonce" value="${escape(data.nonce)}">` +

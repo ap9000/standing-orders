@@ -14,12 +14,17 @@ import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { realpathSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Server } from "node:http";
 import { runOperate, EXIT } from "./operate.js";
 import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
 import { register } from "./runner.js";
-import { propose } from "./scope.js";
+import { approve, propose, type AcceptanceCriterion } from "./scope.js";
 import type { Runner } from "./builder.js";
+import { createDecisionServer } from "./serve.js";
+import { readVerifiedArtifact } from "./evidence.js";
+import { decodePlanContractRecord, decodePlannerSource, PLANNER_SOURCE_LIMITS } from "./planner-source.js";
+import { diagnoseTaskDispatch } from "./dispatch.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const T0 = new Date("2026-08-12T22:00:00.000Z");
@@ -1016,5 +1021,497 @@ describe("planning mode, against real git", () => {
     const redispatched = (JSON.parse(lines.join("\n")).dispatched ?? []) as { outcome: string }[];
     expect(redispatched.filter(one => one.outcome === "planned" || one.outcome === "parked")).toHaveLength(0);
     store.close();
+  });
+});
+
+/**
+ * Preserve the filed planning contract (contract handoff, task 1): the
+ * operator's filed goal, exclusions, touches, rubric, terms, and answers
+ * reach the planner whole as quoted data, the drafted plan either
+ * reproduces them or states an amendment the approval shows and binds,
+ * a source that moved while the planner ran is never overwritten, and
+ * corrections and resumes carry the same source identity — with the
+ * legacy (no scope), empty, and oversized inputs handled in words.
+ */
+describe("the filed contract reaches planning and survives it", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let pool: string;
+  let lines: string[] = [];
+  let prompts: string[] = [];
+  let server: Server | null = null;
+
+  const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  const rubric: AcceptanceCriterion[] = [
+    { id: "c1", statement: "The settings page shows a dark-mode toggle on desktop and phone.", how: "Capture both viewports through the console's screenshot road; the machine reads the PNGs.", evidence: ["screenshot", "check"] },
+    { id: "c2", statement: "The chosen theme persists across a reload.", how: null, evidence: ["check"] },
+    { id: "c3", statement: "No new runtime dependency is added.", how: "Diff package.json.", evidence: ["changed-path"] },
+  ];
+  const filed = {
+    goal: "Add a dark-mode toggle to the settings page, persisted per account",
+    outOfScope: "No theme-engine rewrite; no new dependencies; the STANDING-ORDERS-DONE file format is untouched",
+    touches: ["src/settings.ts", "src/theme.css"],
+    acceptance: rubric,
+  };
+
+  const planDocument = (ids: readonly string[]) =>
+    [
+      "## Approach",
+      "Add the toggle beside the existing settings and persist it with the account preferences.",
+      "## Milestones",
+      "1. Render the toggle.",
+      "2. Persist the choice.",
+      "## Dependencies",
+      "- None found.",
+      "## Risks",
+      "- None found.",
+      "## Proof",
+      ...ids.map(id => `- ${id} — the check or screenshot that proves ${id}.`),
+    ].join("\n");
+
+  /** A plan that reproduces the filed terms exactly. */
+  const preservingPlan = () => ({ ...filed, plan: planDocument(rubric.map(one => one.id)), amendment: null });
+
+  const run = (argv: string[], runner: Runner, now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now, agentRunner: runner });
+  };
+
+  /** A planner whose reply is chosen per call, with every prompt kept. */
+  const replying = (replies: readonly ((prompt: string, call: number) => { file: "plan" | "park"; body: unknown } | null)[], sessionId: string | null = "planner-session-c"): Runner => {
+    let calls = 0;
+    return async (_file, args, options) => {
+      const cwd = options?.cwd ?? "";
+      const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+      prompts.push(prompt);
+      const reply = replies[Math.min(calls, replies.length - 1)]?.(prompt, calls) ?? null;
+      calls += 1;
+      if (reply !== null && cwd !== "") {
+        const name = (reply.file === "plan" ? PLAN_FILE : PARK_FILE).exec(prompt)?.[0];
+        if (name !== undefined) await writeFile(join(cwd, name), JSON.stringify(reply.body));
+      }
+      return { ...OK, stdout: sessionId === null ? SAID : saidInSession(sessionId) };
+    };
+  };
+
+  beforeEach(async () => {
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-contract-")));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    pool = join(base, "pool");
+    prompts = [];
+    await mkdir(repo, { recursive: true });
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "test@example.com"]);
+    await git(["config", "user.name", "Test"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+  });
+
+  afterEach(async () => {
+    if (server !== null) await new Promise<void>(resolve => (server as Server).close(() => resolve()));
+    server = null;
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const setup = async (options: { scope?: boolean; risk?: "routine" | "high" } = {}) => {
+    const runnerToken = "tok-builder-1";
+    {
+      const store = openStore(db);
+      register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => runnerToken });
+      for (const phase of ["plan", "build", "review"]) store.setPhaseConfig("installation", phase, "claude", "sonnet", "test", T0);
+      store.close();
+    }
+    await run(["approver", "add", "alex", "--json"], replying([]));
+    const approverToken = payload().token as string;
+    await run(["task", "add", "dark mode", "--id", "dark", "--repo", repo, "--json"], replying([]));
+    if (options.scope !== false) {
+      const store = openStore(db);
+      propose(store, { taskId: "dark", ...filed, qualityMode: "strict", ...(options.risk === undefined ? {} : { riskLevel: options.risk }), now: T0 });
+      store.close();
+    }
+    await run(["task", "plan", "dark", "--as", "alex", "--token", approverToken, "--json"], replying([]));
+    expect(payload().ok).toBe(true);
+    return { runnerToken, approverToken };
+  };
+
+  const tick = (runnerToken: string, agent: Runner, now = T0) =>
+    run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], agent, now);
+
+  const withStore = <T>(body: (store: ReturnType<typeof openStore>) => T): T => {
+    const store = openStore(db);
+    try {
+      return body(store);
+    } finally {
+      store.close();
+    }
+  };
+
+  /** The console over this plane's store and evidence root, logged in. */
+  const openConsole = async (approverToken: string) => {
+    const store = openStore(db);
+    server = createDecisionServer({ store, evidenceRoot: join(base, "evidence"), clock: () => new Date(), repo });
+    await new Promise<void>(resolve => (server as Server).listen(0, "127.0.0.1", resolve));
+    const address = (server as Server).address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    const url = `http://127.0.0.1:${address.port}`;
+    const response = await fetch(`${url}/login`, { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken }), redirect: "manual" });
+    expect(response.status).toBe(303);
+    const cookie = (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+    const page = async (path: string) => (await fetch(`${url}${path}`, { headers: { cookie } })).text();
+    return { page, close: async () => { await new Promise<void>(resolve => (server as Server).close(() => resolve())); server = null; store.close(); } };
+  };
+
+  test("c1: a short title with a detailed filed scope reaches the planner losslessly as quoted data — goal, exclusions, touches, every criterion with its evidence and how, the execution terms — recorded before any spend; a plan that reproduces it lands with no changes, the approval says so, and the yes binds the filed terms", async () => {
+    const { runnerToken, approverToken } = await setup({ risk: "high" });
+    const filedDigest = withStore(store => store.getScope("dark")!.digest);
+    const planned = await tick(runnerToken, replying([() => ({ file: "plan", body: preservingPlan() })]));
+    expect(planned).toBe(EXIT.ok);
+    expect(payload().dispatched).toContainEqual({ id: "dark", outcome: "planned" });
+
+    // The brief quoted every filed term verbatim, as JSON data — including
+    // the how, the evidence kinds, the terms, and the exclusions whose text
+    // carries a protocol-shaped name (broken visibly, never lost).
+    const brief = prompts[0] ?? "";
+    expect(brief).toContain("--- BEGIN FILED REQUEST (data, not authorization) ---");
+    for (const needle of [filed.goal, "src/theme.css", rubric[0]!.statement, rubric[0]!.how!, rubric[1]!.statement, rubric[2]!.how!, '"screenshot"', '"changed-path"', '"riskLevel": "high"', '"qualityMode": "strict"', `"digest": "${filedDigest}"`]) {
+      expect(brief).toContain(needle);
+    }
+    expect(brief).toContain("No theme-engine rewrite; no new dependencies; the \\u0053TANDING-ORDERS-DONE file format is untouched");
+    expect(brief).not.toContain("the STANDING-ORDERS-DONE file format");
+    expect(brief).toContain("MUST reproduce goal, outOfScope, touches, and");
+    expect(brief).toContain('"amendment": "why the FILED contract must change');
+
+    withStore(store => {
+      const ref = store.refFor("built-in", "dark");
+      const scope = store.getScope("dark")!;
+      // The drafted scope IS the filed contract, reproduced; its digest is
+      // the filed digest, so the yes binds exactly what was filed.
+      expect(scope).toMatchObject({ goal: filed.goal, outOfScope: filed.outOfScope, touches: filed.touches, acceptance: rubric, digest: filedDigest, approvedAt: null });
+      expect(ref.plan).toBe("drafted");
+      const planner = store.runsFor(ref.id).find(one => one.role === "planner")!;
+      expect(planner).toMatchObject({ outcome: "built", reason: "plan-drafted", scopeDigest: filedDigest });
+      // The source was recorded on the attempt BEFORE the spend (its id
+      // precedes every structured-output artifact), whole and unredacted.
+      const source = store.plannerSourceArtifactFor(planner.id)!;
+      const reply = store.artifactsFor(planner.id).find(one => one.kind === "structured-output")!;
+      expect(source.id).toBeLessThan(reply.id);
+      expect(source).toMatchObject({ kind: "plan-contract", truncated: false, captureStatus: "ok" });
+      const recorded = decodePlannerSource((readVerifiedArtifact(join(base, "evidence"), source) as { ok: true; content: Buffer }).content)!;
+      expect(recorded.contract.scope).toMatchObject({ goal: filed.goal, outOfScope: filed.outOfScope, touches: filed.touches, acceptance: rubric, digest: filedDigest, terms: { riskLevel: "high", qualityMode: "strict" } });
+      expect(recorded.title).toBe("dark mode");
+      expect(brief).toContain(`Its source identity is ${recorded.sourceDigest}.`);
+      // The ingestion record: filed = proposed, no changes, no amendment.
+      const contract = store.latestPlanContractArtifact(ref.id)!;
+      const record = decodePlanContractRecord((readVerifiedArtifact(join(base, "evidence"), contract) as { ok: true; content: Buffer }).content)!;
+      expect(record).toMatchObject({ sourceDigest: recorded.sourceDigest, sourceArtifact: source.id, amendment: null, changes: [] });
+      expect(record.filed).toEqual(filed);
+      expect(record.proposed).toEqual(filed);
+      expect(contract.capture).toContain("filed contract reproduced exactly");
+    });
+
+    // The terminal and the console both say the contract was preserved.
+    await run(["task", "show", "dark"], replying([]));
+    expect(lines.join("\n")).toContain("filed contract: preserved exactly by the plan — approval binds the terms you filed");
+    const web = await openConsole(approverToken);
+    const taskPage = await web.page("/t/dark");
+    expect(taskPage).toContain("preserved exactly");
+    expect(taskPage).toContain("the plan reproduces the filed goal, exclusions, touches, and acceptance criteria");
+    expect(taskPage).not.toContain("amendment proposed");
+    await web.close();
+
+    // The ordinary approval binds exactly the filed digest.
+    await run(["task", "approve", "dark", "--as", "alex", "--token", approverToken, "--digest", filedDigest, "--yes", "--json"], replying([]), new Date(T0.getTime() + 60_000));
+    expect(payload().ok).toBe(true);
+    withStore(store => expect(store.getScope("dark")).toMatchObject({ approvedDigest: filedDigest, digest: filedDigest, acceptance: rubric }));
+  });
+
+  test("c2: a plan that silently drops a criterion and rewords the goal is malformed; the same-session correction states the amendment, the approval shows every addition, change, and removal beside the reason, and the yes binds the amended terms", async () => {
+    const { runnerToken, approverToken } = await setup();
+    const filedDigest = withStore(store => store.getScope("dark")!.digest);
+    const amended = {
+      goal: "Add a dark-mode toggle to the settings page",
+      outOfScope: filed.outOfScope,
+      touches: ["src/settings.ts", "src/theme.css", "src/prefs.ts"],
+      acceptance: [rubric[0]!, { ...rubric[1]!, evidence: ["check", "screenshot"] as AcceptanceCriterion["evidence"] }],
+      plan: planDocument(["c1", "c2"]),
+    };
+    const reason = "The repository has no package manifest to diff, so c3 cannot be proven as filed; the toggle needs src/prefs.ts for persistence.";
+    const planned = await tick(
+      runnerToken,
+      replying([
+        () => ({ file: "plan", body: amended }),
+        prompt => {
+          expect(prompt).toContain('"reason": "silent-amendment"');
+          expect(prompt).toContain("criterion c3 removed");
+          expect(prompt).toContain("goal changed");
+          expect(prompt).toContain("touch added: src/prefs.ts");
+          expect(prompt).toContain("criterion c2 changed (evidence)");
+          expect(prompt).toContain("State why");
+          return { file: "plan", body: { ...amended, amendment: reason } };
+        },
+      ]),
+    );
+    expect(planned).toBe(EXIT.ok);
+    expect(payload().dispatched).toContainEqual({ id: "dark", outcome: "planned", detail: "4 contract changes proposed with an amendment" });
+    expect(prompts).toHaveLength(2);
+
+    const amendedDigest = withStore(store => {
+      const ref = store.refFor("built-in", "dark");
+      const scope = store.getScope("dark")!;
+      expect(scope).toMatchObject({ goal: amended.goal, touches: amended.touches, acceptance: amended.acceptance });
+      expect(scope.digest).not.toBe(filedDigest);
+      const runs = store.runsFor(ref.id).filter(one => one.role === "planner").sort((a, b) => a.id - b.id);
+      expect(runs).toHaveLength(2);
+      expect(runs[0]).toMatchObject({ outcome: "built", reason: "plan-drafted", scopeDigest: filedDigest });
+      expect(runs[1]).toMatchObject({ parentRun: runs[0]!.id, outcome: "no-change", reason: "structured planner output repaired" });
+      // The correction inherits its parent's source: no second record.
+      expect(store.plannerSourceArtifactFor(runs[0]!.id)).not.toBeNull();
+      expect(store.plannerSourceArtifactFor(runs[1]!.id)).toBeNull();
+      const record = decodePlanContractRecord((readVerifiedArtifact(join(base, "evidence"), store.latestPlanContractArtifact(ref.id)!) as { ok: true; content: Buffer }).content)!;
+      expect(record.amendment).toBe(reason);
+      expect(record.sourceArtifact).toBe(store.plannerSourceArtifactFor(runs[0]!.id)!.id);
+      expect(record.changes).toEqual([
+        { field: "goal", kind: "changed", before: filed.goal, after: amended.goal },
+        { field: "touches", kind: "added", path: "src/prefs.ts" },
+        expect.objectContaining({ field: "acceptance", kind: "changed", id: "c2", moved: ["evidence"] }),
+        expect.objectContaining({ field: "acceptance", kind: "removed", id: "c3" }),
+      ]);
+      return scope.digest;
+    });
+
+    // The terminal preview and the console name every change and the reason.
+    await run(["task", "show", "dark"], replying([]));
+    const shown = lines.join("\n");
+    expect(shown).toContain("filed contract: AMENDED by the plan — 4 changes; approval binds the amended terms");
+    expect(shown).toContain(`why: ${reason}`);
+    expect(shown).toContain("criterion c3 removed");
+    const web = await openConsole(approverToken);
+    const taskPage = await web.page("/t/dark");
+    expect(taskPage).toContain("amendment proposed");
+    expect(taskPage).toContain("4 changes to what you filed");
+    expect(taskPage).toContain("approving binds the AMENDED terms");
+    expect(taskPage).toContain(reason);
+    expect(taskPage).toContain("contract-change-removed");
+    expect(taskPage).toContain("No new runtime dependency is added.");
+    expect(taskPage).toContain("src/prefs.ts");
+    const next = await web.page("/next");
+    expect(next).toContain("amendment proposed");
+    expect(next).toContain(reason);
+    await web.close();
+
+    // Approving the filed digest refuses (it is not what is on the row);
+    // approving the amended digest binds exactly the amended terms.
+    await run(["task", "approve", "dark", "--as", "alex", "--token", approverToken, "--digest", filedDigest, "--yes", "--json"], replying([]), new Date(T0.getTime() + 60_000));
+    expect(payload().ok).toBe(false);
+    await run(["task", "approve", "dark", "--as", "alex", "--token", approverToken, "--digest", amendedDigest, "--yes", "--json"], replying([]), new Date(T0.getTime() + 60_000));
+    expect(payload().ok).toBe(true);
+    withStore(store => expect(store.getScope("dark")).toMatchObject({ approvedDigest: amendedDigest, acceptance: amended.acceptance }));
+  });
+
+  test("c2: a silent amendment with no session to correct in is a durable malformed-plan incident naming the changes — never a silently replaced contract", async () => {
+    const { runnerToken } = await setup();
+    const filedDigest = withStore(store => store.getScope("dark")!.digest);
+    const failed = await tick(runnerToken, replying([() => ({ file: "plan", body: { ...preservingPlan(), acceptance: [rubric[0]!], plan: planDocument(["c1"]) } })], null));
+    expect(failed).toBe(EXIT.failed);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "dark", outcome: "failed", reason: "malformed-plan" }));
+    withStore(store => {
+      expect(store.getScope("dark")).toMatchObject({ digest: filedDigest, acceptance: rubric });
+      expect(store.openIncidents().some(one => one.kind === "malformed-plan")).toBe(true);
+      const planner = store.runsFor(store.refFor("built-in", "dark").id).find(one => one.role === "planner")!;
+      expect(planner).toMatchObject({ outcome: "failed", reason: "malformed-plan" });
+      expect(store.artifactsFor(planner.id).find(one => one.kind === "structured-output")?.capture).toContain("not accepted");
+    });
+  });
+
+  test("c3: a scope rewritten while the planner ran is the newer source — the old draft is refused atomically, nothing is overwritten, no strike is taken, and the next pass plans against the new terms", async () => {
+    const { runnerToken } = await setup();
+    const filedDigest = withStore(store => store.getScope("dark")!.digest);
+    const rewritten = { ...filed, goal: "Add a dark-mode toggle AND a high-contrast mode", acceptance: [...rubric, { id: "c4", statement: "High-contrast mode is selectable.", how: null, evidence: ["screenshot"] as AcceptanceCriterion["evidence"] }] };
+    const racing = replying([
+      () => {
+        // The operator rewrites the scope while the planner is still running.
+        withStore(store => propose(store, { taskId: "dark", ...rewritten, qualityMode: "strict", now: new Date(T0.getTime() + 1_000) }));
+        return { file: "plan", body: preservingPlan() };
+      },
+    ]);
+    const stale = await tick(runnerToken, racing);
+    expect(stale).toBe(EXIT.refused);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "dark", outcome: "skipped", reason: "stale-source", detail: expect.stringContaining("the filed scope was rewritten") }));
+    const newDigest = withStore(store => {
+      const ref = store.refFor("built-in", "dark");
+      const scope = store.getScope("dark")!;
+      expect(scope).toMatchObject({ goal: rewritten.goal, acceptance: rewritten.acceptance });
+      expect(scope.digest).not.toBe(filedDigest);
+      expect(ref).toMatchObject({ plan: "requested", planStrikes: 0 });
+      const planner = store.runsFor(ref.id).find(one => one.role === "planner")!;
+      expect(planner).toMatchObject({ outcome: "refused", reason: "stale-source", scopeDigest: filedDigest });
+      expect(store.latestPlanArtifact(ref.id)).toBeNull();
+      expect(store.latestPlanContractArtifact(ref.id)).toBeNull();
+      expect(store.currentLiveLease(ref.id, new Date(T0.getTime() + 2_000))).toBeNull();
+      expect(store.raw().prepare("SELECT COUNT(*) AS n FROM notification WHERE kind = 'plan-stale-source'").get()).toEqual({ n: 1 });
+      return scope.digest;
+    });
+    // The next pass plans against the rewritten terms, quoted whole.
+    prompts = [];
+    const replanned = await tick(runnerToken, replying([() => ({ file: "plan", body: { ...rewritten, plan: planDocument(rewritten.acceptance.map(one => one.id)), amendment: null } })]), new Date(T0.getTime() + 5 * 60_000));
+    expect(replanned).toBe(EXIT.ok);
+    expect(payload().dispatched).toContainEqual({ id: "dark", outcome: "planned" });
+    expect(prompts[0]).toContain("High-contrast mode is selectable.");
+    expect(prompts[0]).toContain(`"digest": "${newDigest}"`);
+    withStore(store => expect(store.getScope("dark")).toMatchObject({ digest: newDigest, acceptance: rewritten.acceptance }));
+  });
+
+  test("c3: an authority change while the planner ran — the filed scope approved under it — refuses the draft and leaves the approval standing", async () => {
+    const { runnerToken, approverToken } = await setup();
+    const filedDigest = withStore(store => store.getScope("dark")!.digest);
+    const racing = replying([
+      () => {
+        withStore(store => {
+          const agreed = approve(store, "dark", "alex", new Date(T0.getTime() + 1_000), filedDigest, approverToken);
+          if (!agreed.ok) throw new Error(`approval refused: ${agreed.reason}`);
+        });
+        return { file: "plan", body: { ...preservingPlan(), outOfScope: null, amendment: "the exclusions are implied" } };
+      },
+    ]);
+    expect(await tick(runnerToken, racing)).toBe(EXIT.refused);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "dark", outcome: "skipped", reason: "stale-source", detail: expect.stringContaining("the scope's approval changed") }));
+    withStore(store => {
+      expect(store.getScope("dark")).toMatchObject({ digest: filedDigest, approvedDigest: filedDigest, outOfScope: filed.outOfScope });
+      expect(store.runsFor(store.refFor("built-in", "dark").id).find(one => one.role === "planner")).toMatchObject({ outcome: "refused", reason: "stale-source" });
+    });
+  });
+
+  test("c4: a parked question and its answer resume with the same source identity and the whole filed request quoted again; a same-session correction inherits it", async () => {
+    const { runnerToken, approverToken } = await setup();
+    const asking = replying([
+      () => ({
+        file: "park",
+        body: {
+          urgency: "blocking",
+          recap: "Two persistence stores fit.",
+          question: "Account preferences or local storage?",
+          options: [
+            { id: "account", label: "Account", consequence: "Roams.", reversible: true },
+            { id: "local", label: "Local", consequence: "Simpler.", reversible: true },
+          ],
+          recommendation: "account",
+        },
+      }),
+    ]);
+    expect(await tick(runnerToken, asking)).toBe(EXIT.ok);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "dark", outcome: "parked" }));
+    const firstIdentity = withStore(store => {
+      const ref = store.refFor("built-in", "dark");
+      const root = store.runsFor(ref.id).find(one => one.role === "planner")!;
+      expect(root.outcome).toBe("parked");
+      const source = store.plannerSourceArtifactFor(root.id)!;
+      return decodePlannerSource((readVerifiedArtifact(join(base, "evidence"), source) as { ok: true; content: Buffer }).content)!.sourceDigest;
+    });
+    expect(prompts[0]).toContain(`Its source identity is ${firstIdentity}.`);
+    const decision = withStore(store => store.listDecisions("unanswered")[0]!);
+    await run(["decide", String(decision.id), "--choose", "account", "--as", "alex", "--token", approverToken, "--json"], replying([]), new Date(T0.getTime() + 60_000));
+
+    // The resumed root: a malformed first reply corrected in-session.
+    prompts = [];
+    const resumed = await tick(
+      runnerToken,
+      replying([
+        () => ({ file: "plan", body: { ...preservingPlan(), plan: "not a sectioned plan" } }),
+        () => ({ file: "plan", body: preservingPlan() }),
+      ]),
+      new Date(T0.getTime() + 2 * 60_000),
+    );
+    expect(resumed).toBe(EXIT.ok);
+    expect(payload().dispatched).toContainEqual({ id: "dark", outcome: "planned" });
+    expect(prompts).toHaveLength(2);
+    // The resume was given the whole filed request again, with the same
+    // identity, and the operator's answer beside it.
+    expect(prompts[0]).toContain(`Its source identity is ${firstIdentity}.`);
+    expect(prompts[0]).toContain(rubric[0]!.how!);
+    expect(prompts[0]).toContain("Account preferences or local storage?");
+    expect(prompts[0]).toContain("| A: account");
+    withStore(store => {
+      const ref = store.refFor("built-in", "dark");
+      const runs = store.runsFor(ref.id).filter(one => one.role === "planner").sort((a, b) => a.id - b.id);
+      expect(runs).toHaveLength(3);
+      const [parked, root, correction] = runs as [typeof runs[0], typeof runs[0], typeof runs[0]];
+      expect(parked.outcome).toBe("parked");
+      expect(root).toMatchObject({ outcome: "built", reason: "plan-drafted" });
+      expect(correction).toMatchObject({ parentRun: root.id, outcome: "no-change" });
+      const rootSource = store.plannerSourceArtifactFor(root.id)!;
+      const rootIdentity = decodePlannerSource((readVerifiedArtifact(join(base, "evidence"), rootSource) as { ok: true; content: Buffer }).content)!;
+      expect(rootIdentity.sourceDigest).toBe(firstIdentity);
+      expect(rootIdentity.answers).toEqual([{ question: "Account preferences or local storage?", choice: "account", note: null }]);
+      expect(store.plannerSourceArtifactFor(correction.id)).toBeNull();
+      const record = decodePlanContractRecord((readVerifiedArtifact(join(base, "evidence"), store.latestPlanContractArtifact(ref.id)!) as { ok: true; content: Buffer }).content)!;
+      expect(record).toMatchObject({ sourceDigest: firstIdentity, sourceArtifact: rootSource.id, changes: [] });
+      expect(store.getScope("dark")).toMatchObject({ acceptance: rubric, goal: filed.goal });
+    });
+  });
+
+  test("c4: the legacy road — no scope filed — plans from the title alone, says so on the page, and files the planner's contract as new", async () => {
+    const { runnerToken, approverToken } = await setup({ scope: false });
+    const drafted = { goal: "Add a dark-mode toggle", outOfScope: null, touches: [], acceptance: [{ id: "c1", statement: "A toggle exists.", how: null, evidence: ["check"] }], plan: planDocument(["c1"]) };
+    expect(await tick(runnerToken, replying([() => ({ file: "plan", body: drafted })]))).toBe(EXIT.ok);
+    expect(payload().dispatched).toContainEqual({ id: "dark", outcome: "planned" });
+    expect(prompts[0]).toContain("No scope was filed");
+    expect(prompts[0]).toContain('"scope": null');
+    withStore(store => {
+      const ref = store.refFor("built-in", "dark");
+      expect(store.getScope("dark")).toMatchObject({ goal: drafted.goal, acceptance: drafted.acceptance });
+      const planner = store.runsFor(ref.id).find(one => one.role === "planner")!;
+      expect(planner.scopeDigest).toBe("");
+      const record = decodePlanContractRecord((readVerifiedArtifact(join(base, "evidence"), store.latestPlanContractArtifact(ref.id)!) as { ok: true; content: Buffer }).content)!;
+      expect(record).toMatchObject({ filed: null, changes: [], amendment: null });
+    });
+    await run(["task", "show", "dark"], replying([]));
+    expect(lines.join("\n")).toContain("filed contract: none — the planner drafted every term from the title and repository");
+    const web = await openConsole(approverToken);
+    expect(await web.page("/t/dark")).toContain("no scope was filed before planning");
+    await web.close();
+  });
+
+  test("c4: an empty-shaped scope — no exclusions, no touches, no how — is preserved exactly, and an oversized filed request refuses in words before any lease, run, or spend", async () => {
+    const { runnerToken, approverToken } = await setup({ scope: false });
+    const sparse = { goal: "Add a toggle", outOfScope: null, touches: [], acceptance: [{ id: "c1", statement: "A toggle exists.", how: null, evidence: ["check"] as AcceptanceCriterion["evidence"] }] };
+    withStore(store => propose(store, { taskId: "dark", ...sparse, now: T0 }));
+    expect(await tick(runnerToken, replying([() => ({ file: "plan", body: { ...sparse, plan: planDocument(["c1"]), amendment: null } })]))).toBe(EXIT.ok);
+    expect(payload().dispatched).toContainEqual({ id: "dark", outcome: "planned" });
+    withStore(store => {
+      const ref = store.refFor("built-in", "dark");
+      const record = decodePlanContractRecord((readVerifiedArtifact(join(base, "evidence"), store.latestPlanContractArtifact(ref.id)!) as { ok: true; content: Buffer }).content)!;
+      expect(record).toMatchObject({ changes: [], amendment: null });
+      expect(record.filed).toEqual(sparse);
+    });
+
+    // Oversized: a second task whose legacy-road goal is over the cap
+    // refuses BEFORE any workspace, run, or provider — in words that name
+    // the sizes — and the task page's diagnosis says the same.
+    await run(["task", "add", "huge", "--id", "huge", "--repo", repo, "--json"], replying([]));
+    withStore(store => propose(store, { taskId: "huge", goal: "x".repeat(PLANNER_SOURCE_LIMITS.bytes), acceptance: sparse.acceptance, now: T0 }));
+    await run(["task", "plan", "huge", "--as", "alex", "--token", approverToken, "--json"], replying([]));
+    expect(payload().ok).toBe(true);
+    let spawned = false;
+    const neverSpawns: Runner = async () => {
+      spawned = true;
+      throw new Error("nothing spawns on an oversized request");
+    };
+    expect(await tick(runnerToken, neverSpawns, new Date(T0.getTime() + 60_000))).toBe(EXIT.refused);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "huge", outcome: "skipped", reason: "planner-source-oversized", detail: expect.stringMatching(new RegExp(`over the ${PLANNER_SOURCE_LIMITS.bytes}-byte planner source cap \\(scope \\d+, revision brief 0\\)`)) }));
+    expect(spawned).toBe(false);
+    withStore(store => {
+      const ref = store.refFor("built-in", "huge");
+      expect(store.runsFor(ref.id)).toHaveLength(0);
+      expect(store.currentLiveLease(ref.id, new Date(T0.getTime() + 61_000))).toBeNull();
+      expect(ref).toMatchObject({ plan: "requested", planStrikes: 0 });
+      expect(store.getScope("huge")!.goal).toHaveLength(PLANNER_SOURCE_LIMITS.bytes);
+      expect(diagnoseTaskDispatch(store, "huge", new Date(T0.getTime() + 61_000))).toMatchObject({ code: "planner-source", detail: expect.stringContaining("planner source cap") });
+    });
   });
 });

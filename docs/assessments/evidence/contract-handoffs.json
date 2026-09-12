@@ -1,0 +1,638 @@
+{
+  "journeys": {
+    "journeys": [
+      {
+        "provider": "claude",
+        "model": "opus",
+        "passed": true,
+        "manualInterventions": 0,
+        "runtime": {
+          "sourceCommit": "1b3a2ba3de84e5fed2dbf954ef797e3d3038dbd4",
+          "executableSha256": "bb56ddbee14dec222d131fb65483d27aec51858ebb559571bfdd7bc38edc9d5c",
+          "sha256": "3e8337db49e6713cb047dea44d8c16b78765ed8b3efd889e846c452858b8686b"
+        },
+        "startedAt": "2026-09-12T06:38:46.719Z",
+        "finishedAt": "2026-09-12T06:46:31.389Z",
+        "sourceHead": "33771b1630b4f09f372311f9510e5e9e4a946021",
+        "revisionHead": "4d174e49e3f3b3f3555fdb5690f7293139f0d0a3",
+        "criteria": [
+          {
+            "id": "normalization",
+            "review": "upholds",
+            "coverage": "context",
+            "gaps": []
+          },
+          {
+            "id": "filter",
+            "review": "upholds",
+            "coverage": "patch",
+            "gaps": []
+          },
+          {
+            "id": "responsive",
+            "review": "upholds",
+            "coverage": "context",
+            "gaps": []
+          }
+        ]
+      },
+      {
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "passed": true,
+        "manualInterventions": 0,
+        "runtime": {
+          "sourceCommit": "1b3a2ba3de84e5fed2dbf954ef797e3d3038dbd4",
+          "executableSha256": "bb56ddbee14dec222d131fb65483d27aec51858ebb559571bfdd7bc38edc9d5c",
+          "sha256": "3e8337db49e6713cb047dea44d8c16b78765ed8b3efd889e846c452858b8686b"
+        },
+        "startedAt": "2026-09-12T06:38:46.719Z",
+        "finishedAt": "2026-09-12T06:54:55.486Z",
+        "sourceHead": "5c012c8ebc1fd67ae0bc6d8be067fb4d5cd301e8",
+        "revisionHead": "e69b8a03b4937ac71bebf10d9c1243a234f61a57",
+        "criteria": [
+          {
+            "id": "normalization",
+            "review": "upholds",
+            "coverage": "context",
+            "gaps": []
+          },
+          {
+            "id": "filter",
+            "review": "upholds",
+            "coverage": "patch",
+            "gaps": []
+          },
+          {
+            "id": "responsive",
+            "review": "upholds",
+            "coverage": "patch",
+            "gaps": []
+          }
+        ]
+      }
+    ],
+    "screenshotsVisuallyInspected": 4
+  },
+  "pilot": {
+    "version": 1,
+    "passed": true,
+    "runtime": {
+      "sha256": "ad9cbf0b044c1e18912592df7c6a13c6730789c32a2ca0fed2222138cc981621",
+      "executableSha256": "bb56ddbee14dec222d131fb65483d27aec51858ebb559571bfdd7bc38edc9d5c",
+      "sourceCommit": "1b3a2ba3de84e5fed2dbf954ef797e3d3038dbd4"
+    },
+    "runtimeUnchanged": true,
+    "startedAt": "2026-09-12T06:55:15.663Z",
+    "finishedAt": "2026-09-12T07:09:24.508Z",
+    "platform": "darwin",
+    "node": "22.22.0",
+    "total": 20,
+    "completed": 20,
+    "p50Seconds": 133.306,
+    "p95Seconds": 239.902,
+    "manualInterventions": 0,
+    "scope": "Real subscription builds, approved checks, and automatic independent reviews in disposable repositories across two sequential batches. Contracts are fixed and approved before unattended dispatch. Failed cases receive no manual rescue.",
+    "exclusions": [
+      "provider-authored planning (separately exercised by certify:provider)",
+      "mid-flight human revision or approval",
+      "direct-provider latency comparison",
+      "Windows",
+      "actual subscription exhaustion",
+      "production publication"
+    ],
+    "independentlyUpheldCriteria": 44,
+    "verifiedScreenshotArtifacts": 8,
+    "sourceCertificateSha256": "545853ef616044b2e3b2b2818f2d4437bba34d015b48a12d20ff801c4fb24e31",
+    "results": [
+      {
+        "name": "claude-dedupe",
+        "provider": "claude",
+        "model": "sonnet",
+        "category": "backend bug",
+        "passed": true,
+        "durationSeconds": 85.226,
+        "commit": "e8d39a51ba9599e2ee3603fd26fa0dd354ba5c04",
+        "changed": [
+          "dedupe.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "claude-pagination",
+        "provider": "claude",
+        "model": "sonnet",
+        "category": "backend bug",
+        "passed": true,
+        "durationSeconds": 91.063,
+        "commit": "94926dd4674b45950d3c62b48112c0339b846b22",
+        "changed": [
+          "paginate.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "codex-dedupe",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "category": "backend bug",
+        "passed": true,
+        "durationSeconds": 131.654,
+        "commit": "81e60eeeac2efb34046bd3b4df9a1c28ccb59893",
+        "changed": [
+          "dedupe.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "codex-pagination",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "category": "backend bug",
+        "passed": true,
+        "durationSeconds": 139.741,
+        "commit": "6ffdac36bbc514c47587ca1f03d158324b431683",
+        "changed": [
+          "paginate.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "claude-catalog",
+        "provider": "claude",
+        "model": "sonnet",
+        "category": "multiple files",
+        "passed": true,
+        "durationSeconds": 84.537,
+        "commit": "cff6b3bb7bd08c0266ba1b26da2f75eb21df55db",
+        "changed": [
+          "catalog.js",
+          "slug.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "claude-endpoint",
+        "provider": "claude",
+        "model": "sonnet",
+        "category": "multiple files",
+        "passed": true,
+        "durationSeconds": 60.2,
+        "commit": "3fd65178da75b2040ed1089fba68244a0f2975d7",
+        "changed": [
+          "endpoint.js",
+          "validate.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "codex-catalog",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "category": "multiple files",
+        "passed": true,
+        "durationSeconds": 156.725,
+        "commit": "239df8a6cf299abffe069217be723f4725dd1acb",
+        "changed": [
+          "catalog.js",
+          "slug.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "claude-dependency-format",
+        "provider": "claude",
+        "model": "sonnet",
+        "category": "dependency setup",
+        "passed": true,
+        "durationSeconds": 80.265,
+        "commit": "a3bd0d7646ce31c507471227bd0512a3e30318b3",
+        "changed": [
+          "receipt.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "codex-endpoint",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "category": "multiple files",
+        "passed": true,
+        "durationSeconds": 144.069,
+        "commit": "bf50d423b3a45f8e9a6bd68e0647394c43737c91",
+        "changed": [
+          "endpoint.js",
+          "validate.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "codex-dependency-format",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "category": "dependency setup",
+        "passed": true,
+        "durationSeconds": 144.631,
+        "commit": "2650e8071cc24669608f2e0722518db7e09f18e0",
+        "changed": [
+          "receipt.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "claude-dependency-sort",
+        "provider": "claude",
+        "model": "sonnet",
+        "category": "dependency setup",
+        "passed": true,
+        "durationSeconds": 74.122,
+        "commit": "f5976ff91ba2f54175c02fea09dc7af88d4795df",
+        "changed": [
+          "sort.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "claude-revision-csv",
+        "provider": "claude",
+        "model": "sonnet",
+        "category": "revision of existing behavior",
+        "passed": true,
+        "durationSeconds": 93.511,
+        "commit": "2f3d15f08b4976e21f6198d27d409437a16b5097",
+        "changed": [
+          "csv.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "claude-revision-config",
+        "provider": "claude",
+        "model": "sonnet",
+        "category": "revision of existing behavior",
+        "passed": true,
+        "durationSeconds": 69.869,
+        "commit": "9974e592bf9be5e6d00ea2359d93cf1d865082ff",
+        "changed": [
+          "config.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "codex-dependency-sort",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "category": "dependency setup",
+        "passed": true,
+        "durationSeconds": 155.174,
+        "commit": "8588d1cf406247d5556df736cbe55db951e55d8f",
+        "changed": [
+          "sort.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "codex-revision-csv",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "category": "revision of existing behavior",
+        "passed": true,
+        "durationSeconds": 169.395,
+        "commit": "5fded6914a73ea29211749d8dc2d542f516c0642",
+        "changed": [
+          "csv.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "codex-revision-config",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "category": "revision of existing behavior",
+        "passed": true,
+        "durationSeconds": 188.369,
+        "commit": "eb427f81091fe79588b3077e4b65291bd70b11d3",
+        "changed": [
+          "config.js"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "claude-ui-form",
+        "provider": "claude",
+        "model": "sonnet",
+        "category": "UI flow",
+        "passed": true,
+        "durationSeconds": 133.306,
+        "commit": "9bf4acccba70b71f32bd82ae44b82187558896a9",
+        "changed": [
+          "index.html"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c3",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [
+          {
+            "sha256": "a0a7a2dd345e37cbdb469228bc1dd893edb176dacd6d66f4d39ad276bac0de8f"
+          },
+          {
+            "sha256": "ce9e3682c0ebed3b7f862945a3f6b756b43911f892a78db9b94c9c5a43bbadef"
+          }
+        ],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "claude-ui-filter",
+        "provider": "claude",
+        "model": "sonnet",
+        "category": "UI flow",
+        "passed": true,
+        "durationSeconds": 242.978,
+        "commit": "7e34bcca3e055e22eb3c1f5c64d5fc2593b57667",
+        "changed": [
+          "index.html"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c3",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [
+          {
+            "sha256": "2cacdb38040215800bd0b0f279492e41df3e8bc1bba6c425f05b415b91a106c9"
+          },
+          {
+            "sha256": "380f1dc11c9e0c43072b02179940eb6ca6b225cd7fb17b8eb1d486af21122f00"
+          }
+        ],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "codex-ui-filter",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "category": "UI flow",
+        "passed": true,
+        "durationSeconds": 239.902,
+        "commit": "2f607de0322dee6a5e0617d5a223f3fc75e1816f",
+        "changed": [
+          "index.html"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c3",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [
+          {
+            "sha256": "98420234cbabfb6e23e5605906ae5807ef585facbc0da9846209d47c148c6bc5"
+          },
+          {
+            "sha256": "b52a3d153efa44385087ed6215d2633c225f3949e92c80050a10627dafff9e58"
+          }
+        ],
+        "duplicateDispatch": "refused-empty"
+      },
+      {
+        "name": "codex-ui-form",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "category": "UI flow",
+        "passed": true,
+        "durationSeconds": 230.448,
+        "commit": "fedc6d602d68d2c7f4c77ae114fb119475bbe465",
+        "changed": [
+          "index.html"
+        ],
+        "independentCriteria": [
+          {
+            "id": "c1",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c2",
+            "judgement": "upholds"
+          },
+          {
+            "id": "c3",
+            "judgement": "upholds"
+          }
+        ],
+        "screenshots": [
+          {
+            "sha256": "89494697a0dac5466b9701bd47ce625a7d5fc127191da01028df0019e6643042"
+          },
+          {
+            "sha256": "6f909408599ddc542d595e3dbfcbcd4d42abb5daeaa877188d46449fd416126c"
+          }
+        ],
+        "duplicateDispatch": "refused-empty"
+      }
+    ]
+  }
+}

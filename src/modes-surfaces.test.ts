@@ -7,10 +7,10 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { openStore, type Store } from "./store.js";
 import { addApprover, approvalOf, describeScope, fileAndSealUnderMode, modeFilingCoverage, propose, type AcceptanceCriterion } from "./scope.js";
 import { projectRoute, recommendRoute, routeFromJson, routeWords } from "./phase-routing.js";
@@ -183,20 +183,37 @@ describe("the round-1 closures: bearer fencing, revision defaults, sign-time gra
   });
 
   test("revision filing defaults ride the digest: escalated posture and the mode budget bind at creation (finding 2)", () => {
-    const sealed = store.sealRevision(
-      {
-        task: { title: "revise t-x: 1 comment", repo: REPO, goal: "apply the batch", acceptance: RUBRIC, budgetMicrousd: 2_500_000, posture: "escalated" },
-        artifact: { run: seedRun(store), kind: "revision-brief", key: "1/brief.json", bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: "0".repeat(64), capture: "test" },
-        revisionOf: "t-x",
-        commentIds: null,
-        sourceRun: 1,
-      },
-      T0,
-    );
-    if (!sealed.ok) throw new Error(sealed.reason);
-    const scope = store.getScope(sealed.id);
-    expect(scope?.budgetMicrousd).toBe(2_500_000);
-    expect(scope?.profile).toMatchObject({ provider: "claude", permissionArgv: "bypassPermissions" });
+    // The source is a legacy task with no scope: nothing inherits, so the
+    // mode's fresh filing defaults are the child's whole spend and posture
+    // story (contract handoff task 2: coverage is re-proved by the caller,
+    // never carried from the parent).
+    const run = seedRun(store);
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "so-surfaces-ev-"));
+    try {
+      const briefBytes = Buffer.from(JSON.stringify({ schema: 1, sourceTask: "t-x", sourceRun: run, sourceScopeDigest: null, head: store.getRun(run)!.headRevision, comments: [] }), "utf8");
+      mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
+      writeFileSync(join(evidenceRoot, String(run), "brief.json"), briefBytes);
+      const sealed = store.sealRevision(
+        {
+          source: { task: "t-x", run, scopeDigest: null },
+          brief: { evidenceRoot, key: `${run}/brief.json`, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "test" },
+          child: { title: "revise t-x: 1 comment", repair: "apply the batch" },
+          commentIds: null,
+          coverage: { defaultBudgetMicrousd: 2_500_000, escalated: true },
+        },
+        T0,
+      );
+      if (!sealed.ok) throw new Error(sealed.detail);
+      const scope = store.getScope(sealed.id);
+      expect(scope?.budgetMicrousd).toBe(2_500_000);
+      expect(scope?.profile).toMatchObject({ provider: "claude", permissionArgv: "bypassPermissions" });
+      // Nothing to inherit was inherited: the placeholder rubric, and the
+      // approval left for the ceremony.
+      expect(scope?.acceptance.map(one => one.id)).toEqual(["c1"]);
+      expect(scope?.approvedAt).toBeNull();
+    } finally {
+      rmSync(evidenceRoot, { recursive: true, force: true });
+    }
   });
 });
 

@@ -9,6 +9,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { jsonlDiscriminants } from "./jsonl-discriminants.js";
 
 export type ExecResult = {
   /** Process exit code, or one of the synthetic codes below. */
@@ -526,6 +527,7 @@ type BoundedJsonlLine = {
   prefix: Buffer;
   bytesOriginal: number;
   overflowed: boolean;
+  discriminants?: { type: string; itemType: string | null } | null;
 };
 
 /**
@@ -537,13 +539,16 @@ type BoundedJsonlLine = {
 function boundedJsonlFramer(
   cap: number,
   onLine: (line: BoundedJsonlLine) => void,
+  inspectDiscriminants = false,
 ): { push: (chunk: Buffer) => void; finish: () => void } {
   const retained = Buffer.allocUnsafe(cap);
   let retainedBytes = 0;
   let originalBytes = 0;
   let nonWhitespace = false;
+  let discriminants = inspectDiscriminants ? jsonlDiscriminants() : null;
 
   const append = (part: Buffer): void => {
+    discriminants?.push(part);
     originalBytes += part.length;
     if (!nonWhitespace) {
       for (const byte of part) {
@@ -563,10 +568,12 @@ function boundedJsonlFramer(
       prefix: retained.subarray(0, retainedBytes),
       bytesOriginal: originalBytes,
       overflowed: originalBytes > cap,
+      ...(discriminants === null ? {} : { discriminants: discriminants.finish() }),
     });
     retainedBytes = 0;
     originalBytes = 0;
     nonWhitespace = false;
+    discriminants = inspectDiscriminants ? jsonlDiscriminants() : null;
   };
 
   return {
@@ -753,13 +760,16 @@ export function runStreamJsonl(
 
     const keep = (framed: BoundedJsonlLine): void => {
       if (framed.overflowed) {
-        const type = leadingJsonObjectType(framed.prefix);
+        // Inspect structural keys across the complete byte stream, including
+        // keys AFTER discarded command output. Quoted or nested types cannot
+        // spoof these discriminants, and malformed/ambiguous input stays red.
+        const type = framed.discriminants?.type ?? null;
         if (type !== null && !["thread.started", "turn.completed", "turn.failed", "item.completed"].includes(type)) {
           return;
         }
         if (type === "item.completed") {
-          const itemType = leadingCodexCompletedItemType(framed.prefix);
-          if (itemType !== null && itemType !== "agent_message") return;
+          const itemType = framed.discriminants?.itemType;
+          if (itemType !== undefined && itemType !== null && ["command_execution", "mcp_tool_call", "web_search", "file_change", "todo_list"].includes(itemType)) return;
         }
         // A load-bearing or unclassifiable hard-cap breach is independently
         // retained as failure. Once those bytes were discarded, a later
@@ -826,7 +836,7 @@ export function runStreamJsonl(
       }
     };
 
-    const framing = boundedJsonlFramer(JSONL_EVENT_HARD_CAP, keep);
+    const framing = boundedJsonlFramer(JSONL_EVENT_HARD_CAP, keep, true);
 
     const watchdog = streamWatchdog(options, () => {
       timedOut = true;

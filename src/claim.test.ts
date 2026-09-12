@@ -1,5 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { plannerSourceOf, encodePlannerSource } from "./planner-source.js";
+import { storeEvidence } from "./evidence.js";
 import { register } from "./runner.js";
 import { addApprover, approve, propose } from "./scope.js";
 import {
@@ -897,6 +902,41 @@ describe("sealing a park", () => {
     expect(currentClaim(store, task, later(2_000))).toBeNull();
   });
 
+  test.each(["omitted", "swapped", "tampered", "amendment", "preserved"])("recorded planner source: %s at the ingestion boundary", (mode) => {
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "so-plan-boundary-"));
+    try {
+      propose(store, { taskId: "t-1", goal: "Keep every filed term", outOfScope: "billing", budgetMicrousd: 1_500_000, riskLevel: "high", qualityMode: "strict", acceptance: [{ id: "c1", statement: "Tests pass", how: null, evidence: ["check"] }], now: T0 });
+      acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+      const { root, child } = openPlannerRepair("lease-a");
+      const sourced = plannerSourceOf(store, evidenceRoot, "t-1", []);
+      if (!sourced.ok) throw new Error(sourced.message);
+      const initial = store.getScope("t-1")!;
+      store.stampRun(root, { scopeDigest: initial.digest });
+      const sourceArtifact = storeEvidence(store, evidenceRoot, root, "plan-contract", "planner-source.json", encodePlannerSource(sourced.source), "recorded before spend", T0);
+      let source = sourced.source;
+      if (mode === "swapped") {
+        propose(store, { taskId: "t-1", goal: "A newer contract", now: later(1) });
+        const current = plannerSourceOf(store, evidenceRoot, "t-1", []);
+        if (!current.ok) throw new Error(current.message);
+        source = current.source;
+      }
+      if (mode === "tampered") writeFileSync(join(evidenceRoot, store.getArtifact(sourceArtifact)!.key), "{}");
+      const expected = store.getScope("t-1")!.digest;
+      const result = finalizePlanFenced(store, { leaseId: "lease-a", runId: root, taskId: "t-1", plan: { ...initial, goal: mode === "amendment" ? "Ignore the original contract" : initial.goal, plan: "Implement the specified change" }, artifact: null, repairRunId: child,
+        ...(mode === "omitted" ? {} : { source, sourceArtifact, evidenceRoot }), now: later(1000) });
+      if (mode === "preserved") {
+        expect(result).toMatchObject({ ok: true, changes: 0 });
+        expect(store.getScope("t-1")).toMatchObject({ digest: initial.digest, budgetMicrousd: 1_500_000, riskLevel: "high", qualityMode: "strict", approvedAt: null });
+      } else {
+        expect(result).toMatchObject({ ok: false, reason: "source-invalid" });
+        expect(store.getScope("t-1")!.digest).toBe(expected);
+        expect(store.refForId(task)?.plan).not.toBe("drafted");
+        expect(store.latestPlanContractArtifact(task)).toBeNull();
+      }
+      expect(store.getRun(child)?.outcome).not.toBeNull();
+    } finally { rmSync(evidenceRoot, { recursive: true, force: true }); }
+  });
+
   test("an accepted planner correction settles only inside the successful park fence", () => {
     acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
     const { root, child } = openPlannerRepair("lease-a");
@@ -992,7 +1032,9 @@ describe("sealing a park", () => {
       now: later(1_000),
     });
 
-    expect(sealed).toEqual({ ok: true });
+    // No source was presented (the pre-source road): nothing to compare,
+    // no amendment — the seal says so in the same shape every dispatch reads.
+    expect(sealed).toEqual({ ok: true, changes: 0, amendment: null });
     expect(store.getRun(root)).toMatchObject({ outcome: "built", reason: "plan-drafted" });
     expect(store.getRun(child)).toMatchObject({ outcome: "no-change", reason: "structured planner output repaired" });
     expect(store.getScope("t-1")).toMatchObject({

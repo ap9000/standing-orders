@@ -1,20 +1,26 @@
 # Preserve the task contract through every handoff
 
-Assessed 2026-09-12 UTC against `b96d53e`, now integrated into local main.
-This is proposed implementation scope; the work below has not started.
+Assessed 2026-09-12 UTC. All three bounded tasks ran through Standing Orders
+and are integrated on `codex/contract-handoffs`, with additional operator-led
+hardening. Both real-provider handoff journeys pass with zero rescue
+interventions, and the broader release pilot passed 20/20. See the
+[integration evidence](assessments/CONTRACT_HANDOFF_RESULT.md).
+The [Agor assessment](assessments/AGOR_CONTEXT.md) keeps the implementation
+focused on existing task, run, artifact, and approval boundaries.
 
-## Why this is next
+
+## Observed problem this milestone addresses
 
 Bounded review retries ran through Standing Orders itself: planning, an approved
 build, independent review, an annotated revision, a continuation, and final
 review. The resulting implementation is tested, but completing that journey
 still required the supervising operator to repair lost context and terms.
-The next milestone is completing that same journey without those interventions.
+This milestone completes the same kind of journey without those interventions.
 
 Three observed gaps make this more valuable than adding another orchestrator
 feature now:
 
-| Handoff | Evidence at the integrated revision | Consequence |
+| Handoff | Evidence before this milestone | Consequence |
 | --- | --- | --- |
 | Filed request → planner | `plannerBrief` in `src/planner.ts` receives the title and prior decision answers, without the filed goal, exclusions, or rubric. | The dogfood plans omitted the requested UI evidence; the operator restored it before approval. |
 | Result → revision | Annotation and CI-repair creation in `src/serve.ts` copy selected scope fields; `Store.sealRevision` accepts no risk or quality fields. New scope resolution can fall back to task/installation defaults. | The high-risk revision became routine until the operator corrected it. Other execution terms need an explicit inheritance audit. |
@@ -29,6 +35,15 @@ unattended.
 ## Deliver in three bounded implementation tasks
 
 ### 1. Preserve the filed request during planning
+
+**Implemented and integrated.** `src/planner-source.ts` records the filed
+request; `finalizePlanFenced` verifies its bytes and current identity atomically.
+Explicit amendments and mechanical changes appear at approval. The whole source
+has a 128 KiB artifact limit; lossless prompt fencing preserves its JSON value.
+Earlier decision answers are limited to five with a visible refusal on overflow.
+`src/planner-source.test.ts`, `src/claim.test.ts`,
+`src/planner.test.ts`, and the migration tests cover these boundaries.
+
 
 Use the existing scope, plan artifact, and approval transaction. Capture the
 actual filed input for each planner attempt: goal, exclusions, touches, exact
@@ -50,6 +65,12 @@ amendment is visible; stale source terms refuse; malformed-output correction
 does not drop context. Include empty/legacy input and byte-limit cases.
 
 ### 2. Preserve revision terms with explicit approval semantics
+
+**Implemented and integrated.** The field-by-field policy and its coverage
+are recorded in [REVISION_TERMS.md](REVISION_TERMS.md). Source custody, exact
+annotation batches, a real two-process seal race, and bounded repair ancestry
+have additional integration regressions.
+
 
 Define one field-by-field policy at the existing revision creation boundary,
 used by annotation revisions, CI repair, and semantic repair. Bind the source
@@ -73,6 +94,14 @@ atomically; restart preserves lineage and remaining bounds. Task, chat, and
 approval views must display the actual resulting terms.
 
 ### 3. Make inherited review coverage verifiable
+
+**Implemented and integrated.** `src/review-context.ts` seals bounded source
+context, verified ancestor evidence, and prior review provenance. New revisions
+start at their verified source head. Successive revisions retain source paths;
+coverage and citations are criterion-specific, and evidence custody is rechecked
+when accepting a review. Schema 51 includes both plan-contract and review-context
+artifacts in one migration. See [the final evidence](assessments/CONTRACT_HANDOFF_RESULT.md).
+
 
 Extend the existing sealed evidence inventory with bounded context from the
 exact source and accepted head. Prefer criterion-relevant source files and
@@ -113,17 +142,11 @@ the new journey passes, not after every small change.
 
 ## Separate follow-ups and feature sequencing
 
-- Close a small credential/CLI parsing defect before the larger milestone:
-  valid 32-byte base64url tokens can begin with `--`, but `parseOperateArgs`
-  rejects such a `--token` value. A synthetic credential authenticated in an
-  in-memory store and was then refused by the CLI parser. The first merge gate
-  also had an intermittent planner setup failure; the focused planner suite
-  passed on rerun, but its original error payload was not retained, so the
-  token issue is a plausible cause rather than an established diagnosis.
-- Fix the reproduced JSONL overflow classifier in `src/exec.ts`, whose
-  `leadingCodexCompletedItemType` depends on object-key order. Test equivalent
-  events with different key orders and oversized command output. This is a
-  bounded transport fix; it is not proven to explain planner 1511's failure.
+- Completed: exact 43-character base64url credentials beginning with `--` now
+  parse through the CLI without weakening ordinary missing-value checks.
+- Completed: the bounded Codex JSONL overflow classifier recognizes equivalent
+  telemetry independent of object-key order, while malformed or unknown records
+  still refuse. This is not claimed to explain the earlier planner failure.
 - Reproduce the observed concurrent SQLite contention before choosing a fix.
   Do not claim that the aggressive reconciliation interval caused it.
 - Physical Windows closure/reboot and actual account-exhaustion fallback remain
@@ -133,7 +156,7 @@ the new journey passes, not after every small change.
   Per-task stop/resume and Telegram conversation/media remain distinct forward
   ports over current engines. Project memory follows trustworthy provenance.
 
-## Branch integration assessment
+## Earlier branch integration assessment
 
 Fetching origin and inspecting all refs found 45 local branches. This merge
 fast-forwarded main from `984fb49` to `b96d53e`, integrating 25 commits including
@@ -154,6 +177,6 @@ the merge did not rerun the real-provider release pilot.
 | `standing-orders/nightly-deps-20260812-1534` (`f2f0985`) | Only adds `docs/DEPS.md`. Its upstream claims were explicitly not checked against a registry. Retain as historical notes; regenerate from current manifests and primary sources if dependency review becomes a priority. |
 | `origin/codex/control-app` (`15a1d9c`) | Assessed and selectively integrated over current main. Native shell, setup, provider/model discovery, and calendar schedules are adapted; superseded engines are omitted. See [the full disposition and remaining forward ports](CONTROL_APP_INTEGRATION.md). |
 
-No branches or worktrees were deleted. The merge is local; publishing main and
-upgrading the live schema-v49 controller are separate delivery steps. The live
+No branches or worktrees were deleted. Main through `68ff7eb` has been pushed to GitHub. Upgrading the live
+schema-v49 controller remains a separate delivery step. The live
 controller remains on its stable reliability worktree.

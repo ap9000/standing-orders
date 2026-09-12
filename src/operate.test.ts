@@ -1460,6 +1460,7 @@ describe("task repair: the first CLI road to a revision (v40, evidence-review-v1
       const sealed = approveFn(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, seeded.token);
       if (!sealed.ok) throw new Error(`the fixture approval was refused: ${sealed.reason}`);
       const runId = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "r-1", branch: "b", worktree: "/wt", now: T0, ...presented(store, ref.id, "builder") });
+      store.stampRun(runId, { scopeDigest: store.getScope("t-1")!.digest });
       store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
       store.saveProofVerdict(runId, "short", ["needs a look"], T0, [
         { id: "c1", statement: "it works", requiredEvidence: ["manual-review"], state: "missing", detail: ['criterion "c1" needs work'], answered: [], review: null },
