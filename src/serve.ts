@@ -122,6 +122,7 @@ import {
 import { isQualityMode, qualityModeTitle, type QualityMode } from "./quality.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { parseExecutionPlanDocument, PLAN_LIMITS, milestonesOf, type MilestoneState } from "./plan.js";
+import { contractChangesOf, decodePlanContractRecord, describeContractChanges, type ContractChange } from "./planner-source.js";
 import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
 import { readLiveWindow } from "./live.js";
 import { dirname } from "node:path";
@@ -1112,6 +1113,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response, 200, nextPage(chromeFor(project, "inbox"), {
           item, scope,
           planDocument: planView?.document ?? null,
+          planContract: ref === null || planView === null ? null : planContractViewOf(ref.id, scope),
           approvalDigest,
           raceTerms,
           deliverable: ref?.deliverable ?? "branch",
@@ -1120,7 +1122,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         }));
       }
       return sendScreen(response, 200, nextPage(chromeFor(project, "inbox"), {
-        item, scope: null, planDocument: null, csrf, nonce: "",
+        item, scope: null, planDocument: null, planContract: null, csrf, nonce: "",
         approvalDigest: null, raceTerms: null, route: null,
         remaining: remaining.length, skipped: [...skipped], now,
       }));
@@ -3029,6 +3031,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         plan: ref?.plan ?? null,
         planDocument: planView?.document ?? null,
         planSha: planView?.sha256 ?? null,
+        planContract: ref === null || planView === null ? null : planContractViewOf(ref.id, scope),
         deliverable: ref?.deliverable ?? "branch",
         report: ref === null ? null : readVerifiedReport(store, evidenceRoot, ref.id),
         revision,
@@ -3283,6 +3286,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               nonce: view.nonce,
               digest: view.approvalDigest ?? scope.digest,
               planDocument: view.planDocument,
+              planContract: view.planContract ?? null,
               deliverable: view.deliverable ?? "branch",
               raceTerms: view.raceTerms ?? null,
               revision: view.revision ?? null,
@@ -6595,6 +6599,36 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
   }
 
+  /**
+   * The plan-contract record of the newest drafted plan (contract handoff,
+   * task 1): what the planner was filed, what it proposed, its explicit
+   * amendment, and every mechanical change between the two — verified
+   * before a byte renders, and marked `current` only while the proposed
+   * terms are still exactly the scope row (an operator's later edit turns
+   * the record into history, never a claim about the row).
+   */
+  function planContractViewOf(taskRef: number, scope: Scope | null): PlanContractView | null {
+    const artifact = store.latestPlanContractArtifact(taskRef);
+    if (artifact === null) return null;
+    try {
+      const verified = readVerifiedArtifact(evidenceRoot, artifact);
+      if (!verified.ok) return { run: artifact.run, problem: `the contract record no longer verifies — ${verified.problem}` };
+      const record = decodePlanContractRecord(verified.content);
+      if (record === null) return { run: artifact.run, problem: "the contract record is not the JSON it was sealed as" };
+      return {
+        run: artifact.run,
+        sourceDigest: record.sourceDigest,
+        filed: record.filed !== null,
+        amendment: record.amendment,
+        changes: record.changes,
+        changeWords: describeContractChanges(record.changes),
+        current: scope !== null && contractChangesOf(record.proposed, scope).length === 0,
+      };
+    } catch {
+      return { run: artifact.run, problem: "the contract record could not be read" };
+    }
+  }
+
   function revisionDocOf(row: PlanRevision): RevisionDocView | null {
     const artifact = store.getArtifact(row.artifact);
     if (artifact === null) return null;
@@ -7320,6 +7354,80 @@ function criterionMatrixHtml(
       )
       .join("") +
     `</ul></div>`
+  );
+}
+
+/** What the task and approval views show about a drafted plan's contract
+ * (contract handoff, task 1). A problem is a named problem, never a blank. */
+type PlanContractView =
+  | { run: number; problem: string }
+  | {
+      run: number;
+      sourceDigest: string;
+      /** Whether a scope was filed before planning (false: legacy road). */
+      filed: boolean;
+      amendment: string | null;
+      changes: ContractChange[];
+      changeWords: string[];
+      /** The proposed terms are still exactly the scope row. */
+      current: boolean;
+    };
+
+function contractChangeHtml(change: ContractChange): string {
+  const tag = `<span class="contract-change-kind contract-change-${change.kind}">${change.kind}</span>`;
+  switch (change.field) {
+    case "goal":
+      return `<li>${tag} <strong>goal</strong><div class="contract-before">was: ${escape(change.before)}</div><div class="contract-after">now: ${escape(change.after)}</div></li>`;
+    case "outOfScope":
+      return `<li>${tag} <strong>not this</strong>${change.before === null ? "" : `<div class="contract-before">was: ${escape(change.before)}</div>`}${change.after === null ? `<div class="contract-after">now: <em>no exclusions</em></div>` : `<div class="contract-after">now: ${escape(change.after)}</div>`}</li>`;
+    case "touches":
+      return `<li>${tag} <strong>touches</strong> <span class="mono">${escape(change.path)}</span></li>`;
+    case "acceptance": {
+      const criterion = (one: { statement: string; evidence: readonly string[]; how: string | null } | null): string =>
+        one === null ? "" : `${escape(one.statement)} <span class="meta">[requires: ${one.evidence.map(escape).join(", ")}]</span>${one.how === null ? "" : `<div class="meta">how: ${escape(one.how)}</div>`}`;
+      return (
+        `<li>${tag} <strong>criterion <code>${escape(change.id)}</code></strong>${change.kind === "changed" ? ` <span class="meta">(${change.moved.map(escape).join(", ")})</span>` : ""}` +
+        (change.before === null ? "" : `<div class="contract-before">${change.kind === "removed" ? "removed: " : "was: "}${criterion(change.before)}</div>`) +
+        (change.after === null ? "" : `<div class="contract-after">${change.kind === "added" ? "added: " : "now: "}${criterion(change.after)}</div>`) +
+        `</li>`
+      );
+    }
+  }
+}
+
+/**
+ * The contract panel (contract handoff, task 1): whether the drafted plan
+ * reproduced the filed goal, exclusions, touches, and rubric exactly, or
+ * proposes an amendment — every addition, change, and removal listed, the
+ * planner's stated reason beside them, and the plain consequence that
+ * approving binds the AMENDED terms. "full" is the task page's card;
+ * "ceremony" is the restatement inside the approval form and /next.
+ */
+function planContractHtml(view: PlanContractView | null, mode: "full" | "ceremony"): string {
+  if (view === null) {
+    return mode === "full" ? "" : `<p class="meta contract-note">no contract record for this draft — compare the scope above against what you filed before signing</p>`;
+  }
+  if ("problem" in view) {
+    return `<div class="contract-panel contract-problem"><p class="approval-label">filed contract</p><p class="meta">${escape(view.problem)} · <a href="/r/${view.run}">run ${view.run}</a></p></div>`;
+  }
+  const stale = view.current ? "" : `<p class="meta">the scope was edited after this draft landed — the record below describes the draft as the planner proposed it</p>`;
+  if (!view.filed) {
+    return mode === "full"
+      ? `<div class="contract-panel contract-drafted"><p class="approval-label">filed contract</p><p class="meta">no scope was filed before planning — the planner drafted this contract from the title and the repository; review every term as new</p>${stale}</div>`
+      : `<p class="meta contract-note">no scope was filed before planning — every term above is the planner's proposal</p>`;
+  }
+  if (view.changes.length === 0) {
+    return `<div class="contract-panel contract-preserved"><p class="approval-label">filed contract</p><p><strong>preserved exactly</strong> <span class="meta">the plan reproduces the filed goal, exclusions, touches, and acceptance criteria — approving binds the terms you filed · <a href="/r/${view.run}">run ${view.run}</a></span></p>${stale}</div>`;
+  }
+  return (
+    `<div class="contract-panel contract-amended"${mode === "full" ? ` id="contract-amendment"` : ""}><p class="approval-label">filed contract · amendment proposed</p>` +
+    `<p><strong>${view.changes.length} change${view.changes.length === 1 ? "" : "s"} to what you filed</strong> <span class="meta">— approving binds the AMENDED terms shown ${mode === "full" ? "in the scope" : "above"}, not the ones you filed · <a href="/r/${view.run}">run ${view.run}</a></span></p>` +
+    (view.amendment === null
+      ? `<p class="meta">the planner stated no reason for the amendment</p>`
+      : `<p class="recap contract-reason"><strong>why:</strong> ${escape(view.amendment)}</p>`) +
+    `<ul class="recap contract-changes">${view.changes.map(contractChangeHtml).join("")}</ul>` +
+    stale +
+    `</div>`
   );
 }
 
@@ -8743,6 +8851,24 @@ const STYLE = `
   .approval-boundary .approval-label { margin: 0 0 .2rem; }
   .approval-boundary p { margin: 0; color: var(--muted-foreground); font-size: .8rem; overflow-wrap: anywhere; }
   .approval-chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .8rem 0 .3rem; }
+  /* The filed contract (contract handoff, task 1): preserved, amended, or
+     drafted from nothing — the same panel on the task page, in the
+     ceremony, and on /next, so an amendment is never a surprise after the
+     yes. An amendment is the one state that asks for a second look. */
+  .contract-panel { margin-top: .8rem; padding: .7rem .85rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--muted) 45%, transparent); }
+  .contract-panel .approval-label { margin: 0 0 .25rem; }
+  .contract-panel p { margin: .2rem 0; }
+  .contract-amended { border-color: color-mix(in srgb, var(--warning, #c98a1b) 55%, var(--glass-border)); background: color-mix(in srgb, var(--warning, #c98a1b) 9%, transparent); }
+  .contract-reason { font-size: .9rem; }
+  .contract-changes { margin: .5rem 0 0; padding-left: 1.1rem; display: grid; gap: .45rem; }
+  .contract-changes li { overflow-wrap: anywhere; }
+  .contract-change-kind { display: inline-block; margin-right: .3rem; padding: .05rem .4rem; border-radius: 999px; font: 600 .62rem/1.5 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; background: color-mix(in srgb, var(--muted) 70%, transparent); }
+  .contract-change-added { background: color-mix(in srgb, var(--success, #2f9e5f) 18%, transparent); }
+  .contract-change-removed { background: color-mix(in srgb, var(--danger, #c8453d) 18%, transparent); }
+  .contract-change-changed { background: color-mix(in srgb, var(--warning, #c98a1b) 22%, transparent); }
+  .contract-before, .contract-after { margin-top: .15rem; font-size: .85rem; }
+  .contract-before { color: var(--muted-foreground); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--muted-foreground) 55%, transparent); }
+  .contract-note { margin-top: .5rem; }
   /* The agents (v47): one compact summary, rendered identically on the task
      page, in the approval ceremony, and in the focused chat; reasons and
      change controls stay closed until asked for. */
@@ -11269,6 +11395,9 @@ type TaskChatFocus = {
     nonce: string;
     digest: string;
     planDocument: string | null;
+    /** The drafted plan's contract record (contract handoff, task 1): the
+     * same panel the task page and /next show inside the ceremony. */
+    planContract: PlanContractView | null;
     deliverable: "branch" | "report";
     raceTerms: TournamentTerms | null;
     revision: RevisionView | null;
@@ -11395,7 +11524,7 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
     `<input type="hidden" name="digest" value="${escape(approval.digest)}">` +
     `<input type="hidden" name="return" value="${escape(returnTo)}">` +
     `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">` +
-    (approval.planDocument === null ? "" : `<div class="chat-approval-section"><span class="approval-label">proposed plan</span>${executionPlanHtml(approval.planDocument, true)}</div>`) +
+    (approval.planDocument === null ? "" : `<div class="chat-approval-section"><span class="approval-label">proposed plan</span>${executionPlanHtml(approval.planDocument, true)}${planContractHtml(approval.planContract, "ceremony")}</div>`) +
     (approval.deliverable === "report" ? `<p class="meta"><span class="badge">report only</span> This investigates and reports back without changing the repository.</p>` : "") +
     (approval.coordinator === null ? "" : `<p class="meta">Filed by <span class="mono">${escape(approval.coordinator.label)}</span>${approval.coordinator.filedAgo === null ? "" : ` · ${escape(approval.coordinator.filedAgo)}`}.</p>`) +
     `<div class="chat-approval-section"><span class="approval-label">goal</span><p class="approval-goal">${escape(scope.goal)}</p></div>` +
@@ -14436,6 +14565,8 @@ function taskBody(data: {
   planDocument: string | null;
   /** Hash of the verified plan artifact currently shown. */
   planSha?: string | null;
+  /** The drafted plan's contract record (contract handoff, task 1). */
+  planContract?: PlanContractView | null;
   /** Adaptive execution plans (v44): the revision ledger and live milestone
    * projection — null for a task with no plan at all. */
   planRevisions?: PlanRevisionLedgerView | null;
@@ -14946,6 +15077,7 @@ function taskBody(data: {
         (approval.approved ? `<p class="meta">The agent can adapt this route when evidence changes; your approved outcome stays fixed.</p>` : "") +
         `</div><span class="plan-lock">${planStanding}</span>${approval.approved ? `</summary><div class="planner-plan-body">` : `</div>`}` +
         executionPlanHtml(displayedPlanDocument ?? data.planDocument) +
+        (approval.approved ? "" : planContractHtml(data.planContract ?? null, "full")) +
         (data.csrf === "" || data.planSha == null || approval.approved
           ? ""
           : `<details class="plan-editor"><summary>Edit plan</summary><form method="post" action="${taskHref(task.id)}/plan-edit">` +
@@ -15037,6 +15169,9 @@ function taskBody(data: {
           `<div class="approval-boundary"><p class="approval-label">touches</p><p>${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p></div>`,
           `</div>`,
           acceptanceCeremonyHtml(scope.acceptance),
+          // The contract amendment INSIDE the ceremony (contract handoff,
+          // task 1): what the yes accepts that the operator did not file.
+          data.plan === "drafted" ? planContractHtml(data.planContract ?? null, "ceremony") : "",
           `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
             (approvalPermission === null ? "" : `<span class="approval-chip">${escape(approvalPermission)}</span>`) +
             `</div>`,
@@ -16537,6 +16672,7 @@ const EVIDENCE_WORDS: Record<string, string> = {
   "check-log": "the plane's re-run check",
   screenshot: "a screenshot",
   "structured-output": "an agent response",
+  "plan-contract": "the planner's filed request and contract record",
 };
 
 function evidenceWords(kind: string): string {
@@ -17882,6 +18018,7 @@ function nextPage(chrome: Chrome, data: {
     | null;
   scope: Scope | null;
   planDocument: string | null;
+  planContract?: PlanContractView | null;
   approvalDigest: string | null;
   raceTerms: TournamentTerms | null;
   /** v34: said inside the ceremony when the yes buys a report, not a branch. */
@@ -17933,7 +18070,7 @@ function nextPage(chrome: Chrome, data: {
       `<p>${escape(item.approval.title)}</p>` +
       (data.planDocument === null
         ? ""
-        : `<div class="card"><p><strong>the plan</strong> <span class="meta">drafted by a planning session</span></p>${executionPlanHtml(data.planDocument, true)}</div>`) +
+        : `<div class="card"><p><strong>the plan</strong> <span class="meta">drafted by a planning session</span></p>${executionPlanHtml(data.planDocument, true)}${planContractHtml(data.planContract ?? null, "ceremony")}</div>`) +
       `<form method="post" action="${taskHref(item.approval.taskId)}/approve" class="card approve-form">` +
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
       `<input type="hidden" name="nonce" value="${escape(data.nonce)}">` +

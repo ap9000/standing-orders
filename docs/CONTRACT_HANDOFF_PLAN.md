@@ -1,8 +1,11 @@
 # Preserve the task contract through every handoff
 
 Assessed 2026-09-12 UTC against `b96d53e`, now integrated into local main.
-This is proposed implementation scope; task 2 below is implemented, tasks 1
-and 3 have not started.
+Tasks 1 and 2 are implemented and undergoing integration hardening. Task 3
+is running through Standing Orders. The real-provider completion gate has
+not run. [Agor assessment](assessments/AGOR_CONTEXT.md) keeps this milestone
+focused on existing task, run, artifact, and approval boundaries.
+
 
 ## Why this is next
 
@@ -30,6 +33,42 @@ unattended.
 ## Deliver in three bounded implementation tasks
 
 ### 1. Preserve the filed request during planning
+
+**Status (2026-09-11, branch `standing-orders/preserve-filed-planning-contract`,
+unmerged):** implemented over the existing scope row, plan artifact, and
+`finalizePlanFenced` transaction, with focused regressions in
+`src/planner.test.ts` ("the filed contract reaches planning and survives
+it"), `src/planner-source.test.ts`, and
+`src/migration-v51-plan-contract.test.ts`. What landed: `src/planner-source.ts`
+assembles the filed request per attempt (scope goal/exclusions/touches/rubric
+with evidence kinds and `how`, execution terms, revision brief by verified
+read, earlier answers) under one explicit cap (`PLANNER_SOURCE_LIMITS.bytes`,
+128 KiB, equal to the artifact cap so a record is never truncated); an
+oversized or unreadable request is refused in words before any lease, run, or
+spend (`planner-source-oversized` / `planner-source-revision-brief`, and the
+task page's `planner-source` diagnosis). The source is recorded on the
+planner run as a `plan-contract` artifact (`planner-source.json`) before the
+brief is composed, the run is stamped with the filed scope digest, and the
+brief quotes the whole record as fenced JSON data with its source identity.
+A drafted plan must reproduce the filed goal, outOfScope, touches, and
+acceptance exactly or state an `amendment`; a silent change is a
+`silent-amendment` malformed plan corrected in the same session (the frozen
+authority values stay; the correction may only add the note), or a durable
+incident when no session can be resumed. `finalizePlanFenced` re-derives the
+source identity inside its transaction and refuses a stale draft
+(`stale-source`: no strike, claim released, task still requested, the newer
+scope untouched); on ingestion it writes `plan-contract.json` (filed terms,
+proposed terms, amendment, mechanical changes). The task page, the approval
+ceremony, `/next`, the chat approval card, `task show`, and the `task approve`
+preview show "preserved exactly", the amendment with every addition/change/
+removal and the planner's reason, or "no scope was filed"; the ordinary
+approval still binds the scope row's digest — the filed digest when
+preserved, the amended one otherwise. The six-stage crash canary passed
+on the rebuilt runtime (`evidence/preserve-filed-planning-contract/crash-canary.json`,
+runtime `f6eec868…`, source commit `68ff7eb` plus this branch's uncommitted
+tree at certification). Not done here: revision-term inheritance (task 2),
+inherited review context (task 3), and the integrated request-to-review
+journey with a real provider.
 
 Use the existing scope, plan artifact, and approval transaction. Capture the
 actual filed input for each planner attempt: goal, exclusions, touches, exact

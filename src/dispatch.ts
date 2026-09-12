@@ -9,6 +9,7 @@
 
 import { isAlive } from "./runner.js";
 import { approvalOf, type ExecutionProfile } from "./scope.js";
+import { plannerSourceProblemOf } from "./planner-source.js";
 import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRequestOrigin, type ReviewRetryState, type Store, type TaskState } from "./store.js";
 
 export const DEFAULT_MAX_OPEN_DECISIONS = 5;
@@ -65,6 +66,7 @@ export type DispatchDiagnosisCode =
   | "worker-at-capacity"
   | "provider-quota"
   | "planning-ready"
+  | "planner-source"
   | "scouting-ready"
   | "ready";
 
@@ -399,7 +401,14 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
   if (openDecisions >= DEFAULT_MAX_OPEN_DECISIONS && (role === "planner" || ref.parkRate > 0)) {
     return answer("waiting-decision", "waiting", "Decision queue is full", `${openDecisions} decisions already wait; answer some before this task may add another.`, { action: "answer-decision", role });
   }
-  if (role === "planner") return answer("planning-ready", "retrying", "Planner ready", "An eligible worker can draft the scope on the next pass.", { role });
+  if (role === "planner") {
+    // The filed request's own gate (contract handoff, task 1): a request
+    // the planner could not be given whole is refused before spend, and
+    // this is where the task page says so.
+    const sourceProblem = plannerSourceProblemOf(store, taskId);
+    if (sourceProblem !== null) return answer("planner-source", "waiting", "The filed request cannot be planned as filed", sourceProblem, { action: "write-scope", role });
+    return answer("planning-ready", "retrying", "Planner ready", "An eligible worker can draft the scope on the next pass.", { role });
+  }
   if (role === "scout") return answer("scouting-ready", "retrying", "Scout ready", "An eligible worker can produce the report on the next pass.", { role });
   return answer("ready", "retrying", "Ready to run", "An eligible worker has capacity and every dispatch gate currently passes.", { role });
 }
