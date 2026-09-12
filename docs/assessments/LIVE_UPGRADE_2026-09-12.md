@@ -1,5 +1,8 @@
 # Live controller upgrade
 
+The subsequent [final rollout record](FINAL_ROLLOUT_2026-09-12.md) supersedes
+the deployment-gate status below and records the newer prompt-fix preview.
+
 ## Current installation: schema 52
 
 The subsequent schema-55 completion release is staged at
