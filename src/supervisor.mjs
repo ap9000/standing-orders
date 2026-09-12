@@ -37,7 +37,7 @@
 
 // The source supervisor is also exercised directly by the TypeScript test
 // runner; its shared helper comes from the normal production build there.
-const { stopProcessTree, observeProcessTree } = await import(new URL("./process-tree.js", import.meta.url).href).catch(error => {
+const { stopProcessTree, observeProcessTree, sampleProcessTree } = await import(new URL("./process-tree.js", import.meta.url).href).catch(error => {
   if (error.code !== "ERR_MODULE_NOT_FOUND") throw error;
   return import(new URL("../dist/process-tree.js", import.meta.url).href);
 });
@@ -269,6 +269,9 @@ server.listen(socketPath, () => {
 const fence = () => {
   if (fencing || exited || child === undefined) return;
   fencing = true;
+  // Preserve witnesses before a cooperative root can exit and orphan its
+  // tools between the observer's periodic snapshots.
+  sampleProcessTree(child);
   try {
     child.stdin.end();
   } catch {

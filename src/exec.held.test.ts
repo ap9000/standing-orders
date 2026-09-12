@@ -231,7 +231,8 @@ describe("the held-session transport under the real supervisor", () => {
       expect(existsSync(checkpoint)).toBe(true);
       const pid = Number(readFileSync(checkpoint, "utf8"));
       start.handle.terminate();
-      await start.handle.exited;
+      const exited = await start.handle.exited;
+      if (mode === "inherited") expect(exited.code).toBe(0);
       expect(() => process.kill(pid, 0)).toThrow();
     } finally { start.handle.terminate(); await start.handle.exited; }
   });

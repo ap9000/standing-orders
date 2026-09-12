@@ -26,7 +26,7 @@ function ask(path: string, verb: string): Promise<Record<string, unknown>> {
   });
 }
 
-async function fixture() {
+async function fixture(observeAtFence = false) {
   const dir = mkdtempSync(join(tmpdir(), "so-drain-")); paths.push(dir);
   copyFileSync(new URL("./supervisor.mjs", import.meta.url), join(dir, "supervisor.mjs"));
   // Control the descendant observation boundary, not the supervisor. This
@@ -36,7 +36,9 @@ async function fixture() {
   children.push(descendant);
   const descendantExit = new Promise<void>(resolve => descendant.once("close", () => resolve()));
   writeFileSync(join(dir, "process-tree.js"), `
-export function observeProcessTree(child, observer) { observer.onDescendant(${descendant.pid}); }
+let observer;
+export function observeProcessTree(child, value) { observer = value; ${observeAtFence ? "" : `observer.onDescendant(${descendant.pid});`} }
+export function sampleProcessTree() { observer.onDescendant(${descendant.pid}); }
 export function stopProcessTree(child) { return child.kill("SIGKILL"); }
 `);
   const socket = join(dir, "control.sock");
@@ -61,8 +63,8 @@ export function stopProcessTree(child) { return child.kill("SIGKILL"); }
 }
 
 describe.skipIf(process.platform === "win32")("supervisor drain ownership", () => {
-  test("root close retains custody and a kill reply until the observed descendant is gone", async () => {
-    const f = await fixture();
+  test.each(["periodic observation", "shutdown observation"])("root close retains custody and a kill reply until the descendant found by %s is gone", async observation => {
+    const f = await fixture(observation === "shutdown observation");
     expect(f.status).toMatchObject({ alive: true, groupAlive: false });
     let replied = false;
     const reply = ask(f.socket, "kill").then(value => { replied = true; return value; });

@@ -40,6 +40,15 @@ function uncertain(child: ChildProcess): void {
   try { observed.get(child)?.observer.onUnknown?.(); } catch {}
 }
 
+/** Capture current descendants before asking an owned process to exit.
+ * A cooperative root may exit before the next periodic observation; even
+ * a killed tool can retain its PID briefly after its process group is gone. */
+export function sampleProcessTree(child: ChildProcess): void {
+  if (!live(child) || !observed.has(child)) return;
+  try { remember(child, descendants(snapshot(), child.pid!)); }
+  catch { uncertain(child); }
+}
+
 /** Observe escaped process groups while their ancestry is still provable.
  * Durable witnesses prevent recovery from mistaking a dead harness for a dead
  * shell. They never grant permission to send a signal after worker recovery. */
