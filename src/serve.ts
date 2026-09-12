@@ -2832,9 +2832,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     // …except the one-time-secret pages (forceSensitive): those stay
     // script-free absolutely, and simply do not keep sessions alive.
     const sensitiveChrome = sensitive && s.forceSensitive !== true && s.chrome !== undefined
-      ? beatScript() + sidebarScript()
+      ? beatScript(!restricted()) + sidebarScript()
       : "";
-    const script = functional + (chromeLayer ? chromeScript() : sensitiveChrome);
+    const script = functional + (chromeLayer ? chromeScript(!restricted()) : sensitiveChrome);
     const nonce = script === "" ? undefined : randomBytes(16).toString("base64");
     const body = chromeLayer
       ? `${s.body}\n${paletteTagCached(s.chrome?.project ?? null)}\n${KBD_HELP}`
@@ -10478,7 +10478,8 @@ function transcriptScript(path?: string, elementId = "live-transcript"): string 
  * server-side, renewal-only — any console page keeps the signed-in
  * approver's own sessions live; a hidden tab pauses honestly. Cheap
  * no-op when nothing is open. Shipped ALONE on sensitive pages. */
-function beatScript(): string {
+function beatScript(enabled = true): string {
+  if (!enabled) return "";
   return (
     `(function(){var beat=function(){if(document.hidden)return;` +
     `fetch("/session/attended-beats",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:""}).catch(function(){});};` +
@@ -10501,9 +10502,9 @@ function sidebarScript(): string {
   );
 }
 
-function chromeScript(): string {
+function chromeScript(beats = true): string {
   return (
-    beatScript() +
+    beatScript(beats) +
     sidebarScript() +
     `(function(){` +
     // The app-icon badge (Phase 2E): the page's server-rendered waiting
