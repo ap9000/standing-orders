@@ -12,7 +12,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
 import { injectBootIdentity } from "./boot-identity.js";
@@ -32,7 +32,8 @@ const V52_RUN_PROCESS = `CREATE TABLE run_process (
 describe("schema v53: boot identity and the native OS object ride the process witness", () => {
   let dir: string | undefined;
   let store: Store | null = null;
-  const T0 = new Date("2026-09-12T08:00:00.000Z");
+  const REPO = resolve("/repo");
+const T0 = new Date("2026-09-12T08:00:00.000Z");
 
   afterEach(() => {
     injectBootIdentity(null);
@@ -52,10 +53,10 @@ describe("schema v53: boot identity and the native OS object ride the process wi
     dir = mkdtempSync(join(tmpdir(), "standing-orders-v53-"));
     const file = join(dir, "orders.db");
     store = openStore(file);
-    register(store, { name: "r", host: hostname(), capacity: 1, repos: ["/repo"], now: T0, newToken: () => "tok" });
+    register(store, { name: "r", host: hostname(), capacity: 1, repos: [REPO], now: T0, newToken: () => "tok" });
     store.createTask({ id: "t", title: "t" }, T0);
     const ref = store.refFor("built-in", "t").id;
-    store.placeTask(ref, "/repo");
+    store.placeTask(ref, REPO);
     const claimed = acquire(store, ref, "r", { token: "tok", now: T0, ttlMs: 3_600_000, newLeaseId: () => "lease" });
     if (!claimed.ok) throw new Error(claimed.reason);
     const run = store.startRun({ taskRef: ref, leaseId: "lease", runner: "r", branch: "b", worktree: "/w", now: T0, route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" } });
@@ -115,10 +116,10 @@ describe("schema v53: boot identity and the native OS object ride the process wi
 
   test("the container custody writes are fenced: one object per witness, empty only after it was named", () => {
     store = openStore(":memory:");
-    register(store, { name: "r", host: hostname(), capacity: 1, repos: ["/repo"], now: T0, newToken: () => "tok" });
+    register(store, { name: "r", host: hostname(), capacity: 1, repos: [REPO], now: T0, newToken: () => "tok" });
     store.createTask({ id: "t", title: "t" }, T0);
     const ref = store.refFor("built-in", "t").id;
-    store.placeTask(ref, "/repo");
+    store.placeTask(ref, REPO);
     const run = store.startRun({ taskRef: ref, leaseId: "lease", runner: "r", branch: "b", worktree: "/w", now: T0, route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" } });
     const witness = store.reserveRunProcess(run, T0, true);
     store.markRunContainerEmpty(witness, T0);

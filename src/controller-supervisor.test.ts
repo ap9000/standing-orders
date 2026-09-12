@@ -18,11 +18,12 @@ test("clean exit and actual SIGKILL each restart one controller; explicit stop h
   `);
   const controller = new AbortController();
   const states: ControllerState[] = [];
+  const ready = setInterval(() => { try { if (JSON.parse(readFileSync(join(root, "starts.json"), "utf8")).length === 3) controller.abort(); } catch {} }, 20);
   const safety = setTimeout(() => controller.abort(), 8_000);
   try {
     await superviseController({ file: process.execPath, argv: [fixture, join(root, "starts.json")], signal: controller.signal,
       retryMs: 20, maxRetryMs: 80, shutdownMs: 500,
-      onState: state => { states.push(state); if (state.phase === "running" && state.generation === 3) setTimeout(() => controller.abort(), 150); },
+      onState: state => { states.push(state); },
     });
     expect(JSON.parse(readFileSync(join(root, "starts.json"), "utf8"))).toHaveLength(3);
     expect(states.filter(state => state.phase === "backoff")).toEqual([
@@ -33,7 +34,7 @@ test("clean exit and actual SIGKILL each restart one controller; explicit stop h
     // Windows represents forced termination as a nonzero code, POSIX as a signal.
     expect(killed.exit!.signal === "SIGKILL" || killed.exit!.code !== 0).toBe(true);
     expect(states.at(-1)).toEqual({ phase: "stopped", generation: 3, controllerPid: null });
-  } finally { clearTimeout(safety); controller.abort(); rmSync(root, { recursive: true, force: true }); }
+  } finally { clearInterval(ready); clearTimeout(safety); controller.abort(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("missing runtime backs off, and cancellation during backoff prevents another spawn", async () => {

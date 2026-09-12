@@ -46,6 +46,7 @@ supervisor. Per spawn:
 - **Linux** — a leaf `so-<owner>-<random>` under the delegated root. The
   target is launched as `/bin/sh -c '<prelude>' so-contain <leaf> <file> <args…>`:
   the prelude writes its own pid into `cgroup.procs`, confirms on fd 3,
+  waits for controller authorization after durable custody and guardian readiness,
   closes it, and `exec`s the target with argv as positional parameters —
   never re-parsed, same pid, same stdin/stdout/stderr, same environment and
   cwd. A join that fails exits 126 before the target can run; the
@@ -64,8 +65,8 @@ supervisor. Per spawn:
   kill stop stay exactly as before.
 
 Cancellation (an operator stop, a timeout, the watch's hard stop) reaches
-the current invocation's object only — `cgroup.kill` (or pid-by-pid on
-kernels before 5.14), `TerminateJobObject` — and the transport's
+the current invocation's object only — atomic `cgroup.kill` (Linux 5.14+),
+`TerminateJobObject` — and the transport's
 settlement WAITS for the OS's empty state (`cgroup.events populated 0`, the
 helper's `empty`), bounded. The root's natural exit runs the same
 settlement: members that outlived it (a setsid'd helper, a double fork) are
@@ -74,14 +75,20 @@ killed, then emptiness is proven. A transport exit is never the proof.
 ## Custody (schema v53)
 
 `run_process` gains `boot_id`, `containment`, `container`,
-`container_empty_at` — additive, nullable, NULL on every historical row.
+`container_empty_at`, `container_identity` — additive, nullable, NULL on every historical row.
 The witness names the object at the spawn (before the target executes) and
 is marked empty only on the OS's word. `stopQuiescenceProblem` — the one
 fence behind stop settlement, resume, review-retry admission and recovery —
 reads a native witness with no empty proof as still occupied unless the
 object can be proven empty now (populated flag 0, or a cgroup directory
-that is gone: only an empty one can be removed); a job whose helper is gone
-without its `empty` word stays unproven. Fail-closed, as the plan asks.
+that is gone under the same verified kernel mount and cgroup namespace).
+Ordinary files, removed mounts, namespace changes, malformed populated flags,
+and incomplete custody stay unknown. Windows records a unique global job
+name: recovery opens it with query permission only and reads ActiveProcesses;
+a destroyed job is empty because Windows destroys it only after every member
+has terminated. No recorded identifier grants permission to signal a process.
+The held-session orphan sweep applies the same boot/object proof before
+waiting on a supervisor socket that cannot survive a reboot.
 
 ## Boot identity
 
@@ -104,13 +111,19 @@ exist.
 controller (the Swift shell calls `desktop-host.js service-start|service-stop|service-status`
 instead of writing its own plist):
 
-- launchd `KeepAlive=true` (relaunch after crash AND unexpected clean
-  exit, throttled 15 s), systemd `Restart=always`, a `cmd` restart loop
+- launchd `KeepAlive=true` requests relaunch after crash and clean exit.
+  macOS can defer nondemand launches: actual probes on the development host
+  remained pending past 90 seconds. The desktop and CLI macOS service parents
+  therefore supervise exactly one controller, restart clean/crashed controllers
+  with bounded backoff, and await normal runner/lease fences. This guard does
+  not survive its own SIGKILL or bypass OS login/startup policy;
+- systemd `Restart=always`, a `cmd` restart loop
   under Task Scheduler (whose `RestartOnFailure` alone covers crashes);
 - idempotent start: a loaded, unchanged definition is `kickstart`ed
   without `-k` — a healthy running controller is never killed because the
   installer or the app window ran again;
-- a changed definition (runtime, entry, flags) is booted out, its label's
+- a changed definition (runtime, entry, flags), compared with the fingerprint
+  in the **loaded** job, is booted out, its label's
   disappearance awaited (`launchctl print` until it fails — the pending-
   bootout/bootstrap race), then bootstrapped; systemd restarts an active
   unit only when the unit changed; `schtasks /End` + `/Run` likewise;
@@ -125,7 +138,19 @@ instead of writing its own plist):
 
 Private login, identity, projects and the database are untouched by any of
 this; the desktop's `serve` still opens the database through the
-non-migrating door.
+non-migrating door. The desktop stores one runner identity so crash recovery
+waits for that runner instead of silently creating a suffixed replacement.
+Its app bundle includes the official Node runtime and license, preserves its
+original code signature, and remembers the provider executable search path.
+Install the bundle in Applications; a Documents-located bundle failed the
+launchd startup check on the development host. Project access is a separate
+installed-app check.
+
+CLI daemon installation persists the resolved containment policy, including an
+environment-supplied policy. Desktop policy is retained in private configuration;
+`desktop-host.js containment required --state <directory>` changes it explicitly,
+and the next service start loads the changed definition. Existing installations
+remain observed unless configured otherwise.
 
 ## Certification
 
@@ -138,9 +163,18 @@ non-migrating door.
   after YOU log out/in or reboot, `… verify --db <file> --baseline <file>
   --expect reboot|login`: boot identity as the OS reports it, runtime,
   service state with a fresh heartbeat, settlement of what the old boot left
-  pending by the controller's own rules, task completion. Never a
+  pending by the controller's own rules. A v2 baseline binds the database file,
+  code/runtime digest, service label, and existing worker heartbeat. Use
+  `--runner <name>` to require that worker and `--task <id>` on baseline to
+  require the named task to reach done; generic task recovery alone does not
+  mean successful completion. Never a
   credential in its output; never a reboot, logout or service restart of
   its own. Its report lists the limits below.
+- `node scripts/desktop-recovery-canary.mjs --app <bundle> --project-parent <directory>`
+  uses the real bundled controller under a disposable LaunchAgent: fresh HMAC
+  health and worker lease after clean exit and SIGKILL, one writer, retained
+  unsigned task, unchanged runtime, and explicit stop. It never invokes a
+  provider or claims login/reboot occurred.
 - `npm run certify:launchd` — a DISPOSABLE LaunchAgent under a throwaway
   label: automatic relaunch after exit 0 and after SIGKILL with no manual
   kickstart, explicit stop staying down beyond the throttle, start with a
@@ -158,9 +192,18 @@ non-migrating door.
   unknown.
 - Windows boot identity is unknown in this build (no unprivileged per-boot
   UUID is trusted), so post-reboot custody there keeps the conservative
-  PID road.
+  PID road for legacy/observed custody; named Job Object custody can be queried.
 - The Windows helper is exercised by CI on Windows; it has not been run on
   a physical Windows machine by this wave.
 - A VM-backed provider runtime for macOS is a separate integration gate,
   as the plan states; nothing here mounts a home directory or credentials
   into a container.
+
+This is process lifetime containment, not a hostile-code security sandbox.
+Privileged cgroup migration and work delegated to external services/brokers
+need a separate isolation boundary. Microsoft specifically documents that
+WMI-created processes do not inherit ordinary Job Object membership.
+
+Mechanism references: [Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html),
+[Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects),
+[OpenJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-openjobobjectw).

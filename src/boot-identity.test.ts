@@ -11,7 +11,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { hostname } from "node:os";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { currentBootId, injectBootIdentity, normalizeBootId, provenDeadByBootChange, readBootIdentity } from "./boot-identity.js";
 import { openStore, type Store } from "./store.js";
 import { recordWorktreeProcess, worktreeProcessOccupancy } from "./worktree.js";
@@ -68,7 +68,8 @@ describe("the one rule: proven dead by boot change", () => {
 describe("custody across boots", () => {
   let store: Store;
   let dir: string;
-  const T0 = new Date("2026-09-12T08:00:00.000Z");
+  const REPO = resolve("/repo");
+const T0 = new Date("2026-09-12T08:00:00.000Z");
   const host = hostname();
 
   afterEach(() => {
@@ -80,10 +81,10 @@ describe("custody across boots", () => {
   /** A claimed builder run with a stop recorded and the run already ended — only the witnesses decide. */
   function stoppedRun(): number {
     store = openStore(":memory:");
-    register(store, { name: "r", host, capacity: 1, repos: ["/repo"], now: T0, newToken: () => "tok" });
+    register(store, { name: "r", host, capacity: 1, repos: [REPO], now: T0, newToken: () => "tok" });
     store.createTask({ id: "t", title: "t" }, T0);
     const ref = store.refFor("built-in", "t").id;
-    store.placeTask(ref, "/repo");
+    store.placeTask(ref, REPO);
     const claimed = acquire(store, ref, "r", { token: "tok", now: T0, ttlMs: 3_600_000, newLeaseId: () => "lease" });
     if (!claimed.ok) throw new Error(claimed.reason);
     const runId = store.startRun({ taskRef: ref, leaseId: "lease", runner: "r", branch: "b", worktree: "/w", now: T0, route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" } });
@@ -175,9 +176,9 @@ describe("custody across boots", () => {
 
   test("c4: the worktree occupancy note carries the boot id; a note from a verified previous boot frees the checkout, a legacy note does not", () => {
     store = openStore(":memory:");
-    register(store, { name: "r", host, capacity: 1, repos: ["/repo"], now: T0, newToken: () => "tok" });
+    register(store, { name: "r", host, capacity: 1, repos: [REPO], now: T0, newToken: () => "tok" });
     dir = mkdtempSync(join(tmpdir(), "so-boot-wt-"));
-    store.saveWorktree({ path: dir, repo: "/repo", branch: "b", runner: "r", taskRef: null, createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: true });
+    store.saveWorktree({ path: dir, repo: REPO, branch: "b", runner: "r", taskRef: null, createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: true });
     injectBootIdentity({ ok: true, id: BOOT_A, source: "injected" });
     // Another live process of this machine (the test runner's parent), under this boot.
     recordWorktreeProcess(store, dir, "r", process.ppid);

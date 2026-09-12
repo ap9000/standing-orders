@@ -11,7 +11,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { hostname } from "node:os";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
 import { acquire } from "./claim.js";
@@ -22,6 +22,7 @@ import { assertNoSecret, recordRestartBaseline, RESTART_LIMITS, verifyRestartRec
 const BOOT_A = "4cdea6bb-1ac8-4e7c-bfcf-646f89b8a8a7";
 const BOOT_B = "9b1d0e2f-3a4b-4c5d-8e6f-a1b2c3d4e5f6";
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+const REPO = resolve("/repo");
 const T0 = new Date("2026-09-12T08:00:00.000Z");
 const host = hostname();
 
@@ -48,11 +49,11 @@ describe("restart certification", () => {
   function seed(): { runId: number; taskRef: number; plan: DaemonPlan } {
     dir = mkdtempSync(join(tmpdir(), "so-restart-cert-"));
     store = openStore(join(dir, "orders.db"));
-    const registration = register(store, { name: "r", host, capacity: 1, repos: ["/repo"], now: T0 });
+    const registration = register(store, { name: "r", host, capacity: 1, repos: [REPO], now: T0 });
     token = registration.token;
     store.createTask({ id: "t", title: "t" }, T0);
     const taskRef = store.refFor("built-in", "t").id;
-    store.placeTask(taskRef, "/repo");
+    store.placeTask(taskRef, REPO);
     const claimed = acquire(store, taskRef, "r", { token, now: T0, ttlMs: 3_600_000, newLeaseId: () => "lease" });
     if (!claimed.ok) throw new Error(claimed.reason);
     // The dispatcher moves a claimed task to running; a bare claim here does not.
@@ -61,7 +62,7 @@ describe("restart certification", () => {
     const asked = store.requestRunStop({ runId, taskRef, by: "alex", via: "cli" }, T0);
     if (!asked.ok) throw new Error(asked.reason);
     store.raw().prepare("INSERT INTO run_process (run, pid, host, process_group, observed_at, boot_id) VALUES (?, ?, ?, 1, ?, ?)").run(runId, process.pid, host, T0.toISOString(), BOOT_A);
-    const plan = planDaemon({ platform: "darwin", bin: process.execPath, binArgs: [], runner: "r", repo: "/repo", configDir: dir, watchFlags: [], home: dir, pathEnv: "/usr/bin" });
+    const plan = planDaemon({ platform: "darwin", bin: process.execPath, binArgs: [], runner: "r", repo: REPO, configDir: dir, watchFlags: [], home: dir, pathEnv: "/usr/bin" });
     if ("error" in plan) throw new Error(plan.error);
     return { runId, taskRef, plan };
   }
@@ -167,17 +168,39 @@ describe("restart certification", () => {
     expect(verified.ok).toBe(false);
   });
 
+  test("a different database, changed runtime, missing stop, and incomplete completion task each refuse certification", async () => {
+    const { runId } = seed();
+    injectBootIdentity({ ok: true, id: BOOT_A, source: "injected" });
+    const baseline = await recordRestartBaseline({ store, now: T0, runnerName: "r", completionTasks: ["t"] });
+    const later = new Date(T0.getTime() + 60_000);
+    const other = openStore(join(dir, "other.db"));
+    try {
+      const wrong = await verifyRestartRecovery({ store: other, baseline, now: later });
+      expect(wrong.checks.find(check => check.name === "database")?.ok).toBe(false);
+      expect(wrong.checks.find(check => check.name === "pending-stops")?.ok).toBe(false);
+      expect(wrong.ok).toBe(false);
+    } finally { other.close(); }
+    const changed = { ...baseline, runtime: { ...baseline.runtime, digest: "changed" } };
+    const result = await verifyRestartRecovery({ store, baseline: changed, now: later, recover: false });
+    expect(result.checks.find(check => check.name === "runtime")?.ok).toBe(false);
+    expect(result.checks.find(check => check.name === "completion:t")?.ok).toBe(false);
+    expect(store.stopOf(runId)?.settledAt).toBeNull();
+    register(store, { name: "unrelated", host, capacity: 1, repos: [REPO], now: later });
+    const unrelated = await verifyRestartRecovery({ store, baseline, now: later, recover: false });
+    expect(unrelated.checks.find(check => check.name === "heartbeat")?.ok).toBe(false);
+  });
+
   test("c6: the installed definition is read back from the unit on disk for the certificate's service view", () => {
     dir = mkdtempSync(join(tmpdir(), "so-restart-cert-unit-"));
     store = openStore(":memory:");
     expect(installedServiceDefinition({ label: "com.standing-orders.watch.x", platform: "darwin", home: dir })).toBeNull();
-    const plan = planDaemon({ platform: "darwin", bin: "/opt/node/bin/node", binArgs: ["/opt/so/dist/bin.js"], runner: "r", repo: "/repo", configDir: dir, watchFlags: [], home: dir, pathEnv: "/usr/bin" });
+    const plan = planDaemon({ platform: "darwin", bin: "/opt/node/bin/node", binArgs: ["/opt/so/dist/bin.js"], runner: "r", repo: REPO, configDir: dir, watchFlags: [], home: dir, pathEnv: "/usr/bin" });
     if ("error" in plan) throw new Error(plan.error);
     mkdirSync(join(dir, "Library", "LaunchAgents"), { recursive: true });
     writeFileSync(plan.unitPath, plan.unitContent);
     const installed = installedServiceDefinition({ label: plan.label, platform: "darwin", home: dir });
     expect(installed).toMatchObject({ label: plan.label, bin: process.execPath, entry: expect.stringContaining("controller-service.js"), logPath: plan.logPath, unitContent: plan.unitContent });
-    const linux = planDaemon({ platform: "linux", bin: "/opt/node/bin/node", binArgs: ["/opt/so/dist/bin.js"], runner: "r", repo: "/repo", configDir: dir, watchFlags: [], home: dir, pathEnv: "/usr/bin" });
+    const linux = planDaemon({ platform: "linux", bin: "/opt/node/bin/node", binArgs: ["/opt/so/dist/bin.js"], runner: "r", repo: REPO, configDir: dir, watchFlags: [], home: dir, pathEnv: "/usr/bin" });
     if ("error" in linux) throw new Error(linux.error);
     mkdirSync(join(dir, ".config", "systemd", "user"), { recursive: true });
     writeFileSync(linux.unitPath, linux.unitContent);
