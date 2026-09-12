@@ -21,9 +21,10 @@ import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunn
 import { readProviderKey, readAuthModeStrict, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
 import { classifyTerminal } from "./exhaustion.js";
 import { attestProvider, type VersionProbe } from "./attest.js";
-import { startClaudeHeldSession } from "./exec.js";
+import { runOwnerTag, startClaudeHeldSession } from "./exec.js";
 import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
+import { underStopWatch } from "./task-control.js";
 import { CHILD_DATABASE_ENV as AGENT_DATABASE_ENV, isolatedChildDatabase, removeChildDatabase as removeAgentDatabase } from "./child-database.js";
 
 export type { ProviderRunner } from "./provider.js";
@@ -99,7 +100,7 @@ export type InvokeResult =
   | { kind: "ran"; outcome: AgentOutcome }
   | {
       kind: "refused";
-      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody" | "auth-mode" | "route-authority";
+      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody" | "auth-mode" | "route-authority" | "stopped";
       providerVersion: string | null;
       diagnostic: string | null;
       /** Bounded agent reply when a spawned turn later failed a protocol
@@ -319,6 +320,19 @@ export async function invokeAgent(
       diagnostic: "the run's runner custody lapsed before spawn — the lease, the runner, or its repo binding no longer stands",
     };
   }
+  // THE STOP FENCE at the spawn (v52): a stop recorded against this run
+  // — or the attempt it runs under — before this instant spawns nothing.
+  // A value-shaped refusal, no stamp, no process, no spend; the road's
+  // settlement seals the attempt as interrupted.
+  const stopBeforeSpawn = store.applicableStopFor(runId);
+  if (stopBeforeSpawn !== null) {
+    return {
+      kind: "refused",
+      reason: "stopped",
+      providerVersion: attested === null ? null : attested.version,
+      diagnostic: `stopped by ${stopBeforeSpawn.requestedBy} (run #${stopBeforeSpawn.run}) before the provider spawned — nothing was spent`,
+    };
+  }
 
   if (run.chainCycle != null) {
     const custody =
@@ -348,8 +362,13 @@ export async function invokeAgent(
   const isolatedDb = isolatedAgentDatabase(runId);
   let result: Awaited<ReturnType<typeof spawn>>;
   try {
-    result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
+    // Under the stop watch (v52): the run's stop row is re-read while the
+    // provider runs, and a stop kills THIS run's process group through the
+    // handle registered under its owner tag — the exact-attempt road,
+    // never the global sweep. Settlement then reads the same row.
+    result = await underStopWatch(store, runId, () => spawn(attested !== null ? attested.executable : adapter.binary, argv, {
       ...runOptions,
+      owner: runOwnerTag(runId),
       ...(stdin === undefined ? {} : { stdin }),
       ...(hardTimeoutMs === undefined ? {} : { timeoutMs: hardTimeoutMs }),
       ...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),
@@ -387,7 +406,7 @@ export async function invokeAgent(
         else if (transportAnnouncedSessionId !== normalized) transportSessionConflict = true;
         store.stampRun(runId, { sessionId: normalized });
       },
-    });
+    }));
   } finally {
     removeAgentDatabase(isolatedDb.dir);
   }

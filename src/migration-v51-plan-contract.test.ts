@@ -107,7 +107,9 @@ describe("schema v51: the planner's source and plan-contract record are evidence
   test("a fresh file is born at v51 and admits the kind at once", () => {
     dir = mkdtempSync(join(tmpdir(), "standing-orders-v51-"));
     store = openStore(join(dir, "fresh.db"));
-    expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"])).toBe(51);
+    // v52 (task stop and resume) is the current fresh version; the kind
+    // this test proves arrived at 51 and stays.
+    expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"])).toBeGreaterThanOrEqual(51);
     store.createTask({ id: "t", title: "t" }, new Date("2026-09-11T00:00:00.000Z"));
     const ref = store.refFor("built-in", "t");
     const run = store.startRun({ taskRef: ref.id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", role: "planner", ...bareLegacy("plan"), now: new Date("2026-09-11T00:00:00.000Z") });

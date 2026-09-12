@@ -68,6 +68,16 @@ export type RunOptions = {
    */
   processGroup?: boolean;
   /**
+   * Who OWNS this child (v52, safe task stop): an opaque tag — the
+   * invocation gateway and the builder's check/setup legs pass
+   * `run:<id>` — under which the live child is registered, so an
+   * operator's stop on one exact attempt can end THAT attempt's process
+   * tree through the handle this process holds, and nothing else's. A
+   * kill by tag reaches only children this process spawned and still
+   * tracks: never a pid read back from durable state.
+   */
+  owner?: string;
+  /**
    * Called the moment the stream announces its session (codex:
    * thread.started), so a crash mid-turn cannot lose the id (M6.9 —
    * currently only the streaming transport can deliver this early).
@@ -95,6 +105,56 @@ export type RunOptions = {
 
 /** Live provider children, for the deterministic stop. Registered only when `processGroup` was set. */
 const liveProviders = new Set<import("node:child_process").ChildProcess>();
+
+/** Live children by owner tag (v52): the exact-attempt stop's handle. A
+ * child is registered here beside liveProviders when its options named an
+ * owner, and dropped the moment it closes. */
+const ownedChildren = new Map<string, Set<import("node:child_process").ChildProcess>>();
+
+function registerOwned(owner: string | undefined, child: import("node:child_process").ChildProcess): void {
+  if (owner === undefined) return;
+  let set = ownedChildren.get(owner);
+  if (set === undefined) {
+    set = new Set();
+    ownedChildren.set(owner, set);
+  }
+  set.add(child);
+  child.once("close", () => {
+    const owned = ownedChildren.get(owner);
+    if (owned === undefined) return;
+    owned.delete(child);
+    if (owned.size === 0) ownedChildren.delete(owner);
+  });
+}
+
+/** The tag under which one run's children are registered. */
+export function runOwnerTag(runId: number): string {
+  return `run:${runId}`;
+}
+
+/** How many live children this process still tracks under an owner tag. */
+export function ownedProcessCount(owner: string): number {
+  return ownedChildren.get(owner)?.size ?? 0;
+}
+
+/**
+ * The exact-attempt stop (v52): SIGKILL the process group of every live
+ * child registered under the owner tag — and only those. Returns how many
+ * were signalled. Idempotent: a child already gone was dropped at close,
+ * and a tag nobody registered kills nothing. This is the ONLY kill road a
+ * task action may take; the global sweep below is the watch's shutdown.
+ */
+export function terminateOwnedProcesses(owner: string): number {
+  const owned = ownedChildren.get(owner);
+  if (owned === undefined) return 0;
+  let terminated = 0;
+  for (const child of owned) {
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    killGroup(child);
+    terminated += 1;
+  }
+  return terminated;
+}
 
 /**
  * Live held-session SUPERVISORS (v6 W7). Not in liveProviders: SIGKILLing a
@@ -332,6 +392,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         ...(cwd === undefined ? {} : { cwd }),
         ...(childEnv === undefined ? {} : { childEnv }),
         ...(options.onSpawn === undefined ? {} : { onSpawn: options.onSpawn }),
+        ...(options.owner === undefined ? {} : { owner: options.owner }),
       }),
     );
   }
@@ -375,7 +436,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
 function runBufferedGroup(
   file: string,
   args: readonly string[],
-  bag: { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void },
+  bag: { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string },
 ): Promise<SpawnAttempt> {
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
@@ -399,6 +460,7 @@ function runBufferedGroup(
       return;
     }
     liveProviders.add(child);
+    registerOwned(bag.owner, child);
 
     let stdout = "";
     let stderr = "";
@@ -743,6 +805,7 @@ export function runStreamJsonl(
       return;
     }
     if (options.processGroup === true) liveProviders.add(child);
+    registerOwned(options.owner, child);
 
     let startedLine: string | null = null;
     let startedIdentityLine: string | null = null;
@@ -953,6 +1016,7 @@ export function runGeminiStreamJsonl(
       return;
     }
     if (options.processGroup === true) liveProviders.add(child);
+    registerOwned(options.owner, child);
 
     let initLine: string | null = null;
     let initIdentityLine: string | null = null;
@@ -1179,6 +1243,7 @@ export function runClaudeStreamJsonl(
       return;
     }
     if (options.processGroup === true) liveProviders.add(child);
+    registerOwned(options.owner, child);
 
     let initLine: string | null = null;
     let initIdentityLine: string | null = null;

@@ -32,7 +32,8 @@
 import { unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { run, type ExecResult, type RunOptions } from "./exec.js";
+import { run, runOwnerTag, type ExecResult, type RunOptions } from "./exec.js";
+import { stopRequestedFor, stopWords, underStopWatch } from "./task-control.js";
 import { runWithIsolatedDatabase } from "./child-database.js";
 import { recordWorktreeProcess } from "./worktree.js";
 import type { Decision, SteerNote, Store } from "./store.js";
@@ -894,14 +895,21 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     }
     const runSetup = request.setup ?? run;
     const shell = approvedCommandShell(setupWanted.command);
-    const made = await runWithIsolatedDatabase(runSetup, shell.file, shell.args, {
+    // Setup runs under the stop watch (v52), owned by this run: an
+    // operator's stop ends the setup's process group and the attempt
+    // settles as interrupted below, never as a setup failure.
+    const made = await underStopWatch(store, request.runId, () => runWithIsolatedDatabase(runSetup, shell.file, shell.args, {
       cwd: worktree,
       timeoutMs: setupWanted.timeoutMs,
       processGroup: true,
+      owner: runOwnerTag(request.runId),
       onSpawn: pid => request.onProviderSpawn?.(pid),
       envAllowlist: SETUP_ENV_ALLOWLIST,
       omitEnv: SETUP_ENV_DENYLIST,
-    });
+    }));
+    if (stopRequestedFor(store, request.runId, request.shouldStop)) {
+      return { ok: false, reason: "stopped", message: stopWords(store, request.runId, worktree, `the operator stopped this watch during setup — the checkout is preserved in ${worktree}`) };
+    }
     if (made.timedOut || made.code !== 0) {
       // Setup stderr can carry registry tokens and credentialed URLs
       // (Codex M5-M8 audit, IV-5): what reaches the database and the
@@ -1625,6 +1633,21 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     try { unlinkSync(join(captured.worktree, captured.rubric)); } catch { /* The commit gate still excludes it. */ }
   }
   const { store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef, runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof, clock } = captured;
+  // THE STOP FENCE after the provider (v52): a stop recorded while the
+  // agent ran ends the attempt HERE, before any handoff is read, any park
+  // sealed, or any commit made — whatever the process wrote is preserved
+  // uncommitted in the worktree, a cut-down mailbox is quarantined, and
+  // the disposition seals the run as interrupted (no strike). Operator
+  // interruption is not a timeout and not an agent failure: it keeps its
+  // own words.
+  if (stopRequestedFor(store, request.runId, request.shouldStop)) {
+    quarantineMailboxes(worktree, root, request.runId);
+    return {
+      ok: false,
+      reason: "stopped",
+      message: stopWords(store, request.runId, worktree, `the operator stopped this watch while the agent ran — the work is preserved uncommitted in ${worktree}`),
+    };
+  }
   if (result.timedOut) {
     // A mailbox cut down mid-write is quarantined, never ingested: whatever
     // half-sentence it holds, no lease vouches for it as a decision.
@@ -1894,11 +1917,11 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
   // The stop fence, re-proved at the last gate before anything commits
   // (audit IV-1): an operator's stop beats an agent's finish. The work
   // stays in the worktree, uncommitted, preserved for the successor.
-  if (request.shouldStop?.() === true) {
+  if (stopRequestedFor(store, request.runId, request.shouldStop)) {
     return {
       ok: false,
       reason: "stopped",
-      message: `the operator stopped this watch while the agent ran — the work is preserved uncommitted in ${worktree}`,
+      message: stopWords(store, request.runId, worktree, `the operator stopped this watch while the agent ran — the work is preserved uncommitted in ${worktree}`),
     };
   }
   store.setRunPhase(request.runId, "committing");
@@ -2172,7 +2195,7 @@ async function correctProofReceipt(
   };
   const before = await snapshot();
   if (before === null) return unchanged;
-  const owns = () => !captured.fenced() && request.shouldStop?.() !== true &&
+  const owns = () => !captured.fenced() && !stopRequestedFor(store, request.runId, request.shouldStop) &&
     store.getScope(request.taskId)?.digest === captured.scope?.digest &&
     store.proveRunnerCustodyForSpawn(request.runId, clock());
   for (let turn = 1; turn <= REPAIR_TURNS; turn++) {
@@ -2378,14 +2401,16 @@ async function settleProof(
     const verifyRunner = request.verify ?? run;
     const verifyShell = approvedCommandShell(configured.command);
     const runVerification = async (label: string): Promise<ExecResult> => {
-      const result = await runWithIsolatedDatabase(verifyRunner, verifyShell.file, verifyShell.args, {
+      // The check runs under the stop watch (v52), owned by this run.
+      const result = await underStopWatch(store, runId, () => runWithIsolatedDatabase(verifyRunner, verifyShell.file, verifyShell.args, {
         cwd: worktree,
         timeoutMs: configured.timeoutMs,
         processGroup: true,
+        owner: runOwnerTag(runId),
         onSpawn: pid => request.onProviderSpawn?.(pid),
         envAllowlist: SETUP_ENV_ALLOWLIST,
         omitEnv: SETUP_ENV_DENYLIST,
-      });
+      }));
       checkOutcomes.push(attemptOutcome(label, result));
       checkLog.push(attemptLog(label, configured.command, result));
       return result;
@@ -2444,14 +2469,15 @@ async function settleProof(
           } else {
             const setupRunner = request.setup ?? run;
             const setupShell = approvedCommandShell(liveBeforeSetup.command);
-            const restored = await runWithIsolatedDatabase(setupRunner, setupShell.file, setupShell.args, {
+            const restored = await underStopWatch(store, runId, () => runWithIsolatedDatabase(setupRunner, setupShell.file, setupShell.args, {
               cwd: worktree,
               timeoutMs: liveBeforeSetup.timeoutMs,
               processGroup: true,
+              owner: runOwnerTag(runId),
               onSpawn: pid => request.onProviderSpawn?.(pid),
               envAllowlist: SETUP_ENV_ALLOWLIST,
               omitEnv: SETUP_ENV_DENYLIST,
-            });
+            }));
             checkOutcomes.push(attemptOutcome("Automatic recovery · approved project setup", restored));
             checkLog.push(attemptLog("Automatic recovery · approved project setup", liveBeforeSetup.command, restored));
             if (restored.notFound || restored.timedOut || restored.code !== 0) {

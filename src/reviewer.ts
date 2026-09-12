@@ -1303,13 +1303,15 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
       ));
     } catch (error) {
       const reason = error instanceof Error && error.name === "ReviewerCustodyError" ? "runner-custody"
+        : error instanceof Error && error.name === "ReviewerStoppedError" ? "stopped"
         : error instanceof ReviewBindingError ? "stale-evidence" : "ingestion";
       const diagnostic = safeDiagnostic(error instanceof Error ? error.message : String(error));
       if (acceptedChildRunId !== null) {
         store.finishRun(acceptedChildRunId, {
           outcome: reason === "runner-custody" ? "refused" : "failed",
-          reason: reason === "runner-custody" ? reason : `reviewer-${reason}${diagnostic === null ? "" : `: ${diagnostic}`}`,
+          reason: reason === "runner-custody" ? reason : reason === "stopped" ? "interrupted" : `reviewer-${reason}${diagnostic === null ? "" : `: ${diagnostic}`}`,
           now: clock(),
+          ...(reason === "stopped" ? { stopSettlement: "interrupted" as const } : {}),
         });
       }
       return {
@@ -1478,6 +1480,27 @@ export async function reviewPass(
       if (result.verdict !== null && request.repo !== null) {
         maybeTriggerRepair(store, request.repo, options.evidenceRoot ?? evidenceRoot(homedir()), request.run, result.verdict, clock());
       }
+    } else if (store.applicableStopFor(admitted.reviewerRunId) !== null) {
+      // An operator's stop (v52) won: the root ends as interrupted — the
+      // same words dead-watch recovery writes — with its stop settled now
+      // that its process is gone, and the request is stamped `interrupted`
+      // so the bounded retry projection reads it as one more spent root
+      // attempt the operator may explicitly retry. Not a review failure.
+      for (const owned of store.ownedRunsOf(admitted.reviewerRunId)) {
+        const child = store.getRun(owned);
+        if (child !== null && child.outcome === null) {
+          store.finishRun(owned, { outcome: "failed", reason: "interrupted", now: clock(), stopSettlement: "interrupted" });
+        }
+      }
+      store.stampReviewRequestOutcome(request.id, "interrupted");
+      reports.push({
+        requestId: request.id,
+        run: request.run,
+        outcome: "failed",
+        attempt: admitted.attempt,
+        retriesRemaining: store.reviewRetryStateOf(request.run)?.retriesRemaining ?? 0,
+        detail: "stopped",
+      });
     } else {
       // One logical attempt, spent (R4): review is additive — the task's outcome
       // already stands, so a broken pass is a visible typed run, never a

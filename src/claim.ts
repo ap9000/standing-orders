@@ -120,7 +120,7 @@ export type AcquireResult =
 /** `fenced` means the lease was superseded; `unknown` means it never existed. */
 export type FenceResult =
   | { ok: true; claim: Claim; duplicate?: boolean }
-  | { ok: false; reason: "fenced" | "unknown" };
+  | { ok: false; reason: "fenced" | "unknown" | "stopped" };
 
 /**
  * Completion's OWN result (external dispatch, finding 33): `completed` is
@@ -132,7 +132,7 @@ export type FenceResult =
  */
 export type CompleteResult =
   | { ok: true; arm: "completed" | "disowned"; claim: Claim; duplicate?: boolean }
-  | { ok: false; reason: "fenced" | "unknown" };
+  | { ok: false; reason: "fenced" | "unknown" | "stopped" };
 
 /** How stale a mirror's last complete sync may be before admission refuses. */
 export const SYNC_MAX_AGE_MS = 15 * 60_000;
@@ -1089,7 +1089,7 @@ export function finalizeParkFenced(
     repairRunId?: number | null;
     now: Date;
   },
-): { ok: true; decisionId: number } | { ok: false; reason: "fenced" | "unknown" } {
+): { ok: true; decisionId: number } | { ok: false; reason: "fenced" | "unknown" | "stopped" } {
   const { leaseId, runId, taskId, decision, artifactIds, now } = args;
   const db = store.handle;
 
@@ -1101,6 +1101,8 @@ export function finalizeParkFenced(
       throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a park seals exactly one`);
     }
     const repairRun = plannerRepairChild(store, run, args.repairRunId ?? null);
+    const stopped = interruptIfStopped(store, { leaseId, runId, taskId, now });
+    if (stopped !== null) return { ok: false as const, reason: "stopped" as const };
 
     const { changes } = db
       .prepare(
@@ -1180,7 +1182,7 @@ export function finalizeMalformedFenced(
     problems: readonly Problem[];
     now: Date;
   },
-): { ok: true; incidentId: number } | { ok: false; reason: "fenced" | "unknown" } {
+): { ok: true; incidentId: number } | { ok: false; reason: "fenced" | "unknown" | "stopped" } {
   const { leaseId, runId, taskId, problems, now } = args;
   const db = store.handle;
 
@@ -1189,6 +1191,9 @@ export function finalizeMalformedFenced(
     if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
       throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a park seals exactly one`);
     }
+
+    const stopped = interruptIfStopped(store, { leaseId, runId, taskId, now });
+    if (stopped !== null) return { ok: false as const, reason: "stopped" as const };
 
     const { changes } = db
       .prepare(
@@ -1248,7 +1253,98 @@ export type FailureDisposition =
   | { ok: true; disposition: "backoff"; strikes: number; until: string }
   | { ok: true; disposition: "stalled"; strikes: number; incidentId: number }
   | { ok: true; disposition: "commit-incident"; incidentId: number }
-  | { ok: false; reason: "fenced" | "unknown" };
+  | { ok: false; reason: "fenced" | "unknown" | "stopped" };
+
+export type InterruptSeal =
+  | { ok: true; stopRun: number; requeued: boolean; fenced: false }
+  | { ok: true; stopRun: number; requeued: false; fenced: true };
+
+/**
+ * Seal an operator-stopped attempt (v52): ONE fenced transaction for the
+ * claim's release as `interrupted`, the run's ending as `failed` /
+ * `interrupted` (the same words dead-runner recovery writes, so the
+ * recovered-draft road inherits the preserved work exactly as after a
+ * crash), every open run the attempt owns, the task's return to the
+ * queue under the stop's own hold, and the stop's settlement. Nothing
+ * here is a failure: no strike, no backoff, no incident, no automatic
+ * repair task, no notification page. A commit the attempt already made
+ * is kept as a reviewable artifact — `committed` records that it exists.
+ *
+ * A lease the world moved past (reaped, recovered, superseded) still
+ * ends the run as interrupted — that IS the honest ending — but touches
+ * no task state: the task belongs to whoever holds it now.
+ */
+export function finalizeInterruptedFenced(
+  store: Store,
+  args: { leaseId: string; runId: number; taskId: string; stopRun: number; message?: string; committed?: boolean; now: Date },
+): InterruptSeal {
+  const { leaseId, runId, taskId, stopRun, now } = args;
+  const db = store.handle;
+  return inTransaction(store, () => {
+    const run = store.getRun(runId);
+    if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
+      throw new Error(`run ${runId} is not ${leaseId}'s open attempt — an interruption seals exactly one`);
+    }
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?, released_by = 'interrupted'
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+    const fenced = Number(changes) === 0;
+    if (args.message !== undefined && args.message.trim() !== "") {
+      store.recordOutcomeFacts(runId, { handoff: args.message });
+    }
+    // Owned descendants first (a repair turn, a correction) — the parent's
+    // ending settles the stop, and every owned row ends in the same write.
+    for (const owned of store.ownedRunsOf(runId)) {
+      if (owned === runId) continue;
+      const child = store.getRun(owned);
+      if (child !== null && child.outcome === null) {
+        store.finishRun(owned, { outcome: "failed", reason: "interrupted", now, stopSettlement: "interrupted" });
+      }
+    }
+    store.finishRun(runId, {
+      outcome: "failed",
+      reason: "interrupted",
+      ...(args.committed === undefined ? {} : { committed: args.committed }),
+      now,
+      stopSettlement: "interrupted",
+    });
+    store.settleRunStop(stopRun, "interrupted", now);
+    if (fenced) return { ok: true as const, stopRun, requeued: false as const, fenced: true as const };
+    // Back to the queue, where the stop's hold keeps it — a paused task
+    // reads as queued-and-held, exactly like an operator pause.
+    const requeued = db
+      .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'running'")
+      .run(now.toISOString(), taskId);
+    store.bumpWake();
+    return { ok: true as const, stopRun, requeued: Number(requeued.changes) > 0, fenced: false as const };
+  });
+}
+
+/**
+ * THE STOP FENCE at settlement (v52): when a stop applies to the run —
+ * its own or an owning ancestor's — seal the attempt as interrupted and
+ * answer with the seal; otherwise null, and the caller's own ending
+ * proceeds. Every fenced finalizer asks this first, inside its own
+ * transaction, so a stop that commits before terminal settlement wins
+ * whatever the attempt was about to say.
+ */
+export function interruptIfStopped(
+  store: Store,
+  args: { leaseId: string; runId: number; taskId: string; message?: string; committed?: boolean; now: Date },
+): InterruptSeal | null {
+  const stop = store.applicableStopFor(args.runId);
+  if (stop === null) return null;
+  const run = store.getRun(args.runId);
+  const where = run?.worktree ?? null;
+  return finalizeInterruptedFenced(store, {
+    ...args,
+    stopRun: stop.run,
+    message: args.message ?? `stopped by ${stop.requestedBy} (run #${stop.run}) — ${where === null ? "the attempt's evidence is on record" : `the work is preserved in ${where}`}`,
+  });
+}
 
 /**
  * Seal a failed attempt: one fenced transaction for the release, the run,
@@ -1288,6 +1384,8 @@ export function finalizeFailureFenced(
     if (run.role !== "builder") {
       throw new Error(`run ${runId} is a ${run.role} run — only top-level builder attempts take strikes`);
     }
+    const stopped = interruptIfStopped(store, { leaseId, runId, taskId, now });
+    if (stopped !== null) return { ok: false as const, reason: "stopped" as const };
 
     const { changes } = db
       .prepare(
@@ -1406,7 +1504,7 @@ const PLAN_BACKOFF_MS = [60_000, 2 * 60_000, 4 * 60_000] as const;
 
 export type PlanFinalize =
   | { ok: true; changes: number; amendment: string | null }
-  | { ok: false; reason: "fenced" | "unknown" }
+  | { ok: false; reason: "fenced" | "unknown" | "stopped" }
   /** The filed request moved while the planner ran (contract handoff,
    * task 1): the draft was planned against terms that no longer exist,
    * so nothing of it is ingested — the newer source stands, the claim
@@ -1485,6 +1583,8 @@ export function finalizePlanFenced(
     }
     const repairRun = plannerRepairChild(store, run, args.repairRunId ?? null);
     if (store.lookupRef(taskId)?.id !== run.taskRef) throw new Error("a planner can finalize only its own task");
+    const stopped = interruptIfStopped(store, { leaseId, runId, taskId, now });
+    if (stopped !== null) return { ok: false as const, reason: "stopped" as const };
     const invalidSource = (detail: string, kind: "malformed" | "failure" = "malformed"): PlanFinalize => {
       const failed = finalizePlanFailureFenced(store, { leaseId, runId, taskId, kind, message: detail, now });
       if (repairRun !== null) store.finishRun(repairRun.id, { outcome: "refused", reason: failed.ok ? "source-invalid" : "fenced", now });
@@ -1665,7 +1765,7 @@ function describeSourceDrift(source: PlannerSource, current: PlannerSource["cont
 
 export type RevisionFinalize =
   | { ok: true; revisionId: number; authorityKind: "plan-only" | "authority-change" }
-  | { ok: false; reason: "fenced" | "unknown" };
+  | { ok: false; reason: "fenced" | "unknown" | "stopped" };
 
 /**
  * Seal a running build's plan-revision proposal (adaptive execution plans).
@@ -1737,6 +1837,8 @@ export function finalizeRevisionFenced(
     if (run.role !== "builder") {
       throw new Error(`run ${runId} is a ${run.role} run — only builder runs file plan revisions`);
     }
+    const stopped = interruptIfStopped(store, { leaseId, runId, taskId, now });
+    if (stopped !== null) return { ok: false as const, reason: "stopped" as const };
     const { changes } = db
       .prepare(
         `UPDATE claim SET released_at = ?, released_by = 'released'
@@ -1790,7 +1892,7 @@ export type PlanFailureDisposition =
   | { ok: true; disposition: "malformed-incident"; incidentId: number }
   | { ok: true; disposition: "backoff"; strikes: number }
   | { ok: true; disposition: "exhausted"; incidentId: number; strikes: number }
-  | { ok: false; reason: "fenced" | "unknown" };
+  | { ok: false; reason: "fenced" | "unknown" | "stopped" };
 
 /**
  * The planner's own fenced failure finalizer (Codex planning review,
@@ -1828,6 +1930,8 @@ export function finalizePlanFailureFenced(
     if (run.role !== "planner") {
       throw new Error(`run ${runId} is a ${run.role} run — this finalizer seals planner attempts only`);
     }
+    const stopped = interruptIfStopped(store, { leaseId, runId, taskId, now });
+    if (stopped !== null) return { ok: false as const, reason: "stopped" as const };
     const { changes } = db
       .prepare(
         `UPDATE claim SET released_at = ?, released_by = 'released'
@@ -1921,7 +2025,7 @@ export function finalizePlanFailureFenced(
   });
 }
 
-export type ScoutFinalize = { ok: true } | { ok: false; reason: "fenced" | "unknown" };
+export type ScoutFinalize = { ok: true } | { ok: false; reason: "fenced" | "unknown" | "stopped" };
 
 /**
  * Seal a successful scouting run (mate arc §10): the report artifact, the
@@ -1962,6 +2066,8 @@ export function finalizeScoutFenced(
     if (run.role !== "scout") {
       throw new Error(`run ${runId} is a ${run.role} run — only scout runs deliver reports`);
     }
+    const stopped = interruptIfStopped(store, { leaseId, runId, taskId, now });
+    if (stopped !== null) return { ok: false as const, reason: "stopped" as const };
     const { changes } = db
       .prepare(
         `UPDATE claim SET released_at = ?, released_by = 'completed'
@@ -1998,7 +2104,7 @@ export type ScoutFailureDisposition =
   | { ok: true; disposition: "malformed-incident"; incidentId: number }
   | { ok: true; disposition: "backoff"; strikes: number }
   | { ok: true; disposition: "stalled"; incidentId: number; strikes: number }
-  | { ok: false; reason: "fenced" | "unknown" };
+  | { ok: false; reason: "fenced" | "unknown" | "stopped" };
 
 /**
  * The scout's fenced failure finalizer: the BUILDER's discipline, not the
@@ -2032,6 +2138,8 @@ export function finalizeScoutFailureFenced(
     if (run.role !== "scout") {
       throw new Error(`run ${runId} is a ${run.role} run — this finalizer seals scout attempts only`);
     }
+    const stopped = interruptIfStopped(store, { leaseId, runId, taskId, now });
+    if (stopped !== null) return { ok: false as const, reason: "stopped" as const };
     const { changes } = db
       .prepare(
         `UPDATE claim SET released_at = ?, released_by = 'released'
