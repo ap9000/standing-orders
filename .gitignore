@@ -18,3 +18,7 @@ ds-bundle/
 .design-sync/learnings/
 .design-sync/node_modules
 design/styles/operations-ledger.css
+
+# Local browser artifacts and review/certification snapshots
+output/
+.playwright-cli/

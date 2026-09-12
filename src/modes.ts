@@ -28,6 +28,9 @@ export type ModeTerms = {
   /** Auto-approve the SIGNER'S OWN credentialed filings (C1's predicate
    * and road table). */
   autoApproveFiling: boolean;
+  /** Explicit opt-in: a verified planner may approve a plan that preserves
+   * the signer's pre-authorized filed contract and execution terms exactly. */
+  planAuto: boolean;
   /** Attended mint without the per-mint password — signer only (D8). */
   quickMint: boolean;
   /** The reviewer runs on every built-with-changes outcome (R3). */
@@ -75,6 +78,7 @@ export function presetTerms(name: ModeName, absoluteExpiry: string): ModeTerms {
         name,
         permissionDefault: "safe",
         autoApproveFiling: false,
+        planAuto: false,
         quickMint: true,
         reviewAuto: true,
         perAttemptBudgetMicrousd: null,
@@ -90,8 +94,9 @@ export function presetTerms(name: ModeName, absoluteExpiry: string): ModeTerms {
         name,
         permissionDefault: "escalated",
         autoApproveFiling: true,
+        planAuto: false,
         quickMint: true,
-        reviewAuto: false,
+        reviewAuto: true,
         perAttemptBudgetMicrousd: null,
         dailyMeasuredCapMicrousd: null,
         dailyRunCap: null,
@@ -148,6 +153,7 @@ export function modeTermsFromJson(json: string | null): ModeTerms | null {
     (t["name"] === "standard" || t["name"] === "hands-off") &&
     (t["permissionDefault"] === "safe" || t["permissionDefault"] === "escalated") &&
     typeof t["autoApproveFiling"] === "boolean" &&
+    (t["planAuto"] === undefined || typeof t["planAuto"] === "boolean") &&
     typeof t["quickMint"] === "boolean" &&
     typeof t["reviewAuto"] === "boolean" &&
     budget !== undefined &&
@@ -174,6 +180,7 @@ export function modeTermsFromJson(json: string | null): ModeTerms | null {
       name: t["name"],
       permissionDefault: t["permissionDefault"],
       autoApproveFiling: t["autoApproveFiling"],
+      planAuto: t["planAuto"] === true,
       quickMint: t["quickMint"],
       reviewAuto: t["reviewAuto"],
       perAttemptBudgetMicrousd: budget,
@@ -202,6 +209,9 @@ export function modeWords(terms: ModeTerms): string[] {
     terms.quickMint
       ? "you start watched sessions without re-typing your password — the confirm screen still shows every term"
       : "watched sessions keep the per-session password",
+    terms.planAuto
+      ? "plans for your pre-authorized filings auto-approve only when the goal, exclusions, paths, acceptance criteria, risk, budget, and agent route remain exactly unchanged; provide a goal, paths and acceptance criteria upfront; amendments and unresolved questions still wait for you"
+      : "planner-generated plans wait for your approval",
     terms.reviewAuto
       ? "every finished build gets an agent review; the comments land for you to seal"
       : "reviews run only when you ask",

@@ -56,6 +56,8 @@ import {
 import type { ParsedDecision, Problem } from "./decision.js";
 import { digestOf } from "./scope.js";
 import type { ParsedPlan } from "./plan.js";
+import { parseExecutionPlanDocument } from "./plan.js";
+import { sealUnchangedPlanUnderMode } from "./plan-auto.js";
 import { routeFromJson } from "./phase-routing.js";
 import {
   contractChangesOf,
@@ -1712,6 +1714,7 @@ export function finalizePlanFenced(
       approvedBy: null,
       approvedDigest: null,
     }, {}, filed === null ? {} : {
+      proposedVia: filed.proposedVia,
       riskLevel: filed.terms.riskLevel,
       qualityMode: filed.terms.qualityMode,
       ...(filed.terms.profile == null ? {} : { profile: filed.terms.profile }),
@@ -1719,10 +1722,20 @@ export function finalizePlanFenced(
         canonicalContractJson([...new Set(filed.acceptance.flatMap(one => one.evidence))].sort()) === canonicalContractJson([...new Set(plan.acceptance.flatMap(one => one.evidence))].sort())
         ? { route: routeFromJson(filed.terms.routeJson)! } : {}),
     });
+    let verifiedPlan = false;
     if (args.artifact !== null) {
-      store.saveArtifact({ run: runId, kind: "plan", ...args.artifact }, now);
+      const artifactId = store.saveArtifact({ run: runId, kind: "plan", ...args.artifact }, now);
+      if (args.evidenceRoot !== undefined && !args.artifact.truncated) {
+        try {
+          const captured = store.getArtifact(artifactId);
+          const verified = captured === null ? null : readVerifiedArtifact(args.evidenceRoot, captured);
+          verifiedPlan = verified?.ok === true && verified.content.equals(Buffer.from(plan.plan, "utf8")) && parseExecutionPlanDocument(plan.plan).ok;
+        } catch { verifiedPlan = false; }
+      }
     }
     store.setPlanState(run.taskRef, "drafted");
+    const autoApproved = sealUnchangedPlanUnderMode(store, taskId, args.source?.sourceDigest ?? "", runId,
+      args.source !== undefined && filed !== null && contractChanges.length === 0 && amendment === null && verifiedPlan, now);
     store.resetPlanStrikes(run.taskRef);
     store.finishRun(runId, { outcome: "built", reason: "plan-drafted", now });
     if (repairRun !== null) {
@@ -1732,7 +1745,7 @@ export function finalizePlanFenced(
       {
         dedupeKey: `plan:${run.taskRef}:${runId}`,
         kind: "plan-ready",
-        subject: `${taskId}: plan ready for review${contractChanges.length === 0 ? "" : ` — ${contractChanges.length} contract change${contractChanges.length === 1 ? "" : "s"} to check`}`,
+        subject: autoApproved ? `${taskId}: unchanged plan auto-approved` : `${taskId}: plan ready for review${contractChanges.length === 0 ? "" : ` — ${contractChanges.length} contract change${contractChanges.length === 1 ? "" : "s"} to check`}`,
         body:
           `The planner proposes: ${oneLine(plan.goal, 200)}\n` +
           (contractChanges.length === 0
@@ -1740,7 +1753,7 @@ export function finalizePlanFenced(
               ? ""
               : "The filed goal, exclusions, touches, and acceptance criteria are reproduced exactly.\n"
             : `It AMENDS the filed contract (${oneLine(describeContractChanges(contractChanges).join("; "), 300)})${amendment === null ? "" : ` — because: ${oneLine(amendment, 200)}`}\n`) +
-          "Review, edit, and approve the scope — nothing builds until you do.",
+          (autoApproved ? "Approved under the signed operating mode. The next build may proceed with the original terms and required quality checks." : "Review, edit, and approve the scope — nothing builds until you do."),
       },
       now,
     );

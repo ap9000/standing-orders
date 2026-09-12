@@ -12,7 +12,7 @@ import { hostname } from "node:os";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { openStore, type Store } from "./store.js";
+import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
 import { register } from "./runner.js";
 import { acquire } from "./claim.js";
 import { injectBootIdentity } from "./boot-identity.js";
@@ -78,7 +78,7 @@ describe("restart certification", () => {
       runtime: { nodeVersion: process.version, execPath: process.execPath, packageVersion: "0.4.3" },
       containment: { policy: "observed", mode: "observed" },
       service: { label: plan.label, state: "running", pid: 42 },
-      database: { schemaVersion: 53, runningTasks: ["t"], openRuns: [{ id: runId, role: "builder", runner: "r" }], pendingStops: [{ run: runId, problem: expect.stringContaining("still open") }], witnesses: [{ run: runId, pid: process.pid, bootId: BOOT_A }] },
+      database: { schemaVersion: SCHEMA_VERSION, runningTasks: ["t"], openRuns: [{ id: runId, role: "builder", runner: "r" }], pendingStops: [{ run: runId, problem: expect.stringContaining("still open") }], witnesses: [{ run: runId, pid: process.pid, bootId: BOOT_A }] },
       limits: RESTART_LIMITS,
     });
     expect(baseline.limits.join(" ")).toContain("FileVault");

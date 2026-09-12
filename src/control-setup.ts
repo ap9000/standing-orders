@@ -21,7 +21,7 @@ export function previewSetup(store: Store, repo: string, inputs: SetupInputs) {
 
 export function approveSetup(store: Store, repo: string, inputs: SetupInputs, fingerprint: string, by: string, token: string, now: Date) {
   return store.transact(() => {
-    if (!authenticateApprover(store, by, token).ok) return { ok: false as const, message: "Your operator credential is required." };
+    if (!authenticateApprover(store, by, token, repo).ok) return { ok: false as const, message: "Your operator credential is required." };
     const preview = previewSetup(store, repo, inputs);
     if (!preview.ok) return preview;
     if (preview.fingerprint !== fingerprint) return { ok: false as const, message: "Setup changed. Review it again." };

@@ -266,6 +266,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("keys auth", "choose subscription vs API key for a provider (subscription is the default; the key is kept as fallback)"),
   operatorRead("people list", "everyone who can sign in, their standing, and the open invites"),
   operator("people invite", "mint a single-use sign-in link for one person — their powers are pinned when you mint, never after"),
+  operator("people projects", "set a person's project access — selected project, all projects, or no projects"),
   operator("people revoke", "end a person's access — their sessions, invites, and signed modes end with them; history stays"),
   operatorRead("mode show", "the repository's operating mode, in full — or 'locked' when none is signed"),
   operator("mode set", "sign a per-repository operating mode (password ceremony; standard or hands-off, always expiring)"),

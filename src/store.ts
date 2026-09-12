@@ -79,7 +79,11 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 53;
+import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type ProjectAccess } from "./project-access.js";
+import { LEDGER_SCHEMA, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
+import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
+
+export const SCHEMA_VERSION = 55;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -3373,6 +3377,17 @@ function initializeStore(db: Database, file: string): Store {
   // with the file untouched, rather than running this build's DDL over a
   // shape it cannot name.
   const preflight = schemaVersionPreflight(db, file);
+  // Check existing authority metadata before even stamping a migration.
+  if (preflight !== null && Math.abs(preflight) >= 54) {
+    for (const table of ["approver", "invite"]) {
+      if (!db.prepare(`PRAGMA table_info(${table})`).all().some(row => row["name"] === "projects_json")) {
+        throw new Error(`${file}: project access metadata is missing from ${table}; refusing to widen access`);
+      }
+    }
+  }
+  if (preflight === SCHEMA_VERSION && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_authorization'").get() === undefined) {
+    throw new Error(`${file}: plan authorization metadata is missing; refusing to recreate authority`);
+  }
   // THE SENTINEL IS A CHECKED COMPARE-AND-SET (raw authority repair): the
   // row moves from exactly the version the preflight read to its negative,
   // or this open refuses — a second migrator that raced this one between
@@ -3386,6 +3401,11 @@ function initializeStore(db: Database, file: string): Store {
   }
   db.exec(SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
+  addColumn(db, "approver", "projects_json", "TEXT");
+  addColumn(db, "invite", "projects_json", "TEXT");
+  db.exec(LEDGER_SCHEMA);
+  db.exec(PLAN_AUTO_SCHEMA);
+  installLedgerTriggers(db);
   // Attention/history indexes come AFTER migration: on a database whose
   // constrained tables still carry a pre-rebuild shape, creating a partial
   // index first would fail with a raw SQL error instead of the migration's
@@ -8145,12 +8165,13 @@ export class Store {
 
   /** The full account row for identity checks (v29): hash, role,
    * generation, revocation — one read, no inference. */
-  accountOf(name: string): { credentialHash: string; role: "approver" | "viewer"; generation: number; revokedAt: string | null } | null {
+  accountOf(name: string): { credentialHash: string; role: "approver" | "viewer"; generation: number; revokedAt: string | null; projects: ProjectAccess } | null {
     const row = this.db
-      .prepare("SELECT credential_hash, role, generation, revoked_at FROM approver WHERE name = ?")
+      .prepare("SELECT credential_hash, role, generation, revoked_at, projects_json FROM approver WHERE name = ?")
       .get(name);
     if (row === undefined) return null;
     return {
+      projects: readProjectAccess(row["projects_json"]),
       credentialHash: String(row["credential_hash"]),
       role: String(row["role"]) === "viewer" ? "viewer" : "approver",
       generation: Number(row["generation"]),
@@ -8438,15 +8459,83 @@ export class Store {
       .map(row => ({ name: String(row["name"]), addedAt: String(row["added_at"]) }));
   }
 
+  /** Instance administration stays with unrestricted active operators. */
+  isInstanceOperator(name: string): boolean {
+    const account = this.accountOf(name);
+    return account !== null && account.revokedAt === null && account.role === "approver" && account.projects === null;
+  }
+
+  accountCanAccess(name: string, repo: string | null): boolean {
+    const account = this.accountOf(name);
+    return account !== null && account.revokedAt === null && projectAccessAllows(account.projects, repo);
+  }
+
+  setAccountProjects(name: string, projects: ProjectAccess, by: string, now: Date): { ok: true } | { ok: false; reason: string } {
+    const access = normalizeProjectAccess(projects);
+    return this.transact(() => {
+      if (!this.isInstanceOperator(by)) return { ok: false as const, reason: "instance-operator-required" };
+      const account = this.accountOf(name);
+      if (account === null || account.revokedAt !== null) return { ok: false as const, reason: "no-active-account" };
+      if (this.isInstanceOperator(name) && access !== null && !this.accountFacts().some(one => one.name !== name && this.isInstanceOperator(one.name))) {
+        return { ok: false as const, reason: "last-instance-operator" };
+      }
+      if (JSON.stringify(account.projects) === JSON.stringify(access)) return { ok: true as const };
+      this.db.prepare("UPDATE approver SET projects_json = ?, generation = generation + 1 WHERE name = ?")
+        .run(access === null ? null : JSON.stringify(access), name);
+      // End derived sessions/grants, preserving completed, explicitly signed
+      // instance promises exactly as account revocation already does.
+      this.db.prepare("UPDATE attended_authorization SET closed_at = ?, end_reason = 'approver-revoked' WHERE approver = ? AND closed_at IS NULL").run(now.toISOString(), name);
+      this.db.prepare("UPDATE invite SET revoked_at = ? WHERE minted_by = ? AND revoked_at IS NULL AND consumed_at IS NULL").run(now.toISOString(), name);
+      for (const row of this.db.prepare("SELECT repo FROM operating_mode WHERE signed_by = ? AND revoked_at IS NULL").all(name)) {
+        this.revokeMode(String(row["repo"]), by, "operator", now);
+      }
+      this.revokeDerivedAuthority(name, by, now);
+      for (const repo of [...new Set([...(account.projects ?? []), ...(access ?? [])])]) {
+        this.recordAction({ at: now.toISOString(), actor: by, repo, taskId: null, runId: null,
+          action: `project access changed for ${name}`, outcome: access === null || access.includes(repo) ? "granted" : "removed", source: "access" });
+      }
+      this.recordAction({ at: now.toISOString(), actor: by, repo: null, taskId: null, runId: null,
+        action: `account access changed for ${name}`, outcome: access === null ? "instance access" : `${access.length} projects`, source: "access" });
+      return { ok: true as const };
+    });
+  }
+
+  recordAction(entry: Omit<LedgerEntry, "id">): number {
+    const row = this.db.prepare("INSERT INTO action_ledger(at,actor,repo,task_id,run_id,action,outcome,source) VALUES (?,?,?,?,?,?,?,?)")
+      .run(entry.at, entry.actor, entry.repo, entry.taskId, entry.runId, entry.action, entry.outcome, entry.source);
+    return Number(row.lastInsertRowid);
+  }
+
+  actionLedger(query: { repos: readonly string[] | null; actor?: string; outcome?: string; source?: string; taskId?: string; before?: number; limit?: number }): LedgerEntry[] {
+    const clauses: string[] = [];
+    const args: (string | number)[] = [];
+    if (query.repos !== null) {
+      if (query.repos.length === 0) return [];
+      clauses.push(`repo IN (${query.repos.map(() => "?").join(",")})`);
+      args.push(...query.repos);
+    }
+    for (const [field, value] of [["actor", query.actor], ["outcome", query.outcome], ["source", query.source], ["task_id", query.taskId]] as const) {
+      if (value !== undefined && value !== "") { clauses.push(`${field} = ?`); args.push(value); }
+    }
+    if (query.before !== undefined) { clauses.push("id < ?"); args.push(query.before); }
+    args.push(Math.max(1, Math.min(101, query.limit ?? 51)));
+    return this.db.prepare(`SELECT * FROM action_ledger ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`).all(...args).map(row => ({
+      id: Number(row["id"]), at: String(row["at"]), actor: String(row["actor"]), repo: row["repo"] === null ? null : String(row["repo"]),
+      taskId: row["task_id"] === null ? null : String(row["task_id"]), runId: row["run_id"] === null ? null : Number(row["run_id"]),
+      action: String(row["action"]), outcome: String(row["outcome"]), source: String(row["source"]) as LedgerEntry["source"],
+    }));
+  }
+
   // ---- invites + people (v29, U1-U3/D6/D7) --------------------------------
 
   /** Every account with its standing — the People screen's spine. History
    * is immutable: a revoked person's rows stay attributed forever. */
-  accountFacts(): { name: string; role: "approver" | "viewer"; addedAt: string; revokedAt: string | null; revokedBy: string | null }[] {
+  accountFacts(): { name: string; role: "approver" | "viewer"; addedAt: string; revokedAt: string | null; revokedBy: string | null; projects: ProjectAccess }[] {
     return this.db
-      .prepare("SELECT name, role, added_at, revoked_at, revoked_by FROM approver ORDER BY name")
+      .prepare("SELECT name, role, added_at, revoked_at, revoked_by, projects_json FROM approver ORDER BY name")
       .all()
       .map(row => ({
+        projects: readProjectAccess(row["projects_json"]),
         name: String(row["name"]),
         role: String(row["role"]) as "approver" | "viewer",
         addedAt: String(row["added_at"]),
@@ -8458,13 +8547,18 @@ export class Store {
   /** A single-use door into the instance (U2): 128-bit token, sha256
    * stored, role pinned at mint, 72 hours. Only the caller's own
    * authentication gates this — an approver mints; a viewer cannot. */
-  mintInvite(role: "approver" | "viewer", mintedBy: string, now: Date, token: () => string = () => randomBytes(16).toString("base64url")): { token: string; id: number; expiresAt: string } {
-    const value = token();
-    const expiresAt = new Date(now.getTime() + 72 * 60 * 60_000).toISOString();
-    const inserted = this.db
-      .prepare("INSERT INTO invite (token_hash, role, minted_by, minted_at, expires_at) VALUES (?, ?, ?, ?, ?)")
-      .run(createHash("sha256").update(value, "utf8").digest("hex"), role, mintedBy, now.toISOString(), expiresAt);
-    return { token: value, id: Number(inserted.lastInsertRowid), expiresAt };
+  mintInvite(role: "approver" | "viewer", mintedBy: string, now: Date, token: () => string = () => randomBytes(16).toString("base64url"), projects: ProjectAccess = null): { token: string; id: number; expiresAt: string } {
+    const access = normalizeProjectAccess(projects);
+    return this.transact(() => {
+      if (!this.isInstanceOperator(mintedBy)) throw new Error("Only an instance operator can invite people.");
+      const value = token();
+      const expiresAt = new Date(now.getTime() + 72 * 60 * 60_000).toISOString();
+      const inserted = this.db
+        .prepare("INSERT INTO invite (token_hash, role, minted_by, minted_at, expires_at, projects_json) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(createHash("sha256").update(value, "utf8").digest("hex"), role, mintedBy, now.toISOString(), expiresAt, access === null ? null : JSON.stringify(access));
+      this.recordAction({ at: now.toISOString(), actor: mintedBy, repo: null, taskId: null, runId: null, action: "invitation created", outcome: role === "viewer" ? "viewer" : "operator", source: "access" });
+      return { token: value, id: Number(inserted.lastInsertRowid), expiresAt };
+    });
   }
 
   /** Liveness WITHOUT spending an attempt — what the GET page renders on.
@@ -8525,24 +8619,27 @@ export class Store {
         .prepare(
           `UPDATE invite SET consumed_by = ?, consumed_at = ?
             WHERE token_hash = ? AND revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ?
-            RETURNING role`,
+            RETURNING role, projects_json`,
         )
         .get(args.name, now.toISOString(), hash, now.toISOString());
       if (consumed === undefined) return { ok: false as const, reason: "gone" as const };
       const role = String(consumed["role"]) as "approver" | "viewer";
       this.db
-        .prepare("INSERT INTO approver (name, credential_hash, added_at, role, generation) VALUES (?, ?, ?, ?, 1)")
-        .run(args.name, args.credentialHash, now.toISOString(), role);
+        .prepare("INSERT INTO approver (name, credential_hash, added_at, role, generation, projects_json) VALUES (?, ?, ?, ?, 1, ?)")
+        .run(args.name, args.credentialHash, now.toISOString(), role, consumed["projects_json"] ?? null);
+      for (const repo of readProjectAccess(consumed["projects_json"]) ?? [null]) {
+        this.recordAction({ at: now.toISOString(), actor: args.name, repo, taskId: null, runId: null, action: "joined", outcome: role === "viewer" ? "viewer" : "operator", source: "access" });
+      }
       return { ok: true as const, role };
     });
   }
 
   /** The open invites — the People screen's and the CLI's list. Hashes
    * never leave the store; an invite is named by its row id. */
-  openInvites(now: Date): { id: number; role: "approver" | "viewer"; mintedBy: string; mintedAt: string; expiresAt: string; attempts: number }[] {
+  openInvites(now: Date): { id: number; role: "approver" | "viewer"; mintedBy: string; mintedAt: string; expiresAt: string; attempts: number; projects: ProjectAccess }[] {
     return this.db
       .prepare(
-        "SELECT id, role, minted_by, minted_at, expires_at, attempts FROM invite WHERE revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ? ORDER BY id",
+        "SELECT id, role, minted_by, minted_at, expires_at, attempts, projects_json FROM invite WHERE revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ? ORDER BY id",
       )
       .all(now.toISOString())
       .map(row => ({
@@ -8552,6 +8649,7 @@ export class Store {
         mintedAt: String(row["minted_at"]),
         expiresAt: String(row["expires_at"]),
         attempts: Number(row["attempts"]),
+        projects: readProjectAccess(row["projects_json"]),
       }));
   }
 
@@ -8596,12 +8694,12 @@ export class Store {
     | { ok: true; modesRevoked: number; authorizationsClosed: number; invitesRevoked: number }
     | { ok: false; reason: "unknown" | "already-revoked" | "last-approver" } {
     return this.transact(() => {
-      const account = this.db.prepare("SELECT role, revoked_at FROM approver WHERE name = ?").get(name);
+      const account = this.db.prepare("SELECT role, revoked_at, projects_json FROM approver WHERE name = ?").get(name);
       if (account === undefined) return { ok: false as const, reason: "unknown" as const };
       if (account["revoked_at"] !== null) return { ok: false as const, reason: "already-revoked" as const };
-      if (String(account["role"]) === "approver") {
+      if (String(account["role"]) === "approver" && account["projects_json"] === null) {
         const others = this.db
-          .prepare("SELECT COUNT(*) AS n FROM approver WHERE role = 'approver' AND revoked_at IS NULL AND name <> ?")
+          .prepare("SELECT COUNT(*) AS n FROM approver WHERE role = 'approver' AND revoked_at IS NULL AND projects_json IS NULL AND name <> ?")
           .get(name);
         if (Number(others?.["n"] ?? 0) === 0) return { ok: false as const, reason: "last-approver" as const };
       }
@@ -8631,6 +8729,7 @@ export class Store {
         this.reconcileIntentsForMode(String(mode["repo"]), null, now);
       }
       this.revokeDerivedAuthority(name, by, now);
+      this.recordAction({ at: stamp, actor: by, repo: null, taskId: null, runId: null, action: `account removed: ${name}`, outcome: "revoked", source: "access" });
       return {
         ok: true as const,
         modesRevoked: modes.length,

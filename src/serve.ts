@@ -1,3 +1,10 @@
+import { ledgerBody } from "./ledger-view.js";
+import { authorizePlanUnderMode, applyModeToNewFiling, planAutoPending } from "./plan-auto.js";
+import { LEDGER_CSV_HEADER, ledgerCsvRows } from "./ledger-csv.js";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { setImmediate as yieldEventLoop } from "node:timers/promises";
+import { projectAuthority } from "./project-access.js";
 /**
  * The web console (§7, grown per the console review): the whole built-in
  * queue, visible and operable from a phone. `standing-orders serve` — node:http,
@@ -489,7 +496,14 @@ export function createDecisionServer(options: ServeOptions): Server {
   const unscopedMode = ceiling.repos.length === 0 && ceiling.roots.length === 0;
   /** Per-row visibility under the ceiling — the authorization question for reads. */
   const liveCeiling = () => ({ repos: [...ceiling.repos, ...(options.additionalProjectRepos?.() ?? [])], roots: ceiling.roots });
-  const visible = (repo: string | null): boolean => rowVisible(liveCeiling(), repo);
+  const restricted = (): boolean => {
+    const actor = requestContext.getStore()?.actor;
+    return actor !== undefined && store.accountOf(actor)?.projects !== null;
+  };
+  const visible = (repo: string | null): boolean => {
+    const actor = requestContext.getStore()?.actor;
+    return rowVisible(liveCeiling(), repo) && (actor === undefined || store.accountCanAccess(actor, repo));
+  };
   /** The explicit, currently proved project list. The callback is supplied
    * only by `up`, after it has independently checked git-ness and the root
    * ceiling; this server still filters every row through its own ceiling. */
@@ -508,7 +522,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * enumerate themselves; root ceilings enumerate the STORED repos that
    * pass the ceiling (Codex roll-up review, finding 11); unscoped = null. */
   const admissionList = (): string[] | null =>
-    unscopedMode
+    restricted() ? [...(store.accountOf(requestContext.getStore()!.actor!)?.projects ?? [])].filter(visible) : unscopedMode
       ? null
       : [...new Set([...managedRepos(), ...(ceiling.roots.length === 0 ? [] : store.knownRepos().filter(visible))])];
   /** The task behind a resource, for the ceiling check; null = no ref (visible). */
@@ -564,6 +578,10 @@ export function createDecisionServer(options: ServeOptions): Server {
     who: Who,
     body: URLSearchParams,
   ): { status: number; message: string } | null {
+    const current = store.accountOf(who.name);
+    if (current === null || current.revokedAt !== null || current.role !== who.role || (who.via === "cookie" && current.generation !== who.session.generation)) {
+      return { status: 403, message: "Your access changed. Sign in again." };
+    }
     const type = request.headers["content-type"] ?? "";
     if (!type.startsWith("application/x-www-form-urlencoded")) {
       return { status: 415, message: "forms only" };
@@ -623,9 +641,14 @@ export function createDecisionServer(options: ServeOptions): Server {
    * that is a refusal, not a fallback.
    */
   function projectOf(who: Who, request: IncomingMessage): string | null | undefined {
-    if (who.via === "cookie") return who.session.project;
+    const fallback = () => restricted() ? admissionList()?.[0] ?? null : defaultProject;
+    if (who.via === "cookie") {
+      const selected = who.session.project;
+      if (!restricted()) return selected;
+      return selected !== null && visible(selected) ? selected : fallback();
+    }
     const header = request.headers["x-standing-orders-project"];
-    if (header === undefined) return defaultProject;
+    if (header === undefined) return fallback();
     if (Array.isArray(header)) return undefined;
     const canonical = canonicalProject(header);
     if (canonical === null || !visible(canonical)) return undefined;
@@ -846,12 +869,94 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     const requestFacts = {
+      actor: who.name,
       csrf: who.via === "cookie" ? who.session.csrf : "",
       returnTo: safeReturn(url.pathname + url.search),
     };
-    if (method === "GET") return void (await requestContext.run(requestFacts, () => handleGet(url, who, request, response)));
-    if (method === "POST") return requestContext.run(requestFacts, () => handlePost(url, who, request, response));
+    if (method === "GET" || method === "POST") return requestContext.run(requestFacts, async () => {
+      const body = method === "POST" ? await form(request) : null;
+      const target = actionTarget(url, who, request, body);
+      const execute = async () => {
+        if (!projectRequestAllowed(url, who, request, response)) return;
+        if (method === "GET") return handleGet(url, who, request, response);
+        return handlePost(url, who, request, response, body!);
+      };
+      if (method === "GET" || url.pathname === "/session/attended-beats") return projectAuthority.run({ actor: who.name, repo: target.repo }, execute);
+      // Request acceptance is separate from durable work completion. Never
+      // persist a body, query string, token, password, or arbitrary URL.
+      const entry = { at: clock().toISOString(), actor: who.name, ...target, source: "request" as const };
+      store.recordAction({ ...entry, outcome: "requested" });
+      try {
+        await projectAuthority.run({ actor: who.name, repo: target.repo }, execute);
+        const createdTask = requestContext.getStore()?.createdTask;
+        const placement = createdTask === undefined ? null : store.lookupRef(createdTask);
+        store.recordAction({ ...entry, ...(placement === null ? {} : { repo: placement.repo, taskId: placement.externalId }), at: clock().toISOString(), outcome: response.statusCode >= 500 ? "error" : response.statusCode >= 400 ? "refused" : "accepted" });
+      } catch (error) {
+        store.recordAction({ ...entry, at: clock().toISOString(), outcome: "error" });
+        throw error;
+      }
+    });
     return respond(response, 405, "text/plain; charset=utf-8", "no such method here");
+  }
+
+  function readAccessForm(body: URLSearchParams): { ok: true; projects: string[] | null } | { ok: false; message: string } {
+    if (body.getAll("access").length > 1) return { ok: false, message: "Choose one access setting." };
+    const mode = body.get("access");
+    // Older clients omitted this field and explicitly used instance roles.
+    if ((mode === null && body.getAll("projects").length === 0) || mode === "all") return { ok: true, projects: null };
+    if (mode !== "selected") return { ok: false, message: "Choose selected projects or all projects." };
+    const allowed = new Set([...managedRepos(), ...store.knownRepos()].filter(visible));
+    const projects = [...new Set(body.getAll("projects"))];
+    if (projects.length > 100 || projects.some(repo => !allowed.has(repo))) return { ok: false, message: "Choose projects available on this instance." };
+    return { ok: true, projects };
+  }
+
+  function actionTarget(url: URL, who: Who, request: IncomingMessage, body: URLSearchParams | null = null): { repo: string | null; taskId: string | null; runId: number | null; action: string } {
+    const task = matchTaskPath(url.pathname, "(?:/([a-z-]+))?$");
+    if (task !== null) return { repo: store.lookupRef(task.taskId)?.repo ?? null, taskId: task.taskId, runId: null, action: `task ${task.verb || "view"}` };
+    const resource = /^\/(r|d|i|routines)\/([0-9]{1,15})(?:\/([a-z-]+)(?:\/[0-9]+)?)?$/.exec(url.pathname);
+    if (resource !== null) {
+      const id = Number(resource[2]);
+      if (resource[1] === "routines") return { repo: store.getRoutine(id)?.repo ?? null, taskId: null, runId: null, action: `routine ${resource[3] ?? "view"}` };
+      const runId = resource[1] === "r" ? id : resource[1] === "d" ? store.getDecision(id)?.run ?? null : store.openIncidents().find(one => one.id === id)?.run ?? null;
+      const run = runId === null ? null : store.getRun(runId);
+      const ref = run === null ? null : store.refForId(run.taskRef);
+      return { repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId, action: `${resource[1] === "d" ? "decision" : resource[1] === "i" ? "incident" : "run"} ${resource[3] ?? "view"}` };
+    }
+    const known = new Set(["/tasks/add", "/queue/move", "/queue/note", "/routines/add", "/people/invite", "/people/invite-revoke", "/people/revoke", "/people/projects", "/projects/select", "/projects/open", "/mode/confirm", "/mode/sign", "/mode/revoke"]);
+    const placed = ["/tasks/add", "/routines/add"].includes(url.pathname) ? body?.get("repo")?.trim() : null;
+    return { repo: url.pathname.startsWith("/people/") ? null : placed ? canonicalProject(placed) ?? placed : projectOf(who, request) ?? null, taskId: null, runId: null,
+      action: known.has(url.pathname) ? url.pathname.slice(1).replaceAll("/", " ") : "console request" };
+  }
+
+  function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
+    if (!restricted()) return true;
+    const path = url.pathname;
+    const read = new Set(["/", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const write = new Set(["/projects/select", "/tasks/add", "/routines/add"]);
+    const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
+    const resource = request.method === "GET"
+      ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path)
+      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
+    if (!(request.method === "GET" ? read : write).has(path) && task === null && !resource) {
+      refuse(response, who, 403, "This area requires instance access. Your account operates within its assigned projects.", "/projects");
+      return false;
+    }
+    if (task !== null || resource) {
+      if (!visible(actionTarget(url, who, request).repo)) {
+        refuse(response, who, 404, "No such resource in your projects.", "/projects"); return false;
+      }
+    }
+    // Every collection except these three must have a concrete project;
+    // NULL otherwise means all rows in legacy store APIs.
+    if (!["/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
+      refuse(response, who, 403, "No assigned project is available. Ask an instance operator for access.", "/projects"); return false;
+    }
+    if (request.method === "GET" && path === "/board") {
+      url.searchParams.delete("scope");
+      if (url.searchParams.get("view") === "order") url.searchParams.delete("view");
+    }
+    return true;
   }
 
   // ---- reads ---------------------------------------------------------------
@@ -875,7 +980,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
       url.pathname !== "/chat" &&
-      url.pathname !== "/settings" && url.pathname !== "/logout" && url.pathname !== "/people" &&
+      url.pathname !== "/settings" && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
 
@@ -1063,7 +1168,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             // The one fact the inbox must never hide (install review): with
             // no worker answering, nothing here will ever build, and every
             // approval below is a promise nobody is there to keep.
-            const runners = store.listRunners().filter(one => one.retiredAt === null);
+            const runners = store.listRunners().filter(one => one.retiredAt === null && (!restricted() || one.repos.some(visible)));
             const answering = runners.filter(one => runnerAlive(one, now));
             const lastHeard = runners.map(one => one.heartbeatAt).sort().at(-1) ?? null;
             return { answering: answering.length, registered: runners.length, lastHeard };
@@ -1400,6 +1505,45 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/ledger") {
+      const admitted = admissionList();
+      const projects = admitted ?? [...new Set([...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const chosen = url.searchParams.get("project") ?? "";
+      if (chosen !== "" && !projects.includes(chosen)) return refuse(response, who, 403, "That project is outside your access.", "/ledger");
+      const before = url.searchParams.get("before");
+      if (before !== null && (!/^[1-9][0-9]{0,14}$/.test(before) || !Number.isSafeInteger(Number(before)))) return refuse(response, who, 400, "Invalid ledger cursor.", "/ledger");
+      const query = { repos: chosen === "" ? admitted : [chosen],
+        actor: (url.searchParams.get("actor") ?? "").slice(0, 200), outcome: (url.searchParams.get("outcome") ?? "").slice(0, 100),
+        source: url.searchParams.get("source") ?? "", taskId: (url.searchParams.get("task") ?? "").slice(0, 200) };
+      if (url.searchParams.get("format") === "csv") {
+        const generation = store.accountOf(who.name)?.generation;
+        // Descending immutable IDs pin the export at its first read; later
+        // arrivals cannot duplicate or extend it. Yield between bounded pages
+        // and honor backpressure/disconnects, so exports cannot fill memory.
+        const first = store.actionLedger({ ...query, limit: 100 });
+        async function* chunks() {
+          yield LEDGER_CSV_HEADER;
+          let page = first;
+          while (page.length > 0) {
+            const current = store.accountOf(who.name);
+            if (current === null || current.revokedAt !== null || current.generation !== generation ||
+                page.some(row => !visible(row.repo))) throw new Error("Ledger access changed during export");
+            yield ledgerCsvRows(page);
+            const cursor = page.at(-1)!.id;
+            await yieldEventLoop();
+            page = store.actionLedger({ ...query, before: cursor, limit: 100 });
+          }
+        }
+        response.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="standing-orders-actions.csv"', "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        try { await pipeline(Readable.from(chunks()), response); }
+        catch { response.destroy(); }
+        return;
+      }
+      const rows = store.actionLedger({ ...query, ...(before === null ? {} : { before: Number(before) }), limit: 51 });
+      if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ entries: rows.slice(0, 50), nextBefore: rows.length > 50 ? rows[49]!.id : null }));
+      return sendScreen(response, 200, screen("Action ledger", ledgerBody(rows, projects, url.searchParams), { chrome: chromeFor(chosen === "" ? null : chosen, "ledger", undefined, chosen === "" ? "all" : "project") }));
+    }
+
     if (url.pathname === "/activity") {
       const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
       return sendScreen(
@@ -1481,8 +1625,12 @@ export function createDecisionServer(options: ServeOptions): Server {
                 `<option value="1">approve the moment I file them</option>` +
                 `<option value="0">wait for their own approval</option>` +
                 `</select></label>`,
+              `<label>planner approval<select name="plan-auto">` +
+                `<option value="0">wait for my approval</option>` +
+                `<option value="1">auto-approve plans that preserve my filed contract</option>` +
+                `</select><span class="meta">Requires automatic filing approval and reviews. File the goal, paths, and acceptance criteria upfront. Changed scope and unanswered questions still pause.</span></label>`,
               `<label>reviews<select name="review-auto">` +
-                `<option value="">the preset's default (standard: on; hands-off: off)</option>` +
+                `<option value="">the preset's default (on)</option>` +
                 `<option value="1">agent-review every finished build</option>` +
                 `<option value="0">only when I ask</option>` +
                 `</select></label>`,
@@ -1502,14 +1650,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        screen("mode", [`<h1>operating mode</h1>`, current, signForm].join("\n"), { chrome: chromeFor(project, "mode") }),
+        screen("mode", [`<h1>operating mode</h1><p>Authorize this project's automatic approvals once, for up to ${MODE_MAX_DAYS} days. Select the touchpoints below; the signature covers the exact choices. Existing modes keep their original terms.</p><p class="meta">Quality evidence, scope changes, agent questions, and review comments that require a revision retain their existing checks. Automatic merging also needs a publication grant.</p>`, current, signForm].join("\n"), { chrome: chromeFor(project, "mode") }),
       );
     }
 
     if (url.pathname === "/people") {
       // Approvers see everyone (D7's ceiling: every fact already passed
       // the process admission); a viewer sees exactly themselves (U3).
-      const approverView = who.role === "approver";
+      if (restricted()) {
+        const projects = admissionList() ?? [];
+        return sendScreen(response, 200, screen("people", `<h1>Your access</h1><p>${personChip(who.name)} · ${who.role === "approver" ? "operator" : "viewer"}</p><p>${who.role === "approver" ? "You can create, manage, and approve work in these projects." : "You can read work in these projects."}</p><ul>${projects.map(repo => `<li>${escape(projectName(repo))}</li>`).join("")}</ul><p class="meta">An instance operator manages invitations and project access.</p>`, { chrome: chromeFor(project, "people") }));
+      }
+      const approverView = store.isInstanceOperator(who.name);
       const accounts = store.accountFacts().filter(one => approverView || one.name === who.name);
       const lastSeenOf = (name: string): number | null => {
         let seen: number | null = null;
@@ -1519,6 +1671,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         return seen;
       };
       const csrf = who.via === "cookie" ? who.session.csrf : "";
+      const projectChoices = [...new Set([...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const accessFields = (selected: readonly string[] | null) =>
+        `<label>Project access<select name="access"><option value="selected"${selected !== null ? " selected" : ""}>Selected projects</option><option value="all"${selected === null ? " selected" : ""}>All projects</option></select></label>` +
+        `<p class="meta">Operators with all-project access also manage the instance.</p><fieldset><legend>Projects</legend>${projectChoices.length === 0 ? `<p class="meta">Add a project before granting selected access.</p>` : projectChoices.map(repo => `<label class="row"><input type="checkbox" name="projects" value="${escape(repo)}"${selected?.includes(repo) ? " checked" : ""}>${escape(projectName(repo))}</label>`).join("")}</fieldset>`;
       const cards = accounts.map(one => {
         const seen = lastSeenOf(one.name);
         const attended = store.openAttendedOf(one.name);
@@ -1532,6 +1688,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         return [
           `<div class="card">`,
           `<h2 style="margin-top:0">${personChip(one.name)} <span class="meta">${standing}</span></h2>`,
+          `<p class="meta">${one.projects === null ? "All projects" : one.projects.length === 0 ? "No project access" : one.projects.map(repo => escape(projectName(repo))).join(", ")}</p>`,
+          approverView && one.revokedAt === null ? `<details><summary>Edit project access</summary><form method="post" action="/people/projects">${hiddenFields({ csrf, name: one.name })}${accessFields(one.projects)}<label>Your password<input type="password" name="token" autocomplete="current-password" required></label><p class="meta">Changing access signs this person out and ends their derived sessions and modes. Previously approved work stays recorded.</p><button type="submit">Save project access</button></form></details>` : "",
           `<p class="meta">${seen === null ? "not signed in right now" : `signed in \u2014 active ${escape(new Date(seen).toISOString().slice(11, 16))} UTC`} \u00b7 joined ${escape(one.addedAt.slice(0, 10))}</p>`,
           attended.length === 0
             ? ""
@@ -1551,7 +1709,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       });
       const invites = approverView ? store.openInvites(now) : [];
       const inviteRows = invites.map(one =>
-        `<p class="row">${escape(one.role)} invite \u00b7 from ${personChip(one.mintedBy)} \u00b7 expires ${escape(one.expiresAt.slice(0, 16).replace("T", " "))}${one.attempts > 0 ? ` \u00b7 ${one.attempts} failed attempt${one.attempts === 1 ? "" : "s"}` : ""}` +
+        `<p class="row">${escape(one.role)} invite · ${one.projects === null ? "all projects" : one.projects.map(repo => escape(projectName(repo))).join(", ")} \u00b7 from ${personChip(one.mintedBy)} \u00b7 expires ${escape(one.expiresAt.slice(0, 16).replace("T", " "))}${one.attempts > 0 ? ` \u00b7 ${one.attempts} failed attempt${one.attempts === 1 ? "" : "s"}` : ""}` +
         ` <form method="post" action="/people/invite-revoke" style="display:inline">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="id" value="${one.id}">` +
         `<label>password <input type="password" name="token" autocomplete="current-password" style="width:8rem"></label>` +
@@ -1565,7 +1723,8 @@ export function createDecisionServer(options: ServeOptions): Server {
             inviteRows.length === 0 ? `<p class="meta">no open invites</p>` : inviteRows.join("\n"),
             `<form method="post" action="/people/invite" class="row">`,
             `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-            `<label>they can<select name="role"><option value="viewer">watch everything</option><option value="approver">approve and act</option></select></label>`,
+            `<label>they can<select name="role"><option value="viewer">Viewer — read work</option><option value="approver">Operator — create, manage and approve work</option></select></label>`,
+            accessFields(project === null ? [] : [project]),
             `<label>your password<input type="password" name="token" autocomplete="current-password"></label>`,
             `<button type="submit">make an invite link</button>`,
             `<span class="meta">single-use, expires in 72 hours</span>`,
@@ -1835,8 +1994,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         : "";
       return page(response, 200, shell("menu", [
         `<h1>more</h1>`,
-        section("workflows", workflowsRows()),
-        section("admin", adminRows()),
+        section("workflows", workflowsRows(chrome.projectScoped)),
+        section("admin", adminRows(chrome.projectScoped)),
         settingsSection,
       ].join("\n"), { chrome }));
     }
@@ -2290,7 +2449,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * checklist instructs, it never gains authority (finding e).
    */
   function wizardSteps(now: Date): { done: boolean; title: string; detail: string }[] | null {
-    if (store.firstSuccessAt(now) !== null) return null;
+    if (restricted() || store.firstSuccessAt(now) !== null) return null;
     const repos = admissionList() ?? [];
     const setupDone = repos.filter(one => store.liveWorktreeSetup(one) !== null).length;
     const skillDone = repos.filter(one =>
@@ -2633,7 +2792,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * titles the page itself may render, bounded, saturation declared.
    */
   function paletteIndexTag(project: string | null): string {
-    const admitted = project === null && !unscopedMode ? admissionList() : null;
+    const admitted = project === null ? admissionList() : null;
     const entries: { label: string; href: string }[] = [
       { label: "inbox", href: "/" },
       { label: "board", href: "/board?scope=all" },
@@ -2645,6 +2804,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       { label: "task list", href: "/tasks" },
       { label: "fleet", href: "/fleet" },
       { label: "activity", href: "/activity" },
+      { label: "action ledger", href: "/ledger" },
       { label: "system", href: "/system" },
       { label: "builds", href: "/runs" },
       { label: "requirements", href: "/caps" },
@@ -2656,7 +2816,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       entries.push({ label: `${one.id} — ${one.title}`, href: `/t/${encodeURIComponent(one.id)}` });
     }
     const saturated = open.length > 200;
-    const json = JSON.stringify(saturated ? [...entries, { label: "… more in the task list", href: "/tasks" }] : entries)
+    const safeEntries = restricted() ? entries.filter(one => ["/", "/board", "/routines", "/done", "/review", "/tasks", "/runs", "/projects", "/ledger"].includes(one.href) || one.href.startsWith("/t/")) : entries;
+    const json = JSON.stringify(saturated ? [...safeEntries, { label: "… more in the task list", href: "/tasks" }] : safeEntries)
       .replace(/</g, "\\u003c");
     return `<script type="application/json" id="palette-index">${json}</script>`;
   }
@@ -2672,7 +2833,8 @@ export function createDecisionServer(options: ServeOptions): Server {
    */
   const paletteCache = new Map<string, { at: number; tag: string }>();
   function paletteTagCached(project: string | null): string {
-    const key = `${project ?? "(none)"} ${options.telegramTokenFile !== undefined}`;
+    const actor = requestContext.getStore()?.actor;
+    const key = `${actor ?? ""}:${actor === undefined ? "" : store.accountOf(actor)?.generation}:${project ?? "(none)"} ${options.telegramTokenFile !== undefined}`;
     const hit = paletteCache.get(key);
     if (hit !== undefined && Date.now() - hit.at < 5000) return hit.tag;
     const tag = paletteIndexTag(project);
@@ -2703,9 +2865,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     // …except the one-time-secret pages (forceSensitive): those stay
     // script-free absolutely, and simply do not keep sessions alive.
     const sensitiveChrome = sensitive && s.forceSensitive !== true && s.chrome !== undefined
-      ? beatScript() + sidebarScript()
+      ? beatScript(!restricted()) + sidebarScript()
       : "";
-    const script = functional + (chromeLayer ? chromeScript() : sensitiveChrome);
+    const script = functional + (chromeLayer ? chromeScript(!restricted()) : sensitiveChrome);
     const nonce = script === "" ? undefined : randomBytes(16).toString("base64");
     const body = chromeLayer
       ? `${s.body}\n${paletteTagCached(s.chrome?.project ?? null)}\n${KBD_HELP}`
@@ -2737,11 +2899,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     listPane?: string,
     scope?: Chrome["scope"],
   ): Chrome {
-    const key = project ?? "";
+    if (restricted() && !visible(project)) project = null;
+    const actor = requestContext.getStore()?.actor;
+    const key = `${actor ?? ""}:${actor === undefined ? "" : store.accountOf(actor)?.generation}:${project ?? ""}`;
     const cached = badgeCache.get(key);
     let badge = cached;
     if (badge === undefined || Date.now() - badge.at > 5_000) {
-      const counted = store.countInboxScoped(project, clock(), 100, project === null && !unscopedMode ? admissionList() : null);
+      const counted = store.countInboxScoped(project, clock(), 100, project === null ? admissionList() : null);
       badge = { at: Date.now(), count: counted.count, saturated: counted.saturated };
       badgeCache.set(key, badge);
     }
@@ -2760,6 +2924,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return {
       active,
       project,
+      projectScoped: restricted(),
       ...(projectPeek === undefined ? {} : { projectPeek }),
       // Enrolled projects first (most recently opened), then the repos this
       // server was told to serve that nobody has opened yet — the switcher
@@ -2780,7 +2945,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       ...(facts === undefined ? {} : { csrf: facts.csrf, returnTo: facts.returnTo }),
       inboxCount: badge.count,
       inboxSaturated: badge.saturated,
-      settings: options.telegramTokenFile !== undefined,
+      settings: !restricted() && options.telegramTokenFile !== undefined,
       ...(store.isDemo() ? { demo: true } : {}),
       ...(liveMode === null || liveModeTerms === null
         ? {}
@@ -2794,7 +2959,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               }${liveModeTerms.publication === "automerge" ? " — merges fire themselves on green" : ""}`,
             },
           }),
-      ...(!unscopedMode && managedRepos().length > 0 ? { chat: true } : {}),
+      ...(!restricted() && !unscopedMode && managedRepos().length > 0 ? { chat: true } : {}),
       ...(listPane === undefined ? {} : { listPane }),
       ...(scope === undefined ? {} : { scope }),
     };
@@ -2881,8 +3046,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     // root-configured, non-demo, POSIX serve gets the live card; everybody
     // else gets the card DISABLED with the reason in words.
     const onboardState =
-      who.via !== "cookie"
-        ? { enabled: false as const, why: "adding repositories is a browser session's act" }
+      restricted() || who.via !== "cookie"
+        ? { enabled: false as const, why: "An instance operator adds projects." }
         : store.isDemo()
           ? { enabled: false as const, why: "the sandbox never clones — this is demo data" }
           : process.platform === "win32"
@@ -2910,7 +3075,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return sendScreen(
       response,
       status,
-      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode, ceiling.roots.length > 0 || unscopedMode, onboardState, peeks),
+      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, !restricted() && unscopedMode, !restricted() && (ceiling.roots.length > 0 || unscopedMode), onboardState, peeks),
     );
   }
 
@@ -3035,6 +3200,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         canRetryReview: who.via === "cookie" && who.role === "approver",
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
+        planAuto: planAutoPending(store, taskId, now),
         planDocument: planView?.document ?? null,
         planSha: planView?.sha256 ?? null,
         planContract: ref === null || planView === null ? null : planContractViewOf(ref.id, scope),
@@ -3079,7 +3245,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           const blockerRef = store.lookupRef(blockerId);
           const admitted = blockerRef !== null && visible(blockerRef.repo);
           const blocker = admitted ? store.getTask(blockerId) : null;
-          return { id: blockerId, title: blocker === null ? null : blocker.title, state: blocker === null ? null : blocker.state, admitted };
+          return { id: !admitted && restricted() ? "restricted task" : blockerId, title: blocker === null ? null : blocker.title, state: blocker === null ? null : blocker.state, admitted };
         }),
         // Candidates a "wait for" or replacement select may offer: this
         // TASK's own project, even when the sidebar is in all-project mode.
@@ -3111,7 +3277,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return {
             answering: answering.length,
             registered: eligible.length,
-            totalRegistered: runners.length,
+            totalRegistered: restricted() ? eligible.length : runners.length,
             lastHeard: eligible.map(one => one.heartbeatAt).sort().at(-1) ?? null,
           };
         })(),
@@ -3166,7 +3332,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         nonce,
         problem,
         attended: (() => {
-          if (options.attended === undefined || ref === null || who.via !== "cookie" || store.isDemo()) return null;
+          if (restricted() || options.attended === undefined || ref === null || who.via !== "cookie" || store.isDemo()) return null;
           const open = store.openAuthorizationFor(ref.id);
           if (open !== null) {
             const spent = store.authorizationSpendMicrousd(open.id);
@@ -3321,7 +3487,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   ): void {
     const data = taskViewData(taskId, who, problem);
     if (data === null) return refuse(response, who, 404, "no such task", "/tasks");
-    const paneProject = who.via === "cookie" ? who.session.project : null;
+    const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
     return sendScreen(
       response,
       status,
@@ -3355,7 +3521,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       who.via === "cookie" && routineAgentsState(routine).approvable
         ? mintApprovalNonce(who.name, `routine:${routine.id}`, routine.digest)
         : "";
-    const paneProject = who.via === "cookie" ? who.session.project : null;
+    const paneProject = restricted() ? routine.repo : who.via === "cookie" ? who.session.project : null;
     return sendScreen(
       response,
       status,
@@ -3801,9 +3967,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     who: Who,
     request: IncomingMessage,
     response: ServerResponse,
+    body: URLSearchParams,
   ): Promise<void> {
-    const body = await form(request);
-
     // The attended beat answers BEFORE the shared mutation guard (v28): it
     // carries no parameters, so there is no csrf token to check — its OWN
     // guard is complete and STRICTER for the browsers this console
@@ -3818,6 +3983,11 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     const denied = authorizeMutation(request, who, body);
     if (denied !== null) return refuse(response, who, denied.status, denied.message);
+    if (!projectRequestAllowed(url, who, request, response)) return;
+    if (restricted()) {
+      const repos = body.getAll("repo");
+      if (repos.length > 1 || repos.some(repo => repo.trim() !== "" && !visible(repo.trim()))) return refuse(response, who, 403, "That project is outside your access.", "/projects");
+    }
 
     // THE CENTRAL VIEWER GATE (modes chain, D2/E2): consequential POSTs
     // require ACTIVE approver standing — cookie and bearer alike — with
@@ -3998,7 +4168,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const askedPath = (body.get("path") ?? "").trim();
       const canonicalPick = askedPath === "" ? null : canonicalProject(askedPath);
-      if (canonicalPick !== null && !(await authorizedProject(liveCeiling(), canonicalPick))) {
+      if ((askedPath !== "" && canonicalPick === null) || (canonicalPick !== null && (!visible(canonicalPick) || !(await authorizedProject(liveCeiling(), canonicalPick))))) {
         return refuse(response, who, 403, "that project is outside this console's reach");
       }
       who.session.project = canonicalPick;
@@ -4068,6 +4238,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // in any table.
       const repoGiven = (body.get("repo") ?? "").trim();
       const effective = repoGiven !== "" ? repoGiven : (project ?? "");
+      if (restricted() && !visible(effective === "" ? null : effective)) return refuse(response, who, 403, "That project is outside your access.", "/projects");
       // A scoped console refuses an EMPTY placement server-side (verification
       // finding 1): the form's `required` is a courtesy, not the guard — a
       // direct POST with no project open must not mint an unplaced task
@@ -4112,29 +4283,43 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 400, "quality must be Default or Strict / release", "/tasks/new");
       }
       // One filing door for every surface (Codex adoption review, finding 7).
-      const made = fileTaskProposal(
-        store,
-        {
-          ...(id === "" ? {} : { id }),
-          title,
-          ...(repo === "" ? {} : { repo }),
-          ...(goal === "" ? {} : { goal, acceptance: acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")) }),
-          outOfScope: notThis === "" ? null : notThis,
-          touches: touchesGiven,
-          ...(permissionMode === null ? {} : { permissionMode }),
-          ...(qualityMode === null ? {} : { qualityMode }),
-          ...(scout ? { deliverable: "report" as const } : {}),
-          planning:
-            scout
-              ? "skip"
-              : body.get("planning-policy") === "choice"
-                ? body.get("plan-first") === "1" ? "required" : "skip"
-                : "auto",
-          filedVia: "console",
-          ...(admitted === null ? {} : { admittedRepos: admitted }),
-        },
-        now,
-      );
+      const after = (body.get("after") ?? "").trim();
+      let chainProblem: string | null = null;
+      const made = store.transact(() => {
+        const filed = fileTaskProposal(
+          store,
+          {
+            ...(id === "" ? {} : { id }),
+            title,
+            ...(repo === "" ? {} : { repo }),
+            ...(goal === "" ? {} : { goal, acceptance: acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")) }),
+            outOfScope: notThis === "" ? null : notThis,
+            touches: touchesGiven,
+            ...(permissionMode === null ? {} : { permissionMode }),
+            ...(qualityMode === null ? {} : { qualityMode }),
+            ...(scout ? { deliverable: "report" as const } : {}),
+            planning:
+              scout
+                ? "skip"
+                : body.get("planning-policy") === "choice"
+                  ? body.get("plan-first") === "1" ? "required" : "skip"
+                  : "auto",
+            filedVia: "console",
+            ...(admitted === null ? {} : { admittedRepos: admitted }),
+          },
+          now,
+        );
+        if (filed.ok && after !== "") {
+          const afterRef = store.lookupRef(after);
+          const chained = store.getTask(after) !== null && afterRef !== null && visible(afterRef.repo)
+            ? store.addEdge(filed.id, after) : { ok: false as const, reason: "that task does not exist here" };
+          if (!chained.ok) chainProblem = chained.reason;
+        }
+        // Missing dependencies leave a reviewable, inert task. They must
+        // never be silently dropped before automatic approval starts work.
+        if (filed.ok && chainProblem === null && who.via === "cookie") applyModeToNewFiling(store, filed.id, who.name, now);
+        return filed;
+      });
       if (!made.ok) {
         const csrf = who.via === "cookie" ? who.session.csrf : "";
         return sendScreen(
@@ -4143,23 +4328,12 @@ export function createDecisionServer(options: ServeOptions): Server {
           tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project, null, store.permissionDefault().mode, store.qualityDefault().mode),
         );
       }
+      const actionContext = requestContext.getStore();
+      if (actionContext !== undefined) actionContext.createdTask = made.id;
       // A proved root-mode placement joins the project table (finding 15):
       // the new task's home is openable and admissible from now on.
       if (rootMode && repo !== "") store.upsertProject(repo, projectName(repo), now);
-      // "starts after": a chain filed with the work. The task ALREADY
-      // exists at this point, so a bad chain must not lose it — the new
-      // task's page renders with the un-made wait named instead.
-      const after = (body.get("after") ?? "").trim();
-      if (after !== "") {
-        const afterRef = store.lookupRef(after);
-        const chained =
-          store.getTask(after) !== null && afterRef !== null && visible(afterRef.repo)
-            ? store.addEdge(made.id, after)
-            : { ok: false as const, reason: "that task does not exist here" };
-        if (!chained.ok) {
-          return taskScreen(response, who, made.id, `the task was created, but could not be made to wait for ${after} — ${chained.reason}`, 200);
-        }
-      }
+      if (chainProblem !== null) return taskScreen(response, who, made.id, `the task was created, but could not be made to wait for ${after} — ${chainProblem}`, 200);
       return redirect(response, taskHref(made.id));
     }
 
@@ -4324,6 +4498,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const terms: ModeTerms = {
         ...preset,
         autoApproveFiling: body.get("auto-approve") === "" || body.get("auto-approve") === null ? preset.autoApproveFiling : body.get("auto-approve") === "1",
+        planAuto: body.get("plan-auto") === "1",
         reviewAuto: body.get("review-auto") === "" || body.get("review-auto") === null ? preset.reviewAuto : body.get("review-auto") === "1",
         // The paid-fallback grant is NEVER a preset default (R8): unchecked
         // stays false on every preset — only the explicit box grants it.
@@ -4335,6 +4510,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         repairMaxAttempts: body.get("repair-auto") === "1" ? Math.max(0, Math.min(3, Math.floor(Number(body.get("repair-max-attempts") ?? "0")) || 0)) : 0,
         publication: body.get("publication") === "automerge" ? "automerge" : "notify",
       };
+      if (terms.planAuto && (!terms.autoApproveFiling || !terms.reviewAuto)) {
+        return refuse(response, who, 400, "Automatic planner approval requires automatic filing approval and agent reviews.", "/mode");
+      }
       if (terms.publication === "automerge" && !store.hasMergeCapableGrant(project, now)) {
         return refuse(response, who, 409, "self-merging needs a merge-capable publication grant first — grant one, then sign", "/mode");
       }
@@ -4343,14 +4521,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (url.pathname === "/mode/confirm") {
         // THE CEREMONY (M1): every resolved term in words, and the password
         // signs exactly this digest — a drifted form refuses at /mode/sign.
-        const nonce = mintApprovalNonce(who.name, "mode-sign", digest);
+        const nonce = mintApprovalNonce(who.name, "mode-sign", `${project}:${digest}`);
         const bodyHtml =
           `<h1>sign the ${escape(name)} mode for ${escape(project)}</h1>` +
           `<form method="post" action="/mode/sign" class="card approve-form">` +
           `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">` +
           `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
           `<input type="hidden" name="digest" value="${escape(digest)}">` +
-          ["name", "days", "publication", "auto-approve", "review-auto", "allow-paid-fallback", "repair-auto", "repair-max-attempts"]
+          ["name", "days", "publication", "auto-approve", "plan-auto", "review-auto", "allow-paid-fallback", "repair-auto", "repair-max-attempts"]
             .map(field => `<input type="hidden" name="${field}" value="${escape(body.get(field) ?? "")}">`)
             .join("") +
           `<input type="hidden" name="expiry" value="${escape(expiry)}">` +
@@ -4371,7 +4549,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const signedTerms: ModeTerms = { ...terms, absoluteExpiry: fixedExpiry };
       const rederived = modeDigestOf(signedTerms);
       const nonce = body.get("nonce") ?? "";
-      if (!consumeApprovalNonce(nonce, who.name, "mode-sign", body.get("digest") ?? "")) {
+      if (!consumeApprovalNonce(nonce, who.name, "mode-sign", `${project}:${body.get("digest") ?? ""}`)) {
         return refuse(response, who, 409, "that form is stale — read the terms again", "/mode");
       }
       if (rederived !== (body.get("digest") ?? "") || Date.parse(fixedExpiry) <= now.getTime()) {
@@ -4406,6 +4584,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, ended ? "/mode?said=the%20mode%20is%20ended%20—%20every%20act%20falls%20back%20to%20its%20own%20ceremony" : "/mode");
     }
 
+    if (url.pathname === "/people/projects") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator manages project access.", "/people");
+      if (!authenticateApprover(store, who.name, body.get("token") ?? "", null).ok) return refuse(response, who, 403, "Saving access requires your password.", "/people");
+      const access = readAccessForm(body);
+      if (!access.ok) return refuse(response, who, 400, access.message, "/people");
+      const changed = store.setAccountProjects((body.get("name") ?? "").trim(), access.projects, who.name, now);
+      if (!changed.ok) return refuse(response, who, 409, changed.reason === "last-instance-operator" ? "Keep at least one instance operator with all-project access." : "That account cannot be changed.", "/people");
+      bustBadge();
+      return redirect(response, "/people?said=Project%20access%20saved");
+    }
+
     if (url.pathname === "/people/invite") {
       if (who.via !== "cookie") return refuse(response, who, 403, "inviting is a browser surface");
       const token = body.get("token") ?? "";
@@ -4415,7 +4604,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 403, "making an invite takes your password, typed again", "/people");
       }
       const role = body.get("role") === "approver" ? ("approver" as const) : ("viewer" as const);
-      const minted = store.mintInvite(role, who.name, now);
+      const access = readAccessForm(body);
+      if (!access.ok) return refuse(response, who, 400, access.message, "/people");
+      if (access.projects !== null && access.projects.length === 0) return refuse(response, who, 400, "Select at least one project for this invitation.", "/people");
+      const minted = store.mintInvite(role, who.name, now, undefined, access.projects);
       const origin = options.publicUrl !== undefined ? options.publicUrl.replace(/\/$/, "") : `http://${request.headers.host ?? "this-console"}`;
       const linkScreen = screen(
         "people",
@@ -4424,7 +4616,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           `<div class="card">`,
           `<h2 style="margin-top:0">the invite link \u2014 shown once</h2>`,
           `<p class="mono" style="overflow-wrap:anywhere">${escape(`${origin}/join/${minted.token}`)}</p>`,
-          `<p class="meta">send it to ONE person. It works once, lets them ${role === "approver" ? "approve and act" : "watch everything"}, and dies ${escape(minted.expiresAt.slice(0, 16).replace("T", " "))} UTC. Cancel it any time from the people screen.</p>`,
+          `<p class="meta">send it to ONE person. It works once, lets them ${role === "approver" ? "approve and act" : "read work"} in ${access.projects === null ? "all projects" : access.projects.map(repo => escape(projectName(repo))).join(", ")}, and dies ${escape(minted.expiresAt.slice(0, 16).replace("T", " "))} UTC. Cancel it any time from the people screen.</p>`,
           `</div>`,
           `<p class="meta"><a href="/people">back to people</a></p>`,
         ].join("\n"),
@@ -6039,6 +6231,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!asked.ok) {
           return taskScreen(response, who, taskId, `not planned: ${asked.reason}`, 409);
         }
+        if (who.via === "cookie") authorizePlanUnderMode(store, taskId, who.name, now);
         return redirect(response, taskHref(taskId));
       }
       case "plan-edit": {
@@ -6323,7 +6516,9 @@ export function createDecisionServer(options: ServeOptions): Server {
               message: `scope not saved: ${proposed.reason}`,
             };
           }
-          if (coverage !== null) {
+          if (coverage !== null && ref.plan === "requested") {
+            authorizePlanUnderMode(store, taskId, who.name, now);
+          } else if (coverage !== null) {
             const filedScope = store.getScope(taskId);
             if (filedScope?.profileState === "resolved") {
               const sealedUnderMode = store.sealScopeApproval(taskId, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
@@ -10168,7 +10363,8 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "mode" | "menu" | "none";
+  projectScoped?: boolean;
+  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "ledger" | "mode" | "menu" | "none";
   project: string | null;
   /** The surface's scope for the scope bar — which rows this screen can
    * show. Derived from the ROUTE, not the session: portfolio and fleet are
@@ -10324,7 +10520,8 @@ function transcriptScript(path?: string, elementId = "live-transcript"): string 
  * server-side, renewal-only — any console page keeps the signed-in
  * approver's own sessions live; a hidden tab pauses honestly. Cheap
  * no-op when nothing is open. Shipped ALONE on sensitive pages. */
-function beatScript(): string {
+function beatScript(enabled = true): string {
+  if (!enabled) return "";
   return (
     `(function(){var beat=function(){if(document.hidden)return;` +
     `fetch("/session/attended-beats",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:""}).catch(function(){});};` +
@@ -10347,9 +10544,9 @@ function sidebarScript(): string {
   );
 }
 
-function chromeScript(): string {
+function chromeScript(beats = true): string {
   return (
-    beatScript() +
+    beatScript(beats) +
     sidebarScript() +
     `(function(){` +
     // The app-icon badge (Phase 2E): the page's server-rendered waiting
@@ -10645,7 +10842,7 @@ function shell(
     // treatment. Chat is present only where the ceiling ever allows it
     // (unchanged gating); everything else is a dim text row inside one of
     // the two accordion groups below, or settings pinned under them.
-    ...(chrome.chat === true ? [item("chat", "/chat", "chat")] : []),
+    ...(chrome.chat === true && !chrome.projectScoped ? [item("chat", "/chat", "chat")] : []),
     item("inbox", "/", "inbox", chrome.inboxCount),
     item("board", "/board", "board"),
     item("runs", "/runs", "builds"),
@@ -10653,8 +10850,8 @@ function shell(
     `</nav>`,
     `<a class="new-task" href="/tasks/new" aria-label="new task">+ new task</a>`,
     `<nav class="nav-groups">`,
-    navGroup("workflows", "workflows", workflowsRows(), WORKFLOWS_KEYS.has(chrome.active)),
-    navGroup("admin", "admin", adminRows(), ADMIN_KEYS.has(chrome.active)),
+    navGroup("workflows", "workflows", workflowsRows(chrome.projectScoped), WORKFLOWS_KEYS.has(chrome.active)),
+    navGroup("admin", "admin", adminRows(chrome.projectScoped), ADMIN_KEYS.has(chrome.active)),
     `</nav>`,
     `<span class="grow"></span>`,
     ...(chrome.settings ? [`<nav class="nav-settings">${item("settings", "/settings", "settings")}</nav>`] : []),
@@ -13135,9 +13332,9 @@ function taskComposerHtml(data: {
     `<details class="task-options"${prefill === null ? "" : " open"}>`,
     `<summary><span>Edit details</span><small>optional · defaults are remembered</small></summary>`,
     `<div class="task-options-grid">`,
-    `<label class="wide">goal <span class="meta">— only when skipping planning; the planner normally drafts this</span>` +
+    `<label class="wide">goal <span class="meta">— provide upfront for automatic approval of an unchanged plan</span>` +
       `<textarea name="goal" rows="3" placeholder="What success looks like">${prefill === null ? "" : escape(prefill.goal)}</textarea></label>`,
-    `<label class="wide">acceptance <span class="meta">— needed only when you skip planning; one per line: <code>statement | evidence,kinds | how</code></span>` +
+    `<label class="wide">acceptance <span class="meta">— required with a goal; one per line: <code>statement | evidence,kinds | how</code></span>` +
       `<textarea name="acceptance" rows="3" placeholder="Requests over the limit return 429 | check">${prefill === null ? "" : escape(prefill.acceptance)}</textarea></label>`,
     `<label>not this <span class="meta">— optional boundary</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
     `<label>likely touches <span class="meta">— paths, comma-separated</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
@@ -14196,7 +14393,7 @@ function projectsPage(
  * to. AsyncLocalStorage follows the request's own async chain, so two
  * interleaved requests never read each other's token.
  */
-const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string }>();
+const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string; actor?: string; createdTask?: string }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 function safeReturn(raw: string | null | undefined): string {
@@ -14270,24 +14467,27 @@ type NavRow = { key: Chrome["active"]; href: string; label: string; hint: string
  * the board's order view; peek hangs off builds; settings is pinned
  * outside both groups, never inside one.
  */
-function workflowsRows(): NavRow[] {
-  return [
+function workflowsRows(scoped = false): NavRow[] {
+  const rows: NavRow[] = [
     { key: "workbench", href: "/workbench", label: "portfolio", hint: "every project and live build in one place" },
     { key: "work", href: "/tasks", label: "task list", hint: "everything, filterable" },
     { key: "routines", href: "/routines", label: "routines", hint: "scheduled tracks and their firings" },
+    { key: "ledger", href: "/ledger", label: "action ledger", hint: "who acted, what happened, and the result" },
   ];
+  return scoped ? rows.filter(row => row.key !== "workbench") : rows;
 }
-function adminRows(): NavRow[] {
-  return [
+function adminRows(scoped = false): NavRow[] {
+  const rows: NavRow[] = [
     { key: "fleet", href: "/fleet", label: "fleet", hint: "who is working, and on what" },
     { key: "caps", href: "/caps", label: "requirements", hint: "tools and credentials builds need" },
     { key: "people", href: "/people", label: "people", hint: "who can sign in, and what they have done" },
     { key: "mode", href: "/mode", label: "operating mode", hint: "the signed posture this repository runs under" },
     { key: "system", href: "/system", label: "system", hint: "workers, providers, and grants" },
   ];
+  return scoped ? rows.filter(row => row.key === "people") : rows;
 }
 /** Which accordion group opens by default for a given active page. */
-const WORKFLOWS_KEYS = new Set<Chrome["active"]>(["workbench", "work", "routines"]);
+const WORKFLOWS_KEYS = new Set<Chrome["active"]>(["workbench", "work", "routines", "ledger"]);
 const ADMIN_KEYS = new Set<Chrome["active"]>(["fleet", "caps", "people", "mode", "system"]);
 
 /** The builds screen's views (reduction pass §1): done, the review queue,
@@ -14844,6 +15044,7 @@ function taskBody(data: {
   strikes: number;
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
+  planAuto?: boolean;
   /** Hash of the verified plan artifact currently shown. */
   planSha?: string | null;
   /** The drafted plan's contract record (contract handoff, task 1). */
@@ -15360,7 +15561,7 @@ function taskBody(data: {
     data.planDocument === null
       ? data.plan === "requested"
         ? `<div class="card planner-status"><span class="planner-orb" aria-hidden="true"></span><p><strong>planning requested</strong>` +
-          `<span class="meta">The agent is inspecting the repository and drafting the goal, acceptance criteria, and approach. It will ask only if a missing answer changes the work.</span></p></div>`
+          `<span class="meta">${data.planAuto ? "Automatic approval is enabled for a verified plan that preserves your filed contract. Amendments and unanswered questions still pause." : "The agent is inspecting the repository and drafting the goal, acceptance criteria, and approach. It will ask only if a missing answer changes the work."}</span></p></div>`
         : ""
       : `${approval.approved ? `<details class="card planner-plan planner-plan-collapsed"><summary class="execution-plan-head">` : `<section class="card planner-plan"><div class="execution-plan-head">`}` +
         `<div><span class="eyebrow">execution plan</span><h2>${approval.approved ? `${planMilestoneCount ?? "Full"} step${planMilestoneCount === 1 ? "" : "s"} · open to review` : "How the agent will tackle this"}</h2>` +

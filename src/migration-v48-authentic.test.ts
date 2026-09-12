@@ -66,6 +66,7 @@ function withoutNew(table: string, row: Record<string, unknown>): Record<string,
   // origin are later additive columns; the v47 fixture never carried them.
   if (table === "run") { delete copy["watch_incarnation"]; delete copy["review_attempt"]; }
   if (table === "review_request") { delete copy["reviewer_run"]; delete copy["origin"]; }
+  if (table === "approver" || table === "invite") delete copy["projects_json"];
   return copy;
 }
 
@@ -126,6 +127,7 @@ describe("the authentic v47 database upgrades to v48 and stays put", () => {
         expect(upgraded.rows[table.name], table.name).toBeDefined();
         expect(upgraded.rows[table.name]!.map(row => withoutNew(table.name, row)), table.name).toEqual(authentic.rows[table.name]);
       }
+      for (const table of ["approver", "invite"]) for (const row of upgraded.rows[table]!) expect(row["projects_json"]).toBeNull();
       for (const row of upgraded.rows["routine"]!) expect(row).toMatchObject({ route_json: null, approved_route_json: null });
       for (const row of upgraded.rows["run"]!) expect(row).toMatchObject({ watch_incarnation: null });
       const routineDdl = upgraded.schema.find(one => one.type === "table" && one.name === "routine")!.sql;

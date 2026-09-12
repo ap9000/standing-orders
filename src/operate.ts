@@ -43,6 +43,7 @@ import {
   type TaskState,
 } from "./store.js";
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
+import { authorizePlanUnderMode } from "./plan-auto.js";
 import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
 import { sweepLiveLogs } from "./live.js";
 import { configPath, addRepos, updateRepos, loadRepos, loadProjectRegistry, updateProjectRegistry } from "./repos.js";
@@ -584,7 +585,7 @@ export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
 export const APPROVER_ACTIONS = ["list", "add"] as const;
 export const ROUTINE_ACTIONS = ["list", "add", "show", "approve", "refresh", "pause", "resume", "run-now"] as const;
 export const CONTEST_ACTIONS = ["show", "exclude"] as const;
-export const PEOPLE_ACTIONS = ["list", "invite", "revoke"] as const;
+export const PEOPLE_ACTIONS = ["list", "invite", "projects", "revoke"] as const;
 export const KEYS_ACTIONS = ["status", "set", "clear", "verify", "auth"] as const;
 
 /**
@@ -612,7 +613,7 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
   "no-open", "no-verify", "end", "report", "off", "tmux",
-  "self-heal",
+  "self-heal", "plan-auto",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -4939,9 +4940,10 @@ async function planTaskCommand(
   if (!result.ok) {
     return fail(write, json, "task plan", "refused", result.reason, EXIT.refused);
   }
-  return succeed(write, json, "task plan", { id, ...(pinProvider === undefined ? {} : { planProvider: pinProvider, planModel: pinModel ?? null }) }, () => [
+  const autoPlan = authorizePlanUnderMode(store, id, acting.name, clock());
+  return succeed(write, json, "task plan", { id, autoPlan, ...(pinProvider === undefined ? {} : { planProvider: pinProvider, planModel: pinModel ?? null }) }, () => [
     `${id} will be planned before it is built: the next pass dispatches a planner${pinProvider === undefined ? "" : ` on ${pinProvider}${pinModel === undefined ? "" : ` \u00b7 ${pinModel}`}`}.`,
-    "Its questions reach you like any decision; its plan lands as a scope for you to edit and approve.",
+    autoPlan ? "An unchanged, verified plan can auto-approve under your signed mode. Amendments and questions still wait for you." : "Its questions reach you like any decision; its plan lands as a scope for you to edit and approve.",
   ]);
 }
 
@@ -5508,7 +5510,7 @@ async function peopleCommand(
     }
     for (const one of accounts) {
       const standing = one.revokedAt !== null ? `revoked ${one.revokedAt.slice(0, 10)} by ${one.revokedBy ?? "?"}` : one.role === "approver" ? "approves" : "watches";
-      write(`  ${one.name.padEnd(20)} ${standing.padEnd(28)} joined ${one.addedAt.slice(0, 10)}`);
+      write(`  ${one.name.padEnd(20)} ${standing.padEnd(28)} joined ${one.addedAt.slice(0, 10)} · ${one.projects === null ? "all projects" : one.projects.length === 0 ? "no projects" : one.projects.join(", ")}`);
     }
     for (const one of invites) {
       write(`  (invite)             ${one.role} invite from ${one.mintedBy}, expires ${one.expiresAt.slice(0, 16).replace("T", " ")}`);
@@ -5525,14 +5527,30 @@ async function peopleCommand(
     return fail(write, json, `people ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, acting.name), EXIT.refused);
   }
 
+  const repoGiven = text(flags, "repo");
+  const allProjects = flags.has("all-projects");
+  const noProjects = flags.has("no-projects");
+  if ([repoGiven !== undefined, allProjects, noProjects].filter(Boolean).length > 1) return fail(write, json, `people ${action}`, "usage", "Choose --repo <path>, --all-projects, or --no-projects.", EXIT.usage);
+  const repo = repoGiven === undefined ? null : canonicalProject(repoGiven);
+  if (repoGiven !== undefined && repo === null) return fail(write, json, `people ${action}`, "usage", "The project folder must exist.", EXIT.usage);
+  const projects = repo !== null ? [repo] : noProjects ? [] : null;
+  if (action === "projects") {
+    const name = rest[0]?.trim();
+    if (!name || (repoGiven === undefined && !allProjects && !noProjects)) return fail(write, json, "people projects", "usage", "people projects <name> --repo <path> | --all-projects | --no-projects --as <you> --token <t>", EXIT.usage);
+    const changed = store.setAccountProjects(name, projects, acting.name, clock());
+    if (!changed.ok) return fail(write, json, "people projects", changed.reason, "Project access was not changed: " + changed.reason, EXIT.refused);
+    return succeed(write, json, "people projects", { name, projects }, () => [`${name}: ${projects === null ? "all projects" : projects.length === 0 ? "no project access" : projects.join(", ")}. Access changes end existing sign-in sessions and derived authority.`]);
+  }
+
   if (action === "invite") {
     const roleFlag = text(flags, "role") ?? "viewer";
     if (roleFlag !== "viewer" && roleFlag !== "approver") {
       return fail(write, json, "people invite", "usage", "--role viewer|approver (viewer is the default)", EXIT.usage);
     }
-    const minted = store.mintInvite(roleFlag, acting.name, clock());
-    return succeed(write, json, "people invite", { role: roleFlag, path: `/join/${minted.token}`, expiresAt: minted.expiresAt }, () => [
-      `The invite link's path — shown once, single-use, ${roleFlag === "approver" ? "they can approve and act" : "they can watch everything"}:`,
+    if (noProjects) return fail(write, json, "people invite", "usage", "An invitation needs --repo <path> or all-project access.", EXIT.usage);
+    const minted = store.mintInvite(roleFlag, acting.name, clock(), undefined, projects);
+    return succeed(write, json, "people invite", { role: roleFlag, projects, path: `/join/${minted.token}`, expiresAt: minted.expiresAt }, () => [
+      `The invite link's path — shown once, single-use, ${roleFlag === "approver" ? "they can approve and act" : "they can read work"} in ${projects === null ? "all projects" : projects.join(", ")}:`,
       `  /join/${minted.token}`,
       `Open it on this console's address. It dies ${minted.expiresAt.slice(0, 16).replace("T", " ")} UTC, or when you cancel it on the people screen.`,
     ]);
@@ -5624,6 +5642,10 @@ async function modeCommand(
   if (text(flags, "publication") === "notify") terms.publication = "notify";
   if (flag(flags, "auto-approve")) terms.autoApproveFiling = true;
   if (flag(flags, "review-auto")) terms.reviewAuto = true;
+  if (flag(flags, "plan-auto")) terms.planAuto = true;
+  if (terms.planAuto && (!terms.autoApproveFiling || !terms.reviewAuto)) {
+    return fail(write, json, "mode set", "invalid", "--plan-auto requires automatic filing approval and agent reviews", EXIT.refused);
+  }
   // The paid-fallback grant (R8): NEVER a preset default — only this
   // explicit flag lets an exhausted subscription switch to another account.
   if (flag(flags, "allow-paid-fallback")) terms.allowPaidFallback = true;
@@ -10566,7 +10588,9 @@ function scopeTask(
     });
     let sealedUnderMode = false;
     let modeRefusedCoordinator = false;
-    if (coverage !== null && proposed.profileState === "resolved") {
+    if (coverage !== null && store.lookupRef(id)?.plan === "requested") {
+      authorizePlanUnderMode(store, id, actor as string, now);
+    } else if (coverage !== null && proposed.profileState === "resolved") {
       sealedUnderMode = store.sealScopeApproval(id, actor as string, now, {}, { kind: "mode", modeDigest: coverage.digest });
       modeRefusedCoordinator = !sealedUnderMode;
     }
