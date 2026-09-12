@@ -810,7 +810,7 @@ const SYSTEM_RULES = [
   "A proposal is either",
   '{"kind":"task","repoId":"r1","title":"…","goal":"…","outOfScope":null,"touches":[],"acceptance":[…]}',
   "or",
-  '{"kind":"routine","repoId":"r1","name":"lowercase-dashes","goal":"…","outOfScope":null,"touches":[],"schedule":"daily:03:30 or every:<minutes>","acceptance":[…]}.',
+  '{"kind":"routine","repoId":"r1","name":"lowercase-dashes","goal":"…","outOfScope":null,"touches":[],"schedule":"daily:03:30[@Zone], weekly:<0-6>:<HH:MM>[@Zone], or every:<minutes>","acceptance":[…]}.',
   'acceptance is REQUIRED and non-empty: [{"id":"c1","statement":"<one testable outcome>","evidence":["check"|"screenshot"|"changed-path"|"manual-review",…],"how":"<optional guidance, or null>"}]. A proposal with no acceptance criterion is dropped, whole.',
   "At most 3 proposals. repoId must be one of the ids in the data document.",
 ].join("\n");

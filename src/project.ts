@@ -50,6 +50,22 @@ export async function isGitRepo(path: string, exec: ProjectExec = run): Promise<
   return result.code === 0;
 }
 
+/** Validate a whole selection before enrolling anything; subfolders resolve to their checkout root. */
+export async function projectSelection(paths: readonly string[], exec: ProjectExec = run): Promise<string[]> {
+  if (paths.length === 0 || paths.length > 50) throw new Error("Choose between 1 and 50 project folders.");
+  const repos = new Set<string>();
+  for (const path of paths) {
+    if (!path.trim() || path.length > 4096) throw new Error("Choose a valid project folder.");
+    const canonical = canonicalProject(path);
+    if (canonical === null) throw new Error(`This folder is unavailable: ${path}`);
+    const result = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: canonical, timeoutMs: 5000 });
+    const root = result.code === 0 ? canonicalProject(result.stdout.trim()) : null;
+    if (root === null) throw new Error(`This folder is not a Git project: ${path}`);
+    repos.add(root);
+  }
+  return [...repos];
+}
+
 export type ProjectCeiling = {
   /** Canonical repo paths named at startup. */
   repos: readonly string[];
@@ -69,12 +85,12 @@ export function resolveCeiling(
 ): { ceiling: ProjectCeiling; unresolved: string[] } {
   const unresolved: string[] = [];
   const keep = (paths: readonly string[]): string[] =>
-    paths.map(path => {
+    [...new Set(paths.map(path => {
       const canonical = canonicalProject(path);
       if (canonical !== null) return canonical;
       unresolved.push(path);
       return resolve(path);
-    });
+    }))];
   return { ceiling: { repos: keep(repos), roots: keep(roots) }, unresolved };
 }
 

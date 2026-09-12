@@ -212,6 +212,12 @@ export type Write = (line: string) => void;
 export const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3 } as const;
 
 export type OperateOptions = {
+  /** Native-shell proof key, passed in memory rather than command-line arguments. */
+  desktopIdentity?: string;
+  /** A desktop service directory is state, never an implicitly enrolled project. */
+  inferProjectFromCwd?: boolean;
+  /** Exact additions approved by the native project picker, independent of the enrollment registry. */
+  additionalProjectRepos?: () => readonly string[];
   /** Overridden by tests and by an agent that wants its own queue. */
   databaseFile?: string;
   openDatabase?: (file: string) => Store;
@@ -381,7 +387,7 @@ Routines — standing orders that fire on a schedule, each instance isolated
       same door as a manual filing — a template carries no authority
 
   standing-orders routine add <name> --repo <path> --goal <text>
-      --schedule every:<min>|daily:<HH:MM>   (UTC)
+      --schedule every:<min>|daily:<HH:MM>[@Zone]|weekly:<0-6>:<HH:MM>[@Zone] (UTC by default)
       [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]
       [--budget-usd <n>]                    what each firing may spend
   standing-orders routine approve <name>    the step-up: approving means each
@@ -673,6 +679,9 @@ export async function runOperate(
       databaseFile: file,
       // The bot token's file home. Never a column; see telegram.ts.
       telegramTokenFile: join(dirname(file), "telegram-token"),
+      ...(options.desktopIdentity === undefined ? {} : { desktopIdentity: options.desktopIdentity }),
+      ...(options.inferProjectFromCwd === undefined ? {} : { inferProjectFromCwd: options.inferProjectFromCwd }),
+      ...(options.additionalProjectRepos === undefined ? {} : { additionalProjectRepos: options.additionalProjectRepos }),
       ...(options.agentRunner === undefined ? {} : { agentRunner: options.agentRunner }),
       ...(options.gitRunner === undefined ? {} : { gitRunner: options.gitRunner }),
       ...(options.telegramTransport === undefined ? {} : { telegramTransport: options.telegramTransport }),
@@ -690,6 +699,11 @@ export async function runOperate(
 }
 
 type Context = {
+  desktopIdentity?: string;
+  /** A desktop service directory is state, never an implicitly enrolled project. */
+  inferProjectFromCwd?: boolean;
+  /** Exact additions approved by the native project picker, independent of the enrollment registry. */
+  additionalProjectRepos?: () => readonly string[];
   store: Store;
   write: Write;
   json: boolean;
@@ -4551,6 +4565,8 @@ async function startConsole(options: {
   const { context } = options;
   const server = createDecisionServer({
     store: context.store,
+    ...(context.desktopIdentity === undefined ? {} : { desktopIdentity: context.desktopIdentity }),
+    ...(context.additionalProjectRepos === undefined || options.currentRepos === undefined ? {} : { additionalProjectRepos: options.currentRepos }),
     evidenceRoot: context.evidenceRoot,
     clock: context.clock,
     telegramTokenFile: context.telegramTokenFile,
@@ -6748,7 +6764,7 @@ async function routineCommand(
     const goal = text(flags, "goal");
     const schedule = text(flags, "schedule");
     if (repoGiven === undefined || goal === undefined || schedule === undefined) {
-      return fail(write, json, "routine add", "usage", "`standing-orders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM> --acceptance <rubric> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>] [--budget-usd <n>]`", EXIT.usage);
+      return fail(write, json, "routine add", "usage", "`standing-orders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM>[@Zone]|weekly:<0-6>:<HH:MM>[@Zone] --acceptance <rubric> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>] [--budget-usd <n>]`", EXIT.usage);
     }
     const acceptanceGiven = text(flags, "acceptance");
     if (acceptanceGiven === undefined) {
@@ -7603,7 +7619,7 @@ const UP_LOGIN_FILE = "up-login.txt";
 /** Durably create the login file BEFORE the bootstrap commits (arc 2
  * finding 27): exclusive, 0600, fsynced — file and directory both — so the
  * row only ever follows a durable secret. Throws on any failure. */
-function writeLoginFileDurably(path: string, name: string, password: string): void {
+export function writeLoginFileDurably(path: string, name: string, password: string): void {
   const fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
   try {
     writeSync(fd, `${name} ${password}\n`);
@@ -7874,7 +7890,7 @@ async function upCommand(
       }
       if (!repos.includes(root)) repos.push(root);
     }
-  } else {
+  } else if (context.inferProjectFromCwd !== false) {
     const cwdRepo = await proveRepo(process.cwd());
     if (cwdRepo !== null && !repos.includes(cwdRepo)) repos.push(cwdRepo);
   }
@@ -8167,7 +8183,9 @@ async function upCommand(
         if (stopping) break;
         const canonical = canonicalProject(candidate);
         if (canonical !== null && activeRepos.has(canonical)) continue;
-        const allowed = canonical !== null && (await authorizedProject(dynamicCeiling, canonical));
+        const approvedAdditions = context.additionalProjectRepos?.() ?? [];
+        const admittedCeiling = resolveCeiling([...dynamicCeiling.repos, ...approvedAdditions], dynamicCeiling.roots).ceiling;
+        const allowed = canonical !== null && (await authorizedProject(admittedCeiling, canonical)) && (await proveRepo(canonical)) === canonical;
         if (!allowed) {
           if (!rejected.has(candidate)) {
             rejected.add(candidate);

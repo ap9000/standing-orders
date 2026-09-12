@@ -41,11 +41,17 @@
  * repo, only runs whose task belongs to that repo (or to no repo yet).
  */
 
+import { createConnectionChecker, type ProviderConnection } from "./provider-connection.js";
+import { openRouterModelsCache, openRouterPickerScript } from "./openrouter-models.js";
+import { ASSISTANTS, modelChoices, detectPreparation, previewProjectInstructions, addProjectInstructions } from "./setup-guide.js";
+import { previewSetup, approveSetup, type SetupInputs } from "./control-setup.js";
+import { controlSetupHtml, setupPreviewHtml, connectionHtml, connectionWords, hiddenFields } from "./control-ui.js";
+import { composerSchedule, scheduleEditorHtml, scheduleEditorScript } from "./task-composer.js";
 import { listCoordinators } from "./coordinator.js";
 import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
 import { PLEX_SANS_400, PLEX_SANS_500, PLEX_SANS_600, PLEX_MONO_400, PLEX_MONO_500, PLEX_MONO_600 } from "./fonts.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { createHash, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, opendirSync, readFileSync, readSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -159,7 +165,7 @@ import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, age
 import { isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
-import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
+import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, readProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus, ReviewRetryState } from "./store.js";
@@ -236,6 +242,12 @@ export type ServeOptions = {
    * as an assertion, not machine-bound credential enforcement — the product
    * has none anywhere. Absent = the peek is off, and says so.
    */
+  desktopIdentity?: string;
+  /** Trusted native admission callback; enrollment rows alone never supply this authority. */
+  additionalProjectRepos?: () => readonly string[];
+  connectionProbe?: typeof execRun;
+  connectionHome?: string;
+  modelCatalogFetcher?: typeof fetch;
   localRunner?: string;
   /** The checkout pool root the peek confines itself to (realpath-proved). */
   poolRoot?: string;
@@ -412,6 +424,9 @@ type Who = { name: string; via: "cookie"; session: Session; role: "approver" | "
 export function createDecisionServer(options: ServeOptions): Server {
   const { store, evidenceRoot } = options;
   const clock = options.clock ?? (() => new Date());
+  const providerHome = options.connectionHome ?? homedir();
+  const connectionCheck = createConnectionChecker({ home: providerHome, clock, ...(options.connectionProbe === undefined ? {} : { probe: options.connectionProbe }) });
+  const modelCatalog = openRouterModelsCache(options.modelCatalogFetcher);
   const sessions = new Map<string, Session>();
   /** Wrong setup codes left before the first-account road closes. */
   let setupAttemptsLeft = 5;
@@ -458,8 +473,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
   const approvalNonces = new Map<string, ApprovalNonce>();
 
-  // The ceiling, resolved once at startup. Paths that do not exist are
-  // dropped here rather than silently failing every later check.
+  // Resolve startup authority once. Missing paths remain restrictive.
+  // Native additions come only from the controller after its admission checks.
   const { ceiling, unresolved: unresolvedRepos } = resolveCeiling(
     [...(options.repo === undefined ? [] : [options.repo]), ...(options.repos ?? [])],
     options.projectRoots ?? [],
@@ -470,7 +485,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   /** No ceiling configured at all: the legacy trust-everything mode, named. */
   const unscopedMode = ceiling.repos.length === 0 && ceiling.roots.length === 0;
   /** Per-row visibility under the ceiling — the authorization question for reads. */
-  const visible = (repo: string | null): boolean => rowVisible(ceiling, repo);
+  const liveCeiling = () => ({ repos: [...ceiling.repos, ...(options.additionalProjectRepos?.() ?? [])], roots: ceiling.roots });
+  const visible = (repo: string | null): boolean => rowVisible(liveCeiling(), repo);
   /** The explicit, currently proved project list. The callback is supplied
    * only by `up`, after it has independently checked git-ness and the root
    * ceiling; this server still filters every row through its own ceiling. */
@@ -654,6 +670,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     // excluded, not just the board's (arc 1, live bug): a 2-second
     // transcript poll would otherwise hold a session open until the tab
     // closed, which is no idle expiry at all.
+    if (method === "GET" && url.pathname === "/desktop/health" && options.desktopIdentity !== undefined) {
+      const challenge = url.searchParams.get("challenge") ?? "";
+      if (!/^[a-f0-9]{64}$/.test(challenge) || !/^[a-f0-9]{64}$/.test(options.desktopIdentity)) return respond(response, 400, "application/json", JSON.stringify({ error: "invalid challenge" }));
+      response.setHeader("cache-control", "no-store");
+      return respond(response, 200, "application/json", JSON.stringify({ proof: createHmac("sha256", Buffer.from(options.desktopIdentity, "hex")).update(challenge).digest("hex") }));
+    }
     const fragmentName = url.searchParams.get("fragment");
     const touch = !(method === "GET" && fragmentName !== null && NO_TOUCH_FRAGMENTS.has(fragmentName));
     const who = identify(request, touch);
@@ -2147,6 +2169,31 @@ export function createDecisionServer(options: ServeOptions): Server {
       return routinePage(response, who, routine.id, null, 200);
     }
 
+    if (url.pathname === "/control" || url.pathname === "/control/connection") {
+      if (who.role !== "approver") return refuse(response, who, 403, "Project setup requires an approver.");
+      if (project === null) return redirect(response, "/projects");
+      const saved = store.phaseConfig(project, "build");
+      const asked = url.searchParams.get("provider") ?? saved?.provider ?? "claude";
+      if (!isProviderId(asked)) return refuse(response, who, 400, "Choose a known provider.", "/control");
+      const task = url.searchParams.get("task") ?? "";
+      const connection = await connectionCheck(asked, url.searchParams.get("check-connection") === "1");
+      if (url.pathname === "/control/connection") {
+        const command = asked === "claude" ? "claude auth login" : asked === "codex" ? "codex login" : asked === "gemini" ? "gemini" : null;
+        return sendScreen(response, 200, screen(`${ASSISTANTS[asked].name} connection`, `<h1>${escape(ASSISTANTS[asked].name)} ${connection.state === "connected" ? "is connected" : "connection"}</h1>` +
+          connectionHtml(asked, connection, task) + (command === null ? "" : `<p>On the computer running Standing Orders, sign in with:</p><pre class="recap">${escape(command)}</pre>`) +
+          `<p><a href="/settings#providers">Manage API keys and authentication mode</a></p>` + hiddenFields({ "resume-task": task }), { chrome: chromeFor(project, "settings") }));
+      }
+      const setup = store.liveWorktreeSetup(project);
+      const preparation = detectPreparation(project);
+      const models = modelChoices(asked, saved?.provider === asked ? saved.model : null, providerHome);
+      const instructions = previewProjectInstructions(project);
+      const catalog = asked === "openrouter" ? await modelCatalog(readProviderKey("openrouter", providerHome), url.searchParams.get("refresh-models") === "1") : null;
+      const inputs: SetupInputs = { provider: asked, model: saved?.provider === asked ? saved.model ?? "" : models[0]?.value ?? "", command: setup?.command ?? (saved === null ? preparation?.command ?? "" : ""), seconds: String((setup?.timeoutMs ?? 300_000) / 1000) };
+      return sendScreen(response, 200, screen("Project setup", controlSetupHtml({ repo: project, csrf: who.via === "cookie" ? who.session.csrf : "", provider: asked, inputs, models, connection, catalog, task, preparation,
+        instructions: instructions.ok ? { installed: instructions.installed } : { installed: false, message: instructions.message } }),
+        { chrome: chromeFor(project, "settings"), ...(catalog === null ? {} : { functional: { script: openRouterPickerScript() } }) }));
+    }
+
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
       const existing = loadBotToken({}, options.telegramTokenFile);
       const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
@@ -2163,14 +2210,15 @@ export function createDecisionServer(options: ServeOptions): Server {
       };
       const providerKeys = who.role !== "approver"
         ? null
-        : (PROVIDER_IDS as readonly string[]).map(provider => ({
+        : await Promise.all(PROVIDER_IDS.map(async provider => ({
             provider,
             envName: PROVIDER_KEY_ENV[provider as "claude"],
-            ...keyStatus(provider as "claude"),
+            ...keyStatus(provider, providerHome),
+            connection: await connectionCheck(provider, url.searchParams.get("check-connection") === provider),
             ambient: (process.env[PROVIDER_KEY_ENV[provider as "claude"]] ?? "") !== "",
-            mode: readAuthMode(provider as "claude"),
-            subscriptionCapable: SUBSCRIPTION_CAPABLE[provider as "claude"],
-          }));
+            mode: readAuthMode(provider, providerHome),
+            subscriptionCapable: SUBSCRIPTION_CAPABLE[provider],
+          })));
       const telegramConfigured = loadBotToken(process.env, options.telegramTokenFile) !== null;
       const digest = telegramConfigured
         ? (() => {
@@ -3773,6 +3821,38 @@ export function createDecisionServer(options: ServeOptions): Server {
     // re-counts within five seconds either way, this just makes it exact.
     bustBadge();
 
+    if (["/control/setup-preview", "/control/setup-approve", "/control/instructions-preview", "/control/instructions-approve"].includes(url.pathname)) {
+      const project = projectOf(who, request);
+      if (project == null || body.get("repo") !== project || !visible(project)) return refuse(response, who, 409, "The selected project changed. Open project setup again.", "/control");
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      if (url.pathname.includes("instructions")) {
+        const preview = previewProjectInstructions(project);
+        if (!preview.ok) return refuse(response, who, 400, preview.message, "/control");
+        const nonceKey = `project-instructions:${project}`;
+        if (url.pathname.endsWith("preview")) {
+          const nonce = mintApprovalNonce(who.name, nonceKey, preview.fingerprint);
+          return sendScreen(response, 200, screen("Review agent instructions", `<h1>Review agent instructions</h1><p>${escape(preview.plan.skillPath)}</p><pre class="recap">${escape(preview.content)}</pre><form method="post" action="/control/instructions-approve">${hiddenFields({ csrf, repo: project, nonce, fingerprint: preview.fingerprint })}<label>Your password<input type="password" name="token" autocomplete="current-password" required></label><button>Add these instructions</button></form>`, { chrome: chromeFor(project, "settings") }));
+        }
+        if (who.via === "cookie" && !consumeApprovalNonce(body.get("nonce") ?? "", who.name, nonceKey, body.get("fingerprint") ?? "")) return refuse(response, who, 409, "This instruction preview expired. Review it again.", "/control");
+        if (!authenticateApprover(store, who.name, body.get("token") ?? "").ok) return refuse(response, who, 403, "Your operator credential is required.", "/control");
+        const added = addProjectInstructions(project, body.get("fingerprint") ?? "");
+        if (!added.ok) return refuse(response, who, 409, "The project instructions could not be installed. Review setup again.", "/control");
+        return redirect(response, "/control");
+      }
+      const inputs: SetupInputs = { provider: body.get("provider") ?? "", model: body.get("model") ?? "", command: body.get("command") ?? "", seconds: body.get("seconds") ?? "" };
+      const preview = previewSetup(store, project, inputs);
+      if (!preview.ok) return refuse(response, who, 400, preview.message, "/control");
+      const nonceKey = `project-setup:${project}`;
+      if (url.pathname.endsWith("preview")) {
+        const nonce = mintApprovalNonce(who.name, nonceKey, preview.fingerprint);
+        return sendScreen(response, 200, screen("Approve project setup", setupPreviewHtml(inputs, { csrf, repo: project, fingerprint: preview.fingerprint, nonce }), { chrome: chromeFor(project, "settings") }));
+      }
+      if (who.via === "cookie" && !consumeApprovalNonce(body.get("nonce") ?? "", who.name, nonceKey, body.get("fingerprint") ?? "")) return refuse(response, who, 409, "This setup preview expired. Review it again.", "/control");
+      const approved = approveSetup(store, project, inputs, body.get("fingerprint") ?? "", who.name, body.get("token") ?? "", now);
+      if (!approved.ok) return refuse(response, who, 409, approved.message, "/control");
+      return redirect(response, "/control");
+    }
+
     if (url.pathname === "/settings/messaging" && options.configDir !== undefined && options.telegramTokenFile !== undefined) {
       const wanted = (body.get("primary") ?? "").trim();
       const facts = effectivePrimary(process.env, options.configDir, loadBotToken(process.env, options.telegramTokenFile) !== null);
@@ -3834,8 +3914,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       const provider = body.get("provider") ?? "";
       if (!isProviderId(provider)) return refuse(response, who, 400, "unknown provider", "/settings");
       if (url.pathname === "/settings/provider-key-clear") {
-        const cleared = clearProviderKey(provider);
-        const clearedMode = readAuthMode(provider);
+        const cleared = clearProviderKey(provider, providerHome);
+        const clearedMode = readAuthMode(provider, providerHome);
         return redirect(response, `/settings?said=${encodeURIComponent(
           !cleared
             ? "no stored key to remove"
@@ -3851,7 +3931,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const wantedMode = body.get("auth-mode");
       const value = (body.get("value") ?? "").trim();
       const modeSelected = wantedMode === "subscription" || wantedMode === "api-key";
-      const currentMode = readAuthMode(provider);
+      const currentMode = readAuthMode(provider, providerHome);
       if (!modeSelected && value === "") {
         return refuse(response, who, 400, "nothing to change — paste a key or pick a sign-in", "/settings");
       }
@@ -3866,12 +3946,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       // Apply the mode only when it actually differs.
       const modeChanged = modeSelected && wantedMode !== currentMode;
-      if (modeChanged) setAuthMode(provider, wantedMode as AuthMode);
+      if (modeChanged) setAuthMode(provider, wantedMode as AuthMode, providerHome);
       const modeNote = modeChanged ? ` \u00b7 ${provider} now uses ${wantedMode === "api-key" ? "the API key" : "its own subscription / login"}` : "";
       if (value === "") {
         return redirect(response, `/settings?said=${encodeURIComponent(modeChanged ? `${provider} now uses ${wantedMode === "api-key" ? "the API key" : "its own subscription / login"}` : `no change — ${provider} already uses ${currentMode === "api-key" ? "the API key" : "its own subscription / login"}`)}`);
       }
-      saveProviderKey(provider, value); // known plausible
+      saveProviderKey(provider, value, providerHome); // known plausible
       // Verify right now, so a paste gets an immediate yes/no instead of a
       // failed build later. A stored-but-unreachable key still says so.
       const verdict = await verifyProviderKey(provider, value);
@@ -3904,7 +3984,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const askedPath = (body.get("path") ?? "").trim();
       const canonicalPick = askedPath === "" ? null : canonicalProject(askedPath);
-      if (canonicalPick !== null && !(await authorizedProject(ceiling, canonicalPick))) {
+      if (canonicalPick !== null && !(await authorizedProject(liveCeiling(), canonicalPick))) {
         return refuse(response, who, 403, "that project is outside this console's reach");
       }
       who.session.project = canonicalPick;
@@ -3927,7 +4007,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // repository — validation with direct argv and a bound, never a shell.
       // Both checks apply even to configured repos: naming a directory in
       // config authorizes it; only being a repository makes it openable.
-      if (!(await authorizedProject(ceiling, canonical))) {
+      if (!(await authorizedProject(liveCeiling(), canonical))) {
         return void projectsScreen(response, who, "that path is outside what this server was configured to serve", 403);
       }
       if (!(await isGitRepo(canonical))) {
@@ -3990,7 +4070,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       let admitted: string[] | null = unscopedMode ? null : admissionList() ?? [];
       const rootMode = !unscopedMode && ceiling.roots.length > 0;
       if (rootMode && effective !== "") {
-        const canonical = (await authorizedProject(ceiling, effective)) ? canonicalProject(effective) : null;
+        const canonical = (await authorizedProject(liveCeiling(), effective)) ? canonicalProject(effective) : null;
         if (canonical === null || canonical === undefined) {
           const csrf = who.via === "cookie" ? who.session.csrf : "";
           return sendScreen(
@@ -4610,7 +4690,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return projectsScreen(response, who, "the clone answered with a different path than the preview promised — refused; nothing was enrolled", 400);
       }
       // authorizedProject AFTER the repository exists (finding 20).
-      const proved = await authorizedProject(ceiling, cloned.target);
+      const proved = await authorizedProject(liveCeiling(), cloned.target);
       const admitted = proved ? (canonicalProject(cloned.target) ?? cloned.target) : null;
       if (admitted === null) {
         return projectsScreen(response, who, `the clone landed at ${cloned.target} but did not prove under the ceiling — it was left in place; enroll it by hand`, 400);
@@ -5071,7 +5151,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       let routineRepo = project;
       let routineAdmitted: string[] | null = unscopedMode ? null : admissionList() ?? [];
       if (routineRootMode) {
-        const canonical = (await authorizedProject(ceiling, project)) ? canonicalProject(project) : null;
+        const canonical = (await authorizedProject(liveCeiling(), project)) ? canonicalProject(project) : null;
         if (canonical === null || canonical === undefined) {
           return refuse(response, who, 403, "the open project is outside what this server was configured to show", "/routines");
         }
@@ -5082,6 +5162,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       // 7): the service validates, canonicalizes, digests, and stamps
       // provenance; the admission list makes the ceiling explicit even
       // though `project` was already proved inside it.
+      const scheduled = body.has("repeat") ? composerSchedule(body) : { ok: true as const, schedule: (body.get("schedule") ?? "").trim() };
+      if (!scheduled.ok || scheduled.schedule === null) {
+        return sendScreen(response, 400, routinesPage(chromeFor(project, "routines"), store.routineTracks(project, now).filter(track => visible(track.routine.repo)), {
+          csrf: who.via === "cookie" ? who.session.csrf : "", revision: who.via === "cookie" ? who.session.projectRevision : 0,
+          problem: scheduled.ok ? "Choose a recurring schedule." : scheduled.message, values: body,
+        }));
+      }
       const created = fileRoutineProposal(
         store,
         {
@@ -5092,7 +5179,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           touches: (body.get("touches") ?? "").split(/[\n,]/).map(one => one.trim()).filter(one => one !== ""),
           acceptance: acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")),
           requirements: [],
-          schedule: (body.get("schedule") ?? "").trim(),
+          schedule: scheduled.schedule,
           costCeilingUsd: ceilingGiven === "" ? null : Number(ceilingGiven),
           filedVia: "console",
           ...(routineAdmitted === null ? {} : { admittedRepos: routineAdmitted }),
@@ -5105,7 +5192,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response, created.reason === "duplicate" ? 409 : 400, routinesPage(chromeFor(project, "routines"), tracks, {
           csrf: who.via === "cookie" ? who.session.csrf : "",
           revision: who.via === "cookie" ? who.session.projectRevision : 0,
-          problem: created.message,
+          problem: created.message, values: body,
         }));
       }
       return redirect(response, `/routines/${created.id}`);
@@ -7953,7 +8040,7 @@ const STYLE = `
   button.danger:hover, .approve-form button[type=submit].danger:hover { background: var(--destructive-soft); }
 
   label { display: block; font-size: 0.8125rem; font-weight: 500; margin: .75rem 0 0; color: var(--foreground); }
-  input[type=text], input[type=password], input[type=number], input[type=url], input[type=email], textarea, select {
+  input[type=text], input[type=password], input[type=number], input[type=url], input[type=email], input[type=search], input[type=time], textarea, select {
     width: 100%; margin: .35rem 0 0; padding: .5rem .7rem; font: 400 0.875rem/1.4 var(--font-sans);
     color: var(--foreground); background: color-mix(in srgb, var(--glass-strong) 90%, transparent); min-height: 2.375rem;
     border: 1px solid var(--input); border-radius: calc(var(--radius) - 3px);
@@ -8056,6 +8143,7 @@ const STYLE = `
   button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
   .inline { display: inline-block; width: auto; margin: 0 .375rem .375rem 0; vertical-align: middle; }
+  .assistant-picker .button-link[aria-current=page] { outline: 2px solid var(--ring); outline-offset: 2px; }
   .inline input[type=text] { display: inline-block; width: auto; margin: 0 .375rem 0 0; vertical-align: middle; }
   .inline button { width: auto; }
 
@@ -12262,10 +12350,11 @@ function routinesPage(
     csrf: string;
     revision: number;
     problem: string | null;
+    values?: URLSearchParams;
     prefill?: { name: string; goal: string; not: string; touches: string; schedule: string; acceptance: string } | null;
   },
 ): Screen {
-  const fill = form.prefill ?? null;
+  const fill = form.values === undefined ? form.prefill ?? null : { name: form.values.get("name") ?? "", goal: form.values.get("goal") ?? "", not: form.values.get("not") ?? "", touches: form.values.get("touches") ?? "", schedule: form.values.get("schedule") ?? "", acceptance: form.values.get("acceptance") ?? "" };
   const capture =
     chrome.project === null
       ? ""
@@ -12279,14 +12368,14 @@ function routinesPage(
             ? `<p class="meta">start from a template: ${TEMPLATES.filter(one => one.kind === "routine")
                 .map(one => `<a href="/routines?template=${escape(one.name)}">${escape(one.name)}</a>`)
                 .join(" · ")}</p>`
-            : `<p class="meta">pre-filled from a template — edit anything; nothing fires until you approve the standing order</p>`,
+            : `<p class="meta">${form.values === undefined ? "pre-filled from a template — edit anything" : "Your entries are kept below"}; nothing fires until you approve the standing order</p>`,
           `<label>name <span class="meta">(lowercase-with-dashes — it names each instance)</span><input type="text" name="name" placeholder="nightly-deps" maxlength="41" value="${fill === null ? "" : escape(fill.name)}"></label>`,
           `<label>goal <span class="meta">(what every firing is allowed to do)</span><textarea name="goal" rows="2">${fill === null ? "" : escape(fill.goal)}</textarea></label>`,
           `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${fill === null ? "" : escape(fill.not)}"></label>`,
           `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${fill === null ? "" : escape(fill.touches)}"></label>`,
           `<label>acceptance <span class="meta">(required — one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review; id is optional and auto-numbered)</span><textarea name="acceptance" rows="3" placeholder="The full test suite passes | check">${fill === null ? "" : escape(fill.acceptance)}</textarea></label>`,
-          `<label>schedule <span class="meta">(every:&lt;minutes&gt; or daily:&lt;HH:MM&gt; UTC)</span><input type="text" name="schedule" placeholder="daily:03:30" value="${fill === null ? "" : escape(fill.schedule)}"></label>`,
-          `<label>budget <span class="meta">(dollars per rolling 7 days, optional — needs a provider that reports cost)</span><input type="text" name="ceiling" inputmode="decimal" style="width:8rem"></label>`,
+          scheduleEditorHtml(fill?.schedule ?? null, form.values),
+          `<label>budget <span class="meta">(dollars per rolling 7 days, optional — needs a provider that reports cost)</span><input type="text" name="ceiling" inputmode="decimal" style="width:8rem" value="${escape(form.values?.get("ceiling") ?? "")}"></label>`,
           `<button type="submit">file it \u2192 approve the standing order next</button>`,
           `<p class="meta">filing is cheap — nothing fires until you approve the template on the next screen, password and all</p>`,
           `</form>`,
@@ -12300,7 +12389,7 @@ function routinesPage(
     `<p class="hint">scheduled work — anything needing a person appears in the inbox</p>`,
     list,
     capture,
-  ].join("\n"), { chrome });
+  ].join("\n"), { chrome, functional: { script: scheduleEditorScript() } });
 }
 
 function routineScreenPage(chrome: Chrome, data: {
@@ -13002,7 +13091,7 @@ function portfolioOverview(data: {
     return (
       `<div class="workspace-card${one.attention > 0 ? " hot" : ""}">` +
       `<div class="workspace-head"><span class="workspace-name">${escape(workspace(one.repo))}</span>` +
-      `<span class="badge ${status.cls}">${status.word}</span>${boardForm}</div>` +
+      `<span class="badge ${status.cls}">${status.word}</span>${boardForm}${one.repo === null || data.csrf === "" ? "" : `<form method="post" action="/projects/open" class="inline">${hiddenFields({ csrf: data.csrf, path: one.repo, return: "/control" })}<button>set up →</button></form>`}</div>` +
       `<div class="workspace-stats">` +
       `<span class="pulse-stat${one.attention > 0 ? " hot" : ""}"><b>${one.attention}</b> need you</span>` +
       `<span class="pulse-stat"><b>${one.building}</b> live</span>` +
@@ -17522,7 +17611,7 @@ function settingsPage(
   problem: string | null,
   messaging: { channel: string | null; implicit: boolean; configured: string[] } | null = null,
   push: { available: boolean; devices: PushSubscription[] } | null = null,
-  providerKeys: { provider: string; envName: string; set: boolean; updatedAt: string | null; ambient: boolean; mode: "subscription" | "api-key"; subscriptionCapable: boolean }[] | null = null,
+  providerKeys: { provider: string; envName: string; set: boolean; updatedAt: string | null; ambient: boolean; mode: "subscription" | "api-key"; subscriptionCapable: boolean; connection?: ProviderConnection }[] | null = null,
   digest: { everyMs: number | null; lastSentAt: string | null; held: number } | null = null,
   permissionDefault: { mode: UnattendedPermissionMode; updatedAt: string | null; updatedBy: string | null; canManage: boolean } | null = null,
   qualityDefault: { mode: QualityMode; updatedAt: string | null; updatedBy: string | null; canManage: boolean } | null = null,
@@ -17598,13 +17687,14 @@ function settingsPage(
     providerKeys === null || csrf === ""
       ? ""
       : [
-          "<h2>provider API keys</h2>",
+          '<h2 id="providers">AI providers</h2><p><a href="/control">Set up this project</a></p>',
           `<p class="meta">stored as private files on this machine — never shown back, never in the database. A key reaches its provider only when that provider's sign-in is set to "the API key"; subscription mode strips that provider's key from the agent process, so the logged-in membership cannot silently become API billing.</p>`,
           ...providerKeys.map(one =>
             [
               `<form method="post" action="/settings/provider-key" class="card">`,
               `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
               `<input type="hidden" name="provider" value="${escape(one.provider)}">`,
+              one.connection === undefined ? "" : `<p class="provider-connection"><strong>${connectionWords(one.connection)}</strong> ${[one.connection.email, one.connection.plan, one.connection.method].filter(Boolean).map(value => escape(value!)).join(" · ")} · <a href="/settings?check-connection=${encodeURIComponent(one.provider)}#providers">Check again</a></p>`,
               `<p class="row"><strong>${escape(one.provider)}</strong> <span class="mono meta">${escape(one.envName)}</span> ` +
                 `<span class="meta">${
                   one.mode === "subscription" ? "uses its own login · no API-key spend" : "uses the API key"

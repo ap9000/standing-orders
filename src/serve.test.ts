@@ -3367,7 +3367,9 @@ describe("the first-run checklist (adoption track, step 3)", () => {
     const cookie = await login();
     const routines = await (await fetch(url("/routines?template=nightly-deps"), { headers: { cookie } })).text();
     expect(routines).toContain('value="nightly-deps"');
-    expect(routines).toContain('value="daily:03:30"');
+    expect(routines).toContain('<option value="daily" selected>');
+    expect(routines).toContain('name="time" value="03:30"');
+    expect(routines).toContain('name="timezone" value="UTC"');
     expect(routines).toContain("pre-filled from a template");
     const tasks = await (await fetch(url("/tasks?template=lint-sweep"), { headers: { cookie } })).text();
     expect(tasks).toContain(">One lint-clean sweep</textarea>");

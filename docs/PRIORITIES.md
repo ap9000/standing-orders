@@ -362,3 +362,11 @@ existing spend and run rails — the chain closes the instant any attempt
 reaches *verified* or *attested*, and the operator's own act
 (`standing-orders task repair <run-id> --yes`, or the console) is still
 the only road to unattended-cap-free approval.
+
+### Control-app integration (2026-09-12 UTC)
+
+The operator prioritized assessing and integrating the older control-app branch.
+[The integration record](CONTROL_APP_INTEGRATION.md) distinguishes added desktop,
+setup, provider/model-discovery, and calendar features from superseded engines
+and remaining stop/resume and Telegram forward ports. Contract fidelity remains
+the next quality milestone; no second worker or conversation engine is needed.

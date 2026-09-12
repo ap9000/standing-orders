@@ -255,6 +255,11 @@ Main was still `917bc5b` when this plan was prepared.
   work recovery, interrupted verification, and broader platform certification)
   is still pending. P0.1a does not claim the whole restart workstream is done.
 
+- **2026-09-12 control-app integration:** selected native, setup, discovery, and
+  calendar additions are adapted onto the current controller. See
+  [CONTROL_APP_INTEGRATION.md](CONTROL_APP_INTEGRATION.md) for retained authority,
+  validation, packaging limits, and the explicit stop/resume and Telegram gaps.
+
 ## Prioritized implementation
 
 ### Immediate follow-ups from the first two slices

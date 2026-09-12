@@ -430,7 +430,7 @@ export type Routine = {
   /** v39: the signed rubric every instance's scope copies forward. */
   acceptance: AcceptanceCriterion[];
   requirements: string[];
-  /** 'every:<minutes>' or 'daily:<HH:MM>' (UTC). */
+  /** 'every:<minutes>', 'daily:<HH:MM>[@Zone]', or 'weekly:<0-6>:<HH:MM>[@Zone]' (UTC by default). */
   schedule: string;
   singleFlight: boolean;
   /** Rolling 7-day dollar ceiling; null = none. Enforcement fails closed. */
@@ -1351,7 +1351,7 @@ CREATE TABLE IF NOT EXISTS routine (
   out_of_scope     TEXT,
   touches          TEXT NOT NULL DEFAULT '[]',
   requirements     TEXT NOT NULL DEFAULT '[]',
-  -- 'every:<minutes>' or 'daily:<HH:MM>' (UTC). Parsed, never guessed at.
+  -- 'every:<minutes>', 'daily:<HH:MM>[@Zone]', or 'weekly:<0-6>:<HH:MM>[@Zone]' (UTC by default). Parsed, never guessed at.
   schedule         TEXT NOT NULL,
   single_flight    INTEGER NOT NULL DEFAULT 1,
   -- Rolling 7-day ceiling in dollars. NULL is honestly "no ceiling";

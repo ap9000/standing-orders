@@ -128,9 +128,10 @@ the new journey passes, not after every small change.
   Do not claim that the aggressive reconciliation interval caused it.
 - Physical Windows closure/reboot and actual account-exhaustion fallback remain
   explicit certification gaps in [CERTIFICATION.md](CERTIFICATION.md).
-- After contract fidelity, integrate selected desktop/shared-chat/setup features
-  from the older control-app branch against current execution and approval
-  primitives. Project memory follows trustworthy provenance across the journey.
+- The selected desktop/setup/model-discovery/calendar integration was brought
+  forward at the operator's request; see [CONTROL_APP_INTEGRATION.md](CONTROL_APP_INTEGRATION.md).
+  Per-task stop/resume and Telegram conversation/media remain distinct forward
+  ports over current engines. Project memory follows trustworthy provenance.
 
 ## Branch integration assessment
 
@@ -151,7 +152,7 @@ the merge did not rerun the real-provider release pilot.
 | --- | --- |
 | `standing-orders/explainable-risk-aware-phase-routing-v1` (`c701b7f`) | Superseded by the integrated revision `1d0fc90`, whose commit records applying all seven comments to that implementation, and subsequent authority fixes. Do not merge the earlier implementation again. |
 | `standing-orders/nightly-deps-20260812-1534` (`f2f0985`) | Only adds `docs/DEPS.md`. Its upstream claims were explicitly not checked against a registry. Retain as historical notes; regenerate from current manifests and primary sources if dependency review becomes a priority. |
-| `origin/codex/control-app` (`15a1d9c`) | Two unique commits and substantial distinct desktop, shared-chat, Telegram, provider-discovery, and setup work. A non-mutating merge preview reports 22 conflicting files, including store, approval/scope, execution, and UI code. Preserve it for a scoped port and validation pass; it is not ready for a routine merge. |
+| `origin/codex/control-app` (`15a1d9c`) | Assessed and selectively integrated over current main. Native shell, setup, provider/model discovery, and calendar schedules are adapted; superseded engines are omitted. See [the full disposition and remaining forward ports](CONTROL_APP_INTEGRATION.md). |
 
 No branches or worktrees were deleted. The merge is local; publishing main and
 upgrading the live schema-v49 controller are separate delivery steps. The live

@@ -903,3 +903,10 @@ The workflow this formalizes comes from [Jason Ku's agentic engineering session]
 ## License
 
 [MIT](LICENSE).
+
+### Desktop app and project setup
+
+A local macOS shell, guided project setup, provider/model discovery, and weekly
+schedules with timezones use the same controller and approval flow as the CLI.
+See [build and usage instructions](docs/control-app.md) and
+[the integration assessment](docs/CONTROL_APP_INTEGRATION.md).
