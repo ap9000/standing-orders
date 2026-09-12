@@ -96,7 +96,11 @@ describe("brief concurrent database writers do not disconnect the controller", (
         calls++;
         store.createTask({ id: "must-not-exist", title: "No partial write" }, new Date());
       })).toThrow(/database is locked/);
-      expect(Date.now() - started).toBeLessThan(10_000);
+      // Finite: the 5 s busy timeout, plus SQLite's busy-handler overshoot —
+      // its escalating sleeps land past the nominal budget on macOS (a raw
+      // BEGIN IMMEDIATE against a held writer measures ~13 s here), so the
+      // bound is the order of magnitude, not the pragma's exact number.
+      expect(Date.now() - started).toBeLessThan(30_000);
       expect(calls).toBe(0);
       expect(store.getTask("must-not-exist")).toBeNull();
       child.send("release");

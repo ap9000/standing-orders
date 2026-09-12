@@ -35,7 +35,10 @@ export type DispatchAction =
   | "start-worker"
   /** v50: ask for the bounded explicit review retry (`task review <run>`
    * or the console's Retry review). */
-  | "retry-review";
+  | "retry-review"
+  /** v52: resume the exact stopped attempt (`task resume <id> --run <n>`
+   * or the console's Resume). */
+  | "resume-run";
 
 export type DispatchDiagnosisCode =
   | "complete"
@@ -54,6 +57,8 @@ export type DispatchDiagnosisCode =
   | "waiting-decision"
   | "waiting-incident"
   | "held"
+  /** v52: an operator stopped one exact attempt; only resuming it lifts the pause. */
+  | "stopped"
   | "waiting-dependency"
   | "terminal-dependency"
   | "needs-project"
@@ -340,6 +345,7 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
     }
     if (local.ownerKind === "decision") return answer("waiting-decision", "waiting", "Waiting on your answer", "An agent parked a question; answering it resumes the task.", { action: "answer-decision" });
     if (local.ownerKind === "incident") return answer("waiting-incident", "waiting", "Needs a retry", "An unresolved incident holds the next attempt.", { action: "retry-task" });
+    if (local.ownerKind === "stop") return answer("stopped", "waiting", "Paused", `${local.message.replace(/^held:\s*/, "")}. The attempt's work is preserved; resuming that exact attempt lifts this pause.`, { action: "resume-run" });
     return answer("held", "waiting", "On hold", local.message.replace(/^held:\s*/, ""), { action: local.ownerKind === "operator" ? "unhold" : "inspect-hold" });
   }
   if (local?.code === "dependency") {

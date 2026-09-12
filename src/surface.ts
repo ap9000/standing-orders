@@ -183,6 +183,8 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("task repair", "show the repair a short/refuted run's review drafted, or --yes to approve it — the first CLI road to a revision at all"),
   operator("task route", "which agent plans, builds, repairs, and reviews this task and why; declare its risk or override a phase — approval seals the route"),
   operator("task reopen", "resume external work its tracker closed and has been SEEN open again"),
+  operator("task stop", "stop ONE exact live attempt (--run <id>): durable before any process is signalled, answers 'stopping' until its own processes are established gone; work, branch, and evidence preserved; no strike, no retry"),
+  operator("task resume", "resume the exact stopped attempt (--run <id>): refuses until it is quiescent, lifts only that stop's hold, approves nothing — the next pass re-proves the scope and inherits the draft with fresh proof"),
 
   // ---- leases (runner surface) ----
   { invocation: "claim", synopsis: "take one ready, approved task; answers with a lease", audience: "agent", agentMayInvoke: true, mutation: "keyed",
