@@ -10357,7 +10357,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(asked.status).toBe(303);
     expect(asked.headers.get("location")).toBe("/review?result=t-retry");
     expect(store.reviewRetryStateOf(run)).toMatchObject({ state: "queued", nextAttempt: 2, retriesRemaining: 1 });
-    expect(store.openReviewRequests()).toMatchObject([{ run, requestedBy: "alex" }]);
+    // The console's ask is an operator's (explicit-only): typed so, and
+    // shown so on both pages once queued.
+    expect(store.openReviewRequests()).toMatchObject([{ run, requestedBy: "alex", origin: "operator" }]);
     // Asked again while queued: words, no second request.
     const twice = await post(cookie, "/t/t-retry/retry-review", { csrf, run: String(run) });
     expect(twice.status).toBe(409);
@@ -10367,6 +10369,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     for (const html of [both.task, both.cockpit]) {
       expect(html).toContain('data-review-state="queued" data-review-attempts="1" data-review-cap="3" data-review-remaining="1"');
       expect(html).toContain("<strong>Review retry queued · attempt 2 of 3</strong>");
+      expect(html).toContain("The explicit retry asked by alex is waiting for a worker;");
       expect(html).toContain("1 explicit retry left after it.");
     }
     // Any other return shape lands on the task page's status card.

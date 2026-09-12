@@ -7092,7 +7092,7 @@ function reviewRetryPanel(
       title: retry.attempts.length === 0 ? "Review queued" : `Review retry queued · ${ordinal(retry.nextAttempt)}`,
       detail: retry.attempts.length === 0
         ? "The requested independent review is waiting for a worker."
-        : `The explicit retry is waiting for a worker; ${latest === null ? "" : `${ordinal(latest.attempt)} ${latestWords}. `}${retriesLeft} after it.`,
+        : `The explicit retry${retry.openRequest === null ? "" : ` asked by ${escape(retry.openRequest.requestedBy)}`} is waiting for a worker; ${latest === null ? "" : `${ordinal(latest.attempt)} ${latestWords}. `}${retriesLeft} after it.`,
     },
     running: {
       title: `Reviewing · ${ordinal(retry.live?.attempt ?? null)}`,

@@ -584,6 +584,10 @@ export type ReviewAttemptRow = {
   requestId: number | null;
 };
 
+/** How a review ask was produced (v50, explicit-only retries): a fresh
+ * credentialed operator act, or a build disposition's one-shot producer. */
+export type ReviewRequestOrigin = "operator" | "automatic";
+
 /**
  * One source run's bounded review history (v50): every root attempt in
  * ordinal order, the open request if one is queued, and the ONE state the
@@ -601,7 +605,7 @@ export type ReviewAttemptRow = {
 export type ReviewRetryState = {
   cap: number;
   attempts: ReviewAttemptRow[];
-  openRequest: { id: number; requestedBy: string; basis: "human" | "mode"; requestedAt: string } | null;
+  openRequest: { id: number; requestedBy: string; basis: "human" | "mode"; origin: ReviewRequestOrigin; requestedAt: string } | null;
   live: ReviewAttemptRow | null;
   latest: ReviewAttemptRow | null;
   succeeded: ReviewAttemptRow | null;
@@ -2934,7 +2938,17 @@ CREATE TABLE IF NOT EXISTS review_request (
   -- durable fact. NULL on a request spent without a run (route-changed,
   -- mode-ended, already-reviewed, …) and on any v49 row the migration
   -- could not bind to exactly one root.
-  reviewer_run    INTEGER REFERENCES run(id)
+  reviewer_run    INTEGER REFERENCES run(id),
+  -- v50 (explicit-only retries): how the ask was PRODUCED, apart from
+  -- whose authority it carries. 'operator' = a fresh credentialed act
+  -- (task review, the Retry review button). 'automatic' = a build
+  -- disposition's producer (a reviewAuto mode, a Strict / release scope)
+  -- — one-shot per source run: it queues the first attempt only, and a
+  -- replayed disposition (crash recovery, a re-dispose) can neither queue
+  -- nor admit a retry. Request and admission both refuse on it BEFORE
+  -- any rail or run exists; a mode-basis row is automatic whatever this
+  -- column says.
+  origin          TEXT NOT NULL DEFAULT 'operator' CHECK (origin IN ('operator','automatic'))
 );
 
 -- Operator steering (arc 1, v22): a note that lands at the next safe
@@ -4318,6 +4332,26 @@ function migrate(db: Database, origin: number | null): void {
   addColumn(db, "review_request", "reviewer_run", "INTEGER REFERENCES run(id)");
   if (origin !== null && origin < 50) migrateToV50(db);
   db.exec("DROP INDEX IF EXISTS one_review_per_source");
+  // v50 (explicit-only retries): `review_request.origin` says how an ask
+  // was produced. On a file from before the column, a mode-basis row was
+  // by definition automatic; a human-basis row was either an operator's
+  // ask or the Strict / release producer's, and the two are byte-identical
+  // — so an OPEN human-basis ask that would already be a retry (its
+  // source carries a root attempt) cannot be proved to be a fresh
+  // operator act, and is spent as 'legacy-origin' rather than admitted
+  // on a guess (the v29 legacy-untyped precedent: a person simply asks
+  // again). Consumed rows keep their words; nothing is ever admitted
+  // from them.
+  const preOriginRequests = tableExists(db, "review_request") && !hasColumn(db, "review_request", "origin");
+  addColumn(db, "review_request", "origin", "TEXT NOT NULL DEFAULT 'operator' CHECK (origin IN ('operator','automatic'))");
+  if (preOriginRequests) {
+    db.exec("UPDATE review_request SET origin = 'automatic' WHERE basis = 'mode'");
+    db.exec(
+      `UPDATE review_request SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), consumed_reason = 'legacy-origin'
+        WHERE consumed_at IS NULL AND basis = 'human'
+          AND EXISTS (SELECT 1 FROM run WHERE run.parent_run = review_request.run AND run.role = 'reviewer' AND run.review_attempt IS NOT NULL)`,
+    );
+  }
 }
 
 /** The bounded review-retry law (v50): a source run takes at most this
@@ -4325,6 +4359,14 @@ function migrate(db: Database, origin: number | null): void {
  * retries. Correction children (the same-session structured-output
  * repairs) are not attempts; they continue one. */
 export const REVIEW_ROOT_ATTEMPTS = 3;
+
+/** The one reading of a request row's production (v50, explicit-only
+ * retries): a mode-basis ask is automatic whatever its origin column says
+ * — the column is the strict-scope producer's only durable mark, the
+ * basis is the mode's. */
+function reviewRequestOriginOf(row: Record<string, unknown>): ReviewRequestOrigin {
+  return String(row["basis"]) === "mode" || String(row["origin"] ?? "operator") === "automatic" ? "automatic" : "operator";
+}
 
 /**
  * The v50 data pass: every existing root reviewer (a reviewer whose parent
@@ -10278,12 +10320,18 @@ export class Store {
         requestId: row["request"] === null || row["request"] === undefined ? null : Number(row["request"]),
       }));
     const openRow = this.db
-      .prepare("SELECT id, requested_by, basis, requested_at FROM review_request WHERE run = ? AND consumed_at IS NULL ORDER BY id LIMIT 1")
+      .prepare("SELECT id, requested_by, basis, origin, requested_at FROM review_request WHERE run = ? AND consumed_at IS NULL ORDER BY id LIMIT 1")
       .get(sourceRunId) as Record<string, unknown> | undefined;
     const openRequest =
       openRow === undefined
         ? null
-        : { id: Number(openRow["id"]), requestedBy: String(openRow["requested_by"]), basis: String(openRow["basis"]) as "human" | "mode", requestedAt: String(openRow["requested_at"]) };
+        : {
+            id: Number(openRow["id"]),
+            requestedBy: String(openRow["requested_by"]),
+            basis: String(openRow["basis"]) as "human" | "mode",
+            origin: reviewRequestOriginOf(openRow),
+            requestedAt: String(openRow["requested_at"]),
+          };
     const succeeded = attempts.find(one => one.outcome === "no-change") ?? null;
     const live = attempts.find(one => one.outcome === null) ?? null;
     const latest = attempts.length === 0 ? null : attempts[attempts.length - 1]!;
@@ -10343,12 +10391,21 @@ export class Store {
    * review yet, no root still open, no request already queued, and fewer
    * than REVIEW_ROOT_ATTEMPTS roots so far. A second ask after a failed or
    * interrupted attempt IS the explicit retry; nothing else retries.
+   *
+   * `origin` says how the ask was produced (explicit-only retries): an
+   * 'operator' ask is a fresh credentialed act and may be the retry; an
+   * 'automatic' ask — a mode-basis request always, and the Strict /
+   * release producer by declaration — is one-shot per source run and
+   * refuses 'explicit-only' the moment the run carries any root attempt
+   * or any earlier request, so a replayed build disposition never queues
+   * a retry.
    */
   requestReview(
     runId: number,
     by: string,
     now: Date,
     basis?: { kind: "mode"; digest: string },
+    origin: ReviewRequestOrigin = basis === undefined ? "operator" : "automatic",
   ):
     | { ok: true; id: number; attempt: number }
     | {
@@ -10363,12 +10420,14 @@ export class Store {
           | "already-reviewed"
           | "review-running"
           | "retries-exhausted"
+          | "explicit-only"
           | "already-requested"
           | "route-unreadable"
           | "route-unapproved"
           | "review-leg-problem";
         detail?: string;
       } {
+    const automatic = basis !== undefined || origin === "automatic";
     return this.transact(() => {
       const run = this.getRun(runId);
       if (run === null) return { ok: false as const, reason: "no-run" as const };
@@ -10384,6 +10443,14 @@ export class Store {
       if (diff.truncated) return { ok: false as const, reason: "diff-truncated" as const };
       const allowance = this.rootReviewAdmissionProblem(runId);
       if (allowance !== null) return { ok: false as const, reason: allowance.reason, detail: allowance.detail };
+      // THE ONE SHOT (explicit-only retries): an automatic producer queues
+      // the first attempt and nothing after it — a source run that already
+      // carries a root attempt, or any earlier ask at all, takes a retry
+      // only from a fresh operator act.
+      if (automatic) {
+        const replay = this.automaticReviewReplayProblem(runId);
+        if (replay !== null) return { ok: false as const, reason: "explicit-only" as const, detail: replay };
+      }
       // A request already queued refuses at the insert below (the open
       // request index is the backstop) — after the route is proved, as it
       // always was, so a routing problem is named before a duplicate ask.
@@ -10408,11 +10475,11 @@ export class Store {
       }
       const inserted = this.db
         .prepare(
-          `INSERT INTO review_request (run, requested_by, basis, mode_digest, requested_at, route_digest)
-           SELECT ?, ?, ?, ?, ?, ?
+          `INSERT INTO review_request (run, requested_by, basis, mode_digest, requested_at, route_digest, origin)
+           SELECT ?, ?, ?, ?, ?, ?, ?
            WHERE NOT EXISTS (SELECT 1 FROM review_request WHERE run = ? AND consumed_at IS NULL)`,
         )
-        .run(runId, by, basis === undefined ? "human" : "mode", basis === undefined ? null : basis.digest, now.toISOString(), routeDigest, runId);
+        .run(runId, by, basis === undefined ? "human" : "mode", basis === undefined ? null : basis.digest, now.toISOString(), routeDigest, automatic ? "automatic" : "operator", runId);
       if (Number(inserted.changes) === 0) return { ok: false as const, reason: "already-requested" as const };
       this.bumpWake();
       return { ok: true as const, id: Number(inserted.lastInsertRowid), attempt };
@@ -10428,12 +10495,39 @@ export class Store {
     return Number(row?.last ?? 0) + 1;
   }
 
+  /**
+   * Why an AUTOMATIC ask (a reviewAuto mode, a Strict / release scope) is
+   * a replay rather than a source run's one shot (explicit-only retries),
+   * in words — or null when it is the first ask. Decided inside the
+   * caller's transaction against live rows, by requestReview before any
+   * row exists and by admitReview/admitRun before any rail or run: a root
+   * attempt already on record, or any earlier request at all, means the
+   * producer has had its shot, and only a fresh operator act retries.
+   */
+  private automaticReviewReplayProblem(sourceRunId: number, ignoringRequest?: number): string | null {
+    const root = this.db
+      .prepare("SELECT id, outcome, reason, review_attempt AS attempt FROM run WHERE parent_run = ? AND role = 'reviewer' AND review_attempt IS NOT NULL ORDER BY review_attempt DESC LIMIT 1")
+      .get(sourceRunId) as { id: number | bigint; outcome: string | null; reason: string | null; attempt: number | bigint } | undefined;
+    if (root !== undefined) {
+      const ended = root.outcome === null ? "is still open" : `ended ${root.reason ?? root.outcome}`;
+      return `run #${sourceRunId}'s review attempt ${Number(root.attempt)} (reviewer run #${Number(root.id)}) ${ended} — an automatic review ask is one-shot, and a retry takes a fresh operator action: \`task review ${sourceRunId}\``;
+    }
+    const earlier = this.db
+      .prepare("SELECT id, consumed_reason FROM review_request WHERE run = ? AND id <> ? ORDER BY id LIMIT 1")
+      .get(sourceRunId, ignoringRequest ?? -1) as { id: number | bigint; consumed_reason: string | null } | undefined;
+    if (earlier !== undefined) {
+      return `run #${sourceRunId} already had its review ask (request #${Number(earlier.id)}${earlier.consumed_reason === null ? ", still queued" : `, spent as ${earlier.consumed_reason}`}) — an automatic review ask is one-shot; a person asks again with \`task review ${sourceRunId}\``;
+    }
+    return null;
+  }
+
   /** The open review asks, oldest first, with the facts the pass needs. */
   openReviewRequests(): {
     id: number;
     run: number;
     requestedBy: string;
     basis: "human" | "mode";
+    origin: ReviewRequestOrigin;
     modeDigest: string | null;
     requestedAt: string;
     taskRef: number;
@@ -10442,7 +10536,7 @@ export class Store {
   }[] {
     return this.db
       .prepare(
-        `SELECT rr.id, rr.run, rr.requested_by, rr.basis, rr.mode_digest, rr.requested_at,
+        `SELECT rr.id, rr.run, rr.requested_by, rr.basis, rr.origin, rr.mode_digest, rr.requested_at,
                 run.task_ref AS taskRef, task_ref.external_id AS taskId, task_ref.repo
            FROM review_request rr
            JOIN run ON run.id = rr.run
@@ -10456,6 +10550,7 @@ export class Store {
         run: Number((row as Record<string, unknown>)["run"]),
         requestedBy: String((row as Record<string, unknown>)["requested_by"]),
         basis: String((row as Record<string, unknown>)["basis"]) as "human" | "mode",
+        origin: reviewRequestOriginOf(row as Record<string, unknown>),
         modeDigest:
           (row as Record<string, unknown>)["mode_digest"] === null
             ? null
@@ -10502,7 +10597,7 @@ export class Store {
     now: Date,
   ):
     | { ok: true; reviewerRunId: number; sourceRun: number; taskRef: number; taskId: string; attempt: number }
-    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "review-running" | "retries-exhausted" | "railed" | "unauthenticated" | "route-changed" | "route-mismatch" | "provider-unavailable" | "watch-custody"; rail?: string; detail?: string } {
+    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "review-running" | "retries-exhausted" | "explicit-only" | "railed" | "unauthenticated" | "route-changed" | "route-mismatch" | "provider-unavailable" | "watch-custody"; rail?: string; detail?: string } {
     return this.transact(() => {
       // The reviewer road authenticates INSIDE the admission transaction
       // (review finding 4): reviewer runs hold no task claim by design,
@@ -10512,7 +10607,7 @@ export class Store {
       if (!identity.ok) return { ok: false as const, reason: "unauthenticated" as const, detail: identity.reason };
       const row = this.db
         .prepare(
-          `SELECT rr.run, rr.basis, rr.mode_digest, rr.route_digest,
+          `SELECT rr.run, rr.basis, rr.origin, rr.mode_digest, rr.route_digest,
                   run.task_ref AS taskRef, task_ref.external_id AS taskId, task_ref.repo
              FROM review_request rr
              JOIN run ON run.id = rr.run
@@ -10595,6 +10690,17 @@ export class Store {
       if (allowance !== null) {
         this.consumeReviewRequest(requestId, allowance.reason, now);
         return { ok: false as const, reason: allowance.reason, detail: allowance.detail };
+      }
+      // EXPLICIT ONLY (v50): an automatic ask that would be a retry — a
+      // stale queued one, a replayed disposition's, a row written before
+      // this rule — is spent unrun HERE, before the rail and before any
+      // run row; only a fresh operator act opens attempt 2 or 3.
+      if (reviewRequestOriginOf(row) === "automatic") {
+        const replay = this.automaticReviewReplayProblem(sourceRun, requestId);
+        if (replay !== null) {
+          this.consumeReviewRequest(requestId, "explicit-only", now);
+          return { ok: false as const, reason: "explicit-only" as const, detail: replay };
+        }
       }
       if (repo !== null) {
         const railed = this.reserveModeRail(repo, 1, now);
@@ -14258,7 +14364,7 @@ export class Store {
       } else {
         if (parent.role === "reviewer") refuse(`reviewer run #${parent.id} is a review already — a correction child is admitted by admitCorrection`);
         if (request === undefined) refuse(`run #${parent.id} is reviewed only through its open review request — none was presented`);
-        const open = this.db.prepare("SELECT 1 AS hit FROM review_request WHERE id = ? AND run = ? AND consumed_at IS NULL").get(request, parent.id);
+        const open = this.db.prepare("SELECT basis, origin FROM review_request WHERE id = ? AND run = ? AND consumed_at IS NULL").get(request, parent.id) as Record<string, unknown> | undefined;
         if (open === undefined) refuse(`review request #${request} is not run #${parent.id}'s open request — nothing reviews without one`);
         // THE BOUNDED ALLOWANCE (v50): a root opens only while its source
         // has no successful review, no root still open, and fewer than
@@ -14268,6 +14374,13 @@ export class Store {
         if (allowance !== null) refuse(allowance.detail);
         reviewAttempt = this.nextRootReviewAttempt(parent.id);
         if (reviewAttempt > REVIEW_ROOT_ATTEMPTS) refuse(`run #${parent.id} has spent all ${REVIEW_ROOT_ATTEMPTS} review attempts — nothing retries a fourth time`);
+        // EXPLICIT ONLY (v50): an automatic ask opens attempt 1 and never
+        // another — the insert itself refuses a retry on it, whatever
+        // road presented the request.
+        if (reviewRequestOriginOf(open!) === "automatic") {
+          const replay = this.automaticReviewReplayProblem(parent.id, request);
+          if (replay !== null) refuse(replay);
+        }
         requestToConsume = request;
       }
     } else if (run.request !== undefined) {

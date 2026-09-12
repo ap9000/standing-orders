@@ -1,9 +1,13 @@
 {
  "evidence": "bounded-review-retries",
- "capturedAt": "2026-09-12T00:50:48.555Z",
+ "capturedAt": "2026-09-12T01:29:32.634Z",
  "plane": {
-  "kind": "isolated fixture database seeded by /tmp/so-retry-capture/seed.ts (never the live control database)",
-  "console": "standing-orders serve --db /tmp/so-retry-capture/orders.db --port 4996 --repo /tmp/so-retry-capture/repo"
+  "kind": "isolated fixture database seeded by evidence/bounded-review-retries/seed.ts (never the live control database)",
+  "seed": "node --import tsx evidence/bounded-review-retries/seed.ts /tmp/so-retry-capture",
+  "evidenceRoot": "/tmp/so-retry-capture/evidence (the console's evidence root is the directory beside --db)",
+  "console": "standing-orders serve --db /tmp/so-retry-capture/orders.db --port 4996 --repo /tmp/so-retry-capture/repo",
+  "capture": "node evidence/bounded-review-retries/capture.mjs http://127.0.0.1:4996 evidence/bounded-review-retries <password>",
+  "playwright": "file://~/.npm/_npx/31e32ef8478fbf80/node_modules/playwright/index.mjs"
  },
  "captures": [
   {
@@ -28,12 +32,13 @@
     "right": 807
    },
    "form": "/t/rate-limit-payouts/retry-review",
+   "patchUnverifiable": false,
    "panelTop": 140,
    "panelBottom": 312,
    "buttonBottom": 298,
    "innerHeight": 900,
-   "sha256": "9ae61ace95eea2f55962d965c5bec814d53670546e200990c81a967492b5b287",
-   "bytes": 330959
+   "sha256": "920d84cc2f128f046643e34a98b4e4f0dab1ed00a569cd0ec24ec65baaab0699",
+   "bytes": 331221
   },
   {
    "file": "desktop-cockpit-queued.png",
@@ -57,12 +62,13 @@
     "right": 741
    },
    "form": null,
-   "panelTop": 227,
-   "panelBottom": 400,
-   "buttonBottom": 386,
+   "patchUnverifiable": false,
+   "panelTop": 140,
+   "panelBottom": 313,
+   "buttonBottom": 299,
    "innerHeight": 900,
-   "sha256": "40b71d5f2fc9b13e3e475fd8b05f519b4935af8a24c364e2d10dafe50ff1df09",
-   "bytes": 218543
+   "sha256": "819865a4e462b6e156e2df061961783a0e89467905079fa0095022f1045eadff",
+   "bytes": 230325
   },
   {
    "file": "desktop-exhausted.png",
@@ -86,6 +92,7 @@
     "right": 717
    },
    "form": null,
+   "patchUnverifiable": false,
    "panelTop": 140,
    "panelBottom": 357,
    "buttonBottom": 344,
@@ -115,6 +122,7 @@
     "right": 247
    },
    "form": "/t/rate-limit-payouts/retry-review",
+   "patchUnverifiable": false,
    "panelTop": 140,
    "panelBottom": 349,
    "buttonBottom": 335,
@@ -144,12 +152,13 @@
     "right": 153
    },
    "form": null,
+   "patchUnverifiable": false,
    "panelTop": 140,
    "panelBottom": 331,
    "buttonBottom": 317,
    "innerHeight": 844,
-   "sha256": "144c35a6161b711b1dc2838364c99a3d4f4dfd2a1736f6bac6ba2de5bbf32d17",
-   "bytes": 86131
+   "sha256": "3d80ac9ea42ef921839be4ceedb73565fd5c26d7a3bf092bcdc701a5c3709938",
+   "bytes": 87341
   },
   {
    "file": "mobile-exhausted.png",
@@ -173,6 +182,7 @@
     "right": 157
    },
    "form": null,
+   "patchUnverifiable": false,
    "panelTop": 140,
    "panelBottom": 394,
    "buttonBottom": 380,

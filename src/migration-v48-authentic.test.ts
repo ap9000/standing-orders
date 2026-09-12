@@ -59,10 +59,10 @@ const V48_ROUTINE_COLUMNS = ["route_json", "approved_route_json"];
 function withoutNew(table: string, row: Record<string, unknown>): Record<string, unknown> {
   const copy = { ...row };
   if (table === "routine") for (const column of V48_ROUTINE_COLUMNS) delete copy[column];
-  // v49's watch_incarnation and v50's review_attempt / reviewer_run are
-  // later additive columns; the v47 fixture never carried them.
+  // v49's watch_incarnation and v50's review_attempt / reviewer_run /
+  // origin are later additive columns; the v47 fixture never carried them.
   if (table === "run") { delete copy["watch_incarnation"]; delete copy["review_attempt"]; }
-  if (table === "review_request") delete copy["reviewer_run"];
+  if (table === "review_request") { delete copy["reviewer_run"]; delete copy["origin"]; }
   return copy;
 }
 

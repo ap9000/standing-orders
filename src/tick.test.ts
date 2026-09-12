@@ -2333,7 +2333,10 @@ describe("watch — the loop, zero tokens idle", () => {
     expect(await run(["task", "review", String(source.id), ...auth, "--json"])).toBe(EXIT.ok);
     expect(payload()).toMatchObject({ ok: true, attempt: 2, retriesRemaining: 1 });
     shown = await show("t-retry");
-    expect(shown.dispatch).toMatchObject({ code: "review-pending", summary: "Review retry queued (attempt 2 of 3)", review: { state: "queued", attempt: 2, retriesRemaining: 1 } });
+    expect(shown.dispatch).toMatchObject({ code: "review-pending", summary: "Review retry queued (attempt 2 of 3)", review: { state: "queued", attempt: 2, retriesRemaining: 1, queued: { requestedBy: "alex", origin: "operator" } } });
+    expect(shown.review.openRequest).toMatchObject({ requestedBy: "alex", origin: "operator" });
+    expect(await run(["task", "show", "t-retry"])).toBe(EXIT.ok);
+    expect(lines.join("\n")).toContain("review: retry queued — attempt 2 of 3 waits for a worker (asked by alex)");
     expect(await tick(reviewer(true))).toBe(EXIT.ok);
     expect(payload()).toMatchObject({ dispatched: [expect.objectContaining({ outcome: "reviewed", attempt: 2 })] });
     shown = await show("t-retry");

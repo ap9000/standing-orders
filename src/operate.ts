@@ -9690,7 +9690,7 @@ function reviewStatusLines(review: ReviewRetryState | null, sourceRun: number | 
   if (review === null || sourceRun === null || review.state === "unrequested") return [];
   const word: Record<ReviewRetryState["state"], string> = {
     unrequested: "not requested",
-    queued: `retry queued — attempt ${review.nextAttempt ?? review.attempts.length + 1} of ${review.cap} waits for a worker`,
+    queued: `retry queued — attempt ${review.nextAttempt ?? review.attempts.length + 1} of ${review.cap} waits for a worker${review.openRequest === null ? "" : ` (asked by ${review.openRequest.requestedBy})`}`,
     running: `running — attempt ${review.live?.attempt ?? review.attempts.length} of ${review.cap}`,
     succeeded: `succeeded on attempt ${review.succeeded?.attempt ?? 1} of ${review.cap}`,
     retryable: `${review.latest?.outcome === "interrupted" || review.latest?.reason === "interrupted" ? "interrupted" : "failed"} on attempt ${review.latest?.attempt ?? review.attempts.length} of ${review.cap} — ${review.retriesRemaining === 1 ? "1 explicit retry" : `${review.retriesRemaining} explicit retries`} left: \`standing-orders task review ${sourceRun} --as <you> --token <t>\``,

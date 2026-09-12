@@ -117,9 +117,16 @@ const STANDALONE_BROKE_REASONS = new Set([
  * - the older reviewAuto operating-mode term stays intact and is re-proved
  *   at dispatch as before.
  *
- * Both roads queue, never run inline. Refusals are silently fine here: no
- * diff, a truncated capture, or an existing request means there is nothing
- * honest to review (and the run page keeps that evidence visible).
+ * Both roads queue, never run inline, and both are ONE-SHOT (v50,
+ * explicit-only retries): they declare themselves automatic, so the store
+ * refuses them 'explicit-only' once the run carries any root review
+ * attempt or any earlier ask — a replayed disposition (crash recovery, a
+ * re-dispose, a second tick over the same outcome) never queues a retry,
+ * and a stale automatic row is spent unrun at admission. Only a fresh
+ * operator act (`task review`, the Retry review button) retries.
+ * Refusals are silently fine here: no diff, a truncated capture, or an
+ * existing request means there is nothing honest to review (and the run
+ * page keeps that evidence visible).
  */
 export function maybeRequestAutoReview(store: Store, repo: string, runId: number, committed: boolean, noChange: boolean, now: Date): void {
   if (!committed || noChange) return;
@@ -133,7 +140,7 @@ export function maybeRequestAutoReview(store: Store, repo: string, runId: number
     scope.approvedDigest === scope.digest &&
     run.scopeDigest === scope.digest
   ) {
-    store.requestReview(runId, scope.approvedBy, now);
+    store.requestReview(runId, scope.approvedBy, now, undefined, "automatic");
     return;
   }
   const mode = store.activeMode(repo, now);

@@ -1292,6 +1292,151 @@ describe("the reviewer role in the store", () => {
         }
       });
 
+      describe("explicit only (c9): automatic producers are one-shot", () => {
+        const spec = { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null };
+        const reviewerRows = () => store.raw().prepare("SELECT COUNT(*) AS n FROM run WHERE role = 'reviewer'").get() as { n: number };
+        const railSpent = () => store.raw().prepare("SELECT COALESCE(SUM(reserved_starts), 0) AS n FROM mode_rail").get() as { n: number };
+        const signStandard = () => {
+          const terms = presetTerms("standard", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString());
+          store.signMode({ repo: REPO, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, T0);
+          return terms;
+        };
+        /** A Strict / release task whose approved scope queues the isolated
+         * reviewer from the build disposition — the second automatic road. */
+        const strictBuild = (): { run: number; approvedBy: string } => {
+          store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+          store.setPhaseConfig("installation", "plan", "claude", "sonnet", "alex", T0);
+          store.setPhaseConfig("installation", "review", "claude", "sonnet", "alex", T0);
+          store.createTask({ id: "t-strict", title: "release the payout guard" }, T0);
+          const strictRef = store.refFor("built-in", "t-strict");
+          store.placeTask(strictRef.id, REPO);
+          const scope = propose(store, {
+            taskId: "t-strict", goal: "release the guarded payout path", qualityMode: "strict",
+            acceptance: [{ id: "c1", statement: "the payout path is guarded", how: null, evidence: ["changed-path"] }], now: T0,
+          });
+          expect(approve(store, "t-strict", "alex", T0, scope.digest, approverToken).ok).toBe(true);
+          const run = store.startRun({ taskRef: strictRef.id, leaseId: "lease-strict", runner: "builder-1", branch: "standing-orders/t-strict", worktree: "/pool/t-strict", now: T0, ...presented(store, strictRef.id, "builder") });
+          store.stampRun(run, { scopeDigest: scope.digest });
+          storeEvidence(store, evidenceRoot, run, "terminal-diff", "terminal-diff.patch", Buffer.from(PATCH), "git diff (exit 0)", T0, { captureStatus: "ok" });
+          store.saveProofVerdict(run, "short", ["needs review"], T0, [{ id: "c1", statement: "the payout path is guarded", requiredEvidence: ["changed-path"], state: "manual-review", detail: [], answered: [], review: null }]);
+          store.recordOutcomeFacts(run, { headRevision: "head-strict", handoff: "guarded" });
+          store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+          return { run, approvedBy: "alex" };
+        };
+
+        for (const road of ["mode", "strict"] as const) test(`replaying the ${road} producer after a failed root queues nothing and admits nothing; a fresh operator ask retries to success`, async () => {
+          const source = road === "mode" ? (signStandard(), builtRun) : strictBuild().run;
+          const strictSpec = road === "mode" ? spec : { ...spec, model: "sonnet" };
+          // The producer's one shot: the first ask, typed automatic.
+          maybeRequestAutoReview(store, REPO, source, true, false, T0);
+          const first = store.openReviewRequests();
+          expect(first).toMatchObject([{ run: source, origin: "automatic", basis: road === "mode" ? "mode" : "human" }]);
+          // Replaying it while the ask is still queued adds nothing.
+          maybeRequestAutoReview(store, REPO, source, true, false, T0);
+          expect(store.openReviewRequests()).toHaveLength(1);
+          const admitted = store.admitReview(first[0]!.id, strictSpec, T0);
+          expect(admitted).toMatchObject({ ok: true, attempt: 1 });
+          if (!admitted.ok) return;
+          // Replaying it over the live root adds nothing.
+          maybeRequestAutoReview(store, REPO, source, true, false, T0);
+          expect(store.openReviewRequests()).toHaveLength(0);
+          store.finishRun(admitted.reviewerRunId, { outcome: "failed", reason: "reviewer-agent", now: T0 });
+          store.stampReviewRequestOutcome(first[0]!.id, "reviewer-agent");
+          expect(store.reviewRetryStateOf(source)).toMatchObject({ state: "retryable", retriesRemaining: 2 });
+
+          // THE REPLAY after the failure (the dogfood finding): the producer
+          // can neither queue nor admit attempt 2 — no request, no run, no
+          // rail spend. The direct door says why, in words.
+          const rows = reviewerRows().n;
+          const rail = railSpent().n;
+          maybeRequestAutoReview(store, REPO, source, true, false, new Date(T0.getTime() + 1_000));
+          maybeRequestAutoReview(store, REPO, source, true, false, new Date(T0.getTime() + 2_000));
+          expect(store.openReviewRequests()).toEqual([]);
+          expect(store.reviewRetryStateOf(source)).toMatchObject({ state: "retryable", openRequest: null, retriesRemaining: 2, nextAttempt: 2 });
+          const direct = road === "mode"
+            ? store.requestReview(source, "mode standard", T0, { kind: "mode", digest: modeDigestOf(presetTerms("standard", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString())) })
+            : store.requestReview(source, "alex", T0, undefined, "automatic");
+          expect(direct).toMatchObject({ ok: false, reason: "explicit-only" });
+          expect((direct as { detail: string }).detail).toMatch(new RegExp(`review attempt 1 \\(reviewer run #${admitted.reviewerRunId}\\) ended reviewer-agent .*task review ${source}`));
+          expect(reviewerRows().n).toBe(rows);
+          expect(railSpent().n).toBe(rail);
+          // History is untouched: one root, one spent request.
+          expect(store.raw().prepare("SELECT id, origin, consumed_reason, reviewer_run FROM review_request WHERE run = ? ORDER BY id").all(source)).toEqual([
+            { id: first[0]!.id, origin: "automatic", consumed_reason: "reviewer-agent", reviewer_run: admitted.reviewerRunId },
+          ]);
+
+          // A fresh operator act is the retry, and it runs to success.
+          const retry = store.requestReview(source, "alex", new Date(T0.getTime() + 3_000));
+          expect(retry).toMatchObject({ ok: true, attempt: 2 });
+          expect(store.reviewRetryStateOf(source)).toMatchObject({ state: "queued", openRequest: { origin: "operator", requestedBy: "alex" }, nextAttempt: 2 });
+          const passed = await passOnce(reviewingAgent({ version: 1, comments: [], ...(road === "strict" ? { criteria: [{ id: "c1", judgement: "upholds", note: "guarded" }] } : {}) }));
+          expect(passed).toMatchObject([{ requestId: (retry as { id: number }).id, run: source, outcome: "reviewed", attempt: 2, detail: road === "mode" ? "0 comment(s)" : "0 comment(s), 1 judgement(s)" }]);
+          expect(store.reviewRetryStateOf(source)).toMatchObject({ state: "succeeded", retriesUsed: 1, retriesRemaining: 0 });
+          expect(store.raw().prepare("SELECT origin, consumed_reason FROM review_request WHERE id = ?").get((retry as { id: number }).id)).toEqual({ origin: "operator", consumed_reason: "reviewed" });
+          // And the producer stays silent over the landed review, too.
+          maybeRequestAutoReview(store, REPO, source, true, false, new Date(T0.getTime() + 4_000));
+          expect(store.openReviewRequests()).toEqual([]);
+        });
+
+        test("a stale queued automatic ask that would be a retry is spent 'explicit-only' at admission — before the rail, before any run — and the startRun insert refuses it on any road", () => {
+          signStandard();
+          const mode = store.activeMode(REPO, T0)!;
+          // Attempt 1 through the real doors, failed.
+          maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
+          const first = store.openReviewRequests()[0]!;
+          const admitted = store.admitReview(first.id, spec, T0);
+          if (!admitted.ok) throw new Error(admitted.reason);
+          store.finishRun(admitted.reviewerRunId, { outcome: "failed", reason: "interrupted", now: T0 });
+          store.stampReviewRequestOutcome(first.id, "interrupted");
+          // The stale rows: a mode-basis ask and a human-basis-but-automatic
+          // ask (the Strict producer's shape), written past the request
+          // door — a row an older binary or a replayed disposition left.
+          const staleMode = Number(store.raw().prepare("INSERT INTO review_request (run, requested_by, basis, mode_digest, requested_at, origin) VALUES (?, 'mode standard', 'mode', ?, ?, 'automatic')").run(builtRun, mode.digest, T0.toISOString()).lastInsertRowid);
+          expect(store.reviewRetryStateOf(builtRun)).toMatchObject({ state: "queued", openRequest: { id: staleMode, origin: "automatic" } });
+          const rail = railSpent().n;
+          const rows = reviewerRows().n;
+          const refused = store.admitReview(staleMode, spec, T0);
+          expect(refused).toMatchObject({ ok: false, reason: "explicit-only" });
+          expect(store.raw().prepare("SELECT consumed_reason, reviewer_run FROM review_request WHERE id = ?").get(staleMode)).toEqual({ consumed_reason: "explicit-only", reviewer_run: null });
+          expect(railSpent().n).toBe(rail);
+          expect(reviewerRows().n).toBe(rows);
+          const staleStrict = Number(store.raw().prepare("INSERT INTO review_request (run, requested_by, basis, requested_at, origin) VALUES (?, 'alex', 'human', ?, 'automatic')").run(builtRun, T0.toISOString()).lastInsertRowid);
+          // The insert itself refuses, whatever road presents the row.
+          expect(() =>
+            store.startRun({ taskRef, leaseId: "review:stale", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0, ...presented(store, taskRef, "reviewer"), request: staleStrict }),
+          ).toThrow(/an automatic review ask is one-shot/);
+          expect(store.admitReview(staleStrict, spec, T0)).toMatchObject({ ok: false, reason: "explicit-only" });
+          expect(reviewerRows().n).toBe(rows);
+          expect(store.openReviewRequests()).toEqual([]);
+          // The first root's history is exactly as it was; a person retries.
+          expect(store.getRun(admitted.reviewerRunId)).toMatchObject({ outcome: "failed", reason: "interrupted", reviewAttempt: 1 });
+          expect(store.reviewRetryStateOf(builtRun)).toMatchObject({ state: "retryable", retriesRemaining: 2, nextAttempt: 2 });
+          const human = store.requestReview(builtRun, "alex", new Date(T0.getTime() + 1_000));
+          expect(human).toMatchObject({ ok: true, attempt: 2 });
+          expect(store.admitReview((human as { id: number }).id, spec, T0)).toMatchObject({ ok: true, attempt: 2 });
+        });
+
+        test("an automatic ask before any attempt still runs; a first automatic ask after a spent-unrun ask is a replay too", async () => {
+          signStandard();
+          maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
+          const open = store.openReviewRequests();
+          expect(open).toMatchObject([{ run: builtRun, origin: "automatic" }]);
+          // A railed admission leaves the automatic ask OPEN — the same
+          // request is not its own replay when the next pass admits it.
+          const admitted = store.admitReview(open[0]!.id, spec, T0);
+          expect(admitted).toMatchObject({ ok: true, attempt: 1 });
+          // A second source: the producer's ask spent unrun, then replayed.
+          const other = seedBuilt().runId;
+          maybeRequestAutoReview(store, REPO, other, true, false, T0);
+          const spent = store.openReviewRequests().find(one => one.run === other)!;
+          store.consumeReviewRequest(spent.id, "route-changed", T0);
+          maybeRequestAutoReview(store, REPO, other, true, false, new Date(T0.getTime() + 1_000));
+          expect(store.openReviewRequests().filter(one => one.run === other)).toEqual([]);
+          expect(store.requestReview(other, "mode standard", T0, { kind: "mode", digest: store.activeMode(REPO, T0)!.digest })).toMatchObject({ ok: false, reason: "explicit-only", detail: expect.stringMatching(/already had its review ask \(request #\d+, spent as route-changed\)/) });
+          expect(store.requestReview(other, "alex", T0)).toMatchObject({ ok: true, attempt: 1 });
+        });
+      });
+
       test("every retry seals a fresh scratch from the verified artifacts and re-proves route, custody, and evidence before any money", async () => {
         store.setPhaseConfig("installation", "build", "claude", "claude-sonnet-4", "alex", T0);
         store.setPhaseConfig("installation", "plan", "claude", "claude-sonnet-4", "alex", T0);

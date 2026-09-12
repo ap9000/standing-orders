@@ -36,6 +36,29 @@ stage continues through the explicit retry to attempt 2 of 3 with one build,
 one commit, and no further dispatch. Nothing retries by itself; automatic
 review retry remains deliberately absent.
 
+**2026-09-12 — Explicit-only review retries: automatic producers are
+one-shot.** Dogfooding build 1513 found that replaying the build disposition
+after a failed root review queued AND admitted attempt 2 with basis `mode`, no
+operator involved — the exclusion the retry scope was written under.
+`review_request.origin` (`operator` | `automatic`) now records how every ask
+was produced: `task review` and the console's **Retry review** are
+`operator`; the reviewAuto-mode producer and the Strict / release scope
+producer (`maybeRequestAutoReview`, both roads) declare themselves
+`automatic`, and a mode-basis row is automatic whatever the column says. An
+automatic ask is one shot per source build: `requestReview` refuses it
+`explicit-only`, in words, once the run carries any root attempt or any
+earlier ask; `admitReview` re-proves the same fact inside the admission
+transaction and spends a stale automatic ask `explicit-only` before the daily
+rail and before any run row; the `startRun` reviewer insert refuses it too,
+whatever road presents the request. A fresh operator ask still retries and
+runs to success; the typed dispatch view, `task show`, and the console panel
+name who asked for a queued retry. On a file from before the column, mode
+rows read `automatic`, and an open human-basis ask that would already be a
+retry — the exact row a replayed Strict producer wrote — is spent
+`legacy-origin` rather than admitted on a guess; a person asks again. The
+crash canary's review stage now also replays the automatic producer over the
+interrupted attempt and proves it queues nothing before the explicit retry.
+
 **2026-09-11 — Plan-first and routed execution fail closed without getting
 stuck.** A real Codex plan-first run now finishes: `codex exec resume` has no
 `--sandbox` flag (0.145.0), so every structured correction and repair-by-

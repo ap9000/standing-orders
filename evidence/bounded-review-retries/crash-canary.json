@@ -1,12 +1,12 @@
 {
   "version": 1,
   "passed": true,
-  "sourceCommit": "a9210242630654eaef4c09d67c4453638e60b781",
-  "runtimeSha256": "bcf514d644b7aaa0bc1e42fbe2a9b8c073ad6fa1b6adba2a2dc1c042a8376aaf",
+  "sourceCommit": "a9a9ac984228192f5db448d80ec50306cfd23155",
+  "runtimeSha256": "9791a60ef72fa92332c76a2dc5b275254f1c9b8d5a289601015f46ece07f29c5",
   "runtimeUnchanged": true,
   "platform": "darwin",
   "node": "22.22.0",
-  "durationSeconds": 97.476,
+  "durationSeconds": 98,
   "cases": [
     {
       "stage": "planning",
@@ -15,9 +15,9 @@
       "checks": {
         "checkpoint": {
           "stage": "planning",
-          "pid": 48470,
-          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/planning-1/pool/repo/standing-orders-plan-work-08b69164",
-          "at": 1789174712184
+          "pid": 87812,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/planning-1/pool/repo/standing-orders-plan-work-83bbf079",
+          "at": 1789177220221
         },
         "preCrashRuns": [
           {
@@ -91,38 +91,38 @@
         "events": [
           {
             "name": "provider-start",
-            "pid": 48470,
-            "at": 1789174712183,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/planning-1/pool/repo/standing-orders-plan-work-08b69164",
+            "pid": 87812,
+            "at": 1789177220220,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/planning-1/pool/repo/standing-orders-plan-work-83bbf079",
             "phase": "plan",
-            "session": "36a44f86-7419-4985-ac41-b5785e0a60f7"
+            "session": "af16da08-2a92-480e-9d5f-c130e959bf39"
           },
           {
             "name": "provider-end",
-            "pid": 48470,
-            "at": 1789174802192,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/planning-1/pool/repo/standing-orders-plan-work-08b69164",
+            "pid": 87812,
+            "at": 1789177310206,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/planning-1/pool/repo/standing-orders-plan-work-83bbf079",
             "phase": "plan"
           },
           {
             "name": "provider-start",
-            "pid": 51760,
-            "at": 1789174802840,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/planning-1/pool/repo/standing-orders-plan-work-08b69164",
+            "pid": 90047,
+            "at": 1789177310832,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/planning-1/pool/repo/standing-orders-plan-work-83bbf079",
             "phase": "plan",
-            "session": "b6809de8-7c46-4d52-8356-7768a93d1855"
+            "session": "c0f35261-7ccf-4a74-9664-dd0f9ffa55f0"
           },
           {
             "name": "provider-end",
-            "pid": 51760,
-            "at": 1789174802840,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/planning-1/pool/repo/standing-orders-plan-work-08b69164",
+            "pid": 90047,
+            "at": 1789177310833,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/planning-1/pool/repo/standing-orders-plan-work-83bbf079",
             "phase": "plan"
           }
         ],
         "openRuns": []
       },
-      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/planning-1",
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/planning-1",
       "failures": []
     },
     {
@@ -132,9 +132,9 @@
       "checks": {
         "checkpoint": {
           "stage": "building",
-          "pid": 48560,
-          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/building-1/pool/repo/standing-orders-work-de414eb2",
-          "at": 1789174712543
+          "pid": 87894,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/building-1/pool/repo/standing-orders-work-7b6c98eb",
+          "at": 1789177220573
         },
         "preCrashRuns": [
           {
@@ -193,7 +193,7 @@
               "outcome": "built",
               "reason": null,
               "parent": 1,
-              "head": "00fbf6f23c46d825b96c275594b50896ccbffb0f"
+              "head": "2a28e02df4ee1d1c86c2b22eb2d9f6dc5f72c7da"
             },
             {
               "id": 1,
@@ -208,57 +208,57 @@
         "events": [
           {
             "name": "provider-start",
-            "pid": 48560,
-            "at": 1789174712542,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/building-1/pool/repo/standing-orders-work-de414eb2",
+            "pid": 87894,
+            "at": 1789177220573,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/building-1/pool/repo/standing-orders-work-7b6c98eb",
             "phase": "build",
-            "session": "bf0fc31b-71cb-44d1-8479-ae5a071f9c14"
+            "session": "ef686156-c276-4a18-bfb6-461abe046b6c"
           },
           {
             "name": "provider-end",
-            "pid": 48560,
-            "at": 1789174802424,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/building-1/pool/repo/standing-orders-work-de414eb2",
+            "pid": 87894,
+            "at": 1789177310465,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/building-1/pool/repo/standing-orders-work-7b6c98eb",
             "phase": "build"
           },
           {
             "name": "provider-start",
-            "pid": 51872,
-            "at": 1789174803404,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/building-1/pool/repo/standing-orders-work-de414eb2",
+            "pid": 90164,
+            "at": 1789177311427,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/building-1/pool/repo/standing-orders-work-7b6c98eb",
             "phase": "build",
-            "session": "66683baa-4813-4f11-8930-a4122a6afc8b"
+            "session": "af4deb5a-554d-4e97-8499-f764f1f1ba86"
           },
           {
             "name": "provider-end",
-            "pid": 51872,
-            "at": 1789174803418,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/building-1/pool/repo/standing-orders-work-de414eb2",
+            "pid": 90164,
+            "at": 1789177311439,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/building-1/pool/repo/standing-orders-work-7b6c98eb",
             "phase": "build"
           },
           {
             "name": "commit",
-            "pid": 51918,
-            "at": 1789174803686,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/building-1/pool/repo/standing-orders-work-de414eb2"
+            "pid": 90201,
+            "at": 1789177311708,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/building-1/pool/repo/standing-orders-work-7b6c98eb"
           },
           {
             "name": "check-start",
-            "pid": 51949,
-            "at": 1789174804074,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/building-1/pool/repo/standing-orders-work-de414eb2"
+            "pid": 90231,
+            "at": 1789177312089,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/building-1/pool/repo/standing-orders-work-7b6c98eb"
           },
           {
             "name": "check-end",
-            "pid": 51949,
-            "at": 1789174804074,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/building-1/pool/repo/standing-orders-work-de414eb2"
+            "pid": 90231,
+            "at": 1789177312089,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/building-1/pool/repo/standing-orders-work-7b6c98eb"
           }
         ],
         "openRuns": [],
-        "finalHead": "00fbf6f23c46d825b96c275594b50896ccbffb0f"
+        "finalHead": "2a28e02df4ee1d1c86c2b22eb2d9f6dc5f72c7da"
       },
-      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/building-1",
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/building-1",
       "failures": []
     },
     {
@@ -268,9 +268,9 @@
       "checks": {
         "checkpoint": {
           "stage": "verification",
-          "pid": 48655,
-          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1/pool/repo/standing-orders-work-34b8d65e",
-          "at": 1789174713432
+          "pid": 87981,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1/pool/repo/standing-orders-work-216d63fe",
+          "at": 1789177221343
         },
         "preCrashRuns": [
           {
@@ -280,7 +280,7 @@
             "outcome": null
           }
         ],
-        "committedBeforeCrash": "9336bfd266784bca74d95f26c12a44a0b626cab2",
+        "committedBeforeCrash": "be171e9cca177e8dba3c6e0088b0e53a0f86f0db",
         "workerKilled": true,
         "childSurvived": true,
         "beforeExpiry": "refused",
@@ -330,7 +330,7 @@
               "outcome": "no-change",
               "reason": "handoff",
               "parent": null,
-              "head": "9336bfd266784bca74d95f26c12a44a0b626cab2"
+              "head": "be171e9cca177e8dba3c6e0088b0e53a0f86f0db"
             },
             {
               "id": 1,
@@ -338,76 +338,76 @@
               "outcome": "failed",
               "reason": "interrupted",
               "parent": null,
-              "head": "9336bfd266784bca74d95f26c12a44a0b626cab2"
+              "head": "be171e9cca177e8dba3c6e0088b0e53a0f86f0db"
             }
           ]
         },
         "events": [
           {
             "name": "provider-start",
-            "pid": 48598,
-            "at": 1789174712779,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1/pool/repo/standing-orders-work-34b8d65e",
+            "pid": 87906,
+            "at": 1789177220697,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1/pool/repo/standing-orders-work-216d63fe",
             "phase": "build",
-            "session": "0d8f84a6-bfe7-4f9c-822d-da1fefeaead2"
+            "session": "2a626308-729b-46d6-9229-b6521353473b"
           },
           {
             "name": "provider-end",
-            "pid": 48598,
-            "at": 1789174712791,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1/pool/repo/standing-orders-work-34b8d65e",
+            "pid": 87906,
+            "at": 1789177220710,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1/pool/repo/standing-orders-work-216d63fe",
             "phase": "build"
           },
           {
             "name": "commit",
-            "pid": 48635,
-            "at": 1789174713054,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1/pool/repo/standing-orders-work-34b8d65e"
+            "pid": 87950,
+            "at": 1789177220970,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1/pool/repo/standing-orders-work-216d63fe"
           },
           {
             "name": "check-start",
-            "pid": 48655,
-            "at": 1789174713431,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1/pool/repo/standing-orders-work-34b8d65e"
+            "pid": 87981,
+            "at": 1789177221342,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1/pool/repo/standing-orders-work-216d63fe"
           },
           {
             "name": "check-end",
-            "pid": 48655,
-            "at": 1789174802393,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1/pool/repo/standing-orders-work-34b8d65e"
+            "pid": 87981,
+            "at": 1789177310463,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1/pool/repo/standing-orders-work-216d63fe"
           },
           {
             "name": "provider-start",
-            "pid": 51822,
-            "at": 1789174803105,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1/pool/repo/standing-orders-work-34b8d65e",
+            "pid": 90121,
+            "at": 1789177311171,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1/pool/repo/standing-orders-work-216d63fe",
             "phase": "build",
-            "session": "45799d09-0851-4b14-8d7e-169f74aad994"
+            "session": "c6c9123b-fdb2-4a40-9dab-d3aea8b7e14d"
           },
           {
             "name": "provider-end",
-            "pid": 51822,
-            "at": 1789174803117,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1/pool/repo/standing-orders-work-34b8d65e",
+            "pid": 90121,
+            "at": 1789177311184,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1/pool/repo/standing-orders-work-216d63fe",
             "phase": "build"
           },
           {
             "name": "check-start",
-            "pid": 51868,
-            "at": 1789174803378,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1/pool/repo/standing-orders-work-34b8d65e"
+            "pid": 90166,
+            "at": 1789177311446,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1/pool/repo/standing-orders-work-216d63fe"
           },
           {
             "name": "check-end",
-            "pid": 51868,
-            "at": 1789174803378,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1/pool/repo/standing-orders-work-34b8d65e"
+            "pid": 90166,
+            "at": 1789177311446,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1/pool/repo/standing-orders-work-216d63fe"
           }
         ],
         "openRuns": [],
-        "finalHead": "9336bfd266784bca74d95f26c12a44a0b626cab2"
+        "finalHead": "be171e9cca177e8dba3c6e0088b0e53a0f86f0db"
       },
-      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/verification-1",
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/verification-1",
       "failures": []
     },
     {
@@ -417,9 +417,9 @@
       "checks": {
         "checkpoint": {
           "stage": "setup",
-          "pid": 48588,
-          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1/pool/repo/standing-orders-work-4964cc06",
-          "at": 1789174712984
+          "pid": 87910,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1/pool/repo/standing-orders-work-2da99bc8",
+          "at": 1789177221010
         },
         "preCrashRuns": [
           {
@@ -478,7 +478,7 @@
               "outcome": "built",
               "reason": null,
               "parent": 1,
-              "head": "00fbf6f23c46d825b96c275594b50896ccbffb0f"
+              "head": "2a28e02df4ee1d1c86c2b22eb2d9f6dc5f72c7da"
             },
             {
               "id": 1,
@@ -493,66 +493,66 @@
         "events": [
           {
             "name": "setup-start",
-            "pid": 48588,
-            "at": 1789174712984,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1/pool/repo/standing-orders-work-4964cc06"
+            "pid": 87910,
+            "at": 1789177221009,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1/pool/repo/standing-orders-work-2da99bc8"
           },
           {
             "name": "setup-end",
-            "pid": 48588,
-            "at": 1789174802589,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1/pool/repo/standing-orders-work-4964cc06"
+            "pid": 87910,
+            "at": 1789177310622,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1/pool/repo/standing-orders-work-2da99bc8"
           },
           {
             "name": "setup-start",
-            "pid": 51846,
-            "at": 1789174803246,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1/pool/repo/standing-orders-work-4964cc06"
+            "pid": 90128,
+            "at": 1789177311241,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1/pool/repo/standing-orders-work-2da99bc8"
           },
           {
             "name": "setup-end",
-            "pid": 51846,
-            "at": 1789174803246,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1/pool/repo/standing-orders-work-4964cc06"
+            "pid": 90128,
+            "at": 1789177311241,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1/pool/repo/standing-orders-work-2da99bc8"
           },
           {
             "name": "provider-start",
-            "pid": 51891,
-            "at": 1789174803487,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1/pool/repo/standing-orders-work-4964cc06",
+            "pid": 90169,
+            "at": 1789177311470,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1/pool/repo/standing-orders-work-2da99bc8",
             "phase": "build",
-            "session": "ad39b83a-bf9a-4588-8479-d840e3b0a8ff"
+            "session": "50306f1b-6faa-4ac0-8518-1d405508ce35"
           },
           {
             "name": "provider-end",
-            "pid": 51891,
-            "at": 1789174803499,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1/pool/repo/standing-orders-work-4964cc06",
+            "pid": 90169,
+            "at": 1789177311482,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1/pool/repo/standing-orders-work-2da99bc8",
             "phase": "build"
           },
           {
             "name": "commit",
-            "pid": 51934,
-            "at": 1789174803771,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1/pool/repo/standing-orders-work-4964cc06"
+            "pid": 90204,
+            "at": 1789177311751,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1/pool/repo/standing-orders-work-2da99bc8"
           },
           {
             "name": "check-start",
-            "pid": 51957,
-            "at": 1789174804273,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1/pool/repo/standing-orders-work-4964cc06"
+            "pid": 90234,
+            "at": 1789177312284,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1/pool/repo/standing-orders-work-2da99bc8"
           },
           {
             "name": "check-end",
-            "pid": 51957,
-            "at": 1789174804273,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1/pool/repo/standing-orders-work-4964cc06"
+            "pid": 90234,
+            "at": 1789177312285,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1/pool/repo/standing-orders-work-2da99bc8"
           }
         ],
         "openRuns": [],
-        "finalHead": "00fbf6f23c46d825b96c275594b50896ccbffb0f"
+        "finalHead": "2a28e02df4ee1d1c86c2b22eb2d9f6dc5f72c7da"
       },
-      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/setup-1",
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/setup-1",
       "failures": []
     },
     {
@@ -562,9 +562,9 @@
       "checks": {
         "checkpoint": {
           "stage": "after-commit",
-          "pid": 48616,
-          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/after-commit-1/pool/repo/standing-orders-work-be750832",
-          "at": 1789174712926
+          "pid": 87972,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/after-commit-1/pool/repo/standing-orders-work-ebd4a065",
+          "at": 1789177221097
         },
         "preCrashRuns": [
           {
@@ -574,7 +574,7 @@
             "outcome": null
           }
         ],
-        "committedBeforeCrash": "aa9ee2dbec2a4d4914adf85897e20b3ba16fbc24",
+        "committedBeforeCrash": "a6538f30e15cab907954d42a5a679651257f497d",
         "workerKilled": true,
         "childSurvived": true,
         "beforeExpiry": "refused",
@@ -630,7 +630,7 @@
               "outcome": "no-change",
               "reason": "handoff",
               "parent": 1,
-              "head": "aa9ee2dbec2a4d4914adf85897e20b3ba16fbc24"
+              "head": "a6538f30e15cab907954d42a5a679651257f497d"
             },
             {
               "id": 1,
@@ -645,57 +645,57 @@
         "events": [
           {
             "name": "provider-start",
-            "pid": 48572,
-            "at": 1789174712659,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/after-commit-1/pool/repo/standing-orders-work-be750832",
+            "pid": 87932,
+            "at": 1789177220817,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/after-commit-1/pool/repo/standing-orders-work-ebd4a065",
             "phase": "build",
-            "session": "a36046d8-9904-4db5-bc43-d685887511c3"
+            "session": "b7f3e98c-b86b-4da4-9ab5-2a99d66693c2"
           },
           {
             "name": "provider-end",
-            "pid": 48572,
-            "at": 1789174712672,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/after-commit-1/pool/repo/standing-orders-work-be750832",
+            "pid": 87932,
+            "at": 1789177220829,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/after-commit-1/pool/repo/standing-orders-work-ebd4a065",
             "phase": "build"
           },
           {
             "name": "commit",
-            "pid": 48616,
-            "at": 1789174712926,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/after-commit-1/pool/repo/standing-orders-work-be750832"
+            "pid": 87972,
+            "at": 1789177221097,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/after-commit-1/pool/repo/standing-orders-work-ebd4a065"
           },
           {
             "name": "provider-start",
-            "pid": 51672,
-            "at": 1789174802212,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/after-commit-1/pool/repo/standing-orders-work-be750832",
+            "pid": 89976,
+            "at": 1789177310175,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/after-commit-1/pool/repo/standing-orders-work-ebd4a065",
             "phase": "build",
-            "session": "a23264b7-933c-46fb-be5a-b6ccca80cf17"
+            "session": "02854bf5-7349-4c06-98a4-a71e93257b4a"
           },
           {
             "name": "provider-end",
-            "pid": 51672,
-            "at": 1789174802227,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/after-commit-1/pool/repo/standing-orders-work-be750832",
+            "pid": 89976,
+            "at": 1789177310186,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/after-commit-1/pool/repo/standing-orders-work-ebd4a065",
             "phase": "build"
           },
           {
             "name": "check-start",
-            "pid": 51714,
-            "at": 1789174802777,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/after-commit-1/pool/repo/standing-orders-work-be750832"
+            "pid": 90004,
+            "at": 1789177310708,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/after-commit-1/pool/repo/standing-orders-work-ebd4a065"
           },
           {
             "name": "check-end",
-            "pid": 51714,
-            "at": 1789174802777,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/after-commit-1/pool/repo/standing-orders-work-be750832"
+            "pid": 90004,
+            "at": 1789177310708,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/after-commit-1/pool/repo/standing-orders-work-ebd4a065"
           }
         ],
         "openRuns": [],
-        "finalHead": "aa9ee2dbec2a4d4914adf85897e20b3ba16fbc24"
+        "finalHead": "a6538f30e15cab907954d42a5a679651257f497d"
       },
-      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/after-commit-1",
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/after-commit-1",
       "failures": []
     },
     {
@@ -705,9 +705,9 @@
       "checks": {
         "checkpoint": {
           "stage": "review",
-          "pid": 48699,
-          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1/standing-orders-review-2DP2PW",
-          "at": 1789174714200
+          "pid": 88029,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1/standing-orders-review-XOwAhT",
+          "at": 1789177222233
         },
         "preCrashRuns": [
           {
@@ -723,7 +723,7 @@
             "outcome": null
           }
         ],
-        "committedBeforeCrash": "9336bfd266784bca74d95f26c12a44a0b626cab2",
+        "committedBeforeCrash": "a6538f30e15cab907954d42a5a679651257f497d",
         "workerKilled": true,
         "childSurvived": true,
         "beforeExpiry": "refused",
@@ -748,7 +748,8 @@
               "retriesRemaining": 2,
               "latestRun": 2,
               "latestReason": "interrupted",
-              "interrupted": true
+              "interrupted": true,
+              "queued": null
             }
           },
           "runs": [
@@ -786,7 +787,8 @@
               "retriesRemaining": 2,
               "latestRun": 2,
               "latestReason": "interrupted",
-              "interrupted": true
+              "interrupted": true,
+              "queued": null
             }
           },
           "review": {
@@ -800,8 +802,8 @@
                 "runner": "worker",
                 "provider": "claude",
                 "model": "fixture",
-                "startedAt": "2026-09-12T00:58:34.162Z",
-                "finishedAt": "2026-09-12T01:00:04.285Z",
+                "startedAt": "2026-09-12T01:40:22.196Z",
+                "finishedAt": "2026-09-12T01:41:52.325Z",
                 "requestId": 1
               }
             ],
@@ -815,8 +817,8 @@
               "runner": "worker",
               "provider": "claude",
               "model": "fixture",
-              "startedAt": "2026-09-12T00:58:34.162Z",
-              "finishedAt": "2026-09-12T01:00:04.285Z",
+              "startedAt": "2026-09-12T01:40:22.196Z",
+              "finishedAt": "2026-09-12T01:41:52.325Z",
               "requestId": 1
             },
             "succeeded": null,
@@ -825,6 +827,72 @@
             "retriesRemaining": 2,
             "nextAttempt": 2
           }
+        },
+        "automaticReplay": {
+          "refusal": {
+            "ok": false,
+            "reason": "explicit-only",
+            "detail": "run #1's review attempt 1 (reviewer run #2) ended interrupted — an automatic review ask is one-shot, and a retry takes a fresh operator action: `task review 1`"
+          },
+          "review": {
+            "cap": 3,
+            "attempts": [
+              {
+                "runId": 2,
+                "attempt": 1,
+                "outcome": "failed",
+                "reason": "interrupted",
+                "runner": "worker",
+                "provider": "claude",
+                "model": "fixture",
+                "startedAt": "2026-09-12T01:40:22.196Z",
+                "finishedAt": "2026-09-12T01:41:52.325Z",
+                "requestId": 1
+              }
+            ],
+            "openRequest": null,
+            "live": null,
+            "latest": {
+              "runId": 2,
+              "attempt": 1,
+              "outcome": "failed",
+              "reason": "interrupted",
+              "runner": "worker",
+              "provider": "claude",
+              "model": "fixture",
+              "startedAt": "2026-09-12T01:40:22.196Z",
+              "finishedAt": "2026-09-12T01:41:52.325Z",
+              "requestId": 1
+            },
+            "succeeded": null,
+            "state": "retryable",
+            "retriesUsed": 0,
+            "retriesRemaining": 2,
+            "nextAttempt": 2
+          },
+          "dispatch": {
+            "condition": "waiting",
+            "code": "review-failed",
+            "summary": "Review interrupted — retry available",
+            "detail": "Review attempt 1 of 3 was interrupted (interrupted). The build is preserved; ask for an explicit retry — 2 explicit retries left.",
+            "action": "retry-review",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": {
+              "sourceRun": 1,
+              "state": "retryable",
+              "attempt": 1,
+              "cap": 3,
+              "retriesUsed": 0,
+              "retriesRemaining": 2,
+              "latestRun": 2,
+              "latestReason": "interrupted",
+              "interrupted": true,
+              "queued": null
+            }
+          },
+          "tick": "empty"
         },
         "explicitRetry": {
           "requested": {
@@ -847,8 +915,8 @@
                   "runner": "worker",
                   "provider": "claude",
                   "model": "fixture",
-                  "startedAt": "2026-09-12T00:58:34.162Z",
-                  "finishedAt": "2026-09-12T01:00:04.285Z",
+                  "startedAt": "2026-09-12T01:40:22.196Z",
+                  "finishedAt": "2026-09-12T01:41:52.325Z",
                   "requestId": 1
                 }
               ],
@@ -856,7 +924,8 @@
                 "id": 2,
                 "requestedBy": "fixture",
                 "basis": "human",
-                "requestedAt": "2026-09-12T01:00:05.656Z"
+                "origin": "operator",
+                "requestedAt": "2026-09-12T01:41:54.273Z"
               },
               "live": null,
               "latest": {
@@ -867,8 +936,8 @@
                 "runner": "worker",
                 "provider": "claude",
                 "model": "fixture",
-                "startedAt": "2026-09-12T00:58:34.162Z",
-                "finishedAt": "2026-09-12T01:00:04.285Z",
+                "startedAt": "2026-09-12T01:40:22.196Z",
+                "finishedAt": "2026-09-12T01:41:52.325Z",
                 "requestId": 1
               },
               "succeeded": null,
@@ -897,8 +966,8 @@
                 "runner": "worker",
                 "provider": "claude",
                 "model": "fixture",
-                "startedAt": "2026-09-12T00:58:34.162Z",
-                "finishedAt": "2026-09-12T01:00:04.285Z",
+                "startedAt": "2026-09-12T01:40:22.196Z",
+                "finishedAt": "2026-09-12T01:41:52.325Z",
                 "requestId": 1
               },
               {
@@ -909,8 +978,8 @@
                 "runner": "worker",
                 "provider": "claude",
                 "model": "fixture",
-                "startedAt": "2026-09-12T01:00:05.921Z",
-                "finishedAt": "2026-09-12T01:00:05.967Z",
+                "startedAt": "2026-09-12T01:41:54.531Z",
+                "finishedAt": "2026-09-12T01:41:54.573Z",
                 "requestId": 2
               }
             ],
@@ -924,8 +993,8 @@
               "runner": "worker",
               "provider": "claude",
               "model": "fixture",
-              "startedAt": "2026-09-12T01:00:05.921Z",
-              "finishedAt": "2026-09-12T01:00:05.967Z",
+              "startedAt": "2026-09-12T01:41:54.531Z",
+              "finishedAt": "2026-09-12T01:41:54.573Z",
               "requestId": 2
             },
             "succeeded": {
@@ -936,8 +1005,8 @@
               "runner": "worker",
               "provider": "claude",
               "model": "fixture",
-              "startedAt": "2026-09-12T01:00:05.921Z",
-              "finishedAt": "2026-09-12T01:00:05.967Z",
+              "startedAt": "2026-09-12T01:41:54.531Z",
+              "finishedAt": "2026-09-12T01:41:54.573Z",
               "requestId": 2
             },
             "state": "succeeded",
@@ -963,7 +1032,8 @@
               "retriesRemaining": 0,
               "latestRun": 3,
               "latestReason": "reviewed — 0 comment(s), 2 judgement(s)",
-              "interrupted": false
+              "interrupted": false,
+              "queued": null
             }
           },
           "closed": "already-reviewed",
@@ -992,7 +1062,8 @@
               "retriesRemaining": 0,
               "latestRun": 3,
               "latestReason": "reviewed — 0 comment(s), 2 judgement(s)",
-              "interrupted": false
+              "interrupted": false,
+              "queued": null
             }
           },
           "runs": [
@@ -1018,84 +1089,84 @@
               "outcome": "built",
               "reason": null,
               "parent": null,
-              "head": "9336bfd266784bca74d95f26c12a44a0b626cab2"
+              "head": "a6538f30e15cab907954d42a5a679651257f497d"
             }
           ]
         },
         "events": [
           {
             "name": "provider-start",
-            "pid": 48633,
-            "at": 1789174713020,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1/pool/repo/standing-orders-work-eabb14f8",
+            "pid": 87967,
+            "at": 1789177221045,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1/pool/repo/standing-orders-work-08896358",
             "phase": "build",
-            "session": "4b400378-2cc9-4148-b9b7-7de54758e3d1"
+            "session": "de42435d-9b05-46af-86cb-c6f6ffc57ef7"
           },
           {
             "name": "provider-end",
-            "pid": 48633,
-            "at": 1789174713033,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1/pool/repo/standing-orders-work-eabb14f8",
+            "pid": 87967,
+            "at": 1789177221057,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1/pool/repo/standing-orders-work-08896358",
             "phase": "build"
           },
           {
             "name": "commit",
-            "pid": 48659,
-            "at": 1789174713298,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1/pool/repo/standing-orders-work-eabb14f8"
+            "pid": 87993,
+            "at": 1789177221321,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1/pool/repo/standing-orders-work-08896358"
           },
           {
             "name": "check-start",
-            "pid": 48675,
-            "at": 1789174713659,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1/pool/repo/standing-orders-work-eabb14f8"
+            "pid": 88005,
+            "at": 1789177221712,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1/pool/repo/standing-orders-work-08896358"
           },
           {
             "name": "check-end",
-            "pid": 48675,
-            "at": 1789174713659,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1/pool/repo/standing-orders-work-eabb14f8"
+            "pid": 88005,
+            "at": 1789177221712,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1/pool/repo/standing-orders-work-08896358"
           },
           {
             "name": "provider-start",
-            "pid": 48699,
-            "at": 1789174714200,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1/standing-orders-review-2DP2PW",
+            "pid": 88029,
+            "at": 1789177222232,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1/standing-orders-review-XOwAhT",
             "phase": "review",
-            "session": "3d9a6b00-ddfb-4026-90a6-39d44e2b1a17"
+            "session": "b3ed5489-7d82-4b28-ab10-b6d4810c8c61"
           },
           {
             "name": "provider-end",
-            "pid": 48699,
-            "at": 1789174805113,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1/standing-orders-review-2DP2PW",
+            "pid": 88029,
+            "at": 1789177313183,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1/standing-orders-review-XOwAhT",
             "phase": "review"
           },
           {
             "name": "provider-start",
-            "pid": 52165,
-            "at": 1789174805961,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1/standing-orders-review-wEBVTI",
+            "pid": 90414,
+            "at": 1789177314568,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1/standing-orders-review-2xMfDj",
             "phase": "review",
-            "session": "b6d0cdd6-1118-442c-8ffe-a2d26c54bca0"
+            "session": "08e2210a-a2b3-45c8-94d6-39be5aaa3730"
           },
           {
             "name": "provider-end",
-            "pid": 52165,
-            "at": 1789174805962,
-            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1/standing-orders-review-wEBVTI",
+            "pid": 90414,
+            "at": 1789177314568,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1/standing-orders-review-2xMfDj",
             "phase": "review"
           }
         ],
         "openRuns": [],
-        "finalHead": "9336bfd266784bca74d95f26c12a44a0b626cab2"
+        "finalHead": "a6538f30e15cab907954d42a5a679651257f497d"
       },
-      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5/review-1",
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25/review-1",
       "failures": []
     }
   ],
-  "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-TQPcV5",
-  "scope": "Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
+  "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-ULMv25",
+  "scope": "Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage replays the automatic review producer over the interrupted attempt under a live reviewAuto mode (it queues nothing: explicit-only retries), then continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
   "exclusions": [
     "real-provider recovery",
     "real-provider review retry",

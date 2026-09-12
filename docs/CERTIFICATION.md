@@ -77,7 +77,9 @@ the recovered attempt reads as attempt 1 of 3 needing attention, the retry is
 admitted as attempt 2 under the same sealed route with every sealed input
 re-verified, the fixture review lands, the source build and its commit are
 unchanged, a further ask refuses (`already-reviewed`), and a further tick
-dispatches nothing. Automatic review retry does not exist and is not certified;
+dispatches nothing; before the explicit retry, the automatic producer is
+replayed over the interrupted attempt and proven to queue nothing (explicit-only
+retries). Automatic review retry does not exist and is not certified;
 the explicit retry is certified with fixture providers only, never a real
 model. The pilot used fixed scopes approved before dispatch, with the
 exclusions described below. The original main checkout and live worker were

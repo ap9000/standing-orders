@@ -1,9 +1,34 @@
-import { chromium } from "/Users/alekseypelletier/.npm/_npx/e41f203b7505f1fb/node_modules/playwright/index.mjs";
+/** Capture the review-retry evidence screenshots against the seeded
+ * fixture console: `node evidence/bounded-review-retries/capture.mjs
+ * http://127.0.0.1:4996 evidence/bounded-review-retries retry-capture-pass`.
+ * Playwright is resolved from PLAYWRIGHT_MODULE, then the `playwright`
+ * package if installed, then any npx cache under ~/.npm/_npx — never a
+ * path baked in from one machine. */
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 const base = process.argv[2];
 const out = process.argv[3];
 const password = process.argv[4];
+async function loadChromium() {
+  const npxCache = join(homedir(), ".npm", "_npx");
+  const cached = existsSync(npxCache)
+    ? readdirSync(npxCache).map(entry => join(npxCache, entry, "node_modules", "playwright", "index.mjs")).filter(candidate => existsSync(candidate)).map(candidate => pathToFileURL(candidate).href)
+    : [];
+  const candidates = [process.env.PLAYWRIGHT_MODULE && pathToFileURL(process.env.PLAYWRIGHT_MODULE).href, "playwright", ...cached].filter(Boolean);
+  const problems = [];
+  for (const candidate of candidates) {
+    try {
+      return { chromium: (await import(candidate)).chromium, from: candidate };
+    } catch (error) {
+      problems.push(`${candidate}: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+    }
+  }
+  throw new Error(`playwright not found — set PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs or install it (npx playwright install chromium)\n${problems.join("\n")}`);
+}
+const { chromium, from: playwrightFrom } = await loadChromium();
 const browser = await chromium.launch();
 const report = [];
 const captures = [
@@ -40,6 +65,9 @@ for (const capture of captures) {
       remaining: panel?.getAttribute("data-review-remaining") ?? null,
       button: button === null || button === undefined ? null : { text: button.textContent, disabled: button.disabled, width: Math.round(buttonRect.width), height: Math.round(buttonRect.height), right: Math.round(buttonRect.right) },
       form: panel?.querySelector("form.review-retry-form")?.getAttribute("action") ?? null,
+      // The sealed patch must resolve from the fixture's evidence root —
+      // the page must not say "stored but unverifiable" anywhere.
+      patchUnverifiable: document.body.innerText.includes("stored but unverifiable"),
     };
   });
   await page.waitForTimeout(400);
@@ -57,5 +85,24 @@ for (const capture of captures) {
   await context.close();
 }
 await browser.close();
-writeFileSync(`${out}/manifest.json`, JSON.stringify({ evidence: "bounded-review-retries", capturedAt: new Date().toISOString(), plane: { kind: "isolated fixture database seeded by /tmp/so-retry-capture/seed.ts (never the live control database)", console: "standing-orders serve --db /tmp/so-retry-capture/orders.db --port 4996 --repo /tmp/so-retry-capture/repo" }, captures: report }, null, 1) + "\n");
+for (const entry of report) {
+  if (entry.state !== entry.expectedState) throw new Error(`${entry.file}: expected review state ${entry.expectedState}, saw ${entry.state}`);
+  if (entry.scrollWidth > entry.clientWidth) throw new Error(`${entry.file}: horizontal overflow (${entry.scrollWidth} > ${entry.clientWidth})`);
+  if (entry.patchUnverifiable) throw new Error(`${entry.file}: the sealed patch did not resolve — serve the fixture with --db so its evidence root is the directory beside it`);
+  if (entry.button === null) throw new Error(`${entry.file}: no retry control on the page`);
+}
+const fixtureBase = process.env.SO_RETRY_CAPTURE_BASE ?? "/tmp/so-retry-capture";
+writeFileSync(`${out}/manifest.json`, JSON.stringify({
+  evidence: "bounded-review-retries",
+  capturedAt: new Date().toISOString(),
+  plane: {
+    kind: "isolated fixture database seeded by evidence/bounded-review-retries/seed.ts (never the live control database)",
+    seed: `node --import tsx evidence/bounded-review-retries/seed.ts ${fixtureBase}`,
+    evidenceRoot: `${fixtureBase}/evidence (the console's evidence root is the directory beside --db)`,
+    console: `standing-orders serve --db ${fixtureBase}/orders.db --port 4996 --repo ${fixtureBase}/repo`,
+    capture: `node evidence/bounded-review-retries/capture.mjs ${base} evidence/bounded-review-retries <password>`,
+    playwright: playwrightFrom.replace(homedir(), "~"),
+  },
+  captures: report,
+}, null, 1) + "\n");
 console.log(JSON.stringify(report, null, 1));

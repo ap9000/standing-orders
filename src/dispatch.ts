@@ -9,7 +9,7 @@
 
 import { isAlive } from "./runner.js";
 import { approvalOf, type ExecutionProfile } from "./scope.js";
-import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRetryState, type Store, type TaskState } from "./store.js";
+import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRequestOrigin, type ReviewRetryState, type Store, type TaskState } from "./store.js";
 
 export const DEFAULT_MAX_OPEN_DECISIONS = 5;
 
@@ -100,6 +100,10 @@ export type ReviewDispatchView = {
   latestRun: number | null;
   latestReason: string | null;
   interrupted: boolean;
+  /** The open ask, when one is queued: who asked and how it was produced
+   * (explicit-only retries: a retry is always an operator's ask; an
+   * automatic producer queues attempt 1 only). */
+  queued: { requestedBy: string; origin: ReviewRequestOrigin } | null;
 };
 
 /**
@@ -247,6 +251,7 @@ function reviewViewOf(sourceRun: number, retry: ReviewRetryState): ReviewDispatc
     latestRun: retry.latest?.runId ?? null,
     latestReason: retry.latest?.reason ?? null,
     interrupted: retry.latest !== null && (retry.latest.outcome === "interrupted" || retry.latest.reason === "interrupted"),
+    queued: retry.openRequest === null ? null : { requestedBy: retry.openRequest.requestedBy, origin: retry.openRequest.origin },
   };
 }
 
@@ -286,7 +291,7 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
       if (retry.state === "queued") {
         return review.attempt === 1
           ? answer("review-pending", "waiting", "Waiting for review", "The build finished and its requested independent review is waiting for a worker.", { action: "open-result", review })
-          : answer("review-pending", "waiting", `Review retry queued (${ordinal})`, `The explicit review retry is waiting for a worker; ${retriesLeft(review.retriesRemaining)} would remain after it.`, { action: "open-result", review });
+          : answer("review-pending", "waiting", `Review retry queued (${ordinal})`, `The explicit review retry${review.queued === null ? "" : `, asked by ${review.queued.requestedBy},`} is waiting for a worker; ${retriesLeft(review.retriesRemaining)} would remain after it.`, { action: "open-result", review });
       }
       if (retry.state === "retryable") {
         const what = review.interrupted ? "was interrupted" : "failed";

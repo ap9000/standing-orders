@@ -779,7 +779,10 @@ Everything below ships in 0.4.0:
   every sealed input re-verified; the failed attempts stay on record;
   a review that succeeded, or one still queued or running, is never
   retried; nothing retries by itself, and the source build is never
-  rerun.
+  rerun. A retry is an operator's act only: the mode's and the Strict /
+  release scope's automatic review asks are one shot per build, and a
+  replayed one is refused at request and again at admission, before any
+  money.
 - **People** — invite someone with a single-use link that pins their
   powers at mint (watch everything, or approve and act), see who is
   doing what, and remove access with one ceremony that actually severs:

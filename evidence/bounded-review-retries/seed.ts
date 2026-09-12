@@ -1,4 +1,8 @@
-/** Seed an isolated fixture database with the three review-retry states for screenshots. */
+/** Seed an isolated fixture database with the review-retry states for
+ * screenshots: `node --import tsx evidence/bounded-review-retries/seed.ts
+ * [base-dir]` (default /tmp/so-retry-capture), never the live control
+ * database. Serve it with `standing-orders serve --db <base>/orders.db
+ * --repo <realpath of base>/repo --port 4996`. */
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -7,12 +11,18 @@ import { storeEvidence } from "../../src/evidence.js";
 import { register } from "../../src/runner.js";
 import { addApprover, approve, propose } from "../../src/scope.js";
 
-const base = "/tmp/so-retry-capture";
+// The console resolves a --db file's evidence root as the `evidence`
+// directory BESIDE the database (operate.ts: `join(dirname(file),
+// "evidence")`), so the fixture's sealed artifacts are written exactly there
+// and the task pages verify the patch instead of reporting it unresolvable.
+const base = process.argv[2] ?? "/tmp/so-retry-capture";
 const repo = join(base, "repo");
-const evidenceRoot = join(base, "home", ".standing-orders", "evidence");
+const evidenceRoot = join(base, "evidence");
 rmSync(join(base, "orders.db"), { force: true });
+rmSync(join(base, "orders.db-wal"), { force: true });
+rmSync(join(base, "orders.db-shm"), { force: true });
 rmSync(repo, { recursive: true, force: true });
-rmSync(join(base, "home"), { recursive: true, force: true });
+rmSync(evidenceRoot, { recursive: true, force: true });
 mkdirSync(repo, { recursive: true });
 mkdirSync(evidenceRoot, { recursive: true });
 execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });

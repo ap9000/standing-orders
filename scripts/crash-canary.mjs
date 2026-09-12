@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /** Kill actual CLI workers at real process barriers; no clock injection or model calls.
  * The review stage additionally proves the bounded explicit retry (v50): the
- * interrupted review is recovered to an attention state, retried ONCE through
- * the public `task review` door, completes on attempt 2 of 3, leaves the one
- * source build and commit untouched, and admits no further review dispatch. */
+ * interrupted review is recovered to an attention state, the automatic
+ * review producer replayed over it queues nothing (explicit-only retries),
+ * the review is retried ONCE through the public `task review` door, completes
+ * on attempt 2 of 3, leaves the one source build and commit untouched, and
+ * admits no further review dispatch. */
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -181,6 +183,38 @@ async function one(stage, round) {
       assert.equal(after.review.state, "retryable");
       assert.deepEqual(after.review.attempts.map(one => [one.attempt, one.outcome, one.reason]), [[1, "failed", "interrupted"]]);
       const builder = after.runs.find(r => r.role === "builder");
+      // EXPLICIT ONLY: with a live reviewAuto mode signed through the public
+      // CLI, the build disposition's automatic producer is replayed over the
+      // interrupted attempt (the exact call a re-disposed build makes) and
+      // must queue nothing — the direct door refuses `explicit-only` in
+      // words, the projection stays retryable with nothing queued, and a
+      // tick dispatches nothing. The mode is revoked again before the
+      // operator's retry so the retry runs under no automatic authority.
+      await cli(["mode", "set", "--repo", repo, "--name", "standard", "--days", "1", ...auth]);
+      const { openStore } = await import(join(root, "dist/store.js"));
+      const { maybeRequestAutoReview } = await import(join(root, "dist/dispose.js"));
+      const replayStore = openStore(db);
+      let replayRefusal;
+      try {
+        const mode = replayStore.activeMode(repo, new Date());
+        assert(mode !== null, "the standard mode must be active for the replay");
+        maybeRequestAutoReview(replayStore, repo, builder.id, true, false, new Date());
+        maybeRequestAutoReview(replayStore, repo, builder.id, true, false, new Date());
+        replayRefusal = replayStore.requestReview(builder.id, `mode ${mode.name}`, new Date(), { kind: "mode", digest: mode.digest });
+      } finally { replayStore.close(); }
+      assert.equal(replayRefusal.ok, false);
+      assert.equal(replayRefusal.reason, "explicit-only");
+      assert.match(replayRefusal.detail, /an automatic review ask is one-shot/);
+      const replayed = await cli(["task", "show", "work"]);
+      assert.equal(replayed.review.state, "retryable");
+      assert.equal(replayed.review.openRequest, null, "the automatic producer must queue nothing after a failed attempt");
+      assert.equal(replayed.dispatch.code, "review-failed");
+      const replayTick = await cli(["tick", "--runner", "worker", "--token", registered.token, "--repo", repo, "--pool", pool], [3]);
+      assert.equal(replayTick.reason, "empty");
+      assert.deepEqual(rows("SELECT id FROM run ORDER BY id"), runsBeforeDuplicate);
+      assert.deepEqual(rows("SELECT id, origin, consumed_reason FROM review_request ORDER BY id").map(one => [one.origin, one.consumed_reason]), [["operator", "interrupted"]]);
+      await cli(["mode", "revoke", "--repo", repo, ...auth]);
+      record.checks.automaticReplay = { refusal: replayRefusal, review: replayed.review, dispatch: replayed.dispatch, tick: replayTick.reason };
       const retried = await cli(["task", "review", String(builder.id), ...auth]);
       assert.equal(retried.attempt, 2);
       assert.equal(retried.retriesRemaining, 1);
@@ -205,7 +239,7 @@ async function one(stage, round) {
       const noMore = await cli(["tick", "--runner", "worker", "--token", registered.token, "--repo", repo, "--pool", pool], [3]);
       assert.equal(noMore.reason, "empty");
       assert.deepEqual(rows("SELECT id FROM run ORDER BY id"), runsAfterRetry);
-      assert.deepEqual(rows("SELECT id, consumed_reason, reviewer_run FROM review_request ORDER BY id").map(one => [one.consumed_reason, one.reviewer_run !== null]), [["interrupted", true], ["reviewed", true]]);
+      assert.deepEqual(rows("SELECT id, consumed_reason, reviewer_run, origin FROM review_request ORDER BY id").map(one => [one.consumed_reason, one.reviewer_run !== null, one.origin]), [["interrupted", true, "operator"], ["reviewed", true, "operator"]]);
       record.checks.explicitRetry = { requested: retried, tick: retryTick.dispatched, review: after.review, dispatch: after.dispatch, closed: closed.reason, duplicateAfterRetry: noMore.reason,
         providerStarts: events().filter(e => e.name === "provider-start" && e.phase === "review").length };
       assert.equal(record.checks.explicitRetry.providerStarts, 2, "one interrupted reviewer plus one retried reviewer, never more");
@@ -245,7 +279,7 @@ await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, 
 }));
 const certificate = { version:1, passed: cases.every(c=>c.passed) && hash()===runtime, sourceCommit:revision, runtimeSha256:runtime, runtimeUnchanged:hash()===runtime,
   platform:process.platform, node:process.versions.node, durationSeconds:(Date.now()-started)/1000, cases, retainedAt:base,
-  scope:"Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
+  scope:"Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage replays the automatic review producer over the interrupted attempt under a live reviewAuto mode (it queues nothing: explicit-only retries), then continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
   exclusions:["real-provider recovery", "real-provider review retry", "Windows", "reboot", "detached descendants", "power-loss filesystem durability"] };
 mkdirSync(dirname(output), { recursive:true }); writeFileSync(output, JSON.stringify(certificate,null,2)+"\n");
 console.log(`Certificate: ${output}`);

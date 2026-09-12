@@ -130,6 +130,23 @@ function windBackToV49(file: string, version: number): void {
   raw.close();
 }
 
+/** Wind a v50 file back to build 1513's shape: v50 in every respect but
+ * the `origin` column — the file a replayed Strict producer could have
+ * written a human-basis retry ask into. */
+function windBackToPreOrigin(file: string): void {
+  const raw = new DatabaseSync(file);
+  raw.exec("PRAGMA foreign_keys = OFF");
+  raw.exec("BEGIN");
+  raw.exec(V49_REVIEW_REQUEST_DDL.replace("CREATE TABLE review_request", "CREATE TABLE review_request_1513").replace("consumed_reason TEXT", "consumed_reason TEXT,\n  reviewer_run    INTEGER REFERENCES run(id)"));
+  raw.exec("INSERT INTO review_request_1513 (id, run, requested_by, basis, mode_digest, route_digest, requested_at, consumed_at, consumed_reason, reviewer_run) SELECT id, run, requested_by, basis, mode_digest, route_digest, requested_at, consumed_at, consumed_reason, reviewer_run FROM review_request");
+  raw.exec("DROP TABLE review_request");
+  raw.exec("ALTER TABLE review_request_1513 RENAME TO review_request");
+  raw.exec("CREATE UNIQUE INDEX one_open_review_request ON review_request (run) WHERE consumed_at IS NULL");
+  raw.exec("CREATE UNIQUE INDEX one_root_review_per_request ON review_request (reviewer_run) WHERE reviewer_run IS NOT NULL");
+  raw.exec("COMMIT");
+  raw.close();
+}
+
 const rows = (file: string, sql: string): Record<string, unknown>[] => {
   const raw = new DatabaseSync(file, { readOnly: true });
   try {
@@ -170,7 +187,11 @@ describe("schema v50: bounded review retries upgrade a v49 database without rewr
         requests: rows(file, "SELECT * FROM review_request ORDER BY id"),
       };
       expect(strip(after.run, "review_attempt")).toEqual(before.run);
-      expect(strip(after.requests, "reviewer_run")).toEqual(before.requests);
+      expect(strip(after.requests, "reviewer_run", "origin")).toEqual(before.requests);
+      // Every v49 ask reads as an operator's — the human-basis rows the
+      // fixture wrote — and none was spent by the origin pass.
+      for (const row of after.requests) expect(row["origin"]).toBe("operator");
+      expect(after.requests.map(row => row["consumed_reason"])).toEqual(before.requests.map(row => row["consumed_reason"]));
       expect(rows(file, "SELECT * FROM diff_comment ORDER BY id")).toEqual(before.comments);
       expect(rows(file, "SELECT * FROM criterion_review ORDER BY id")).toEqual(before.judgements);
       expect(rows(file, "SELECT * FROM proof_verdict ORDER BY run")).toEqual(before.verdicts);
@@ -206,13 +227,59 @@ describe("schema v50: bounded review retries upgrade a v49 database without rewr
 
       // Reopen: nothing moves.
       const settled = rows(file, "SELECT id, review_attempt FROM run ORDER BY id");
-      const settledRequests = rows(file, "SELECT id, reviewer_run, consumed_reason FROM review_request ORDER BY id");
+      const settledRequests = rows(file, "SELECT id, reviewer_run, origin, consumed_reason FROM review_request ORDER BY id");
       const again = openStore(file);
       expect(again.raw().prepare("SELECT version FROM schema_version").get()).toMatchObject({ version: SCHEMA_VERSION });
       expect(rows(file, "SELECT id, review_attempt FROM run ORDER BY id")).toEqual(settled);
-      expect(rows(file, "SELECT id, reviewer_run, consumed_reason FROM review_request ORDER BY id")).toEqual(settledRequests);
+      expect(rows(file, "SELECT id, reviewer_run, origin, consumed_reason FROM review_request ORDER BY id")).toEqual(settledRequests);
       expect(again.raw().prepare("PRAGMA foreign_key_check").all()).toEqual([]);
       expect(indexesOf(file)).toEqual(indexes);
+      again.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const shape of ["v49", "v50 before origin"] as const) test(`explicit-only retries on a ${shape} file: mode asks read automatic, an open human ask that would be a retry is spent legacy-origin, a first ask keeps its authority`, () => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v50-origin-"));
+    const file = join(dir, "orders.db");
+    try {
+      const store = openStore(file);
+      const seeded = seed(store, join(dir, "evidence"));
+      store.close();
+      if (shape === "v49") windBackToV49(file, 49);
+      else windBackToPreOrigin(file);
+      const raw = new DatabaseSync(file);
+      expect(raw.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('review_request') WHERE name = 'origin'").get()).toMatchObject({ n: 0 });
+      // A mode's spent ask on the reviewed source, an OPEN human-basis ask
+      // on the source whose root failed (a retry nobody can prove a person
+      // asked for — build 1513's replayed Strict producer wrote exactly
+      // this row), and an OPEN human-basis first ask on the unrun source.
+      raw.prepare("INSERT INTO review_request (run, requested_by, basis, mode_digest, requested_at, consumed_at, consumed_reason) VALUES (?, 'mode standard', 'mode', 'deadbeef', ?, ?, 'mode-ended')").run(seeded.reviewed, T0.toISOString(), T0.toISOString());
+      const stale = Number(raw.prepare("INSERT INTO review_request (run, requested_by, basis, requested_at) VALUES (?, 'alex', 'human', ?)").run(seeded.failed, T0.toISOString()).lastInsertRowid);
+      const fresh = Number(raw.prepare("INSERT INTO review_request (run, requested_by, basis, requested_at) VALUES (?, 'alex', 'human', ?)").run(seeded.unrun, T0.toISOString()).lastInsertRowid);
+      raw.close();
+
+      const upgraded = openStore(file);
+      const origins = new Map(rows(file, "SELECT id, basis, origin, consumed_reason FROM review_request ORDER BY id").map(row => [Number(row["id"]), row]));
+      expect(origins.get(seeded.requests[0]!)).toMatchObject({ basis: "human", origin: "operator", consumed_reason: "reviewed" });
+      expect([...origins.values()].find(row => row["basis"] === "mode")).toMatchObject({ origin: "automatic", consumed_reason: "mode-ended" });
+      expect(origins.get(stale)).toMatchObject({ origin: "operator", consumed_reason: "legacy-origin" });
+      expect(origins.get(fresh)).toMatchObject({ origin: "operator", consumed_reason: null });
+      // The projection and the doors agree: the failed source is retryable
+      // by a fresh operator act (nothing queued), the unrun source's first
+      // ask still admits.
+      expect(upgraded.reviewRetryStateOf(seeded.failed)).toMatchObject({ state: "retryable", openRequest: null, retriesRemaining: 2 });
+      expect(upgraded.reviewRetryStateOf(seeded.unrun)).toMatchObject({ state: "queued", openRequest: { id: fresh, origin: "operator" } });
+      expect(upgraded.admitReview(stale, { runner: "worker", token: "tok-worker", provider: "claude", model: null }, T0)).toMatchObject({ ok: false, reason: "gone" });
+      expect(upgraded.admitReview(fresh, { runner: "worker", token: "tok-worker", provider: "claude", model: null }, T0)).toMatchObject({ ok: true, attempt: 1 });
+      expect(upgraded.requestReview(seeded.failed, "alex", T0)).toMatchObject({ ok: true, attempt: 2 });
+      expect(upgraded.raw().prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      upgraded.close();
+      // Reopen: the origin pass ran once; nothing moves.
+      const settled = rows(file, "SELECT id, origin, consumed_reason FROM review_request ORDER BY id");
+      const again = openStore(file);
+      expect(rows(file, "SELECT id, origin, consumed_reason FROM review_request ORDER BY id")).toEqual(settled);
       again.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

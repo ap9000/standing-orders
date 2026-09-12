@@ -70,8 +70,12 @@ Main was still `917bc5b` when this plan was prepared.
   in all — each a fresh request and reviewer admitted under the current sealed
   route with newly sealed, re-verified inputs, the failed history retained, a
   successful, queued, or running review never retried, and nothing retrying by
-  itself. The CLI, the typed dispatch diagnosis, and the task/result pages state
-  the attempt count and the remaining allowance. Main and the live worker
+  itself: the automatic producers (a reviewAuto mode, a Strict / release
+  scope) are one-shot, typed `automatic` on the request, and refused
+  `explicit-only` at request and admission once the build carries a root
+  attempt — only a fresh operator ask retries. The CLI, the typed dispatch
+  diagnosis, and the task/result pages state the attempt count, the remaining
+  allowance, and who asked for a queued retry. Main and the live worker
   remain unchanged.
 
 - The previous integrated code at `cf328cb` passed typecheck/build and the full suite:
