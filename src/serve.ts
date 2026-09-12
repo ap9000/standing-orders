@@ -1,3 +1,5 @@
+import { ledgerBody } from "./ledger-view.js";
+import { projectAuthority } from "./project-access.js";
 /**
  * The web console (§7, grown per the console review): the whole built-in
  * queue, visible and operable from a phone. `standing-orders serve` — node:http,
@@ -489,7 +491,14 @@ export function createDecisionServer(options: ServeOptions): Server {
   const unscopedMode = ceiling.repos.length === 0 && ceiling.roots.length === 0;
   /** Per-row visibility under the ceiling — the authorization question for reads. */
   const liveCeiling = () => ({ repos: [...ceiling.repos, ...(options.additionalProjectRepos?.() ?? [])], roots: ceiling.roots });
-  const visible = (repo: string | null): boolean => rowVisible(liveCeiling(), repo);
+  const restricted = (): boolean => {
+    const actor = requestContext.getStore()?.actor;
+    return actor !== undefined && store.accountOf(actor)?.projects !== null;
+  };
+  const visible = (repo: string | null): boolean => {
+    const actor = requestContext.getStore()?.actor;
+    return rowVisible(liveCeiling(), repo) && (actor === undefined || store.accountCanAccess(actor, repo));
+  };
   /** The explicit, currently proved project list. The callback is supplied
    * only by `up`, after it has independently checked git-ness and the root
    * ceiling; this server still filters every row through its own ceiling. */
@@ -508,7 +517,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * enumerate themselves; root ceilings enumerate the STORED repos that
    * pass the ceiling (Codex roll-up review, finding 11); unscoped = null. */
   const admissionList = (): string[] | null =>
-    unscopedMode
+    restricted() ? [...(store.accountOf(requestContext.getStore()!.actor!)?.projects ?? [])].filter(visible) : unscopedMode
       ? null
       : [...new Set([...managedRepos(), ...(ceiling.roots.length === 0 ? [] : store.knownRepos().filter(visible))])];
   /** The task behind a resource, for the ceiling check; null = no ref (visible). */
@@ -564,6 +573,10 @@ export function createDecisionServer(options: ServeOptions): Server {
     who: Who,
     body: URLSearchParams,
   ): { status: number; message: string } | null {
+    const current = store.accountOf(who.name);
+    if (current === null || current.revokedAt !== null || current.role !== who.role || (who.via === "cookie" && current.generation !== who.session.generation)) {
+      return { status: 403, message: "Your access changed. Sign in again." };
+    }
     const type = request.headers["content-type"] ?? "";
     if (!type.startsWith("application/x-www-form-urlencoded")) {
       return { status: 415, message: "forms only" };
@@ -623,9 +636,14 @@ export function createDecisionServer(options: ServeOptions): Server {
    * that is a refusal, not a fallback.
    */
   function projectOf(who: Who, request: IncomingMessage): string | null | undefined {
-    if (who.via === "cookie") return who.session.project;
+    const fallback = () => restricted() ? admissionList()?.[0] ?? null : defaultProject;
+    if (who.via === "cookie") {
+      const selected = who.session.project;
+      if (!restricted()) return selected;
+      return selected !== null && visible(selected) ? selected : fallback();
+    }
     const header = request.headers["x-standing-orders-project"];
-    if (header === undefined) return defaultProject;
+    if (header === undefined) return fallback();
     if (Array.isArray(header)) return undefined;
     const canonical = canonicalProject(header);
     if (canonical === null || !visible(canonical)) return undefined;
@@ -846,12 +864,94 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     const requestFacts = {
+      actor: who.name,
       csrf: who.via === "cookie" ? who.session.csrf : "",
       returnTo: safeReturn(url.pathname + url.search),
     };
-    if (method === "GET") return void (await requestContext.run(requestFacts, () => handleGet(url, who, request, response)));
-    if (method === "POST") return requestContext.run(requestFacts, () => handlePost(url, who, request, response));
+    if (method === "GET" || method === "POST") return requestContext.run(requestFacts, async () => {
+      const body = method === "POST" ? await form(request) : null;
+      const target = actionTarget(url, who, request, body);
+      const execute = async () => {
+        if (!projectRequestAllowed(url, who, request, response)) return;
+        if (method === "GET") return handleGet(url, who, request, response);
+        return handlePost(url, who, request, response, body!);
+      };
+      if (method === "GET" || url.pathname === "/session/attended-beats") return projectAuthority.run({ actor: who.name, repo: target.repo }, execute);
+      // Request acceptance is separate from durable work completion. Never
+      // persist a body, query string, token, password, or arbitrary URL.
+      const entry = { at: clock().toISOString(), actor: who.name, ...target, source: "request" as const };
+      store.recordAction({ ...entry, outcome: "requested" });
+      try {
+        await projectAuthority.run({ actor: who.name, repo: target.repo }, execute);
+        const createdTask = requestContext.getStore()?.createdTask;
+        const placement = createdTask === undefined ? null : store.lookupRef(createdTask);
+        store.recordAction({ ...entry, ...(placement === null ? {} : { repo: placement.repo, taskId: placement.externalId }), at: clock().toISOString(), outcome: response.statusCode >= 500 ? "error" : response.statusCode >= 400 ? "refused" : "accepted" });
+      } catch (error) {
+        store.recordAction({ ...entry, at: clock().toISOString(), outcome: "error" });
+        throw error;
+      }
+    });
     return respond(response, 405, "text/plain; charset=utf-8", "no such method here");
+  }
+
+  function readAccessForm(body: URLSearchParams): { ok: true; projects: string[] | null } | { ok: false; message: string } {
+    if (body.getAll("access").length > 1) return { ok: false, message: "Choose one access setting." };
+    const mode = body.get("access");
+    // Older clients omitted this field and explicitly used instance roles.
+    if ((mode === null && body.getAll("projects").length === 0) || mode === "all") return { ok: true, projects: null };
+    if (mode !== "selected") return { ok: false, message: "Choose selected projects or all projects." };
+    const allowed = new Set([...managedRepos(), ...store.knownRepos()].filter(visible));
+    const projects = [...new Set(body.getAll("projects"))];
+    if (projects.length > 100 || projects.some(repo => !allowed.has(repo))) return { ok: false, message: "Choose projects available on this instance." };
+    return { ok: true, projects };
+  }
+
+  function actionTarget(url: URL, who: Who, request: IncomingMessage, body: URLSearchParams | null = null): { repo: string | null; taskId: string | null; runId: number | null; action: string } {
+    const task = matchTaskPath(url.pathname, "(?:/([a-z-]+))?$");
+    if (task !== null) return { repo: store.lookupRef(task.taskId)?.repo ?? null, taskId: task.taskId, runId: null, action: `task ${task.verb || "view"}` };
+    const resource = /^\/(r|d|i|routines)\/([0-9]{1,15})(?:\/([a-z-]+)(?:\/[0-9]+)?)?$/.exec(url.pathname);
+    if (resource !== null) {
+      const id = Number(resource[2]);
+      if (resource[1] === "routines") return { repo: store.getRoutine(id)?.repo ?? null, taskId: null, runId: null, action: `routine ${resource[3] ?? "view"}` };
+      const runId = resource[1] === "r" ? id : resource[1] === "d" ? store.getDecision(id)?.run ?? null : store.openIncidents().find(one => one.id === id)?.run ?? null;
+      const run = runId === null ? null : store.getRun(runId);
+      const ref = run === null ? null : store.refForId(run.taskRef);
+      return { repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId, action: `${resource[1] === "d" ? "decision" : resource[1] === "i" ? "incident" : "run"} ${resource[3] ?? "view"}` };
+    }
+    const known = new Set(["/tasks/add", "/queue/move", "/queue/note", "/routines/add", "/people/invite", "/people/invite-revoke", "/people/revoke", "/people/projects", "/projects/select", "/projects/open", "/mode/confirm", "/mode/sign", "/mode/revoke"]);
+    const placed = ["/tasks/add", "/routines/add"].includes(url.pathname) ? body?.get("repo")?.trim() : null;
+    return { repo: url.pathname.startsWith("/people/") ? null : placed ? canonicalProject(placed) ?? placed : projectOf(who, request) ?? null, taskId: null, runId: null,
+      action: known.has(url.pathname) ? url.pathname.slice(1).replaceAll("/", " ") : "console request" };
+  }
+
+  function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
+    if (!restricted()) return true;
+    const path = url.pathname;
+    const read = new Set(["/", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const write = new Set(["/projects/select", "/tasks/add", "/routines/add"]);
+    const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
+    const resource = request.method === "GET"
+      ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path)
+      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
+    if (!(request.method === "GET" ? read : write).has(path) && task === null && !resource) {
+      refuse(response, who, 403, "This area requires instance access. Your account operates within its assigned projects.", "/projects");
+      return false;
+    }
+    if (task !== null || resource) {
+      if (!visible(actionTarget(url, who, request).repo)) {
+        refuse(response, who, 404, "No such resource in your projects.", "/projects"); return false;
+      }
+    }
+    // Every collection except these three must have a concrete project;
+    // NULL otherwise means all rows in legacy store APIs.
+    if (!["/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
+      refuse(response, who, 403, "No assigned project is available. Ask an instance operator for access.", "/projects"); return false;
+    }
+    if (request.method === "GET" && path === "/board") {
+      url.searchParams.delete("scope");
+      if (url.searchParams.get("view") === "order") url.searchParams.delete("view");
+    }
+    return true;
   }
 
   // ---- reads ---------------------------------------------------------------
@@ -875,7 +975,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
       url.pathname !== "/chat" &&
-      url.pathname !== "/settings" && url.pathname !== "/logout" && url.pathname !== "/people" &&
+      url.pathname !== "/settings" && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
 
@@ -1063,7 +1163,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             // The one fact the inbox must never hide (install review): with
             // no worker answering, nothing here will ever build, and every
             // approval below is a promise nobody is there to keep.
-            const runners = store.listRunners().filter(one => one.retiredAt === null);
+            const runners = store.listRunners().filter(one => one.retiredAt === null && (!restricted() || one.repos.some(visible)));
             const answering = runners.filter(one => runnerAlive(one, now));
             const lastHeard = runners.map(one => one.heartbeatAt).sort().at(-1) ?? null;
             return { answering: answering.length, registered: runners.length, lastHeard };
@@ -1400,6 +1500,21 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/ledger") {
+      const admitted = admissionList();
+      const projects = admitted ?? [...new Set([...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const chosen = url.searchParams.get("project") ?? "";
+      if (chosen !== "" && !projects.includes(chosen)) return refuse(response, who, 403, "That project is outside your access.", "/ledger");
+      const before = url.searchParams.get("before");
+      if (before !== null && (!/^[1-9][0-9]{0,14}$/.test(before) || !Number.isSafeInteger(Number(before)))) return refuse(response, who, 400, "Invalid ledger cursor.", "/ledger");
+      const rows = store.actionLedger({ repos: chosen === "" ? admitted : [chosen],
+        actor: (url.searchParams.get("actor") ?? "").slice(0, 200), outcome: (url.searchParams.get("outcome") ?? "").slice(0, 100),
+        source: url.searchParams.get("source") ?? "", taskId: (url.searchParams.get("task") ?? "").slice(0, 200),
+        ...(before === null ? {} : { before: Number(before) }), limit: 51 });
+      if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ entries: rows.slice(0, 50), nextBefore: rows.length > 50 ? rows[49]!.id : null }));
+      return sendScreen(response, 200, screen("Action ledger", ledgerBody(rows, projects, url.searchParams), { chrome: chromeFor(project, "ledger") }));
+    }
+
     if (url.pathname === "/activity") {
       const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
       return sendScreen(
@@ -1509,7 +1624,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/people") {
       // Approvers see everyone (D7's ceiling: every fact already passed
       // the process admission); a viewer sees exactly themselves (U3).
-      const approverView = who.role === "approver";
+      if (restricted()) {
+        const projects = admissionList() ?? [];
+        return sendScreen(response, 200, screen("people", `<h1>Your access</h1><p>${personChip(who.name)} · ${who.role === "approver" ? "operator" : "viewer"}</p><p>${who.role === "approver" ? "You can create, manage, and approve work in these projects." : "You can read work in these projects."}</p><ul>${projects.map(repo => `<li>${escape(projectName(repo))}</li>`).join("")}</ul><p class="meta">An instance operator manages invitations and project access.</p>`, { chrome: chromeFor(project, "people") }));
+      }
+      const approverView = store.isInstanceOperator(who.name);
       const accounts = store.accountFacts().filter(one => approverView || one.name === who.name);
       const lastSeenOf = (name: string): number | null => {
         let seen: number | null = null;
@@ -1519,6 +1638,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         return seen;
       };
       const csrf = who.via === "cookie" ? who.session.csrf : "";
+      const projectChoices = [...new Set([...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const accessFields = (selected: readonly string[] | null) =>
+        `<label>Project access<select name="access"><option value="selected"${selected !== null ? " selected" : ""}>Selected projects</option><option value="all"${selected === null ? " selected" : ""}>All projects</option></select></label>` +
+        `<p class="meta">Operators with all-project access also manage the instance.</p><fieldset><legend>Projects</legend>${projectChoices.length === 0 ? `<p class="meta">Add a project before granting selected access.</p>` : projectChoices.map(repo => `<label class="row"><input type="checkbox" name="projects" value="${escape(repo)}"${selected?.includes(repo) ? " checked" : ""}>${escape(projectName(repo))}</label>`).join("")}</fieldset>`;
       const cards = accounts.map(one => {
         const seen = lastSeenOf(one.name);
         const attended = store.openAttendedOf(one.name);
@@ -1532,6 +1655,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         return [
           `<div class="card">`,
           `<h2 style="margin-top:0">${personChip(one.name)} <span class="meta">${standing}</span></h2>`,
+          `<p class="meta">${one.projects === null ? "All projects" : one.projects.length === 0 ? "No project access" : one.projects.map(repo => escape(projectName(repo))).join(", ")}</p>`,
+          approverView && one.revokedAt === null ? `<details><summary>Edit project access</summary><form method="post" action="/people/projects">${hiddenFields({ csrf, name: one.name })}${accessFields(one.projects)}<label>Your password<input type="password" name="token" autocomplete="current-password" required></label><p class="meta">Changing access signs this person out and ends their derived sessions and modes. Previously approved work stays recorded.</p><button type="submit">Save project access</button></form></details>` : "",
           `<p class="meta">${seen === null ? "not signed in right now" : `signed in \u2014 active ${escape(new Date(seen).toISOString().slice(11, 16))} UTC`} \u00b7 joined ${escape(one.addedAt.slice(0, 10))}</p>`,
           attended.length === 0
             ? ""
@@ -1551,7 +1676,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       });
       const invites = approverView ? store.openInvites(now) : [];
       const inviteRows = invites.map(one =>
-        `<p class="row">${escape(one.role)} invite \u00b7 from ${personChip(one.mintedBy)} \u00b7 expires ${escape(one.expiresAt.slice(0, 16).replace("T", " "))}${one.attempts > 0 ? ` \u00b7 ${one.attempts} failed attempt${one.attempts === 1 ? "" : "s"}` : ""}` +
+        `<p class="row">${escape(one.role)} invite · ${one.projects === null ? "all projects" : one.projects.map(repo => escape(projectName(repo))).join(", ")} \u00b7 from ${personChip(one.mintedBy)} \u00b7 expires ${escape(one.expiresAt.slice(0, 16).replace("T", " "))}${one.attempts > 0 ? ` \u00b7 ${one.attempts} failed attempt${one.attempts === 1 ? "" : "s"}` : ""}` +
         ` <form method="post" action="/people/invite-revoke" style="display:inline">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="id" value="${one.id}">` +
         `<label>password <input type="password" name="token" autocomplete="current-password" style="width:8rem"></label>` +
@@ -1565,7 +1690,8 @@ export function createDecisionServer(options: ServeOptions): Server {
             inviteRows.length === 0 ? `<p class="meta">no open invites</p>` : inviteRows.join("\n"),
             `<form method="post" action="/people/invite" class="row">`,
             `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-            `<label>they can<select name="role"><option value="viewer">watch everything</option><option value="approver">approve and act</option></select></label>`,
+            `<label>they can<select name="role"><option value="viewer">Viewer — read work</option><option value="approver">Operator — create, manage and approve work</option></select></label>`,
+            accessFields(project === null ? [] : [project]),
             `<label>your password<input type="password" name="token" autocomplete="current-password"></label>`,
             `<button type="submit">make an invite link</button>`,
             `<span class="meta">single-use, expires in 72 hours</span>`,
@@ -1835,8 +1961,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         : "";
       return page(response, 200, shell("menu", [
         `<h1>more</h1>`,
-        section("workflows", workflowsRows()),
-        section("admin", adminRows()),
+        section("workflows", workflowsRows(chrome.projectScoped)),
+        section("admin", adminRows(chrome.projectScoped)),
         settingsSection,
       ].join("\n"), { chrome }));
     }
@@ -2290,7 +2416,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * checklist instructs, it never gains authority (finding e).
    */
   function wizardSteps(now: Date): { done: boolean; title: string; detail: string }[] | null {
-    if (store.firstSuccessAt(now) !== null) return null;
+    if (restricted() || store.firstSuccessAt(now) !== null) return null;
     const repos = admissionList() ?? [];
     const setupDone = repos.filter(one => store.liveWorktreeSetup(one) !== null).length;
     const skillDone = repos.filter(one =>
@@ -2633,7 +2759,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * titles the page itself may render, bounded, saturation declared.
    */
   function paletteIndexTag(project: string | null): string {
-    const admitted = project === null && !unscopedMode ? admissionList() : null;
+    const admitted = project === null ? admissionList() : null;
     const entries: { label: string; href: string }[] = [
       { label: "inbox", href: "/" },
       { label: "board", href: "/board?scope=all" },
@@ -2645,6 +2771,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       { label: "task list", href: "/tasks" },
       { label: "fleet", href: "/fleet" },
       { label: "activity", href: "/activity" },
+      { label: "action ledger", href: "/ledger" },
       { label: "system", href: "/system" },
       { label: "builds", href: "/runs" },
       { label: "requirements", href: "/caps" },
@@ -2656,7 +2783,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       entries.push({ label: `${one.id} — ${one.title}`, href: `/t/${encodeURIComponent(one.id)}` });
     }
     const saturated = open.length > 200;
-    const json = JSON.stringify(saturated ? [...entries, { label: "… more in the task list", href: "/tasks" }] : entries)
+    const safeEntries = restricted() ? entries.filter(one => ["/", "/board", "/routines", "/done", "/review", "/tasks", "/runs", "/projects", "/ledger"].includes(one.href) || one.href.startsWith("/t/")) : entries;
+    const json = JSON.stringify(saturated ? [...safeEntries, { label: "… more in the task list", href: "/tasks" }] : safeEntries)
       .replace(/</g, "\\u003c");
     return `<script type="application/json" id="palette-index">${json}</script>`;
   }
@@ -2672,7 +2800,8 @@ export function createDecisionServer(options: ServeOptions): Server {
    */
   const paletteCache = new Map<string, { at: number; tag: string }>();
   function paletteTagCached(project: string | null): string {
-    const key = `${project ?? "(none)"} ${options.telegramTokenFile !== undefined}`;
+    const actor = requestContext.getStore()?.actor;
+    const key = `${actor ?? ""}:${actor === undefined ? "" : store.accountOf(actor)?.generation}:${project ?? "(none)"} ${options.telegramTokenFile !== undefined}`;
     const hit = paletteCache.get(key);
     if (hit !== undefined && Date.now() - hit.at < 5000) return hit.tag;
     const tag = paletteIndexTag(project);
@@ -2737,11 +2866,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     listPane?: string,
     scope?: Chrome["scope"],
   ): Chrome {
-    const key = project ?? "";
+    if (restricted() && !visible(project)) project = null;
+    const actor = requestContext.getStore()?.actor;
+    const key = `${actor ?? ""}:${actor === undefined ? "" : store.accountOf(actor)?.generation}:${project ?? ""}`;
     const cached = badgeCache.get(key);
     let badge = cached;
     if (badge === undefined || Date.now() - badge.at > 5_000) {
-      const counted = store.countInboxScoped(project, clock(), 100, project === null && !unscopedMode ? admissionList() : null);
+      const counted = store.countInboxScoped(project, clock(), 100, project === null ? admissionList() : null);
       badge = { at: Date.now(), count: counted.count, saturated: counted.saturated };
       badgeCache.set(key, badge);
     }
@@ -2760,6 +2891,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return {
       active,
       project,
+      projectScoped: restricted(),
       ...(projectPeek === undefined ? {} : { projectPeek }),
       // Enrolled projects first (most recently opened), then the repos this
       // server was told to serve that nobody has opened yet — the switcher
@@ -2780,7 +2912,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       ...(facts === undefined ? {} : { csrf: facts.csrf, returnTo: facts.returnTo }),
       inboxCount: badge.count,
       inboxSaturated: badge.saturated,
-      settings: options.telegramTokenFile !== undefined,
+      settings: !restricted() && options.telegramTokenFile !== undefined,
       ...(store.isDemo() ? { demo: true } : {}),
       ...(liveMode === null || liveModeTerms === null
         ? {}
@@ -2794,7 +2926,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               }${liveModeTerms.publication === "automerge" ? " — merges fire themselves on green" : ""}`,
             },
           }),
-      ...(!unscopedMode && managedRepos().length > 0 ? { chat: true } : {}),
+      ...(!restricted() && !unscopedMode && managedRepos().length > 0 ? { chat: true } : {}),
       ...(listPane === undefined ? {} : { listPane }),
       ...(scope === undefined ? {} : { scope }),
     };
@@ -2881,8 +3013,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     // root-configured, non-demo, POSIX serve gets the live card; everybody
     // else gets the card DISABLED with the reason in words.
     const onboardState =
-      who.via !== "cookie"
-        ? { enabled: false as const, why: "adding repositories is a browser session's act" }
+      restricted() || who.via !== "cookie"
+        ? { enabled: false as const, why: "An instance operator adds projects." }
         : store.isDemo()
           ? { enabled: false as const, why: "the sandbox never clones — this is demo data" }
           : process.platform === "win32"
@@ -2910,7 +3042,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return sendScreen(
       response,
       status,
-      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode, ceiling.roots.length > 0 || unscopedMode, onboardState, peeks),
+      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, !restricted() && unscopedMode, !restricted() && (ceiling.roots.length > 0 || unscopedMode), onboardState, peeks),
     );
   }
 
@@ -3079,7 +3211,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           const blockerRef = store.lookupRef(blockerId);
           const admitted = blockerRef !== null && visible(blockerRef.repo);
           const blocker = admitted ? store.getTask(blockerId) : null;
-          return { id: blockerId, title: blocker === null ? null : blocker.title, state: blocker === null ? null : blocker.state, admitted };
+          return { id: !admitted && restricted() ? "restricted task" : blockerId, title: blocker === null ? null : blocker.title, state: blocker === null ? null : blocker.state, admitted };
         }),
         // Candidates a "wait for" or replacement select may offer: this
         // TASK's own project, even when the sidebar is in all-project mode.
@@ -3111,7 +3243,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return {
             answering: answering.length,
             registered: eligible.length,
-            totalRegistered: runners.length,
+            totalRegistered: restricted() ? eligible.length : runners.length,
             lastHeard: eligible.map(one => one.heartbeatAt).sort().at(-1) ?? null,
           };
         })(),
@@ -3166,7 +3298,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         nonce,
         problem,
         attended: (() => {
-          if (options.attended === undefined || ref === null || who.via !== "cookie" || store.isDemo()) return null;
+          if (restricted() || options.attended === undefined || ref === null || who.via !== "cookie" || store.isDemo()) return null;
           const open = store.openAuthorizationFor(ref.id);
           if (open !== null) {
             const spent = store.authorizationSpendMicrousd(open.id);
@@ -3321,7 +3453,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   ): void {
     const data = taskViewData(taskId, who, problem);
     if (data === null) return refuse(response, who, 404, "no such task", "/tasks");
-    const paneProject = who.via === "cookie" ? who.session.project : null;
+    const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
     return sendScreen(
       response,
       status,
@@ -3355,7 +3487,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       who.via === "cookie" && routineAgentsState(routine).approvable
         ? mintApprovalNonce(who.name, `routine:${routine.id}`, routine.digest)
         : "";
-    const paneProject = who.via === "cookie" ? who.session.project : null;
+    const paneProject = restricted() ? routine.repo : who.via === "cookie" ? who.session.project : null;
     return sendScreen(
       response,
       status,
@@ -3801,9 +3933,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     who: Who,
     request: IncomingMessage,
     response: ServerResponse,
+    body: URLSearchParams,
   ): Promise<void> {
-    const body = await form(request);
-
     // The attended beat answers BEFORE the shared mutation guard (v28): it
     // carries no parameters, so there is no csrf token to check — its OWN
     // guard is complete and STRICTER for the browsers this console
@@ -3818,6 +3949,11 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     const denied = authorizeMutation(request, who, body);
     if (denied !== null) return refuse(response, who, denied.status, denied.message);
+    if (!projectRequestAllowed(url, who, request, response)) return;
+    if (restricted()) {
+      const repos = body.getAll("repo");
+      if (repos.length > 1 || repos.some(repo => repo.trim() !== "" && !visible(repo.trim()))) return refuse(response, who, 403, "That project is outside your access.", "/projects");
+    }
 
     // THE CENTRAL VIEWER GATE (modes chain, D2/E2): consequential POSTs
     // require ACTIVE approver standing — cookie and bearer alike — with
@@ -3998,7 +4134,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const askedPath = (body.get("path") ?? "").trim();
       const canonicalPick = askedPath === "" ? null : canonicalProject(askedPath);
-      if (canonicalPick !== null && !(await authorizedProject(liveCeiling(), canonicalPick))) {
+      if ((askedPath !== "" && canonicalPick === null) || (canonicalPick !== null && (!visible(canonicalPick) || !(await authorizedProject(liveCeiling(), canonicalPick))))) {
         return refuse(response, who, 403, "that project is outside this console's reach");
       }
       who.session.project = canonicalPick;
@@ -4068,6 +4204,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // in any table.
       const repoGiven = (body.get("repo") ?? "").trim();
       const effective = repoGiven !== "" ? repoGiven : (project ?? "");
+      if (restricted() && !visible(effective === "" ? null : effective)) return refuse(response, who, 403, "That project is outside your access.", "/projects");
       // A scoped console refuses an EMPTY placement server-side (verification
       // finding 1): the form's `required` is a courtesy, not the guard — a
       // direct POST with no project open must not mint an unplaced task
@@ -4143,6 +4280,8 @@ export function createDecisionServer(options: ServeOptions): Server {
           tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project, null, store.permissionDefault().mode, store.qualityDefault().mode),
         );
       }
+      const actionContext = requestContext.getStore();
+      if (actionContext !== undefined) actionContext.createdTask = made.id;
       // A proved root-mode placement joins the project table (finding 15):
       // the new task's home is openable and admissible from now on.
       if (rootMode && repo !== "") store.upsertProject(repo, projectName(repo), now);
@@ -4406,6 +4545,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, ended ? "/mode?said=the%20mode%20is%20ended%20—%20every%20act%20falls%20back%20to%20its%20own%20ceremony" : "/mode");
     }
 
+    if (url.pathname === "/people/projects") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator manages project access.", "/people");
+      if (!authenticateApprover(store, who.name, body.get("token") ?? "", null).ok) return refuse(response, who, 403, "Saving access requires your password.", "/people");
+      const access = readAccessForm(body);
+      if (!access.ok) return refuse(response, who, 400, access.message, "/people");
+      const changed = store.setAccountProjects((body.get("name") ?? "").trim(), access.projects, who.name, now);
+      if (!changed.ok) return refuse(response, who, 409, changed.reason === "last-instance-operator" ? "Keep at least one instance operator with all-project access." : "That account cannot be changed.", "/people");
+      bustBadge();
+      return redirect(response, "/people?said=Project%20access%20saved");
+    }
+
     if (url.pathname === "/people/invite") {
       if (who.via !== "cookie") return refuse(response, who, 403, "inviting is a browser surface");
       const token = body.get("token") ?? "";
@@ -4415,7 +4565,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 403, "making an invite takes your password, typed again", "/people");
       }
       const role = body.get("role") === "approver" ? ("approver" as const) : ("viewer" as const);
-      const minted = store.mintInvite(role, who.name, now);
+      const access = readAccessForm(body);
+      if (!access.ok) return refuse(response, who, 400, access.message, "/people");
+      if (access.projects !== null && access.projects.length === 0) return refuse(response, who, 400, "Select at least one project for this invitation.", "/people");
+      const minted = store.mintInvite(role, who.name, now, undefined, access.projects);
       const origin = options.publicUrl !== undefined ? options.publicUrl.replace(/\/$/, "") : `http://${request.headers.host ?? "this-console"}`;
       const linkScreen = screen(
         "people",
@@ -4424,7 +4577,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           `<div class="card">`,
           `<h2 style="margin-top:0">the invite link \u2014 shown once</h2>`,
           `<p class="mono" style="overflow-wrap:anywhere">${escape(`${origin}/join/${minted.token}`)}</p>`,
-          `<p class="meta">send it to ONE person. It works once, lets them ${role === "approver" ? "approve and act" : "watch everything"}, and dies ${escape(minted.expiresAt.slice(0, 16).replace("T", " "))} UTC. Cancel it any time from the people screen.</p>`,
+          `<p class="meta">send it to ONE person. It works once, lets them ${role === "approver" ? "approve and act" : "read work"} in ${access.projects === null ? "all projects" : access.projects.map(repo => escape(projectName(repo))).join(", ")}, and dies ${escape(minted.expiresAt.slice(0, 16).replace("T", " "))} UTC. Cancel it any time from the people screen.</p>`,
           `</div>`,
           `<p class="meta"><a href="/people">back to people</a></p>`,
         ].join("\n"),
@@ -10168,7 +10321,8 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "mode" | "menu" | "none";
+  projectScoped?: boolean;
+  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "ledger" | "mode" | "menu" | "none";
   project: string | null;
   /** The surface's scope for the scope bar — which rows this screen can
    * show. Derived from the ROUTE, not the session: portfolio and fleet are
@@ -10645,7 +10799,7 @@ function shell(
     // treatment. Chat is present only where the ceiling ever allows it
     // (unchanged gating); everything else is a dim text row inside one of
     // the two accordion groups below, or settings pinned under them.
-    ...(chrome.chat === true ? [item("chat", "/chat", "chat")] : []),
+    ...(chrome.chat === true && !chrome.projectScoped ? [item("chat", "/chat", "chat")] : []),
     item("inbox", "/", "inbox", chrome.inboxCount),
     item("board", "/board", "board"),
     item("runs", "/runs", "builds"),
@@ -10653,8 +10807,8 @@ function shell(
     `</nav>`,
     `<a class="new-task" href="/tasks/new" aria-label="new task">+ new task</a>`,
     `<nav class="nav-groups">`,
-    navGroup("workflows", "workflows", workflowsRows(), WORKFLOWS_KEYS.has(chrome.active)),
-    navGroup("admin", "admin", adminRows(), ADMIN_KEYS.has(chrome.active)),
+    navGroup("workflows", "workflows", workflowsRows(chrome.projectScoped), WORKFLOWS_KEYS.has(chrome.active)),
+    navGroup("admin", "admin", adminRows(chrome.projectScoped), ADMIN_KEYS.has(chrome.active)),
     `</nav>`,
     `<span class="grow"></span>`,
     ...(chrome.settings ? [`<nav class="nav-settings">${item("settings", "/settings", "settings")}</nav>`] : []),
@@ -14196,7 +14350,7 @@ function projectsPage(
  * to. AsyncLocalStorage follows the request's own async chain, so two
  * interleaved requests never read each other's token.
  */
-const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string }>();
+const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string; actor?: string; createdTask?: string }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 function safeReturn(raw: string | null | undefined): string {
@@ -14270,24 +14424,27 @@ type NavRow = { key: Chrome["active"]; href: string; label: string; hint: string
  * the board's order view; peek hangs off builds; settings is pinned
  * outside both groups, never inside one.
  */
-function workflowsRows(): NavRow[] {
-  return [
+function workflowsRows(scoped = false): NavRow[] {
+  const rows: NavRow[] = [
     { key: "workbench", href: "/workbench", label: "portfolio", hint: "every project and live build in one place" },
     { key: "work", href: "/tasks", label: "task list", hint: "everything, filterable" },
     { key: "routines", href: "/routines", label: "routines", hint: "scheduled tracks and their firings" },
+    { key: "ledger", href: "/ledger", label: "action ledger", hint: "who acted, what happened, and the result" },
   ];
+  return scoped ? rows.filter(row => row.key !== "workbench") : rows;
 }
-function adminRows(): NavRow[] {
-  return [
+function adminRows(scoped = false): NavRow[] {
+  const rows: NavRow[] = [
     { key: "fleet", href: "/fleet", label: "fleet", hint: "who is working, and on what" },
     { key: "caps", href: "/caps", label: "requirements", hint: "tools and credentials builds need" },
     { key: "people", href: "/people", label: "people", hint: "who can sign in, and what they have done" },
     { key: "mode", href: "/mode", label: "operating mode", hint: "the signed posture this repository runs under" },
     { key: "system", href: "/system", label: "system", hint: "workers, providers, and grants" },
   ];
+  return scoped ? rows.filter(row => row.key === "people") : rows;
 }
 /** Which accordion group opens by default for a given active page. */
-const WORKFLOWS_KEYS = new Set<Chrome["active"]>(["workbench", "work", "routines"]);
+const WORKFLOWS_KEYS = new Set<Chrome["active"]>(["workbench", "work", "routines", "ledger"]);
 const ADMIN_KEYS = new Set<Chrome["active"]>(["fleet", "caps", "people", "mode", "system"]);
 
 /** The builds screen's views (reduction pass §1): done, the review queue,

@@ -1,3 +1,4 @@
+import { projectAuthority } from "./project-access.js";
 /**
  * What a task is allowed to become, agreed before anything builds it.
  *
@@ -1075,6 +1076,7 @@ export function authenticateApprover(
   store: Store,
   by: string,
   token: string,
+  repo?: string | null,
 ): { ok: true } | { ok: false; reason: "no-approvers" | "not-an-approver" } {
   const account = authenticateAccount(store, by, token);
   if (!account.ok) {
@@ -1083,6 +1085,9 @@ export function authenticateApprover(
   // A viewer's credential is real and still cannot agree to anything —
   // the words every refused ceremony shows are the viewer words.
   if (account.role !== "approver") return { ok: false, reason: "not-an-approver" };
+  const context = projectAuthority.getStore();
+  const resource = repo === undefined ? (context?.actor === by ? context.repo : null) : repo;
+  if (!store.accountCanAccess(by, resource)) return { ok: false, reason: "not-an-approver" };
   return { ok: true };
 }
 
@@ -1188,7 +1193,7 @@ export function approve(
   // this approval — which would resurrect the old wording *and* mark it
   // agreed, the precise opposite of what the digest is for.
   return store.transact(() => {
-    const authenticated = authenticateApprover(store, by, token);
+    const authenticated = authenticateApprover(store, by, token, store.lookupRef(taskId)?.repo ?? null);
     if (!authenticated.ok) return authenticated;
 
     const scope = store.getScope(taskId);

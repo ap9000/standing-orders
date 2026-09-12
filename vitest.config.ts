@@ -2,6 +2,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // Review snapshots under output/ are artifacts, never runnable suites.
+    include: ["src/**/*.test.ts"],
     setupFiles: ["./test/setup-state.ts"],
     globalSetup: ["./test/ensure-build.ts"],
     // The suite exercises real SQLite files, git repositories, and child

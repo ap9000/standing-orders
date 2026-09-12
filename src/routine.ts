@@ -302,7 +302,7 @@ export function approveRoutine(
   token: string,
 ): ApproveRoutineResult {
   return store.transact(() => {
-    const authenticated = authenticateApprover(store, by, token);
+    const authenticated = authenticateApprover(store, by, token, store.getRoutine(routineId)?.repo ?? null);
     if (!authenticated.ok) return authenticated;
 
     const routine = store.getRoutine(routineId);

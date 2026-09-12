@@ -881,8 +881,12 @@ N parallel sessions per worker), the attested runtime (four providers
 conformance, never a registry row), labeled cross-runtime comparisons
 with honest per-lane money, operating modes with their daily rails,
 the artifact-only reviewer, and multi-user instances with invite
-links, roles, and a People screen. Every arc shipped behind its own
-adversarial review rounds; docs/PROGRESS.md records every finding.
+links, roles, and a People screen. Project access now supports viewer/operator
+invitations restricted to selected repositories, with an action ledger for
+people and unattended work. See [Project access and action ledger v1](docs/PROJECT_ACCESS_LEDGER.md)
+for its permissions, history coverage, and migration behavior.
+Earlier arcs shipped behind their own adversarial review rounds;
+docs/PROGRESS.md records those findings.
 
 **M4 built.** The whole loop runs: `standing-orders watch` (or `daemon
 install` — no crontab) dispatches approved work, spends nothing while idle,
