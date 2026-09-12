@@ -29,9 +29,13 @@ const {acceptanceToLines}=await import(join(root,'dist/scope.js'));
 const models={claude:'opus',codex:'gpt-5.6-sol'};
 async function run(file,args,cwd=root) {
   return new Promise((done,reject)=>{
-    const child=spawn(file,args,{cwd,stdio:['ignore','pipe','pipe']});
+    const child=spawn(file,args,{cwd,stdio:['ignore','pipe','pipe'],detached:process.platform!=='win32'});
     let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);
-    child.on('error',reject);child.on('close',code=>done({code,stdout,stderr}));
+    let forced=null;
+    const signal=s=>{try{if(process.platform!=='win32')process.kill(-child.pid,s);else child.kill(s);}catch{}};
+    const timer=setTimeout(()=>{signal('SIGTERM');forced=setTimeout(()=>signal('SIGKILL'),30_000);},25*60_000);
+    child.on('error',error=>{clearTimeout(timer);if(forced)clearTimeout(forced);reject(error);});
+    child.on('close',code=>{clearTimeout(timer);if(forced)clearTimeout(forced);done({code,stdout,stderr});});
   });
 }
 async function identity() {
@@ -72,7 +76,7 @@ for(const provider of providers) {
     } finally {await window.happyDOM.abort();}
   }
   const tick=label=>cli(label,['tick','--runner','journey-worker','--token',runnerToken,'--repo',repo,'--pool',pool]);
-  const scopeTerms=s=>({goal:s.goal,outOfScope:s.outOfScope,touches:s.touches,acceptance:s.acceptance,qualityMode:s.qualityMode,riskLevel:s.riskLevel});
+  const scopeTerms=s=>({goal:s.goal,outOfScope:s.outOfScope,touches:[...s.touches].sort(),acceptance:s.acceptance.map(c=>({...c,evidence:[...c.evidence].sort()})).sort((a,b)=>a.id.localeCompare(b.id)),qualityMode:s.qualityMode,riskLevel:s.riskLevel});
   try {
     await mkdir(repo,{recursive:true});const fixture=handoffFixture(playwright);
     for(const [name,body] of Object.entries(fixture.files))await writeFile(join(repo,name),body);
