@@ -89,9 +89,9 @@ describe("safe task stop and resume (v52)", () => {
   });
   afterEach(() => store.close());
 
-  test("a fresh file is born at v52 with the run_stop table and a hold that admits the stop owner", () => {
-    expect(SCHEMA_VERSION).toBe(52);
-    expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"])).toBe(52);
+  test("a fresh file is born at the current schema with the run_stop table and a hold that admits the stop owner", () => {
+    expect(SCHEMA_VERSION).toBe(53);
+    expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"])).toBe(SCHEMA_VERSION);
     expect(store.raw().prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'run_stop'").get()).toBeDefined();
     const ddl = String(store.raw().prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hold'").get()?.["sql"]);
     expect(ddl).toContain("'revision','stop'");
@@ -370,7 +370,7 @@ describe("safe task stop and resume (v52)", () => {
       expect(() => raw.prepare("INSERT INTO hold (task_ref, owner_kind, owner_id, reason, held_at) VALUES (?, 'stop', '9', 'x', ?)").run(ref, T0.toISOString())).toThrow();
       legacy.close();
       const upgraded = openStore(file);
-      expect(Number(upgraded.raw().prepare("SELECT version FROM schema_version").get()?.["version"])).toBe(52);
+      expect(Number(upgraded.raw().prepare("SELECT version FROM schema_version").get()?.["version"])).toBe(SCHEMA_VERSION);
       expect(upgraded.raw().prepare("SELECT * FROM hold ORDER BY id").all()).toEqual(before);
       upgraded.holdOwned({ taskRef: ref, ownerKind: "stop", ownerId: "9", reason: "stopped", until: null }, T0);
       expect(upgraded.activeHolds(ref, T0).map(one => one.ownerKind)).toEqual(["operator", "revision", "stop"]);

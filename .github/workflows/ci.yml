@@ -27,6 +27,36 @@ jobs:
         env:
           CI: "true"
 
+  # The native containment backend, EXECUTED: a cgroup v2 leaf is delegated
+  # to the runner user (chown, as the kernel's delegation model prescribes)
+  # and the test process is moved into it, so the real-process tests —
+  # setsid escape, natural root exit, exact-run stop, worker death, held
+  # supervisor — run against the kernel, and SO_EXPECT_NATIVE_CONTAINMENT
+  # turns "facility unavailable" into a failure instead of a skip.
+  linux-native-containment:
+    name: linux native containment · delegated cgroup v2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Delegate a cgroup v2 leaf and run the native tests inside it
+        run: |
+          set -euo pipefail
+          test -f /sys/fs/cgroup/cgroup.controllers
+          sudo mkdir -p /sys/fs/cgroup/so-ci
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/so-ci
+          echo $$ | sudo tee /sys/fs/cgroup/so-ci/cgroup.procs >/dev/null
+          echo "test shell cgroup: $(cat /proc/self/cgroup)"
+          npx vitest run src/containment-native.test.ts src/containment.test.ts src/container-state.test.ts src/boot-identity.test.ts
+        env:
+          CI: "true"
+          SO_EXPECT_NATIVE_CONTAINMENT: "1"
+
   windows-baseline:
     name: windows baseline · node ${{ matrix.node }}
     runs-on: windows-latest
@@ -44,9 +74,30 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       # The Windows gate covers the native service/link path, the scheduler's
-      # Never Stuck contract, and the builder's native-shell setup + proof
-      # path. POSIX-only fake-provider fixtures stay in the Unix matrix until
-      # their executables are made cross-platform.
-      - run: npx vitest run src/daemon.test.ts src/link.test.ts src/dispatch.test.ts src/command-shell.test.ts src/child-database.test.ts src/store-contention.test.ts src/task-control.test.ts src/task-control-console.test.ts src/task-control-git.test.ts src/task-control-adversarial.test.ts
+      # Never Stuck contract, the builder's native-shell setup + proof path,
+      # the containment policy/capability surface, boot-identity custody, the
+      # service lifecycle, and the restart certificate. POSIX-only
+      # fake-provider fixtures stay in the Unix matrix until their
+      # executables are made cross-platform.
+      # These files each create real subprocesses and SQLite writers. Bound
+      # file-level concurrency on shared Windows hosts; the within-test
+      # contention and cancellation races still execute unchanged.
+      - run: npx vitest run --maxWorkers=2 src/daemon.test.ts src/link.test.ts src/dispatch.test.ts src/command-shell.test.ts src/child-database.test.ts src/store-contention.test.ts src/task-control.test.ts src/task-control-console.test.ts src/task-control-git.test.ts src/task-control-adversarial.test.ts src/containment.test.ts src/boot-identity.test.ts src/migration-v53-process-custody.test.ts src/restart-certification.test.ts
         env:
           CI: "true"
+
+  native-windows:
+    name: Windows Job Object containment
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx vitest run src/containment-windows.test.ts
+        env:
+          CI: "true"
+          SO_EXPECT_NATIVE_CONTAINMENT: "1"

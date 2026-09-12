@@ -17,6 +17,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
     var attemptedLogin = false
     var stateDir: URL!
     var node: String = ""
+    var providerBin: String = ""
     var helper: String = ""
     var label = "com.standing-orders.desktop"
     let keychainService = "com.standing-orders.desktop.login"
@@ -35,7 +36,9 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         do {
             let resources = Bundle.main.resourceURL!
             let runtime = try JSONSerialization.jsonObject(with: Data(contentsOf: resources.appendingPathComponent("runtime.json"))) as! [String: String]
-            node = runtime["node"]!
+            let configuredNode = runtime["node"]!
+            node = configuredNode.hasPrefix("/") ? configuredNode : resources.appendingPathComponent(configuredNode).standardizedFileURL.path
+            providerBin = runtime["providerBin"] ?? URL(fileURLWithPath: node).deletingLastPathComponent().path
             helper = resources.appendingPathComponent("dist/desktop-host.js").path
             try FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             makeWindow()
@@ -108,10 +111,11 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
 
     func process(_ executable: String, _ args: [String], input: Data? = nil) async throws -> Data {
         let runtimeDirectory = URL(fileURLWithPath: node).deletingLastPathComponent().path
+        let providerDirectory = providerBin
         return try await Task.detached {
             let task = Process(); task.executableURL = URL(fileURLWithPath: executable); task.arguments = args
             var environment = ProcessInfo.processInfo.environment
-            environment["PATH"] = [runtimeDirectory, FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
+            environment["PATH"] = [runtimeDirectory, providerDirectory, FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
             task.environment = environment
             // Private files prevent pipe deadlock and keep credential output off logs.
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("standing-orders-" + UUID().uuidString)
@@ -124,7 +128,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
             task.standardOutput = output; task.standardError = errors
             if let input { let pipe = Pipe(); task.standardInput = pipe; try task.run(); pipe.fileHandleForWriting.write(input); try pipe.fileHandleForWriting.close() }
             else { task.standardInput = FileHandle.nullDevice; try task.run() }
-            let deadline = Date().addingTimeInterval(args.first == "bootout" ? 75 : 15)
+            let deadline = Date().addingTimeInterval(args.contains("service-start") || args.contains("service-stop") ? 75 : 15)
             var refusal: String?
             while task.isRunning {
                 let size = [outputURL, errorURL].reduce(Int64(0)) { total, url in total + (((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0) }
@@ -217,19 +221,12 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         do {
             settings = try await inspect()
             guard !settings!.repos.isEmpty else { status.stringValue = "Choose a repository to begin."; return }
-            let agentDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents")
-            try FileManager.default.createDirectory(at: agentDir, withIntermediateDirectories: true)
-            let log = stateDir.appendingPathComponent("service.log").path
-            if !FileManager.default.fileExists(atPath: log) { FileManager.default.createFile(atPath: log, contents: nil, attributes: [.posixPermissions: 0o600]) }
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: log)
-            let plist: [String: Any] = ["Label": label, "ProgramArguments": [node, helper, "serve", "--state", stateDir.path], "RunAtLoad": true,
-                "KeepAlive": ["SuccessfulExit": false], "ThrottleInterval": 15, "ExitTimeOut": 60,
-                "WorkingDirectory": stateDir.path, "StandardOutPath": log, "StandardErrorPath": log,
-                "EnvironmentVariables": ["PATH": [URL(fileURLWithPath: node).deletingLastPathComponent().path, FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")]]
-            let path = agentDir.appendingPathComponent("\(label).plist")
-            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: path, options: .atomic)
-            if (try? await process("/bin/launchctl", ["print", "gui/\(getuid())/\(label)"])) == nil { _ = try await process("/bin/launchctl", ["bootstrap", "gui/\(getuid())", path.path]) }
-            else { _ = try? await process("/bin/launchctl", ["kickstart", "gui/\(getuid())/\(label)"]) }
+            // The service definition and its lifecycle live in the shared helper
+            // (daemon.ts): the same launchd contract the CLI daemon uses — always
+            // supervised across controller exits, with an idempotent
+            // start that never kills a healthy running controller because this
+            // window reopened, and a real reload when the runtime or entry changed.
+            _ = try await command("service-start", extra: ["--node", node, "--helper", helper, "--label", label, "--provider-bin", providerBin])
             status.stringValue = "Connecting to the background service…"
             connect(attempts: 25)
         } catch { showError(error.localizedDescription) }
@@ -283,7 +280,9 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         alert.informativeText = "This stops the local console and its workers. The controller stops accepting new work and finishes shutdown through its normal recovery path. Closing the window alone keeps work running."
         alert.addButton(withTitle: "Stop service"); alert.addButton(withTitle: "Keep running")
         if alert.runModal() != .alertFirstButtonReturn { return }
-        do { _ = try await process("/bin/launchctl", ["bootout", "gui/\(getuid())/\(label)"]); status.stringValue = "Background service stopped. File → Start background service to return." }
+        // Explicit stop unloads AND disables the service; only Start background
+        // service (an install) brings it back — no relaunch at the next login.
+        do { _ = try await command("service-stop", extra: ["--node", node, "--helper", helper, "--label", label]); status.stringValue = "Background service stopped and disabled. File → Start background service to return." }
         catch { showError(error.localizedDescription) }
     }
     func showError(_ text: String) { if status != nil { status.stringValue = "Needs attention: \(text.prefix(180))" }; let alert = NSAlert(); alert.messageText = "Standing Orders needs attention"; alert.informativeText = text; alert.runModal() }

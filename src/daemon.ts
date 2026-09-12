@@ -15,15 +15,35 @@
  * beside the database is the kind of thing backup tooling already treats
  * as sensitive.
  *
+ * The lifecycle (OS containment and login recovery plan) is ONE contract
+ * for the CLI daemon and the desktop service, which share the launchd road
+ * below:
+ *   - an installed always-on controller restarts after an unexpected
+ *     clean exit as well as a crash (launchd KeepAlive=true, systemd
+ *     Restart=always, a cmd restart loop under Task Scheduler);
+ *   - start is idempotent — a healthy running service is never killed
+ *     because the installer or the app window ran again;
+ *   - a CHANGED definition (runtime, entry, flags) really reloads: the old
+ *     job is booted out, its disappearance is awaited (the pending-bootout
+ *     race), and the new unit is bootstrapped;
+ *   - explicit stop unloads AND disables, so nothing relaunches it until a
+ *     person installs again — which re-enables;
+ *   - status tells a loaded definition from a fresh working controller,
+ *     and names a missing runtime, a missing entry, or a disabled service.
+ *
  * Everything here is generation plus one supervisor invocation, both
  * injectable — the tests read the generated unit and script `launchctl`,
  * and never touch the machine's real supervision.
  */
 
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import type { ExecResult, RunOptions } from "./exec.js";
+import { isAlive } from "./runner.js";
+import type { Store } from "./store.js";
 
 export type SupervisorRunner = (
   file: string,
@@ -31,14 +51,27 @@ export type SupervisorRunner = (
   options?: RunOptions,
 ) => Promise<ExecResult>;
 
-export type DaemonPlan = {
+/** What every installed service — CLI watch or desktop controller — is made of. */
+export type ServiceDefinition = {
   platform: "darwin" | "linux" | "win32";
   label: string;
   unitPath: string;
   unitContent: string;
   logPath: string;
+  /** The executable the unit runs (the pinned Node binary, or an explicit wrapper). */
+  bin: string;
+  /** The JavaScript entry the runtime is given, when there is one. */
+  entry: string | null;
+};
+
+export type DaemonPlan = ServiceDefinition & {
   tokenFile: string;
 };
+
+/** A stable fingerprint of a unit's text: the changed-definition test. */
+export function definitionDigest(unitContent: string): string {
+  return createHash("sha256").update(unitContent).digest("hex").slice(0, 16);
+}
 
 /**
  * `launchctl bootout` can return before the old label has disappeared from
@@ -93,6 +126,66 @@ export function labelFor(repo: string): string {
   return `com.standing-orders.watch.${slug === "" ? "root" : slug}`;
 }
 
+/** The uid launchd's gui domain is keyed by. */
+function launchdUid(): number {
+  return typeof process.getuid === "function" ? process.getuid() : 501;
+}
+
+/**
+ * The launchd unit shared by the CLI daemon and the desktop service.
+ * KeepAlive requests relaunch after either clean exit or crash. macOS may
+ * defer nondemand launches; the desktop's live controller supervisor covers
+ * controller exits independently. Login/OS-service recovery requires the
+ * physical certification, not just a valid plist.
+ */
+export function launchdPlist(args: { label: string; command: readonly string[]; workingDirectory: string; pathEnv: string; logPath: string; environment?: Record<string, string> }): string {
+  const escaped = args.command.map(part => `    <string>${xml(part)}</string>`).join("\n");
+  const digest = createHash("sha256").update(JSON.stringify(args));
+  // Include executable and package code identity so an update at the same
+  // path reloads the service. Files are only read; credentials are excluded.
+  for (const file of args.command.slice(0, 2)) {
+    try { if (file && existsSync(file)) digest.update(readFileSync(file)); } catch { digest.update("unreadable-runtime"); }
+  }
+  const entry = args.command[1];
+  if (entry?.endsWith(".js")) {
+    try { for (const file of readdirSync(dirname(entry)).filter(name => /\.(js|ps1)$/.test(name)).sort()) digest.update(file).update(readFileSync(join(dirname(entry), file))); } catch { digest.update("unreadable-package"); }
+  }
+  const environment = Object.entries({ PATH: args.pathEnv, ...(args.environment ?? {}), STANDING_ORDERS_SERVICE_DIGEST: digest.digest("hex") })
+    .map(([key, value]) => `    <key>${xml(key)}</key>\n    <string>${xml(value)}</string>`)
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${xml(args.label)}</string>
+  <key>ProgramArguments</key>
+  <array>
+${escaped}
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${xml(args.workingDirectory)}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+${environment}
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>${xml(args.logPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${xml(args.logPath)}</string>
+</dict>
+</plist>
+`;
+}
+
 /**
  * Everything `install` would do, computed without doing it — the unit text,
  * where it goes, where logs land. `--dry-run` prints exactly this.
@@ -123,6 +216,7 @@ export function planDaemon(args: {
   const logDir = join(configDir, "logs");
   const logPath = join(logDir, `${label}.log`);
   const tokenFile = join(configDir, "runner-token");
+  const entry = binArgs[0] !== undefined && /\.(?:c|m)?js$/i.test(binArgs[0]) ? binArgs[0] : null;
 
   const command = [
     bin,
@@ -138,49 +232,15 @@ export function planDaemon(args: {
   ];
 
   if (platform === "darwin") {
-    const escaped = command.map(part => `    <string>${xml(part)}</string>`).join("\n");
-    const unitContent = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${xml(label)}</string>
-  <key>ProgramArguments</key>
-  <array>
-${escaped}
-  </array>
-  <key>WorkingDirectory</key>
-  <string>${xml(repo)}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${xml(pathEnv)}</string>
-  </dict>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>Crashed</key>
-    <true/>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
-  <key>ThrottleInterval</key>
-  <integer>15</integer>
-  <key>StandardOutPath</key>
-  <string>${xml(logPath)}</string>
-  <key>StandardErrorPath</key>
-  <string>${xml(logPath)}</string>
-</dict>
-</plist>
-`;
     return {
       platform,
       label,
       unitPath: join(home, "Library", "LaunchAgents", `${label}.plist`),
-      unitContent,
+      unitContent: launchdPlist({ label, command: [process.execPath, fileURLToPath(new URL("./controller-service.js", import.meta.url)), ...command], workingDirectory: repo, pathEnv, logPath }),
       logPath,
       tokenFile,
+      bin,
+      entry,
     };
   }
 
@@ -189,12 +249,15 @@ ${escaped}
     // on failure, created from an XML definition — no admin, no Service
     // wrapper. schtasks does not redirect output, so the action runs
     // through cmd with an append redirection into the same log file the
-    // other platforms use.
+    // other platforms use. RestartOnFailure covers a crash only; a clean
+    // exit would end the task, so the action itself is a bounded restart
+    // loop (15 s between runs, like ThrottleInterval) — `schtasks /End`
+    // (explicit stop) ends the loop's whole tree.
     const inner = [quoteWin(bin), ...binArgs.map(quoteWin), "watch",
       "--runner", quoteWin(runner), "--token-file", quoteWin(tokenFile),
       "--repo", quoteWin(repo), ...watchFlags.map(quoteWin)].join(" ");
     const pathPrefix = pathEnv === "" ? "" : `set "PATH=${pathEnv};%PATH%" && `;
-    const cmdArguments = `/d /s /c "${pathPrefix}${inner} >> ${quoteWin(logPath)} 2>&1"`;
+    const cmdArguments = `/d /s /c "${pathPrefix}for /L %i in (1,0,2) do (${inner} >> ${quoteWin(logPath)} 2>&1 & timeout /t 15 /nobreak >nul)"`;
     const unitContent = `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -231,9 +294,15 @@ ${escaped}
       unitContent,
       logPath,
       tokenFile,
+      bin,
+      entry,
     };
   }
 
+  // Restart=always: a clean exit the operator did not ask for comes back
+  // too; `systemctl --user stop` / `disable --now` (explicit stop) does
+  // not trigger a restart. Whether the user manager itself survives logout
+  // is linger (`loginctl enable-linger`) — documented, not assumed.
   const unitContent = `[Unit]
 Description=standing-orders watch — ${repo}
 
@@ -241,8 +310,9 @@ Description=standing-orders watch — ${repo}
 Environment=${systemdEscape(`PATH=${pathEnv}`)}
 ExecStart=${command.map(systemdEscape).join(" ")}
 WorkingDirectory=${systemdEscape(repo)}
-Restart=on-failure
+Restart=always
 RestartSec=15
+
 StandardOutput=append:${logPath}
 StandardError=append:${logPath}
 
@@ -256,7 +326,109 @@ WantedBy=default.target
     unitContent,
     logPath,
     tokenFile,
+    bin,
+    entry,
   };
+}
+
+/** The desktop shell's always-on controller: the same launchd contract, pointed at the desktop host. */
+export function planDesktopService(args: {
+  node: string;
+  helper: string;
+  stateDir: string;
+  label: string;
+  home?: string;
+  pathEnv?: string;
+  environment?: Record<string, string>;
+}): ServiceDefinition {
+  const home = args.home ?? homedir();
+  const logPath = join(args.stateDir, "service.log");
+  return {
+    platform: "darwin",
+    label: args.label,
+    unitPath: join(home, "Library", "LaunchAgents", `${args.label}.plist`),
+    unitContent: launchdPlist({
+      label: args.label,
+      command: [args.node, args.helper, "serve", "--state", args.stateDir],
+      workingDirectory: args.stateDir,
+      pathEnv: args.pathEnv ?? process.env["PATH"] ?? "",
+      logPath,
+      ...(args.environment === undefined ? {} : { environment: args.environment }),
+    }),
+    logPath,
+    bin: args.node,
+    entry: args.helper,
+  };
+}
+
+export type ServiceStart = { ok: true; changed: boolean; action: "bootstrapped" | "reloaded" | "started" | "running" } | { ok: false; message: string };
+
+/** The file on disk does not identify the definition launchd has loaded. */
+function loadedLaunchdMatches(unit: string, status: string): boolean {
+  const wanted = /<key>STANDING_ORDERS_SERVICE_DIGEST<\/key>\s*<string>([a-f0-9]{64})<\/string>/.exec(unit)?.[1];
+  const actual = /STANDING_ORDERS_SERVICE_DIGEST\s*=>\s*([a-f0-9]{64})/.exec(status)?.[1];
+  return wanted !== undefined && actual === wanted;
+}
+
+/**
+ * The shared launchd road. Idempotent start: a loaded job whose definition
+ * is unchanged is kickstarted WITHOUT -k (a running one is left alone; a
+ * stopped one starts); a loaded job whose definition changed is booted out,
+ * awaited, and bootstrapped afresh; an unloaded label is enabled (an
+ * explicit stop had disabled it) and bootstrapped. Nothing here kills a
+ * healthy service to prove it can.
+ */
+export async function installLaunchdService(definition: ServiceDefinition, run: SupervisorRunner): Promise<ServiceStart> {
+  const uid = launchdUid();
+  const service = `gui/${uid}/${definition.label}`;
+  const before = existsSync(definition.unitPath) ? readFileSync(definition.unitPath, "utf8") : null;
+  let changed = before !== definition.unitContent;
+  mkdirSync(join(definition.logPath, ".."), { recursive: true });
+  mkdirSync(join(definition.unitPath, ".."), { recursive: true });
+  writeFileSync(definition.unitPath, definition.unitContent, { mode: 0o644 });
+
+  const status = await run("launchctl", ["print", service]);
+  const loaded = status.code === 0;
+  if (loaded) changed ||= !loadedLaunchdMatches(definition.unitContent, status.stdout);
+  if (loaded && !changed) {
+    const started = await run("launchctl", ["kickstart", service]);
+    if (started.code !== 0) return { ok: false, message: `loaded, but launchctl could not start the worker: ${firstLine(started.stderr) || `exit ${started.code}`}` };
+    return { ok: true, changed: false, action: "started" };
+  }
+  if (loaded) {
+    const replaced = await run("launchctl", ["bootout", service]);
+    if (replaced.code !== 0) return { ok: false, message: `launchctl could not boot out the previous definition: ${firstLine(replaced.stderr) || `exit ${replaced.code}`}` };
+    if (!(await waitForLaunchdBootout(run, service))) {
+      return { ok: false, message: "launchd did not finish stopping the previous worker; try the install again" };
+    }
+  }
+  // An explicit stop disables the label; installing again is the only road back.
+  const enabled = await run("launchctl", ["enable", service]);
+  if (enabled.code !== 0) return { ok: false, message: `launchctl could not enable the service: ${firstLine(enabled.stderr) || enabled.code}` };
+  const modern = await run("launchctl", ["bootstrap", `gui/${uid}`, definition.unitPath]);
+  if (modern.code === 0) {
+    // RunAtLoad starts the job; the kickstart (no -k: never a restart) gives
+    // the installer a synchronous boundary instead of "the plist parsed".
+    const started = await run("launchctl", ["kickstart", service]);
+    if (started.code === 0) return { ok: true, changed, action: loaded ? "reloaded" : "bootstrapped" };
+    return { ok: false, message: `loaded, but launchctl could not start the worker: ${firstLine(started.stderr) || `exit ${started.code}`}` };
+  }
+  // Modern first, legacy fallback: `bootstrap` replaced `load` but older
+  // macOS answers only to the old verb.
+  const legacy = await run("launchctl", ["load", "-w", definition.unitPath]);
+  if (legacy.code === 0) return { ok: true, changed, action: loaded ? "reloaded" : "bootstrapped" };
+  return { ok: false, message: `launchctl refused the unit: ${firstLine(modern.stderr) || firstLine(legacy.stderr) || `exit ${legacy.code}`}` };
+}
+
+/** Explicit stop: unload AND disable, so nothing relaunches it until a person installs again. */
+export async function stopLaunchdService(definition: ServiceDefinition, run: SupervisorRunner): Promise<{ ok: true; wasLoaded: boolean } | { ok: false; message: string }> {
+  const service = `gui/${launchdUid()}/${definition.label}`;
+  const disabled = await run("launchctl", ["disable", service]);
+  if (disabled.code !== 0) return { ok: false, message: `launchctl could not disable ${definition.label}: ${firstLine(disabled.stderr) || disabled.code}` };
+  const modern = await run("launchctl", ["bootout", service]);
+  if (modern.code !== 0) await run("launchctl", ["unload", definition.unitPath]);
+  if (!(await waitForLaunchdBootout(run, service))) return { ok: false, message: `launchctl did not stop ${definition.label}; the service is still loaded` };
+  return { ok: true, wasLoaded: modern.code === 0 };
 }
 
 /** Write the token 0600 and the unit, then hand the unit to the supervisor. */
@@ -264,74 +436,53 @@ export async function installDaemon(
   plan: DaemonPlan,
   token: string,
   run: SupervisorRunner,
-): Promise<{ ok: true } | { ok: false; message: string }> {
+): Promise<ServiceStart> {
   writeFileSync(plan.tokenFile, `${token}\n`, { mode: 0o600 });
   chmodSync(plan.tokenFile, 0o600);
+
+  if (plan.platform === "darwin") return installLaunchdService(plan, run);
+
+  const before = existsSync(plan.unitPath) ? readFileSync(plan.unitPath, "utf8") : null;
+  const changed = before !== plan.unitContent;
   mkdirSync(join(plan.logPath, ".."), { recursive: true });
   mkdirSync(join(plan.unitPath, ".."), { recursive: true });
   writeFileSync(plan.unitPath, plan.unitContent, { mode: 0o644 });
 
-  if (plan.platform === "darwin") {
-    // Modern first, legacy fallback: `bootstrap` replaced `load` but older
-    // macOS answers only to the old verb.
-    const uid = typeof process.getuid === "function" ? process.getuid() : 501;
-    let modern = await run("launchctl", ["bootstrap", `gui/${uid}`, plan.unitPath]);
-    if (modern.code !== 0) {
-      // Re-install is an update, not a false "already installed" success.
-      // If this label is already loaded, boot it out and bootstrap the unit
-      // we just wrote so changed runtimes/flags actually take effect.
-      const service = `gui/${uid}/${plan.label}`;
-      const replaced = await run("launchctl", ["bootout", service]);
-      if (replaced.code === 0) {
-        const gone = await waitForLaunchdBootout(run, service);
-        if (!gone) {
-          return { ok: false, message: "launchd did not finish stopping the previous worker; try the install again" };
-        }
-        modern = await run("launchctl", ["bootstrap", `gui/${uid}`, plan.unitPath]);
-      }
-    }
-    if (modern.code === 0) {
-      // RunAtLoad should start the job, but an explicit kickstart gives the
-      // installer a synchronous success/failure boundary instead of treating
-      // "the plist parsed" as proof that the worker started.
-      const started = await run("launchctl", ["kickstart", "-k", `gui/${uid}/${plan.label}`]);
-      if (started.code === 0) return { ok: true };
-      return {
-        ok: false,
-        message: `loaded, but launchctl could not start the worker: ${firstLine(started.stderr) || `exit ${started.code}`}`,
-      };
-    }
-    const legacy = await run("launchctl", ["load", "-w", plan.unitPath]);
-    if (legacy.code === 0) return { ok: true };
-    return {
-      ok: false,
-      message: `launchctl refused the unit: ${firstLine(modern.stderr) || firstLine(legacy.stderr) || `exit ${legacy.code}`}`,
-    };
-  }
-
   if (plan.platform === "win32") {
-    // /F replaces an existing definition, so re-install is idempotent; the
-    // task starts immediately rather than waiting for the next logon.
+    // /F replaces an existing definition, so re-install is idempotent. A
+    // task already running under an UNCHANGED definition is left alone; a
+    // changed one is ended and run again so the new action takes effect.
     const created = await run("schtasks", ["/Create", "/TN", plan.label, "/XML", plan.unitPath, "/F"]);
     if (created.code !== 0) {
       return { ok: false, message: `schtasks /Create failed: ${firstLine(created.stderr) || `exit ${created.code}`}` };
     }
+    const query = await run("schtasks", ["/Query", "/TN", plan.label, "/FO", "LIST", "/V"]);
+    const running = query.code === 0 && /Status:\s*Running/i.test(query.stdout);
+    if (running && !changed) return { ok: true, changed: false, action: "running" };
+    if (running) await run("schtasks", ["/End", "/TN", plan.label]);
     const started = await run("schtasks", ["/Run", "/TN", plan.label]);
     if (started.code !== 0) {
       return { ok: false, message: `created, but schtasks /Run failed: ${firstLine(started.stderr)}` };
     }
-    return { ok: true };
+    return { ok: true, changed, action: running ? "reloaded" : "started" };
   }
 
   const reload = await run("systemctl", ["--user", "daemon-reload"]);
   if (reload.code !== 0) {
     return { ok: false, message: `systemctl daemon-reload failed: ${firstLine(reload.stderr)}` };
   }
+  const active = (await run("systemctl", ["--user", "is-active", plan.label])).stdout.trim() === "active";
+  if (active && changed) {
+    // `enable --now` leaves a running service on its OLD definition; only a
+    // restart loads the new one.
+    const restarted = await run("systemctl", ["--user", "restart", plan.label]);
+    if (restarted.code !== 0) return { ok: false, message: `systemctl restart failed: ${firstLine(restarted.stderr)}` };
+  }
   const enable = await run("systemctl", ["--user", "enable", "--now", plan.label]);
   if (enable.code !== 0) {
     return { ok: false, message: `systemctl enable failed: ${firstLine(enable.stderr)}` };
   }
-  return { ok: true };
+  return { ok: true, changed, action: active ? (changed ? "reloaded" : "running") : "started" };
 }
 
 export async function uninstallDaemon(
@@ -339,9 +490,8 @@ export async function uninstallDaemon(
   run: SupervisorRunner,
 ): Promise<{ ok: true; existed: boolean }> {
   if (plan.platform === "darwin") {
-    const uid = typeof process.getuid === "function" ? process.getuid() : 501;
-    const modern = await run("launchctl", ["bootout", `gui/${uid}/${plan.label}`]);
-    if (modern.code !== 0) await run("launchctl", ["unload", plan.unitPath]);
+    const stopped = await stopLaunchdService(plan, run);
+    if (!stopped.ok) throw new Error(stopped.message);
   } else if (plan.platform === "win32") {
     await run("schtasks", ["/End", "/TN", plan.label]);
     await run("schtasks", ["/Delete", "/TN", plan.label, "/F"]);
@@ -357,40 +507,138 @@ export async function uninstallDaemon(
   return { ok: true, existed };
 }
 
+/**
+ * The definition a label is INSTALLED under, read back from the unit file
+ * (the certificate's view: whatever is on disk is the baseline, so `stale`
+ * is false by construction and the runtime/entry are the installed ones).
+ * Null when no unit file exists for the label.
+ */
+export function installedServiceDefinition(args: { label: string; platform?: NodeJS.Platform; home?: string; configDir?: string; logPath?: string }): ServiceDefinition | null {
+  const platform = args.platform ?? process.platform;
+  if (platform !== "darwin" && platform !== "linux" && platform !== "win32") return null;
+  const home = args.home ?? homedir();
+  const unitPath =
+    platform === "darwin" ? join(home, "Library", "LaunchAgents", `${args.label}.plist`)
+      : platform === "linux" ? join(home, ".config", "systemd", "user", `${args.label}.service`)
+        : join(args.configDir ?? home, "daemon", `${args.label}.xml`);
+  if (!existsSync(unitPath)) return null;
+  const unitContent = readFileSync(unitPath, "utf8");
+  let bin = "";
+  let entry: string | null = null;
+  if (platform === "darwin") {
+    const strings = [...(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(unitContent)?.[1] ?? "").matchAll(/<string>([^<]*)<\/string>/g)].map(match => unxml(match[1] ?? ""));
+    bin = strings[0] ?? "";
+    entry = strings[1] !== undefined && /\.(?:c|m)?js$/i.test(strings[1]) ? strings[1] : null;
+  } else if (platform === "linux") {
+    const exec = /^ExecStart=(.*)$/m.exec(unitContent)?.[1] ?? "";
+    const parts = exec.match(/"(?:[^"\\]|\\.)*"|\S+/g)?.map(part => part.startsWith('"') ? part.slice(1, -1).replace(/\\(["\\])/g, "$1") : part) ?? [];
+    bin = parts[0] ?? "";
+    entry = parts[1] !== undefined && /\.(?:c|m)?js$/i.test(parts[1]) ? parts[1] : null;
+  }
+  const logPath = args.logPath ?? (/<key>StandardOutPath<\/key>\s*<string>([^<]*)<\/string>/.exec(unitContent)?.[1] ?? /^StandardOutput=append:(.*)$/m.exec(unitContent)?.[1] ?? "");
+  return { platform, label: args.label, unitPath, unitContent, logPath: unxml(logPath), bin, entry };
+}
+
+function unxml(text: string): string {
+  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+
+export type ServiceStatus = {
+  /** `loaded` = the supervisor knows the definition but no process runs;
+   * `disabled` = an explicit stop turned it off. Neither is "working". */
+  state: "running" | "loaded" | "disabled" | "not-installed";
+  pid: number | null;
+  detail: string;
+  /** Diagnostics a person can act on: a missing runtime, a missing entry. */
+  problems: string[];
+  /** The installed unit's fingerprint, or null when no unit file exists. */
+  installedDigest: string | null;
+  /** Whether the installed unit still matches what this build would write. */
+  stale: boolean;
+};
+
+/** Runtime facts that make a loaded definition unable to become a working controller. */
+export function runtimeProblems(definition: ServiceDefinition): string[] {
+  const problems: string[] = [];
+  if (!existsSync(definition.bin)) problems.push(`the service's runtime ${definition.bin} does not exist — reinstall to pin the current Node binary`);
+  if (definition.entry !== null && !existsSync(definition.entry)) problems.push(`the service's entry ${definition.entry} does not exist — reinstall from the current package`);
+  return problems;
+}
+
 export async function daemonStatus(
-  plan: DaemonPlan,
+  plan: ServiceDefinition,
   run: SupervisorRunner,
-): Promise<{ state: "running" | "loaded" | "not-installed"; pid: number | null; detail: string }> {
+): Promise<ServiceStatus> {
+  const problems = runtimeProblems(plan);
+  const installed = existsSync(plan.unitPath) ? readFileSync(plan.unitPath, "utf8") : null;
+  const facts = { problems, installedDigest: installed === null ? null : definitionDigest(installed), stale: installed !== null && installed !== plan.unitContent };
   if (plan.platform === "darwin") {
-    const uid = typeof process.getuid === "function" ? process.getuid() : 501;
-    const answer = await run("launchctl", ["print", `gui/${uid}/${plan.label}`]);
-    if (answer.code !== 0) return { state: "not-installed", pid: null, detail: "launchd does not know the label" };
+    const service = `gui/${launchdUid()}/${plan.label}`;
+    const answer = await run("launchctl", ["print", service]);
+    if (answer.code !== 0) {
+      const disabled = await run("launchctl", ["print-disabled", `gui/${launchdUid()}`]);
+      const pattern = new RegExp(`"${plan.label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*=>\\s*(disabled|true)`);
+      if (disabled.code === 0 && pattern.test(disabled.stdout)) {
+        return { state: "disabled", pid: null, detail: "disabled by an explicit stop; install again to re-enable", ...facts };
+      }
+      return { state: "not-installed", pid: null, detail: "launchd does not know the label", ...facts };
+    }
+    facts.stale ||= !loadedLaunchdMatches(plan.unitContent, answer.stdout);
     const pid = /pid = (\d+)/.exec(answer.stdout)?.[1];
     return pid === undefined
-      ? { state: "loaded", pid: null, detail: "loaded, not currently running" }
-      : { state: "running", pid: Number(pid), detail: `running as pid ${pid}` };
+      ? { state: "loaded", pid: null, detail: "loaded, not currently running", ...facts }
+      : { state: "running", pid: Number(pid), detail: `running as pid ${pid}`, ...facts };
   }
   if (plan.platform === "win32") {
     const answer = await run("schtasks", ["/Query", "/TN", plan.label, "/FO", "LIST", "/V"]);
     if (answer.code !== 0) {
-      return { state: "not-installed", pid: null, detail: "the scheduler does not know the task" };
+      return { state: "not-installed", pid: null, detail: "the scheduler does not know the task", ...facts };
     }
-    const running = /Status:\s*Running/i.test(answer.stdout);
-    return running
-      ? { state: "running", pid: null, detail: "running (Task Scheduler does not expose the pid)" }
-      : { state: "loaded", pid: null, detail: "installed, not currently running" };
+    if (/Status:\s*Running/i.test(answer.stdout)) return { state: "running", pid: null, detail: "running (Task Scheduler does not expose the pid)", ...facts };
+    if (/Status:\s*Disabled/i.test(answer.stdout) || /Scheduled Task State:\s*Disabled/i.test(answer.stdout)) {
+      return { state: "disabled", pid: null, detail: "the task is disabled", ...facts };
+    }
+    return { state: "loaded", pid: null, detail: "installed, not currently running", ...facts };
   }
 
   const answer = await run("systemctl", ["--user", "is-active", plan.label]);
   const active = answer.stdout.trim() === "active";
   if (answer.code !== 0 && !active) {
-    return { state: "not-installed", pid: null, detail: answer.stdout.trim() || "inactive" };
+    const enabled = await run("systemctl", ["--user", "is-enabled", plan.label]);
+    const word = enabled.stdout.trim();
+    if (word === "disabled") return { state: "disabled", pid: null, detail: "disabled by an explicit stop; install again to re-enable", ...facts };
+    if (word === "enabled" || word === "linked") return { state: "loaded", pid: null, detail: answer.stdout.trim() || "inactive", ...facts };
+    return { state: "not-installed", pid: null, detail: answer.stdout.trim() || "inactive", ...facts };
   }
   const pidAnswer = await run("systemctl", ["--user", "show", "--property=MainPID", plan.label]);
   const pid = Number(/MainPID=(\d+)/.exec(pidAnswer.stdout)?.[1] ?? 0);
   return active
-    ? { state: "running", pid: pid > 0 ? pid : null, detail: "active" }
-    : { state: "loaded", pid: null, detail: "installed, inactive" };
+    ? { state: "running", pid: pid > 0 ? pid : null, detail: "active", ...facts }
+    : { state: "loaded", pid: null, detail: "installed, inactive", ...facts };
+}
+
+/**
+ * A supervisor PID is necessary but not sufficient: macOS can leave a
+ * process stuck behind a protected-folder access check before it ever
+ * opens the queue. The credentialed runner heartbeat is the end-to-end
+ * readiness receipt that proves a service reached the work loop — and a
+ * FRESH one, newer than what stood before the start, so a stale row from
+ * the previous incarnation cannot pass for the new controller.
+ */
+export async function awaitFreshHeartbeat(
+  store: Store,
+  runnerName: string,
+  heartbeatBefore: string | null,
+  deadlineMs = 5_000,
+  sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
+): Promise<{ ok: true; heartbeatAt: string } | { ok: false }> {
+  const deadline = Date.now() + deadlineMs;
+  for (;;) {
+    const live = store.getRunner(runnerName)?.runner ?? null;
+    if (live !== null && live.heartbeatAt !== heartbeatBefore && isAlive(live, new Date())) return { ok: true, heartbeatAt: live.heartbeatAt };
+    if (Date.now() >= deadline) return { ok: false };
+    await sleep(100);
+  }
 }
 
 function xml(text: string): string {

@@ -1,5 +1,26 @@
 # Progress
 
+**2026-09-12 — OS process containment and controller recovery (schema 53).**
+Integrated the self-hosted builder's commit with independent operator fixes in
+PR #3. Native Linux cgroup v2 and Windows Job Objects admit a target only after
+durable custody, terminate detached descendants, and require kernel emptiness
+before settlement. Required mode refuses unsupported hosts; macOS remains
+observational. Boot-aware custody and worktree occupancy preserve conservative
+recovery when identity is missing. Desktop and CLI services share lifecycle
+code, verify loaded generations, and supervise controller restarts. The desktop
+bundles its signed Node runtime and retains one runner identity.
+
+The fixed `2cda503` runtime passed real Claude and Codex Stop/Resume journeys,
+all seven crash scenarios, and an actual disposable desktop controller recovery
+check (clean exit 1.7 s, SIGKILL 182 s through normal fences, no rescue).
+A schema 52→53 preview preserved all historical values across 95 tables.
+The installed controller remains on schema 52: fresh launchd services blocked
+reading a Documents fixture with both existing and bundled Node. OS job
+relaunch was also deferred in independent launchd probes. Physical login/reboot,
+protected-project access and live deployment are separate gates, not inferred
+from the passing controller tests. See [the operator assessment](assessments/PROCESS_CONTAINMENT_2026-09-12.md)
+and [capabilities and boundaries](PROCESS_CONTAINMENT.md).
+
 **2026-09-12 09:40 UTC — Installed controller upgraded and verified.**
 Main includes PR #2 (`4c70a8c`), and the live desktop runs the certified
 `82d0d28` runtime on schema 52. Both real providers passed Stop/Resume without

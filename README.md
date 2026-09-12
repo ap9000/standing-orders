@@ -381,6 +381,18 @@ standing-orders daemon logs        # the file to tail
 standing-orders daemon uninstall   # take it back off
 ```
 
+The service restarts after a crash and after an unexpected clean exit alike
+(launchd `KeepAlive`, systemd `Restart=always`, a restart loop under Task
+Scheduler); `daemon install` is idempotent on a healthy running service and
+really reloads a changed definition; `daemon uninstall` unloads and disables
+it. `--containment observed|preferred|required` chooses how provider, setup
+and check processes are bounded: a delegated cgroup v2 on Linux or a Job
+Object on Windows when native, the observational tree scan otherwise —
+`required` refuses to spawn rather than silently downgrading (macOS has no
+native equivalent; the status says so and names the Linux route). The
+contract and boundaries are in
+[docs/PROCESS_CONTAINMENT.md](docs/PROCESS_CONTAINMENT.md).
+
 Under the hood it runs `standing-orders watch`: a work-conserving loop that
 composes the same passes cron would call — but wakes on events (a decision
 answered from your phone dispatches the next build in seconds), recovers

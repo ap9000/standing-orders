@@ -835,7 +835,7 @@ export async function sweepHeldOrphans(
   let paged = 0;
   await Promise.all(
     owned.map(async ({ session, run }) => {
-      const killed = await orderKill(session.socketPath, session.cookie);
+      const killed = store.runCustodyProvenGone(session.run) ? { settled: true } : await orderKill(session.socketPath, session.cookie);
       if (!killed.settled) {
         // Page, keep custody, leave 'fencing' for a later helper (v5 P4).
         store.enqueueNotification(
