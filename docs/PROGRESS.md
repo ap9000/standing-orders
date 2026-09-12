@@ -1,5 +1,15 @@
 # Progress
 
+**2026-09-12 — Recipe creator and frequent-work launch (schema 57).** Authors
+can save reusable instructions with questions for the parts that change. Each
+use asks only those questions, freezes their answers into the existing durable
+preview, and uses existing approval and recovery. Saved recipes are searchable,
+show recent uses first, and link directly from new-task intake. Format-1 recipes
+and their digests/receipts are preserved; schema 57 fences older readers and
+indexes recent-use lookups. Typecheck/build and 2,673 local tests passed. See
+the [guide](WORKFLOW_RECIPES.md) and
+[scope and validation record](assessments/RECIPE_CREATOR_2026-09-12.md).
+
 **2026-09-12 — Guided workflow recipes (schema 56).** Six starters now lead
 through choose, customize, and preview into the existing task/routine engine.
 Project recipes are reusable immutable copies with JSON import/export; task

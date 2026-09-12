@@ -50,6 +50,10 @@ boundaries, evidence requirements, model, and permissions.
   work. Save project recipes for teammates, reuse a task's scope, or share a
   portable JSON definition. Creation retries return the same work; existing
   approval and recovery rules apply. [Get started](docs/WORKFLOW_RECIPES.md).
+- **A creator for your usual work.** Write instructions once and add questions
+  for the parts that change, such as a module or feature. Save the recipe,
+  then use a short answer form to kick off another run. Saved recipes are
+  searchable, show recently used work first, and can be shared with teammates.
 - **Unified portfolio chat.** Read every project, prioritize queues, answer
   decisions, repair failed or cancelled dependencies, and confirm rich action
   cards from one conversation. The chat proposes; durable workflow state

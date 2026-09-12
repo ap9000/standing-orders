@@ -65,8 +65,8 @@ import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, 
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
-import { starterRecipes, savedRecipes, findRecipe, importRecipe, exportRecipe, createWorkflowPreview, workflowPreview, launchWorkflow, saveWorkflowRecipe, RecipeError } from "./recipes.js";
-import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtml, recipeScript, RECIPE_CSS } from "./recipe-ui.js";
+import { starterRecipes, savedRecipes, findRecipe, importRecipe, exportRecipe, createWorkflowPreview, workflowPreview, launchWorkflow, saveWorkflowRecipe, RecipeError, prepareRecipeRun } from "./recipes.js";
+import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtml, recipeScript, RECIPE_CSS, recipeDefinitionPreviewHtml, recipeRunHtml, recipeAnswersFromForm } from "./recipe-ui.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
@@ -925,7 +925,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const ref = run === null ? null : store.refForId(run.taskRef);
       return { repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId, action: `${resource[1] === "d" ? "decision" : resource[1] === "i" ? "incident" : "run"} ${resource[3] ?? "view"}` };
     }
-    const known = new Set(["/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/tasks/add", "/queue/move", "/queue/note", "/routines/add", "/people/invite", "/people/invite-revoke", "/people/revoke", "/people/projects", "/projects/select", "/projects/open", "/mode/confirm", "/mode/sign", "/mode/revoke"]);
+    const known = new Set(["/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/tasks/add", "/queue/move", "/queue/note", "/routines/add", "/people/invite", "/people/invite-revoke", "/people/revoke", "/people/projects", "/projects/select", "/projects/open", "/mode/confirm", "/mode/sign", "/mode/revoke"]);
     const placed = ["/tasks/add", "/routines/add"].includes(url.pathname) ? body?.get("repo")?.trim() : null;
     return { repo: url.pathname.startsWith("/people/") ? null : placed ? canonicalProject(placed) ?? placed : projectOf(who, request) ?? null, taskId: null, runId: null,
       action: known.has(url.pathname) ? url.pathname.slice(1).replaceAll("/", " ") : "console request" };
@@ -934,8 +934,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
     if (!restricted()) return true;
     const path = url.pathname;
-    const read = new Set(["/recipes", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
-    const write = new Set(["/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
+    const read = new Set(["/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const write = new Set(["/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path)
@@ -2209,7 +2209,12 @@ export function createDecisionServer(options: ServeOptions): Server {
             planning: "auto", deliverable: ref.deliverable === "report" ? "report" : "branch", schedule: null, costCeilingUsd: null,
           } };
         }
+        if (url.pathname === "/recipes/run") {
+          if (recipe === null || recipe.repo === null) throw new RecipeError("Save a project recipe before using it here.", 404);
+          return render(recipeRunHtml(recipe, project, csrf, revision, null, undefined, url.searchParams.get("saved") === "1"));
+        }
         if (url.pathname === "/recipes/preview" && preview !== null) {
+          if (preview.document.version === 2 || url.searchParams.get("purpose") === "recipe") return render(recipeDefinitionPreviewHtml(preview, csrf, revision));
           const agents = resolveRoutineAuthority(store, project, preview.document.acceptance, now);
           const workers = store.listRunners().filter(one => one.retiredAt === null && one.repos.includes(project) && runnerAlive(one, now));
           const mode = store.activeMode(project, now);
@@ -2226,7 +2231,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           response.setHeader("Content-Disposition", 'attachment; filename="standing-orders-recipe.json"');
           return respond(response, 200, "application/json; charset=utf-8", exportRecipe(recipe.document));
         }
-        if (["/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task"].includes(url.pathname)) return render(recipeEditorHtml(recipe, project, csrf, revision));
+        if (["/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task"].includes(url.pathname)) return render(recipeEditorHtml(recipe, project, csrf, revision, null, undefined, ["/recipes/new", "/recipes/from-task"].includes(url.pathname) || (url.pathname === "/recipes/start" && recipe.repo !== null) || recipe.document.version === 2 || url.searchParams.get("purpose") === "recipe"));
         return refuse(response, who, 404, "No recipe screen here.", "/recipes");
       } catch (error) {
         if (error instanceof RecipeError) return refuse(response, who, error.status, error.message, "/recipes");
@@ -5400,11 +5405,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, "/chat");
     }
 
-    if (["/recipes/preview", "/recipes/import", "/recipes/launch", "/recipes/save"].includes(url.pathname)) {
+    if (["/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/launch", "/recipes/save"].includes(url.pathname)) {
       const project = projectOf(who, request);
       try {
         if (project === null || project === undefined || !visible(project)) throw new RecipeError("Open a project first.", 403);
-        for (const field of ["repo", "projectRevision", "preview", "source", "sourceRevision", "document"]) if (body.getAll(field).length > 1) throw new RecipeError(`Duplicated ${field} field.`);
+        for (const field of ["repo", "projectRevision", "preview", "source", "sourceRevision", "document", "recipe", "recipeRevision", "purpose", "next"]) if (body.getAll(field).length > 1) throw new RecipeError(`Duplicated ${field} field.`);
         if (body.get("repo") !== project || (who.via === "cookie" && body.get("projectRevision") !== String(who.session.projectRevision))) throw new RecipeError("The open project changed. Reopen this recipe in the intended project.", 409);
         const rootMode = !unscopedMode && ceiling.roots.length > 0;
         if (rootMode && !(await authorizedProject(liveCeiling(), project))) throw new RecipeError("The project is outside this server's access.", 403);
@@ -5413,11 +5418,26 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (projectOf(who, request) !== project) throw new RecipeError("The open project changed. Preview the intended project again.", 409);
         const csrf = who.via === "cookie" ? who.session.csrf : "";
         const revision = who.via === "cookie" ? who.session.projectRevision : 0;
+        if (url.pathname === "/recipes/prepare") {
+          const id = body.get("recipe") ?? "", version = body.get("recipeRevision") ?? "";
+          if (!/^[1-9][0-9]{0,8}$/.test(version)) throw new RecipeError("Choose a valid recipe version.");
+          const recipe = findRecipe(store, who.name, project, id, Number(version));
+          if (recipe === null || recipe.repo === null) throw new RecipeError("This recipe is not available in this project.", 404);
+          try {
+            const preview = prepareRecipeRun(store, who.name, project, id, Number(version), recipeAnswersFromForm(body), now);
+            return redirect(response, `/recipes/preview?preview=${preview.token}`);
+          } catch (error) {
+            if (!(error instanceof RecipeError)) throw error;
+            return sendScreen(response, error.status, screen("Use recipe", recipeRunHtml(recipe, project, csrf, revision, error.message, body), { chrome: chromeFor(project, "recipes"), functional: { script: recipeScript() } }));
+          }
+        }
         if (url.pathname === "/recipes/import") {
           const document = importRecipe(body.get("document") ?? "");
-          return sendScreen(response, 200, screen("Imported recipe", recipeEditorHtml({ id: "imported", revision: 1, repo: project, document, digest: "", author: who.name }, project, csrf, revision), { chrome: chromeFor(project, "recipes"), functional: { script: recipeScript() } }));
+          return sendScreen(response, 200, screen("Imported recipe", recipeEditorHtml({ id: "imported", revision: 1, repo: project, document, digest: "", author: who.name }, project, csrf, revision, null, undefined, true), { chrome: chromeFor(project, "recipes"), functional: { script: recipeScript() } }));
         }
         if (url.pathname === "/recipes/preview") {
+          const purpose = body.get("purpose") ?? "workflow";
+          if (!["recipe", "workflow"].includes(purpose)) throw new RecipeError("Choose preview recipe or preview workflow.");
           const source = body.get("source") ?? "custom";
           const sourceVersion = body.get("sourceRevision") ?? "1";
           if (!/^[1-9][0-9]{0,8}$/.test(sourceVersion)) throw new RecipeError("Choose a valid recipe version.");
@@ -5428,15 +5448,16 @@ export function createDecisionServer(options: ServeOptions): Server {
           catch (error) {
             if (!(error instanceof RecipeError)) throw error;
             const fallback = original ?? { ...starterRecipes().find(one => one.id === "small-feature")!, id: source };
-            return sendScreen(response, error.status, screen("Customize recipe", recipeEditorHtml(fallback, project, csrf, revision, error.message, body), { chrome: chromeFor(project, "recipes"), functional: { script: recipeScript() } }));
+            return sendScreen(response, error.status, screen("Customize recipe", recipeEditorHtml(fallback, project, csrf, revision, error.message, body, purpose === "recipe"), { chrome: chromeFor(project, "recipes"), functional: { script: recipeScript() } }));
           }
           const preview = createWorkflowPreview(store, who.name, project, document, source, now);
-          return redirect(response, `/recipes/preview?preview=${preview.token}`);
+          return redirect(response, `/recipes/preview?preview=${preview.token}${purpose === "recipe" || document.version === 2 ? "&purpose=recipe" : ""}`);
         }
         const token = body.get("preview") ?? "";
         if (url.pathname === "/recipes/save") {
-          saveWorkflowRecipe(store, who.name, project, token, now);
-          return redirect(response, `/recipes/preview?preview=${token}`);
+          if (body.has("next") && body.get("next") !== "use") throw new RecipeError("Choose a valid recipe destination.");
+          const saved = saveWorkflowRecipe(store, who.name, project, token, now);
+          return redirect(response, body.get("next") === "use" ? `/recipes/run?recipe=${saved.id}&revision=${saved.revision}&saved=1` : `/recipes/preview?preview=${token}`);
         }
         const made = launchWorkflow(store, who.name, project, token, now, who.via === "cookie");
         if (rootMode) store.upsertProject(project, projectName(project), now);
@@ -14945,6 +14966,7 @@ function newTaskPage(
     `<div class="task-intake-hero"><span class="task-intake-mark" aria-hidden="true">s·o</span>` +
       `<h1>What should get done?</h1>` +
       `<p>Describe the outcome in plain language. The planner will inspect the repository and turn it into a scope you can review.</p></div>`,
+    `<p class="meta">Work you do often? <a href="/recipes">Use a saved recipe</a> or <a href="/recipes/new">create one</a>.</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     taskComposerHtml({
       csrf,

@@ -1,10 +1,55 @@
 # Workflow recipes
 
-Open **Recipes** in the console, choose a starter, customize its outcome, and
-preview the work before creating it. Recipes use the same tasks, scope approval,
+Open **Recipes** in the console to create a reusable recipe, use one you saved,
+or customize a starter. Recipes use the same tasks, scope approval,
 planning, evidence, review, scheduler, and recovery paths as other work.
 
 <img src="media/ui/workflow-recipes.png" alt="Recipe library with six starters and a saved project recipe." width="920">
+
+## Create a recipe for work you do often
+
+Choose **Create a recipe**, give it a name, describe the instructions, and say
+what success looks like. Keep a fixed scope for repeatable work, or open
+**Ask something each time** to add questions for the parts that change.
+
+For example, a regression-test recipe can use:
+
+- Name: `Test {{module}}`
+- Instructions: `Add regression tests for {{module}}, covering {{scenario}}.`
+- Questions: key `module`, label “Which module?”; key `scenario`, label “Which
+  behavior should the tests cover?” A default answer is optional.
+- Success check: `The tests cover {{scenario}} in {{module}} and pass.`
+
+**Insert into instructions** adds the question at your cursor so you do not
+have to type the placeholder. Inputs can appear in the name, description,
+instructions, exclusions, and success-check statements. Allowed paths and
+check commands stay fixed. Questions are for work details, not passwords,
+credentials, or executable snippets. Up to eight questions are supported.
+
+Choose **Preview recipe**, review the reusable definition, then **Save recipe**.
+Saving starts no work. You can also open a task's **Reuse this scope as a recipe**
+link, adapt its existing instructions, add questions, and save a copy.
+
+## Kick off familiar work
+
+<img src="media/ui/recipe-creator-run-mobile.png" alt="A saved recipe asks only which module needs tests before previewing a run." width="280">
+
+Saved recipes appear above the starters, with recently used recipes first and
+a search field. **Use recipe** opens a short form containing only that recipe's
+questions. Fill in what changes this time, **Preview this run**, and create
+the task. A fixed recipe needs no answers. The new-task screen also links
+directly to your saved recipes.
+
+Each use freezes its answers into a fresh scope. Reusing the recipe with another
+module creates independent work; retrying the same preview returns the same
+task. Questions, answers, and saved scope never grant project access or bypass
+the existing approval policy. Teammates answer the same recipe in their own
+sessions, with their own current project permissions.
+
+For repeating recipes, the chosen answers stay fixed for every scheduled
+firing. **Use recipe** creates another schedule; manage or pause an existing
+one from **Routines**. **Edit a copy** changes a new recipe, leaving previous
+copies and work intact.
 
 ## Your first workflow
 
@@ -45,7 +90,8 @@ definition: dependencies, credentials, approvals, provider settings, budgets,
 and publication grants are not copied. Review the new project's policy before
 creating work.
 
-**Export recipe JSON** creates a portable version-1 work definition. Paste it
+**Export recipe JSON** creates a portable work definition: version 1 for fixed
+recipes and version 2 for recipes with questions. Paste it
 under **Import a shared recipe** in another project to customize and preview
 it there. Imports carry no project identity, permissions, credentials, or
 approval authority; unsupported fields and versions are rejected. The text
@@ -67,8 +113,10 @@ text, malformed schedules, unsupported evidence, oversized documents, and
 excess success checks are refused. There are at most 30 unused, unexpired
 previews per actor.
 
-Recipes add schema 56's `workflow_recipe` and `workflow_preview` tables. The
-migration preserves prior data. A database already marked current but missing
+Recipes use schema 56's `workflow_recipe` and `workflow_preview` tables. Schema
+57 adds an index for recently used recipes and fences older readers before
+question-based recipes are saved. Existing version-1 documents, digests, and
+launch receipts are preserved. A database already marked current but missing
 its recipe/receipt tables is refused instead of silently recreating history.
 Back up and follow the existing coordinated controller upgrade process; older
 workers must not write a newer schema.

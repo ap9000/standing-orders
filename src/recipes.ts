@@ -34,11 +34,12 @@ CREATE TABLE IF NOT EXISTS workflow_preview (
   FOREIGN KEY(saved_id, saved_revision) REFERENCES workflow_recipe(id, revision)
 );
 CREATE INDEX IF NOT EXISTS workflow_preview_project ON workflow_preview(repo, created_at DESC);
+CREATE INDEX IF NOT EXISTS workflow_preview_source ON workflow_preview(repo, source, created_at DESC)
+WHERE task_id IS NOT NULL OR routine_id IS NOT NULL;
 `;
 
-export type RecipeDocument = {
+type RecipeFields = {
   format: "standing-orders-recipe";
-  version: 1;
   name: string;
   description: string;
   goal: string;
@@ -50,6 +51,10 @@ export type RecipeDocument = {
   schedule: string | null;
   costCeilingUsd: number | null;
 };
+export type RecipeInput = { key: string; label: string; defaultValue: string | null };
+export type RecipeDocument = RecipeFields & ({ version: 1; inputs?: never } | { version: 2; inputs: RecipeInput[] });
+export const RECIPE_INPUT_LIMIT = 8;
+export type RecipeAnswers = ReadonlyMap<string, string>;
 export type Recipe = { id: string; revision: number; repo: string | null; document: RecipeDocument; digest: string; author: string };
 export type WorkflowPreview = { token: string; actor: string; repo: string; document: RecipeDocument; digest: string; source: string; expiresAt: string; taskId: string | null; routineId: number | null; savedId: string | null; savedRevision: number | null };
 export class RecipeError extends Error {
@@ -64,8 +69,9 @@ export function parseRecipe(input: unknown): RecipeDocument {
   if (typeof input !== "object" || input === null || Array.isArray(input)) throw new RecipeError("Choose a recipe document.");
   if (Buffer.byteLength(JSON.stringify(input), "utf8") > 32_768) throw new RecipeError("A recipe must be at most 32 KB.");
   const raw = input as Record<string, unknown>;
-  if (Object.keys(raw).some(key => !keys.includes(key)) || keys.some(key => !Object.hasOwn(raw, key))) throw new RecipeError("Recipe fields do not match version 1. Recipes contain work definitions, not permissions, credentials, or agent settings.");
-  if (raw.format !== "standing-orders-recipe" || raw.version !== 1) throw new RecipeError("This recipe format/version is not supported.");
+  if (raw.format !== "standing-orders-recipe" || (raw.version !== 1 && raw.version !== 2)) throw new RecipeError("This recipe format/version is not supported.");
+  const expected = raw.version === 2 ? [...keys, "inputs"] : keys;
+  if (Object.keys(raw).some(key => !expected.includes(key)) || expected.some(key => !Object.hasOwn(raw, key))) throw new RecipeError("Recipe fields do not match this version. Recipes contain work definitions, not permissions, credentials, or agent settings.");
   if (typeof raw.name !== "string" || typeof raw.description !== "string" || typeof raw.goal !== "string" || (raw.outOfScope !== null && typeof raw.outOfScope !== "string") || !Array.isArray(raw.touches) || raw.touches.some(path => typeof path !== "string")) throw new RecipeError("Name, goal, exclusions, and allowed paths must be readable text.");
   if (raw.description.length > 400 || !honest(raw.description)) throw new RecipeError("Keep the description within 400 characters, without hidden text.");
   const bad = validateTaskText({ title: raw.name, goal: raw.goal, outOfScope: raw.outOfScope, touches: raw.touches as string[] });
@@ -79,13 +85,19 @@ export function parseRecipe(input: unknown): RecipeDocument {
   if (!Array.isArray(raw.acceptance) || raw.acceptance.some(one => typeof one !== "object" || one === null || Object.keys(one).some(key => !["id", "statement", "how", "evidence"].includes(key)))) throw new RecipeError("Success checks have unsupported fields.");
   const parsed = parseAcceptanceCriteria(raw.acceptance);
   if (parsed.problems.length > 0 || parsed.criteria.length === 0) throw new RecipeError(parsed.problems.map(one => one.message).join("; ") || "Add at least one success check.");
-  const document: RecipeDocument = { format: "standing-orders-recipe", version: 1, name: raw.name.trim(), description: raw.description.trim(), goal: raw.goal.trim(), outOfScope: raw.outOfScope?.trim() || null,
+  const fields: RecipeFields = { format: "standing-orders-recipe", name: raw.name.trim(), description: raw.description.trim(), goal: raw.goal.trim(), outOfScope: raw.outOfScope?.trim() || null,
     touches: [...raw.touches as string[]], acceptance: parsed.criteria, planning: raw.planning as RecipeDocument["planning"], deliverable: raw.deliverable as RecipeDocument["deliverable"], schedule: raw.schedule as string | null, costCeilingUsd: raw.costCeilingUsd as number | null };
+  const document: RecipeDocument = raw.version === 1 ? { ...fields, version: 1 } : { ...fields, version: 2, inputs: parseRecipeInputs(raw.inputs) };
+  // Keep v1's canonical key order stable: existing immutable digests must survive.
+  const ordered: RecipeDocument = { format: document.format, version: document.version, name: document.name, description: document.description, goal: document.goal,
+    outOfScope: document.outOfScope, touches: document.touches, acceptance: document.acceptance, planning: document.planning, deliverable: document.deliverable,
+    schedule: document.schedule, costCeilingUsd: document.costCeilingUsd, ...(document.version === 2 ? { inputs: document.inputs } : {}) } as RecipeDocument;
+  if (ordered.version === 2) validateInputReferences(ordered);
   if (document.schedule !== null) {
     const problems = validateRoutineTerms({ repo: "/recipe-preview", ...document, requirements: [], schedule: document.schedule, singleFlight: true });
     if (problems.length) throw new RecipeError(problems.map(one => `${one.field}: ${one.problem}`).join("; "));
   }
-  return document;
+  return ordered;
 }
 export function importRecipe(text: string): RecipeDocument {
   if (Buffer.byteLength(text, "utf8") > 32_768) throw new RecipeError("A recipe must be at most 32 KB.");
@@ -94,6 +106,66 @@ export function importRecipe(text: string): RecipeDocument {
 }
 export const recipeDigest = (document: RecipeDocument): string => createHash("sha256").update(JSON.stringify(document)).digest("hex");
 export const exportRecipe = (document: RecipeDocument): string => JSON.stringify(parseRecipe(document), null, 2) + "\n";
+
+/** Inputs are literal work text, never a program, path grant, or shell fragment. */
+function parseRecipeInputs(raw: unknown): RecipeInput[] {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > RECIPE_INPUT_LIMIT) throw new RecipeError("Add between 1 and 8 questions, or remove the empty questions to save a fixed recipe.");
+  const seen = new Set<string>();
+  return raw.map(input => {
+    if (input === null || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(key => !["key", "label", "defaultValue"].includes(key))) throw new RecipeError("Questions contain only a key, label, and optional default answer.");
+    const { key, label, defaultValue } = input as Record<string, unknown>;
+    if (typeof key !== "string" || !/^[a-z][a-z0-9_]{0,31}$/.test(key) || ["constructor", "prototype"].includes(key) || seen.has(key)) throw new RecipeError("Give each question a unique key: lowercase letters, numbers, or underscores, starting with a letter (up to 32 characters).");
+    if (typeof label !== "string" || !label.trim() || label.length > 80 || !honest(label)) throw new RecipeError("Give each question a readable label of up to 80 characters.");
+    if (defaultValue !== null && (typeof defaultValue !== "string" || defaultValue.length > 500 || !honest(defaultValue) || /\{\{|\}\}/.test(defaultValue))) throw new RecipeError("Default answers must be plain text up to 500 characters, without input placeholders.");
+    seen.add(key);
+    return { key, label: label.trim(), defaultValue: typeof defaultValue === "string" ? defaultValue.trim() || null : null };
+  });
+}
+const inputToken = /\{\{\s*([a-z][a-z0-9_]{0,31})\s*\}\}/g;
+function workTexts(document: RecipeDocument): string[] {
+  return [document.name, document.description, document.goal, document.outOfScope ?? "", ...document.acceptance.map(one => one.statement)];
+}
+function validateInputReferences(document: RecipeDocument & { version: 2 }): void {
+  const keys = new Set(document.inputs.map(input => input.key)), used = new Set<string>();
+  for (const text of workTexts(document)) {
+    const rest = text.replace(inputToken, (_, key: string) => {
+      if (!keys.has(key)) throw new RecipeError(`Add a question for {{${key}}}, or remove that placeholder.`);
+      used.add(key); return "";
+    });
+    if (/\{\{|\}\}/.test(rest)) throw new RecipeError("Use placeholders like {{module}}, matching a question key.");
+  }
+  if ([...document.touches, ...document.acceptance.map(one => one.how ?? "")].some(text => /\{\{|\}\}/.test(text))) throw new RecipeError("Use inputs in instructions and success checks. Allowed paths and check commands must stay fixed.");
+  for (const key of keys) if (!used.has(key)) throw new RecipeError(`Use {{${key}}} in your instructions or success checks so its answer affects the work.`);
+}
+export function resolveRecipe(document: RecipeDocument, answers: RecipeAnswers): RecipeDocument & { version: 1 } {
+  const parsed = parseRecipe(document);
+  const inputs = parsed.version === 2 ? parsed.inputs : [];
+  const known = new Set(inputs.map(input => input.key));
+  for (const key of answers.keys()) if (!known.has(key)) throw new RecipeError("This recipe does not ask for that input. Reload it before continuing.");
+  const values = new Map<string, string>();
+  for (const input of inputs) {
+    const value = (answers.has(input.key) ? answers.get(input.key)! : input.defaultValue ?? "").trim();
+    if (!value) throw new RecipeError(`Answer “${input.label}” before previewing the work.`);
+    if (value.length > 500 || !honest(value) || /\{\{|\}\}/.test(value)) throw new RecipeError(`“${input.label}” must be plain text up to 500 characters, without input placeholders.`);
+    values.set(input.key, value);
+  }
+  if (parsed.version === 1) return parsed;
+  const expand = (text: string) => text.replace(inputToken, (_, key: string) => values.get(key)!);
+  const { inputs: _inputs, ...fields } = parsed;
+  return parseRecipe({ ...fields, version: 1, name: expand(parsed.name), description: expand(parsed.description), goal: expand(parsed.goal), outOfScope: parsed.outOfScope === null ? null : expand(parsed.outOfScope),
+    acceptance: parsed.acceptance.map(one => ({ ...one, statement: expand(one.statement) })) }) as RecipeDocument & { version: 1 };
+}
+
+/** Only the stored definition supplies scope; form answers cannot replace it. */
+export function prepareRecipeRun(store: Store, actor: string, repo: string, id: string, revision: number, answers: RecipeAnswers, now: Date): WorkflowPreview {
+  repo = recipeProject(repo);
+  return store.transact(() => {
+    access(store, actor, repo, true);
+    const recipe = findRecipe(store, actor, repo, id, revision);
+    if (recipe === null || recipe.repo === null) throw new RecipeError("This recipe is not available in this project.", 404);
+    return createWorkflowPreview(store, actor, repo, resolveRecipe(recipe.document, answers), recipe.id, now);
+  });
+}
 
 const titles: Record<string, string> = { "nightly-deps": "Keep dependencies current", "test-coverage": "Test one overlooked module", "docs-drift": "Keep documentation accurate", "lint-sweep": "Clean up lint and types" };
 export function starterRecipes(): Recipe[] {
@@ -123,7 +195,7 @@ function readRecipe(row: Record<string, unknown>): Recipe {
 export function savedRecipes(store: Store, actor: string, repo: string): Recipe[] {
   repo = recipeProject(repo);
   access(store, actor, repo);
-  return store.handle.prepare(`SELECT r.* FROM workflow_recipe r WHERE repo=? AND revision=(SELECT MAX(revision) FROM workflow_recipe WHERE id=r.id) ORDER BY created_at DESC, id LIMIT 100`).all(repo).map(readRecipe);
+  return store.handle.prepare(`SELECT r.* FROM workflow_recipe r WHERE repo=? AND revision=(SELECT MAX(revision) FROM workflow_recipe WHERE id=r.id) ORDER BY (SELECT MAX(p.created_at) FROM workflow_preview p WHERE p.repo=r.repo AND p.source=r.id AND (p.task_id IS NOT NULL OR p.routine_id IS NOT NULL)) DESC, created_at DESC, id LIMIT 100`).all(repo).map(readRecipe);
 }
 export function findRecipe(store: Store, actor: string, repo: string | null, id: string, revision?: number): Recipe | null {
   const starter = starterRecipes().find(one => one.id === id);
@@ -172,6 +244,7 @@ export function launchWorkflow(store: Store, actor: string, repo: string, token:
     if (preview.taskId !== null || preview.routineId !== null) return { taskId: preview.taskId, routineId: preview.routineId };
     if (preview.expiresAt <= now.toISOString()) throw new RecipeError("This preview expired. Preview it again before creating work.", 409);
     const d = preview.document;
+    if (d.version === 2) throw new RecipeError("Answer the recipe questions and preview the filled-in work before creating it.", 409);
     const provenance = `recipe:${preview.savedId ?? preview.source}`;
     let taskId: string | null = null, routineId: number | null = null;
     if (d.schedule === null) {
