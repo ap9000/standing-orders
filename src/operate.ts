@@ -592,18 +592,24 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
       positional.push(argument);
       continue;
     }
-    const name = argument.slice(2);
+    const equals = argument.indexOf("=");
+    const name = argument.slice(2, equals === -1 ? undefined : equals);
     if (booleans.has(name)) {
+      if (equals !== -1) return { error: `--${name} does not take a value` };
       flags.set(name, true);
       continue;
     }
     if (!wantsValue.has(name)) {
       return { error: `unknown option --${name} — add --help to any queue command for the whole surface` };
     }
-    const value = argv[++index];
+    const value = equals === -1 ? argv[++index] : argument.slice(equals + 1);
     // A following --flag is not a value — consuming it would swallow a real
     // flag and leave this one holding a name-shaped lie.
-    if (value === undefined || value.startsWith("--")) return { error: `--${name} needs a value` };
+    // Minted 32-byte base64url credentials may begin with two hyphens.
+    // Accept that exact token shape without swallowing a following flag.
+    // Explicit --name=value also carries arbitrary literal leading hyphens.
+    const mintedToken = name === "token" && value !== undefined && /^[A-Za-z0-9_-]{43}$/.test(value);
+    if (value === undefined || (equals === -1 && value.startsWith("--") && !mintedToken)) return { error: `--${name} needs a value` };
     flags.set(name, value);
     if (name === "repo") {
       for (const one of value.split(",").map(part => part.trim()).filter(part => part !== "")) repoList.push(one);
