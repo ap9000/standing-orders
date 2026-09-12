@@ -12,13 +12,14 @@ import {Window} from 'happy-dom';
 import {handoffFixture} from './fixtures/handoff-journey.mjs';
 import {assertReviewedCriteria} from './canary-assertions.mjs';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
-let output=resolve('output/certification/handoff-journey.json'),playwright=null,providers=['claude','codex'];
+let output=resolve('output/certification/handoff-journey.json'),playwright=null,providers=['claude','codex'],prepareOnly=false;
 for(let i=2;i<process.argv.length;i++) {
   const arg=process.argv[i];
   if(arg==='--output') output=resolve(process.argv[++i]);
   else if(arg==='--playwright') playwright=resolve(process.argv[++i]);
   else if(arg==='--provider') providers=[process.argv[++i]];
-  else if(arg==='--help') { console.log('node scripts/handoff-journey.mjs --playwright /installed/playwright/index.mjs [--provider claude|codex] [--output file]');process.exit(0); }
+  else if(arg==='--prepare-only') prepareOnly=true;
+  else if(arg==='--help') { console.log('node scripts/handoff-journey.mjs --playwright /installed/playwright/index.mjs [--provider claude|codex] [--prepare-only] [--output file]');process.exit(0); }
   else throw new Error('Unknown argument '+arg);
 }
 assert(playwright&&providers.every(p=>['claude','codex'].includes(p)),'Choose the installed Playwright module and supported providers.');
@@ -87,6 +88,8 @@ for(const provider of providers) {
     await cli('file detailed high-risk intent',['task','scope','catalog','--goal',fixture.goal,'--not',fixture.exclusions,'--touches',fixture.touches.join(','),'--acceptance',acceptanceToLines(fixture.acceptance).join(';'),'--risk','high']);
     await form('/t/catalog','/t/catalog/scope',{'quality-mode':'strict'});
     const filed=await show('catalog','filed');assert.equal(filed.scope.qualityMode,'strict');assert.equal(filed.scope.riskLevel,'high');
+    if(prepareOnly) record.prepared=true;
+    else {
     await cli('request planning',['task','plan','catalog',...auth]);
     console.log(provider+': planning the detailed filed intent');await tick('plan filed intent');
     const planned=await show('catalog','planned');assert.deepEqual(scopeTerms(planned.scope),scopeTerms(filed.scope),'Planner changed the fixed filed requirements');
@@ -119,10 +122,11 @@ for(const provider of providers) {
     assert(final.runs.every(r=>r.outcome!==null),'Orphan run');
     const duplicate=await cli('duplicate dispatch',['tick','--runner','journey-worker','--token',runnerToken,'--repo',repo,'--pool',pool],[3]);assert.equal(duplicate.reason,'empty');
     record.passed=true;record.sourceHead=sourceHead;record.revisionHead=head;record.duplicateDispatch='refused-empty';
+    }
   } catch(error) {record.error=String(error.stack??error).replaceAll(password,'[redacted]').replaceAll(runnerToken??'NO_TOKEN','[redacted]');}
   finally {if(server)await new Promise(r=>server.close(r));store?.close();}
   record.finishedAt=new Date().toISOString();results.push(record);await writeFile(join(dir,'result.json'),JSON.stringify(record,null,2));
-  console.log(provider+': '+(record.passed?'PASS':'FAIL '+record.error.split('\n')[0]));
+  console.log(provider+': '+(record.prepared?'PREPARED (no provider invoked)':record.passed?'PASS':'FAIL '+record.error.split('\n')[0]));
 }
-const report={version:1,passed:results.every(r=>r.passed),runtime,runtimeUnchanged:JSON.stringify(await identity())===JSON.stringify(runtime),startedAt,finishedAt:new Date().toISOString(),retainedAt,manualInterventions:0,results,scope:'Detailed filed intent through planning, ordinary approval, real UI build, independent review, annotated revision and inherited-code review under strict/high-risk terms. Fresh disposable repositories; no rescue edits.',exclusions:['Windows reboot','actual account exhaustion','production publication']};
-report.passed&&=report.runtimeUnchanged;await mkdir(dirname(output),{recursive:true});await writeFile(output,JSON.stringify(report,null,2)+'\n');console.log('Handoff journey: '+output);if(!report.passed)process.exitCode=1;
+const report={version:1,prepared:prepareOnly&&results.every(r=>r.prepared),passed:!prepareOnly&&results.every(r=>r.passed),runtime,runtimeUnchanged:JSON.stringify(await identity())===JSON.stringify(runtime),startedAt,finishedAt:new Date().toISOString(),retainedAt,manualInterventions:0,results,scope:prepareOnly?'Preparation only: private fixture, routes, verification approval, detailed strict/high-risk filing and ordinary form submission; no provider invoked.':'Detailed filed intent through planning, ordinary approval, real UI build, independent review, annotated revision and inherited-code review under strict/high-risk terms. Fresh disposable repositories; no rescue edits.',exclusions:['Windows reboot','actual account exhaustion','production publication']};
+report.passed&&=report.runtimeUnchanged;await mkdir(dirname(output),{recursive:true});await writeFile(output,JSON.stringify(report,null,2)+'\n');console.log('Handoff journey: '+output);if(!(prepareOnly?report.prepared:report.passed))process.exitCode=1;
