@@ -79,7 +79,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
    * with a sealed terminal diff to annotate. */
   const seedSource = (
     taskId: string,
-    terms: { risk?: "routine" | "elevated" | "high"; quality?: "default" | "strict"; budget?: number | null; permission?: "auto" | "bypassPermissions"; goal?: string } = {},
+    terms: { risk?: "routine" | "elevated" | "high"; quality?: "default" | "strict"; budget?: number | null; permission?: "auto" | "bypassPermissions"; goal?: string; reviewOverride?: boolean } = {},
   ) => {
     store.createTask({ id: taskId, title: `${taskId} title` }, T0);
     const taskRef = store.refFor(BUILT_IN, taskId).id;
@@ -96,10 +96,15 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
       ...(terms.permission === undefined ? {} : { permissionMode: terms.permission }),
       now: T0,
     });
+    if (terms.reviewOverride) {
+      const edited = store.editTaskRoute(taskRef, { by: "alex", authenticate: () => ({ ok: true }), override: { phase: "review", provider: "claude", model: "opus" } }, T0);
+      if (!edited.ok) throw new Error(`fixture override refused: ${edited.reason}`);
+    }
     const scope = store.getScope(taskId)!;
     const approved = approve(store, taskId, "alex", T0, scope.digest, alexToken);
     if (!approved.ok) throw new Error(`fixture approval refused: ${approved.reason}`);
     const run = store.startRun({ taskRef, leaseId: `l-${taskId}-${Math.random().toString(16).slice(2, 8)}`, runner: "builder-1", branch: `so/${taskId}`, worktree: `/pool/${taskId}`, now: T0, ...presented(store, taskRef, "builder") });
+    store.stampRun(run, { scopeDigest: scope.digest });
     store.finishRun(run, { outcome: "built", committed: true, now: T0 });
     mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
     const patch = Buffer.from(`diff --git a/${taskId} b/${taskId}\n+x\n`, "utf8");
@@ -114,8 +119,8 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
   /** Write a brief file under the evidence root the way every caller does
    * BEFORE its seal, and describe it the way the seal wants it. */
   const writeBrief = (s: Store, run: number, body: Record<string, unknown>, name = `brief-${Math.random().toString(16).slice(2, 8)}.json`) => {
-    void s;
-    const bytes = Buffer.from(JSON.stringify(body, null, 2), "utf8");
+    const source = s.getRun(run);
+    const bytes = Buffer.from(JSON.stringify({ sourceScopeDigest: source?.scopeDigest ?? null, head: source?.headRevision ?? null, ...body }, null, 2), "utf8");
     mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
     writeFileSync(join(evidenceRoot, String(run), name), bytes);
     return { evidenceRoot, key: `${run}/${name}`, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, capture: "machine-authored brief (exit 0)" };
@@ -124,12 +129,16 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
   const annotate = (run: number, artifactId: number, note = "tighten this") =>
     store.addDiffComment({ artifactId, runId: run, path: "src/payments/guard.ts", line: 3, note, author: "alex" }, T0)!;
 
+  const briefComments = (s: Store, run: number, ids: readonly number[]) => s.liveDiffComments(run)
+    .filter(one => ids.includes(one.id))
+    .map(({ id, path, line, note, author, createdAt }) => ({ id, path, line, note, author, createdAt }));
+
   /** The annotation road's seal, exactly as serve.ts drives it. */
   const sealAnnotation = (s: Store, taskId: string, run: number, commentIds: number[], scopeDigest: string | null, coverage: { defaultBudgetMicrousd: number | null; escalated: boolean } | null = null) =>
     s.sealRevision(
       {
         source: { task: taskId, run, scopeDigest },
-        brief: writeBrief(s, run, { schema: 1, sourceTask: taskId, sourceRun: run, comments: commentIds.map(id => ({ id })) }),
+        brief: writeBrief(s, run, { schema: 1, sourceTask: taskId, sourceRun: run, comments: briefComments(s, run, commentIds) }),
         child: { title: `Revise ${taskId} from ${commentIds.length} annotation on build #${run}`, repair: `apply the annotations recorded on build #${run}; the revision brief carries the exact batch` },
         commentIds,
         coverage,
@@ -158,6 +167,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
       if (!approved.ok) throw new Error(`fixture approval refused: ${approved.reason}`);
     }
     const run = store.startRun({ taskRef, leaseId: `l-${taskId}-${Math.random().toString(16).slice(2, 8)}`, runner: "builder-1", branch: `so/${taskId}`, worktree: `/pool/${taskId}`, now: T0, ...presented(store, taskRef, "builder") });
+    store.stampRun(run, { scopeDigest: scope.digest });
     store.finishRun(run, { outcome: "built", committed: true, now: T0 });
     store.saveProofVerdict(run, "short", ["needs a look"], T0, RUBRIC.map(one => row(one.id, unresolved.includes(one.id) ? "missing" : "pass")));
     maybeSettleRepairChain(store, taskId, "short", T0);
@@ -208,12 +218,8 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
   };
 
   test("c1: all three draft paths inherit high risk, strict quality, the budget, the boundaries and the exact rubric after the installation's defaults are downgraded and widened", () => {
-    const source = seedSource("t-high");
-    // The source's durable route choices: a review override and a plan pin.
-    const edited = store.editTaskRoute(source.taskRef, { by: "alex", authenticate: () => ({ ok: true }), override: { phase: "review", provider: "claude", model: "opus" } }, T0);
-    if (!edited.ok) throw new Error(`fixture override refused: ${edited.reason}`);
-    const reapproved = approve(store, "t-high", "alex", T0, store.getScope("t-high")!.digest, alexToken);
-    if (!reapproved.ok) throw new Error(`fixture re-approval refused: ${reapproved.reason}`);
+    // Route choices belong to the source contract BEFORE its built run.
+    const source = seedSource("t-high", { reviewOverride: true });
     const digest = store.getScope("t-high")!.digest;
     // The installation changes its mind AFTER the source was signed: wider
     // permissions by default, and a different agent for every phase.
@@ -297,6 +303,36 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     expect(legacy).toMatchObject({ riskLevel: "routine", qualityMode: "strict", permissionMode: "auto", budgetMicrousd: null, fromScope: false, goal: "" });
   });
 
+  test("a fresh caller digest cannot relabel an older run's contract", () => {
+    const source = seedSource("t-old-run");
+    const comment = annotate(source.run, source.artifactId);
+    const count = taskCount();
+    propose(store, { taskId: "t-old-run", goal: "a different request", acceptance: RUBRIC, now: T0 });
+    const current = store.getScope("t-old-run")!.digest;
+    expect(current).not.toBe(source.digest);
+    expect(sealAnnotation(store, "t-old-run", source.run, [comment], current)).toMatchObject({ ok: false, reason: "stale-source" });
+    expect(taskCount()).toBe(count);
+    expect(store.liveDiffComments(source.run)).toHaveLength(1);
+    expect(briefRows(source.run)).toBe(0);
+  });
+
+  test.each(["scope", "head", "comments"])("a revision brief binds the actual source %s, not just its task/run names", (field) => {
+    const source = seedSource("t-brief-binding");
+    const comment = annotate(source.run, source.artifactId);
+    const count = taskCount();
+    const body = { schema: 1, sourceTask: "t-brief-binding", sourceRun: source.run, comments: briefComments(store, source.run, [comment]),
+      ...(field === "scope" ? { sourceScopeDigest: "another scope" } : {}),
+      ...(field === "head" ? { head: "a".repeat(40) } : {}),
+    };
+    if (field === "comments") body.comments[0]!.note = "a different instruction";
+    const result = store.sealRevision({ source: { task: "t-brief-binding", run: source.run, scopeDigest: source.digest },
+      brief: writeBrief(store, source.run, body), child: { title: "a revision", repair: "apply the batch" }, commentIds: [comment] }, T0);
+    expect(result).toMatchObject({ ok: false, reason: "brief-custody" });
+    expect(taskCount()).toBe(count);
+    expect(store.liveDiffComments(source.run)).toHaveLength(1);
+    expect(briefRows(source.run)).toBe(0);
+  });
+
   test("c2: the seal proves task, run, scope digest, stored terms and brief custody first — a stale or mismatched source refuses with zero rows, nested or not", () => {
     const source = seedSource("t-bind");
     const other = seedSource("t-other");
@@ -307,7 +343,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     propose(store, { taskId: "t-bind", goal: "do t-bind carefully — rewritten", outOfScope: "authentication and billing", touches: ["src/payments/", "src/limits/"], acceptance: RUBRIC, budgetMicrousd: 5_000_000, riskLevel: "high", qualityMode: "strict", now: T0 });
     const stale = sealAnnotation(store, "t-bind", source.run, [comment], source.digest);
     expect(stale).toMatchObject({ ok: false, reason: "stale-source" });
-    const current = store.getScope("t-bind")!.digest;
+    let current = store.getScope("t-bind")!.digest;
     expect(current).not.toBe(source.digest);
 
     // Wrong run: another task's attempt.
@@ -316,6 +352,12 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     expect(sealAnnotation(store, "t-nowhere", source.run, [comment], current)).toMatchObject({ ok: false, reason: "source-task" });
     // A caller that saw no scope, on a task that has one.
     expect(sealAnnotation(store, "t-bind", source.run, [comment], null)).toMatchObject({ ok: false, reason: "stale-source" });
+
+    // Restore the run's original terms before checking independent custody
+    // failures. A fresh caller digest cannot make the old run current.
+    propose(store, { taskId: "t-bind", goal: "do t-bind carefully", outOfScope: "authentication and billing", touches: ["src/payments/", "src/limits/"], acceptance: RUBRIC, budgetMicrousd: 5_000_000, riskLevel: "high", qualityMode: "strict", now: T0 });
+    current = store.getScope("t-bind")!.digest;
+    expect(current).toBe(source.digest);
 
     // A brief that names another source, a tampered brief, a missing brief.
     const wrongBrief = writeBrief(store, source.run, { schema: 1, sourceTask: "t-other", sourceRun: other.run, comments: [] });
@@ -346,6 +388,8 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     expect(taskCount()).toBe(before);
     expect(briefRows(source.run)).toBe(0);
 
+    // Change the source again before independently exercising stale CI.
+    propose(store, { taskId: "t-bind", goal: "new CI terms", acceptance: RUBRIC, now: T0 });
     // And the CI road refuses the same stale source the same way.
     expect(sealCi(store, "t-bind", source.run, source.digest)).toMatchObject({ ok: false, reason: "stale-source" });
     expect(store.getTask("t-bind-ci-7")).toBeNull();
@@ -386,7 +430,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     if (!tightened.ok) throw new Error(tightened.detail);
     expect(store.getScope(tightened.id)!.budgetMicrousd).toBe(3_000_000);
     const c2 = annotate(source.run, source.artifactId, "two");
-    const kept = sealAnnotation(store, "t-perm", source.run, [c2], digest, { defaultBudgetMicrousd: 8_000_000, escalated: false });
+    const kept = sealAnnotation(store, "t-perm", source.run, [c2], digest, { defaultBudgetMicrousd: 8_000_000, escalated: true });
     if (!kept.ok) throw new Error(kept.detail);
     expect(store.getScope(kept.id)!.budgetMicrousd).toBe(5_000_000);
     const c3 = annotate(source.run, source.artifactId, "three");
@@ -452,6 +496,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     // a detour that is NOT a repair draft.
     const fixRef = store.lookupRef("t-chain-fix-1")!.id;
     const fixRun = store.startRun({ taskRef: fixRef, leaseId: "l-fix-1", runner: "builder-1", branch: "so/fix-1", worktree: "/pool/fix-1", now: T0, ...presented(store, fixRef, "builder") });
+    store.stampRun(fixRun, { scopeDigest: store.getScope("t-chain-fix-1")!.digest });
     store.finishRun(fixRun, { outcome: "built", committed: true, now: T0 });
     mkdirSync(join(evidenceRoot, String(fixRun)), { recursive: true });
     const patch = Buffer.from("diff --git a/f b/f\n+y\n", "utf8");
@@ -467,6 +512,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     // A CI detour on top of the annotation detour, then a RESTART.
     const detourRef = store.lookupRef(detour.id)!.id;
     const detourRun = store.startRun({ taskRef: detourRef, leaseId: "l-detour", runner: "builder-1", branch: "so/detour", worktree: "/pool/detour", now: T0, ...(approve(store, detour.id, "alex", T0, store.getScope(detour.id)!.digest, alexToken).ok ? presented(store, detourRef, "builder") : {}) });
+    store.stampRun(detourRun, { scopeDigest: store.getScope(detour.id)!.digest });
     store.finishRun(detourRun, { outcome: "built", committed: true, now: T0 });
     const ci = sealCi(store, detour.id, detourRun, store.getScope(detour.id)!.digest, 9);
     if (!ci.ok) throw new Error(ci.detail);

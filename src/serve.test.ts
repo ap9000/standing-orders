@@ -840,6 +840,7 @@ describe("the operations console", () => {
     propose(store, { taskId: "t-lim", goal: "fix the rounding", outOfScope: "authentication", touches: ["src/payments/"], acceptance: [{ id: "c1", statement: "The rounding is fixed.", evidence: ["check"] }], now: T0 });
     sealScopeFixture(store, "t-lim", approverToken);
     const run = store.startRun({ taskRef: ref, leaseId: "l-lim", runner: "b-1", branch: "so/t-lim", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
+    store.stampRun(run, { scopeDigest: store.getScope("t-lim")!.digest });
     store.finishRun(run, { outcome: "built", now: T0 });
     mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
     const patch = Buffer.from("diff --git a/p b/p\n+x\n", "utf8");
@@ -903,6 +904,7 @@ describe("the operations console", () => {
     });
     sealScopeFixture(store, "t-strict", approverToken);
     const run = store.startRun({ taskRef: ref, leaseId: "l-strict", runner: "b-1", branch: "so/t-strict", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
+    store.stampRun(run, { scopeDigest: store.getScope("t-strict")!.digest });
     store.finishRun(run, { outcome: "built", now: T0 });
     mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
     const patch = Buffer.from("diff --git a/g b/g\n+guard\n", "utf8");
@@ -7622,6 +7624,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     propose(store, { taskId: "t-review", goal: "wire the guard", acceptance: [{ id: "c1", statement: "it works", how: null, evidence: ["manual-review"] }], now: T0 });
     sign("t-review");
     const run = store.startRun({ taskRef: ref, leaseId: "l-review", runner: "night-shift-1", provider: "claude", branch: "b", worktree: "/wt", now: T0, ...presented(store, ref, "builder") });
+    store.stampRun(run, { scopeDigest: store.getScope("t-review")!.digest });
     store.finishRun(run, { outcome: "built", committed: true, now: T0 });
     store.saveProofVerdict(
       run,

@@ -669,6 +669,8 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
     kind: "criterion-repair" as const,
     sourceTask: ref.externalId,
     sourceRun: sourceRunId,
+    sourceScopeDigest: scope.digest,
+    head: run.headRevision,
     rootTask,
     attempt,
     unresolved: unresolvedDetail,

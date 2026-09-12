@@ -109,6 +109,7 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
       if (!approved.ok) throw new Error(`the fixture approval was refused: ${approved.reason}`);
     }
     const runId = store.startRun({ taskRef, leaseId: `l-${taskId}-${Math.random().toString(16).slice(2, 8)}`, runner: "builder-1", branch: `b-${taskId}`, worktree: `/pool/${taskId}`, now: T0, ...presented(store, taskRef, "builder") });
+    store.stampRun(runId, { scopeDigest: store.getScope(taskId)!.digest });
     store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
     store.saveProofVerdict(runId, verdict, reasons, T0, matrix);
     maybeSettleRepairChain(store, taskId, verdict, T0);

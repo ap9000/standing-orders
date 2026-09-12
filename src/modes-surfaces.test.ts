@@ -190,7 +190,7 @@ describe("the round-1 closures: bearer fencing, revision defaults, sign-time gra
     const run = seedRun(store);
     const evidenceRoot = mkdtempSync(join(tmpdir(), "so-surfaces-ev-"));
     try {
-      const briefBytes = Buffer.from(JSON.stringify({ schema: 1, sourceTask: "t-x", sourceRun: run, comments: [] }), "utf8");
+      const briefBytes = Buffer.from(JSON.stringify({ schema: 1, sourceTask: "t-x", sourceRun: run, sourceScopeDigest: null, head: store.getRun(run)!.headRevision, comments: [] }), "utf8");
       mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
       writeFileSync(join(evidenceRoot, String(run), "brief.json"), briefBytes);
       const sealed = store.sealRevision(

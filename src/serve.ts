@@ -5350,6 +5350,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         schema: 1 as const,
         sourceTask: sourceTaskId,
         sourceRun: id,
+        sourceScopeDigest: sourceScope?.digest ?? null,
         head: found.headRevision,
         diffArtifactSha: terminal?.sha256 ?? null,
         comments: comments.map(one => ({
@@ -5451,6 +5452,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         kind: "ci-repair" as const,
         sourceTask: sourceTaskId,
         sourceRun: id,
+        sourceScopeDigest: sourceScope?.digest ?? null,
+        head: found.headRevision,
         pr: publication.prNumber,
         prUrl: publication.prUrl,
         publishedHeadSha: publication.headSha,

@@ -10979,6 +10979,9 @@ export class Store {
           if (sourceScope !== null && sourceScope.termsProblem != null) {
             return refuse("source-terms", `${args.source.task}'s stored terms do not read back exactly (${sourceScope.termsProblem}) — nothing inherits from a row that is not authority`);
           }
+          if (sourceRun.scopeDigest !== args.source.scopeDigest) {
+            return refuse("stale-source", `run #${sourceRun.id} was built against different terms — a newer task scope cannot stand in for that run's contract`);
+          }
           // THE BRIEF CUSTODY: the file, re-read and re-hashed under the
           // evidence root, must be the bytes the caller claims AND name
           // exactly this source. A brief for another run is a wrong brief.
@@ -10997,14 +11000,31 @@ export class Store {
             captureStatus: null,
           });
           if (!custody.ok) return refuse("brief-custody", `the revision brief does not verify — ${custody.problem}`);
-          let named: { sourceTask?: unknown; sourceRun?: unknown };
+          let named: { sourceTask?: unknown; sourceRun?: unknown; sourceScopeDigest?: unknown; head?: unknown; comments?: unknown };
           try {
-            named = JSON.parse(custody.content.toString("utf8")) as { sourceTask?: unknown; sourceRun?: unknown };
+            named = JSON.parse(custody.content.toString("utf8")) as typeof named;
           } catch {
             return refuse("brief-custody", "the revision brief is not JSON");
           }
           if (named === null || typeof named !== "object" || named.sourceTask !== args.source.task || named.sourceRun !== args.source.run) {
             return refuse("brief-custody", `the revision brief names ${String(named?.sourceTask ?? "?")} / run #${String(named?.sourceRun ?? "?")}, not ${args.source.task} / run #${args.source.run}`);
+          }
+          if (named.sourceScopeDigest !== sourceRun.scopeDigest || named.head !== sourceRun.headRevision) {
+            return refuse("brief-custody", "the revision brief does not bind the source run's exact scope and head");
+          }
+          if (args.commentIds !== null) {
+            const ids = new Set(args.commentIds);
+            const live = this.liveDiffComments(sourceRun.id).filter(one => ids.has(one.id));
+            if (ids.size !== args.commentIds.length || live.length !== ids.size) {
+              throw new RevisionRaced("this annotation batch is no longer whole — read the current comments before sealing it");
+            }
+            const exactComment = (one: Record<string, unknown>) => ({ id: one["id"], path: one["path"], line: one["line"], note: one["note"], author: one["author"], createdAt: one["createdAt"] });
+            const expected = live.map(one => exactComment({ ...one }));
+            const described = Array.isArray(named.comments) && named.comments.every(one => one !== null && typeof one === "object" && !Array.isArray(one))
+              ? named.comments.map(one => exactComment(one as Record<string, unknown>)) : null;
+            if (JSON.stringify(described) !== JSON.stringify(expected)) {
+              return refuse("brief-custody", "the revision brief does not contain the exact annotation batch being consumed");
+            }
           }
           // THE TERMS, from the source rows this transaction just proved.
           const terms = revisionTermsOf(sourceRef, sourceScope, args.coverage ?? null, this.permissionDefault().mode, this.qualityDefault().mode);
@@ -21308,7 +21328,8 @@ export function revisionTermsOf(
         ? "strict"
         : "default";
   const sealedPosture = sourceScope === null ? null : permissionModeOfProfile(sourceScope.approvedProfile ?? sourceScope.profile ?? null);
-  const permissionMode: UnattendedPermissionMode = sourceRef.permissionMode ?? sealedPosture ?? permissionDefault;
+  const permissionMode: UnattendedPermissionMode =
+    sealedPosture === "auto" || sourceRef.permissionMode === "auto" ? "auto" : sourceRef.permissionMode ?? sealedPosture ?? permissionDefault;
   const sourceBudget = sourceScope?.budgetMicrousd ?? null;
   const coverageBudget = coverage?.defaultBudgetMicrousd ?? null;
   const budgetMicrousd =
@@ -21325,7 +21346,7 @@ export function revisionTermsOf(
     routeOverridesJson: sourceRef.routeOverrides === null || sourceRef.routeOverrides === undefined || sourceRef.routeOverrides.length === 0 ? null : canonicalOverridesJson(sourceRef.routeOverrides),
     agentPin: sourceRef.agentProvider === null ? null : { provider: sourceRef.agentProvider, model: sourceRef.agentModel },
     planPin: sourceRef.planProvider === null ? null : { provider: sourceRef.planProvider, model: sourceRef.planModel },
-    escalated: coverage?.escalated === true,
+    escalated: coverage?.escalated === true && (sourceScope === null || permissionMode === "bypassPermissions"),
     fromScope: sourceScope !== null,
   };
 }
