@@ -134,6 +134,37 @@ export function recordWorktreeProcess(store: Store, path: string, runner: string
   writeFileSync(join(path, MARKER), `${pid} ${runner} group\n`, "utf8");
 }
 
+/** Read-only occupancy witness shared with stop settlement. */
+export function worktreeProcessOccupancy(path: string): { held: true; by: number } | { held: false } {
+  const note = join(path, MARKER);
+  if (!existsSync(note)) return { held: false };
+
+  const parts = readFileSync(note, "utf8").trim().split(/\s+/);
+  const pid = Number(parts[0]);
+  if (!Number.isInteger(pid) || pid <= 0) return { held: false };
+  if (pid === process.pid) return { held: false };
+
+  // A shell/provider can exit before its descendants. A recorded POSIX
+  // process group remains an owner until that whole group has gone.
+  if (parts[2] === "group" && process.platform !== "win32") {
+    try { process.kill(-pid, 0); return { held: true, by: pid }; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return { held: true, by: pid }; }
+  }
+
+  try {
+    process.kill(pid, 0);
+    return { held: true, by: pid };
+  } catch (error) {
+    // Two different answers hide behind one throw. ESRCH means the process
+    // is gone and the note is what it left behind. EPERM means it is very
+    // much alive and simply not ours to signal — running as another user, or
+    // elevated — and reading that as "gone" would hand somebody's live
+    // checkout to another runner. Only ESRCH frees it.
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ESRCH" ? { held: false } : { held: true, by: pid };
+  }
+}
+
 export class WorktreePool {
   private readonly runner: Runner;
 
@@ -167,33 +198,7 @@ export class WorktreePool {
    * may be in costs a retry, and taking one they are in costs their work.
    */
   inUse(path: string): { held: true; by: number } | { held: false } {
-    const note = join(path, MARKER);
-    if (!existsSync(note)) return { held: false };
-
-    const parts = readFileSync(note, "utf8").trim().split(/\s+/);
-    const pid = Number(parts[0]);
-    if (!Number.isInteger(pid) || pid <= 0) return { held: false };
-    if (pid === process.pid) return { held: false };
-
-    // A shell/provider can exit before its descendants. A recorded POSIX
-    // process group remains an owner until that whole group has gone.
-    if (parts[2] === "group" && process.platform !== "win32") {
-      try { process.kill(-pid, 0); return { held: true, by: pid }; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return { held: true, by: pid }; }
-    }
-
-    try {
-      process.kill(pid, 0);
-      return { held: true, by: pid };
-    } catch (error) {
-      // Two different answers hide behind one throw. ESRCH means the process
-      // is gone and the note is what it left behind. EPERM means it is very
-      // much alive and simply not ours to signal — running as another user, or
-      // elevated — and reading that as "gone" would hand somebody's live
-      // checkout to another runner. Only ESRCH frees it.
-      const code = (error as NodeJS.ErrnoException).code;
-      return code === "ESRCH" ? { held: false } : { held: true, by: pid };
-    }
+    return worktreeProcessOccupancy(path);
   }
 
   /**

@@ -24,6 +24,8 @@ import { addApprover, approve, propose } from "./scope.js";
 import { routeDigestOf } from "./phase-routing.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { maybeRequestAutoReview } from "./dispose.js";
+import { requestTaskStop, resumeTaskStop } from "./task-control.js";
+import { run as runCommand } from "./exec.js";
 import {
   diffPathsOf,
   parseReview,
@@ -1139,6 +1141,44 @@ describe("the reviewer role in the store", () => {
         expect(retryState().attempts.map(one => one.requestId)).toEqual([(first as { id: number }).id, (second as { id: number }).id, (third as { id: number }).id]);
         expect(store.getRun(builtRun)).toMatchObject({ outcome: "built", headRevision: "head-aaa" });
         expect(readdirSync(scratchRoot)).toHaveLength(0);
+      });
+
+      test("an operator's exact-run stop (v52) during a review ends the root as interrupted — late review output is never ingested, the request reads `interrupted`, and the explicit retry door stays open", async () => {
+        const first = store.requestReview(builtRun, "alex", T0);
+        expect(first).toMatchObject({ ok: true, attempt: 1 });
+        // The reviewer "finishes" a valid review, but the stop lands while
+        // it runs — before ingestion — so the judgement is never landed.
+        let stoppedRoot: number | null = null;
+        const stoppedMidway: Runner = async (_file, args, options) => {
+          const root = store.runsFor(taskRef).find(run => run.role === "reviewer" && run.outcome === null);
+          if (root === undefined) throw new Error("no live reviewer root");
+          stoppedRoot = root.id;
+          // Exercise the real spawn-custody callback before injecting the
+          // stop between process completion and review ingestion.
+          await runCommand(process.execPath, ["-e", "process.exit(0)"], { ...options, timeoutMs: 1_000 });
+          const asked = requestTaskStop(store, { taskId: "t-1", runId: root.id, by: "alex", via: "cli" }, T0);
+          expect(asked).toMatchObject({ ok: true, repeated: false });
+          expect(store.activeHolds(taskRef, T0)).toEqual([]);
+          return reviewingAgent({ version: 1, comments: [{ path: "src/payouts.ts", line: 2, note: "never awaited", severity: "question" }] })(_file, args, options);
+        };
+        const reports = await passOnce(stoppedMidway);
+        expect(reports).toEqual([{ requestId: (first as { id: number }).id, run: builtRun, outcome: "failed", attempt: 1, retriesRemaining: 2, detail: "stopped" }]);
+        expect(stoppedRoot).not.toBeNull();
+        expect(store.getRun(stoppedRoot as number)).toMatchObject({ outcome: "failed", reason: "interrupted" });
+        expect(store.stopOf(stoppedRoot as number)).toMatchObject({ settlement: "interrupted", requestedBy: "alex" });
+        expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+        expect(store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get((first as { id: number }).id)).toEqual({ consumed_reason: "interrupted" });
+        expect(retryState()).toMatchObject({ state: "retryable", retriesUsed: 0, retriesRemaining: 2, nextAttempt: 2 });
+        expect(retryState().latest).toMatchObject({ attempt: 1, outcome: "failed", reason: "interrupted" });
+        // The build's own outcome stands untouched.
+        expect(store.getRun(builtRun)).toMatchObject({ outcome: "built", headRevision: "head-aaa" });
+        // Resume is not the road for a review; the bounded explicit retry is.
+        expect(resumeTaskStop(store, { taskId: "t-1", runId: stoppedRoot as number, by: "alex", via: "cli" }, T0)).toMatchObject({ ok: false, reason: "review" });
+        const retry = store.requestReview(builtRun, "alex", new Date(T0.getTime() + 1_000));
+        expect(retry).toMatchObject({ ok: true, attempt: 2 });
+        const again = await passOnce(reviewingAgent({ version: 1, comments: [{ path: "src/payouts.ts", line: 2, note: "never awaited", severity: "question" }] }));
+        expect(again).toMatchObject([{ outcome: "reviewed", attempt: 2 }]);
+        expect(store.liveDiffComments(builtRun)).toHaveLength(1);
       });
 
       test("a successful retry ends the allowance: the review lands once, and a later ask refuses already-reviewed", async () => {

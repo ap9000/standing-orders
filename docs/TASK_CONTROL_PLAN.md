@@ -101,3 +101,79 @@ review, any repairs, real-provider certification, and remaining physical-machine
 limits honestly. Only the tested integrated runtime is eligible for the next
 live upgrade. Keep a pre-migration backup and verify login, schema integrity,
 launchd ownership, and fresh runner heartbeats after deployment.
+
+## Implementation record (2026-09-12)
+
+Delivered on `standing-orders/safe-task-stop-and-resume` as schema 52.
+
+- **Durable intent.** `run_stop` (one row per exact run: requested by/via/at,
+  settlement `interrupted | recovered | held | finished` with its time, resumed
+  by/via/at) and the `stop` hold owner (`hold.owner_kind`), lifted only by
+  resuming that run. `Store.requestRunStop` proves the run is this task's
+  current live attempt (a reviewer's open outcome counts through its
+  synthetic lease), not a tournament lane, and has admitted no publication;
+  a repeated request answers with the same row.
+- **Fences.** `Store.applicableStopFor` follows `parent_run` while the lease
+  is shared (repair turns, reviewer corrections). It is consulted at the
+  invocation gateway before spawn, in the builder after the provider and at
+  the commit gate and the repair loop, inside every fenced finalizer
+  (`interruptIfStopped` in claim.ts), at settlement in `disposeBuildOutcome`
+  (inside one transaction, before any arm), in `Store.ingestReview`, in
+  `resolveChainOnRunEnd` (a stopped tail ends the cycle without advancing),
+  and in the recovered-draft grant (an unresumed stop admits no successor).
+- **Process ownership.** `exec.ts` registers children under an `owner` tag
+  (database identity plus run ID); `terminateOwnedProcesses` kills only that tag's process
+  trees. POSIX cancellation freezes the owned process and its current
+  descendants, re-scans before killing, and includes tool shells that created
+  their own groups. A shared observer retains descendant liveness witnesses
+  while their ancestry is still visible; recovery never signals those saved
+  PIDs. Held supervisors use the same tree cancellation. Unknown process
+  observations remain blocked. `underStopWatch` re-reads the stop row every
+  1.5 s while a provider,
+  setup, or check child runs. The held coordinator fences a stopped session
+  through its supervisor (`HeldSessionCoordinator.stop`, and the lapse
+  interval for stops filed elsewhere). No global sweep is used for a task act.
+- **Settlement.** `finalizeInterruptedFenced` (claim.ts) releases the claim
+  as `interrupted`, ends the run and its owned descendants as
+  `failed / interrupted`, keeps a commit already made, requeues the task
+  under the stop's hold. Settlement separately requires every owned run to
+  end and every retained process witness to establish exit. Worker death
+  alone is insufficient. Each OS spawn first reserves a durable `run_process`
+  row, then attaches its PID; a crash in between stays visibly Stopping.
+  Reconcile revisits pending stops after orphan processes exit. Saved PIDs
+  are read-only liveness witnesses and never authorize signals.
+- **Resume.** `Store.resumeRunStop` refuses `stopping`, `already-resumed`,
+  `superseded` (a newer attempt head), `busy` (a live claim), `review`; the
+  store always checks retained process witnesses and workspace occupancy,
+  including web callers without a configured pool; the domain door reports
+  the concrete gate (`diagnoseTaskDispatch`) when work cannot start yet.
+- **Surfaces.** `src/task-control.ts` is the shared domain API and the one
+  projection (`taskControlOf`: stop / stopping / paused / review-stopped).
+  CLI: `task stop`, `task resume`, and `task show` (`control`, `stops`).
+  Console: `POST /t/:id/stop` (approver session, csrf, exact run),
+  `POST /t/:id/resume-arm` → ceremony, `POST /t/:id/resume` (password +
+  durable `run-resume` nonce over the run, its settlement, and the scope
+  approval), rendered by `taskControlHtml` on the task page and inside the
+  focused chat's live region (which the page script swaps alone, leaving
+  the composer's typed input untouched).
+- **Tests.** `task-control.test.ts` (both stop-versus-success orders,
+  stale/replayed actions against a successor, hold precision, restart
+  settlement, the v51→v52 upgrade), `task-control-process.test.ts` (two real
+  process trees, one stopped; no write after settlement),
+  `task-control-git.test.ts` (real Git journey through the CLI),
+  `task-control-console.test.ts` (auth, viewer, bearer, stale nonce, changed
+  approval, foreign project, finished run, stopped review), plus held and
+  reviewer cases in their own suites.
+- **Independent hardening.** Self-hosted build #1520 and review #1521
+  produced and assessed the initial implementation. Operator review then
+  reproduced and fixed cross-database process collisions, a late-spawn stop
+  race, an unlocked completion window, orphan recovery/resume, and review
+  retry over a live orphan. Completion and stop disposition share one write
+  transaction. CLI, task page, and focused chat derive the same state.
+  `task-control-adversarial.test.ts` exercises these boundaries with real
+  database connections and subprocesses. The provider review covers its
+  original commit only; it is not evidence for later operator changes.
+- **Certification gates.** The frozen candidate must pass the full suite,
+  platform CI, six-stage crash canary plus stop-before-crash, and ordinary
+  authenticated real-provider Stop/Resume journeys before live deployment.
+  The journey also verifies that live chat polling preserves unsent text.

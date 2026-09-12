@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore } from "./store.js";
@@ -8,6 +8,7 @@ import { acquire, acquireIfReady } from "./claim.js";
 import { canonicalProfileJson, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import { HeldSessionCoordinator, sweepHeldOrphans } from "./held.js";
 import { run as runExec } from "./exec.js";
+import { requestTaskStop, resumeTaskStop } from "./task-control.js";
 import type { CapturedBuild } from "./builder.js";
 import type { HeldSessionStart, HeldSessionHandle } from "./exec.js";
 
@@ -205,9 +206,12 @@ describe("the coordinator: final proof, custody, settlement through the shared m
       },
       exited,
     };
-    const starter = ((_file: string, _args: readonly string[], options: { events?: typeof state.events }) => {
+    const starter = (async (_file: string, _args: readonly string[], options: { events?: typeof state.events }) => {
+      // Use an actually reaped fixture process. Fixed fake PIDs can collide
+      // with a real CI process and correctly fail the quiescence check.
+      await runExec(process.execPath, ["-e", ""], { processGroup: true, onSpawn: pid => { handle.supervisorPid = pid; handle.agentPgid = pid; } });
       state.events = options.events;
-      return Promise.resolve({ ok: true, handle } as HeldSessionStart);
+      return { ok: true, handle } as HeldSessionStart;
     }) as typeof import("./exec.js").startClaudeHeldSession;
     return starter;
   };
@@ -330,6 +334,52 @@ describe("the coordinator: final proof, custody, settlement through the shared m
     expect(store.heldSessionOf(args.runId)?.endedAt).not.toBeNull();
     expect(store.readAuthorization("auth-att")?.closedAt).not.toBeNull();
     expect(store.readAuthorization("auth-att")?.endReason).toBe("finished");
+    rmSync(worktree.dir, { recursive: true, force: true });
+    store.close();
+  }, 20_000);
+
+  test("an operator's exact-run stop (v52) fences a held session through its supervisor: interrupted, the stop settled as held, custody and authorization closed in the stop's words, the worktree kept", async () => {
+    const store = openStore(":memory:");
+    const coordinator = new HeldSessionCoordinator();
+    const worktree = await gitWorktree();
+    let disposed: unknown = null;
+    let terminated = 0;
+    // The "agent" accepts the brief and then holds — never a result.
+    const starter = fakeStarter({
+      onWrite: (_json, emit) => {
+        setTimeout(() => emit({ type: "system", subtype: "init", session_id: "sess-att" }), 10);
+      },
+    });
+    const args = await launchArgsFor(store, coordinator, worktree, starter, d => (disposed = d));
+    const launched = await coordinator.launch(args as never);
+    expect(launched).toMatchObject({ ok: true });
+    expect(store.heldSessionOf(args.runId)?.state).toBe("open");
+    writeFileSync(join(worktree.dir, "draft.ts"), "// half-written\n");
+
+    // The shared door: durable first, then the coordinator's own fence.
+    const asked = requestTaskStop(store, {
+      taskId: "t-att", runId: args.runId, by: "alex", via: "web",
+      held: { stop: id => { terminated += 1; return coordinator.stop(id); } },
+    }, new Date());
+    expect(asked).toMatchObject({ ok: true, repeated: false });
+    expect(terminated).toBe(1);
+    await new Promise<void>(pass => {
+      const poll = () => (disposed !== null ? pass() : setTimeout(poll, 25));
+      poll();
+    });
+    expect(disposed).toMatchObject({ kind: "interrupted", reason: "stopped" });
+    expect(store.getRun(args.runId)).toMatchObject({ outcome: "interrupted", reason: "stopped" });
+    expect(store.stopOf(args.runId)).toMatchObject({ settlement: "held" });
+    expect(store.heldSessionOf(args.runId)?.endReason).toBe("stopped");
+    expect(store.readAuthorization("auth-att")?.endReason).toBe("stopped");
+    expect(store.raw().prepare("SELECT released_by FROM claim WHERE lease_id = 'lease-att'").get()?.["released_by"]).toBe("held-fence");
+    // The draft stays on disk; the stop's hold keeps the task paused.
+    expect(readFileSync(join(worktree.dir, "draft.ts"), "utf8")).toContain("half-written");
+    expect(store.activeHolds(args.captured.taskRef, new Date()).map(one => one.ownerKind)).toEqual(["stop"]);
+    // A second stop is the same request; a resume now succeeds (quiescent) and lifts only that hold.
+    expect(requestTaskStop(store, { taskId: "t-att", runId: args.runId, by: "alex", via: "web" }, new Date())).toMatchObject({ ok: true, repeated: true });
+    expect(resumeTaskStop(store, { taskId: "t-att", runId: args.runId, by: "alex", via: "web" }, new Date())).toMatchObject({ ok: true });
+    expect(store.activeHolds(args.captured.taskRef, new Date())).toEqual([]);
     rmSync(worktree.dir, { recursive: true, force: true });
     store.close();
   }, 20_000);
@@ -943,9 +993,12 @@ describe("parallel attended sessions (v28): two held conversations on one runner
       killHard(): void { exitResolve({ code: null }); },
       exited,
     };
-    const starter = ((_file: string, _args: readonly string[], options: { events?: typeof state.events }) => {
+    const starter = (async (_file: string, _args: readonly string[], options: { events?: typeof state.events }) => {
+      // Use an actually reaped fixture process. Fixed fake PIDs can collide
+      // with a real CI process and correctly fail the quiescence check.
+      await runExec(process.execPath, ["-e", ""], { processGroup: true, onSpawn: pid => { handle.supervisorPid = pid; handle.agentPgid = pid; } });
       state.events = options.events;
-      return Promise.resolve({ ok: true, handle } as HeldSessionStart);
+      return { ok: true, handle } as HeldSessionStart;
     }) as typeof import("./exec.js").startClaudeHeldSession;
     return starter;
   };

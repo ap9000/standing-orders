@@ -12,6 +12,16 @@ import { adapterFor } from "./provider.js";
 const NODE = process.execPath;
 
 describe("run", () => {
+  test.each([run, runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl])("a late spawn fence creates no subprocess (%#)", async transport => {
+    let spawned = false;
+    const result = await transport(NODE, ["-e", "console.log('must not run')"], {
+      processGroup: true, beforeSpawn: () => false, onSpawn: () => { spawned = true; },
+    });
+    expect(spawned).toBe(false);
+    expect(result.code).not.toBe(0);
+    expect(result.timedOut).toBe(false);
+    expect(result.stdout).toBe("");
+  });
   test.each([run, runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl])("a failed custody callback reaps the spawned child before returning (%#)", async transport => {
     let pid: number | null = null;
     const result = await transport(NODE, ["-e", "setInterval(()=>{},1000)"], {

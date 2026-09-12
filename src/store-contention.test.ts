@@ -96,6 +96,7 @@ describe("brief concurrent database writers do not disconnect the controller", (
         calls++;
         store.createTask({ id: "must-not-exist", title: "No partial write" }, new Date());
       })).toThrow(/database is locked/);
+      // Allow scheduling tolerance around the configured five-second wait.
       expect(Date.now() - started).toBeLessThan(10_000);
       expect(calls).toBe(0);
       expect(store.getTask("must-not-exist")).toBeNull();

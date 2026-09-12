@@ -1,0 +1,269 @@
+{
+ "evidence": "safe-task-stop-and-resume",
+ "capturedAt": "2026-09-12T08:35:13.839Z",
+ "plane": {
+  "kind": "isolated fixture database seeded by evidence/safe-task-stop-and-resume/seed.ts (never the live control database)",
+  "seed": "node --import tsx evidence/safe-task-stop-and-resume/seed.ts /tmp/so-stop-capture",
+  "console": "standing-orders serve --db /tmp/so-stop-capture/orders.db --port 4997 --repo /tmp/so-stop-capture/repo",
+  "capture": "node evidence/safe-task-stop-and-resume/capture.mjs http://127.0.0.1:4997 evidence/safe-task-stop-and-resume <password>",
+  "playwright": "file://~/.npm/_npx/31e32ef8478fbf80/node_modules/playwright/index.mjs"
+ },
+ "captures": [
+  {
+   "file": "desktop-stop.png",
+   "page": "/t/rate-limit-payouts-live",
+   "expectedState": "stop",
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "title": "task · rate-limit-payouts-live",
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "state": "stop",
+   "run": "1",
+   "panelTop": 140,
+   "panelBottom": 245,
+   "panelRight": 1360,
+   "button": {
+    "text": "Stop",
+    "disabled": false,
+    "top": 170,
+    "bottom": 214,
+    "left": 1225,
+    "right": 1345,
+    "width": 120,
+    "height": 44
+   },
+   "innerWidth": 1400,
+   "innerHeight": 900,
+   "saysStopped": false,
+   "sha256": "d80e7777c45c67ab3905274cce80c35ab7df4dc95b2efae9f6f1a468365c181a",
+   "bytes": 256149
+  },
+  {
+   "file": "desktop-stopping.png",
+   "page": "/t/rate-limit-payouts-stopping",
+   "expectedState": "stopping",
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "title": "task · rate-limit-payouts-stopping",
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "state": "stopping",
+   "run": "2",
+   "panelTop": 140,
+   "panelBottom": 245,
+   "panelRight": 1360,
+   "button": {
+    "text": "Stopping…",
+    "disabled": true,
+    "top": 170,
+    "bottom": 214,
+    "left": 1225,
+    "right": 1345,
+    "width": 120,
+    "height": 44
+   },
+   "innerWidth": 1400,
+   "innerHeight": 900,
+   "saysStopped": false,
+   "sha256": "97cd200eb80be8c0585adf90af57a97281ade042359fa68f323ccd1f620b15b8",
+   "bytes": 258209
+  },
+  {
+   "file": "desktop-paused.png",
+   "page": "/t/rate-limit-payouts-paused",
+   "expectedState": "paused",
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "title": "task · rate-limit-payouts-paused",
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "state": "paused",
+   "run": "3",
+   "panelTop": 140,
+   "panelBottom": 285,
+   "panelRight": 1360,
+   "button": {
+    "text": "Resume",
+    "disabled": false,
+    "top": 190,
+    "bottom": 234,
+    "left": 1225,
+    "right": 1345,
+    "width": 120,
+    "height": 44
+   },
+   "innerWidth": 1400,
+   "innerHeight": 900,
+   "saysStopped": false,
+   "sha256": "a2562dde63e565b99a4ca2c10a7fdfb947f4c4f0b3034400d9c82f6710782fff",
+   "bytes": 275195
+  },
+  {
+   "file": "desktop-chat-paused.png",
+   "page": "/chat?task=rate-limit-payouts-paused",
+   "expectedState": "paused",
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "title": "chat",
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "state": "paused",
+   "run": "3",
+   "panelTop": 140,
+   "panelBottom": 284,
+   "panelRight": 1360,
+   "button": {
+    "text": "Resume",
+    "disabled": false,
+    "top": 190,
+    "bottom": 234,
+    "left": 1225,
+    "right": 1345,
+    "width": 120,
+    "height": 44
+   },
+   "innerWidth": 1400,
+   "innerHeight": 900,
+   "saysStopped": false,
+   "sha256": "4d37feaa71d596f72b511f5f18f2fac71174f0c2cd9beb94c1ce96e9f6d26238",
+   "bytes": 250860
+  },
+  {
+   "file": "phone-stopping.png",
+   "page": "/t/rate-limit-payouts-stopping",
+   "expectedState": "stopping",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "title": "task · rate-limit-payouts-stopping",
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "state": "stopping",
+   "run": "2",
+   "panelTop": 140,
+   "panelBottom": 319,
+   "panelRight": 358,
+   "button": {
+    "text": "Stopping…",
+    "disabled": true,
+    "top": 261,
+    "bottom": 305,
+    "left": 47,
+    "right": 343,
+    "width": 295,
+    "height": 44
+   },
+   "innerWidth": 390,
+   "innerHeight": 844,
+   "saysStopped": false,
+   "sha256": "e4799683cc629f405511592f25614cf097401bd9e93b832026485853a2040191",
+   "bytes": 118630
+  },
+  {
+   "file": "phone-paused.png",
+   "page": "/t/rate-limit-payouts-paused",
+   "expectedState": "paused",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "title": "task · rate-limit-payouts-paused",
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "state": "paused",
+   "run": "3",
+   "panelTop": 140,
+   "panelBottom": 416,
+   "panelRight": 358,
+   "button": {
+    "text": "Resume",
+    "disabled": false,
+    "top": 358,
+    "bottom": 402,
+    "left": 47,
+    "right": 343,
+    "width": 295,
+    "height": 44
+   },
+   "innerWidth": 390,
+   "innerHeight": 844,
+   "saysStopped": false,
+   "sha256": "afb5821e2966b84da5ceff43c189dafb10694c499222d22ee51c4ad4962d6a94",
+   "bytes": 113234
+  },
+  {
+   "file": "phone-chat-stopping.png",
+   "page": "/chat?task=rate-limit-payouts-stopping",
+   "expectedState": "stopping",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "title": "chat",
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "state": "stopping",
+   "run": "2",
+   "panelTop": 140,
+   "panelBottom": 318,
+   "panelRight": 374,
+   "button": {
+    "text": "Stopping…",
+    "disabled": true,
+    "top": 261,
+    "bottom": 305,
+    "left": 31,
+    "right": 359,
+    "width": 327,
+    "height": 44
+   },
+   "innerWidth": 390,
+   "innerHeight": 844,
+   "saysStopped": false,
+   "sha256": "141b9093acb3a1bad3b24adf151aa5bf6a90b7fd02aaa713c0a9b6339e6f716b",
+   "bytes": 115361
+  },
+  {
+   "file": "desktop-resume-ceremony.png",
+   "page": "/t/rate-limit-payouts-paused",
+   "expectedState": "resume-ceremony",
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "title": "resume",
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "state": "resume-ceremony",
+   "run": "3",
+   "panelTop": 452,
+   "panelBottom": 605,
+   "panelRight": 1056,
+   "button": {
+    "text": "resume run #3",
+    "disabled": false,
+    "top": 544,
+    "bottom": 588,
+    "left": 291,
+    "right": 407,
+    "width": 116,
+    "height": 44
+   },
+   "innerWidth": 1400,
+   "innerHeight": 900,
+   "saysStopped": false,
+   "sha256": "493102e779ac8c7874408ce2d0fe5580f3e260e2b39819905befdb03e79056fe",
+   "bytes": 217663
+  }
+ ]
+}

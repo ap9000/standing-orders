@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +22,10 @@ process.stdin.setEncoding("utf8");
 let buf = "";
 let n = 0;
 const mode = process.argv[2] ?? "echo";
+if(mode === "detached") {
+ const {spawn}=require("node:child_process");
+ spawn(process.execPath,["-e","require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},100)",process.argv[3]],{detached:true,stdio:"ignore"}).unref();
+}
 process.stdin.on("data", c => {
   buf += c;
   let i;
@@ -44,7 +48,7 @@ process.stdin.on("data", c => {
   }
 });
 process.stdin.on("end", () => {
-  if (mode === "silent") { setInterval(() => {}, 1000); return; }
+  if (mode === "silent" || mode === "detached") { setInterval(() => {}, 1000); return; }
   setTimeout(() => process.exit(0), 40);
 });
 `;
@@ -134,6 +138,17 @@ describe("the held-session transport under the real supervisor", () => {
     expect(start).toMatchObject({ ok: false, reason: "spawn-failed" });
   });
 
+  test("rejected supervisor custody is reaped before spawn failure returns", async () => {
+    let pid = 0;
+    const start = await startClaudeHeldSession(process.execPath, [agentPath, "silent"], {
+      socketPath: socket(), cookie: "c".repeat(32),
+      onSpawn: child => { pid = child; throw new Error("custody write refused"); },
+    });
+    expect(start).toMatchObject({ ok: false, reason: "spawn-failed" });
+    expect(pid).toBeGreaterThan(0);
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
   test("an oversized socket path refuses BEFORE anything spawns", async () => {
     const long = join(tmpdir(), `${"x".repeat(HELD_SOCKET_PATH_LIMIT)}.sock`);
     expect(heldSocketPathProblem(long)).not.toBeNull();
@@ -188,6 +203,24 @@ describe("the held-session transport under the real supervisor", () => {
     const exit = await start.handle.exited;
     expect(exit.code === 0).toBe(false);
   }, 20_000);
+
+  test("held shutdown also ends a tool in a separate process group", async () => {
+    const checkpoint = join(dir, "escaped-pid");
+    const start = await startClaudeHeldSession(process.execPath, [agentPath, "detached", checkpoint], {
+      socketPath: socket(), cookie: "c".repeat(32), graceMs: 200,
+    });
+    expect(start.ok).toBe(true);
+    if (!start.ok) return;
+    try {
+      const deadline = Date.now() + 3000;
+      while (!existsSync(checkpoint) && Date.now() < deadline) await new Promise(pass => setTimeout(pass, 20));
+      expect(existsSync(checkpoint)).toBe(true);
+      const pid = Number(readFileSync(checkpoint, "utf8"));
+      start.handle.terminate();
+      await start.handle.exited;
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally { start.handle.terminate(); await start.handle.exited; }
+  });
 
   test("stdin EOF fences autonomously: grace, then the group dies without any order", async () => {
     const start = await startClaudeHeldSession(process.execPath, [agentPath, "silent"], {

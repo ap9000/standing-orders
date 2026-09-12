@@ -1,0 +1,151 @@
+{
+  "sourceCommit": "82d0d28c4dee2aacdef52d699e048642c12e9b53",
+  "executableSha256": "657506173dc5b16e20e7940adcd67d60594861631813bc5eed6de09c626257fa",
+  "ci": "https://github.com/ap9000/standing-orders/actions/runs/34685907416",
+  "fullSuite": {
+    "files": 138,
+    "passed": 2550,
+    "existingSkips": 12
+  },
+  "providers": [
+    {
+      "provider": "claude",
+      "model": "opus",
+      "passed": true,
+      "manualInterventions": 0,
+      "startedAt": "2026-09-12T09:27:52.551Z",
+      "finishedAt": "2026-09-12T09:30:50.989Z",
+      "checks": {
+        "draftSha256": "9655abec669e04f92a21a77e211c133354753e672f5010e20debc183c32a2fb3",
+        "stopSettlementMs": 1657,
+        "unsentChatDraftPreserved": true,
+        "resumeReplayStatus": 409,
+        "duplicateDispatch": "refused-empty",
+        "retainedDraft": true,
+        "noLateWrites": true,
+        "freshProof": "verified"
+      }
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "passed": true,
+      "manualInterventions": 0,
+      "startedAt": "2026-09-12T09:27:52.550Z",
+      "finishedAt": "2026-09-12T09:32:42.882Z",
+      "checks": {
+        "draftSha256": "807548831b137bc07216eaa2a3bfffa4663cb2d5338771c22926837fa3efa92c",
+        "stopSettlementMs": 1263,
+        "unsentChatDraftPreserved": true,
+        "resumeReplayStatus": 409,
+        "duplicateDispatch": "refused-empty",
+        "retainedDraft": true,
+        "noLateWrites": true,
+        "freshProof": "verified"
+      }
+    }
+  ],
+  "crashCases": [
+    {
+      "stage": "planning",
+      "stopBeforeCrash": false,
+      "passed": true
+    },
+    {
+      "stage": "verification",
+      "stopBeforeCrash": false,
+      "passed": true
+    },
+    {
+      "stage": "building",
+      "stopBeforeCrash": false,
+      "passed": true
+    },
+    {
+      "stage": "setup",
+      "stopBeforeCrash": false,
+      "passed": true
+    },
+    {
+      "stage": "after-commit",
+      "stopBeforeCrash": false,
+      "passed": true
+    },
+    {
+      "stage": "review",
+      "stopBeforeCrash": false,
+      "passed": true
+    },
+    {
+      "stage": "building",
+      "stopBeforeCrash": true,
+      "passed": true
+    }
+  ],
+  "screenshots": [
+    {
+      "state": "stopping",
+      "viewport": "desktop",
+      "width": 1280,
+      "height": 900,
+      "sha256": "3e564dbae6ca10a59eb59cbacdc7285825c23cc3f29889f1932d8233c61c9670",
+      "file": "claude-stopping-desktop.png"
+    },
+    {
+      "state": "stopping",
+      "viewport": "phone",
+      "width": 390,
+      "height": 844,
+      "sha256": "5eb132f7aac0da72c3a97d95f334e2ef91a1bf66ec4038d9a69b8489f961f941",
+      "file": "claude-stopping-phone.png"
+    },
+    {
+      "state": "paused",
+      "viewport": "desktop",
+      "width": 1280,
+      "height": 900,
+      "sha256": "5cacb464063e7571461acc4398bd6c312237073cb6210a5dfc17df24f38e03c2",
+      "file": "claude-paused-desktop.png"
+    },
+    {
+      "state": "paused",
+      "viewport": "phone",
+      "width": 390,
+      "height": 844,
+      "sha256": "41f2ab08d1ec227083eb5b8dce7fb43feda5951d3452c162b3c3c645ba055405",
+      "file": "claude-paused-phone.png"
+    },
+    {
+      "state": "stopping",
+      "viewport": "desktop",
+      "width": 1280,
+      "height": 900,
+      "sha256": "89373bfce95f10264976e6fcb8be19f0e2143831b8b822cfb2d37f189c5ce051",
+      "file": "codex-stopping-desktop.png"
+    },
+    {
+      "state": "stopping",
+      "viewport": "phone",
+      "width": 390,
+      "height": 844,
+      "sha256": "525e00d09dd00fa3d14f381d4aa293e7bc17ef4dc8bc3e400d366b5289081e0e",
+      "file": "codex-stopping-phone.png"
+    },
+    {
+      "state": "paused",
+      "viewport": "desktop",
+      "width": 1280,
+      "height": 900,
+      "sha256": "4b800ccbc4879bfc7b43506b68a4031c4979017ebdc7c7fee8d6c32da5b172c7",
+      "file": "codex-paused-desktop.png"
+    },
+    {
+      "state": "paused",
+      "viewport": "phone",
+      "width": 390,
+      "height": 844,
+      "sha256": "1783625e08261ed2214a526b98ede0f0aa67fccea751a00a4f9579c1284dd909",
+      "file": "codex-paused-phone.png"
+    }
+  ]
+}

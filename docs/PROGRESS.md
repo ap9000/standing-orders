@@ -1,5 +1,40 @@
 # Progress
 
+**2026-09-12 — Safe task stop and resume (schema 52).** An authenticated
+operator stops ONE exact active attempt: `task stop <id> --run <n>` or the
+console's Stop, which name the run and are recorded — who, when, from where —
+in `run_stop` BEFORE any process is signalled. The answer is *Stopping…*,
+never *Stopped*: the attempt's own process tree (provider, repair turns,
+setup and check children, or a held session through its supervisor) is
+ended through the handle the worker holds under a per-run owner tag, and
+the stop settles only at the fenced interruption seal
+(`finalizeInterruptedFenced`: claim released as `interrupted`, the run and
+every owned descendant `failed / interrupted`, the task requeued under the
+stop's own `stop`-owned hold — no strike, no backoff, no incident, no
+automatic repair). A stop that commits before terminal settlement wins at
+every road — build success, park, failure, plan ingestion, review
+ingestion, fallback resolution, publication admission — so late output is
+never accepted; a finished attempt refuses a stop and its completion
+stands; a run that already admitted a publication refuses in those words.
+Descendants sharing the stopped run's lease inherit the stop; a successor
+under a fresh claim never does. Crash recovery (dead runner and dead
+incarnation) settles a pending stop as `recovered`, preserving evidence,
+commits, and dirty worktrees; the held supervisor settles as `held`.
+Resume (`task resume`, or the console's password ceremony over a durable
+nonce bound to the run, its settlement, and the scope approval) refuses
+until the exact attempt is quiescent — settled, owned runs ended, no live
+claim, workspace not held by a live process — lifts only that stop's hold,
+approves nothing, and points a stopped review at the bounded explicit
+retry door. The recovered-draft road refuses to inherit a stopped draft
+until it is resumed; the next pass takes a fresh claim, re-proves the
+signed scope, quarantines the old handoff, and requires fresh proof. Real
+subprocess tests stop one of two simultaneous trees and prove no write after
+settlement; a real Git journey interrupts a dirty draft mid-flight from
+another connection, resumes it through the CLI, and lands one accepted
+result with main untouched. Desktop and phone captures of Stop, Stopping…,
+Paused/Resume, and the resume ceremony are under
+`evidence/safe-task-stop-and-resume/`. See [the plan](TASK_CONTROL_PLAN.md).
+
 **2026-09-12 UTC — Contract handoffs integrated and certified in bounded workflows.**
 All three implementation tasks completed through Standing Orders, followed by
 operator-led integration hardening. This is assisted implementation. The Agor

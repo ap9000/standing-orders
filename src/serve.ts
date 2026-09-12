@@ -49,6 +49,8 @@ import { controlSetupHtml, setupPreviewHtml, connectionHtml, connectionWords, hi
 import { composerSchedule, scheduleEditorHtml, scheduleEditorScript } from "./task-composer.js";
 import { listCoordinators } from "./coordinator.js";
 import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
+import { requestTaskStop, resumeTaskStop, taskControlOf, type TaskControlView } from "./task-control.js";
+import { WorktreePool } from "./worktree.js";
 import { PLEX_SANS_400, PLEX_SANS_500, PLEX_SANS_600, PLEX_MONO_400, PLEX_MONO_500, PLEX_MONO_600 } from "./fonts.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, createHmac, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
@@ -3027,6 +3029,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     return {
         task: found,
         dispatch: diagnoseTaskDispatch(store, taskId, now),
+        // v52: the exact-run control — the same projection the focused
+        // chat and `task show` read.
+        control: ref === null ? { kind: "none" as const } : taskControlOf(store, ref.id, now),
         canRetryReview: who.via === "cookie" && who.role === "approver",
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
@@ -3278,6 +3283,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       milestoneProgress: view?.milestoneProgress ?? progressOf(ref.id, planRevisions?.current?.document ?? null),
       claimed: view?.claimed ?? store.hasLiveClaim(ref.id, now),
       liveRun: live === null ? null : { id: live.id, runner: live.runner, startedAt: live.startedAt, phase: live.phase },
+      control: view?.control ?? taskControlOf(store, ref.id, now),
       route: view?.route ?? null,
       approval:
         view === null || who?.role !== "approver" || scope === null || approval.approved
@@ -4599,7 +4605,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route|retry-review)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -6513,6 +6519,112 @@ export function createDecisionServer(options: ServeOptions): Server {
           return taskScreen(response, who, taskId, words[asked.reason] ?? `${asked.reason}${asked.detail === undefined ? "" : `: ${asked.detail}`}`, 409);
         }
         return redirect(response, destination);
+      }
+      case "stop": {
+        // The exact-run stop (v52): a browser session's act, an approver's
+        // act, naming ONE run. The store's transaction proves the run is
+        // this task's current live attempt and records who asked before
+        // any process is signalled; the answer is "stopping", never
+        // "stopped". A repeated post is the same request; a stale one (a
+        // finished run, a successor) is refused in words.
+        if (who.via !== "cookie") return refuse(response, who, 403, "stopping a task is a browser session's act");
+        if (who.role !== "approver") return taskScreen(response, who, taskId, "your login can watch — stopping an attempt is an approver's act", 403);
+        if (store.isDemo()) return taskScreen(response, who, taskId, "the demo authorizes nothing", 403);
+        const named = (body.get("run") ?? "").trim();
+        if (!/^[0-9]{1,15}$/.test(named)) return taskScreen(response, who, taskId, "which attempt? the stop names one exact run", 400);
+        const asked = requestTaskStop(store, { taskId, runId: Number(named), by: verifiedAuthor(who.name), via: "web", held: options.attended?.coordinator }, now);
+        if (!asked.ok) {
+          const words: Record<string, string> = {
+            "no-run": `there is no run #${escape(named)}`,
+            "wrong-task": `run #${escape(named)} is not one of this task's attempts`,
+            finished: `run #${escape(named)} already ended before the stop — nothing rewrites a finished attempt; reload to see the current state`,
+            "not-live": `run #${escape(named)} is not the attempt holding this task now — reload and decide against the current attempt`,
+            tournament: "this run is a racing lane — stop the tournament through its own pick or abandon controls",
+            publication: `run #${escape(named)} already admitted its publication — an external request in flight is not recalled by a stop`,
+          };
+          return taskScreen(response, who, taskId, words[asked.reason] ?? asked.detail, 409);
+        }
+        const back = body.get("return") ?? "";
+        return redirect(response, back === "chat" ? `${taskChatHref(taskId)}#task-control` : `${taskHref(taskId)}#task-control`);
+      }
+      case "resume-arm": {
+        // The resume ceremony's first half (v52): minted by THIS POST, never
+        // a GET. The nonce is bound to the exact run, this approver, and a
+        // digest of the facts the confirmation restates — the run, its
+        // settlement, and the scope's current approval — so a page read
+        // before the approval changed cannot resume under the new terms.
+        if (who.via !== "cookie") return refuse(response, who, 403, "resuming a task is a browser session's act");
+        if (who.role !== "approver") return taskScreen(response, who, taskId, "your login can watch — resuming an attempt is an approver's act", 403);
+        if (store.isDemo()) return taskScreen(response, who, taskId, "the demo authorizes nothing", 403);
+        const named = (body.get("run") ?? "").trim();
+        if (!/^[0-9]{1,15}$/.test(named)) return taskScreen(response, who, taskId, "which attempt? the resume names the exact stopped run", 400);
+        const runId = Number(named);
+        const stop = store.stopOf(runId);
+        const run = store.getRun(runId);
+        if (stop === null || run === null || stop.taskRef !== ref.id) return taskScreen(response, who, taskId, `run #${runId} is not a stopped attempt of this task`, 409);
+        if (run.role === "reviewer") return taskScreen(response, who, taskId, `run #${runId} is a review — a stopped review is retried with Review again, which keeps its bounded attempts`, 409);
+        if (stop.resumedAt !== null) return taskScreen(response, who, taskId, `run #${runId} was already resumed by ${escape(stop.resumedBy ?? "?")}`, 409);
+        const control = taskControlOf(store, ref.id, now);
+        if (control.kind !== "paused" || control.run !== runId) {
+          return taskScreen(response, who, taskId, control.kind === "stopping" ? `run #${runId} is still stopping — its processes are not yet established gone` : `run #${runId} is no longer the attempt a resume can name — reload and decide against the current state`, 409);
+        }
+        const digest = resumeDigestOf(taskId, runId, stop.settledAt ?? "", store.getScope(taskId));
+        const nonceValue = randomBytes(18).toString("base64url");
+        const minted = store.mintCeremonyNonce(
+          { hash: nonceHashOf(nonceValue), approver: who.name, subject: "run-resume", subjectId: runId, digest, ttlMs: 15 * 60_000 },
+          now,
+        );
+        if (!minted.ok) return taskScreen(response, who, taskId, "too many unfinished confirmations are open — finish or let them expire", 429);
+        const gate = diagnoseTaskDispatch(store, taskId, now);
+        return sendScreen(response, 200, resumeCeremonyPage(chromeFor(who.session.project, "tasks"), {
+          taskId, taskTitle: store.getTask(taskId)?.title ?? taskId, control, nonceValue, csrf: who.session.csrf,
+          returnTo: body.get("return") === "chat" ? "chat" : "task",
+          gate: gate !== null && gate.code === "stopped" ? null : gate,
+          approved: (() => { const scope = store.getScope(taskId); return scope !== null && approvalOf(scope).approved; })(),
+        }));
+      }
+      case "resume": {
+        // The resume itself (v52): password typed again + the durable nonce
+        // consumed INSIDE the store's resume transaction against the digest
+        // re-derived from live state. A replay finds the nonce spent; a
+        // changed approval finds the digest moved; a successor attempt finds
+        // the run superseded — each refuses without starting work; a submitted nonce remains one-shot.
+        if (who.via !== "cookie") return refuse(response, who, 403, "resuming a task is a browser session's act");
+        if (who.role !== "approver") return taskScreen(response, who, taskId, "your login can watch — resuming an attempt is an approver's act", 403);
+        if (store.isDemo()) return taskScreen(response, who, taskId, "the demo authorizes nothing", 403);
+        const named = (body.get("run") ?? "").trim();
+        if (!/^[0-9]{1,15}$/.test(named)) return taskScreen(response, who, taskId, "which attempt? the resume names the exact stopped run", 400);
+        const runId = Number(named);
+        const token = body.get("token") ?? "";
+        if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+          return taskScreen(response, who, taskId, "resuming takes your password, typed again", 403);
+        }
+        const nonceValue = body.get("nonce") ?? "";
+        if (nonceValue === "") return taskScreen(response, who, taskId, "that confirmation form was incomplete — start again", 400);
+        const resumed = store.transact(() => {
+          const stop = store.stopOf(runId);
+          if (stop === null || stop.taskRef !== ref.id) return { ok: false as const, reason: "no-stop" as const, detail: `run #${runId} is not a stopped attempt of this task` };
+          const digest = resumeDigestOf(taskId, runId, stop.settledAt ?? "", store.getScope(taskId));
+          if (!store.consumeCeremonyNonce(nonceHashOf(nonceValue), who.name, "run-resume", runId, digest, now)) {
+            return { ok: false as const, reason: "stale" as const, detail: "that confirmation is stale, already used, or the approval changed since you read it — start again from the task" };
+          }
+          return resumeTaskStop(store, { taskId, runId, by: verifiedAuthor(who.name), via: "web" }, now);
+        });
+        if (!resumed.ok) {
+          const words: Record<string, string> = {
+            stale: resumed.detail,
+            "no-stop": resumed.detail,
+            stopping: `not yet — ${resumed.detail}`,
+            occupied: `not yet — ${resumed.detail}`,
+            "already-resumed": resumed.detail,
+            superseded: resumed.detail,
+            busy: resumed.detail,
+            review: `run #${runId} is a review — use Review again, which keeps its bounded attempts`,
+          };
+          return taskScreen(response, who, taskId, words[resumed.reason] ?? resumed.detail, 409);
+        }
+        const back = body.get("return") ?? "";
+        return redirect(response, back === "chat" ? `${taskChatHref(taskId)}#task-control` : `${taskHref(taskId)}#task-control`);
       }
       default:
         return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
@@ -8808,6 +8920,19 @@ const STYLE = `
   }
   .dispatch-status[data-dispatch-status="needs-verification"] .dispatch-copy > strong::before { background: var(--muted-foreground); }
   .review-retry { margin-bottom: .65rem; }
+  .task-control { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .6rem .9rem; margin: .65rem 0; padding: .8rem .9rem; }
+  .task-control-copy { display: flex; flex-direction: column; gap: .15rem; min-width: 0; flex: 1 1 16rem; }
+  .task-control-copy strong { display: flex; align-items: center; gap: .4rem; overflow-wrap: anywhere; }
+  .task-control-copy .meta { overflow-wrap: anywhere; }
+  .task-control-form { margin: 0; flex: none; }
+  .task-control-button { width: auto; min-width: 7.5rem; white-space: nowrap; }
+  .task-control-button.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600; }
+  .task-control-button[disabled] { opacity: .65; cursor: not-allowed; }
+  .task-control[data-task-control="stopping"] { border-color: color-mix(in srgb, var(--destructive) 45%, var(--glass-border)); }
+  .task-control[data-task-control="stopping"] .live-dot { background: var(--destructive); }
+  .task-control[data-task-control="paused"] .eyebrow { color: var(--destructive); }
+  .resume-ceremony .row { margin: .3rem 0; }
+  @media (max-width: 480px) { .task-control { align-items: stretch; } .task-control-form, .task-control-button { width: 100%; } .task-control-form .task-control-button { width: 100%; } }
   .review-attempts { margin: .55rem 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .2rem; font-size: .8125rem; }
   .review-attempts li { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .45rem; min-width: 0; }
   .review-attempts .review-attempt-ordinal { font-weight: 600; }
@@ -11415,6 +11540,8 @@ type TaskChatFocus = {
   milestoneProgress: MilestoneProgressView[] | null;
   claimed: boolean;
   liveRun: { id: number; runner: string; startedAt: string; phase: string | null } | null;
+  /** v52: the exact-run control — the task page's own projection. */
+  control: TaskControlView;
   /** The phase route (v47): the task page's exact projection, so chat and
    * page can never disagree about which agent runs which phase. */
   route: RouteView | null;
@@ -11472,8 +11599,125 @@ function taskRecoveryHref(taskId: string, diagnosis: DispatchDiagnosis | null): 
     case "open-result":
       return task;
     case "retry-review":
+    case "resume-run":
       return `${task}#run-status`;
   }
+}
+
+/** The resume ceremony's digest (v52): the exact run, its settlement, and
+ * the scope approval as it stands — a nonce minted over one set of facts
+ * cannot confirm a resume under another. */
+function resumeDigestOf(taskId: string, runId: number, settledAt: string, scope: Scope | null): string {
+  return createHash("sha256")
+    .update(JSON.stringify([taskId, runId, settledAt, scope?.digest ?? null, scope?.approvedDigest ?? null, scope?.approvedAt ?? null, scope?.approvedBy ?? null]))
+    .digest("hex");
+}
+
+const stopWhen = (iso: string): string => iso.replace("T", " ").replace(/\.\d{3}Z$/, "Z");
+
+/**
+ * The exact-run control (v52): ONE component on the task page, the
+ * focused chat, and the status fragment, so every surface names the same
+ * run and shows the same state. Stop is one guarded post naming the run;
+ * Stopping… is a disabled control with who asked and when; Resume opens
+ * the password ceremony; a stopped review points at Review again. Forms
+ * carry the CSRF token and the exact run id, nothing else.
+ */
+function taskControlState(state: string, control?: TaskControlView): string {
+  if (control?.kind === "stopping") return "stopping";
+  if (control?.kind === "paused") return "paused";
+  if (control?.kind === "review-stopped") return "review-stopped";
+  if (control?.kind === "stop") return control.role === "reviewer" ? "reviewing" : "running";
+  return state;
+}
+
+function taskControlHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false): string {
+  if (control.kind === "none") return "";
+  const back = `<input type="hidden" name="return" value="${surface}">`;
+  const guarded = csrf !== "" && !inert;
+  const role = (word: TaskControlView & { kind: "stop" | "stopping" | "paused" }): string =>
+    word.role === "planner" ? "plan attempt" : word.role === "scout" ? "scouting attempt" : word.role === "reviewer" ? "review" : "build";
+  if (control.kind === "stop") {
+    return (
+      `<section class="card task-control" id="task-control" data-task-control="stop" data-control-run="${control.run}" aria-label="stop this attempt">` +
+      `<div class="task-control-copy"><span class="eyebrow">running</span><strong>${escape(role(control))} #${control.run} is running</strong><span class="meta">Stopping ends only this attempt's own processes. Its branch, uncommitted work, evidence, and decisions stay preserved; other tasks keep running.</span></div>` +
+      (guarded
+        ? `<form method="post" action="${taskHref(taskId)}/stop" class="inline task-control-form task-stop-form"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${control.run}">${back}<button type="submit" class="danger task-control-button">Stop</button></form>`
+        : `<button type="button" class="danger task-control-button" disabled>Stop</button>`) +
+      `</section>`
+    );
+  }
+  if (control.kind === "stopping") {
+    return (
+      `<section class="card task-control" id="task-control" data-task-control="stopping" data-control-run="${control.run}" aria-label="stopping this attempt" aria-busy="true">` +
+      `<div class="task-control-copy"><span class="eyebrow">stop requested</span><strong><span class="live-dot" aria-hidden="true"></span>Stopping ${escape(role(control))} #${control.run}…</strong>` +
+      `<span class="meta">Asked by <span class="mono">${escape(control.stop.requestedBy)}</span> at ${escape(stopWhen(control.stop.requestedAt))}. ${control.unsettledRun ? "Its own processes are being ended; this reads Paused once they are established gone." : escape(control.detail ?? "The run ended; a recovery pass still needs to establish that its processes exited.")}</span></div>` +
+      `<button type="button" class="task-control-button" disabled aria-disabled="true">Stopping…</button>` +
+      `</section>`
+    );
+  }
+  if (control.kind === "paused") {
+    const settled = control.stop.settledAt === null ? "" : ` · settled ${escape(stopWhen(control.stop.settledAt))} (${escape(control.stop.settlement ?? "?")})`;
+    const kept = control.stop.settlement === "finished"
+      ? `The attempt reached its own ending (${escape(control.outcome ?? "?")}) before the stop took effect; that outcome stands.`
+      : `${control.committed ? "Its commit is on the branch as a reviewable artifact; a" : "A"}ny uncommitted work is preserved${control.worktree === null ? "" : ` in <span class="mono">${escape(control.worktree)}</span>`}. Resuming takes a fresh claim, re-proves the signed scope, and requires fresh proof — nothing is approved by resuming.`;
+    return (
+      `<section class="card task-control" id="task-control" data-task-control="paused" data-control-run="${control.run}" aria-label="paused attempt">` +
+      `<div class="task-control-copy"><span class="eyebrow">paused</span><strong>${escape(role(control))} #${control.run} was stopped by <span class="mono">${escape(control.stop.requestedBy)}</span></strong>` +
+      `<span class="meta">Asked ${escape(stopWhen(control.stop.requestedAt))}${settled}. ${kept}</span></div>` +
+      (guarded
+        ? `<form method="post" action="${taskHref(taskId)}/resume-arm" class="inline task-control-form task-resume-form"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${control.run}">${back}<button type="submit" class="task-control-button primary">Resume</button></form>`
+        : `<button type="button" class="task-control-button" disabled>Resume</button>`) +
+      `</section>`
+    );
+  }
+  return (
+    `<section class="card task-control" id="task-control" data-task-control="review-stopped" data-control-run="${control.run}" aria-label="stopped review">` +
+    `<div class="task-control-copy"><span class="eyebrow">review stopped</span><strong>review #${control.run} was stopped by <span class="mono">${escape(control.stop.requestedBy)}</span></strong>` +
+    `<span class="meta">The build it reviewed stands. A stopped review is retried explicitly through <strong>Review again</strong>, which keeps the same bounded attempt allowance.</span></div>` +
+    (guarded && control.sourceRun !== null
+      ? `<form method="post" action="${taskHref(taskId)}/retry-review" class="inline task-control-form review-retry-form"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${control.sourceRun}"><button type="submit" class="task-control-button review-retry-button">Review again</button></form>`
+      : "") +
+    `</section>`
+  );
+}
+
+/** The resume confirmation (v52): the exact run restated, what resuming
+ * does and does not do, the gate that would still keep work from
+ * starting, and the password typed again. */
+function resumeCeremonyPage(chrome: Chrome, data: {
+  taskId: string;
+  taskTitle: string;
+  control: TaskControlView & { kind: "paused" };
+  nonceValue: string;
+  csrf: string;
+  returnTo: "task" | "chat";
+  gate: DispatchDiagnosis | null;
+  approved: boolean;
+}): Screen {
+  const back = `<p class="meta"><a href="${data.returnTo === "chat" ? taskChatHref(data.taskId) : taskHref(data.taskId)}">back — resume nothing</a></p>`;
+  const control = data.control;
+  return screen("resume", [
+    `<h1>resume run #${control.run} of ${escape(data.taskTitle)}?</h1>`,
+    `<div class="card resume-ceremony">`,
+    `<p class="row">Run #${control.run} was stopped by <span class="mono">${escape(control.stop.requestedBy)}</span> at ${escape(stopWhen(control.stop.requestedAt))}${control.stop.settledAt === null ? "" : ` and settled ${escape(stopWhen(control.stop.settledAt))} (${escape(control.stop.settlement ?? "?")})`}.</p>`,
+    `<p class="row">— the pause this stop placed is lifted; any operator, decision, incident, or backoff hold placed beside it stands</p>`,
+    `<p class="row">— the next pass takes a <strong>fresh claim</strong>, re-proves the <strong>signed scope as it stands now</strong>, and inherits the preserved draft${control.committed ? " and its commit" : ""}${control.worktree === null ? "" : ` in <span class="mono">${escape(control.worktree)}</span>`}</p>`,
+    `<p class="row">— the earlier attempt's handoff is quarantined; the resumed attempt must produce <strong>fresh proof</strong></p>`,
+    `<p class="row">— nothing is approved, widened, or published by resuming; budget, risk, routing, verification, fallback, and review bounds apply exactly as before</p>`,
+    data.approved ? "" : `<p class="row problem-words"><strong>the scope is not approved as it stands</strong> — resuming lifts the pause, but no worker spends until the scope is approved again</p>`,
+    data.gate === null ? "" : `<p class="row"><strong>gate:</strong> ${escape(data.gate.summary)} — ${escape(data.gate.detail)}</p>`,
+    `</div>`,
+    `<form method="post" action="${taskHref(data.taskId)}/resume" class="card resume-form">`,
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    `<input type="hidden" name="nonce" value="${escape(data.nonceValue)}">`,
+    `<input type="hidden" name="run" value="${control.run}">`,
+    `<input type="hidden" name="return" value="${data.returnTo}">`,
+    `<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>`,
+    `<button type="submit">resume run #${control.run}</button>`,
+    `</form>`,
+    back,
+  ].join("\n"), { chrome });
 }
 
 function taskViewSwitch(taskId: string, active: "overview" | "ask"): string {
@@ -11585,19 +11829,24 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     const state = index < active || (index === 4 && hasResult) ? "complete" : index === active ? "active" : "upcoming";
     return `<li class="${state}"><i aria-hidden="true">${state === "complete" ? "✓" : index + 1}</i><span>${label}</span></li>`;
   }).join("");
+  const displayState = taskControlState(focus.state, focus.control);
   const summary = focus.dispatch?.summary ?? (hasResult ? "Result ready" : "Checking task status");
   const detail = focus.dispatch?.detail ?? "This status comes from the task scheduler.";
-  const fallback = focus.state === "done" || focus.state === "cancelled" || focus.approval !== null
+  const fallback = focus.state === "done" || focus.state === "cancelled" || focus.approval !== null || ["stopping", "paused", "review-stopped"].includes(focus.control.kind)
     ? null
     : taskRecoveryHref(focus.id, focus.dispatch);
-  const polling = !inert && (focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled";
+  const polling = !inert && ((focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled" || focus.control.kind === "stopping" || focus.control.kind === "stop");
   return (
     `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}">` +
-    `<section class="card task-journey" aria-label="task progress"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div><span class="badge badge-${escape(focus.state)}">${escape(focus.state)}</span></div>` +
+    `<section class="card task-journey" aria-label="task progress"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div><span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span></div>` +
     `<ol>${steps}</ol><p class="meta">${escape(detail)}</p>` +
     (focus.liveRun === null ? "" : `<p class="task-live-build"><span class="live-dot" aria-hidden="true"></span><strong>Build #${focus.liveRun.id}</strong> · ${escape(focus.liveRun.runner)} · <time data-elapsed-since="${escape(focus.liveRun.startedAt)}"></time> <a href="/r/${focus.liveRun.id}">watch details →</a></p>`) +
     (fallback === null ? "" : `<a class="button-link task-journey-action" href="${fallback}">Open the next step →</a>`) +
     `</section>` +
+    // The exact-run control (v52): the SAME component the task page
+    // renders, refreshed with the live region — typed input in the
+    // composer is untouched because only this region is replaced.
+    taskControlHtml(focus.control, focus.id, csrf, "chat", inert) +
     // The compact agents strip (v47): always visible, phones included,
     // where the desktop context panel is hidden.
     agentsStripHtml(focus.route, focus.id) +
@@ -14590,6 +14839,8 @@ function taskBody(data: {
   task: Task;
   /** Shared read-side lifecycle answer; the atomic claim still re-proves it. */
   dispatch?: DispatchDiagnosis | null;
+  /** v52: the exact-run Stop / Stopping / Resume control. */
+  control?: TaskControlView;
   strikes: number;
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
@@ -14719,6 +14970,8 @@ function taskBody(data: {
   now: Date;
 }): string {
   const { task, scope } = data;
+  const displayState = taskControlState(task.state, data.control);
+  const stopControlsActive = data.control !== undefined && ["stopping", "paused", "review-stopped"].includes(data.control.kind);
   const act = (verb: string, label: string, extra = ""): string =>
     [
       `<form method="post" action="${taskHref(task.id)}/${verb}" class="inline">`,
@@ -14823,7 +15076,7 @@ function taskBody(data: {
         return `<div class="dependency-repair-actions" aria-label="ways to continue this task"><p class="meta dependency-repair-help">Choose another task that must finish first, or let this task continue without it.</p>${retry}${replace}${unlink}</div>`;
       })();
       const recoveryControl = (() => {
-        if (diagnosis.action === null || diagnosis.action === "repair-dependency") return "";
+        if (stopControlsActive || diagnosis.action === null || diagnosis.action === "repair-dependency") return "";
         if (diagnosis.action === "start-worker") {
           const firstConnection = diagnosis.code === "no-worker-registered";
           return (
@@ -15504,7 +15757,7 @@ function taskBody(data: {
     liveRun !== undefined
       ? prop("worker", `${escape(liveRun.runner)} · <a href="/r/${liveRun.id}">build #${liveRun.id}</a> running`)
       : data.runs[0] !== undefined
-        ? prop("last attempt", `<a href="/r/${data.runs[0].id}">${runNoun(data.runs[0])} #${data.runs[0].id}</a> · ${escape(data.runs[0].role === "planner" && data.runs[0].reason === "plan-drafted" ? "planned" : data.runs[0].outcome ?? "never finished")} · ${escape(data.runs[0].runner)}`)
+        ? prop("last attempt", `<a href="/r/${data.runs[0].id}">${runNoun(data.runs[0])} #${data.runs[0].id}</a> · ${escape(data.runs[0].role === "planner" && data.runs[0].reason === "plan-drafted" ? "planned" : data.runs[0].reason === "interrupted" ? "interrupted" : data.runs[0].outcome ?? "never finished")} · ${escape(data.runs[0].runner)}`)
         : "";
   const queueRow =
     data.position !== null && data.position !== undefined && task.state === "queued"
@@ -15650,7 +15903,7 @@ function taskBody(data: {
   // claim is live — so the words say exactly when each becomes real.
   const canPlan = data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined);
   const primaryAct =
-    stalled && !data.claimed
+    stopControlsActive ? null : stalled && !data.claimed
       ? { html: act("requeue", "retry — branch and workspace kept"), why: "resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased", whyClass: "retry" }
       : canPlan
         ? { html: act("plan", "plan first"), why: "plan first sends an agent to read the repository, ask you questions, and propose a scope — nothing builds until you approve it", whyClass: "plan" }
@@ -15675,11 +15928,11 @@ function taskBody(data: {
     // A task with no scope is already unable to start. Showing a hold next
     // to "plan first" adds a second, unnecessary decision at the exact
     // moment the page should have one obvious action.
-    canPlan || !canHold ? "" : holdAct,
+    stopControlsActive || canPlan || !canHold ? "" : holdAct,
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
     `</div>`,
     primaryAct === null ? "" : `<p class="meta acts-why acts-why-${primaryAct.whyClass}">${primaryAct.why}</p>`,
-    data.claimed
+    data.claimed && !stopControlsActive
       ? `<p class="meta acts-why">a worker is building this right now — <em>hold next attempt</em> stops the one after it; cancel waits for the current build to finish${
           stalled ? "; retry becomes available after this attempt finishes" : ""
         }</p>`
@@ -15718,10 +15971,13 @@ function taskBody(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
-    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
+    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span></h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
     // The planner and approval cards already answer "what now?". Avoid a
     // second status box above the one action the operator came here for.
     (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested" ? dispatchStatus : "",
+    // The exact-run control (v52), directly under the scheduler's answer:
+    // the one place a person stops or resumes THIS attempt.
+    taskControlHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task"),
     data.completion === null || data.completion === undefined || data.completion.receipt === null
       ? ""
       : completionReceiptCard(data.completion.receipt, task.id, "task"),
@@ -16730,6 +16986,7 @@ function runOutcomeBadge(run: Run, live: boolean): string {
   if (!live && run.role === "planner" && run.reason === "plan-drafted") {
     return `<span class="badge">planned</span>`;
   }
+  if (!live && run.reason === "interrupted") return `<span class="badge">interrupted</span>`;
   return live
     ? `<span class="badge badge-running">running</span>`
     : `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>`;

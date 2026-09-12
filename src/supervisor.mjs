@@ -35,6 +35,12 @@
  *      flushed; the socket file is unlinked on the way out.
  */
 
+// The source supervisor is also exercised directly by the TypeScript test
+// runner; its shared helper comes from the normal production build there.
+const { stopProcessTree, observeProcessTree } = await import(new URL("./process-tree.js", import.meta.url).href).catch(error => {
+  if (error.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  return import(new URL("../dist/process-tree.js", import.meta.url).href);
+});
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { chmodSync, unlinkSync } from "node:fs";
@@ -58,6 +64,8 @@ let exitCode = null;
 let fencing = false;
 let server = null;
 let killsInFlight = 0;
+const descendantPids = new Set();
+let treeUnknown = false;
 let exitWanted = false;
 
 /** The exit road, deferred while a kill verb's reply is still owed: the
@@ -88,13 +96,17 @@ const groupAlive = pgid => {
   try {
     process.kill(-pgid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return error.code !== "ESRCH";
   }
 };
+const descendantsAlive = () => treeUnknown || [...descendantPids].some(pid => {
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code !== "ESRCH"; }
+});
 
 /** SIGKILL the group and poll to PROVEN-gone (bounded). */
 const killGroupSettled = async pgid => {
+  if (child !== undefined && !exited) stopProcessTree(child);
   try {
     process.kill(-pgid, "SIGKILL");
   } catch {
@@ -102,10 +114,10 @@ const killGroupSettled = async pgid => {
   }
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    if (!groupAlive(pgid)) return true;
+    if (!groupAlive(pgid) && !descendantsAlive()) return true;
     await new Promise(pass => setTimeout(pass, 50));
   }
-  return !groupAlive(pgid);
+  return !groupAlive(pgid) && !descendantsAlive();
 };
 
 // The control socket comes up BEFORE the agent spawns.
@@ -198,6 +210,7 @@ server.listen(socketPath, () => {
     process.exit(1);
   });
 
+  observeProcessTree(child, { onDescendant: pid => descendantPids.add(pid), onUnknown: () => { treeUnknown = true; } });
   child.on("spawn", () => {
     frame({ so_supervisor: "ready", agentPgid: child.pid, supervisorPid: process.pid });
     // Relay AFTER the frame: agent bytes buffered meanwhile flow next.

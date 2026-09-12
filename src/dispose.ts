@@ -18,6 +18,7 @@ import {
   finalizeFailureFenced,
   finalizeMalformedFenced,
   finalizeParkFenced,
+  interruptIfStopped,
   release,
   type FailureClass,
 } from "./claim.js";
@@ -76,6 +77,11 @@ export type Disposition =
     }
   /** The standalone road's simple record: outcome written, nothing else. */
   | { kind: "recorded"; outcome: "failed" | "refused" }
+  /** v52: an operator's stop won before terminal settlement — the attempt
+   * is sealed as interrupted with its work preserved, its own stop
+   * settled, no strike and no retry. `stopRun` names the exact stopped
+   * run (this one, or the owning ancestor whose stop it inherited). */
+  | { kind: "stopped"; stopRun: number; requeued: boolean }
   | { kind: "invariant"; reason: string };
 
 /** The reasons tick classifies as the attempt itself breaking. */
@@ -151,8 +157,39 @@ export function maybeRequestAutoReview(store: Store, repo: string, runId: number
 }
 
 export function disposeBuildOutcome(context: DisposeContext, result: BuildResult): Disposition {
+  // Stop and every terminal side effect compete under the same SQLite
+  // write lock. A separate preliminary transaction leaves a completion gap.
+  return context.store.transact(() => disposeBuildOutcomeLocked(context, result));
+}
+
+function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult): Disposition {
   const { store, policy, leaseId, runId, taskId, taskRef, runner, repo, branch, origin, provider, model, worktreePath, clock } =
     context;
+
+  // THE STOP FENCE at settlement (v52), before any arm below and inside
+  // its own transaction: a stop recorded against this attempt (or the
+  // ancestor it runs under) before this instant WINS — a late success is
+  // never accepted as done, a park is never sealed, a failure never takes
+  // a strike. The attempt ends as interrupted with its work preserved (a
+  // commit it made stays on the branch as a reviewable artifact), its
+  // stop settles, and the task waits under the stop's own hold. The
+  // already-sealed revision endings are exempt exactly as below: their
+  // finalizer fenced the stop itself, inside its own transaction.
+  if (result.ok || (result.reason !== "plan-revised" && result.reason !== "plan-revision-blocked")) {
+    const stopped = store.transact(() => {
+      const run = store.getRun(runId);
+      const fenceLease = leaseId ?? run?.leaseId;
+      if (run === null || run.outcome !== null || fenceLease === undefined) return null;
+      return interruptIfStopped(store, {
+        leaseId: fenceLease,
+        runId,
+        taskId,
+        ...(result.ok && result.parked === undefined ? { committed: result.committed } : {}),
+        now: clock(),
+      });
+    });
+    if (stopped !== null) return { kind: "stopped", stopRun: stopped.stopRun, requeued: stopped.requeued };
+  }
 
   if (result.ok && result.parked !== undefined) {
     if (leaseId === undefined) return { kind: "park-fenced" };

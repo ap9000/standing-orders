@@ -321,6 +321,18 @@ export class HeldSessionCoordinator {
     return winner === "fenced" ? [] : [...this.sessions.keys()];
   }
 
+  /**
+   * The exact-run stop (v52): fence ONE held session now, through the
+   * supervisor's own handle — EOF → grace → kill, conservative settlement,
+   * the worktree preserved, the stop settled as `held` by the run's ending.
+   * The console calls this after the durable request; the lapse interval
+   * takes the same road for a stop filed by another process. Idempotent:
+   * a session already fencing or gone settles nothing twice.
+   */
+  stop(runId: number): Promise<void> {
+    return this.fenceByRun(runId, "stopped");
+  }
+
   /** The beat endpoint, answers, and revocation poke this directly (v2 S1d). */
   poke(runId: number): void {
     const controller = this.sessions.get(runId);
@@ -428,6 +440,13 @@ export class HeldSessionCoordinator {
     controller.timers.push(expiry);
 
     const lapse = setInterval(() => {
+      // The operator's exact-run stop (v52) takes the same fence road as a
+      // revocation: EOF → grace → kill through the supervisor's handle,
+      // conservative settlement, the worktree preserved.
+      if (args.store.applicableStopFor(args.runId) !== null) {
+        void this.fence(args, "stopped");
+        return;
+      }
       const live = args.store.readAuthorization(args.authorization.id);
       if (live === null || live.closedAt !== null) {
         void this.fence(args, live?.endReason === "revoked" ? "revoked" : "lapsed");
@@ -744,7 +763,9 @@ export class HeldSessionCoordinator {
         store.settleTurnTerminal(turn.id, "uncertain", args.clock());
       }
     }
-    store.finishRun(args.runId, { outcome: "interrupted", reason, now: args.clock() });
+    // The run's ending settles a pending stop as `held` (v52): by here the
+    // supervisor's exit was awaited or its hard kill ordered.
+    store.finishRun(args.runId, { outcome: "interrupted", reason, now: args.clock(), stopSettlement: "held" });
     store.closeHeldFencing(args.runId, fencer, reason, args.clock());
     store.closeAuthorization(args.authorization.id, reason, args.clock());
     // The worktree is PRESERVED on interruption (released to the pool
@@ -752,6 +773,7 @@ export class HeldSessionCoordinator {
     await args.releaseWorktree(args.cwd);
     args.liveLog?.close();
     args.onDisposed?.({ kind: "interrupted", reason });
+    store.settleRunStop(args.runId, "held", args.clock());
     this.drop(args.runId);
   }
 

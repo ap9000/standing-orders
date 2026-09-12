@@ -30,6 +30,10 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { hostname } from "node:os";
+import { ownedProcessCount, runOwnerTag } from "./exec.js";
+import { worktreeProcessOccupancy } from "./worktree.js";
+import { processMayBeAlive } from "./process-liveness.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
 import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
@@ -73,7 +77,7 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 51;
+export const SCHEMA_VERSION = 52;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -489,7 +493,9 @@ export type RoutineFire = {
 };
 
 /** Who placed a hold — and therefore who alone may lift it. */
-export type HoldOwner = "operator" | "decision" | "incident" | "backoff" | "contest" | "revision";
+/** 'stop' (v52) = the pause one exact attempt's operator stop placed — lifted
+ * only by resuming THAT attempt, never by `unhold` or by answering a decision. */
+export type HoldOwner = "operator" | "decision" | "incident" | "backoff" | "contest" | "revision" | "stop";
 
 export type Hold = {
   id: number;
@@ -569,6 +575,29 @@ export type Notification = {
 export type RunnerWorkRecovery = {
   runs: number[];
   requeued: string[];
+};
+
+/** How a stop's settlement was established (v52). `interrupted` = the
+ * owning worker sealed the attempt after its processes ended; `held` = the
+ * held-session supervisor fenced it; `recovered` = dead-incarnation
+ * recovery settled a run whose worker is proven gone; `finished` = the
+ * attempt reached another ending first (the stop was recorded, but the
+ * run's own outcome stands — the words say which). */
+export type StopSettlement = "interrupted" | "recovered" | "held" | "finished";
+
+/** One exact attempt's operator stop (v52) — its provenance, its settlement,
+ * and the resume that lifted it, all on one row. */
+export type RunStop = {
+  run: number;
+  taskRef: number;
+  requestedBy: string;
+  requestedVia: "cli" | "web";
+  requestedAt: string;
+  settledAt: string | null;
+  settlement: StopSettlement | null;
+  resumedAt: string | null;
+  resumedBy: string | null;
+  resumedVia: "cli" | "web" | null;
 };
 
 /** One ROOT review attempt of a source run (v50): the reviewer run, its
@@ -1789,7 +1818,7 @@ CREATE INDEX IF NOT EXISTS routine_fire_recent ON routine_fire (routine_id, id D
 CREATE TABLE IF NOT EXISTS hold (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
-  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff','contest','revision')),
+  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff','contest','revision','stop')),
   owner_id   TEXT NOT NULL,
   reason     TEXT NOT NULL,
   until      TEXT,
@@ -3194,10 +3223,52 @@ CREATE TABLE IF NOT EXISTS held_session (
   end_reason            TEXT
 );
 
+-- v52 (safe task stop and resume): an operator's stop, bound to ONE exact
+-- attempt. The row is durable BEFORE any process is signalled, so a crash
+-- between the request and the kill still settles as a stop, never as a
+-- success. settled_at lands only once the attempt's owned processes are
+-- established gone — the worker's own fenced interruption seal, the held
+-- supervisor's fence, or dead-incarnation recovery — and the successor a
+-- resume admits is never named here: it inherits the draft through the
+-- ordinary recovered-draft road with a fresh lease. Repair turns and
+-- reviewer corrections inherit their parent's stop by sharing its lease;
+-- a later independently admitted attempt does not. One stop per run:
+-- a repeated request is the same request, never a second one.
+CREATE TABLE IF NOT EXISTS run_stop (
+  run           INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
+  task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  requested_by  TEXT NOT NULL,
+  requested_via TEXT NOT NULL CHECK (requested_via IN ('cli','web')),
+  requested_at  TEXT NOT NULL,
+  settled_at    TEXT,
+  settlement    TEXT CHECK (settlement IN ('interrupted','recovered','held','finished')),
+  resumed_at    TEXT,
+  resumed_by    TEXT,
+  resumed_via   TEXT CHECK (resumed_via IN ('cli','web')),
+  CHECK ((settled_at IS NULL) = (settlement IS NULL)),
+  CHECK (resumed_at IS NULL OR settled_at IS NOT NULL),
+  CHECK ((resumed_at IS NULL) = (resumed_by IS NULL))
+);
+
+-- Retained spawn witnesses also cover reviewers and setup/check children,
+-- which need not have an execution slot or a persistent worktree marker.
+-- PIDs are only queried for liveness; they never authorize a signal.
+CREATE TABLE IF NOT EXISTS run_process (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  pid INTEGER CHECK (pid > 0),
+  host TEXT NOT NULL,
+  process_group INTEGER NOT NULL CHECK (process_group IN (0,1)),
+  observed_at TEXT NOT NULL,
+  exited_at TEXT
+);
+CREATE INDEX IF NOT EXISTS run_process_by_run ON run_process(run, exited_at);
+
 CREATE INDEX IF NOT EXISTS task_by_state ON task (state);
 CREATE INDEX IF NOT EXISTS edge_by_blocker ON task_edge (blocker);
 CREATE INDEX IF NOT EXISTS claim_by_task ON claim (task_ref, lease_generation DESC);
 CREATE INDEX IF NOT EXISTS hold_by_task ON hold (task_ref);
+CREATE INDEX IF NOT EXISTS run_stop_by_task ON run_stop (task_ref, requested_at DESC);
 `;
 
 /**
@@ -4379,6 +4450,30 @@ function migrate(db: Database, origin: number | null): void {
   // ingestion record. The same exact-recognizer copy/rename as v46; no
   // historical row changes meaning.
   rebuildArtifactForV51(db);
+
+  // v52 (safe task stop and resume): `run_stop` is a wholly new table and
+  // arrives through the fresh SCHEMA's IF NOT EXISTS. `hold`'s owner_kind
+  // CHECK is WIDENED to admit 'stop' — the pause an exact attempt's stop
+  // places, lifted only by resuming that attempt — through the same
+  // exact-recognizer copy/rename v44 used for 'revision'. No historical
+  // row changes meaning.
+  rebuildForV4(
+    db,
+    "hold",
+    "'operator','decision','incident','backoff','contest','revision'",
+    "'stop'",
+    `CREATE TABLE hold_next (
+       id         INTEGER PRIMARY KEY AUTOINCREMENT,
+       task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+       owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff','contest','revision','stop')),
+       owner_id   TEXT NOT NULL,
+       reason     TEXT NOT NULL,
+       until      TEXT,
+       held_at    TEXT NOT NULL,
+       UNIQUE (owner_kind, owner_id)
+     )`,
+    ["id", "task_ref", "owner_kind", "owner_id", "reason", "until", "held_at"],
+  );
 }
 
 /** The origin CHECK, verbatim from the fresh review_request DDL. */
@@ -5950,10 +6045,27 @@ function rebuildForV4(
   try {
     db.exec("BEGIN IMMEDIATE");
     try {
+      // The AUTOINCREMENT bookkeeping (the v51 rebuildExact discipline,
+      // applied here for v52's hold widening): a drop-and-rename moves or
+      // mints the table's sqlite_sequence row; the rows that stood before
+      // are restored in their order and with their counters, and a row
+      // the copy minted for a table that had none is removed again.
+      const sequenceBefore = tableExists(db, "sqlite_sequence")
+        ? (db.prepare("SELECT name, seq FROM sqlite_sequence ORDER BY rowid").all() as { name: string; seq: number | bigint }[])
+        : [];
       db.exec(targetDDL);
       db.exec(`INSERT INTO ${table}_next (${names}) SELECT ${names} FROM ${table}`);
       db.exec(`DROP TABLE ${table}`);
       db.exec(`ALTER TABLE ${table}_next RENAME TO ${table}`);
+      if (tableExists(db, "sqlite_sequence")) {
+        if (sequenceBefore.some(row => row.name === table)) {
+          db.exec("DELETE FROM sqlite_sequence");
+          const restore = db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)");
+          for (const row of sequenceBefore) restore.run(row.name, typeof row.seq === "bigint" ? row.seq : BigInt(row.seq));
+        } else {
+          db.prepare("DELETE FROM sqlite_sequence WHERE name = ?").run(table);
+        }
+      }
       if (table === "hold") db.exec("CREATE INDEX IF NOT EXISTS hold_by_task ON hold (task_ref)");
       const broken = db.prepare("PRAGMA foreign_key_check").all();
       if (broken.length > 0) {
@@ -9291,6 +9403,15 @@ export class Store {
         error.name = "ReviewerCustodyError";
         throw error;
       }
+      // THE STOP FENCE at ingestion (v52): a stop recorded against this
+      // reviewer (or the root it corrects) before this write wins — late
+      // review output is never ingested as a judgement. Named so the
+      // caller seals the attempt as interrupted, never as a review failure.
+      if (this.applicableStopFor(args.reviewerRunId) !== null) {
+        const error = new Error(`reviewer ${args.reviewerRunId} was stopped by the operator before its review could be ingested — nothing is ingested`);
+        error.name = "ReviewerStoppedError";
+        throw error;
+      }
       const authoringReviewer = this.getRun(args.reviewerRunId);
       const rootReviewer = authoringReviewer === null ? null : this.reviewerRoot(authoringReviewer, true);
       if (rootReviewer === null) {
@@ -9614,6 +9735,14 @@ export class Store {
         // A parked tail is a PAUSED lineage, not an ended one: repair resumes
         // the same custody, and the cycle stays open for it.
         if (run.outcome === "parked") return { kind: "parked-tail" as const };
+        // An operator-stopped tail (v52) ends the cycle as an ordinary end:
+        // a stop never advances a chain, spends a fallback edge, or counts
+        // as the exhaustion the chain was approved to survive. The resumed
+        // attempt opens its own cycle at the base, under the same approval.
+        if (this.applicableStopFor(finishedRunId) !== null) {
+          this.closeFallbackCycle(cycle.id, cycle.transitionGeneration, "entry-ended", now);
+          return { kind: "closed" as const, reason: "entry-ended" as const };
+        }
         const cls: TerminalClass = run.terminalClass ?? "unknown";
         // A chain-bound tail carries its pinned auth mode from admission; a
         // row whose auth mode does not read (v48 authority repair) is a corrupt stamp and
@@ -10525,6 +10654,13 @@ export class Store {
     if (succeeded !== undefined) return { reason: "already-reviewed", detail: `run #${sourceRunId} already has its review (reviewer run #${Number(succeeded.id)}) — a successful review is never retried` };
     const live = roots.find(one => one.outcome === null);
     if (live !== undefined) return { reason: "review-running", detail: `reviewer run #${Number(live.id)} is still open on run #${sourceRunId} — one review attempt at a time` };
+    for (const root of roots) {
+      const id = Number(root.id);
+      const stop = this.stopOf(id);
+      if (stop !== null && (stop.settledAt === null || this.stopQuiescenceProblem(id) !== null)) {
+        return { reason: "review-running", detail: `reviewer run #${id} is still stopping; its processes must exit before another review can start` };
+      }
+    }
     if (roots.length >= REVIEW_ROOT_ATTEMPTS) return { reason: "retries-exhausted", detail: `run #${sourceRunId} has spent all ${REVIEW_ROOT_ATTEMPTS} review attempts — the failed attempts remain on record; nothing retries a fourth time` };
     return null;
   }
@@ -15194,6 +15330,11 @@ export class Store {
     const interrupted = parent.outcome === null || (parent.outcome === "failed" && parent.reason === "interrupted");
     if (!interrupted) return `run #${parent.id} ended as ${parent.outcome}${parent.reason === null ? "" : ` (${parent.reason})`} — only an interrupted attempt's draft is recovered`;
     if (parent.outcome === null && this.liveClaimByLease(parent.leaseId, now) !== null) return `run #${parent.id} is still being built under lease ${parent.leaseId} — nothing recovers a live attempt's draft`;
+    // THE RESUME GRANT (v52): an operator-stopped attempt's draft is
+    // inherited only after that exact attempt was resumed — the stop's own
+    // hold keeps the queue away, and this keeps every other road away too.
+    const stop = this.stopOf(parent.id);
+    if (stop !== null && stop.resumedAt === null) return `run #${parent.id} was stopped by ${stop.requestedBy} and has not been resumed — resume that exact attempt before anything inherits its draft`;
     return null;
   }
 
@@ -15490,6 +15631,11 @@ export class Store {
       reason?: string;
       committed?: boolean;
       now: Date;
+      /** v52: how this ending settles a pending operator stop on the run,
+       * when one stands. The fenced interruption seal and the held fence
+       * name their own word; every other road settles it as `finished` —
+       * the attempt reached this ending first, and its outcome stands. */
+      stopSettlement?: StopSettlement;
     },
   ): void {
     this.db
@@ -15501,6 +15647,10 @@ export class Store {
         result.now.toISOString(),
         id,
       );
+    // An outcome alone does not prove subprocess exit. Settlement checks
+    // retained witnesses and every owned run; recovery revisits a pending
+    // stop after an orphan or held supervisor finishes shutdown.
+    this.settleRunStop(id, result.stopSettlement ?? "finished", result.now);
     // The park rate is *measured* — parked over concluded builder attempts —
     // and maintained where attempts conclude, because the attention budget's
     // gate reads it inside a claim transaction and must never trust a number
@@ -16733,10 +16883,15 @@ export class Store {
 
   /** Stamp pids after spawn. False = the row closed underneath the spawn — kill the child. */
   stampHeldSession(run: number, supervisorPid: number, agentPgid: number): boolean {
-    const { changes } = this.db
-      .prepare("UPDATE held_session SET supervisor_pid = ?, agent_pgid = ? WHERE run = ? AND ended_at IS NULL")
-      .run(supervisorPid, agentPgid, run);
-    return Number(changes) > 0;
+    return this.transact(() => {
+      const { changes } = this.db
+        .prepare("UPDATE held_session SET supervisor_pid = ?, agent_pgid = ? WHERE run = ? AND ended_at IS NULL")
+        .run(supervisorPid, agentPgid, run);
+      if (Number(changes) === 0) return false;
+      this.recordRunProcess(run, supervisorPid, new Date(), false);
+      this.recordRunProcess(run, agentPgid, new Date());
+      return true;
+    });
   }
 
   heldSessionOf(run: number): HeldSession | null {
@@ -19636,6 +19791,10 @@ export class Store {
         )
         .all(BUILT_IN, runner);
       for (const row of stranded) requeueUnowned(Number(row["ref"]));
+      // Closing the runner does not prove subprocess exit. Only exact stops
+      // whose retained process witnesses are absent can settle; their own
+      // holds keep every other recovered attempt paused.
+      this.settleQuiescentStops(now);
       if (runs.length > 0 || requeued.length > 0) this.bumpWake();
       return { runs, requeued };
     });
@@ -19757,9 +19916,282 @@ export class Store {
       this.db.prepare(
         "UPDATE review_request SET consumed_reason = 'interrupted' WHERE consumed_reason = 'dispatched' AND reviewer_run IN (SELECT id FROM run WHERE runner = ? AND watch_incarnation = ? AND role = 'reviewer' AND review_attempt IS NOT NULL AND reason = 'interrupted')",
       ).run(runner, incarnation);
+      // A dead incarnation can leave live descendants. Keep its stop pending
+      // until the separate process-witness check establishes quiescence.
+      this.settleQuiescentStops(now);
       if (claims.length + extra > 0) this.bumpWake();
       return claims.length + extra;
     });
+  }
+
+  /** Recovery closing a run does not establish provider death. Reconcile
+   * each exact pending stop against the retained process witnesses. */
+  settleQuiescentStops(now: Date): number {
+    return this.transact(() => {
+      let settled = 0;
+      const pending = this.db.prepare("SELECT run FROM run_stop WHERE settled_at IS NULL ORDER BY run").all();
+      for (const row of pending) {
+        const id = Number(row["run"]);
+        const kind = this.heldSessionOf(id) === null ? "recovered" : "held";
+        if (this.settleRunStop(id, kind, now)) settled++;
+      }
+      if (settled > 0) this.bumpWake();
+      return settled;
+    });
+  }
+
+  // ---- safe task stop and resume (v52) -------------------------------------
+
+  /** The stop recorded against exactly this run, if any. */
+  stopOf(runId: number): RunStop | null {
+    const row = this.db.prepare("SELECT * FROM run_stop WHERE run = ?").get(runId);
+    return row === undefined ? null : readRunStop(row);
+  }
+
+  /**
+   * The run ids one exact attempt OWNS (v52): the run itself plus every
+   * descendant that runs under the SAME lease — a builder's repair turns,
+   * a planner's corrections, a root reviewer's correction child. Ownership
+   * is the shared lease, never the task: a successor admitted later under
+   * a fresh claim, a warm park resume, or a recovered-draft attempt is its
+   * own attempt and inherits nothing.
+   */
+  ownedRunsOf(runId: number): number[] {
+    return this.db
+      .prepare(
+        `WITH RECURSIVE owned(id, lease_id) AS (
+           SELECT id, lease_id FROM run WHERE id = ?
+           UNION ALL
+           SELECT r.id, r.lease_id FROM run r JOIN owned o ON r.parent_run = o.id WHERE r.lease_id = o.lease_id
+         ) SELECT id FROM owned ORDER BY id`,
+      )
+      .all(runId)
+      .map(row => Number(row["id"]));
+  }
+
+  /**
+   * The stop that APPLIES to a run (v52): its own, or the one recorded
+   * against an owning ancestor it shares a lease with (a repair turn under
+   * a stopped builder, a correction under a stopped root review). Read by
+   * every fence — invocation, settlement, ingestion, admission — so a
+   * descendant can never finish work its parent was told to stop.
+   */
+  applicableStopFor(runId: number): RunStop | null {
+    const row = this.db
+      .prepare(
+        `WITH RECURSIVE lineage(id, parent_run, lease_id) AS (
+           SELECT id, parent_run, lease_id FROM run WHERE id = ?
+           UNION ALL
+           SELECT r.id, r.parent_run, r.lease_id FROM run r JOIN lineage l ON r.id = l.parent_run WHERE r.lease_id = l.lease_id
+         ) SELECT s.* FROM run_stop s JOIN lineage l ON l.id = s.run ORDER BY s.run LIMIT 1`,
+      )
+      .get(runId);
+    return row === undefined ? null : readRunStop(row);
+  }
+
+  /**
+   * THE STOP REQUEST (v52): one exact, still-open attempt, recorded
+   * durably with who asked and when BEFORE any process is signalled. The
+   * transaction proves the run is this task's, is still open, holds the
+   * task's CURRENT live claim (a reviewer's synthetic lease counts through
+   * its open outcome alone), is not a racing lane (tournaments keep their
+   * own controls), and has admitted no publication — an external request
+   * in flight is never recalled by a stop, and the words say so. The
+   * stop's hold rides the same write, owned by this run, so nothing
+   * automatic retries the task while it is paused; a repeated request
+   * finds its own row and answers the same, never a second stop.
+   */
+  requestRunStop(
+    args: { runId: number; taskRef: number; by: string; via: "cli" | "web" },
+    now: Date,
+  ):
+    | { ok: true; stop: RunStop; repeated: boolean }
+    | { ok: false; reason: "no-run" | "wrong-task" | "finished" | "not-live" | "tournament" | "publication"; detail: string } {
+    return this.transact(() => {
+      const run = this.getRun(args.runId);
+      if (run === null) return { ok: false as const, reason: "no-run" as const, detail: `no run #${args.runId}` };
+      if (run.taskRef !== args.taskRef) return { ok: false as const, reason: "wrong-task" as const, detail: `run #${args.runId} is not one of this task's attempts` };
+      const existing = this.stopOf(args.runId);
+      if (existing !== null) return { ok: true as const, stop: existing, repeated: true };
+      if (run.parentRun !== null && this.getRun(run.parentRun)?.leaseId === run.leaseId) {
+        return { ok: false as const, reason: "not-live" as const, detail: `run #${run.id} belongs to attempt #${run.parentRun}; stop the owning attempt` };
+      }
+      if (run.outcome !== null) {
+        return { ok: false as const, reason: "finished" as const, detail: `run #${args.runId} already ended (${run.outcome}${run.reason === null ? "" : ` · ${run.reason}`}) — a finished attempt is never rewritten by a stop` };
+      }
+      if (run.contestant !== null) return { ok: false as const, reason: "tournament" as const, detail: `run #${args.runId} is a racing lane — tournaments are stopped through their own pick/abandon controls` };
+      if (run.role !== "reviewer") {
+        const holding = this.currentLiveLease(run.taskRef, now);
+        if (holding !== run.leaseId) {
+          return { ok: false as const, reason: "not-live" as const, detail: holding === null ? `run #${args.runId} holds no live claim — recovery settles it, not a stop` : `run #${args.runId} is not the attempt holding this task now` };
+        }
+      }
+      if (this.publicationForRun(args.runId) !== null) {
+        return { ok: false as const, reason: "publication" as const, detail: `run #${args.runId} has already admitted its publication — an external request in flight is not recalled by a stop` };
+      }
+      this.db
+        .prepare("INSERT INTO run_stop (run, task_ref, requested_by, requested_via, requested_at) VALUES (?, ?, ?, ?, ?)")
+        .run(args.runId, run.taskRef, args.by, args.via, now.toISOString());
+      // The pause this stop OWNS: one row keyed to the run, beside — never
+      // over — any operator, decision, incident, or backoff hold already
+      // standing. A review has no queue to pause (retries are explicit),
+      // so a stopped review places none.
+      if (run.role !== "reviewer") {
+        this.holdOwned(
+          { taskRef: run.taskRef, ownerKind: "stop", ownerId: String(args.runId), reason: `stopped by ${args.by} — resume run #${args.runId} when ready`, until: null },
+          now,
+        );
+      }
+      this.addRunNote(args.runId, args.by, `Stop requested. The attempt's own processes are being stopped; its work stays preserved and the task stays paused until this exact attempt is resumed.`, now);
+      this.bumpWake();
+      return { ok: true as const, stop: this.stopOf(args.runId) as RunStop, repeated: false };
+    });
+  }
+
+  /** Settle a stop — compare-and-set on the unsettled row. True when THIS
+   * call settled it; false when it was already settled or never asked. */
+  settleRunStop(runId: number, settlement: StopSettlement, now: Date): boolean {
+    const stop = this.stopOf(runId);
+    if (stop === null || stop.settledAt !== null) return false;
+    return this.transact(() => {
+      if (this.stopQuiescenceProblem(runId) !== null) return false;
+      const recordExit = this.db.prepare("UPDATE run_process SET exited_at = ? WHERE run = ? AND exited_at IS NULL");
+      for (const owned of this.ownedRunsOf(runId)) recordExit.run(now.toISOString(), owned);
+      const { changes } = this.db
+        .prepare("UPDATE run_stop SET settled_at = ?, settlement = ? WHERE run = ? AND settled_at IS NULL")
+        .run(now.toISOString(), settlement, runId);
+      return Number(changes) > 0;
+    });
+  }
+
+  /** Every owned run must have ended, and every retained local process
+   * witness must be absent. Read-only probes never authorize PID kills. */
+  stopQuiescenceProblem(runId: number): string | null {
+    const ids = this.ownedRunsOf(runId);
+    if (ids.length === 0) return `run #${runId} does not exist`;
+    for (const id of ids) {
+      const run = this.getRun(id)!;
+      if (run.outcome === null) return `run #${id} is still open`;
+      if (ownedProcessCount(runOwnerTag(this, id)) > 0) return `run #${id} still has an owned subprocess`;
+      const held = this.heldSessionOf(id);
+      if (held !== null && held.endedAt === null) return `run #${id}'s held supervisor has not finished shutdown`;
+      const witnesses = this.db.prepare("SELECT * FROM run_process WHERE run = ? ORDER BY id").all(id);
+      if (run.providerStartedAt !== null && witnesses.length === 0) {
+        return `run #${id} may have spawned before its process witness was recorded; exit is unproven`;
+      }
+      for (const witness of witnesses) {
+        if (witness["exited_at"] !== null) continue;
+        if (witness["pid"] === null) return `run #${id} has an incomplete spawn witness; exit is unproven`;
+        if (witness["host"] !== hostname()) return `run #${id}'s process belongs to another host; exit is unproven here`;
+        const pid = Number(witness["pid"]);
+        if (processMayBeAlive(pid, witness["process_group"] === 1)) return `run #${id}'s process ${pid} may still be running`;
+      }
+      if (run.worktree !== null) {
+        try {
+          const occupied = worktreeProcessOccupancy(run.worktree);
+          if (occupied.held) return `run #${id}'s workspace is still held by process ${occupied.by}`;
+        } catch { return `run #${id}'s workspace occupancy could not be established`; }
+      }
+    }
+    return null;
+  }
+
+  reserveRunProcess(runId: number, now: Date, group = true): number {
+    return Number(this.db.prepare("INSERT INTO run_process (run,host,process_group,observed_at) VALUES (?,?,?,?)")
+      .run(runId, hostname(), group ? 1 : 0, now.toISOString()).lastInsertRowid);
+  }
+
+  finishUnspawnedProcess(witness: number, now: Date): void {
+    this.db.prepare("UPDATE run_process SET exited_at = ? WHERE id = ? AND pid IS NULL")
+      .run(now.toISOString(), witness);
+  }
+
+  recordRunProcess(runId: number, pid: number, now: Date, group = true, witness?: number): void {
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("a process witness needs a valid spawned PID");
+    if (witness !== undefined) {
+      const changed = this.db.prepare("UPDATE run_process SET pid = ? WHERE id = ? AND run = ? AND pid IS NULL AND exited_at IS NULL")
+        .run(pid, witness, runId);
+      if (Number(changed.changes) !== 1) throw new Error("spawn witness custody changed");
+      return;
+    }
+    this.db.prepare("INSERT INTO run_process (run,pid,host,process_group,observed_at) VALUES (?,?,?,?,?)")
+      .run(runId, pid, hostname(), group ? 1 : 0, now.toISOString());
+  }
+
+  /**
+   * THE RESUME (v52): the stopped attempt the operator actually reviewed,
+   * and only once it is quiescent — its stop settled, the run and every
+   * owned descendant ended, no live claim on the task, and it still the
+   * task's NEWEST attempt (a later attempt makes this stop history; a
+   * replayed or stale resume names it and is refused). It lifts exactly
+   * the hold this stop owns: an operator pause, a decision, an incident, a
+   * backoff, a revision hold placed beside it all stand. It approves
+   * nothing and admits nothing — the next pass re-proves the signed scope,
+   * takes a fresh claim, and inherits the draft through the recovered-draft
+   * road. A review resumes through the explicit bounded retry door instead,
+   * and this refuses in those words.
+   */
+  resumeRunStop(
+    args: { runId: number; taskRef: number; by: string; via: "cli" | "web" },
+    now: Date,
+  ):
+    | { ok: true; stop: RunStop }
+    | { ok: false; reason: "no-stop" | "wrong-task" | "stopping" | "already-resumed" | "superseded" | "busy" | "review"; detail: string } {
+    return this.transact(() => {
+      const stop = this.stopOf(args.runId);
+      const run = this.getRun(args.runId);
+      if (stop === null || run === null) return { ok: false as const, reason: "no-stop" as const, detail: `run #${args.runId} was not stopped` };
+      if (stop.taskRef !== args.taskRef) return { ok: false as const, reason: "wrong-task" as const, detail: `run #${args.runId} is not one of this task's attempts` };
+      if (stop.resumedAt !== null) return { ok: false as const, reason: "already-resumed" as const, detail: `run #${args.runId} was already resumed by ${stop.resumedBy ?? "?"} at ${stop.resumedAt}` };
+      if (run.role === "reviewer") return { ok: false as const, reason: "review" as const, detail: `run #${args.runId} is a review — a stopped review is retried through the explicit review-retry door, which keeps its bounded attempts` };
+      if (stop.settledAt === null || run.outcome === null) {
+        return { ok: false as const, reason: "stopping" as const, detail: `run #${args.runId} is still stopping — its processes have not been established gone yet` };
+      }
+      const quiescence = this.stopQuiescenceProblem(args.runId);
+      if (quiescence !== null) return { ok: false as const, reason: "stopping" as const, detail: quiescence };
+      const openOwned = this.db
+        .prepare(
+          `WITH RECURSIVE owned(id, lease_id) AS (
+             SELECT id, lease_id FROM run WHERE id = ?
+             UNION ALL
+             SELECT r.id, r.lease_id FROM run r JOIN owned o ON r.parent_run = o.id WHERE r.lease_id = o.lease_id
+           ) SELECT run.id AS id FROM run JOIN owned ON owned.id = run.id WHERE run.outcome IS NULL LIMIT 1`,
+        )
+        .get(args.runId);
+      if (openOwned !== undefined) {
+        return { ok: false as const, reason: "stopping" as const, detail: `run #${Number(openOwned["id"])}, owned by the stopped attempt, is still open` };
+      }
+      // The newest ATTEMPT: a lease-group head (a repair turn under the
+      // stopped attempt is the attempt's own, not a successor).
+      const newest = this.db
+        .prepare(
+          `SELECT r.id AS id FROM run r LEFT JOIN run p ON p.id = r.parent_run
+            WHERE r.task_ref = ? AND r.role <> 'reviewer' AND (r.parent_run IS NULL OR p.lease_id <> r.lease_id)
+            ORDER BY r.id DESC LIMIT 1`,
+        )
+        .get(args.taskRef);
+      if (newest !== undefined && Number(newest["id"]) !== args.runId) {
+        return { ok: false as const, reason: "superseded" as const, detail: `run #${args.runId} is no longer this task's newest attempt — #${Number(newest["id"])} came after it; reload and decide against the current state` };
+      }
+      const holding = this.currentLiveLease(args.taskRef, now);
+      if (holding !== null) return { ok: false as const, reason: "busy" as const, detail: `the task is claimed right now (lease ${holding}) — nothing resumes over live work` };
+      this.db
+        .prepare("UPDATE run_stop SET resumed_at = ?, resumed_by = ?, resumed_via = ? WHERE run = ? AND resumed_at IS NULL")
+        .run(now.toISOString(), args.by, args.via, args.runId);
+      // Exactly this stop's hold — by owner, never by task.
+      this.releaseOwnedHold("stop", String(args.runId));
+      this.addRunNote(args.runId, args.by, "Resumed. The next pass takes a fresh claim, re-proves the signed scope, and inherits this attempt's preserved draft with fresh proof.", now);
+      this.bumpWake();
+      return { ok: true as const, stop: this.stopOf(args.runId) as RunStop };
+    });
+  }
+
+  /** Every stop recorded on a task, newest request first. */
+  stopsForTask(taskRef: number): RunStop[] {
+    return this.db
+      .prepare("SELECT * FROM run_stop WHERE task_ref = ? ORDER BY requested_at DESC, run DESC")
+      .all(taskRef)
+      .map(readRunStop);
   }
 
   // ---- quota ---------------------------------------------------------------
@@ -20654,6 +21086,21 @@ function readPlanRevision(row: Record<string, unknown>): PlanRevision {
     createdAt: String(row["created_at"]),
     resolvedAt: row["resolved_at"] === null || row["resolved_at"] === undefined ? null : String(row["resolved_at"]),
     resolvedBy: row["resolved_by"] === null || row["resolved_by"] === undefined ? null : String(row["resolved_by"]),
+  };
+}
+
+function readRunStop(row: Record<string, unknown>): RunStop {
+  return {
+    run: Number(row["run"]),
+    taskRef: Number(row["task_ref"]),
+    requestedBy: String(row["requested_by"]),
+    requestedVia: String(row["requested_via"]) as "cli" | "web",
+    requestedAt: String(row["requested_at"]),
+    settledAt: row["settled_at"] === null || row["settled_at"] === undefined ? null : String(row["settled_at"]),
+    settlement: row["settlement"] === null || row["settlement"] === undefined ? null : (String(row["settlement"]) as StopSettlement),
+    resumedAt: row["resumed_at"] === null || row["resumed_at"] === undefined ? null : String(row["resumed_at"]),
+    resumedBy: row["resumed_by"] === null || row["resumed_by"] === undefined ? null : String(row["resumed_by"]),
+    resumedVia: row["resumed_via"] === null || row["resumed_via"] === undefined ? null : (String(row["resumed_via"]) as "cli" | "web"),
   };
 }
 

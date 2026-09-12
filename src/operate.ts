@@ -194,6 +194,7 @@ import { createInterface } from "node:readline";
 import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage, acceptanceLinesToInput, parseAcceptanceCriteria } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
+import { requestTaskStop, resumeTaskStop, taskControlOf } from "./task-control.js";
 import {
   approveRoutine,
   describeRoutine,
@@ -564,7 +565,7 @@ type Args = {
 export const TASK_ACTIONS = [
   "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "plan",
-  "review", "accept", "repair", "route",
+  "review", "accept", "repair", "route", "stop", "resume",
 ] as const;
 export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
@@ -593,6 +594,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "command", "timeout-seconds", "setup-digest", "stop-grace", "title", "name", "every", "lines",
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   "phase", "risk", "tier", "clear-phase",
+  "run",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
@@ -1896,7 +1898,7 @@ class StaleAuthorization extends Error {}
 /** What happened to one task this pass looked at. */
 type TickOutcome = {
   id: string;
-  outcome: "built" | "planned" | "reported" | "parked" | "skipped" | "failed" | "contest" | "held" | "reviewed" | "review-failed";
+  outcome: "built" | "planned" | "reported" | "parked" | "skipped" | "failed" | "contest" | "held" | "reviewed" | "review-failed" | "stopped";
   /** Why it was skipped or how it failed; absent on a build. */
   reason?: string;
   /** The gap's own words, when the reason is a capability. */
@@ -3121,6 +3123,8 @@ async function tickCommand(
           store.resetPlanStrikes(ref.id);
           dispatched.push({ id, outcome: "parked", reason: `decision:${sealed.decisionId}` });
           parked++;
+        } else if (sealed.reason === "stopped") {
+          dispatched.push({ id, outcome: "stopped", reason: `stop:${planRunId}` });
         } else {
           dispatched.push({ id, outcome: "failed", reason: "fenced" });
           broke++;
@@ -3148,6 +3152,11 @@ async function tickCommand(
           // task stays requested — the next pass plans against what is
           // filed now. Not a strike: the planner did nothing wrong.
           dispatched.push({ id, outcome: "skipped", reason: sealed.reason, detail: sealed.detail });
+        } else if (sealed.reason === "stopped") {
+          // An operator's stop (v52) won before the draft was ingested:
+          // the planner attempt ends interrupted, nothing is proposed,
+          // and the task waits under the stop's hold. Not a strike.
+          dispatched.push({ id, outcome: "stopped", reason: `stop:${planRunId}` });
         } else {
           dispatched.push({ id, outcome: "failed", reason: "fenced" });
           broke++;
@@ -3163,6 +3172,10 @@ async function tickCommand(
         message: outcome.message,
         now: clock(),
       });
+      if (!sealedFailure.ok && sealedFailure.reason === "stopped") {
+        dispatched.push({ id, outcome: "stopped", reason: `stop:${planRunId}` });
+        continue;
+      }
       dispatched.push({ id, outcome: "failed", reason: outcome.reason });
       if (!sealedFailure.ok) release(store, lease, clock());
       broke++;
@@ -3286,6 +3299,8 @@ async function tickCommand(
         if (sealed.ok) {
           store.clearQuota(runner, spec.provider, spec.model ?? "");
           dispatched.push({ id, outcome: "reported", ...leftover });
+        } else if (sealed.reason === "stopped") {
+          dispatched.push({ id, outcome: "stopped", reason: `stop:${scoutRunId}`, ...leftover });
         } else {
           dispatched.push({ id, outcome: "failed", reason: "fenced", ...leftover });
           broke++;
@@ -3301,6 +3316,10 @@ async function tickCommand(
         message: scouted.message,
         now: clock(),
       });
+      if (!sealedFailure.ok && sealedFailure.reason === "stopped") {
+        dispatched.push({ id, outcome: "stopped", reason: `stop:${scoutRunId}`, ...leftover });
+        continue;
+      }
       dispatched.push({ id, outcome: "failed", reason: scouted.reason, ...leftover });
       if (!sealedFailure.ok) release(store, lease, clock());
       broke++;
@@ -3664,6 +3683,11 @@ async function tickCommand(
       case "recorded":
         // The standalone-only arm; unreachable under the tick policy.
         break;
+      case "stopped":
+        // An operator's stop (v52): interrupted with its work preserved —
+        // not a break, not a strike; the task waits under the stop's hold.
+        dispatched.push({ id, outcome: "stopped", reason: `stop:${disposition.stopRun}`, branch, worktree: leased.worktree.path });
+        break;
       case "invariant":
         dispatched.push({ id, outcome: "failed", reason: disposition.reason });
         broke++;
@@ -3832,6 +3856,9 @@ async function tickCommand(
       case "built":
         dispatched.push({ id: pending.taskId, outcome: "built", committed: disposition.committed, branch, worktree: leased.worktree.path });
         built++;
+        break;
+      case "stopped":
+        dispatched.push({ id: pending.taskId, outcome: "stopped", reason: `stop:${disposition.stopRun}`, branch, worktree: leased.worktree.path });
         break;
       case "parked":
         dispatched.push({ id: pending.taskId, outcome: "parked", reason: `decision:${disposition.decisionId}`, worktree: leased.worktree.path });
@@ -4028,11 +4055,11 @@ async function tickCommand(
       );
       dispatched.push({
         id: taskId,
-        outcome: disposition.kind === "built" ? "built" : "failed",
-        ...(result.ok ? {} : { reason: result.reason }),
+        outcome: disposition.kind === "built" ? "built" : disposition.kind === "stopped" ? "stopped" : "failed",
+        ...(disposition.kind === "stopped" ? { reason: `stop:${disposition.stopRun}` } : result.ok ? {} : { reason: result.reason }),
         worktree: leased.worktree.path,
       });
-      if (disposition.kind !== "built") broke++;
+      if (disposition.kind !== "built" && disposition.kind !== "stopped") broke++;
     }
   }
 
@@ -4189,6 +4216,7 @@ async function reconcileCommand(
   }
 
   const recovered = recoverDead(store, clock());
+  store.settleQuiescentStops(clock());
   for (const one of recovered) {
     for (const leaseId of one.claims) {
       // Lease ids are unique forever, so each recovery is its own episode.
@@ -9361,6 +9389,10 @@ function taskCommand(
       return holdTask(rest, flags, context);
     case "unhold":
       return unholdTask(rest, flags, context);
+    case "stop":
+      return stopTaskCommand(rest, flags, context);
+    case "resume":
+      return resumeTaskCommand(rest, flags, context);
     case "require":
       return requireTask(rest, flags, context);
     case "requeue":
@@ -9777,6 +9809,10 @@ function showTask(positional: readonly string[], context: Context): number {
     // in order, the open request, and the one state they add up to.
     review: latestFinished === null ? null : store.reviewRetryStateOf(latestFinished.id),
     dispatch: diagnoseTaskDispatch(store, id, now),
+    // v52: the exact-run control the console shows — Stop, Stopping,
+    // Paused (resume), or the review-retry door — and every stop on record.
+    control: taskControlOf(store, ref.id, now),
+    stops: store.stopsForTask(ref.id),
   };
 
   return succeed(write, json, "task show", detail, () => [
@@ -9809,6 +9845,15 @@ function showTask(positional: readonly string[], context: Context): number {
     ...(detail.hold === null ? [] : [`  held: ${detail.hold.reason}`]),
     ...(detail.claim === null ? [] : [`  claimed by ${detail.claim.runner} until ${detail.claim.expiresAt}`]),
     ...(detail.dispatch === null ? [] : [`  dispatch: ${detail.dispatch.summary} — ${detail.dispatch.detail}`]),
+    ...(detail.control.kind === "none"
+      ? []
+      : detail.control.kind === "stop"
+        ? [`  control: run #${detail.control.run} is live — \`task stop ${task.id} --run ${detail.control.run} --as <you> --token <t>\``]
+        : detail.control.kind === "stopping"
+          ? [`  control: run #${detail.control.run} is stopping (asked by ${detail.control.stop.requestedBy} at ${detail.control.stop.requestedAt})${detail.control.unsettledRun ? " — its processes are not yet established gone" : " — the run ended but the stop is unsettled; needs attention"}`]
+          : detail.control.kind === "paused"
+            ? [`  control: paused — run #${detail.control.run} was stopped by ${detail.control.stop.requestedBy} (${detail.control.stop.settlement ?? "?"})${detail.control.committed ? "; its commit is on the branch" : ""}; work preserved${detail.control.worktree === null ? "" : ` in ${detail.control.worktree}`} — \`task resume ${task.id} --run ${detail.control.run} --as <you> --token <t>\``]
+            : [`  control: review #${detail.control.run} was stopped by ${detail.control.stop.requestedBy} — retry it explicitly with \`task review ${detail.control.sourceRun ?? "<run>"} --as <you> --token <t>\``]),
     ...reviewStatusLines(detail.review, latestFinished?.id ?? null),
     ...(scope === null
       ? ["  no scope — nothing will build this until one is written and approved"]
@@ -11187,6 +11232,97 @@ function unholdTask(
   if (!lifted) return fail(write, json, "task unhold", "not-held", `${id} was not on hold`, EXIT.refused);
 
   return succeed(write, json, "task unhold", { id }, () => [`${id} is off hold.`]);
+}
+
+/**
+ * `standing-orders task stop <id> --run <n> --as <you> --token <t>` (v52):
+ * the authenticated stop of ONE exact active attempt. The answer is "stop
+ * requested" — the request is durable before any process is signalled;
+ * settlement is reported by `task show` once the attempt's own processes
+ * are established gone. A repeated request answers the same; a stale one
+ * (an attempt that already ended, or one that no longer holds the task)
+ * is refused in words and touches nothing.
+ */
+async function stopTaskCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const id = positional[0];
+  const runText = text(flags, "run");
+  const runId = Number(runText ?? "");
+  if (id === undefined || runText === undefined || !Number.isInteger(runId) || runId < 1) {
+    return fail(write, json, "task stop", "usage", "`standing-orders task stop <id> --run <run-id> --as <you> --token <t>` — the stop names one exact attempt", EXIT.usage);
+  }
+  if (store.getTask(id) === null) return fail(write, json, "task stop", "unknown-task", `no task \`${id}\``, EXIT.refused);
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "task stop", "usage", "stopping takes `--as <you> --token <t>` — it is an operator's act and is recorded against your name", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, "task stop", authenticated.reason, describeApproveFailure(authenticated.reason, id), EXIT.refused);
+  }
+  const asked = requestTaskStop(store, { taskId: id, runId, by: acting.name, via: "cli" }, clock());
+  if (!asked.ok) return fail(write, json, "task stop", asked.reason, asked.detail, EXIT.refused, { run: runId });
+  const control = taskControlOf(store, store.refFor(BUILT_IN, id).id, clock());
+  return succeed(write, json, "task stop", { id, run: runId, requested: !asked.repeated, repeated: asked.repeated, terminated: asked.terminated, stop: asked.stop, control }, () => [
+    asked.repeated
+      ? `Run #${runId} of ${id} was already asked to stop (by ${asked.stop.requestedBy} at ${asked.stop.requestedAt}); nothing changed.`
+      : `Stop requested for run #${runId} of ${id}.`,
+    asked.stop.settledAt === null
+      ? `  It is stopping: its own processes are being ended${asked.terminated > 0 ? ` (${asked.terminated} process group${asked.terminated === 1 ? "" : "s"} signalled here)` : ""}; \`task show ${id}\` reports when it has settled.`
+      : `  Settled (${asked.stop.settlement}).`,
+    "  Its branch, uncommitted work, evidence, and decisions are preserved; the task stays paused until this exact attempt is resumed.",
+  ]);
+}
+
+/**
+ * `standing-orders task resume <id> --run <n> --as <you> --token <t>` (v52):
+ * resume the exact stopped attempt the operator reviewed. Refuses until it
+ * is quiescent; lifts only the hold that stop owns; approves nothing — the
+ * next pass re-proves the signed scope and takes a fresh claim. The gate
+ * that still keeps work from starting, if any, is printed rather than
+ * hidden behind "resumed".
+ */
+async function resumeTaskCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const id = positional[0];
+  const runText = text(flags, "run");
+  const runId = Number(runText ?? "");
+  if (id === undefined || runText === undefined || !Number.isInteger(runId) || runId < 1) {
+    return fail(write, json, "task resume", "usage", "`standing-orders task resume <id> --run <run-id> --as <you> --token <t>` — the resume names the exact stopped attempt", EXIT.usage);
+  }
+  if (store.getTask(id) === null) return fail(write, json, "task resume", "unknown-task", `no task \`${id}\``, EXIT.refused);
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "task resume", "usage", "resuming takes `--as <you> --token <t>` — it lets the next pass spend again", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, "task resume", authenticated.reason, describeApproveFailure(authenticated.reason, id), EXIT.refused);
+  }
+  const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
+  const worktrees = new WorktreePool(store, { root: pool });
+  const resumed = resumeTaskStop(store, { taskId: id, runId, by: acting.name, via: "cli", occupied: path => worktrees.inUse(path) }, clock());
+  if (!resumed.ok) {
+    if (resumed.reason === "review") {
+      return fail(write, json, "task resume", "review", `${resumed.detail} — \`standing-orders task review <source-run> --as <you> --token <t>\``, EXIT.refused, { run: runId });
+    }
+    return fail(write, json, "task resume", resumed.reason, resumed.detail, EXIT.refused, { run: runId });
+  }
+  const control = taskControlOf(store, store.refFor(BUILT_IN, id).id, clock());
+  return succeed(write, json, "task resume", { id, run: runId, stop: resumed.stop, gate: resumed.gate, control }, () => [
+    `Resumed ${id} from run #${runId}: the stop's hold is lifted; every other hold stands.`,
+    resumed.gate === null
+      ? "  The next pass takes a fresh claim, re-proves the signed scope, and inherits the preserved draft with fresh proof."
+      : `  Not starting yet — ${resumed.gate.summary}: ${resumed.gate.detail}`,
+  ]);
 }
 
 // ---- shared ---------------------------------------------------------------
