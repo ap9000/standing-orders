@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { plannerSourceOf, encodePlannerSource } from "./planner-source.js";
 import { storeEvidence } from "./evidence.js";
+import { authorizePlanUnderMode } from "./plan-auto.js";
+import { presetTerms, modeDigestOf, modeTermsJson } from "./modes.js";
 import { register } from "./runner.js";
 import { addApprover, approve, propose } from "./scope.js";
 import {
@@ -934,6 +936,56 @@ describe("sealing a park", () => {
         expect(store.latestPlanContractArtifact(task)).toBeNull();
       }
       expect(store.getRun(child)?.outcome).not.toBeNull();
+    } finally { rmSync(evidenceRoot, { recursive: true, force: true }); }
+  });
+
+  test.each(["unchanged", "amended", "revoked", "expired", "renewed", "tampered-plan", "missing-plan", "wrong-source", "changed-terms", "legacy-mode", "different-actor", "no-paths", "mate", "contest-added", "fenced", "rollback"])("bounded plan auto-approval: %s", scenario => {
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "so-plan-auto-"));
+    try {
+      const initial = propose(store, { taskId: "t-1", goal: "Keep every filed term", outOfScope: "No billing changes", touches: scenario === "no-paths" ? [] : ["src/example.ts"], budgetMicrousd: 1_500_000, riskLevel: "high", qualityMode: "strict", acceptance: [{ id: "c1", statement: "Tests pass", how: null, evidence: ["check"] }], now: T0 });
+      if (scenario === "mate") store.raw().prepare("UPDATE task_scope SET proposed_via='mate' WHERE task_id='t-1'").run();
+      expect(store.requestPlan(task, T0).ok).toBe(true);
+      const terms = { ...presetTerms("standard", later(60_000).toISOString()), autoApproveFiling: true, planAuto: scenario !== "legacy-mode" };
+      const sign = () => store.signMode({ repo: REPO, name: terms.name, signedBy: "alex", digest: modeDigestOf(terms), termsJson: modeTermsJson(terms), publication: terms.publication, absoluteExpiry: terms.absoluteExpiry }, T0);
+      sign();
+      const armed = authorizePlanUnderMode(store, "t-1", scenario === "different-actor" ? "someone-else" : "alex", T0);
+      expect(armed).toBe(!["legacy-mode", "different-actor", "no-paths", "mate"].includes(scenario));
+      expect(store.scopeSealed("t-1")).toBe(false);
+      acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+      const { root, child } = openPlannerRepair("lease-a");
+      const sourced = plannerSourceOf(store, evidenceRoot, "t-1", []);
+      if (!sourced.ok) throw new Error(sourced.message);
+      store.stampRun(root, { scopeDigest: initial.digest });
+      const sourceArtifact = storeEvidence(store, evidenceRoot, root, "plan-contract", "planner-source.json", encodePlannerSource(sourced.source), "recorded before spend", T0);
+      const document = "## Approach\nImplement the filed change.\n## Milestones\n- Change the named file.\n## Dependencies\n- None.\n## Risks\n- Existing behavior must hold.\n## Proof\n- Run the existing checks.";
+      const artifactId = storeEvidence(store, evidenceRoot, root, "plan", "plan.md", Buffer.from(document), "verified tree", T0);
+      const artifact = store.getArtifact(artifactId)!;
+      if (scenario === "tampered-plan") writeFileSync(join(evidenceRoot, artifact.key), "changed bytes");
+      if (scenario === "revoked") store.revokeMode(REPO, "alex", "operator", later(500));
+      if (scenario === "renewed") { terms.absoluteExpiry = later(120_000).toISOString(); sign(); }
+      if (scenario === "wrong-source") store.raw().prepare("UPDATE plan_authorization SET source_digest='stale'").run();
+      if (scenario === "changed-terms") propose(store, { taskId: "t-1", goal: "Changed while planning", now: later(1) });
+      if (scenario === "contest-added") store.fileTournamentTerms({ taskRef: task, raceDigest: "race-digest", agents: Array.from({ length: 2 }, () => ({ provider: "claude", model: "sonnet", repairModel: "sonnet" })), perAgentBudgetMicrousd: 1000000, overrunReserveMicrousd: 1000000, totalBudgetMicrousd: 3000000, priceVersion: 1, publicationPolicy: "notify" }, T0);
+      if (scenario === "fenced") {
+        release(store, "lease-a", later(10));
+        acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(20), newLeaseId: ids("lease-b") });
+      }
+      const finalize = () => finalizePlanFenced(store, { leaseId: "lease-a", runId: root, taskId: "t-1", plan: { ...initial, goal: scenario === "amended" ? "Wider goal" : initial.goal, amendment: scenario === "amended" ? "Request a larger change" : null, plan: document }, artifact: scenario === "missing-plan" ? null : artifact, repairRunId: child, source: sourced.source, sourceArtifact, evidenceRoot, now: later(scenario === "expired" ? 61_000 : 1_000) });
+      if (scenario === "rollback") {
+        expect(() => store.transact(() => { expect(finalize().ok).toBe(true); expect(store.scopeSealed("t-1")).toBe(true); throw new Error("rollback"); })).toThrow("rollback");
+        expect(store.raw().prepare("SELECT 1 FROM plan_authorization").get()).toBeDefined();
+      } else {
+        const result = finalize();
+        expect(result.ok).toBe(!["fenced", "changed-terms"].includes(scenario));
+      }
+      expect(store.scopeSealed("t-1")).toBe(scenario === "unchanged");
+      if (scenario === "unchanged") {
+        expect(store.getScope("t-1")).toMatchObject({ digest: initial.digest, approvalBasis: "mode", approvedBy: "alex", budgetMicrousd: 1_500_000, riskLevel: "high", qualityMode: "strict" });
+        expect(store.modeApprovalLive(task, later(1000))).toBe(true);
+        expect(store.actionLedger({ repos: [REPO] })).toEqual(expect.arrayContaining([expect.objectContaining({ action: "plan auto-approval", outcome: "approved", actor: "alex", runId: root })]));
+        store.revokeMode(REPO, "alex", "operator", later(2000));
+        expect(store.scopeSealed("t-1")).toBe(false);
+      }
     } finally { rmSync(evidenceRoot, { recursive: true, force: true }); }
   });
 

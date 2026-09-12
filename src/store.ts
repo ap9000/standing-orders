@@ -81,8 +81,9 @@ import type { ProgressSnapshot } from "./plan.js";
 
 import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type ProjectAccess } from "./project-access.js";
 import { LEDGER_SCHEMA, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
+import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 
-export const SCHEMA_VERSION = 54;
+export const SCHEMA_VERSION = 55;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -3376,6 +3377,17 @@ function initializeStore(db: Database, file: string): Store {
   // with the file untouched, rather than running this build's DDL over a
   // shape it cannot name.
   const preflight = schemaVersionPreflight(db, file);
+  // Check existing authority metadata before even stamping a migration.
+  if (preflight !== null && Math.abs(preflight) >= 54) {
+    for (const table of ["approver", "invite"]) {
+      if (!db.prepare(`PRAGMA table_info(${table})`).all().some(row => row["name"] === "projects_json")) {
+        throw new Error(`${file}: project access metadata is missing from ${table}; refusing to widen access`);
+      }
+    }
+  }
+  if (preflight === SCHEMA_VERSION && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_authorization'").get() === undefined) {
+    throw new Error(`${file}: plan authorization metadata is missing; refusing to recreate authority`);
+  }
   // THE SENTINEL IS A CHECKED COMPARE-AND-SET (raw authority repair): the
   // row moves from exactly the version the preflight read to its negative,
   // or this open refuses — a second migrator that raced this one between
@@ -3387,20 +3399,12 @@ function initializeStore(db: Database, file: string): Store {
       throw new Error(`${file}: refusing to open — the schema version moved from v${preflight} between the preflight and the epoch stamp (another process is migrating it); this build speaks schema v${SCHEMA_VERSION} and alters nothing it cannot name`);
     }
   }
-  // Once project restrictions exist, a missing authority column is damage,
-  // not an invitation to recreate it as unrestricted NULLs.
-  if (preflight === SCHEMA_VERSION) {
-    for (const table of ["approver", "invite"]) {
-      if (!db.prepare(`PRAGMA table_info(${table})`).all().some(row => row["name"] === "projects_json")) {
-        throw new Error(`${file}: project access metadata is missing from ${table}; refusing to widen access`);
-      }
-    }
-  }
   db.exec(SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
   db.exec(LEDGER_SCHEMA);
+  db.exec(PLAN_AUTO_SCHEMA);
   installLedgerTriggers(db);
   // Attention/history indexes come AFTER migration: on a database whose
   // constrained tables still carry a pre-rebuild shape, creating a partial

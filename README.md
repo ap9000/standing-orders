@@ -884,6 +884,9 @@ the artifact-only reviewer, and multi-user instances with invite
 links, roles, and a People screen. Project access now supports viewer/operator
 invitations restricted to selected repositories, with an action ledger for
 people and unattended work. See [Project access and action ledger v1](docs/PROJECT_ACCESS_LEDGER.md)
+
+[Automatic approvals](docs/AUTO_APPROVAL.md) explains the signed project policy for scope filings, unchanged plans, reviews, repairs, and merges.
+
 for its permissions, history coverage, and migration behavior.
 Earlier arcs shipped behind their own adversarial review rounds;
 docs/PROGRESS.md records those findings.

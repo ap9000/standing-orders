@@ -43,6 +43,7 @@ import {
   type TaskState,
 } from "./store.js";
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
+import { authorizePlanUnderMode } from "./plan-auto.js";
 import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
 import { sweepLiveLogs } from "./live.js";
 import { configPath, addRepos, updateRepos, loadRepos, loadProjectRegistry, updateProjectRegistry } from "./repos.js";
@@ -612,7 +613,7 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
   "no-open", "no-verify", "end", "report", "off", "tmux",
-  "self-heal",
+  "self-heal", "plan-auto",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -4939,9 +4940,10 @@ async function planTaskCommand(
   if (!result.ok) {
     return fail(write, json, "task plan", "refused", result.reason, EXIT.refused);
   }
-  return succeed(write, json, "task plan", { id, ...(pinProvider === undefined ? {} : { planProvider: pinProvider, planModel: pinModel ?? null }) }, () => [
+  const autoPlan = authorizePlanUnderMode(store, id, acting.name, clock());
+  return succeed(write, json, "task plan", { id, autoPlan, ...(pinProvider === undefined ? {} : { planProvider: pinProvider, planModel: pinModel ?? null }) }, () => [
     `${id} will be planned before it is built: the next pass dispatches a planner${pinProvider === undefined ? "" : ` on ${pinProvider}${pinModel === undefined ? "" : ` \u00b7 ${pinModel}`}`}.`,
-    "Its questions reach you like any decision; its plan lands as a scope for you to edit and approve.",
+    autoPlan ? "An unchanged, verified plan can auto-approve under your signed mode. Amendments and questions still wait for you." : "Its questions reach you like any decision; its plan lands as a scope for you to edit and approve.",
   ]);
 }
 
@@ -5640,6 +5642,10 @@ async function modeCommand(
   if (text(flags, "publication") === "notify") terms.publication = "notify";
   if (flag(flags, "auto-approve")) terms.autoApproveFiling = true;
   if (flag(flags, "review-auto")) terms.reviewAuto = true;
+  if (flag(flags, "plan-auto")) terms.planAuto = true;
+  if (terms.planAuto && (!terms.autoApproveFiling || !terms.reviewAuto)) {
+    return fail(write, json, "mode set", "invalid", "--plan-auto requires automatic filing approval and agent reviews", EXIT.refused);
+  }
   // The paid-fallback grant (R8): NEVER a preset default — only this
   // explicit flag lets an exhausted subscription switch to another account.
   if (flag(flags, "allow-paid-fallback")) terms.allowPaidFallback = true;
@@ -10582,7 +10588,9 @@ function scopeTask(
     });
     let sealedUnderMode = false;
     let modeRefusedCoordinator = false;
-    if (coverage !== null && proposed.profileState === "resolved") {
+    if (coverage !== null && store.lookupRef(id)?.plan === "requested") {
+      authorizePlanUnderMode(store, id, actor as string, now);
+    } else if (coverage !== null && proposed.profileState === "resolved") {
       sealedUnderMode = store.sealScopeApproval(id, actor as string, now, {}, { kind: "mode", modeDigest: coverage.digest });
       modeRefusedCoordinator = !sealedUnderMode;
     }

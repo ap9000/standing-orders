@@ -1,4 +1,9 @@
 import { ledgerBody } from "./ledger-view.js";
+import { authorizePlanUnderMode, applyModeToNewFiling, planAutoPending } from "./plan-auto.js";
+import { LEDGER_CSV_HEADER, ledgerCsvRows } from "./ledger-csv.js";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { setImmediate as yieldEventLoop } from "node:timers/promises";
 import { projectAuthority } from "./project-access.js";
 /**
  * The web console (§7, grown per the console review): the whole built-in
@@ -1507,10 +1512,34 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (chosen !== "" && !projects.includes(chosen)) return refuse(response, who, 403, "That project is outside your access.", "/ledger");
       const before = url.searchParams.get("before");
       if (before !== null && (!/^[1-9][0-9]{0,14}$/.test(before) || !Number.isSafeInteger(Number(before)))) return refuse(response, who, 400, "Invalid ledger cursor.", "/ledger");
-      const rows = store.actionLedger({ repos: chosen === "" ? admitted : [chosen],
+      const query = { repos: chosen === "" ? admitted : [chosen],
         actor: (url.searchParams.get("actor") ?? "").slice(0, 200), outcome: (url.searchParams.get("outcome") ?? "").slice(0, 100),
-        source: url.searchParams.get("source") ?? "", taskId: (url.searchParams.get("task") ?? "").slice(0, 200),
-        ...(before === null ? {} : { before: Number(before) }), limit: 51 });
+        source: url.searchParams.get("source") ?? "", taskId: (url.searchParams.get("task") ?? "").slice(0, 200) };
+      if (url.searchParams.get("format") === "csv") {
+        const generation = store.accountOf(who.name)?.generation;
+        // Descending immutable IDs pin the export at its first read; later
+        // arrivals cannot duplicate or extend it. Yield between bounded pages
+        // and honor backpressure/disconnects, so exports cannot fill memory.
+        const first = store.actionLedger({ ...query, limit: 100 });
+        async function* chunks() {
+          yield LEDGER_CSV_HEADER;
+          let page = first;
+          while (page.length > 0) {
+            const current = store.accountOf(who.name);
+            if (current === null || current.revokedAt !== null || current.generation !== generation ||
+                page.some(row => !visible(row.repo))) throw new Error("Ledger access changed during export");
+            yield ledgerCsvRows(page);
+            const cursor = page.at(-1)!.id;
+            await yieldEventLoop();
+            page = store.actionLedger({ ...query, before: cursor, limit: 100 });
+          }
+        }
+        response.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="standing-orders-actions.csv"', "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        try { await pipeline(Readable.from(chunks()), response); }
+        catch { response.destroy(); }
+        return;
+      }
+      const rows = store.actionLedger({ ...query, ...(before === null ? {} : { before: Number(before) }), limit: 51 });
       if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ entries: rows.slice(0, 50), nextBefore: rows.length > 50 ? rows[49]!.id : null }));
       return sendScreen(response, 200, screen("Action ledger", ledgerBody(rows, projects, url.searchParams), { chrome: chromeFor(chosen === "" ? null : chosen, "ledger", undefined, chosen === "" ? "all" : "project") }));
     }
@@ -1596,8 +1625,12 @@ export function createDecisionServer(options: ServeOptions): Server {
                 `<option value="1">approve the moment I file them</option>` +
                 `<option value="0">wait for their own approval</option>` +
                 `</select></label>`,
+              `<label>planner approval<select name="plan-auto">` +
+                `<option value="0">wait for my approval</option>` +
+                `<option value="1">auto-approve plans that preserve my filed contract</option>` +
+                `</select><span class="meta">Requires automatic filing approval and reviews. File the goal, paths, and acceptance criteria upfront. Changed scope and unanswered questions still pause.</span></label>`,
               `<label>reviews<select name="review-auto">` +
-                `<option value="">the preset's default (standard: on; hands-off: off)</option>` +
+                `<option value="">the preset's default (on)</option>` +
                 `<option value="1">agent-review every finished build</option>` +
                 `<option value="0">only when I ask</option>` +
                 `</select></label>`,
@@ -1617,7 +1650,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        screen("mode", [`<h1>operating mode</h1>`, current, signForm].join("\n"), { chrome: chromeFor(project, "mode") }),
+        screen("mode", [`<h1>operating mode</h1><p>Authorize this project's automatic approvals once, for up to ${MODE_MAX_DAYS} days. Select the touchpoints below; the signature covers the exact choices. Existing modes keep their original terms.</p><p class="meta">Quality evidence, scope changes, agent questions, and review comments that require a revision retain their existing checks. Automatic merging also needs a publication grant.</p>`, current, signForm].join("\n"), { chrome: chromeFor(project, "mode") }),
       );
     }
 
@@ -3167,6 +3200,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         canRetryReview: who.via === "cookie" && who.role === "approver",
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
+        planAuto: planAutoPending(store, taskId, now),
         planDocument: planView?.document ?? null,
         planSha: planView?.sha256 ?? null,
         planContract: ref === null || planView === null ? null : planContractViewOf(ref.id, scope),
@@ -4249,29 +4283,43 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 400, "quality must be Default or Strict / release", "/tasks/new");
       }
       // One filing door for every surface (Codex adoption review, finding 7).
-      const made = fileTaskProposal(
-        store,
-        {
-          ...(id === "" ? {} : { id }),
-          title,
-          ...(repo === "" ? {} : { repo }),
-          ...(goal === "" ? {} : { goal, acceptance: acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")) }),
-          outOfScope: notThis === "" ? null : notThis,
-          touches: touchesGiven,
-          ...(permissionMode === null ? {} : { permissionMode }),
-          ...(qualityMode === null ? {} : { qualityMode }),
-          ...(scout ? { deliverable: "report" as const } : {}),
-          planning:
-            scout
-              ? "skip"
-              : body.get("planning-policy") === "choice"
-                ? body.get("plan-first") === "1" ? "required" : "skip"
-                : "auto",
-          filedVia: "console",
-          ...(admitted === null ? {} : { admittedRepos: admitted }),
-        },
-        now,
-      );
+      const after = (body.get("after") ?? "").trim();
+      let chainProblem: string | null = null;
+      const made = store.transact(() => {
+        const filed = fileTaskProposal(
+          store,
+          {
+            ...(id === "" ? {} : { id }),
+            title,
+            ...(repo === "" ? {} : { repo }),
+            ...(goal === "" ? {} : { goal, acceptance: acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")) }),
+            outOfScope: notThis === "" ? null : notThis,
+            touches: touchesGiven,
+            ...(permissionMode === null ? {} : { permissionMode }),
+            ...(qualityMode === null ? {} : { qualityMode }),
+            ...(scout ? { deliverable: "report" as const } : {}),
+            planning:
+              scout
+                ? "skip"
+                : body.get("planning-policy") === "choice"
+                  ? body.get("plan-first") === "1" ? "required" : "skip"
+                  : "auto",
+            filedVia: "console",
+            ...(admitted === null ? {} : { admittedRepos: admitted }),
+          },
+          now,
+        );
+        if (filed.ok && after !== "") {
+          const afterRef = store.lookupRef(after);
+          const chained = store.getTask(after) !== null && afterRef !== null && visible(afterRef.repo)
+            ? store.addEdge(filed.id, after) : { ok: false as const, reason: "that task does not exist here" };
+          if (!chained.ok) chainProblem = chained.reason;
+        }
+        // Missing dependencies leave a reviewable, inert task. They must
+        // never be silently dropped before automatic approval starts work.
+        if (filed.ok && chainProblem === null && who.via === "cookie") applyModeToNewFiling(store, filed.id, who.name, now);
+        return filed;
+      });
       if (!made.ok) {
         const csrf = who.via === "cookie" ? who.session.csrf : "";
         return sendScreen(
@@ -4285,20 +4333,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // A proved root-mode placement joins the project table (finding 15):
       // the new task's home is openable and admissible from now on.
       if (rootMode && repo !== "") store.upsertProject(repo, projectName(repo), now);
-      // "starts after": a chain filed with the work. The task ALREADY
-      // exists at this point, so a bad chain must not lose it — the new
-      // task's page renders with the un-made wait named instead.
-      const after = (body.get("after") ?? "").trim();
-      if (after !== "") {
-        const afterRef = store.lookupRef(after);
-        const chained =
-          store.getTask(after) !== null && afterRef !== null && visible(afterRef.repo)
-            ? store.addEdge(made.id, after)
-            : { ok: false as const, reason: "that task does not exist here" };
-        if (!chained.ok) {
-          return taskScreen(response, who, made.id, `the task was created, but could not be made to wait for ${after} — ${chained.reason}`, 200);
-        }
-      }
+      if (chainProblem !== null) return taskScreen(response, who, made.id, `the task was created, but could not be made to wait for ${after} — ${chainProblem}`, 200);
       return redirect(response, taskHref(made.id));
     }
 
@@ -4463,6 +4498,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const terms: ModeTerms = {
         ...preset,
         autoApproveFiling: body.get("auto-approve") === "" || body.get("auto-approve") === null ? preset.autoApproveFiling : body.get("auto-approve") === "1",
+        planAuto: body.get("plan-auto") === "1",
         reviewAuto: body.get("review-auto") === "" || body.get("review-auto") === null ? preset.reviewAuto : body.get("review-auto") === "1",
         // The paid-fallback grant is NEVER a preset default (R8): unchecked
         // stays false on every preset — only the explicit box grants it.
@@ -4474,6 +4510,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         repairMaxAttempts: body.get("repair-auto") === "1" ? Math.max(0, Math.min(3, Math.floor(Number(body.get("repair-max-attempts") ?? "0")) || 0)) : 0,
         publication: body.get("publication") === "automerge" ? "automerge" : "notify",
       };
+      if (terms.planAuto && (!terms.autoApproveFiling || !terms.reviewAuto)) {
+        return refuse(response, who, 400, "Automatic planner approval requires automatic filing approval and agent reviews.", "/mode");
+      }
       if (terms.publication === "automerge" && !store.hasMergeCapableGrant(project, now)) {
         return refuse(response, who, 409, "self-merging needs a merge-capable publication grant first — grant one, then sign", "/mode");
       }
@@ -4482,14 +4521,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (url.pathname === "/mode/confirm") {
         // THE CEREMONY (M1): every resolved term in words, and the password
         // signs exactly this digest — a drifted form refuses at /mode/sign.
-        const nonce = mintApprovalNonce(who.name, "mode-sign", digest);
+        const nonce = mintApprovalNonce(who.name, "mode-sign", `${project}:${digest}`);
         const bodyHtml =
           `<h1>sign the ${escape(name)} mode for ${escape(project)}</h1>` +
           `<form method="post" action="/mode/sign" class="card approve-form">` +
           `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">` +
           `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
           `<input type="hidden" name="digest" value="${escape(digest)}">` +
-          ["name", "days", "publication", "auto-approve", "review-auto", "allow-paid-fallback", "repair-auto", "repair-max-attempts"]
+          ["name", "days", "publication", "auto-approve", "plan-auto", "review-auto", "allow-paid-fallback", "repair-auto", "repair-max-attempts"]
             .map(field => `<input type="hidden" name="${field}" value="${escape(body.get(field) ?? "")}">`)
             .join("") +
           `<input type="hidden" name="expiry" value="${escape(expiry)}">` +
@@ -4510,7 +4549,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const signedTerms: ModeTerms = { ...terms, absoluteExpiry: fixedExpiry };
       const rederived = modeDigestOf(signedTerms);
       const nonce = body.get("nonce") ?? "";
-      if (!consumeApprovalNonce(nonce, who.name, "mode-sign", body.get("digest") ?? "")) {
+      if (!consumeApprovalNonce(nonce, who.name, "mode-sign", `${project}:${body.get("digest") ?? ""}`)) {
         return refuse(response, who, 409, "that form is stale — read the terms again", "/mode");
       }
       if (rederived !== (body.get("digest") ?? "") || Date.parse(fixedExpiry) <= now.getTime()) {
@@ -6192,6 +6231,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!asked.ok) {
           return taskScreen(response, who, taskId, `not planned: ${asked.reason}`, 409);
         }
+        if (who.via === "cookie") authorizePlanUnderMode(store, taskId, who.name, now);
         return redirect(response, taskHref(taskId));
       }
       case "plan-edit": {
@@ -6476,7 +6516,9 @@ export function createDecisionServer(options: ServeOptions): Server {
               message: `scope not saved: ${proposed.reason}`,
             };
           }
-          if (coverage !== null) {
+          if (coverage !== null && ref.plan === "requested") {
+            authorizePlanUnderMode(store, taskId, who.name, now);
+          } else if (coverage !== null) {
             const filedScope = store.getScope(taskId);
             if (filedScope?.profileState === "resolved") {
               const sealedUnderMode = store.sealScopeApproval(taskId, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
@@ -13290,9 +13332,9 @@ function taskComposerHtml(data: {
     `<details class="task-options"${prefill === null ? "" : " open"}>`,
     `<summary><span>Edit details</span><small>optional · defaults are remembered</small></summary>`,
     `<div class="task-options-grid">`,
-    `<label class="wide">goal <span class="meta">— only when skipping planning; the planner normally drafts this</span>` +
+    `<label class="wide">goal <span class="meta">— provide upfront for automatic approval of an unchanged plan</span>` +
       `<textarea name="goal" rows="3" placeholder="What success looks like">${prefill === null ? "" : escape(prefill.goal)}</textarea></label>`,
-    `<label class="wide">acceptance <span class="meta">— needed only when you skip planning; one per line: <code>statement | evidence,kinds | how</code></span>` +
+    `<label class="wide">acceptance <span class="meta">— required with a goal; one per line: <code>statement | evidence,kinds | how</code></span>` +
       `<textarea name="acceptance" rows="3" placeholder="Requests over the limit return 429 | check">${prefill === null ? "" : escape(prefill.acceptance)}</textarea></label>`,
     `<label>not this <span class="meta">— optional boundary</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
     `<label>likely touches <span class="meta">— paths, comma-separated</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
@@ -15002,6 +15044,7 @@ function taskBody(data: {
   strikes: number;
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
+  planAuto?: boolean;
   /** Hash of the verified plan artifact currently shown. */
   planSha?: string | null;
   /** The drafted plan's contract record (contract handoff, task 1). */
@@ -15518,7 +15561,7 @@ function taskBody(data: {
     data.planDocument === null
       ? data.plan === "requested"
         ? `<div class="card planner-status"><span class="planner-orb" aria-hidden="true"></span><p><strong>planning requested</strong>` +
-          `<span class="meta">The agent is inspecting the repository and drafting the goal, acceptance criteria, and approach. It will ask only if a missing answer changes the work.</span></p></div>`
+          `<span class="meta">${data.planAuto ? "Automatic approval is enabled for a verified plan that preserves your filed contract. Amendments and unanswered questions still pause." : "The agent is inspecting the repository and drafting the goal, acceptance criteria, and approach. It will ask only if a missing answer changes the work."}</span></p></div>`
         : ""
       : `${approval.approved ? `<details class="card planner-plan planner-plan-collapsed"><summary class="execution-plan-head">` : `<section class="card planner-plan"><div class="execution-plan-head">`}` +
         `<div><span class="eyebrow">execution plan</span><h2>${approval.approved ? `${planMilestoneCount ?? "Full"} step${planMilestoneCount === 1 ? "" : "s"} · open to review` : "How the agent will tackle this"}</h2>` +

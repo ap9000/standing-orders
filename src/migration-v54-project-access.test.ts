@@ -20,7 +20,7 @@ test("v53 upgrades with unchanged account and invite authority; reopening is byt
     // additions. Account credentials, invite hashes, IDs, and work survive.
     const old = new DatabaseSync(file);
     for (const row of old.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND (name LIKE 'ledger_%' OR name LIKE 'action_ledger_%')").all()) old.exec(`DROP TRIGGER "${String(row.name)}"`);
-    old.exec("DROP TABLE action_ledger; ALTER TABLE approver DROP COLUMN projects_json; ALTER TABLE invite DROP COLUMN projects_json; UPDATE schema_version SET version=53;");
+    old.exec("DROP TABLE plan_authorization; DROP TABLE action_ledger; ALTER TABLE approver DROP COLUMN projects_json; ALTER TABLE invite DROP COLUMN projects_json; UPDATE schema_version SET version=53;");
     const accounts = old.prepare("SELECT * FROM approver").all();
     const invites = old.prepare("SELECT * FROM invite").all();
     const tasks = old.prepare("SELECT * FROM task").all();

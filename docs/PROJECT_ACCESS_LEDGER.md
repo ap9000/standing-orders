@@ -12,7 +12,7 @@ Each account card shows its project access. **Edit project access** can replace 
 
 As with existing account revocation, an explicitly approved scope, routine, publication grant, or other completed approval remains an instance promise. Changing someone's access does not silently cancel that already-approved work. Use the existing stop/revoke controls when that is intended.
 
-Open **Workflows → Action ledger**. Filter by project, person/worker, event category, outcome, or task. Actor names are shortcuts to their history; task and run links open the existing work and evidence. Pages contain at most 50 entries, with a stable cursor for older events. `/ledger?format=json` returns the same authorized page and a `nextBefore` cursor.
+Open **Workflows → Action ledger**. Filter by project, person/worker, event category, outcome, or task. Actor names are shortcuts to their history; task and run links open the existing work and evidence. Pages contain at most 50 entries, with a stable cursor for older events. `/ledger?format=json` returns the same authorized page and a `nextBefore` cursor. The compact layout shows one short row per event on desktop and a condensed layout on mobile. **Export CSV** downloads every matching event across all pages, using the current filters and project permissions. The export ignores the page cursor, uses UTC timestamps and RFC-style quoted fields, and neutralizes spreadsheet formulas. It streams bounded batches and stops if access is revoked during download.
 
 CLI examples (use the existing credential input mechanism):
 
@@ -53,3 +53,5 @@ Schema v54 adds nullable project-access columns to accounts/invitations, an acti
 The implementation is covered by real HTTP tests for invitation redemption, project collections, guessed resource URLs, forged repository fields, viewer mutation denial, instance-route denial, empty grants, stale sessions, request attribution, ledger filtering/paging, HTML escaping, and rollback. Migration tests preserve existing account credentials, invitation hashes, IDs, and task rows and verify a byte-identical second open and refusal of damaged authority metadata.
 
 A browser fixture validates the People and ledger surfaces independently of the running desktop controller. This source release does not install, restart, or migrate the user's live desktop app. The existing macOS permission/recovery handoff remains outstanding.
+
+See [Automatic approvals](AUTO_APPROVAL.md) for project operating modes and the optional unchanged-plan approval policy added in schema v55.

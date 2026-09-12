@@ -2758,9 +2758,11 @@ describe("the reviewer role in the store", () => {
     expect(open[0]?.basis).toBe("mode");
     expect(open[0]?.modeDigest).toBe(modeDigestOf(terms));
 
-    // hands-off says reviewAuto: false — a renewal to it queues nothing new.
+    // An explicitly disabled review policy queues nothing new. Fresh presets
+    // both keep reviews enabled; old signed terms remain unchanged.
     store.consumeReviewRequest(open[0]?.id ?? -1, "test", T0);
     const handsOff = presetTerms("hands-off", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString());
+    handsOff.reviewAuto = false;
     store.signMode(
       { repo: REPO, name: "hands-off", termsJson: modeTermsJson(handsOff), digest: modeDigestOf(handsOff), signedBy: "alex", absoluteExpiry: handsOff.absoluteExpiry, publication: handsOff.publication },
       T0,

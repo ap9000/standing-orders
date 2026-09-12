@@ -7,6 +7,8 @@ import { openStore, type Store } from "./store.js";
 import { addApprover, authenticateApprover, hashPassword } from "./scope.js";
 import { createDecisionServer } from "./serve.js";
 import { readProjectAccess } from "./project-access.js";
+import { csvCell } from "./ledger-csv.js";
+import { presetTerms, modeDigestOf, modeTermsJson } from "./modes.js";
 
 describe("project access and the action ledger", () => {
   let store: Store;
@@ -178,6 +180,80 @@ describe("project access and the action ledger", () => {
     const response = await (await get("/ledger?format=json&source=work&actor=worker-one")).json();
     expect(response.entries).toHaveLength(2);
     expect(response.entries.every((row: { repo: string }) => row.repo === alpha)).toBe(true);
+  });
+
+  test("CSV exports every matching page with the same permissions and spreadsheet-safe fields", async () => {
+    for (let i = 0; i < 235; i++) store.recordAction({ at: now.toISOString(), actor: "exporter", repo: alpha, taskId: "alpha-task", runId: null, action: i === 0 ? 'quoted, "action"\nsecond line' : "exported action", outcome: "recorded", source: "work" });
+    store.recordAction({ at: now.toISOString(), actor: "exporter", repo: beta, taskId: "beta-task", runId: null, action: "private action", outcome: "recorded", source: "work" });
+    const response = await get("/ledger?format=csv&actor=exporter&source=work&outcome=recorded&task=alpha-task&before=1", "viewer");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/csv");
+    expect(response.headers.get("content-disposition")).toBe('attachment; filename="standing-orders-actions.csv"');
+    const csv = await response.text();
+    expect(csv.match(/"exporter"/g)).toHaveLength(235);
+    expect(csv).toContain('"quoted, ""action""\nsecond line"');
+    expect(csv).not.toContain("private action");
+    expect(csv).not.toContain(beta);
+    expect((await get("/ledger?format=csv&project=" + encodeURIComponent(beta))).status).toBe(403);
+    expect((await get("/ledger?format=csv&actor=exporter&outcome=absent")).headers.get("content-type")).toContain("text/csv");
+    for (const input of ["=SUM(1,1)", "+CMD", "-CMD", "@formula", "  =formula", "\tformula", "\rformula"]) expect(csvCell(input)).toBe('"\'' + input + '"');
+    store.setAccountProjects("member", [], "owner", now);
+    expect(await (await get("/ledger?format=csv")).text()).not.toContain("exporter");
+  });
+
+  test("mode signing binds planner authority and the selected repository to the reviewed form", async () => {
+    const cookie = await login("owner");
+    const page = await (await fetch(base + "/tasks/new", { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+    const send = (path: string, input: Record<string, string> | URLSearchParams) => fetch(base + path, { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf, ...Object.fromEntries(input instanceof URLSearchParams ? input : Object.entries(input)) }), redirect: "manual" });
+    await send("/projects/select", { path: alpha });
+    const terms = { name: "standard", days: "1", "auto-approve": "1", "plan-auto": "1", "review-auto": "1" };
+    expect((await send("/mode/confirm", { ...terms, "auto-approve": "0" })).status).toBe(400);
+    expect((await send("/mode/confirm", { ...terms, "review-auto": "0" })).status).toBe(400);
+    const confirm = async () => {
+      const response = await send("/mode/confirm", terms);
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("unresolved questions still wait");
+      return new URLSearchParams([...html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map(one => [one[1]!, one[2]!]));
+    };
+    const wrongProject = await confirm(); wrongProject.set("token", ownerToken);
+    await send("/projects/select", { path: beta });
+    expect((await send("/mode/sign", wrongProject)).status).toBe(409);
+    expect(store.activeMode(beta, now)).toBeNull();
+    await send("/projects/select", { path: alpha });
+    const changed = await confirm(); changed.set("token", ownerToken); changed.set("plan-auto", "0");
+    expect((await send("/mode/sign", changed)).status).toBe(409);
+    const signed = await confirm(); signed.set("token", ownerToken);
+    expect((await send("/mode/sign", signed)).status).toBe(303);
+    expect(JSON.parse(store.activeMode(alpha, now)!.termsJson).planAuto).toBe(true);
+  });
+
+  test("console filings defer planning approval to the signed mode; bearer filings cannot spend it", async () => {
+    for (const phase of ["plan", "build", "review"]) store.setPhaseConfig("installation", phase, "claude", "sonnet", "owner", now);
+    const terms = { ...presetTerms("standard", new Date(now.getTime() + 3600000).toISOString()), autoApproveFiling: true, planAuto: true };
+    store.signMode({ repo: alpha, name: terms.name, signedBy: "owner", digest: modeDigestOf(terms), termsJson: modeTermsJson(terms), publication: terms.publication, absoluteExpiry: terms.absoluteExpiry }, now);
+    const cookie = await login("owner");
+    const page = await (await fetch(base + "/tasks/new", { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+    const input = { title: "A bounded task", repo: alpha, goal: "Keep the filed goal", acceptance: "Checks pass | check", touches: "src/example.ts", "planning-policy": "choice", "plan-first": "1" };
+    const response = await fetch(base + "/tasks/add", { method: "POST", headers: { cookie }, body: new URLSearchParams({ ...input, id: "planned-auto", csrf }), redirect: "manual" });
+    expect(response.status).toBe(303);
+    expect(store.scopeSealed("planned-auto")).toBe(false);
+    expect(store.raw().prepare("SELECT signed_by FROM plan_authorization WHERE task_id='planned-auto'").get()?.signed_by).toBe("owner");
+    expect((await post("/tasks/add", { ...input, id: "machine-auto" }, "owner")).status).toBe(303);
+    expect(store.raw().prepare("SELECT 1 FROM plan_authorization WHERE task_id='machine-auto'").get()).toBeUndefined();
+    const direct = await fetch(base + "/tasks/add", { method: "POST", headers: { cookie }, body: new URLSearchParams({ ...input, id: "direct-auto", "plan-first": "0", csrf }), redirect: "manual" });
+    expect(direct.status).toBe(303);
+    expect(store.scopeSealed("direct-auto")).toBe(true);
+    const blocked = await fetch(base + "/tasks/add", { method: "POST", headers: { cookie }, body: new URLSearchParams({ ...input, id: "bad-dependency", "plan-first": "0", after: "missing-task", csrf }), redirect: "manual" });
+    expect(blocked.status).toBe(200);
+    expect(store.scopeSealed("bad-dependency")).toBe(false);
+    expect(store.raw().prepare("SELECT 1 FROM plan_authorization WHERE task_id='bad-dependency'").get()).toBeUndefined();
+    const taskPage = await (await fetch(base + "/t/planned-auto", { headers: { cookie } })).text();
+    expect(taskPage).toContain("Automatic approval is enabled for a verified plan");
+    store.revokeMode(alpha, "owner", "operator", now);
+    expect(await (await fetch(base + "/t/planned-auto", { headers: { cookie } })).text()).not.toContain("Automatic approval is enabled for a verified plan");
   });
 
   test("ledger pagination is stable under new actions and renders untrusted labels as text", async () => {

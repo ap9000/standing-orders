@@ -11,6 +11,16 @@ const T0 = new Date("2026-08-27T12:00:00.000Z");
 const expiry = new Date(T0.getTime() + 24 * 60 * 60_000).toISOString();
 
 describe("mode terms: digest, rehydration, words", () => {
+  test("planner authority is explicit and legacy modes inherit none; new presets retain review", () => {
+    const terms = presetTerms("hands-off", expiry);
+    expect(terms.reviewAuto).toBe(true);
+    expect(terms.planAuto).toBe(false);
+    const legacy = JSON.parse(modeTermsJson(terms)); delete legacy.planAuto;
+    expect(modeTermsFromJson(JSON.stringify(legacy))?.planAuto).toBe(false);
+    expect(modeTermsFromJson(JSON.stringify({ ...legacy, planAuto: "yes" }))).toBeNull();
+    expect(modeDigestOf({ ...terms, planAuto: true })).not.toBe(modeDigestOf(terms));
+    expect(modeWords({ ...terms, planAuto: true }).join(" ")).toContain("unresolved questions still wait");
+  });
   test("presets round-trip stably; the digest binds every term", () => {
     for (const name of ["standard", "hands-off"] as const) {
       const terms = presetTerms(name, expiry);
