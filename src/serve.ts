@@ -57,7 +57,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
-import { dispatchStatusToken, passFraction, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
+import { dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
   buildDataDocument,
@@ -2999,6 +2999,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         proofMatrix: verdict?.matrix ?? [],
         proofMatrixLinks: evidenceLinksFor(artifacts),
         proofAccepted: store.proofAcceptance(latest.id) !== null,
+        qualityMode: latest.qualityMode ?? "default",
         // Either direction: the ORIGINAL task's page finds the chain by
         // its own latest run (the one that triggered a draft); a DRAFT
         // task's page finds the SAME chain by being named as the draft.
@@ -7333,14 +7334,41 @@ function criterionMatrixHtml(
     matrix
       .map(
         row =>
-          `<li>${matrixStateBadge(row.state)}${reviewJudgementBadge(row.review)} <code>${escape(row.id)}</code> ${escape(row.statement)}` +
+          `<li>${matrixStateBadge(row.state)}${reviewJudgementBadge(row.review)}${coverageBadge(row.coverage)} <code>${escape(row.id)}</code> ${escape(row.statement)}` +
           ` <span class="meta">[requires: ${row.requiredEvidence.map(escape).join(", ")}]</span>` +
           answeredHtml(row) +
           (compact || row.detail.length === 0 ? "" : `<br><span class="meta">${row.detail.map(escape).join("; ")}</span>`) +
+          // A context GAP is never folded into the compact view: the words
+          // that say what is missing are the point (v51).
+          (row.coverage === undefined || (compact && row.coverage.state !== "gap") ? "" : `<br><span class="meta" data-context-coverage="${escape(row.coverage.state)}">context: ${escape(coverageStateWords(row.coverage))}</span>`) +
           `</li>`,
       )
       .join("") +
     `</ul></div>`
+  );
+}
+
+/** v51: where a reviewer's evidence for a criterion comes from — the
+ * revision's own patch, sealed inherited context, or a named gap. Absent
+ * on every run that captured no inventory, so nothing older changes. */
+function coverageBadge(coverage: CriterionMatrixRow["coverage"]): string {
+  if (coverage === undefined) return "";
+  const cls = coverage.state === "gap" ? "badge-failed" : coverage.state === "context" ? "badge-manual-review" : "badge";
+  const word = coverage.state === "gap" ? "context gap" : coverage.state === "context" ? "sealed context" : "in patch";
+  return ` <span class="badge ${cls}" data-context-coverage="${escape(coverage.state)}" title="${escape(coverageStateWords(coverage))}">${escape(word)}</span>`;
+}
+
+/** The semantic-coverage line (v51): what an independent reviewer settled,
+ * under which policy, shown apart from the machine proof — the same
+ * `coverageWords` the CLI prints. Empty for a run with no rubric. */
+function semanticCoverageHtml(matrix: readonly CriterionMatrixRow[], qualityMode: "default" | "strict"): string {
+  const coverage = semanticCoverage(matrix, qualityMode);
+  const lines = coverageWords(coverage);
+  if (lines.length === 0) return "";
+  return (
+    `<div class="result-section semantic-coverage" data-semantic-coverage="${coverage.satisfied === null ? "unsettled" : coverage.satisfied ? "satisfied" : "unsatisfied"}" data-coverage-policy="${coverage.policy}">` +
+    lines.map((line, index) => `<p class="meta"${index === 0 ? "" : ' data-context-gap=""'}>${escape(line)}</p>`).join("") +
+    `</div>`
   );
 }
 
@@ -8201,8 +8229,9 @@ const STYLE = `
   .receipt-shot { display: grid; gap: .35rem; color: var(--muted-foreground); font-size: .7rem; text-decoration: none; }
   .receipt-shot img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: var(--muted); }
   .receipt-shot:hover { color: var(--foreground); }
-  .receipt-caveats { margin-top: .8rem; padding: .7rem .8rem; border-left: 2px solid var(--border); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: color-mix(in srgb, var(--muted) 62%, transparent); font-size: .78rem; }
-  .receipt-caveats ul { margin: .3rem 0 0; padding-left: 1.15rem; }
+  .receipt-caveats, .receipt-coverage { margin-top: .8rem; padding: .7rem .8rem; border-left: 2px solid var(--border); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: color-mix(in srgb, var(--muted) 62%, transparent); font-size: .78rem; }
+  .receipt-caveats ul, .receipt-coverage ul { margin: .3rem 0 0; padding-left: 1.15rem; }
+  .semantic-coverage p { margin: .2rem 0; }
   .receipt-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem 1rem; margin-top: .9rem; }
   .receipt-actions > a:not(.button-link) { font-size: .78rem; font-weight: 550; }
   /* The review cockpit (Priority 5): a master/detail over completed work.
@@ -14479,6 +14508,9 @@ function taskBody(data: {
     proofMatrix: CriterionMatrixRow[];
     proofMatrixLinks: EvidenceLinkMap;
     proofAccepted: boolean;
+    /** v51: the run's signed quality mode — the policy semantic coverage is
+     * read under (default: review optional; strict: review required). */
+    qualityMode?: "default" | "strict";
     /** v40: this run's own place in a bounded repair chain, if any. */
     repairChain: RepairChainRow | null;
     /** v50: every root review attempt of this result and what the
@@ -14714,11 +14746,15 @@ function taskBody(data: {
           ? ""
           : `<p class="meta">An independent review found conflicting evidence.</p>`;
       const chainHtml = repairChainHtml(proof.repairChain);
+      // v51: semantic coverage sits beside the matrix, never inside the
+      // verdict word — what the independent reviewer settled, under the
+      // signed policy, with every context gap named.
+      const coverageHtml = semanticCoverageHtml(proof.proofMatrix, proof.qualityMode ?? "default");
       const proofDetails =
         proof.proofMatrix.length === 0 && machineNote === "" && chainHtml === ""
           ? ""
           : `<details class="dispatch-proof-details"><summary>${proof.proofMatrix.length === 0 ? "Verification details" : `${proof.proofMatrix.length} requirement${proof.proofMatrix.length === 1 ? "" : "s"}`} · View details</summary>` +
-            `<div class="dispatch-proof-body">${criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })}${machineNote}${chainHtml}</div></details>`;
+            `<div class="dispatch-proof-body">${criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })}${coverageHtml}${machineNote}${chainHtml}</div></details>`;
       if (proof.proofVerdict === "verified") {
         const recovered = verificationRecovered(proof.proofReasons);
         return withReview(box(
@@ -16496,6 +16532,7 @@ const EVIDENCE_WORDS: Record<string, string> = {
   "check-log": "the plane's re-run check",
   screenshot: "a screenshot",
   "structured-output": "an agent response",
+  "review-context": "the sealed inherited review context",
 };
 
 function evidenceWords(kind: string): string {
@@ -16633,6 +16670,8 @@ type ProofBundleView = {
   machineVerdict: ProofVerdict | null;
   /** v40: this run's own place in a bounded repair chain, if any. */
   repairChain: RepairChainRow | null;
+  /** v51: the policy semantic coverage is read under. */
+  qualityMode: "default" | "strict";
 };
 
 /** The smallest complete answer to "what did this task deliver?". It is a
@@ -16645,6 +16684,10 @@ type CompletionReceiptView = {
   verdict: ProofVerdict | null;
   accepted: boolean;
   matrix: CriterionMatrixRow[];
+  /** v51: the semantic-coverage lines (`coverageWords`) — independent
+   * review standing under the run's policy, plus every named context gap.
+   * Rendered beside the machine verdict on the task and chat receipts. */
+  coverage: string[];
   diff:
     | { fileCount: number; additions: number; deletions: number; binaryCount: number; filesTruncated: boolean }
     | { problem: string }
@@ -16700,6 +16743,7 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
     matrix: verdictRow?.matrix ?? [],
     matrixLinks: evidenceLinksFor(artifacts),
     machineVerdict: verdictRow?.machineVerdict ?? null,
+    qualityMode: run.qualityMode ?? "default",
     repairChain: store.repairChainFor(run.id) ?? (() => {
       const ref = store.refById(run.taskRef);
       return ref === null ? null : store.repairChainForDraft(ref.externalId);
@@ -16731,6 +16775,7 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
           },
     screenshots: proof?.screenshots ?? [],
     caveats: proof?.proof?.caveats ?? [],
+    coverage: coverageWords(semanticCoverage(proof?.matrix ?? [], run.qualityMode ?? "default")),
   };
 }
 
@@ -17047,6 +17092,7 @@ function evidenceBundleCard(view: ProofBundleView | null, runId: number): string
   }
 
   parts.push(criterionMatrixHtml(view.matrix, { runId, links: view.matrixLinks }));
+  parts.push(semanticCoverageHtml(view.matrix, view.qualityMode));
   if (view.machineVerdict !== null && view.machineVerdict !== view.verdict) {
     parts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
   }
@@ -17153,6 +17199,12 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     view.caveats.length === 0
       ? ""
       : `<div class="receipt-caveats"><strong>Before you move on</strong><ul>${view.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+  // v51: semantic coverage, distinct from the machine proof word above —
+  // the same lines the CLI prints, so chat and terminal cannot disagree.
+  const coverage =
+    view.coverage.length === 0
+      ? ""
+      : `<div class="receipt-coverage" data-semantic-coverage=""><strong>Independent review</strong><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
   return (
     `<section class="card completion-receipt" data-card-kind="result-receipt">` +
     `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>What shipped</h2></div>` +
@@ -17161,7 +17213,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>against the approved scope</small></span>` +
     `<span><strong>${escape(diff)}</strong><small>from the sealed final diff</small></span>` +
     `<span><strong>${view.screenshots.length} screenshot${view.screenshots.length === 1 ? "" : "s"}</strong><small>${view.screenshots.length === 0 ? "none required or captured" : "validated visual proof"}</small></span></div>` +
-    shots + caveats +
+    shots + coverage + caveats +
     `<div class="receipt-actions"><a class="button-link" href="/r/${view.runId}">${place === "chat" ? "Review & annotate" : "Review full evidence"}</a>` +
     (place === "task"
       ? `<a href="${taskChatHref(taskId)}">Discuss or request changes →</a>`

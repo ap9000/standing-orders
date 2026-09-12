@@ -74,6 +74,17 @@ approval views must display the actual resulting terms.
 
 ### 3. Make inherited review coverage verifiable
 
+*Implemented 2026-09-12 (schema v51, `src/review-context.ts`; see
+[PROGRESS.md](PROGRESS.md)). Delivered against this baseline alone: sealed
+context from git objects at the exact head, verified ancestor artifacts,
+prior review as proved context, per-criterion coverage on the shared matrix,
+identical evidence for both subscription reviewers, provenance-citing
+judgements, and the distinct semantic-coverage projection on task, run, chat,
+and CLI. Not changed here: revision branches still grow from the project's
+checked-out branch, so a source head outside the revision's history is a
+visible `stale-ancestry` gap, not verified context; tasks 1 and 2 remain
+separate.*
+
 Extend the existing sealed evidence inventory with bounded context from the
 exact source and accepted head. Prefer criterion-relevant source files and
 verified ancestor artifacts; bind every item to its commit, path, digest, and

@@ -53,7 +53,7 @@ import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
 import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
 import { readVerifiedArtifact, readVerifiedReport } from "./evidence.js";
-import { verdictWords as proofVerdictWords, matrixWords } from "./proof.js";
+import { verdictWords as proofVerdictWords, matrixWords, semanticCoverage, coverageWords } from "./proof.js";
 import { probeRepo, isVerified } from "./probe.js";
 import {
   diagnoseTaskDispatch,
@@ -9656,6 +9656,10 @@ function showTask(positional: readonly string[], context: Context): number {
     proofReasons: proofVerdict?.reasons ?? [],
     proofMatrix: proofVerdict?.matrix ?? [],
     proofAccepted,
+    // v51: semantic coverage — what an independent reviewer settled under
+    // the run's signed policy, with every context gap named — the same
+    // projection the console prints, never re-derived here.
+    semanticCoverage: latestFinished === null ? null : semanticCoverage(proofVerdict?.matrix ?? [], latestFinished.qualityMode ?? "default"),
     // v50: the latest build's bounded review history — every root attempt
     // in order, the open request, and the one state they add up to.
     review: latestFinished === null ? null : store.reviewRetryStateOf(latestFinished.id),
@@ -9674,6 +9678,7 @@ function showTask(positional: readonly string[], context: Context): number {
           `  proof: ${proofVerdictWords(detail.proofVerdict, detail.proofReasons).word}${detail.proofAccepted ? " (accepted)" : ""}`,
           ...(detail.proofReasons.length > 0 ? [`    ${detail.proofReasons.join("; ")}`] : []),
           ...matrixWords(detail.proofMatrix),
+          ...(detail.semanticCoverage === null ? [] : coverageWords(detail.semanticCoverage).map(line => `  ${line}`)),
         ]),
     ...(detail.report === null
       ? []

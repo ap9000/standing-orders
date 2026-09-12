@@ -71,7 +71,7 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 50;
+export const SCHEMA_VERSION = 51;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -915,7 +915,12 @@ export type Artifact = {
     | "proof"
     | "check-log"
     | "screenshot"
-    | "structured-output";
+    | "structured-output"
+    /** v51 (inherited review context): the machine-captured, bounded
+     * source-and-ancestry inventory a revision's reviewer is shown beside
+     * its patch — one per run, JSON, re-verified at review admission and
+     * bound at ingestion exactly like the proof and check log. */
+    | "review-context";
   key: string;
   bytesOriginal: number;
   bytesStored: number;
@@ -1981,7 +1986,7 @@ CREATE TABLE IF NOT EXISTS decision (
 CREATE TABLE IF NOT EXISTS artifact (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report','proof','check-log','screenshot','structured-output')),
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report','proof','check-log','screenshot','structured-output','review-context')),
   key            TEXT NOT NULL,
   bytes_original INTEGER NOT NULL,
   bytes_stored   INTEGER NOT NULL,
@@ -2811,7 +2816,13 @@ CREATE TABLE IF NOT EXISTS criterion_review (
   proof_sha          TEXT,
   check_log_artifact INTEGER,
   check_log_sha      TEXT,
-  screenshots_json   TEXT NOT NULL DEFAULT '[]'
+  screenshots_json   TEXT NOT NULL DEFAULT '[]',
+  -- v51 (inherited review context): the sealed context inventory the
+  -- reviewer was shown, hash-bound and re-validated at ingest exactly like
+  -- the proof. NULL exactly when the run captured no inventory (every run
+  -- that is not a revision, and every run before v51).
+  context_artifact   INTEGER,
+  context_sha        TEXT
 );
 
 -- The bounded repair loop's ledger (v40, evidence-review-v1): one row per
@@ -4223,6 +4234,10 @@ function migrate(db: Database, origin: number | null): void {
   addColumn(db, "criterion_review", "check_log_artifact", "INTEGER");
   addColumn(db, "criterion_review", "check_log_sha", "TEXT");
   addColumn(db, "criterion_review", "screenshots_json", "TEXT NOT NULL DEFAULT '[]'");
+  // v51 (inherited review context): the context inventory binding, additive
+  // and NULL on every judgement recorded before a run could carry one.
+  addColumn(db, "criterion_review", "context_artifact", "INTEGER");
+  addColumn(db, "criterion_review", "context_sha", "TEXT");
 
   // v41 (two quality modes): additive and backwards-compatible. Default
   // deliberately means the historical workflow; only an explicitly strict
@@ -4336,6 +4351,12 @@ function migrate(db: Database, origin: number | null): void {
   // was produced — the column and its one classification pass arrive
   // together, in one write transaction (migrateReviewRequestOrigin).
   migrateReviewRequestOrigin(db);
+
+  // v51 (inherited review context): artifact.kind additionally admits
+  // 'review-context' — the same exact-recognizer copy/rename v34, v38, and
+  // v46 used; no historical row changes meaning. The criterion_review
+  // binding columns arrived additively above.
+  rebuildArtifactForV51(db);
 }
 
 /** The origin CHECK, verbatim from the fresh review_request DDL. */
@@ -4510,6 +4531,11 @@ function V46_ARTIFACT_DDL(name: string): string {
   return V38_ARTIFACT_DDL(name).replace("'proof','check-log','screenshot'", "'proof','check-log','screenshot','structured-output'");
 }
 
+/** v51: the sealed inherited-review-context inventory is evidence. */
+function V51_ARTIFACT_DDL(name: string): string {
+  return V46_ARTIFACT_DDL(name).replace("'screenshot','structured-output'", "'screenshot','structured-output','review-context'");
+}
+
 /** v38: incident.kind additionally admits 'malformed-proof'. */
 function V38_INCIDENT_DDL(name: string): string {
   return V34_INCIDENT_DDL(name).replace("'plan-attempts-exhausted','malformed-report'", "'plan-attempts-exhausted','malformed-report','malformed-proof'");
@@ -4540,11 +4566,27 @@ function rebuildExact(
   try {
     db.exec("BEGIN IMMEDIATE");
     try {
+      // The AUTOINCREMENT bookkeeping, read before the copy (v51): a
+      // drop-and-rename moves the table's sqlite_sequence row to the end
+      // and resets its counter to the surviving max id. Both are restored
+      // below — the original counter (never reusing an id a deleted row
+      // once held) in the original row order — so an upgraded file's
+      // bookkeeping is byte for byte what the predecessor wrote.
+      const sequenceBefore = tableExists(db, "sqlite_sequence")
+        ? (db.prepare("SELECT name, seq FROM sqlite_sequence ORDER BY rowid").all() as { name: string; seq: number | bigint }[])
+        : [];
       db.exec(targetDdl(`${table}_next`));
       const names = columns.join(", ");
       db.exec(`INSERT INTO ${table}_next (${names}) SELECT ${names} FROM ${table}`);
       db.exec(`DROP TABLE ${table}`);
       db.exec(`ALTER TABLE ${table}_next RENAME TO ${table}`);
+      if (sequenceBefore.some(row => row.name === table)) {
+        db.exec("DELETE FROM sqlite_sequence");
+        const restore = db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)");
+        // Bound as INTEGER (a JS number would land as REAL in this untyped
+        // system table and read back as a different type).
+        for (const row of sequenceBefore) restore.run(row.name, typeof row.seq === "bigint" ? row.seq : BigInt(row.seq));
+      }
       const broken = db.prepare("PRAGMA foreign_key_check").all();
       if (broken.length > 0) throw new Error(`foreign keys did not survive the ${table} rebuild`);
       db.exec("COMMIT");
@@ -4566,7 +4608,7 @@ export function rebuildArtifactForV34(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact'").get();
   if (
     row !== undefined &&
-    [V38_ARTIFACT_DDL("artifact"), V46_ARTIFACT_DDL("artifact")].some(ddl => canonicalDdl(String(row["sql"])) === canonicalDdl(ddl))
+    [V38_ARTIFACT_DDL("artifact"), V46_ARTIFACT_DDL("artifact"), V51_ARTIFACT_DDL("artifact")].some(ddl => canonicalDdl(String(row["sql"])) === canonicalDdl(ddl))
   ) return;
   rebuildExact(db, "artifact", V17_ARTIFACT_DDL, V34_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
@@ -4581,13 +4623,25 @@ export function rebuildIncidentForV34(db: Database): void {
 /** v38: artifact.kind admits 'proof','check-log','screenshot'. */
 export function rebuildArtifactForV38(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact'").get();
-  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(V46_ARTIFACT_DDL("artifact"))) return;
+  if (
+    row !== undefined &&
+    [V46_ARTIFACT_DDL("artifact"), V51_ARTIFACT_DDL("artifact")].some(ddl => canonicalDdl(String(row["sql"])) === canonicalDdl(ddl))
+  ) return;
   rebuildExact(db, "artifact", [V17_ARTIFACT_DDL, V34_ARTIFACT_DDL], V38_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
 
-/** v46: artifact.kind additionally admits structured-output. */
+/** v46: artifact.kind additionally admits structured-output. A table
+ * already at the v51 shape is a DONE shape (the same later-widening
+ * tolerance rebuildArtifactForV34/V38 carry). */
 export function rebuildArtifactForV46(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact'").get();
+  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(V51_ARTIFACT_DDL("artifact"))) return;
   rebuildExact(db, "artifact", V38_ARTIFACT_DDL, V46_ARTIFACT_DDL, ARTIFACT_COLUMNS);
+}
+
+/** v51: artifact.kind additionally admits review-context. */
+export function rebuildArtifactForV51(db: Database): void {
+  rebuildExact(db, "artifact", V46_ARTIFACT_DDL, V51_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
 
 /** v38: incident.kind admits 'malformed-proof'. */
@@ -8952,6 +9006,10 @@ export class Store {
         proof: { artifactId: number; sha256: string } | null;
         checkLog: { artifactId: number; sha256: string } | null;
         screenshots: readonly { artifactId: number; sha256: string; path?: string }[];
+        /** v51: the sealed review-context inventory, or null when the run
+         * captured none. Absent (undefined) reads as null — every caller
+         * before v51 showed the reviewer no inventory. */
+        context?: { artifactId: number; sha256: string } | null;
       };
     },
     now: Date,
@@ -9104,13 +9162,33 @@ export class Store {
         liveScreenshots.map(shot => ({ artifact: shot.id, sha256: shot.sha256, path: shot.capture })),
       );
 
+      // v51: the review-context inventory is singular like the proof, and
+      // its binding is proved both ways — a caller that showed none while
+      // the run now carries one (empty-to-added), or showed one the run no
+      // longer carries at that exact hash, is refused whole.
+      const contextArtifacts = runArtifacts.filter(one => one.kind === "review-context");
+      if (contextArtifacts.length > 1) {
+        throw new ReviewBindingError(`run ${args.runId} has more than one review-context artifact — the exact review inventory is ambiguous; nothing is ingested`);
+      }
+      const liveContext = contextArtifacts[0] ?? null;
+      const boundContext = bindings.context ?? null;
+      if (
+        (liveContext === null) !== (boundContext === null) ||
+        (liveContext !== null &&
+          boundContext !== null &&
+          (liveContext.id !== boundContext.artifactId || liveContext.sha256 !== boundContext.sha256))
+      ) {
+        throw new ReviewBindingError(`run ${args.runId}'s review-context inventory no longer matches what the reviewer was shown — nothing is ingested`);
+      }
+
       for (const judgement of args.judgements) {
         this.db
           .prepare(
             `INSERT INTO criterion_review
                (reviewer_run, source_run, criterion_id, judgement, note, artifact, artifact_sha, author, created_at,
-                scope_digest, head_sha, proof_artifact, proof_sha, check_log_artifact, check_log_sha, screenshots_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                scope_digest, head_sha, proof_artifact, proof_sha, check_log_artifact, check_log_sha, screenshots_json,
+                context_artifact, context_sha)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             args.reviewerRunId,
@@ -9129,6 +9207,8 @@ export class Store {
             bindings.checkLog?.artifactId ?? null,
             bindings.checkLog?.sha256 ?? null,
             screenshotsJson,
+            boundContext?.artifactId ?? null,
+            boundContext?.sha256 ?? null,
           );
       }
       const folded = foldReview(
@@ -9169,6 +9249,7 @@ export class Store {
         proof: { artifactId: number; sha256: string } | null;
         checkLog: { artifactId: number; sha256: string } | null;
         screenshots: readonly { artifactId: number; sha256: string; path?: string }[];
+        context?: { artifactId: number; sha256: string } | null;
       };
     },
     now: Date,
@@ -10899,6 +10980,22 @@ export class Store {
       cursor = parent;
     }
     return null;
+  }
+
+  /**
+   * The lineage a revision task carries (v51, inherited review context):
+   * the source task it revises and the exact source run its sealed brief
+   * was written against — the brief artifact's own `run` column, the one
+   * durable fact every revision road (annotation, CI repair, criterion
+   * repair) writes. null for a task that is not a revision, or whose brief
+   * artifact row is gone: lineage is read, never inferred from a title.
+   */
+  revisionSourceOf(taskRef: number): { sourceTask: string; sourceRun: number; briefArtifact: Artifact } | null {
+    const ref = this.refForId(taskRef);
+    if (ref === null || ref.revisionOf === null || ref.revisionBriefArtifact === null) return null;
+    const briefArtifact = this.getArtifact(ref.revisionBriefArtifact);
+    if (briefArtifact === null || briefArtifact.kind !== "revision-brief") return null;
+    return { sourceTask: ref.revisionOf, sourceRun: briefArtifact.run, briefArtifact };
   }
 
   /** Stamp a task as the revision it is: source task + immutable brief. */
@@ -20911,6 +21008,9 @@ export type CriterionReviewRow = {
   proof: ReviewBindingArtifact | null;
   checkLog: ReviewBindingArtifact | null;
   screenshots: ReviewBindingArtifact[];
+  /** v51: the sealed inherited-review-context inventory the reviewer was
+   * shown; null when the run captured none (not a revision, or pre-v51). */
+  context: ReviewBindingArtifact | null;
 };
 
 function readReviewBindingList(raw: unknown): ReviewBindingArtifact[] {
@@ -20955,6 +21055,10 @@ function readCriterionReview(row: Record<string, unknown>): CriterionReviewRow {
         ? null
         : { artifact: Number(checkLogArtifact), sha256: String(row["check_log_sha"]) },
     screenshots: readReviewBindingList(row["screenshots_json"]),
+    context:
+      row["context_artifact"] === null || row["context_artifact"] === undefined
+        ? null
+        : { artifact: Number(row["context_artifact"]), sha256: String(row["context_sha"]) },
   };
 }
 

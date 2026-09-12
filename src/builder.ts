@@ -75,6 +75,7 @@ import {
 } from "./evidence.js";
 import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, proofSubmissionProblems, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
 import { storeStructuredAttempt, normalizeStructuredJson } from "./structured-output.js";
+import { captureReviewContext } from "./review-context.js";
 import {
   authoritySnapshotDigest,
   classifyRevisionAuthority,
@@ -2550,6 +2551,35 @@ async function settleProof(
   const scope = store.getScope(request.taskId);
   const approvedCriteria = (scope?.acceptance ?? []).map(c => ({ id: c.id, statement: c.statement, evidence: c.evidence }));
 
+  // v51 (inherited review context): a REVISION seals the bounded source
+  // and ancestry context its reviewer needs for criteria outside its own
+  // patch — read from git objects at the exact sealed head, bound to the
+  // source run, and stored as one more verified artifact. Any other run
+  // captures nothing and adjudicates exactly as before. A capture that
+  // throws stores nothing; the reviewer then sees every inherited
+  // criterion as a coverage gap rather than a silently missing file.
+  let reviewContext: Parameters<typeof adjudicate>[0]["reviewContext"];
+  if (approvedCriteria.length > 0 && store.revisionSourceOf(captured.taskRef) !== null) {
+    try {
+      const captureResult = await captureReviewContext(store, captured.git, {
+        runId,
+        taskRef: captured.taskRef,
+        head: sealedHead,
+        base: captured.baseRevision,
+        rubric: approvedCriteria,
+        patchPaths: diffStat !== null && diffStat.captured ? diffStat.paths : new Set<string>(),
+        worktree,
+        root,
+        now,
+      });
+      if (captureResult !== null) {
+        reviewContext = captureResult.inventory.coverage.map(one => ({ id: one.id, state: one.state, inherited: one.inherited, items: one.items, gaps: one.gaps, priorSupport: one.priorSupport }));
+      }
+    } catch {
+      reviewContext = approvedCriteria.map(one => ({ id: one.id, state: "gap" as const, inherited: false, items: [], gaps: ["the review context could not be captured"], priorSupport: "none" as const }));
+    }
+  }
+
   const { verdict, reasons, matrix } = adjudicate({
     proofArtifactPresent,
     proofParse,
@@ -2560,6 +2590,7 @@ async function settleProof(
     verifyCommand,
     screenshots,
     approvedCriteria,
+    ...(reviewContext === undefined ? {} : { reviewContext }),
   });
   store.saveProofVerdict(runId, verdict, reasons, now(), matrix);
   // v40: a repair attempt that reaches verified/attested closes its chain
