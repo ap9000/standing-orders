@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "scope": "small-imperative",
+  "model": "gpt-6-astra",
+  "briefSource": "docs/assessments/evidence/natural-task-instructions/brief-small-imperative-after.txt",
+  "briefSha256": "fe42a8dee144dbdc60ab193cd2cd01bf25e9c54e647b083651e8865caba6b79b",
+  "briefBytes": 11544,
+  "briefHasBlanketStopRule": false,
+  "codex": {
+    "exitCode": 0,
+    "timedOut": false,
+    "notFound": false,
+    "elapsedMs": 132838,
+    "stderrTail": "0:05:49.844676Z  WARN codex_skills::interface: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/\n2026-09-12T20:05:50.122815Z  WARN codex_mcp::rmcp_client: MCP server startup failed server_name=\"messages\" error=handshaking with MCP server failed: JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"}): JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"})\n2026-09-12T20:05:50.364689Z  WARN codex_skills::interface: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/\n2026-09-12T20:05:50.364705Z  WARN codex_skills::interface: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/\n2026-09-12T20:05:50.440664Z  WARN codex_mcp::rmcp_client: MCP server startup failed server_name=\"messages\" error=handshaking with MCP server failed: JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"}): JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"})\n2026-09-12T20:08:00.913120Z  WARN codex_mcp::rmcp_client: failed to initialize MCP client during shutdown: MCP startup failed: handshaking with MCP server failed: JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"}): JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"})\n"
+  },
+  "stream": {
+    "thread": "01a09739-e854-7240-95bf-f3e214f5bde5",
+    "usage": {
+      "input_tokens": 147163,
+      "cached_input_tokens": 132608,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 3920,
+      "reasoning_output_tokens": 606
+    },
+    "commands": 9,
+    "fileChanges": 1,
+    "messages": [
+      "I’ll check the worktree, add and test `greet`, then write and validate the handoff and proof files. I’ll leave all changes uncommitted.\n",
+      "`greet` is implemented and exported. All three tests pass, including checks for non-string inputs, and `README.md` and `package.json` are unchanged. I’m now writing and validating the handoff and proof against both signed criteria.\n",
+      "Implemented and exported `greet(name)` with TypeError validation.\n\n- `node --test`: 3 passed, 0 failed.\n- `README.md` and `package.json` unchanged.\n- Required handoff and proof files written and preflight validated.\n\nAll changes remain uncommitted; branch and HEAD are unchanged."
+    ]
+  },
+  "protocolFiles": {
+    "done": {
+      "name": "STANDING-ORDERS-DONE-5adc6cc871fc0904.json",
+      "bytes": 888,
+      "parsed": {
+        "version": 2,
+        "status": "completed",
+        "conclusion": "Added and exported greet(name). It returns the requested greeting for strings and throws TypeError for non-strings. All tests pass; README.md and package.json are unchanged. Changes remain uncommitted.",
+        "changes": [
+          "Added src/greet.js with string validation and greeting formatting.",
+          "Exported greet from src/index.js.",
+          "Added test/greet.test.js covering strings, empty strings, whitespace, Unicode, omitted arguments, and all non-string type categories."
+        ],
+        "verification": [
+          "node --test: exit 0; 3 tests passed, 0 failed.",
+          "git diff --exit-code HEAD -- README.md package.json: exit 0; both files unchanged.",
+          "git diff --check: exit 0; no whitespace errors.",
+          "Branch remains standing-orders/greet-smoke; HEAD remains 6f824df6708aff90e7a3899327729bea2187b8ca."
+        ],
+        "followUps": []
+      }
+    },
+    "park": {
+      "name": "STANDING-ORDERS-PARK-60f1eeadbdae9c4e.json",
+      "absent": true
+    },
+    "proof": {
+      "name": "STANDING-ORDERS-PROOF-26e3f083bab55841.json",
+      "bytes": 1914,
+      "parsed": {
+        "version": 1,
+        "criteria": [
+          {
+            "id": "g1",
+            "statement": "greet returns the greeting for a string and throws TypeError otherwise, proven by `node --test`",
+            "verdict": "met",
+            "how": "node --test passed all 3 tests through the public src/index.js export. Assertions cover ordinary, empty, whitespace and Unicode strings, every non-string type category, boxed strings, and an omitted argument.",
+            "evidence": [
+              {
+                "kind": "check",
+                "ref": "node --test"
+              }
+            ]
+          },
+          {
+            "id": "g2",
+            "statement": "README.md and package.json are unchanged",
+            "verdict": "met",
+            "how": "Implementation and test changes are limited to src/greet.js, src/index.js, and test/greet.test.js. The protected-file diff exited zero with no output, confirming README.md and package.json match HEAD.",
+            "evidence": [
+              {
+                "kind": "changed-path",
+                "ref": "src/greet.js"
+              },
+              {
+                "kind": "changed-path",
+                "ref": "src/index.js"
+              },
+              {
+                "kind": "changed-path",
+                "ref": "test/greet.test.js"
+              },
+              {
+                "kind": "check",
+                "ref": "git diff --exit-code HEAD -- README.md package.json"
+              }
+            ]
+          }
+        ],
+        "checks": [
+          {
+            "command": "node --test",
+            "exitCode": 0,
+            "summary": "3 tests passed; 0 failed. Greeting formatting and TypeError validation passed through the public export."
+          },
+          {
+            "command": "git diff --exit-code HEAD -- README.md package.json",
+            "exitCode": 0,
+            "summary": "No differences; README.md and package.json match HEAD."
+          },
+          {
+            "command": "git diff --check",
+            "exitCode": 0,
+            "summary": "No whitespace errors."
+          }
+        ],
+        "changed": [
+          "src/greet.js",
+          "src/index.js",
+          "test/greet.test.js"
+        ],
+        "caveats": [],
+        "screenshots": []
+      }
+    }
+  },
+  "repository": {
+    "baseline": "6f824df6708aff90e7a3899327729bea2187b8ca",
+    "head": "6f824df6708aff90e7a3899327729bea2187b8ca",
+    "headMoved": false,
+    "branch": "standing-orders/greet-smoke",
+    "status": "M src/index.js\n?? STANDING-ORDERS-DONE-5adc6cc871fc0904.json\n?? STANDING-ORDERS-PROOF-26e3f083bab55841.json\n?? STANDING-ORDERS-RUBRIC-eee2b96604db0f27.json\n?? src/greet.js\n?? test/greet.test.js"
+  },
+  "verdict": {
+    "citedInstructionWordingAsReasonToStop": false,
+    "wroteHandoff": true,
+    "handoffStatus": "completed",
+    "parked": false
+  },
+  "fixture": null,
+  "recordedAt": "2026-09-12T20:08:02.528Z"
+}

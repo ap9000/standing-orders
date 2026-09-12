@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "scope": "small-imperative",
+  "model": "gpt-6-astra",
+  "briefSource": "docs/assessments/evidence/natural-task-instructions/brief-small-imperative-before.txt",
+  "briefSha256": "777b9f0625b399c30c7b2f430c5a99ebda11142cf01016fefa28b6d191c6fa1c",
+  "briefBytes": 10467,
+  "briefHasBlanketStopRule": true,
+  "codex": {
+    "exitCode": 0,
+    "timedOut": false,
+    "notFound": false,
+    "elapsedMs": 159940,
+    "stderrTail": "0:03:00.345776Z  WARN codex_skills::interface: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/\n2026-09-12T20:03:00.617755Z  WARN codex_mcp::rmcp_client: MCP server startup failed server_name=\"messages\" error=handshaking with MCP server failed: JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"}): JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"})\n2026-09-12T20:03:00.876048Z  WARN codex_skills::interface: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/\n2026-09-12T20:03:00.876069Z  WARN codex_skills::interface: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/\n2026-09-12T20:03:00.959396Z  WARN codex_mcp::rmcp_client: MCP server startup failed server_name=\"messages\" error=handshaking with MCP server failed: JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"}): JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"})\n2026-09-12T20:05:39.197565Z  WARN codex_mcp::rmcp_client: failed to initialize MCP client during shutdown: MCP startup failed: handshaking with MCP server failed: JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"}): JSON-RPC error: -32603: Internal error: The data couldn’t be read because it isn’t in the correct format.({\"detail\":\"The data couldn’t be read because it isn’t in the correct format.\"})\n"
+  },
+  "stream": {
+    "thread": "01a09737-5237-7812-8cf0-4d4707df472b",
+    "usage": {
+      "input_tokens": 122227,
+      "cached_input_tokens": 97024,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 4777,
+      "reasoning_output_tokens": 1049
+    },
+    "commands": 8,
+    "fileChanges": 1,
+    "messages": [
+      "I’ll check the worktree and signed rubric, add the greeting function and tests, then run `node --test` and validate the handoff files. I’ll leave all changes uncommitted.\n\n",
+      "The function and export are in place. All three tests pass, covering string greetings, non-string errors, and the public export. README.md, package.json, the branch, and HEAD are unchanged. I’m writing and validating the proof and handoff files now.\n\n",
+      "Implemented and exported `greet(name)` with TypeError validation.\n\n- `node --test`: all 3 tests passed.\n- README.md and package.json unchanged.\n- Proof and DONE files written and preflighted.\n- All changes remain uncommitted; branch and HEAD unchanged."
+    ]
+  },
+  "protocolFiles": {
+    "done": {
+      "name": "STANDING-ORDERS-DONE-a98067cae3553118.json",
+      "bytes": 1067,
+      "parsed": {
+        "version": 2,
+        "status": "completed",
+        "conclusion": "Added and exported greet(name), with exact string greetings and TypeError for non-strings. All 3 tests pass. README.md and package.json are unchanged; all changes remain uncommitted on standing-orders/greet-smoke with HEAD unchanged.",
+        "changes": [
+          "Added src/greet.js with string validation and greeting formatting.",
+          "Exported greet from src/index.js.",
+          "Added test/greet.test.js covering the export, string greetings, and non-string rejection.",
+          "Wrote the acceptance proof and completion handoff."
+        ],
+        "verification": [
+          "node --test: 3 passed, 0 failed.",
+          "git diff --exit-code HEAD -- README.md package.json: exited 0; both files unchanged.",
+          "git diff --check: exited 0; no whitespace errors in the tracked diff.",
+          "Branch remains standing-orders/greet-smoke; HEAD remains f237383a3c1fc255367f1ed3ade1e06bdd24a80b.",
+          "Re-read and preflighted both protocol files for JSON validity, caps, exact rubric wording, and evidence references."
+        ],
+        "followUps": []
+      }
+    },
+    "park": {
+      "name": "STANDING-ORDERS-PARK-e39dda5f2223aee9.json",
+      "absent": true
+    },
+    "proof": {
+      "name": "STANDING-ORDERS-PROOF-1069e1f92c40f208.json",
+      "bytes": 2046,
+      "parsed": {
+        "version": 1,
+        "criteria": [
+          {
+            "id": "g1",
+            "statement": "greet returns the greeting for a string and throws TypeError otherwise, proven by `node --test`",
+            "verdict": "met",
+            "how": "node --test passed all 3 tests: the public export matches src/greet.js; ordinary, empty, whitespace, and Unicode strings produce exact greetings; non-string values and an omitted argument throw TypeError.",
+            "evidence": [
+              {
+                "kind": "check",
+                "ref": "node --test"
+              }
+            ]
+          },
+          {
+            "id": "g2",
+            "statement": "README.md and package.json are unchanged",
+            "verdict": "met",
+            "how": "Reviewed the complete changed-path list: only src/greet.js, src/index.js, test/greet.test.js, and the required proof and handoff files changed. git diff --exit-code HEAD -- README.md package.json exited 0 with no diff.",
+            "evidence": [
+              {
+                "kind": "changed-path",
+                "ref": "src/greet.js"
+              },
+              {
+                "kind": "changed-path",
+                "ref": "src/index.js"
+              },
+              {
+                "kind": "changed-path",
+                "ref": "test/greet.test.js"
+              },
+              {
+                "kind": "check",
+                "ref": "git diff --exit-code HEAD -- README.md package.json"
+              }
+            ]
+          }
+        ],
+        "checks": [
+          {
+            "command": "node --test",
+            "exitCode": 0,
+            "summary": "3 tests passed, 0 failed; string greetings, non-string TypeErrors, and the public export verified."
+          },
+          {
+            "command": "git diff --exit-code HEAD -- README.md package.json",
+            "exitCode": 0,
+            "summary": "No changes to README.md or package.json relative to HEAD."
+          },
+          {
+            "command": "git diff --check",
+            "exitCode": 0,
+            "summary": "No whitespace errors in the tracked diff."
+          }
+        ],
+        "changed": [
+          "src/greet.js",
+          "src/index.js",
+          "test/greet.test.js",
+          "STANDING-ORDERS-DONE-a98067cae3553118.json",
+          "STANDING-ORDERS-PROOF-1069e1f92c40f208.json"
+        ],
+        "caveats": [],
+        "screenshots": []
+      }
+    }
+  },
+  "repository": {
+    "baseline": "f237383a3c1fc255367f1ed3ade1e06bdd24a80b",
+    "head": "f237383a3c1fc255367f1ed3ade1e06bdd24a80b",
+    "headMoved": false,
+    "branch": "standing-orders/greet-smoke",
+    "status": "M src/index.js\n?? STANDING-ORDERS-DONE-a98067cae3553118.json\n?? STANDING-ORDERS-PROOF-1069e1f92c40f208.json\n?? src/greet.js\n?? test/greet.test.js"
+  },
+  "verdict": {
+    "citedInstructionWordingAsReasonToStop": false,
+    "wroteHandoff": true,
+    "handoffStatus": "completed",
+    "parked": false
+  },
+  "fixture": null,
+  "recordedAt": "2026-09-12T20:05:40.152Z"
+}
