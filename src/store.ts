@@ -10977,8 +10977,8 @@ export class Store {
       commentIds: readonly number[] | null;
       /** Fresh mode filing coverage, re-proved by the caller INSIDE this
        * transaction (never carried across one): its budget default may only
-       * TIGHTEN the inherited ceiling; its escalated posture rides the
-       * filing exactly as it does on every other mode-covered filing. */
+       * TIGHTEN the inherited ceiling; its escalated posture may apply only when the source already
+       * permits full access (or no source scope exists). */
       coverage?: { defaultBudgetMicrousd: number | null; escalated: boolean } | null;
     },
     now: Date,
@@ -11009,6 +11009,8 @@ export class Store {
           if (sourceRun.scopeDigest !== args.source.scopeDigest) {
             return refuse("stale-source", `run #${sourceRun.id} was built against different terms — a newer task scope cannot stand in for that run's contract`);
           }
+          const ancestry = this.revisionAncestryStatus(args.source.task);
+          if (ancestry.problem !== null) return refuse("source-terms", ancestry.problem);
           // THE BRIEF CUSTODY: the file, re-read and re-hashed under the
           // evidence root, must be the bytes the caller claims AND name
           // exactly this source. A brief for another run is a wrong brief.
@@ -11106,6 +11108,7 @@ export class Store {
     } catch (error) {
       if (error instanceof RevisionRaced) return refuse("comments-taken", error.message);
       const message = String((error as Error).message ?? error);
+      if (/database (?:is )?locked|SQLITE_BUSY/.test(message)) return refuse("busy", "another writer holds the revision boundary; read the current source before retrying");
       if (/UNIQUE constraint failed/.test(message)) return refuse("duplicate", `another draft won this source run — ${message}`);
       return refuse("invariant", message);
     }
@@ -11117,17 +11120,24 @@ export class Store {
    * lineage (task page, chat, approval, the repair loop) reads this walk,
    * never a caller's copy of it.
    */
-  revisionAncestryOf(taskId: string): string[] {
+  revisionAncestryStatus(taskId: string): { chain: string[]; problem: string | null } {
     const seen = new Set<string>();
     const chain: string[] = [];
     let cursor: string | null = taskId;
-    while (cursor !== null && !seen.has(cursor) && chain.length < 64) {
+    while (cursor !== null) {
+      if (seen.has(cursor)) return { chain, problem: `revision ancestry cycles at ${cursor}` };
+      if (chain.length >= 64) return { chain, problem: "revision ancestry exceeds the 64-task verification bound" };
+      const ref = this.lookupRef(cursor);
+      if (ref === null) return { chain, problem: `revision ancestor ${cursor} is missing` };
       seen.add(cursor);
       chain.push(cursor);
-      const ref = this.lookupRef(cursor);
-      cursor = ref === null ? null : ref.revisionOf;
+      cursor = ref.revisionOf;
     }
-    return chain;
+    return { chain, problem: null };
+  }
+
+  revisionAncestryOf(taskId: string): string[] {
+    return this.revisionAncestryStatus(taskId).chain;
   }
 
   /**
@@ -11140,7 +11150,9 @@ export class Store {
    * A task with no chain anywhere above it roots its own, as before.
    */
   repairLineageOf(taskId: string): RepairLineage {
-    for (const ancestor of this.revisionAncestryOf(taskId)) {
+    const ancestry = this.revisionAncestryStatus(taskId);
+    if (ancestry.problem !== null) return { rootTask: taskId, attempts: [], continues: null, via: null, problem: ancestry.problem };
+    for (const ancestor of ancestry.chain) {
       const asDraft = this.repairChainForDraft(ancestor);
       if (asDraft !== null) {
         const attempts = this.repairChainForRoot(asDraft.rootTask);
@@ -11174,7 +11186,7 @@ export class Store {
     const mode = ref.repo === null ? null : this.activeMode(ref.repo, now);
     const modeTerms = mode === null ? null : modeTermsFromJson(mode.termsJson);
     const cap = modeTerms !== null && modeTerms.repairAuto === true ? modeTerms.repairMaxAttempts : null;
-    const attemptsUsed = lineage.attempts.length;
+    const attemptsUsed = lineage.attempts.reduce((highest, row) => Math.max(highest, row.attempt), 0);
     const profile = scope === null ? null : (scope.approvedProfile ?? scope.profile ?? null);
     return {
       sourceTask: ref.revisionOf,
@@ -11197,6 +11209,7 @@ export class Store {
               routeOverrides: ref.routeOverrides === null || ref.routeOverrides === undefined ? 0 : ref.routeOverrides.length,
             },
       sourceHadScope: sourceScope !== null,
+      ...(lineage.problem === undefined ? {} : { problem: lineage.problem }),
       repair:
         lineage.attempts.length === 0
           ? null
@@ -11237,6 +11250,22 @@ export class Store {
     try {
       return this.transact(() =>
         this.savepoint(() => {
+          if (this.repairChainFor(args.source.run) !== null) return { ok: false as const, reason: "duplicate" as const, detail: "this source run already produced a repair disposition" };
+          const lineage = this.repairLineageOf(args.source.task);
+          const next = lineage.attempts.reduce((highest, row) => Math.max(highest, row.attempt), 0) + 1;
+          if (lineage.problem !== undefined || args.rootTask !== lineage.rootTask || args.attempt !== next) {
+            return { ok: false as const, reason: "source-terms" as const, detail: lineage.problem ?? "the repair root or attempt changed; a handoff cannot reset its allowance" };
+          }
+          if (args.basis === "mode") {
+            const repo = this.lookupRef(args.source.task)?.repo;
+            const mode = repo == null ? null : this.activeMode(repo, now);
+            const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
+            if (mode === null || mode.digest !== args.modeDigest || terms?.repairAuto !== true || next > terms.repairMaxAttempts) {
+              return { ok: false as const, reason: "source-terms" as const, detail: "the automatic repair authority is absent, changed, or spent" };
+            }
+          } else if (args.modeDigest !== null) {
+            return { ok: false as const, reason: "source-terms" as const, detail: "a human repair draft cannot carry an automatic approval basis" };
+          }
           const sealed = this.sealRevision({ source: args.source, brief: args.brief, child: args.child, commentIds: null }, now);
           if (!sealed.ok) return sealed;
           // The chain row rides the same savepoint as the seal: a second
@@ -11254,7 +11283,7 @@ export class Store {
       );
     } catch (error) {
       const message = String((error as Error).message ?? error);
-      return { ok: false, reason: /UNIQUE constraint failed/.test(message) ? "duplicate" : "invariant", detail: message };
+      return { ok: false, reason: /database (?:is )?locked|SQLITE_BUSY/.test(message) ? "busy" : /UNIQUE constraint failed/.test(message) ? "duplicate" : "invariant", detail: message };
     }
   }
 
@@ -21287,6 +21316,7 @@ function readCriterionReview(row: Record<string, unknown>): CriterionReviewRow {
 
 /** Why a seal refused, in one word; `detail` carries the sentence. */
 export type RevisionRefusal =
+  | "busy"
   | "source-task"
   | "source-run"
   | "stale-source"
@@ -21332,7 +21362,7 @@ class RevisionRaced extends Error {}
  *     its revision ledger (a revision is planned afresh, if at all; the
  *     brief plus the source scope are its contract), strikes, holds.
  *   FRESH from a live mode, only when the caller re-proved coverage inside
- *     this transaction: the escalated posture and the budget default.
+ *     this transaction: the budget default and an escalation only within the source permission ceiling.
  *
  * A source with no scope (a legacy filing) has nothing to inherit: the
  * child files the placeholder rubric and today's defaults, and every
@@ -21411,6 +21441,7 @@ export function revisionTermsOf(
 
 /** Which repair chain a task continues — see `Store.repairLineageOf`. */
 export type RepairLineage = {
+  problem?: string;
   rootTask: string;
   /** Every attempt row of that chain, in attempt order. */
   attempts: RepairChainRow[];
@@ -21422,6 +21453,7 @@ export type RepairLineage = {
 
 /** A revision's lineage and ACTUAL terms — see `Store.revisionLineageOf`. */
 export type RevisionLineage = {
+  problem?: string;
   sourceTask: string;
   sourceRun: number | null;
   /** Nearest first, up to and including the root. */

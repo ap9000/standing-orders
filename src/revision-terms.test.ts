@@ -13,6 +13,8 @@
  * real close and reopen.
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -540,7 +542,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     expect(store.repairChainForRoot("t-chain").map(one => [one.attempt, one.outcome])).toEqual([[1, "drafted"], [2, "attempts-spent"]]);
     expect(store.getTask("t-chain-fix-3")).toBeNull();
 
-    // CONCURRENT DUPLICATES, through a second connection to the same file:
+    // REPLAYED DUPLICATES, through a second connection to the same file:
     // both read the same live batch; one seal wins, the other refuses with
     // zero rows. The deterministic CI id and the chain's source_run UNIQUE
     // are the same story on the other two roads.
@@ -583,6 +585,82 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
       twin.close();
     }
   });
+
+  test.each(["cycle", "missing", "bound"])("incomplete %s ancestry cannot open a fresh revision or repair allowance", (kind) => {
+    const source = seedSource("t-gap");
+    if (kind === "cycle") store.raw().prepare("UPDATE task_ref SET revision_of = 't-gap' WHERE id = ?").run(source.taskRef);
+    if (kind === "missing") store.raw().prepare("UPDATE task_ref SET revision_of = 'gone' WHERE id = ?").run(source.taskRef);
+    if (kind === "bound") {
+      for (let i = 0; i < 64; i++) {
+        store.createTask({ id: `ancestor-${i}`, title: "ancestor" }, T0);
+        const id = i === 0 ? source.taskRef : store.lookupRef(`ancestor-${i - 1}`)!.id;
+        store.raw().prepare("UPDATE task_ref SET revision_of = ? WHERE id = ?").run(`ancestor-${i}`, id);
+      }
+    }
+    expect(store.repairLineageOf("t-gap").problem).toBeTruthy();
+    expect(store.revisionLineageOf("t-gap", T0)?.problem).toBeTruthy();
+    const count = taskCount();
+    const comment = annotate(source.run, source.artifactId);
+    expect(sealAnnotation(store, "t-gap", source.run, [comment], source.digest)).toMatchObject({ ok: false, reason: "source-terms" });
+    expect(taskCount()).toBe(count);
+    expect(store.liveDiffComments(source.run)).toHaveLength(1);
+  });
+
+  test("the repair seal derives its root, ordinal and automatic allowance inside the transaction", () => {
+    const source = seedSource("t-ledger");
+    const base = {
+      source: { task: "t-ledger", run: source.run, scopeDigest: source.digest },
+      brief: writeBrief(store, source.run, { sourceTask: "t-ledger", sourceRun: source.run }),
+      child: { id: "t-ledger-fix-1", title: "repair", repair: "repair c1" },
+      rootTask: "t-ledger", attempt: 1, basis: "human" as const, modeDigest: null, unresolved: ["c1"],
+    };
+    const count = taskCount();
+    for (const override of [{ rootTask: "invented-root" }, { attempt: 0 }, { attempt: 8 }, { basis: "mode" as const, modeDigest: "ungranted" }]) {
+      expect(store.openRepairDraft({ ...base, ...override }, T0)).toMatchObject({ ok: false, reason: "source-terms" });
+      expect(taskCount()).toBe(count);
+      expect(store.repairChainFor(source.run)).toBeNull();
+    }
+  });
+
+  test("two processes released together seal exactly one annotation batch", async () => {
+    const source = seedSource("t-race");
+    const comment = annotate(source.run, source.artifactId);
+    const count = taskCount();
+    const args = {
+      source: { task: "t-race", run: source.run, scopeDigest: source.digest },
+      brief: writeBrief(store, source.run, { sourceTask: "t-race", sourceRun: source.run, comments: briefComments(store, source.run, [comment]) }),
+      child: { title: "a raced revision", repair: "apply the comment" }, commentIds: [comment],
+    };
+    const moduleUrl = pathToFileURL(join(process.cwd(), "src/store.ts")).href;
+    const code = `import { openStore } from ${JSON.stringify(moduleUrl)};
+      const store = openStore(process.argv[1]);
+      process.send({ready:true});
+      process.once('message', args => {
+        const result = store.sealRevision(args, new Date(${JSON.stringify(T0.toISOString())}));
+        store.close(); process.send({result}, () => process.disconnect());
+      });`;
+    const children = Array.from({ length: 2 }, () => spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code, dbPath], { stdio: ["ignore", "ignore", "pipe", "ipc"] }));
+    try {
+      const results = children.map(child => new Promise<ReturnType<Store["sealRevision"]>>((resolve, reject) => {
+        child.on("message", message => { const data = message as { result?: ReturnType<Store["sealRevision"]> }; if (data.result !== undefined) resolve(data.result); });
+        child.on("error", reject);
+        child.on("exit", code => { if (code !== 0) reject(new Error(`race process exited ${code}`)); });
+      }));
+      await Promise.all(children.map(child => new Promise<void>((resolve, reject) => {
+        child.on("message", message => { if ((message as { ready?: boolean }).ready) resolve(); });
+        child.on("error", reject);
+        child.on("exit", code => reject(new Error(`race process exited before ready: ${code}`)));
+      })));
+      for (const child of children) child.send(args);
+      const answers = await Promise.all(results);
+      expect(answers.filter(one => one.ok)).toHaveLength(1);
+      const loser = answers.find(one => !one.ok);
+      expect(loser && !loser.ok && ["comments-taken", "busy"].includes(loser.reason)).toBe(true);
+      expect(taskCount()).toBe(count + 1);
+      expect(briefRows(source.run)).toBe(1);
+      expect(store.liveDiffComments(source.run)).toHaveLength(0);
+    } finally { for (const child of children) child.kill(); }
+  }, 15_000);
 
   test("c5: the lineage projection reads the child's ACTUAL terms and names what re-resolves and what never inherits", () => {
     const source = seedSource("t-view");

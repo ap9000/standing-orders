@@ -14524,6 +14524,7 @@ type RevisionView =
  */
 export function revisionLineageWords(lineage: RevisionLineage): string[] {
   const words: string[] = [];
+  if (lineage.problem !== undefined) words.push(`lineage verification gap: ${lineage.problem}; no automatic repair allowance can be inferred`);
   const chain = lineage.ancestors.length > 1 ? ` · lineage ${lineage.ancestors.join(" → ")}` : "";
   words.push(`revises ${lineage.sourceTask}${lineage.sourceRun === null ? "" : ` (build #${lineage.sourceRun})`}${chain}`);
   if (!lineage.sourceHadScope) {

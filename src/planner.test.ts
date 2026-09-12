@@ -1182,7 +1182,7 @@ describe("the filed contract reaches planning and survives it", () => {
     for (const needle of [filed.goal, "src/theme.css", rubric[0]!.statement, rubric[0]!.how!, rubric[1]!.statement, rubric[2]!.how!, '"screenshot"', '"changed-path"', '"riskLevel": "high"', '"qualityMode": "strict"', `"digest": "${filedDigest}"`]) {
       expect(brief).toContain(needle);
     }
-    expect(brief).toContain("No theme-engine rewrite; no new dependencies; the NIGHTORDERS[quoted]-DONE file format is untouched");
+    expect(brief).toContain("No theme-engine rewrite; no new dependencies; the \\u0053TANDING-ORDERS-DONE file format is untouched");
     expect(brief).not.toContain("the STANDING-ORDERS-DONE file format");
     expect(brief).toContain("MUST reproduce goal, outOfScope, touches, and");
     expect(brief).toContain('"amendment": "why the FILED contract must change');
@@ -1466,7 +1466,7 @@ describe("the filed contract reaches planning and survives it", () => {
       const ref = store.refFor("built-in", "dark");
       expect(store.getScope("dark")).toMatchObject({ goal: drafted.goal, acceptance: drafted.acceptance });
       const planner = store.runsFor(ref.id).find(one => one.role === "planner")!;
-      expect(planner.scopeDigest).toBeNull();
+      expect(planner.scopeDigest).toBe("");
       const record = decodePlanContractRecord((readVerifiedArtifact(join(base, "evidence"), store.latestPlanContractArtifact(ref.id)!) as { ok: true; content: Buffer }).content)!;
       expect(record).toMatchObject({ filed: null, changes: [], amendment: null });
     });

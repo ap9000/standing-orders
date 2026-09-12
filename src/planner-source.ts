@@ -73,6 +73,9 @@ export type PlannerContractScope = ContractTerms & {
     budgetMicrousd: number | null;
     /** The resolved build agent, when the filing resolved one. */
     agent: { provider: string; model: string } | null;
+    profile: Scope["profile"];
+    routeJson: string | null;
+    chainJson: string | null;
     profileState: "resolved" | "unresolved" | null;
     unresolvedReason: string | null;
   };
@@ -88,6 +91,12 @@ export type PlannerContract = {
    * the planner drafts the contract from scratch (the legacy road). */
   scope: PlannerContractScope | null;
   task: {
+    id: string;
+    title: string;
+    repo: string | null;
+    routeOverrides: import("./store.js").TaskRef["routeOverrides"];
+    agentPin: { provider: string | null; model: string | null };
+    planPin: { provider: string | null; model: string | null };
     deliverable: "branch" | "report";
     riskLevel: RiskLevel | null;
     qualityMode: QualityMode | null;
@@ -142,6 +151,9 @@ function contractScopeOf(scope: Scope): PlannerContractScope {
       qualityMode: scope.qualityMode ?? "default",
       budgetMicrousd: scope.budgetMicrousd,
       agent: scope.profile == null ? null : { provider: scope.profile.provider, model: scope.profile.model },
+      profile: scope.profile ?? null,
+      routeJson: scope.proposedRouteJson ?? null,
+      chainJson: scope.proposedChainJson ?? null,
       profileState: scope.profileState ?? null,
       unresolvedReason: scope.unresolvedReason ?? null,
     },
@@ -180,6 +192,12 @@ export function plannerContractOf(store: Store, taskId: string): { ok: true; con
     contract: {
       scope: scope === null ? null : contractScopeOf(scope),
       task: {
+        id: taskId,
+        title: store.getTask(taskId)?.title ?? taskId,
+        repo: ref.repo,
+        routeOverrides: ref.routeOverrides ?? null,
+        agentPin: { provider: ref.agentProvider, model: ref.agentModel },
+        planPin: { provider: ref.planProvider, model: ref.planModel },
         deliverable: ref.deliverable,
         riskLevel: ref.riskLevel ?? null,
         qualityMode: ref.qualityMode ?? null,
@@ -212,6 +230,9 @@ export function plannerSourceOf(
   const task = store.getTask(taskId);
   if (task === null) return { ok: false, reason: "no-task", message: `no task ${taskId}` };
 
+  if (answers.length > PLANNER_SOURCE_LIMITS.answers) {
+    return { ok: false, reason: "oversized", message: `${taskId} has more than ${PLANNER_SOURCE_LIMITS.answers} earlier answers; the planner cannot omit part of that history — consolidate the answered decisions before planning again` };
+  }
   let revisionBrief: string | null = null;
   if (contract.contract.revision !== null) {
     const artifact = store.getArtifact(contract.contract.revision.briefArtifact);
@@ -237,7 +258,7 @@ export function plannerSourceOf(
     contract: contract.contract,
     sourceDigest: plannerSourceDigest(contract.contract),
     revisionBrief,
-    answers: answers.slice(0, PLANNER_SOURCE_LIMITS.answers).map(one => ({ question: one.question, choice: one.choice, note: one.note })),
+    answers: answers.map(one => ({ question: one.question, choice: one.choice, note: one.note })),
   };
   const bytes = encodePlannerSource(source).length;
   if (bytes > PLANNER_SOURCE_LIMITS.bytes) {
@@ -278,6 +299,14 @@ export function encodePlannerSource(source: PlannerSource): Buffer {
   return Buffer.from(JSON.stringify(source, null, 2), "utf8");
 }
 
+const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+const nullableString = (value: unknown): value is string | null => value === null || typeof value === "string";
+function isContractTerms(value: unknown): value is ContractTerms & Record<string, unknown> {
+  return object(value) && typeof value["goal"] === "string" && nullableString(value["outOfScope"]) &&
+    Array.isArray(value["touches"]) && value["touches"].every(one => typeof one === "string") &&
+    Array.isArray(value["acceptance"]) && value["acceptance"].every(one => object(one) && typeof one["id"] === "string" && typeof one["statement"] === "string" && nullableString(one["how"]) && Array.isArray(one["evidence"]) && one["evidence"].every(kind => ["check", "screenshot", "changed-path", "manual-review"].includes(String(kind))));
+}
+
 /** Read a recorded source back; null when the bytes are not one. */
 export function decodePlannerSource(content: Buffer): PlannerSource | null {
   try {
@@ -285,7 +314,12 @@ export function decodePlannerSource(content: Buffer): PlannerSource | null {
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
     const body = parsed as Record<string, unknown>;
     if (body["version"] !== PLANNER_SOURCE_VERSION || typeof body["taskId"] !== "string" || typeof body["sourceDigest"] !== "string") return null;
-    if (typeof body["contract"] !== "object" || body["contract"] === null) return null;
+    if (!object(body["contract"]) || typeof body["title"] !== "string" || !nullableString(body["revisionBrief"])) return null;
+    if (!Array.isArray(body["answers"]) || body["answers"].length > PLANNER_SOURCE_LIMITS.answers || !body["answers"].every(one => object(one) && typeof one["question"] === "string" && typeof one["choice"] === "string" && nullableString(one["note"]))) return null;
+    const contract = body["contract"];
+    if (!object(contract["task"]) || !["branch", "report"].includes(String(contract["task"]["deliverable"]))) return null;
+    if (contract["scope"] !== null && (!isContractTerms(contract["scope"]) || !object(contract["scope"]["terms"]) || !object(contract["scope"]["approval"]))) return null;
+    if (contract["revision"] !== null && (!object(contract["revision"]) || typeof contract["revision"]["of"] !== "string" || !Number.isSafeInteger(contract["revision"]["briefArtifact"]) || typeof contract["revision"]["briefSha256"] !== "string")) return null;
     const source = parsed as PlannerSource;
     // The record proves itself: the digest it carries is the digest of the
     // contract it carries, or the file is not the record it claims to be.
@@ -426,6 +460,10 @@ export function decodePlanContractRecord(content: Buffer): PlanContractRecord | 
     if (body["version"] !== PLANNER_SOURCE_VERSION || typeof body["sourceDigest"] !== "string") return null;
     if (!Array.isArray(body["changes"]) || typeof body["proposed"] !== "object" || body["proposed"] === null) return null;
     if (body["amendment"] !== null && typeof body["amendment"] !== "string") return null;
+    if (!isContractTerms(body["proposed"]) || (body["filed"] !== null && !isContractTerms(body["filed"]))) return null;
+    if (body["sourceArtifact"] !== null && (!Number.isSafeInteger(body["sourceArtifact"]) || Number(body["sourceArtifact"]) <= 0)) return null;
+    const expected = body["filed"] === null ? [] : contractChangesOf(body["filed"], body["proposed"]);
+    if (canonicalContractJson(expected) !== canonicalContractJson(body["changes"])) return null;
     return parsed as PlanContractRecord;
   } catch {
     return null;
@@ -443,11 +481,10 @@ export function decodePlanContractRecord(content: Buffer): PlanContractRecord | 
  */
 export function fenceSourceLine(text: string): string {
   return `| ${text
+    // Preserve the JSON value while removing delimiter-shaped raw bytes.
     // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
-    .replace(/STANDING-ORDERS-/g, "NIGHTORDERS[quoted]-")
-    .replace(/```/g, "` ` `")
-    .trimEnd()}`;
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029`]/g, one => `\\u${one.charCodeAt(0).toString(16).padStart(4, "0")}`)
+    .replace(/STANDING-ORDERS-/g, "\\u0053TANDING-ORDERS-")}`;
 }
 
 /**

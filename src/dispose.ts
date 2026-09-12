@@ -611,6 +611,10 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   // The next attempt number is one past the chain's highest, whichever
   // branch spent it; nothing resets because a person annotated a draft.
   const lineage = store.repairLineageOf(ref.externalId);
+  if (lineage.problem !== undefined) {
+    store.enqueueNotification({ dedupeKey: `repair-lineage:${sourceRunId}`, kind: "repair-lineage", subject: `${ref.externalId}: repair ancestry needs attention`, body: lineage.problem, link: `/t/${encodeURIComponent(ref.externalId)}` }, now);
+    return { kind: "stopped", reason: "repair-refused-integrity" };
+  }
   const priorChain = lineage.continues;
   const rootTask = lineage.rootTask;
   const attempt = lineage.attempts.reduce((highest, row) => Math.max(highest, row.attempt), 0) + 1;

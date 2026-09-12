@@ -56,8 +56,13 @@ import {
 import type { ParsedDecision, Problem } from "./decision.js";
 import { digestOf } from "./scope.js";
 import type { ParsedPlan } from "./plan.js";
+import { routeFromJson } from "./phase-routing.js";
 import {
   contractChangesOf,
+  decodePlannerSource,
+  encodePlannerSource,
+  canonicalContractJson,
+  PLANNER_SOURCE_LIMITS,
   describeContractChanges,
   encodePlanContractRecord,
   plannerContractOf,
@@ -65,7 +70,7 @@ import {
   type PlanContractRecord,
   type PlannerSource,
 } from "./planner-source.js";
-import { storeEvidence } from "./evidence.js";
+import { storeEvidence, readVerifiedArtifact, EVIDENCE_CAPS } from "./evidence.js";
 import type { AuthorityChangeField } from "./plan.js";
 import type { ParsedReport } from "./scout-report.js";
 
@@ -1406,7 +1411,7 @@ export type PlanFinalize =
    * task 1): the draft was planned against terms that no longer exist,
    * so nothing of it is ingested — the newer source stands, the claim
    * releases, and the task stays requested for a fresh attempt. */
-  | { ok: false; reason: "stale-source"; detail: string };
+  | { ok: false; reason: "stale-source" | "source-invalid"; detail: string };
 
 /**
  * Seal a successful planning run: the proposed scope, the plan document
@@ -1479,6 +1484,32 @@ export function finalizePlanFenced(
       throw new Error(`run ${runId} is a ${run.role} run — only planner runs draft plans`);
     }
     const repairRun = plannerRepairChild(store, run, args.repairRunId ?? null);
+    if (store.lookupRef(taskId)?.id !== run.taskRef) throw new Error("a planner can finalize only its own task");
+    const invalidSource = (detail: string, kind: "malformed" | "failure" = "malformed"): PlanFinalize => {
+      const failed = finalizePlanFailureFenced(store, { leaseId, runId, taskId, kind, message: detail, now });
+      if (repairRun !== null) store.finishRun(repairRun.id, { outcome: "refused", reason: failed.ok ? "source-invalid" : "fenced", now });
+      return failed.ok ? { ok: false, reason: "source-invalid", detail } : failed;
+    };
+    const sources = store.artifactsFor(runId).filter(one => one.kind === "plan-contract" && one.key.endsWith("/planner-source.json"));
+    // Legacy rows have no input stamp or artifact. Every current dispatch
+    // stamps even an empty scope; dropping a caller argument cannot bypass custody.
+    if (args.source !== undefined || sources.length > 0 || run.scopeDigest !== null) {
+      if (args.source === undefined || args.evidenceRoot === undefined || sources.length !== 1 || sources[0]!.id !== args.sourceArtifact) {
+        return invalidSource("the planner's admitted source inventory is missing, ambiguous, or was not presented");
+      }
+      const artifact = sources[0]!;
+      let verified: ReturnType<typeof readVerifiedArtifact>;
+      try { verified = readVerifiedArtifact(args.evidenceRoot, artifact); }
+      catch { return invalidSource("the planner source file cannot be read"); }
+      if (!verified.ok || artifact.truncated) return invalidSource("the planner source bytes no longer verify");
+      const recorded = decodePlannerSource(verified.content);
+      if (recorded === null || recorded.taskId !== taskId || !verified.content.equals(encodePlannerSource(args.source)) || run.scopeDigest !== (recorded.contract.scope?.digest ?? "")) {
+        return invalidSource("the supplied planning source is not the source recorded for this run");
+      }
+      if (contractChanges.length > 0 && (typeof amendment !== "string" || !amendment.trim() || amendment.length > PLANNER_SOURCE_LIMITS.amendment)) {
+        return invalidSource("a planner changed the filed contract without a bounded, explicit amendment");
+      }
+    }
 
     // THE SOURCE RECHECK (contract handoff, task 1): the filed request is
     // re-derived from durable state inside this very transaction and must
@@ -1490,7 +1521,8 @@ export function finalizePlanFenced(
     if (args.source !== undefined) {
       const current = plannerContractOf(store, taskId);
       const currentDigest = current.ok ? plannerSourceDigest(current.contract) : null;
-      if (currentDigest !== args.source.sourceDigest) {
+      const currentAnswers = store.answeredDecisionsFor(taskId, PLANNER_SOURCE_LIMITS.answers + 1).map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
+      if (currentDigest !== args.source.sourceDigest || canonicalContractJson(currentAnswers) !== canonicalContractJson(args.source.answers)) {
         const detail = current.ok
           ? describeSourceDrift(args.source, current.contract)
           : `the filed request can no longer be read: ${current.message}`;
@@ -1521,6 +1553,32 @@ export function finalizePlanFenced(
       }
     }
 
+    if (record !== null && args.evidenceRoot !== undefined) {
+      const recordBytes = encodePlanContractRecord(record);
+      if (recordBytes.length > EVIDENCE_CAPS["plan-contract"]) return invalidSource("the required plan amendment record exceeds its explicit evidence cap");
+      try {
+        const recordId = storeEvidence(
+          store,
+          args.evidenceRoot,
+          runId,
+          "plan-contract",
+          "plan-contract.json",
+          recordBytes,
+          record.changes.length === 0
+            ? "plan ingestion: filed contract reproduced exactly (verified tree)"
+            : `plan ingestion: ${record.changes.length} contract change(s), amendment ${record.amendment === null ? "absent" : "stated"} (verified tree)`,
+          now,
+          { captureStatus: "ok" },
+        );
+        const captured = store.getArtifact(recordId);
+        if (captured === null || captured.truncated || !readVerifiedArtifact(args.evidenceRoot, captured).ok) {
+          return invalidSource("the required plan contract record did not seal completely", "failure");
+        }
+      } catch {
+        return invalidSource("the required plan contract record could not be saved", "failure");
+      }
+    }
+
     const { changes } = db
       .prepare(
         `UPDATE claim SET released_at = ?, released_by = 'completed'
@@ -1541,34 +1599,20 @@ export function finalizePlanFenced(
       acceptance: plan.acceptance,
       proposedAt: now.toISOString(),
       digest: digestOf({ goal: plan.goal, outOfScope: plan.outOfScope, touches: plan.touches, acceptance: plan.acceptance }),
-      budgetMicrousd: null,
+      budgetMicrousd: filed?.terms.budgetMicrousd ?? null,
       approvedAt: null,
       approvedBy: null,
       approvedDigest: null,
+    }, {}, filed === null ? {} : {
+      riskLevel: filed.terms.riskLevel,
+      qualityMode: filed.terms.qualityMode,
+      ...(filed.terms.profile == null ? {} : { profile: filed.terms.profile }),
+      ...(filed.terms.profile != null && routeFromJson(filed.terms.routeJson) !== null &&
+        canonicalContractJson([...new Set(filed.acceptance.flatMap(one => one.evidence))].sort()) === canonicalContractJson([...new Set(plan.acceptance.flatMap(one => one.evidence))].sort())
+        ? { route: routeFromJson(filed.terms.routeJson)! } : {}),
     });
     if (args.artifact !== null) {
       store.saveArtifact({ run: runId, kind: "plan", ...args.artifact }, now);
-    }
-    if (record !== null && args.evidenceRoot !== undefined) {
-      try {
-        storeEvidence(
-          store,
-          args.evidenceRoot,
-          runId,
-          "plan-contract",
-          "plan-contract.json",
-          encodePlanContractRecord(record),
-          record.changes.length === 0
-            ? "plan ingestion: filed contract reproduced exactly (verified tree)"
-            : `plan ingestion: ${record.changes.length} contract change(s), amendment ${record.amendment === null ? "absent" : "stated"} (verified tree)`,
-          now,
-          { captureStatus: "ok" },
-        );
-      } catch {
-        // The draft still lands: the scope row and plan document are the
-        // authority; the approval view says the record is missing rather
-        // than pretending the contract was reproduced.
-      }
     }
     store.setPlanState(run.taskRef, "drafted");
     store.resetPlanStrikes(run.taskRef);

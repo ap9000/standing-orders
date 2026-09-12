@@ -3006,7 +3006,7 @@ async function tickCommand(
       // that cannot be read, is a refusal in words here: nothing trims a
       // criterion silently, and nothing plans against half a contract.
       const answers = store
-        .answeredDecisionsFor(id, 5)
+        .answeredDecisionsFor(id, 6)
         .map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
       const sourced = plannerSourceOf(store, context.evidenceRoot, id, answers);
       if (!sourced.ok) {
@@ -3083,9 +3083,7 @@ async function tickCommand(
         broke++;
         continue;
       }
-      if (sourced.source.contract.scope !== null) {
-        store.stampRun(planRunId, { scopeDigest: sourced.source.contract.scope.digest });
-      }
+      store.stampRun(planRunId, { scopeDigest: sourced.source.contract.scope?.digest ?? "" });
       const outcome = await planTask(store, {
         taskId: id,
         taskTitle: store.getTask(id)?.title ?? id,
@@ -3145,11 +3143,11 @@ async function tickCommand(
         if (sealed.ok) {
           store.clearQuota(runner, spec.provider, spec.model ?? "");
           dispatched.push({ id, outcome: "planned", ...(sealed.changes === 0 ? {} : { detail: `${sealed.changes} contract change${sealed.changes === 1 ? "" : "s"} proposed${sealed.amendment === null ? "" : " with an amendment"}` }) });
-        } else if (sealed.reason === "stale-source") {
+        } else if (sealed.reason === "stale-source" || sealed.reason === "source-invalid") {
           // The newer source stands; the draft is not ingested and the
           // task stays requested — the next pass plans against what is
           // filed now. Not a strike: the planner did nothing wrong.
-          dispatched.push({ id, outcome: "skipped", reason: "stale-source", detail: sealed.detail });
+          dispatched.push({ id, outcome: "skipped", reason: sealed.reason, detail: sealed.detail });
         } else {
           dispatched.push({ id, outcome: "failed", reason: "fenced" });
           broke++;
@@ -3226,7 +3224,7 @@ async function tickCommand(
       });
       store.stampRun(scoutRunId, { scopeDigest: scopeRow?.approvedDigest ?? "", profileDigest: profileDigestOf(proof.effective.profile) });
       const scoutAnswers = store
-        .answeredDecisionsFor(id, 5)
+        .answeredDecisionsFor(id, 6)
         .map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
       const scouted = await scoutTask(store, {
         taskId: id,
