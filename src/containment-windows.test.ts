@@ -39,7 +39,7 @@ if (process.env.SO_MODE === "exit") { setTimeout(() => process.exit(0), 300); }
 else { setInterval(() => {}, 1000); }
 `;
 
-describe("native containment (Windows Job Object)", () => {
+describe("native containment (Windows Job Object)", { timeout: 40_000 }, () => {
   test("the facility is reported truthfully — and expected where CI runs Windows", () => {
     if (capability === null) console.log(`native containment (job object): not win32 (${process.platform}) — skipped here`);
     else console.log(`native containment (job object): ${capability.available ? "available" : "unavailable"} — ${capability.detail}`);
@@ -63,7 +63,7 @@ describe("native containment (Windows Job Object)", () => {
 
   test.skipIf(!native)("c2: a detached grandchild dies with the root's natural exit; the job is reported empty; no writes after settlement", async () => {
     let id = "";
-    const result = await run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, timeoutMs: 60_000, env: { SO_DIR: dir, SO_MODE: "exit" }, onContainer: info => { id = info.id; } });
+    const result = await run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, timeoutMs: 8_000, env: { SO_DIR: dir, SO_MODE: "exit" }, onContainer: info => { id = info.id; } });
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     expect(result.containment).toEqual({ backend: "job-object", id, empty: true });
@@ -76,8 +76,8 @@ describe("native containment (Windows Job Object)", () => {
     const { mkdirSync } = await import("node:fs");
     const a = join(dir, "a"); const b = join(dir, "b");
     mkdirSync(a); mkdirSync(b);
-    const runA = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:A", timeoutMs: 60_000, env: { SO_DIR: a, SO_MODE: "linger" } });
-    const runB = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:B", timeoutMs: 60_000, env: { SO_DIR: b, SO_MODE: "linger" } });
+    const runA = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:A", timeoutMs: 8_000, env: { SO_DIR: a, SO_MODE: "linger" } });
+    const runB = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, owner: "run:B", timeoutMs: 8_000, env: { SO_DIR: b, SO_MODE: "linger" } });
     expect(await waitFor(() => existsSync(join(a, "pids.json")) && existsSync(join(b, "pids.json")) && existsSync(join(a, "ticks.log")) && existsSync(join(b, "ticks.log")), 30_000)).toBe(true);
     const pidsA = JSON.parse(readFileSync(join(a, "pids.json"), "utf8")) as { root: number; escaped: number };
     const pidsB = JSON.parse(readFileSync(join(b, "pids.json"), "utf8")) as { root: number; escaped: number };
@@ -99,7 +99,7 @@ describe("native containment (Windows Job Object)", () => {
     const script = join(dir, "echo.mjs");
     writeFileSync(script, `process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), env: process.env.SO_PROBE, cwd: process.cwd() }));`);
     const args = ["--flag", "a value with spaces", 'quotes "inside"', "trailing\\", "", "%PATH%", "unicode ✓"];
-    const result = await run(process.execPath, [script, ...args], { processGroup: true, cwd: dir, timeoutMs: 60_000, env: { SO_PROBE: "probe-value" } });
+    const result = await run(process.execPath, [script, ...args], { processGroup: true, cwd: dir, timeoutMs: 8_000, env: { SO_PROBE: "probe-value" } });
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({ argv: args, env: "probe-value", cwd: dir });

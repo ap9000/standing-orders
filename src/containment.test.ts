@@ -238,7 +238,7 @@ describe("the shared transports under a required policy", () => {
     writeFileSync(process.env.SO_MARK, "ran\\n");
   `;
 
-  test("an exit-zero target cannot pass proof when the native object stays unproven", async () => {
+  test.skipIf(!posix)("an exit-zero target cannot pass proof when the native object stays unproven", async () => {
     pinContainment(effectiveContainment("required", available));
     overrideContainerFactoryForTests(() => ({ ...fileBackedContainer(dir, log), populated: () => null, kill: async () => false }));
     for (const transport of [run, runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl]) {

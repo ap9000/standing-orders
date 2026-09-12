@@ -481,6 +481,7 @@ export function jobObjectContainer(capability: ContainmentCapability, label: str
   let failure: string | null = null;
   let authorized = false;
   let cancelled = false;
+  let helperChild: ChildProcess | null = null;
   const fail = (detail: string): void => { failure ??= detail; if (state !== "empty") state = "lost"; connection?.destroy(); };
   const authorize = (): void => {
     if (authorized && state === "ready") connection?.write(cancelled ? "kill\n" : "go\n");
@@ -529,6 +530,7 @@ export function jobObjectContainer(capability: ContainmentCapability, label: str
         extraStdio: [],
         async attach(child) {
           // Called only after the durable onSpawn callback succeeded.
+          helperChild = child;
           authorized = true; authorize();
           child.once("error", error => fail(String(error)));
           const deadline = performance.now() + 15_000;
@@ -542,6 +544,11 @@ export function jobObjectContainer(capability: ContainmentCapability, label: str
     async kill(timeoutMs = 5_000) {
       cancelled = true;
       try { connection?.write("kill\n"); } catch { fail("containment control channel unavailable"); }
+      if (await waitEmpty(timeoutMs)) return true;
+      // A nonresponsive helper is still our own ChildProcess. Closing its
+      // actual handle triggers KILL_ON_JOB_CLOSE; saved IDs remain query-only.
+      if (helperChild && helperChild.exitCode === null && helperChild.signalCode === null) helperChild.kill("SIGKILL");
+      state = "lost";
       return waitEmpty(timeoutMs);
     },
     populated, waitEmpty,
