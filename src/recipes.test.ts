@@ -34,7 +34,7 @@ describe("reusable recipes on the existing work engine", () => {
     for (const extra of ["approvedAt", "permissionMode", "provider", "model", "token", "repo", "publicationGrant", "autoApprove"]) {
       expect(() => parseRecipe({ ...document, [extra]: true })).toThrow("Recipe fields");
     }
-    expect(() => parseRecipe({ ...document, version: 2 })).toThrow("not supported");
+    expect(() => parseRecipe({ ...document, version: 3 })).toThrow("not supported");
     expect(() => importRecipe("not-json")).toThrow("not valid");
     expect(() => parseRecipe({ ...document, name: "hidden\u202Ename" })).toThrow();
     expect(() => parseRecipe({ ...document, acceptance: [] })).toThrow("success check");

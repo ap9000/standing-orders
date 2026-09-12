@@ -84,7 +84,8 @@ import { LEDGER_SCHEMA, installLedgerTriggers, type LedgerEntry } from "./action
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 
-export const SCHEMA_VERSION = 56;
+// v57 fences older recipe readers before question-based documents are saved.
+export const SCHEMA_VERSION = 57;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and

@@ -63,6 +63,111 @@ describe("recipe onboarding through authenticated HTTP", () => {
     return { path, html: await preview.text(), form };
   }
 
+  async function createQuestionRecipe() {
+    const page = await (await get("/recipes/new")).text();
+    expect(page).toContain("Create a reusable recipe");
+    const form = fields(page, ".recipe-editor");
+    form.set("name", "Test {{module}}"); form.set("goal", "Add regression tests for {{module}} and summarize coverage.");
+    form.set("touches", "src/\ntests/"); form.set("planning", "skip");
+    form.set("criterion-0-statement", "Regression tests for {{module}} pass.");
+    form.set("input-0-key", "module"); form.set("input-0-label", "Which module?"); form.set("purpose", "recipe");
+    const response = await post("/recipes/preview", form); expect(response.status).toBe(303);
+    const path = response.headers.get("location")!;
+    const preview = await (await get(path)).text();
+    expect(preview).toContain("Preview your recipe"); expect(preview).not.toContain('action="/recipes/launch"');
+    const save = fields(preview, 'form[action="/recipes/save"]');
+    expect((await post("/recipes/launch", save)).status).toBe(409);
+    const saved = await post("/recipes/save", save); expect(saved.status).toBe(303);
+    expect((await post("/recipes/save", save)).headers.get("location")).toBe(saved.headers.get("location"));
+    const usePath = saved.headers.get("location")!;
+    expect(usePath).toContain("/recipes/run?");
+    const use = await (await get(usePath)).text();
+    expect(use).toContain("Recipe saved · ready when you are");
+    return { usePath, body: fields(use, ".recipe-run"), path };
+  }
+
+  test("create a recipe, save without work, answer once and launch through the existing preview", async () => {
+    const { usePath, body, path } = await createQuestionRecipe();
+    expect(store.listTasks()).toHaveLength(0);
+    expect(body.has("goal")).toBe(false); expect(body.has("touches")).toBe(false);
+    body.set("answer-module", "parser"); body.set("goal", "Forged scope from a short form");
+    const prepared = await post("/recipes/prepare", body); expect(prepared.status).toBe(303);
+    const html = await (await get(prepared.headers.get("location")!)).text();
+    const launch = fields(html, 'form[action="/recipes/launch"]');
+    expect((await post("/recipes/launch", launch)).status).toBe(303);
+    const first = store.listTasks()[0]!;
+    expect(store.getScope(first.id)?.goal).toBe("Add regression tests for parser and summarize coverage.");
+    expect(store.getScope(first.id)?.touches).toEqual(["src/", "tests/"]);
+    const second = await login("other");
+    const next = fields(await (await get(usePath, second)).text(), ".recipe-run"); next.set("answer-module", "scheduler");
+    const response = await post("/recipes/prepare", next, second); expect(response.status).toBe(303);
+    const newLaunch = fields(await (await get(response.headers.get("location")!, second)).text(), 'form[action="/recipes/launch"]');
+    expect((await post("/recipes/launch", newLaunch, second)).status).toBe(303);
+    expect(store.listTasks()).toHaveLength(2);
+    expect(store.listTasks().map(task => store.getScope(task.id)?.goal).some(goal => goal?.includes("scheduler"))).toBe(true);
+    const exported = await (await get(path.replace("/preview?", "/export?"))).json();
+    expect(exported.version).toBe(2); expect(exported.inputs[0].key).toBe("module"); expect(exported.goal).toContain("{{module}}");
+    const library = await (await get("/recipes")).text();
+    expect(library.indexOf("Your project’s recipes")).toBeLessThan(library.indexOf("Start here"));
+    expect(library).toContain("Use recipe");
+  });
+
+  test("short launch forms preserve answers on errors and enforce current access, CSRF and recipe identity", async () => {
+    const { body, usePath } = await createQuestionRecipe();
+    let response = await post("/recipes/prepare", body); expect(response.status).toBe(400);
+    expect(await response.text()).toContain("Which module?");
+    body.set("answer-module", "My module"); body.set("answer-extra", "Unknown input");
+    response = await post("/recipes/prepare", body); expect(response.status).toBe(400);
+    expect(fields(await response.text(), ".recipe-run").get("answer-module")).toBe("My module");
+    body.delete("answer-extra"); body.append("answer-module", "Duplicate"); expect((await post("/recipes/prepare", body)).status).toBe(400);
+    body.set("answer-module", "parser");
+    const stale = new URLSearchParams(body); stale.set("projectRevision", "999"); expect((await post("/recipes/prepare", stale)).status).toBe(409);
+    const csrf = new URLSearchParams(body); csrf.delete("csrf"); expect((await post("/recipes/prepare", csrf)).status).toBe(403);
+    const unknown = new URLSearchParams(body); unknown.set("recipeRevision", "2"); expect((await post("/recipes/prepare", unknown)).status).toBe(404);
+    const viewer = await login("viewer"); const viewForm = fields(await (await get(usePath, viewer)).text(), ".recipe-run"); viewForm.set("answer-module", "parser");
+    expect((await post("/recipes/prepare", viewForm, viewer)).status).toBe(403);
+    store.setAccountProjects("member", [], "owner", now);
+    expect((await post("/recipes/prepare", body)).status).toBe(401);
+    expect(store.listTasks()).toHaveLength(0);
+  });
+
+  test("removing the last question requires removing its placeholders before saving a fixed copy", async () => {
+    const { path } = await createQuestionRecipe();
+    const edit = await get(path.replace("/preview?", "/edit?"));
+    const form = fields(await edit.text(), ".recipe-editor"); form.set("purpose", "recipe");
+    for (const field of ["key", "label", "default"]) form.set(`input-0-${field}`, "");
+    const invalid = await post("/recipes/preview", form); expect(invalid.status).toBe(400);
+    const html = await invalid.text(); expect(html).toContain("Remove the input placeholders");
+    const fixed = fields(html, ".recipe-editor"); fixed.set("purpose", "recipe");
+    fixed.set("name", "Test parser"); fixed.set("goal", "Test parser and summarize coverage."); fixed.set("criterion-0-statement", "Regression tests pass.");
+    expect((await post("/recipes/preview", fixed)).status).toBe(303);
+    expect(store.listTasks()).toHaveLength(0);
+  });
+
+  test("creator question controls and library search use the rendered forms without HTML injection", async () => {
+    const initial = await (await get("/recipes/new")).text();
+    const window = new Window(); window.document.body.innerHTML = initial; window.eval(recipeScript());
+    (window.document.querySelector('[data-add-question]') as import("happy-dom").HTMLButtonElement).click();
+    expect(window.document.querySelectorAll(".recipe-question")).toHaveLength(2);
+    const key = window.document.querySelector('[name="input-1-key"]') as import("happy-dom").HTMLInputElement;
+    key.value = '<img src=x onerror="alert(1)">'; key.dispatchEvent(new window.Event("input", { bubbles: true }));
+    expect(window.document.querySelectorAll(".recipe-question img")).toHaveLength(0);
+    expect(window.document.querySelectorAll('[data-question-token]')[1]?.textContent).toContain(key.value);
+    key.value = "scenario";
+    (key.closest("fieldset")!.querySelector('[data-insert-question]') as import("happy-dom").HTMLButtonElement).click();
+    expect((window.document.querySelector('[name="goal"]') as import("happy-dom").HTMLTextAreaElement).value).toContain("{{scenario}}");
+    window.happyDOM.abort();
+    await createQuestionRecipe();
+    const library = new Window(); library.document.body.innerHTML = await (await get("/recipes")).text(); library.eval(recipeScript());
+    const search = library.document.querySelector('[data-recipe-search-input]') as import("happy-dom").HTMLInputElement;
+    search.value = "no match"; search.dispatchEvent(new library.Event("input"));
+    expect(library.document.querySelector('[data-saved-recipes] [data-recipe-card]')?.hasAttribute("hidden")).toBe(true);
+    expect(library.document.querySelector('[data-recipe-empty]')?.hasAttribute("hidden")).toBe(false);
+    search.value = "TEST"; search.dispatchEvent(new library.Event("input"));
+    expect(library.document.querySelector('[data-saved-recipes] [data-recipe-card]')?.hasAttribute("hidden")).toBe(false);
+    library.happyDOM.abort();
+  });
+
   test("choose, customize, preview, save, export and launch; retry opens the same task", async () => {
     const library = await (await get("/recipes")).text();
     expect(library).toContain("Good work, on repeat."); expect(library).toContain("Understand this project");
