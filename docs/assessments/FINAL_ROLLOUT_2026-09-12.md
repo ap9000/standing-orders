@@ -33,8 +33,9 @@ that earlier runtime, not a fresh physical reboot of this installation.
 
 ## Mac deployment gate
 
-The live controller remains healthy on schema 52. No open runs were present at
-21:13 UTC. Released claims must not be counted as active solely because their
+The live controller remains healthy on schema 52. No open runs or unreleased, unexpired claims were present at
+21:10:35 UTC. A consistent private schema-52 backup passed SQLite integrity
+checking before the proposed system restart. Released claims must not be counted as active solely because their
 expiration is in the future. The installed service and database were not replaced.
 
 The unlocked-session Documents canary failed before its first healthy project
