@@ -4,9 +4,13 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, realpat
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { createHmac, randomBytes as randomChallenge } from "node:crypto";
 import { openStore, openStoreNoMigrate, databasePath } from "./store.js";
 import { authenticateApprover, hashPassword } from "./scope.js";
 import { runOperate, writeLoginFileDurably } from "./operate.js";
+import { daemonStatus, installLaunchdService, planDesktopService, stopLaunchdService, type ServiceDefinition, type SupervisorRunner } from "./daemon.js";
+import { run as execRun } from "./exec.js";
+import { containmentStatus, currentContainment } from "./containment.js";
 import { updateRepos, addRepos } from "./repos.js";
 import { projectSelection } from "./project.js";
 import type { Store } from "./store.js";
@@ -95,6 +99,66 @@ export function pairDesktopLogin(store: Store, file: string, login: { name: stri
   if (!authenticateApprover(store, login.name, login.password).ok) throw new Error("Another operator was created during setup. Sign in again.");
 }
 
+/** The desktop service definition the shell asks for: the shared launchd contract, labelled by the shell. */
+export function desktopServiceDefinition(stateDir: string, args: { node: string; helper: string; label: string; home?: string }): ServiceDefinition {
+  const runtimeDir = dirname(args.node);
+  const home = args.home ?? homedir();
+  return planDesktopService({
+    node: args.node,
+    helper: args.helper,
+    stateDir,
+    label: args.label,
+    home,
+    pathEnv: [runtimeDir, join(home, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"),
+  });
+}
+
+export type DesktopLiveness = { alive: true; port: number } | { alive: false; port: number; problem: string };
+
+/** The fresh-liveness check: the controller answers its identity challenge on the configured port. */
+export async function verifyDesktopLiveness(config: DesktopConfig, fetchImpl: typeof fetch = fetch): Promise<DesktopLiveness> {
+  const challenge = randomBytes(32).toString("hex");
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${config.port}/desktop/health?challenge=${challenge}`, { signal: AbortSignal.timeout(2_000) });
+    if (response.status !== 200) return { alive: false, port: config.port, problem: `the controller answered ${response.status} on port ${config.port}` };
+    const body = (await response.json()) as { proof?: unknown };
+    const expected = createHmac("sha256", Buffer.from(config.identity, "hex")).update(challenge).digest("hex");
+    if (body.proof !== expected) return { alive: false, port: config.port, problem: `something on port ${config.port} is not this installation's controller` };
+    return { alive: true, port: config.port };
+  } catch (error) {
+    return { alive: false, port: config.port, problem: `no controller answered on port ${config.port} (${error instanceof Error ? error.message : String(error)})` };
+  }
+}
+
+/** `service-start | service-stop | service-status --node <path> --helper <path> --label <label>`: the shell's service verbs, on the shared lifecycle. */
+export async function desktopServiceCommand(verb: string, stateDir: string, config: DesktopConfig, argv: string[], supervise: SupervisorRunner = execRun): Promise<Record<string, unknown>> {
+  const read = (name: string): string => {
+    const at = argv.indexOf(`--${name}`);
+    const value = at >= 0 ? argv[at + 1] : undefined;
+    if (value === undefined || value.startsWith("--")) throw new Error(`${verb} needs --${name}.`);
+    return value;
+  };
+  const definition = desktopServiceDefinition(stateDir, { node: read("node"), helper: read("helper"), label: read("label") });
+  if (verb === "service-start") {
+    if (config.repos.length === 0) throw new Error("Choose a repository in the desktop app first.");
+    // The log stays private: the service writes into the state directory only.
+    if (!existsSync(definition.logPath)) writeFileSync(definition.logPath, "", { mode: 0o600 });
+    const started = await installLaunchdService(definition, supervise);
+    if (!started.ok) throw new Error(started.message);
+    return { ok: true, action: started.action, changed: started.changed, label: definition.label, unit: definition.unitPath };
+  }
+  if (verb === "service-stop") {
+    const stopped = await stopLaunchdService(definition, supervise);
+    return { ok: true, wasLoaded: stopped.wasLoaded, label: definition.label };
+  }
+  if (verb === "service-status") {
+    const status = await daemonStatus(definition, supervise);
+    const liveness = status.state === "running" ? await verifyDesktopLiveness(config) : null;
+    return { ok: true, ...status, label: definition.label, liveness, containment: containmentStatus(currentContainment()) };
+  }
+  throw new Error("Unknown desktop service operation.");
+}
+
 export async function desktopMain(argv: string[]): Promise<void> {
   const stateArg = argv.indexOf("--state");
   if (stateArg >= 0 && !argv[stateArg + 1]) throw new Error("--state needs a directory.");
@@ -121,6 +185,8 @@ export async function desktopMain(argv: string[]): Promise<void> {
       } else if (argv[0] === "add-repo" || argv[0] === "add-repos") {
         config = await addDesktopProjects(stateDir, store, argv.slice(1, stateArg < 0 ? undefined : stateArg));
         console.log(JSON.stringify({ ok: true, repos: config.repos }));
+      } else if (argv[0] === "service-start" || argv[0] === "service-stop" || argv[0] === "service-status") {
+        console.log(JSON.stringify(await desktopServiceCommand(argv[0], stateDir, config, argv.slice(1))));
       } else throw new Error("Unknown desktop operation.");
     } finally { store.close(); }
     return;

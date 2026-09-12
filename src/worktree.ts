@@ -25,8 +25,10 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync, mkdirSync, readdirSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
+import { currentBootId, provenDeadByBootChange } from "./boot-identity.js";
 import type { Store, WorktreeRow } from "./store.js";
 import { HANDOFF_PREFIX, MAILBOX_SUFFIX, readMailbox } from "./evidence.js";
 import { parseHandoff } from "./decision.js";
@@ -131,7 +133,11 @@ export function recordWorktreeProcess(store: Store, path: string, runner: string
       (leaseEpoch !== undefined && leased.leaseEpoch !== leaseEpoch)) {
     throw new Error(`${path}: subprocess custody no longer matches its worktree lease`);
   }
-  writeFileSync(join(path, MARKER), `${pid} ${runner} group\n`, "utf8");
+  // The boot the holder was born under rides the note (v53): after a
+  // verified boot change nothing of it survives, and the checkout is free
+  // without a PID probe that a reused pid could answer wrongly.
+  const bootId = currentBootId();
+  writeFileSync(join(path, MARKER), `${pid} ${runner} group${bootId === null ? "" : ` ${bootId}`}\n`, "utf8");
 }
 
 /** Read-only occupancy witness shared with stop settlement. */
@@ -143,6 +149,11 @@ export function worktreeProcessOccupancy(path: string): { held: true; by: number
   const pid = Number(parts[0]);
   if (!Number.isInteger(pid) || pid <= 0) return { held: false };
   if (pid === process.pid) return { held: false };
+  // A note from a previous, VERIFIED boot of this host names a process
+  // that cannot exist any more; a note without a boot id (legacy) or a
+  // boot this host cannot verify keeps the probe below.
+  const noteBoot = parts[3];
+  if (noteBoot !== undefined && provenDeadByBootChange({ host: hostname(), bootId: noteBoot })) return { held: false };
 
   // A shell/provider can exit before its descendants. A recorded POSIX
   // process group remains an owner until that whole group has gone.

@@ -22,6 +22,7 @@ import { readProviderKey, readAuthModeStrict, PROVIDER_KEY_ENV, OWN_KEY_ENV } fr
 import { classifyTerminal } from "./exhaustion.js";
 import { attestProvider, type VersionProbe } from "./attest.js";
 import { runOwnerTag, startClaudeHeldSession } from "./exec.js";
+import { currentContainment } from "./containment.js";
 import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
 import { witnessedRunner } from "./process-custody.js";
@@ -101,7 +102,7 @@ export type InvokeResult =
   | { kind: "ran"; outcome: AgentOutcome }
   | {
       kind: "refused";
-      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody" | "auth-mode" | "route-authority" | "stopped";
+      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody" | "auth-mode" | "route-authority" | "stopped" | "containment";
       providerVersion: string | null;
       diagnostic: string | null;
       /** Bounded agent reply when a spawned turn later failed a protocol
@@ -332,6 +333,20 @@ export async function invokeAgent(
       reason: "stopped",
       providerVersion: attested === null ? null : attested.version,
       diagnostic: `stopped by ${stopBeforeSpawn.requestedBy} (run #${stopBeforeSpawn.run}) before the provider spawned — nothing was spent`,
+    };
+  }
+
+  // THE CONTAINMENT FENCE at the spawn (OS containment plan): a required
+  // native policy this runner cannot meet — macOS, an undelegated cgroup,
+  // a missing helper — spawns nothing. A value-shaped refusal in the
+  // policy's own words, no stamp, no process, no spend.
+  const containment = currentContainment();
+  if (containment.refusal !== null) {
+    return {
+      kind: "refused",
+      reason: "containment",
+      providerVersion: attested === null ? null : attested.version,
+      diagnostic: containment.refusal,
     };
   }
 
@@ -645,6 +660,12 @@ export async function invokeHeldAgent(
   if (!heldStrict.ok) throw new Error(`run ${runId}: ${heldStrict.problem}`);
   const heldMode = heldStrict.mode;
 
+  // The containment fence, same direction as the one-shot gateway: a
+  // required policy this runner cannot meet throws in its words before
+  // the start stamp, and no supervisor spawns.
+  const heldContainment = currentContainment();
+  if (heldContainment.refusal !== null) throw new Error(`run ${runId}: ${heldContainment.refusal}`);
+
   // The stamp precedes the spawn — same direction as the one-shot gateway.
   store.stampProviderStart(runId, clock());
 
@@ -666,6 +687,14 @@ export async function invokeHeldAgent(
       onSpawn: pid => {
         store.recordRunProcess(runId, pid, clock(), false, heldWitness);
         runOptions.onSpawn?.(pid);
+      },
+      onContainer: info => {
+        if (heldWitness !== undefined) store.recordRunContainer(heldWitness, info.backend, info.id);
+        runOptions.onContainer?.(info);
+      },
+      onContainerEmpty: () => {
+        if (heldWitness !== undefined) store.markRunContainerEmpty(heldWitness, clock());
+        runOptions.onContainerEmpty?.();
       },
       onDescendant: (pid, group) => {
         store.recordRunProcess(runId, pid, clock(), group);

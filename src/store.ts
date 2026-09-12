@@ -34,6 +34,8 @@ import { hostname } from "node:os";
 import { ownedProcessCount, runOwnerTag } from "./exec.js";
 import { worktreeProcessOccupancy } from "./worktree.js";
 import { processMayBeAlive } from "./process-liveness.js";
+import { currentBootId, provenDeadByBootChange } from "./boot-identity.js";
+import { containerEmptiness } from "./container-state.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
 import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
@@ -77,7 +79,7 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 52;
+export const SCHEMA_VERSION = 53;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -3253,6 +3255,13 @@ CREATE TABLE IF NOT EXISTS run_stop (
 -- Retained spawn witnesses also cover reviewers and setup/check children,
 -- which need not have an execution slot or a persistent worktree marker.
 -- PIDs are only queried for liveness; they never authorize a signal.
+-- v53 (OS containment and login recovery): each witness also carries the
+-- OS boot it was born under (boot_id — a verified boot change on the same
+-- host proves the process gone; NULL keeps the conservative road), and the
+-- native OS object the spawn ran inside (containment = the backend,
+-- container = the cgroup directory or job name, container_empty_at = when
+-- the OS proved it empty). A native witness with no empty proof keeps every
+-- stop/resume fence closed until the object can be proven empty.
 CREATE TABLE IF NOT EXISTS run_process (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
@@ -3260,7 +3269,11 @@ CREATE TABLE IF NOT EXISTS run_process (
   host TEXT NOT NULL,
   process_group INTEGER NOT NULL CHECK (process_group IN (0,1)),
   observed_at TEXT NOT NULL,
-  exited_at TEXT
+  exited_at TEXT,
+  boot_id TEXT,
+  containment TEXT,
+  container TEXT,
+  container_empty_at TEXT
 );
 CREATE INDEX IF NOT EXISTS run_process_by_run ON run_process(run, exited_at);
 
@@ -4474,6 +4487,15 @@ function migrate(db: Database, origin: number | null): void {
      )`,
     ["id", "task_ref", "owner_kind", "owner_id", "reason", "until", "held_at"],
   );
+
+  // v53 (OS containment and login recovery): four additive, nullable
+  // columns on run_process. A legacy witness has NULL in all four, which
+  // every reader treats as "unknown boot, observed containment" — the
+  // conservative road it already took. No historical row changes meaning.
+  addColumn(db, "run_process", "boot_id", "TEXT");
+  addColumn(db, "run_process", "containment", "TEXT");
+  addColumn(db, "run_process", "container", "TEXT");
+  addColumn(db, "run_process", "container_empty_at", "TEXT");
 }
 
 /** The origin CHECK, verbatim from the fresh review_request DDL. */
@@ -20081,8 +20103,26 @@ export class Store {
       }
       for (const witness of witnesses) {
         if (witness["exited_at"] !== null) continue;
+        const host = String(witness["host"]);
+        const bootId = witness["boot_id"] === null || witness["boot_id"] === undefined ? null : String(witness["boot_id"]);
+        // A VERIFIED boot change on this host (v53): nothing of the old
+        // boot survives — an incomplete spawn, a reused pid and a native
+        // object alike are gone. Every other case keeps the conservative
+        // road below.
+        if (provenDeadByBootChange({ host, bootId })) continue;
         if (witness["pid"] === null) return `run #${id} has an incomplete spawn witness; exit is unproven`;
-        if (witness["host"] !== hostname()) return `run #${id}'s process belongs to another host; exit is unproven here`;
+        if (host !== hostname()) return `run #${id}'s process belongs to another host; exit is unproven here`;
+        const backend = witness["containment"] === null || witness["containment"] === undefined ? null : String(witness["containment"]);
+        const container = witness["container"] === null || witness["container"] === undefined ? null : String(witness["container"]);
+        if (backend !== null && container !== null && witness["container_empty_at"] === null) {
+          // A native witness settles ONLY on the OS's word: the object is
+          // proven empty, or it is gone (an OS object is removable only
+          // when empty). A transport exit never proved it.
+          const state = containerEmptiness(backend, container);
+          if (state === "populated") return `run #${id}'s ${backend} object ${container} still has members`;
+          if (state === "unknown") return `run #${id}'s ${backend} object ${container} cannot be proven empty from here`;
+          continue;
+        }
         const pid = Number(witness["pid"]);
         if (processMayBeAlive(pid, witness["process_group"] === 1)) return `run #${id}'s process ${pid} may still be running`;
       }
@@ -20097,8 +20137,8 @@ export class Store {
   }
 
   reserveRunProcess(runId: number, now: Date, group = true): number {
-    return Number(this.db.prepare("INSERT INTO run_process (run,host,process_group,observed_at) VALUES (?,?,?,?)")
-      .run(runId, hostname(), group ? 1 : 0, now.toISOString()).lastInsertRowid);
+    return Number(this.db.prepare("INSERT INTO run_process (run,host,process_group,observed_at,boot_id) VALUES (?,?,?,?,?)")
+      .run(runId, hostname(), group ? 1 : 0, now.toISOString(), currentBootId()).lastInsertRowid);
   }
 
   finishUnspawnedProcess(witness: number, now: Date): void {
@@ -20114,8 +20154,29 @@ export class Store {
       if (Number(changed.changes) !== 1) throw new Error("spawn witness custody changed");
       return;
     }
-    this.db.prepare("INSERT INTO run_process (run,pid,host,process_group,observed_at) VALUES (?,?,?,?,?)")
-      .run(runId, pid, hostname(), group ? 1 : 0, now.toISOString());
+    this.db.prepare("INSERT INTO run_process (run,pid,host,process_group,observed_at,boot_id) VALUES (?,?,?,?,?,?)")
+      .run(runId, pid, hostname(), group ? 1 : 0, now.toISOString(), currentBootId());
+  }
+
+  /** The native OS object a witnessed spawn ran inside (v53) — recorded
+   * with the spawn, before the target can execute. */
+  recordRunContainer(witness: number, backend: string, container: string): void {
+    const changed = this.db.prepare("UPDATE run_process SET containment = ?, container = ? WHERE id = ? AND container IS NULL AND exited_at IS NULL")
+      .run(backend, container, witness);
+    if (Number(changed.changes) !== 1) throw new Error("container custody changed");
+  }
+
+  /** The OS proved the witness's object empty (v53): the ONLY road that
+   * marks a native witness settled; a transport exit never does. */
+  markRunContainerEmpty(witness: number, now: Date): void {
+    this.db.prepare("UPDATE run_process SET container_empty_at = ? WHERE id = ? AND container IS NOT NULL AND container_empty_at IS NULL")
+      .run(now.toISOString(), witness);
+  }
+
+  /** The newest witness a run holds, for a caller that must name one. */
+  latestRunProcessWitness(runId: number): number | null {
+    const row = this.db.prepare("SELECT id FROM run_process WHERE run = ? ORDER BY id DESC LIMIT 1").get(runId);
+    return row === undefined ? null : Number(row["id"]);
   }
 
   /**

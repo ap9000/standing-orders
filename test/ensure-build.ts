@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 export default function ensureBuild(): void {
   const root = resolve(import.meta.dirname, "..");
   const stale = readdirSync(join(root, "src")).some(name => {
-    if ((!name.endsWith(".ts") || name.endsWith(".test.ts")) && name !== "supervisor.mjs") return false;
+    if ((!name.endsWith(".ts") || name.endsWith(".test.ts")) && name !== "supervisor.mjs" && name !== "job-object-helper.ps1") return false;
     const output = join(root, "dist", name.replace(/\.ts$/, ".js"));
     return !existsSync(output) || statSync(join(root, "src", name)).mtimeMs > statSync(output).mtimeMs;
   });

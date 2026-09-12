@@ -6,7 +6,9 @@ type Runner = (file: string, args: readonly string[], options?: RunOptions) => P
 /** Reserve each spawn before the OS call. A crash before its PID is recorded
  * leaves an explicit unknown, even if earlier setup/check processes exited.
  * Only the returning transport can certify that its reserved spawn made no child.
- * Retained PIDs are read-only witnesses, never authority to signal a process. */
+ * Retained PIDs are read-only witnesses, never authority to signal a process.
+ * A native OS object (v53) rides the same witness: named at the spawn, and
+ * marked empty only when the OS proved it so — never on a transport exit. */
 export function witnessedRunner(store: Store, runId: number, clock: () => Date, runner: Runner): Runner {
   return async (file, args, options = {}) => {
     const witnesses: number[] = [];
@@ -29,6 +31,16 @@ export function witnessedRunner(store: Store, runId: number, clock: () => Date, 
       onSpawn: pid => {
         store.recordRunProcess(runId, pid, clock(), options.processGroup === true, witnesses.at(-1));
         options.onSpawn?.(pid);
+      },
+      onContainer: info => {
+        const witness = witnesses.at(-1);
+        if (witness !== undefined) store.recordRunContainer(witness, info.backend, info.id);
+        options.onContainer?.(info);
+      },
+      onContainerEmpty: () => {
+        const witness = witnesses.at(-1);
+        if (witness !== undefined) store.markRunContainerEmpty(witness, clock());
+        options.onContainerEmpty?.();
       },
     });
     for (const witness of witnesses) store.finishUnspawnedProcess(witness, clock());

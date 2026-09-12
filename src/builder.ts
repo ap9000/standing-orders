@@ -326,7 +326,11 @@ export type BuildRefusal =
   // The route re-proof at the spawn (final authority closure): the
   // provenance a run was admitted under no longer proves against the
   // authority its task holds — no spend, the words say what moved.
-  | "route-authority";
+  | "route-authority"
+  // Required native containment this runner cannot provide (OS
+  // containment plan): refused before any target executes — no spend, no
+  // strike, the words name the missing facility and the route to it.
+  | "containment";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;

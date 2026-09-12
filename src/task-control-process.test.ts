@@ -21,7 +21,10 @@ import { disposeBuildOutcome } from "./dispose.js";
 import { attemptHasLiveChildren, requestTaskStop, resumeTaskStop, taskControlOf } from "./task-control.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
-const T0 = new Date("2026-09-12T09:00:00.000Z");
+// A minute ago in REAL time: the claim's one-hour lease must still be live
+// when the gateway re-proves runner custody at the actual spawn, whatever
+// the clock says today — a fixed calendar instant expired after 10:00Z.
+const T0 = new Date(Date.now() - 60_000);
 const REPO = "/code/stop-process";
 const tok = (name: string) => `tok-${name}`;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
