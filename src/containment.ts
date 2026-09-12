@@ -499,7 +499,13 @@ export function jobObjectContainer(capability: ContainmentCapability, label: str
         const line = buffered.slice(0, cut); buffered = buffered.slice(cut + 1);
         if (line === "ready" && state === "pending") { state = "ready"; authorize(); }
         else if (line === "attached" && state === "ready" && authorized) state = "attached";
-        else if (line === "empty") state = "empty";
+        else if (line === "empty") {
+          state = "empty";
+          // The helper may have a pending control read. Close now, on its
+          // kernel empty proof, so .NET disposal never waits for an EOF that
+          // transport `close` would otherwise delay until after helper exit.
+          socket.destroy();
+        }
         else if (line.startsWith("failed ")) fail(line.slice(7));
         else { fail("invalid containment control sequence"); return; }
       }

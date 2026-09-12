@@ -56,7 +56,6 @@ jobs:
         env:
           CI: "true"
           SO_EXPECT_NATIVE_CONTAINMENT: "1"
-          SO_CONTAINMENT_DEBUG: "1"
 
   windows-baseline:
     name: windows baseline · node ${{ matrix.node }}
@@ -99,4 +98,3 @@ jobs:
         env:
           CI: "true"
           SO_EXPECT_NATIVE_CONTAINMENT: "1"
-          SO_CONTAINMENT_DEBUG: "1"

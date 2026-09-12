@@ -29,8 +29,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-function Trace([string] $phase) { if ($env:SO_CONTAINMENT_DEBUG -eq "1") { [Console]::Error.WriteLine("containment-debug " + $phase) } }
-Trace "compile"
 
 Add-Type -TypeDefinition @"
 using System;
@@ -163,9 +161,7 @@ if ($JobName -cnotmatch '^Global\\so-[A-Za-z0-9._-]+-[a-f0-9]{64}$') { throw "in
 $name = $Pipe
 if ($name.StartsWith("\\.\pipe\")) { $name = $name.Substring(9) }
 $client = New-Object System.IO.Pipes.NamedPipeClientStream(".", $name, [System.IO.Pipes.PipeDirection]::InOut)
-Trace "connect"
 $client.Connect(5000)
-Trace "connected"
 $writer = New-Object System.IO.StreamWriter($client)
 $writer.AutoFlush = $true
 $reader = New-Object System.IO.StreamReader($client)
@@ -179,15 +175,12 @@ try {
   if ($targetArguments.Count -lt 1) { throw "the target argv is empty" }
   # Admission arrives only after the controller durably records this helper.
   $job = [SoJob]::MakeJob($JobName)
-  Trace "job-created"
   Send "ready"
   $admission = $reader.ReadLineAsync()
   if (-not $admission.Wait(15000) -or $admission.Result -cne "go") { throw "job admission refused" }
-  Trace "admitted"
   $parts = @()
   foreach ($arg in $targetArguments) { $parts += [SoJob]::Quote([string]$arg) }
   $pi = [SoJob]::StartSuspended(($parts -join " "))
-  Trace "suspended"
   if (-not [SoJob]::AssignProcessToJobObject($job, $pi.hProcess)) {
     $code = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
     [void][SoJob]::TerminateProcess($pi.hProcess, 126)
@@ -195,7 +188,6 @@ try {
     exit 126
   }
   if ([SoJob]::ResumeThread($pi.hThread) -eq [uint32]::MaxValue) { throw "ResumeThread failed" }
-  Trace "resumed"
   Send "attached"
 } catch {
   if ($pi -ne $null -and $pi.hProcess -ne [IntPtr]::Zero) { [void][SoJob]::TerminateProcess($pi.hProcess, 126) }
@@ -207,9 +199,7 @@ try {
 # Orders from the controller are read asynchronously on this one thread (a
 # PowerShell runspace is single-threaded; ReadLineAsync polls without one). The
 # pipe closing - the controller died - is itself the order to terminate.
-Trace "before-read"
 $pendingRead = $reader.ReadLineAsync()
-Trace "reading"
 $pipeClosed = $false
 function NextOrders {
   $found = @()
@@ -228,7 +218,6 @@ $rootExited = $false
 $rootExitedAt = $null
 while ($true) {
   if (-not $rootExited -and [SoJob]::WaitForSingleObject($pi.hProcess, 50) -eq 0) {
-    Trace "root-exited"
     $rootExited = $true
     $rootExitedAt = Get-Date
     $c = [uint32]0
@@ -242,7 +231,7 @@ while ($true) {
   }
   if ($rootExited) {
     $active = [SoJob]::ActiveProcesses($job)
-    if ($active -eq 0) { Trace "empty"; Send "empty"; break }
+    if ($active -eq 0) { Send "empty"; break }
     # The root is gone but members remain (a detached grandchild): natural
     # exit cleans them up too, after a short grace for the ordinary case.
     if (((Get-Date) - $rootExitedAt).TotalMilliseconds -gt 2000) { [void][SoJob]::TerminateJobObject($job, 137) }

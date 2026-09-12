@@ -12,7 +12,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+import { containerEmptiness } from "./container-state.js";
+import { join, resolve } from "node:path";
 import { effectiveContainment, pinContainment, probeContainmentCapability, resetContainmentForTests } from "./containment.js";
 import { run, terminateOwnedProcesses } from "./exec.js";
 
@@ -66,6 +69,7 @@ describe("native containment (Windows Job Object)", { timeout: 40_000 }, () => {
     const result = await run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, timeoutMs: 8_000, env: { SO_DIR: dir, SO_MODE: "exit" }, onContainer: info => { id = info.id; } });
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
+    expect(result.timedOut).toBe(false);
     expect(result.containment).toEqual({ backend: "job-object", id, empty: true });
     const pids = JSON.parse(readFileSync(join(dir, "pids.json"), "utf8")) as { root: number; escaped: number };
     expect(await waitFor(() => !alive(pids.escaped), 5_000)).toBe(true);
@@ -97,11 +101,34 @@ describe("native containment (Windows Job Object)", { timeout: 40_000 }, () => {
 
   test.skipIf(!native)("c1: argv, environment and cwd reach the target verbatim through the helper", async () => {
     const script = join(dir, "echo.mjs");
-    writeFileSync(script, `process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), env: process.env.SO_PROBE, cwd: process.cwd() }));`);
+    writeFileSync(script, `let input=""; process.stdin.setEncoding("utf8"); process.stdin.on("data",chunk=>input+=chunk); process.stdin.on("end",()=>process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), env: process.env.SO_PROBE, cwd: process.cwd(), input })));`);
     const args = ["--flag", "a value with spaces", 'quotes "inside"', "trailing\\", "", "%PATH%", "unicode ✓"];
-    const result = await run(process.execPath, [script, ...args], { processGroup: true, cwd: dir, timeoutMs: 8_000, env: { SO_PROBE: "probe-value" } });
+    const result = await run(process.execPath, [script, ...args], { processGroup: true, cwd: dir, timeoutMs: 8_000, stdin: "prompt\nsecond line\n", env: { SO_PROBE: "probe-value" } });
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ argv: args, env: "probe-value", cwd: dir });
+    expect(result.timedOut).toBe(false);
+    expect(JSON.parse(result.stdout)).toEqual({ argv: args, env: "probe-value", cwd: dir, input: "prompt\nsecond line\n" });
   });
+  test.skipIf(!native)("worker death closes its job and a new controller can prove it empty", async () => {
+    const worker = join(dir, "worker.mjs"), note = join(dir, "object.json");
+    writeFileSync(worker, `
+      import {writeFileSync} from 'node:fs';
+      const {pinContainment,effectiveContainment,probeContainmentCapability}=await import(${JSON.stringify(pathToFileURL(resolve("dist/containment.js")).href)});
+      const {run}=await import(${JSON.stringify(pathToFileURL(resolve("dist/exec.js")).href)});
+      pinContainment(effectiveContainment('required',probeContainmentCapability()));
+      void run(process.execPath,[${JSON.stringify(join(dir, "root.mjs"))}],{processGroup:true,env:{SO_DIR:${JSON.stringify(dir)},SO_MODE:'linger'},onContainer:info=>writeFileSync(${JSON.stringify(note)},JSON.stringify(info))});
+    `);
+    const child = spawn(process.execPath, [worker], { stdio: "ignore" });
+    try {
+      expect(await waitFor(() => existsSync(join(dir, "pids.json")) && existsSync(join(dir, "ticks.log")), 15_000)).toBe(true);
+      const info = JSON.parse(readFileSync(note, "utf8"));
+      const pids = JSON.parse(readFileSync(join(dir, "pids.json"), "utf8"));
+      expect(containerEmptiness(info.backend, info.id, process.platform, info.identity)).toBe("populated");
+      const exited = new Promise(done => child.once("exit", done)); child.kill("SIGKILL"); await exited;
+      expect(await waitFor(() => !alive(pids.root) && !alive(pids.escaped), 10_000)).toBe(true);
+      expect(containerEmptiness(info.backend, info.id, process.platform, info.identity)).toBe("empty");
+      expect(await stableAfterSettlement(join(dir, "ticks.log"))).toBe(true);
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
+  });
+
 });
