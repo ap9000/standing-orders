@@ -20,7 +20,7 @@
 
 param(
   [Parameter(Position = 0)] [string] $Pipe,
-  # The target's argv — file first — as base64(UTF-8 JSON array): one opaque
+  # The target's argv - file first - as base64(UTF-8 JSON array): one opaque
   # token, so PowerShell's own command-line parsing can never touch a quote,
   # a space or a percent sign the controller passed.
   [Parameter(Position = 1)] [string] $Encoded,
@@ -184,7 +184,7 @@ try {
   if (-not [SoJob]::AssignProcessToJobObject($job, $pi.hProcess)) {
     $code = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
     [void][SoJob]::TerminateProcess($pi.hProcess, 126)
-    Send ("failed AssignProcessToJobObject failed with Win32 error " + $code + " — the target never ran")
+    Send ("failed AssignProcessToJobObject failed with Win32 error " + $code + " - the target never ran")
     exit 126
   }
   if ([SoJob]::ResumeThread($pi.hThread) -eq [uint32]::MaxValue) { throw "ResumeThread failed" }
@@ -198,7 +198,7 @@ try {
 
 # Orders from the controller are read asynchronously on this one thread (a
 # PowerShell runspace is single-threaded; ReadLineAsync polls without one). The
-# pipe closing — the controller died — is itself the order to terminate.
+# pipe closing - the controller died - is itself the order to terminate.
 $pendingRead = $reader.ReadLineAsync()
 $pipeClosed = $false
 function NextOrders {
@@ -225,7 +225,7 @@ while ($true) {
   }
   foreach ($order in (NextOrders)) {
     # A stop from the controller, or the controller's death (pipe closed):
-    # end every member now. "release" needs nothing here — the helper exits
+    # end every member now. "release" needs nothing here - the helper exits
     # on its own the moment the job is proven empty.
     if ($order -eq "kill" -or $order -eq "closed") { [void][SoJob]::TerminateJobObject($job, 137); if (-not $rootExited) { $rootExited = $true; $rootExitedAt = Get-Date; $exitCode = 137 } }
   }
