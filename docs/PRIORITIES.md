@@ -160,6 +160,16 @@ started.
 
 ## Current focus
 
+The reliability/routing stack and bounded explicit review retries are integrated
+in main at `b96d53e`. The next body of work is
+[preserving the task contract through every handoff](CONTRACT_HANDOFF_PLAN.md):
+filed requirements reach the planner, revision terms retain their intended risk
+and quality, and independent review can assess inherited criteria from sealed
+context. The retry feature's self-hosted journey needed operator assistance at
+each of those boundaries. Complete this journey without rescue before expanding
+the desktop/shared-chat branch or starting project memory. The linked plan also
+records the remaining branch inventory and integration decisions.
+
 Priority 1 is active again under the [unattended completion plan](UNATTENDED_PLAN.md).
 The earlier pre-Windows gates passed, but subsequent real work exposed gaps
 that now need closure and broader certification. Physical-machine and real

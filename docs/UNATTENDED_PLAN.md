@@ -47,6 +47,14 @@ Main was still `917bc5b` when this plan was prepared.
 
 ## Execution status
 
+- **2026-09-12 integration:** local main fast-forwarded from `984fb49` to
+  `b96d53e`, including the reliability/routing stack and final schema-v50 review
+  retry fixes. The live controller remains on the stable schema-v49 runtime;
+  this merge does not upgrade it or publish main. Earlier statements below
+  about unmerged branches describe their historical checkpoints. The next
+  implementation body is the [contract handoff plan](CONTRACT_HANDOFF_PLAN.md),
+  based on the assisted planner/revision/review journey in runs 1511–1518.
+
 - Candidate `a9caf73` passes typecheck/build, package dry run, and 120 test
   files / 2,361 tests (12 existing skips). The actual public-CLI SIGKILL matrix
   passed 120/120 cases: 20 each at planning, setup, building, after commit,
