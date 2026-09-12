@@ -32,17 +32,19 @@ function usage() {
     "  --model <model>           exact model sealed into plan and build",
     "  --output <file>           write the final JSON certificate",
     "  --review                  require an independent review of the result",
+    "  --auto-approve            sign an unchanged-plan policy; require automatic review",
     "  --keep                    keep the disposable repo and evidence",
     "  --json                    print only the final JSON certificate",
   ].join("\n");
 }
 
 function parseArgs(argv) {
-  const result = { provider: null, model: null, output: null, keep: false, review: false, json: false, help: false };
+  const result = { provider: null, model: null, output: null, keep: false, review: false, autoApprove: false, json: false, help: false };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === "--keep") result.keep = true;
     else if (arg === "--review") result.review = true;
+    else if (arg === "--auto-approve") { result.autoApprove = true; result.review = true; }
     else if (arg === "--json") result.json = true;
     else if (arg === "--help" || arg === "-h") result.help = true;
     else if (arg === "--provider" || arg === "--model" || arg === "--output") {
@@ -215,11 +217,27 @@ async function main() {
       "Only these files; no questions; acceptance evidence: check and changed-path only.",
     ].join(" ");
     await cli("file the task", ["task", "add", title, "--id", TASK_ID, "--repo", repo]);
-    await cli("request a repository-aware plan", [
+    let filedDigest = null;
+    if (options.autoApprove) {
+      await cli("sign bounded automatic approval with independent reviews", [
+        "mode", "set", "--repo", repo, "--name", "standard", "--days", "1",
+        "--auto-approve", "true", "--plan-auto", "--as", "canary", "--token", password,
+      ]);
+      await cli("file the fixed contract without approving its scope", [
+        "task", "scope", TASK_ID, "--goal", title, "--not", "No other files and no publication.",
+        "--touches", "canary.txt,canary.test.js",
+        "--acceptance", `canary.txt contains exactly standing-orders ${options.provider} canary passed followed by one newline.|changed-path;canary.test.js uses node:test to verify the exact file bytes and the approved node --test command passes.|check,changed-path`,
+      ]);
+      const filed = await cli("retain the exact filed contract digest", ["task", "show", TASK_ID]);
+      filedDigest = filed.scope?.digest;
+      if (typeof filedDigest !== "string" || filed.scope.approvedAt != null) throw new Error("fixed contract was missing or prematurely approved");
+    }
+    const requested = await cli("request a repository-aware plan", [
       "task", "plan", TASK_ID,
       "--provider", options.provider, "--model", options.model,
       "--as", "canary", "--token", password,
     ]);
+    if (options.autoApprove && requested.autoPlan !== true) throw new Error("the exact filed plan was not pre-authorized");
     const planned = await cli("run the planning pass", [
       "tick", "--runner", "canary-worker", "--token", runnerToken,
       "--repo", repo, "--pool", pool,
@@ -234,7 +252,11 @@ async function main() {
     if (!Array.isArray(afterPlan.scope?.acceptance) || afterPlan.scope.acceptance.length === 0) {
       throw new Error("the planning pass produced no acceptance criteria");
     }
-    await cli("approve the exact planned scope", [
+    if (options.autoApprove) {
+      if (digest !== filedDigest || afterPlan.scope.approvedDigest !== digest || afterPlan.scope.approvalBasis !== "mode") {
+        throw new Error("the unchanged plan did not receive the exact signed mode approval");
+      }
+    } else await cli("approve the exact planned scope", [
       "task", "approve", TASK_ID, "--yes", "--digest", digest,
       "--as", "canary", "--token", password,
     ]);
@@ -270,15 +292,20 @@ async function main() {
     }
 
     if (options.review) {
-      await cli("request an independent review", ["task", "review", String(buildRun.id), "--as", "canary", "--token", password]);
-      const reviewed = await cli("run the independent review", ["tick", "--runner", "canary-worker", "--token", runnerToken, "--repo", repo, "--pool", pool]);
-      if (!reviewed.dispatched?.some(item => item?.outcome === "reviewed")) throw new Error("the requested independent review did not complete");
+      if (!options.autoApprove) await cli("request an independent review", ["task", "review", String(buildRun.id), "--as", "canary", "--token", password]);
+      // A signed mode can finish its automatic review in the build tick.
+      // Require the same completed review whether it landed there or next.
+      if (!options.autoApprove || final.review?.state !== "succeeded") {
+        const reviewed = await cli("run the independent review", ["tick", "--runner", "canary-worker", "--token", runnerToken, "--repo", repo, "--pool", pool]);
+        if (!reviewed.dispatched?.some(item => item?.outcome === "reviewed")) throw new Error("the requested independent review did not complete");
+      }
       final = await cli("read the reviewed result", ["task", "show", TASK_ID]);
       if (final.proofVerdict !== "verified") throw new Error(`review left proof ${final.proofVerdict}: ${JSON.stringify(final.proofReasons ?? [])}`);
       if (!final.runs?.some(one => one.role === "reviewer" && one.outcome === "no-change" && one.provider === options.provider && one.model === options.model)) {
         throw new Error("no completed reviewer run proved the requested provider and model");
       }
       assertReviewedCriteria(final.proofMatrix, afterPlan.scope.acceptance.map(one => one.id), options.provider, options.model);
+      if (final.dispatch?.code !== "complete" || final.review?.state !== "succeeded") throw new Error("review did not reach verified completion");
     }
 
     const duplicate = await cli("prove the completed task cannot dispatch twice", [
@@ -286,6 +313,8 @@ async function main() {
       "--repo", repo, "--pool", pool,
     ], [3]);
     if (duplicate.reason !== "empty") throw new Error(`duplicate pass was not empty: ${JSON.stringify(duplicate)}`);
+    if (await git("rev-parse", "main") !== baseSha) throw new Error("the default branch changed");
+    if (Number(await git("rev-list", "--count", `${baseSha}..${branchSha}`)) !== 1) throw new Error("expected exactly one work commit");
     await assertRuntime();
 
     const providerRun = final.runs.find(runRow => runRow?.provider === options.provider && runRow?.providerStartedAt != null);
@@ -305,7 +334,9 @@ async function main() {
       workflow: {
         registration: "passed",
         planning: "passed",
-        approval: "passed",
+        approval: options.autoApprove ? "unchanged-plan-under-signed-mode" : "passed",
+        humanActionsAfterPlanningStarted: options.autoApprove ? 0 : options.review ? 2 : 1,
+        filedScopeDigest: filedDigest,
         worktreeBuild: "passed",
         commit: branchSha,
         verificationCommand: "node --test",

@@ -67,6 +67,9 @@ let killsInFlight = 0;
 const descendantPids = new Set();
 let treeUnknown = false;
 let exitWanted = false;
+let drain = null;
+let relayClosed = false;
+let relayDeadline = null;
 
 /** The exit road, deferred while a kill verb's reply is still owed: the
  * fencer must HEAR that the group is proven gone before the process that
@@ -103,9 +106,11 @@ const groupAlive = pgid => {
 const descendantsAlive = () => treeUnknown || [...descendantPids].some(pid => {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code !== "ESRCH"; }
 });
+const holdGone = pgid => relayClosed && !groupAlive(pgid) && !descendantsAlive();
 
-/** SIGKILL the group and poll to PROVEN-gone (bounded). */
-const killGroupSettled = async pgid => {
+/** All exit roads share one drain. In particular, child.close must not
+ * outrun an EOF fence that is still waiting for a detached tool to die. */
+const killGroupSettled = pgid => drain ??= Promise.resolve().then(async () => {
   if (child !== undefined && !exited) stopProcessTree(child);
   try {
     process.kill(-pgid, "SIGKILL");
@@ -114,11 +119,11 @@ const killGroupSettled = async pgid => {
   }
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    if (!groupAlive(pgid) && !descendantsAlive()) return true;
+    if (holdGone(pgid)) return true;
     await new Promise(pass => setTimeout(pass, 50));
   }
-  return !groupAlive(pgid) && !descendantsAlive();
-};
+  return holdGone(pgid);
+});
 
 // The control socket comes up BEFORE the agent spawns.
 const pending = new Set();
@@ -151,16 +156,17 @@ server = createServer(connection => {
       const pgid = child?.pid;
       const group = pgid !== undefined && groupAlive(pgid);
       connection.end(
-        `${JSON.stringify({ ok: true, alive: !exited || group, groupAlive: group, agentPgid: pgid ?? null, exitCode })}\n`,
+        `${JSON.stringify({ ok: true, alive: !exited || !relayClosed || group || descendantsAlive(), groupAlive: group, agentPgid: pgid ?? null, exitCode })}\n`,
       );
       return;
     }
     if (order.verb === "kill") {
-      const pgid = child.pid;
-      if (exited || pgid === undefined) {
-        connection.end(`${JSON.stringify({ ok: true, killed: false, settled: true, exitCode })}\n`);
+      const pgid = child?.pid;
+      if (pgid === undefined) {
+        connection.end(`${JSON.stringify({ ok: true, killed: false, settled: false, exitCode })}\n`);
         return;
       }
+      const killed = !exited;
       killsInFlight += 1;
       killGroupSettled(pgid).then(settled => {
         // The reply counts as owed until the write side has FLUSHED —
@@ -175,7 +181,7 @@ server = createServer(connection => {
         try {
           connection.on("finish", done);
           connection.on("close", done);
-          connection.end(`${JSON.stringify({ ok: true, killed: true, settled, exitCode })}\n`);
+          connection.end(`${JSON.stringify({ ok: true, killed, settled, exitCode })}\n`);
           setTimeout(done, 2_000).unref();
         } catch {
           done();
@@ -224,9 +230,23 @@ server.listen(socketPath, () => {
   child.on("exit", (code, signal) => {
     exited = true;
     exitCode = code ?? (signal === null ? 1 : 143);
+    // A tool may inherit stdout/stderr and keep `close` from ever firing.
+    // Start cleanup at root exit, while retaining the relay until flushed.
+    if (child.pid !== undefined) void killGroupSettled(child.pid);
+    relayDeadline = setTimeout(() => {
+      if (relayClosed) return;
+      // Open pipes after the drain bound may belong to an unobserved,
+      // detached writer. Do not call the hold successfully completed.
+      treeUnknown = true;
+      exitCode = 126;
+      child.stdout.destroy();
+      child.stderr.destroy();
+    }, 5_000);
   });
 
   child.on("close", code => {
+    relayClosed = true;
+    clearTimeout(relayDeadline);
     // stdio flushed and the process reaped. The GROUP may still have
     // members — a tool the agent launched can outlive its leader (round-6
     // finding 4) — so the whole group is drained and PROVEN gone before
@@ -234,8 +254,11 @@ server.listen(socketPath, () => {
     // one pid.
     exitCode = exitCode ?? code ?? 1;
     const pgid = child.pid;
-    const drained = pgid !== undefined && groupAlive(pgid) ? killGroupSettled(pgid) : Promise.resolve(true);
-    drained.then(() => {
+    const drained = pgid !== undefined ? killGroupSettled(pgid) : Promise.resolve(false);
+    drained.then(settled => {
+      // Match exec.ts's containment refusal. A clean root exit is not a
+      // clean hold when descendants remain or observation failed.
+      if (!settled || treeUnknown) exitCode = 126;
       exitWanted = true;
       maybeExit();
     });

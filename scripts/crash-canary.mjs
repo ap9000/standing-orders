@@ -14,6 +14,7 @@ import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { assertReviewedCriteria } from "./canary-assertions.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "scripts/fixtures/crash-process.mjs");
@@ -23,6 +24,7 @@ let selected = stages;
 let rounds = 1;
 let concurrency = 6;
 let stopBeforeCrash = false;
+let autoApprove = false;
 let output = resolve("output/certification/crash.json");
 for (let i = 2; i < process.argv.length; i++) {
   const arg = process.argv[i];
@@ -30,14 +32,16 @@ for (let i = 2; i < process.argv.length; i++) {
   else if (arg === "--rounds") rounds = Number(process.argv[++i]);
   else if (arg === "--concurrency") concurrency = Number(process.argv[++i]);
   else if (arg === "--stop-before-crash") stopBeforeCrash = true;
+  else if (arg === "--auto-approve") autoApprove = true;
   else if (arg === "--output") output = resolve(process.argv[++i]);
-  else if (arg === "--help") { console.log("npm run certify:crash -- [--stage planning|setup|building|after-commit|verification|review] [--stop-before-crash (building only)] [--rounds 1] [--concurrency 6] [--output file]"); process.exit(0); }
+  else if (arg === "--help") { console.log("npm run certify:crash -- [--stage planning|setup|building|after-commit|verification|review] [--auto-approve (planning only)] [--stop-before-crash (building only)] [--rounds 1] [--concurrency 6] [--output file]"); process.exit(0); }
   else throw new Error(`unknown argument ${arg}`);
 }
 assert(process.platform !== "win32", "SIGKILL fixture requires macOS or Linux; physical Windows remains a separate gate");
 assert(selected.every(stage => stages.includes(stage)) && Number.isInteger(rounds) && rounds >= 1 && rounds <= 20, "invalid stages/rounds");
 assert(Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 20, "concurrency is 1..20");
 assert(!stopBeforeCrash || selected.length === 1 && selected[0] === "building", "--stop-before-crash requires --stage building");
+assert(!autoApprove || selected.length === 1 && selected[0] === "planning", "--auto-approve requires --stage planning");
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const base = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-crash-canary-")));
 const gitBinary = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
@@ -48,7 +52,7 @@ const hash = () => {
     const p = join(path, name.name); if (name.isDirectory()) visit(p); else h.update(p.slice(root.length)).update(readFileSync(p));
   }};
   visit(join(root, "dist"));
-  for (const file of ["scripts/crash-canary.mjs", "scripts/fixtures/crash-process.mjs", "package.json"]) h.update(file).update(readFileSync(join(root, file)));
+  for (const file of ["scripts/crash-canary.mjs", "scripts/fixtures/crash-process.mjs", "scripts/canary-assertions.mjs", "package.json"]) h.update(file).update(readFileSync(join(root, file)));
   return h.digest("hex");
 };
 const runtime = hash();
@@ -120,7 +124,15 @@ async function one(stage, round) {
     if (stage === "setup") await cli(["setup", "set", "--repo", repo, "--command", wrapper("setup", "setup"), "--timeout-seconds", "240", "--yes", ...auth]);
     await cli(["task", "add", "Write result.txt containing recovered and a newline.", "--id", "work", "--repo", repo]);
     if (stage === "planning") {
-      await cli(["task", "plan", "work", "--provider", "claude", "--model", "fixture", ...auth]);
+      if (autoApprove) {
+        await cli(["mode", "set", "--repo", repo, "--name", "standard", "--days", "1", "--auto-approve", "true", "--plan-auto", ...auth]);
+        await cli(["task", "scope", "work", "--goal", "Write the result and verify it.", "--not", "No publication.", "--touches", "result.txt", "--acceptance", acceptance.map(c => `${c.statement}|${c.evidence.join(",")}`).join(";")]);
+        const filed = await cli(["task", "show", "work"]);
+        assert.equal(filed.scope.approvedAt, null);
+        record.checks.filedScopeDigest = filed.scope.digest;
+      }
+      const requested = await cli(["task", "plan", "work", "--provider", "claude", "--model", "fixture", ...auth]);
+      if (autoApprove) assert.equal(requested.autoPlan, true);
     } else {
       await cli(["task", "scope", "work", "--goal", "Write the result and verify it.", "--acceptance", acceptance.map(c => `${c.statement}|${c.evidence.join(",")}`).join(";")]);
       const preview = await cli(["task", "show", "work"]);
@@ -191,13 +203,26 @@ async function one(stage, round) {
       await cli(["task", "resume", "work", "--run", String(record.checks.stopTarget), ...auth]);
       assert.notEqual(rows("SELECT resumed_at FROM run_stop")[0]?.resumed_at, null);
     }
-    if (stage !== "review") writeFileSync(join(control,"recovery-result.json"), JSON.stringify(await start([...workerArgs, "--for", "2500"], opts).done));
+    if (stage !== "review") writeFileSync(join(control,"recovery-result.json"), JSON.stringify(await start([...workerArgs, "--for", autoApprove ? "15000" : "2500"], opts).done));
     let after = await cli(["task", "show", "work"]);
     const runsBeforeDuplicate = rows("SELECT id FROM run ORDER BY id");
     const duplicate = await cli(["tick", "--runner", "worker", "--token", registered.token, "--repo", repo, "--pool", pool], [3]);
-    assert.equal(duplicate.reason, stage === "planning" ? "nothing-dispatched" : "empty");
+    assert.equal(duplicate.reason, stage === "planning" && !autoApprove ? "nothing-dispatched" : "empty");
     assert.deepEqual(rows("SELECT id FROM run ORDER BY id"), runsBeforeDuplicate);
-    record.checks.duplicateDispatch = stage === "planning" ? "refused-unapproved" : "refused-empty";
+    record.checks.duplicateDispatch = stage === "planning" && !autoApprove ? "refused-unapproved" : "refused-empty";
+    if (autoApprove) {
+      assert.equal(after.scope.digest, record.checks.filedScopeDigest);
+      assert.equal(after.scope.approvedDigest, record.checks.filedScopeDigest);
+      assert.equal(after.scope.approvalBasis, "mode");
+      assert.equal(after.task.state, "done");
+      assert.equal(after.proofVerdict, "verified");
+      assert.equal(after.dispatch.code, "complete");
+      assert.equal(after.review.state, "succeeded");
+      assertReviewedCriteria(after.proofMatrix, acceptance.map(c => c.id), "claude", "fixture");
+      const approvals = rows("SELECT action,outcome FROM action_ledger WHERE action='plan auto-approval'");
+      assert.deepEqual(approvals.map(row => row.outcome), ["approved"]);
+      record.checks.autoApproval = { approvals, humanActionsAfterPlanningStarted: 0, review: after.review, criteria: after.proofMatrix };
+    }
     if (stage === "review") {
       // THE EXPLICIT RETRY (v50). Recovery left the interrupted attempt as
       // attempt 1 of 3 needing attention — nothing retried it by itself
@@ -283,7 +308,7 @@ async function one(stage, round) {
     if (stage === "planning" && !after.scope) failures.push("the interrupted planning request did not resume");
     if (!["planning","review"].includes(stage) && (after.task.state !== "done" || after.proofVerdict !== "verified")) failures.push("the preserved draft/commit did not finish with verified proof");
     if (stage === "review" && (after.dispatch.code !== "complete" || after.review?.state !== "succeeded" || after.proofVerdict !== "verified")) failures.push("the explicit review retry did not complete with the preserved verified build");
-    if (stage !== "planning") {
+    if (stage !== "planning" || autoApprove) {
       const finalHead = execFileSync(gitBinary, ["rev-parse", "standing-orders/work"], { cwd: repo, encoding: "utf8" }).trim();
       assert.equal(execFileSync(gitBinary, ["show", `${finalHead}:result.txt`], { cwd: repo, encoding: "utf8" }), "recovered\n");
       assert.equal(events().filter(e => e.name === "commit").length, 1, "recovery must not create a duplicate commit");
@@ -307,7 +332,7 @@ await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, 
   while (pending.length) { const next = pending.shift(); await one(next.stage, next.round); }
 }));
 const certificate = { version:1, passed: cases.every(c=>c.passed) && hash()===runtime, sourceCommit:revision, runtimeSha256:runtime, runtimeUnchanged:hash()===runtime,
-  stopBeforeCrash,
+  stopBeforeCrash, autoApprove,
   platform:process.platform, node:process.versions.node, durationSeconds:(Date.now()-started)/1000, cases, retainedAt:base,
   scope:"Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage replays the automatic review producer over the interrupted attempt under a live reviewAuto mode (it queues nothing: explicit-only retries), then continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
   exclusions:["real-provider recovery", "real-provider review retry", "Windows", "reboot", "detached descendants", "power-loss filesystem durability"] };

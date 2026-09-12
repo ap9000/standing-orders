@@ -1901,6 +1901,11 @@ export function startClaudeHeldSession(
     supervisor.on("close", code => {
       heldSupervisors.delete(supervisor);
       if (partial.trim() !== "") keep(partial);
+      // The POSIX supervisor could not prove its observed tree drained.
+      // Persist uncertainty before any onExit handler can release custody.
+      if (container === null && code === CONTAINMENT_REFUSED_CODE) {
+        try { options.onUnknown?.(); } catch { /* the observer must not prevent settlement */ }
+      }
       const settlement = container === null ? Promise.resolve(true) : settleContainer(container, options);
       void settlement.then(empty => {
         if (!settledStart) {

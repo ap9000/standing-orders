@@ -22,9 +22,9 @@ process.stdin.setEncoding("utf8");
 let buf = "";
 let n = 0;
 const mode = process.argv[2] ?? "echo";
-if(mode === "detached") {
+if(mode === "detached" || mode === "inherited" || mode === "escaped-relay") {
  const {spawn}=require("node:child_process");
- spawn(process.execPath,["-e","require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},100)",process.argv[3]],{detached:true,stdio:"ignore"}).unref();
+ spawn(process.execPath,["-e","require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},100)",process.argv[3]],{detached:mode !== "inherited",stdio:mode === "detached" ? "ignore" : ["ignore","inherit","inherit"]}).unref();
 }
 process.stdin.on("data", c => {
   buf += c;
@@ -48,6 +48,7 @@ process.stdin.on("data", c => {
   }
 });
 process.stdin.on("end", () => {
+  if (mode === "unsettled") { process.exit(126); }
   if (mode === "silent" || mode === "detached") { setInterval(() => {}, 1000); return; }
   setTimeout(() => process.exit(0), 40);
 });
@@ -73,6 +74,19 @@ afterAll(() => {
 });
 
 describe("the held-session transport under the real supervisor", () => {
+  test("an unsettled supervisor records custody uncertainty before the exit callback", async () => {
+    const order: string[] = [];
+    const start = await startClaudeHeldSession(process.execPath, [agentPath, "unsettled"], {
+      socketPath: socket(), cookie: "c".repeat(32),
+      onUnknown: () => { order.push("unknown"); },
+      events: { onExit: info => { order.push(`exit:${info.code}`); } },
+    });
+    expect(start.ok).toBe(true);
+    if (!start.ok) return;
+    start.handle.endInput();
+    expect(await start.handle.exited).toEqual({ code: 126 });
+    expect(order).toEqual(["unknown", "exit:126"]);
+  });
   test("ready frame, per-turn init/result counting, session id, clean EOF exit", async () => {
     const inits: number[] = [];
     const results: Array<{ seq: number; cost: unknown }> = [];
@@ -204,9 +218,9 @@ describe("the held-session transport under the real supervisor", () => {
     expect(exit.code === 0).toBe(false);
   }, 20_000);
 
-  test("held shutdown also ends a tool in a separate process group", async () => {
-    const checkpoint = join(dir, "escaped-pid");
-    const start = await startClaudeHeldSession(process.execPath, [agentPath, "detached", checkpoint], {
+  test.each(["detached", "inherited"])("held shutdown drains a %s tool even when it retains the relay", async mode => {
+    const checkpoint = join(dir, `${mode}-pid`);
+    const start = await startClaudeHeldSession(process.execPath, [agentPath, mode, checkpoint], {
       socketPath: socket(), cookie: "c".repeat(32), graceMs: 200,
     });
     expect(start.ok).toBe(true);
@@ -235,6 +249,30 @@ describe("the held-session transport under the real supervisor", () => {
     // killed, not clean — the silent agent never honors EOF
     expect(exit.code === 0).toBe(false);
   }, 20_000);
+
+  test("an escaped tool retaining the relay yields bounded uncertainty rather than a hung or successful hold", async () => {
+    const checkpoint = join(dir, "escaped-relay-pid");
+    let unknown = false;
+    const start = await startClaudeHeldSession(process.execPath, [agentPath, "escaped-relay", checkpoint], {
+      socketPath: socket(), cookie: "c".repeat(32), onUnknown: () => { unknown = true; },
+    });
+    expect(start.ok).toBe(true);
+    if (!start.ok) return;
+    try {
+      const deadline = Date.now() + 3000;
+      while (!existsSync(checkpoint) && Date.now() < deadline) await new Promise(pass => setTimeout(pass, 20));
+      expect(existsSync(checkpoint)).toBe(true);
+      start.handle.endInput();
+      expect(await start.handle.exited).toEqual({ code: 126 });
+      expect(unknown).toBe(true);
+    } finally {
+      // The fixture deliberately leaves a live tool beyond observed custody.
+      // Release only that fixture process; production recovery never signals
+      // a saved PID after its owned ancestry has disappeared.
+      if (existsSync(checkpoint)) { try { process.kill(Number(readFileSync(checkpoint, "utf8")), "SIGKILL"); } catch {} }
+      start.handle.terminate(); await start.handle.exited;
+    }
+  }, 12000);
 
   test("SIGTERM takes the same fence road (the hard-stop sweep's contract)", async () => {
     const start = await startClaudeHeldSession(process.execPath, [agentPath, "silent"], {
