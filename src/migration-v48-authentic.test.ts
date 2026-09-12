@@ -30,7 +30,10 @@ function snapshot(file: string): Snapshot {
   const schema = (db.prepare("SELECT name, type, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").all() as { name: string; type: string; sql: string }[]).map(one => ({ ...one }));
   const rows: Record<string, Record<string, unknown>[]> = {};
   for (const table of schema.filter(one => one.type === "table")) {
-    const statement = db.prepare(`SELECT * FROM "${table.name}" ORDER BY rowid`);
+    // sqlite_sequence has no stable rowid order across a table rebuild
+    // (a v46/v51-style copy-rename re-registers the AUTOINCREMENT counter
+    // at the end); its facts are (name, seq), compared by name.
+    const statement = db.prepare(`SELECT * FROM "${table.name}" ORDER BY ${table.name === "sqlite_sequence" ? "name" : "rowid"}`);
     statement.setReadBigInts(true);
     rows[table.name] = (statement.all() as Record<string, unknown>[]).map(row => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, typeof v === "bigint" ? String(v) : v])));
   }

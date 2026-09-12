@@ -1,5 +1,42 @@
 # Progress
 
+**2026-09-11 — Preserve the filed planning contract (schema v51).** The
+planner now receives exactly what the operator filed, as quoted data: the
+scope's goal, exclusions, touches, and the whole rubric (ids, statements,
+evidence kinds, advisory `how`), the execution terms (risk, quality, budget,
+resolved agent, task-level permission), the revision brief by verified read
+when the task revises reviewed work, and the earlier answers — assembled per
+attempt by `src/planner-source.ts`, bounded by one explicit 128 KiB cap, and
+refused in words before any workspace, run, or provider spend when over it or
+when the brief cannot be verified (the task page's dispatch diagnosis says the
+same). The record is sealed on the planner run as a `plan-contract` artifact
+before the brief is composed, the run is stamped with the filed scope digest,
+and the brief carries the record between markers with its source identity.
+Filed intent is data, never authorization. A drafted plan must reproduce the
+filed contract exactly or state an `amendment`: a silent change is a
+`silent-amendment` malformed plan, corrected in the same session by adding the
+note (goal/outOfScope/touches/acceptance stay frozen) or sealed as a durable
+incident when no session can be resumed. `finalizePlanFenced` re-derives the
+source identity inside its transaction and refuses a draft whose source moved
+— scope rewritten, approval changed, terms re-termed — as `stale-source`
+(claim released, no strike, the newer scope untouched, the task still
+requested); on ingestion it seals `plan-contract.json` with the filed terms,
+the proposed terms, the amendment, and every mechanical addition, change, and
+removal. The task page, the approval ceremony, `/next`, the chat approval
+card, `task show`, and the `task approve` preview show the contract as
+preserved exactly, amended (every change beside the planner's reason, and the
+plain consequence that the yes binds the amended terms), or drafted with no
+scope filed; the ordinary approval binds the scope row's digest as before.
+Corrections inherit the root's record; a resumed decision re-derives the same
+identity and quotes the whole request again. The v50→v51 upgrade widens
+`artifact.kind` by the v46 copy-rename recipe, byte for byte, refusing any
+predecessor shape it cannot prove. Typecheck, the full suite (129 files, 2,444
+tests), the build, and the six-stage crash canary on the rebuilt runtime
+(`evidence/preserve-filed-planning-contract/crash-canary.json`, runtime
+`f6eec868…`) pass. Not in this change: revision-term inheritance, inherited
+review context, and the integrated request-to-review journey with a real
+provider.
+
 **2026-09-11 — Bounded explicit review retries (schema v50).** A finished
 build's independent review that failed or was interrupted can now be retried
 by an operator — `standing-orders task review <run> --as <you> --token <t>`

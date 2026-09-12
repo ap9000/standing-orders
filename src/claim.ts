@@ -56,6 +56,16 @@ import {
 import type { ParsedDecision, Problem } from "./decision.js";
 import { digestOf } from "./scope.js";
 import type { ParsedPlan } from "./plan.js";
+import {
+  contractChangesOf,
+  describeContractChanges,
+  encodePlanContractRecord,
+  plannerContractOf,
+  plannerSourceDigest,
+  type PlanContractRecord,
+  type PlannerSource,
+} from "./planner-source.js";
+import { storeEvidence } from "./evidence.js";
 import type { AuthorityChangeField } from "./plan.js";
 import type { ParsedReport } from "./scout-report.js";
 
@@ -1390,8 +1400,13 @@ export const MAX_PLAN_STRIKES = 3;
 const PLAN_BACKOFF_MS = [60_000, 2 * 60_000, 4 * 60_000] as const;
 
 export type PlanFinalize =
-  | { ok: true }
-  | { ok: false; reason: "fenced" | "unknown" };
+  | { ok: true; changes: number; amendment: string | null }
+  | { ok: false; reason: "fenced" | "unknown" }
+  /** The filed request moved while the planner ran (contract handoff,
+   * task 1): the draft was planned against terms that no longer exist,
+   * so nothing of it is ingested — the newer source stands, the claim
+   * releases, and the task stays requested for a fresh attempt. */
+  | { ok: false; reason: "stale-source"; detail: string };
 
 /**
  * Seal a successful planning run: the proposed scope, the plan document
@@ -1420,11 +1435,41 @@ export function finalizePlanFenced(
     } | null;
     /** Open planner correction that authored the accepted payload. */
     repairRunId?: number | null;
+    /** The filed request this attempt planned for, and the recorded
+     * evidence of it (contract handoff, task 1). The source identity is
+     * re-derived from the store INSIDE this transaction and compared:
+     * a concurrent scope, authority, or term change refuses the draft
+     * atomically rather than letting an old plan overwrite the newer
+     * source. Optional only for the pre-source road (tests that seal a
+     * hand-built plan); every dispatch presents one. */
+    source?: PlannerSource;
+    sourceArtifact?: number | null;
+    /** Where the plan-contract ingestion record is written. */
+    evidenceRoot?: string;
     now: Date;
   },
 ): PlanFinalize {
   const { leaseId, runId, taskId, plan, now } = args;
   const db = store.handle;
+  // The ingestion record (contract handoff, task 1) is composed here from
+  // the filed terms and the drafted plan; its file and row land inside the
+  // transaction below, only after the stale-source check admits the draft.
+  const filed = args.source?.contract.scope ?? null;
+  const contractChanges = filed === null ? [] : contractChangesOf(filed, plan);
+  // A hand-built plan (the pre-source road) carries no amendment field.
+  const amendment = plan.amendment ?? null;
+  const record: PlanContractRecord | null =
+    args.source === undefined
+      ? null
+      : {
+          version: 1,
+          sourceDigest: args.source.sourceDigest,
+          sourceArtifact: args.sourceArtifact ?? null,
+          filed: filed === null ? null : { goal: filed.goal, outOfScope: filed.outOfScope, touches: filed.touches, acceptance: filed.acceptance },
+          proposed: { goal: plan.goal, outOfScope: plan.outOfScope, touches: plan.touches, acceptance: plan.acceptance },
+          amendment,
+          changes: contractChanges,
+        };
   return inTransaction(store, () => {
     const run = store.getRun(runId);
     if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
@@ -1434,6 +1479,48 @@ export function finalizePlanFenced(
       throw new Error(`run ${runId} is a ${run.role} run — only planner runs draft plans`);
     }
     const repairRun = plannerRepairChild(store, run, args.repairRunId ?? null);
+
+    // THE SOURCE RECHECK (contract handoff, task 1): the filed request is
+    // re-derived from durable state inside this very transaction and must
+    // still be the one the planner read. A scope rewritten, approved, or
+    // re-termed while the planner ran is the NEWER source; an old draft
+    // never overwrites it. The attempt ends refused in words — no strike,
+    // the planner did nothing wrong — and the task stays requested. The
+    // claim releases under the same fence the ingestion would have used.
+    if (args.source !== undefined) {
+      const current = plannerContractOf(store, taskId);
+      const currentDigest = current.ok ? plannerSourceDigest(current.contract) : null;
+      if (currentDigest !== args.source.sourceDigest) {
+        const detail = current.ok
+          ? describeSourceDrift(args.source, current.contract)
+          : `the filed request can no longer be read: ${current.message}`;
+        const released = db
+          .prepare(
+            `UPDATE claim SET released_at = ?, released_by = 'released'
+              WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+          )
+          .run(now.toISOString(), leaseId);
+        if (Number(released.changes) === 0) {
+          if (repairRun !== null) store.finishRun(repairRun.id, { outcome: "refused", reason: "fenced", now });
+          store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
+          return refusal(db, leaseId);
+        }
+        if (repairRun !== null) store.finishRun(repairRun.id, { outcome: "refused", reason: "stale-source", now });
+        store.finishRun(runId, { outcome: "refused", reason: "stale-source", now });
+        store.enqueueNotification(
+          {
+            dedupeKey: `plan-stale-source:${run.taskRef}:${runId}`,
+            kind: "plan-stale-source",
+            link: `/t/${encodeURIComponent(taskId)}`,
+            subject: `${taskId}: the filed request changed while the planner ran`,
+            body: `${oneLine(detail, 300)}\nNothing from that draft was ingested; the current terms stand and the next pass plans against them.`,
+          },
+          now,
+        );
+        return { ok: false as const, reason: "stale-source" as const, detail };
+      }
+    }
+
     const { changes } = db
       .prepare(
         `UPDATE claim SET released_at = ?, released_by = 'completed'
@@ -1462,6 +1549,27 @@ export function finalizePlanFenced(
     if (args.artifact !== null) {
       store.saveArtifact({ run: runId, kind: "plan", ...args.artifact }, now);
     }
+    if (record !== null && args.evidenceRoot !== undefined) {
+      try {
+        storeEvidence(
+          store,
+          args.evidenceRoot,
+          runId,
+          "plan-contract",
+          "plan-contract.json",
+          encodePlanContractRecord(record),
+          record.changes.length === 0
+            ? "plan ingestion: filed contract reproduced exactly (verified tree)"
+            : `plan ingestion: ${record.changes.length} contract change(s), amendment ${record.amendment === null ? "absent" : "stated"} (verified tree)`,
+          now,
+          { captureStatus: "ok" },
+        );
+      } catch {
+        // The draft still lands: the scope row and plan document are the
+        // authority; the approval view says the record is missing rather
+        // than pretending the contract was reproduced.
+      }
+    }
     store.setPlanState(run.taskRef, "drafted");
     store.resetPlanStrikes(run.taskRef);
     store.finishRun(runId, { outcome: "built", reason: "plan-drafted", now });
@@ -1472,13 +1580,43 @@ export function finalizePlanFenced(
       {
         dedupeKey: `plan:${run.taskRef}:${runId}`,
         kind: "plan-ready",
-        subject: `${taskId}: plan ready for review`,
-        body: `The planner proposes: ${oneLine(plan.goal, 200)}\nReview, edit, and approve the scope — nothing builds until you do.`,
+        subject: `${taskId}: plan ready for review${contractChanges.length === 0 ? "" : ` — ${contractChanges.length} contract change${contractChanges.length === 1 ? "" : "s"} to check`}`,
+        body:
+          `The planner proposes: ${oneLine(plan.goal, 200)}\n` +
+          (contractChanges.length === 0
+            ? filed === null
+              ? ""
+              : "The filed goal, exclusions, touches, and acceptance criteria are reproduced exactly.\n"
+            : `It AMENDS the filed contract (${oneLine(describeContractChanges(contractChanges).join("; "), 300)})${amendment === null ? "" : ` — because: ${oneLine(amendment, 200)}`}\n`) +
+          "Review, edit, and approve the scope — nothing builds until you do.",
       },
       now,
     );
-    return { ok: true as const };
+    return { ok: true as const, changes: contractChanges.length, amendment };
   });
+}
+
+/** Which part of the filed request moved, in words — for the refusal,
+ * the page, and the notification. */
+function describeSourceDrift(source: PlannerSource, current: PlannerSource["contract"]): string {
+  const was = source.contract;
+  const parts: string[] = [];
+  if ((was.scope?.digest ?? null) !== (current.scope?.digest ?? null)) {
+    parts.push(
+      was.scope === null
+        ? "a scope was filed after planning started"
+        : current.scope === null
+          ? "the filed scope was removed"
+          : "the filed scope was rewritten",
+    );
+  } else if (was.scope !== null && current.scope !== null && was.scope.approval.approvedDigest !== current.scope.approval.approvedDigest) {
+    parts.push("the scope's approval changed");
+  } else if (was.scope !== null && current.scope !== null && JSON.stringify(was.scope.terms) !== JSON.stringify(current.scope.terms)) {
+    parts.push("the scope's execution terms changed");
+  }
+  if (JSON.stringify(was.task) !== JSON.stringify(current.task)) parts.push("the task's terms changed");
+  if (JSON.stringify(was.revision) !== JSON.stringify(current.revision)) parts.push("the revision brief changed");
+  return `the filed request changed while the planner ran: ${parts.length === 0 ? "its source identity moved" : parts.join("; ")} (planned against ${source.sourceDigest.slice(0, 12)})`;
 }
 
 export type RevisionFinalize =

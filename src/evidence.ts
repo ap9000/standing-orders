@@ -87,6 +87,10 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   "check-log": 64 * 1024,
   screenshot: SCREENSHOT_BYTE_CAP,
   "structured-output": 64 * 1024,
+  // The planner's recorded source is bounded BEFORE it is written (the
+  // planner-source cap IS this value), so a stored record is never a
+  // truncated one: what the record holds is exactly what the planner read.
+  "plan-contract": 128 * 1024,
 };
 
 export function evidenceRoot(home: string): string {

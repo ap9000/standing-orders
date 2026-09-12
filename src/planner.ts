@@ -47,6 +47,13 @@ import {
   STRUCTURED_REPAIR_MAX_TURNS,
   STRUCTURED_REPAIR_TIMEOUT_MS,
 } from "./structured-output.js";
+import {
+  contractChangesOf,
+  describeContractChanges,
+  plannerSourceBlock,
+  PLANNER_SOURCE_LIMITS,
+  type PlannerSource,
+} from "./planner-source.js";
 
 const GIT = "git";
 const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
@@ -81,6 +88,12 @@ export type PlanRequest = {
   git?: Runner;
   /** Answered questions from earlier planning rounds, for the brief. */
   answers?: readonly { question: string; choice: string; note: string | null }[];
+  /** The filed request this attempt plans for (contract handoff, task 1):
+   * recorded as evidence by the caller BEFORE any spend, quoted whole into
+   * the brief, and the contract a drafted plan is checked against — a
+   * plan that changes filed terms without an explicit amendment is
+   * malformed. The same source rides every same-session correction. */
+  source: PlannerSource;
 };
 
 export type PlanOutcome =
@@ -132,6 +145,7 @@ function plannerBrief(
   mailbox: string,
   planFile: string,
   answers: readonly { question: string; choice: string; note: string | null }[],
+  source: PlannerSource,
 ): string {
   const answeredBlock =
     answers.length === 0
@@ -153,6 +167,12 @@ function plannerBrief(
     "NOT modify any file, create any file (other than the two protocol",
     "files named below), stage, commit, or switch branches. The workspace",
     "is checked after you finish; any other change discards your session.",
+    "",
+    // The filed request, whole and quoted (contract handoff, task 1): the
+    // operator's goal, exclusions, rubric, terms, and revision brief reach
+    // the planner as data — never as a title-derived guess, never as
+    // authorization. The rules for preserving or amending it ride with it.
+    ...plannerSourceBlock(source),
     answeredBlock,
     "If you need the operator's judgement to plan well, write ONE decision",
     `as JSON to a file named exactly \`${mailbox}\` (fields: urgency:"blocking",`,
@@ -170,7 +190,9 @@ function plannerBrief(
     '    outcome>", "evidence": ["check"|"screenshot"|"changed-path"|',
     '    "manual-review", ...], "how": "<optional advisory guidance, or',
     `    null>" }, ... 1 to ${ACCEPTANCE_LIMITS.criteria} ],`,
-    '  "plan": "a concise markdown execution plan in the exact format below"',
+    '  "plan": "a concise markdown execution plan in the exact format below",',
+    '  "amendment": "why the FILED contract must change (or null when your goal,',
+    `    outOfScope, touches, and acceptance reproduce it exactly); at most ${PLANNER_SOURCE_LIMITS.amendment} characters"`,
     "}",
     "The plan string MUST use these five headings, once each and in order:",
     "## Approach",
@@ -302,12 +324,40 @@ function planProblemsAreDocumentOnly(problems: readonly PlanProblem[]): boolean 
     problem =>
       problem.reason === "missing-plan" ||
       problem.reason === "bad-plan" ||
+      // A silent amendment is repaired by SAYING the amendment (the frozen
+      // authority values stay exactly as the planner wrote them; the
+      // operator sees every change at approval) — never by re-planning.
+      problem.reason === "silent-amendment" ||
+      problem.reason === "bad-amendment" ||
+      problem.reason.startsWith("amendment") ||
       problem.reason.startsWith("plan-"),
   );
 }
 
+/**
+ * The contract check (contract handoff, task 1): a plan drafted against
+ * FILED terms either reproduces them exactly or states an amendment. A
+ * plan that changes the filed goal, exclusions, touches, or rubric in
+ * silence is malformed — the exact changes are the validation message,
+ * so the correction knows what it must own up to.
+ */
+function contractProblemsOf(plan: ParsedPlan, source: PlannerSource): PlanProblem[] {
+  const filed = source.contract.scope;
+  if (filed === null) return [];
+  const changes = contractChangesOf(filed, plan);
+  if (changes.length === 0 || plan.amendment !== null) return [];
+  return [
+    {
+      reason: "silent-amendment",
+      message:
+        `the plan changes the filed contract without an explicit amendment (${describeContractChanges(changes).join("; ")}) — ` +
+        "either reproduce the filed goal, outOfScope, touches, and acceptance exactly, or state why the contract must change in `amendment`",
+    },
+  ];
+}
+
 /** Read both nonce-bound outputs so writing both can never win by priority. */
-function plannerPayload(worktree: string, mailbox: string, planFile: string): PlannerPayload {
+function plannerPayload(worktree: string, mailbox: string, planFile: string, source: PlannerSource): PlannerPayload {
   const decision = readMailbox(join(worktree, mailbox));
   const proposed = readMailbox(join(worktree, planFile), PLAN_LIMITS.payload);
   const hasDecision = decision.ok || !decision.missing;
@@ -410,7 +460,15 @@ function plannerPayload(worktree: string, mailbox: string, planFile: string): Pl
     }
 
     const anchor = planAuthorityAnchor(decoded.text);
-    const parsed = parsePlan(normalized.text);
+    const parsedShape = parsePlan(normalized.text);
+    // A well-formed plan that silently amends the filed contract is a
+    // malformed plan: the shape passed, the contract did not.
+    const parsed: typeof parsedShape = parsedShape.ok
+      ? (() => {
+          const contractProblems = contractProblemsOf(parsedShape.plan, source);
+          return contractProblems.length === 0 ? parsedShape : { ok: false as const, problems: contractProblems };
+        })()
+      : parsedShape;
     return parsed.ok
       ? { state: "plan", kind, raw, sourceBytesOriginal: raw.length, normalized: normalized.changed, plan: parsed.plan, authorityAnchor: anchor }
       : {
@@ -476,7 +534,14 @@ function plannerRepairBrief(
       ? [
           "The original goal, outOfScope, touches, and acceptance values are",
           "frozen. Reproduce those values exactly; only the non-authority plan",
-          "document or transport shape may be corrected.",
+          "document, the `amendment` note, or transport shape may be corrected.",
+        ]
+      : []),
+    ...(problems.some(problem => problem.reason === "silent-amendment")
+      ? [
+          "Your plan changed the FILED contract without saying so. State why",
+          "in `amendment` (a short string) — the operator will see every",
+          "addition, change, and removal at approval and decide.",
         ]
       : []),
     "Return valid JSON through the chosen nonce-bound file only.",
@@ -808,7 +873,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
       { provider, model },
       {
         phase: "plan",
-        brief: plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? []),
+        brief: plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? [], request.source),
         maxTurns,
         // Claude's built-in `plan` permission mode diverts writes into its
         // own ~/.claude/plans file and refuses the nonce-bound handoff file.
@@ -830,7 +895,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
 
     const firstProof = await proveAfterInvocation();
     if (firstProof !== null) return firstProof;
-    let payload = plannerPayload(worktree, mailbox, planFile);
+    let payload = plannerPayload(worktree, mailbox, planFile, request.source);
     const initialEligible =
       invoked.kind === "ran" &&
       !invoked.outcome.timedOut &&
@@ -997,7 +1062,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
         });
         return repairProof;
       }
-      const observed = plannerPayload(worktree, mailbox, planFile);
+      const observed = plannerPayload(worktree, mailbox, planFile, request.source);
       let corrected: Exclude<PlannerPayload, { state: "missing" }>;
       if (observed.state === "missing") {
         corrected = {

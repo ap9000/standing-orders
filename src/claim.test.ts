@@ -992,7 +992,9 @@ describe("sealing a park", () => {
       now: later(1_000),
     });
 
-    expect(sealed).toEqual({ ok: true });
+    // No source was presented (the pre-source road): nothing to compare,
+    // no amendment — the seal says so in the same shape every dispatch reads.
+    expect(sealed).toEqual({ ok: true, changes: 0, amendment: null });
     expect(store.getRun(root)).toMatchObject({ outcome: "built", reason: "plan-drafted" });
     expect(store.getRun(child)).toMatchObject({ outcome: "no-change", reason: "structured planner output repaired" });
     expect(store.getScope("t-1")).toMatchObject({

@@ -71,7 +71,7 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 50;
+export const SCHEMA_VERSION = 51;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -915,7 +915,11 @@ export type Artifact = {
     | "proof"
     | "check-log"
     | "screenshot"
-    | "structured-output";
+    | "structured-output"
+    /** v51 (contract handoff, task 1): the planner's recorded SOURCE —
+     * the filed request quoted into its brief — and the ingestion record
+     * of what it proposed against those terms. */
+    | "plan-contract";
   key: string;
   bytesOriginal: number;
   bytesStored: number;
@@ -1981,7 +1985,7 @@ CREATE TABLE IF NOT EXISTS decision (
 CREATE TABLE IF NOT EXISTS artifact (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report','proof','check-log','screenshot','structured-output')),
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report','proof','check-log','screenshot','structured-output','plan-contract')),
   key            TEXT NOT NULL,
   bytes_original INTEGER NOT NULL,
   bytes_stored   INTEGER NOT NULL,
@@ -4336,6 +4340,12 @@ function migrate(db: Database, origin: number | null): void {
   // was produced — the column and its one classification pass arrive
   // together, in one write transaction (migrateReviewRequestOrigin).
   migrateReviewRequestOrigin(db);
+
+  // v51 (preserve the filed planning contract): artifact.kind additionally
+  // admits 'plan-contract' — the planner's recorded source and its
+  // ingestion record. The same exact-recognizer copy/rename as v46; no
+  // historical row changes meaning.
+  rebuildArtifactForV51(db);
 }
 
 /** The origin CHECK, verbatim from the fresh review_request DDL. */
@@ -4510,6 +4520,11 @@ function V46_ARTIFACT_DDL(name: string): string {
   return V38_ARTIFACT_DDL(name).replace("'proof','check-log','screenshot'", "'proof','check-log','screenshot','structured-output'");
 }
 
+/** v51: the planner's recorded source and plan-contract record are evidence. */
+function V51_ARTIFACT_DDL(name: string): string {
+  return V46_ARTIFACT_DDL(name).replace("'screenshot','structured-output'", "'screenshot','structured-output','plan-contract'");
+}
+
 /** v38: incident.kind additionally admits 'malformed-proof'. */
 function V38_INCIDENT_DDL(name: string): string {
   return V34_INCIDENT_DDL(name).replace("'plan-attempts-exhausted','malformed-report'", "'plan-attempts-exhausted','malformed-report','malformed-proof'");
@@ -4566,7 +4581,7 @@ export function rebuildArtifactForV34(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact'").get();
   if (
     row !== undefined &&
-    [V38_ARTIFACT_DDL("artifact"), V46_ARTIFACT_DDL("artifact")].some(ddl => canonicalDdl(String(row["sql"])) === canonicalDdl(ddl))
+    [V38_ARTIFACT_DDL("artifact"), V46_ARTIFACT_DDL("artifact"), V51_ARTIFACT_DDL("artifact")].some(ddl => canonicalDdl(String(row["sql"])) === canonicalDdl(ddl))
   ) return;
   rebuildExact(db, "artifact", V17_ARTIFACT_DDL, V34_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
@@ -4581,13 +4596,25 @@ export function rebuildIncidentForV34(db: Database): void {
 /** v38: artifact.kind admits 'proof','check-log','screenshot'. */
 export function rebuildArtifactForV38(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact'").get();
-  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(V46_ARTIFACT_DDL("artifact"))) return;
+  if (
+    row !== undefined &&
+    [V46_ARTIFACT_DDL("artifact"), V51_ARTIFACT_DDL("artifact")].some(ddl => canonicalDdl(String(row["sql"])) === canonicalDdl(ddl))
+  ) return;
   rebuildExact(db, "artifact", [V17_ARTIFACT_DDL, V34_ARTIFACT_DDL], V38_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
 
-/** v46: artifact.kind additionally admits structured-output. */
+/** v46: artifact.kind additionally admits structured-output. A table
+ * already at the v51 shape is a DONE shape (migrate() runs every step on
+ * every open). */
 export function rebuildArtifactForV46(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact'").get();
+  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(V51_ARTIFACT_DDL("artifact"))) return;
   rebuildExact(db, "artifact", V38_ARTIFACT_DDL, V46_ARTIFACT_DDL, ARTIFACT_COLUMNS);
+}
+
+/** v51: artifact.kind additionally admits plan-contract. */
+export function rebuildArtifactForV51(db: Database): void {
+  rebuildExact(db, "artifact", V46_ARTIFACT_DDL, V51_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
 
 /** v38: incident.kind admits 'malformed-proof'. */
@@ -15398,6 +15425,37 @@ export class Store {
          ORDER BY artifact.id DESC LIMIT 1`,
       )
       .get(taskRef);
+    return row === undefined ? null : readArtifact(row as Record<string, unknown>);
+  }
+
+  /** The newest plan-contract INGESTION record on one of this task's
+   * planner runs (contract handoff, task 1): what the draft proposed
+   * against the filed terms, and every change between them. The source
+   * record of the same attempt is `plannerSourceArtifactFor(run)`. */
+  latestPlanContractArtifact(taskRef: number): Artifact | null {
+    const row = this.db
+      .prepare(
+        `SELECT artifact.* FROM artifact
+         JOIN run ON run.id = artifact.run
+         WHERE run.task_ref = ? AND run.role = 'planner' AND artifact.kind = 'plan-contract'
+           AND artifact.key LIKE '%/plan-contract.json'
+         ORDER BY artifact.id DESC LIMIT 1`,
+      )
+      .get(taskRef);
+    return row === undefined ? null : readArtifact(row as Record<string, unknown>);
+  }
+
+  /** The recorded planner SOURCE of one planner run — the exact filed
+   * request quoted into its brief. A correction child carries none of its
+   * own: its parent's record is the one it inherited. */
+  plannerSourceArtifactFor(runId: number): Artifact | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM artifact
+         WHERE run = ? AND kind = 'plan-contract' AND key LIKE '%/planner-source.json'
+         ORDER BY id ASC LIMIT 1`,
+      )
+      .get(runId);
     return row === undefined ? null : readArtifact(row as Record<string, unknown>);
   }
 

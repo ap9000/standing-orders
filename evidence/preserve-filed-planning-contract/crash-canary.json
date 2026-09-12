@@ -1,0 +1,1178 @@
+{
+  "version": 1,
+  "passed": true,
+  "sourceCommit": "68ff7eb6cf845f3aa16198ce210656aa265f3341",
+  "runtimeSha256": "f6eec8684d4e3fa508acba9560f7ab33e20c13a2785b6a7e06047408b49c9377",
+  "runtimeUnchanged": true,
+  "platform": "darwin",
+  "node": "22.22.0",
+  "durationSeconds": 98.174,
+  "cases": [
+    {
+      "stage": "planning",
+      "round": 1,
+      "passed": true,
+      "checks": {
+        "checkpoint": {
+          "stage": "planning",
+          "pid": 45279,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/planning-1/pool/repo/standing-orders-plan-work-b102c454",
+          "at": 1789192748262
+        },
+        "preCrashRuns": [
+          {
+            "id": 1,
+            "role": "planner",
+            "phase": null,
+            "outcome": null
+          }
+        ],
+        "workerKilled": true,
+        "childSurvived": true,
+        "beforeExpiry": "refused",
+        "overlappingWriters": [],
+        "afterTakeover": {
+          "state": "queued",
+          "dispatch": {
+            "condition": "retrying",
+            "code": "planning-ready",
+            "summary": "Planner ready",
+            "detail": "An eligible worker can draft the scope on the next pass.",
+            "action": null,
+            "nextAt": null,
+            "role": "planner",
+            "blockerTaskId": null,
+            "review": null
+          },
+          "runs": [
+            {
+              "id": 1,
+              "role": "planner",
+              "outcome": "failed",
+              "reason": "interrupted"
+            }
+          ]
+        },
+        "duplicateDispatch": "refused-unapproved",
+        "final": {
+          "state": "queued",
+          "scope": true,
+          "proof": null,
+          "dispatch": {
+            "condition": "waiting",
+            "code": "needs-approval",
+            "summary": "Needs your approval",
+            "detail": "Review and sign the current scope before a worker can claim it.",
+            "action": "approve-scope",
+            "nextAt": null,
+            "role": "builder",
+            "blockerTaskId": null,
+            "review": null
+          },
+          "runs": [
+            {
+              "id": 2,
+              "role": "planner",
+              "outcome": "built",
+              "reason": "plan-drafted",
+              "parent": null,
+              "head": null
+            },
+            {
+              "id": 1,
+              "role": "planner",
+              "outcome": "failed",
+              "reason": "interrupted",
+              "parent": null,
+              "head": null
+            }
+          ]
+        },
+        "events": [
+          {
+            "name": "provider-start",
+            "pid": 45279,
+            "at": 1789192748261,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/planning-1/pool/repo/standing-orders-plan-work-b102c454",
+            "phase": "plan",
+            "session": "c47466db-90d2-4438-a106-30854d0676ad"
+          },
+          {
+            "name": "provider-end",
+            "pid": 45279,
+            "at": 1789192838442,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/planning-1/pool/repo/standing-orders-plan-work-b102c454",
+            "phase": "plan"
+          },
+          {
+            "name": "provider-start",
+            "pid": 60941,
+            "at": 1789192839069,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/planning-1/pool/repo/standing-orders-plan-work-b102c454",
+            "phase": "plan",
+            "session": "8c81fc05-c6b4-4e69-a810-faba868727e1"
+          },
+          {
+            "name": "provider-end",
+            "pid": 60941,
+            "at": 1789192839069,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/planning-1/pool/repo/standing-orders-plan-work-b102c454",
+            "phase": "plan"
+          }
+        ],
+        "openRuns": []
+      },
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/planning-1",
+      "failures": []
+    },
+    {
+      "stage": "building",
+      "round": 1,
+      "passed": true,
+      "checks": {
+        "checkpoint": {
+          "stage": "building",
+          "pid": 45379,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/building-1/pool/repo/standing-orders-work-eca4f69c",
+          "at": 1789192748851
+        },
+        "preCrashRuns": [
+          {
+            "id": 1,
+            "role": "builder",
+            "phase": "agent-running",
+            "outcome": null
+          }
+        ],
+        "workerKilled": true,
+        "childSurvived": true,
+        "beforeExpiry": "refused",
+        "overlappingWriters": [],
+        "afterTakeover": {
+          "state": "queued",
+          "dispatch": {
+            "condition": "retrying",
+            "code": "ready",
+            "summary": "Ready to run",
+            "detail": "An eligible worker has capacity and every dispatch gate currently passes.",
+            "action": null,
+            "nextAt": null,
+            "role": "builder",
+            "blockerTaskId": null,
+            "review": null
+          },
+          "runs": [
+            {
+              "id": 1,
+              "role": "builder",
+              "outcome": "failed",
+              "reason": "interrupted"
+            }
+          ]
+        },
+        "duplicateDispatch": "refused-empty",
+        "final": {
+          "state": "done",
+          "scope": true,
+          "proof": "verified",
+          "dispatch": {
+            "condition": "terminal",
+            "code": "complete",
+            "summary": "Complete",
+            "detail": "The task finished; open its result for proof.",
+            "action": "open-result",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": null
+          },
+          "runs": [
+            {
+              "id": 2,
+              "role": "builder",
+              "outcome": "built",
+              "reason": null,
+              "parent": 1,
+              "head": "97b805fa688c54eda80e9375031b2099c402a7a8"
+            },
+            {
+              "id": 1,
+              "role": "builder",
+              "outcome": "failed",
+              "reason": "interrupted",
+              "parent": null,
+              "head": null
+            }
+          ]
+        },
+        "events": [
+          {
+            "name": "provider-start",
+            "pid": 45379,
+            "at": 1789192748851,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/building-1/pool/repo/standing-orders-work-eca4f69c",
+            "phase": "build",
+            "session": "f0fc6a75-21e9-4176-bcdc-f63f2d1f959a"
+          },
+          {
+            "name": "provider-end",
+            "pid": 45379,
+            "at": 1789192838711,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/building-1/pool/repo/standing-orders-work-eca4f69c",
+            "phase": "build"
+          },
+          {
+            "name": "provider-start",
+            "pid": 61057,
+            "at": 1789192839654,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/building-1/pool/repo/standing-orders-work-eca4f69c",
+            "phase": "build",
+            "session": "5b08925f-9eff-435a-9de0-ced143f8c2f3"
+          },
+          {
+            "name": "provider-end",
+            "pid": 61057,
+            "at": 1789192839666,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/building-1/pool/repo/standing-orders-work-eca4f69c",
+            "phase": "build"
+          },
+          {
+            "name": "commit",
+            "pid": 61094,
+            "at": 1789192839928,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/building-1/pool/repo/standing-orders-work-eca4f69c"
+          },
+          {
+            "name": "check-start",
+            "pid": 61123,
+            "at": 1789192840303,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/building-1/pool/repo/standing-orders-work-eca4f69c"
+          },
+          {
+            "name": "check-end",
+            "pid": 61123,
+            "at": 1789192840303,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/building-1/pool/repo/standing-orders-work-eca4f69c"
+          }
+        ],
+        "openRuns": [],
+        "finalHead": "97b805fa688c54eda80e9375031b2099c402a7a8"
+      },
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/building-1",
+      "failures": []
+    },
+    {
+      "stage": "verification",
+      "round": 1,
+      "passed": true,
+      "checks": {
+        "checkpoint": {
+          "stage": "verification",
+          "pid": 45457,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1/pool/repo/standing-orders-work-90c3bcfd",
+          "at": 1789192749651
+        },
+        "preCrashRuns": [
+          {
+            "id": 1,
+            "role": "builder",
+            "phase": "verifying-proof",
+            "outcome": null
+          }
+        ],
+        "committedBeforeCrash": "64eea7dd776711e3a130a66c6897a5c59e8de5e7",
+        "workerKilled": true,
+        "childSurvived": true,
+        "beforeExpiry": "refused",
+        "overlappingWriters": [],
+        "afterTakeover": {
+          "state": "queued",
+          "dispatch": {
+            "condition": "retrying",
+            "code": "ready",
+            "summary": "Ready to run",
+            "detail": "An eligible worker has capacity and every dispatch gate currently passes.",
+            "action": null,
+            "nextAt": null,
+            "role": "builder",
+            "blockerTaskId": null,
+            "review": null
+          },
+          "runs": [
+            {
+              "id": 1,
+              "role": "builder",
+              "outcome": "failed",
+              "reason": "interrupted"
+            }
+          ]
+        },
+        "duplicateDispatch": "refused-empty",
+        "final": {
+          "state": "done",
+          "scope": true,
+          "proof": "verified",
+          "dispatch": {
+            "condition": "terminal",
+            "code": "complete",
+            "summary": "Complete",
+            "detail": "The task finished; open its result for proof.",
+            "action": "open-result",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": null
+          },
+          "runs": [
+            {
+              "id": 2,
+              "role": "builder",
+              "outcome": "no-change",
+              "reason": "handoff",
+              "parent": null,
+              "head": "64eea7dd776711e3a130a66c6897a5c59e8de5e7"
+            },
+            {
+              "id": 1,
+              "role": "builder",
+              "outcome": "failed",
+              "reason": "interrupted",
+              "parent": null,
+              "head": "64eea7dd776711e3a130a66c6897a5c59e8de5e7"
+            }
+          ]
+        },
+        "events": [
+          {
+            "name": "provider-start",
+            "pid": 45393,
+            "at": 1789192748976,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1/pool/repo/standing-orders-work-90c3bcfd",
+            "phase": "build",
+            "session": "cdfa8909-2b8b-4f99-9772-2227ffefa867"
+          },
+          {
+            "name": "provider-end",
+            "pid": 45393,
+            "at": 1789192748989,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1/pool/repo/standing-orders-work-90c3bcfd",
+            "phase": "build"
+          },
+          {
+            "name": "commit",
+            "pid": 45424,
+            "at": 1789192749263,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1/pool/repo/standing-orders-work-90c3bcfd"
+          },
+          {
+            "name": "check-start",
+            "pid": 45457,
+            "at": 1789192749651,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1/pool/repo/standing-orders-work-90c3bcfd"
+          },
+          {
+            "name": "check-end",
+            "pid": 45457,
+            "at": 1789192838729,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1/pool/repo/standing-orders-work-90c3bcfd"
+          },
+          {
+            "name": "provider-start",
+            "pid": 61002,
+            "at": 1789192839405,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1/pool/repo/standing-orders-work-90c3bcfd",
+            "phase": "build",
+            "session": "941eb4c0-be11-4d73-a0dd-5221209db5ef"
+          },
+          {
+            "name": "provider-end",
+            "pid": 61002,
+            "at": 1789192839419,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1/pool/repo/standing-orders-work-90c3bcfd",
+            "phase": "build"
+          },
+          {
+            "name": "check-start",
+            "pid": 61059,
+            "at": 1789192839673,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1/pool/repo/standing-orders-work-90c3bcfd"
+          },
+          {
+            "name": "check-end",
+            "pid": 61059,
+            "at": 1789192839673,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1/pool/repo/standing-orders-work-90c3bcfd"
+          }
+        ],
+        "openRuns": [],
+        "finalHead": "64eea7dd776711e3a130a66c6897a5c59e8de5e7"
+      },
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/verification-1",
+      "failures": []
+    },
+    {
+      "stage": "setup",
+      "round": 1,
+      "passed": true,
+      "checks": {
+        "checkpoint": {
+          "stage": "setup",
+          "pid": 45383,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1/pool/repo/standing-orders-work-dd0262dc",
+          "at": 1789192749177
+        },
+        "preCrashRuns": [
+          {
+            "id": 1,
+            "role": "builder",
+            "phase": null,
+            "outcome": null
+          }
+        ],
+        "workerKilled": true,
+        "childSurvived": true,
+        "beforeExpiry": "refused",
+        "overlappingWriters": [],
+        "afterTakeover": {
+          "state": "queued",
+          "dispatch": {
+            "condition": "retrying",
+            "code": "ready",
+            "summary": "Ready to run",
+            "detail": "An eligible worker has capacity and every dispatch gate currently passes.",
+            "action": null,
+            "nextAt": null,
+            "role": "builder",
+            "blockerTaskId": null,
+            "review": null
+          },
+          "runs": [
+            {
+              "id": 1,
+              "role": "builder",
+              "outcome": "failed",
+              "reason": "interrupted"
+            }
+          ]
+        },
+        "duplicateDispatch": "refused-empty",
+        "final": {
+          "state": "done",
+          "scope": true,
+          "proof": "verified",
+          "dispatch": {
+            "condition": "terminal",
+            "code": "complete",
+            "summary": "Complete",
+            "detail": "The task finished; open its result for proof.",
+            "action": "open-result",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": null
+          },
+          "runs": [
+            {
+              "id": 2,
+              "role": "builder",
+              "outcome": "built",
+              "reason": null,
+              "parent": 1,
+              "head": "26371ac5d824c6deda616fafd524b6d87236ce0a"
+            },
+            {
+              "id": 1,
+              "role": "builder",
+              "outcome": "failed",
+              "reason": "interrupted",
+              "parent": null,
+              "head": null
+            }
+          ]
+        },
+        "events": [
+          {
+            "name": "setup-start",
+            "pid": 45383,
+            "at": 1789192749176,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1/pool/repo/standing-orders-work-dd0262dc"
+          },
+          {
+            "name": "setup-end",
+            "pid": 45383,
+            "at": 1789192838868,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1/pool/repo/standing-orders-work-dd0262dc"
+          },
+          {
+            "name": "setup-start",
+            "pid": 61025,
+            "at": 1789192839501,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1/pool/repo/standing-orders-work-dd0262dc"
+          },
+          {
+            "name": "setup-end",
+            "pid": 61025,
+            "at": 1789192839501,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1/pool/repo/standing-orders-work-dd0262dc"
+          },
+          {
+            "name": "provider-start",
+            "pid": 61068,
+            "at": 1789192839732,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1/pool/repo/standing-orders-work-dd0262dc",
+            "phase": "build",
+            "session": "c3e4ae96-bc17-4643-904c-fe615d9a4e2d"
+          },
+          {
+            "name": "provider-end",
+            "pid": 61068,
+            "at": 1789192839744,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1/pool/repo/standing-orders-work-dd0262dc",
+            "phase": "build"
+          },
+          {
+            "name": "commit",
+            "pid": 61106,
+            "at": 1789192840011,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1/pool/repo/standing-orders-work-dd0262dc"
+          },
+          {
+            "name": "check-start",
+            "pid": 61130,
+            "at": 1789192840497,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1/pool/repo/standing-orders-work-dd0262dc"
+          },
+          {
+            "name": "check-end",
+            "pid": 61130,
+            "at": 1789192840497,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1/pool/repo/standing-orders-work-dd0262dc"
+          }
+        ],
+        "openRuns": [],
+        "finalHead": "26371ac5d824c6deda616fafd524b6d87236ce0a"
+      },
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/setup-1",
+      "failures": []
+    },
+    {
+      "stage": "after-commit",
+      "round": 1,
+      "passed": true,
+      "checks": {
+        "checkpoint": {
+          "stage": "after-commit",
+          "pid": 45394,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/after-commit-1/pool/repo/standing-orders-work-50e4993c",
+          "at": 1789192749013
+        },
+        "preCrashRuns": [
+          {
+            "id": 1,
+            "role": "builder",
+            "phase": "committing",
+            "outcome": null
+          }
+        ],
+        "committedBeforeCrash": "64eea7dd776711e3a130a66c6897a5c59e8de5e7",
+        "workerKilled": true,
+        "childSurvived": true,
+        "beforeExpiry": "refused",
+        "overlappingWriters": [],
+        "afterTakeover": {
+          "state": "done",
+          "dispatch": {
+            "condition": "terminal",
+            "code": "complete",
+            "summary": "Complete",
+            "detail": "The task finished; open its result for proof.",
+            "action": "open-result",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": null
+          },
+          "runs": [
+            {
+              "id": 2,
+              "role": "builder",
+              "outcome": "no-change",
+              "reason": "handoff"
+            },
+            {
+              "id": 1,
+              "role": "builder",
+              "outcome": "failed",
+              "reason": "interrupted"
+            }
+          ]
+        },
+        "duplicateDispatch": "refused-empty",
+        "final": {
+          "state": "done",
+          "scope": true,
+          "proof": "verified",
+          "dispatch": {
+            "condition": "terminal",
+            "code": "complete",
+            "summary": "Complete",
+            "detail": "The task finished; open its result for proof.",
+            "action": "open-result",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": null
+          },
+          "runs": [
+            {
+              "id": 2,
+              "role": "builder",
+              "outcome": "no-change",
+              "reason": "handoff",
+              "parent": 1,
+              "head": "64eea7dd776711e3a130a66c6897a5c59e8de5e7"
+            },
+            {
+              "id": 1,
+              "role": "builder",
+              "outcome": "failed",
+              "reason": "interrupted",
+              "parent": null,
+              "head": null
+            }
+          ]
+        },
+        "events": [
+          {
+            "name": "provider-start",
+            "pid": 45365,
+            "at": 1789192748730,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/after-commit-1/pool/repo/standing-orders-work-50e4993c",
+            "phase": "build",
+            "session": "f7032b4f-27f2-4f90-a2de-4fe17d5b9d6b"
+          },
+          {
+            "name": "provider-end",
+            "pid": 45365,
+            "at": 1789192748741,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/after-commit-1/pool/repo/standing-orders-work-50e4993c",
+            "phase": "build"
+          },
+          {
+            "name": "commit",
+            "pid": 45394,
+            "at": 1789192749013,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/after-commit-1/pool/repo/standing-orders-work-50e4993c"
+          },
+          {
+            "name": "provider-start",
+            "pid": 60854,
+            "at": 1789192838416,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/after-commit-1/pool/repo/standing-orders-work-50e4993c",
+            "phase": "build",
+            "session": "e2800463-60fa-452e-bf5e-d5794bd959ed"
+          },
+          {
+            "name": "provider-end",
+            "pid": 60854,
+            "at": 1789192838428,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/after-commit-1/pool/repo/standing-orders-work-50e4993c",
+            "phase": "build"
+          },
+          {
+            "name": "check-start",
+            "pid": 60897,
+            "at": 1789192839008,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/after-commit-1/pool/repo/standing-orders-work-50e4993c"
+          },
+          {
+            "name": "check-end",
+            "pid": 60897,
+            "at": 1789192839008,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/after-commit-1/pool/repo/standing-orders-work-50e4993c"
+          }
+        ],
+        "openRuns": [],
+        "finalHead": "64eea7dd776711e3a130a66c6897a5c59e8de5e7"
+      },
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/after-commit-1",
+      "failures": []
+    },
+    {
+      "stage": "review",
+      "round": 1,
+      "passed": true,
+      "checks": {
+        "checkpoint": {
+          "stage": "review",
+          "pid": 45499,
+          "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1/standing-orders-review-Q5F6SL",
+          "at": 1789192750376
+        },
+        "preCrashRuns": [
+          {
+            "id": 1,
+            "role": "builder",
+            "phase": "verifying-proof",
+            "outcome": "built"
+          },
+          {
+            "id": 2,
+            "role": "reviewer",
+            "phase": null,
+            "outcome": null
+          }
+        ],
+        "committedBeforeCrash": "e95ef3c9f78ffe63413dedbcd5065ad6df68c4b3",
+        "workerKilled": true,
+        "childSurvived": true,
+        "beforeExpiry": "refused",
+        "overlappingWriters": [],
+        "afterTakeover": {
+          "state": "done",
+          "dispatch": {
+            "condition": "waiting",
+            "code": "review-failed",
+            "summary": "Review interrupted — retry available",
+            "detail": "Review attempt 1 of 3 was interrupted (interrupted). The build is preserved; ask for an explicit retry — 2 explicit retries left.",
+            "action": "retry-review",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": {
+              "sourceRun": 1,
+              "state": "retryable",
+              "attempt": 1,
+              "cap": 3,
+              "retriesUsed": 0,
+              "retriesRemaining": 2,
+              "latestRun": 2,
+              "latestReason": "interrupted",
+              "interrupted": true,
+              "queued": null
+            }
+          },
+          "runs": [
+            {
+              "id": 2,
+              "role": "reviewer",
+              "outcome": "failed",
+              "reason": "interrupted"
+            },
+            {
+              "id": 1,
+              "role": "builder",
+              "outcome": "built",
+              "reason": null
+            }
+          ]
+        },
+        "duplicateDispatch": "refused-empty",
+        "afterRecovery": {
+          "dispatch": {
+            "condition": "waiting",
+            "code": "review-failed",
+            "summary": "Review interrupted — retry available",
+            "detail": "Review attempt 1 of 3 was interrupted (interrupted). The build is preserved; ask for an explicit retry — 2 explicit retries left.",
+            "action": "retry-review",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": {
+              "sourceRun": 1,
+              "state": "retryable",
+              "attempt": 1,
+              "cap": 3,
+              "retriesUsed": 0,
+              "retriesRemaining": 2,
+              "latestRun": 2,
+              "latestReason": "interrupted",
+              "interrupted": true,
+              "queued": null
+            }
+          },
+          "review": {
+            "cap": 3,
+            "attempts": [
+              {
+                "runId": 2,
+                "attempt": 1,
+                "outcome": "failed",
+                "reason": "interrupted",
+                "runner": "worker",
+                "provider": "claude",
+                "model": "fixture",
+                "startedAt": "2026-09-12T05:59:10.339Z",
+                "finishedAt": "2026-09-12T06:00:40.465Z",
+                "requestId": 1
+              }
+            ],
+            "openRequest": null,
+            "live": null,
+            "latest": {
+              "runId": 2,
+              "attempt": 1,
+              "outcome": "failed",
+              "reason": "interrupted",
+              "runner": "worker",
+              "provider": "claude",
+              "model": "fixture",
+              "startedAt": "2026-09-12T05:59:10.339Z",
+              "finishedAt": "2026-09-12T06:00:40.465Z",
+              "requestId": 1
+            },
+            "succeeded": null,
+            "state": "retryable",
+            "retriesUsed": 0,
+            "retriesRemaining": 2,
+            "nextAttempt": 2
+          }
+        },
+        "automaticReplay": {
+          "refusal": {
+            "ok": false,
+            "reason": "explicit-only",
+            "detail": "run #1's review attempt 1 (reviewer run #2) ended interrupted — an automatic review ask is one-shot, and a retry takes a fresh operator action: `task review 1`"
+          },
+          "review": {
+            "cap": 3,
+            "attempts": [
+              {
+                "runId": 2,
+                "attempt": 1,
+                "outcome": "failed",
+                "reason": "interrupted",
+                "runner": "worker",
+                "provider": "claude",
+                "model": "fixture",
+                "startedAt": "2026-09-12T05:59:10.339Z",
+                "finishedAt": "2026-09-12T06:00:40.465Z",
+                "requestId": 1
+              }
+            ],
+            "openRequest": null,
+            "live": null,
+            "latest": {
+              "runId": 2,
+              "attempt": 1,
+              "outcome": "failed",
+              "reason": "interrupted",
+              "runner": "worker",
+              "provider": "claude",
+              "model": "fixture",
+              "startedAt": "2026-09-12T05:59:10.339Z",
+              "finishedAt": "2026-09-12T06:00:40.465Z",
+              "requestId": 1
+            },
+            "succeeded": null,
+            "state": "retryable",
+            "retriesUsed": 0,
+            "retriesRemaining": 2,
+            "nextAttempt": 2
+          },
+          "dispatch": {
+            "condition": "waiting",
+            "code": "review-failed",
+            "summary": "Review interrupted — retry available",
+            "detail": "Review attempt 1 of 3 was interrupted (interrupted). The build is preserved; ask for an explicit retry — 2 explicit retries left.",
+            "action": "retry-review",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": {
+              "sourceRun": 1,
+              "state": "retryable",
+              "attempt": 1,
+              "cap": 3,
+              "retriesUsed": 0,
+              "retriesRemaining": 2,
+              "latestRun": 2,
+              "latestReason": "interrupted",
+              "interrupted": true,
+              "queued": null
+            }
+          },
+          "tick": "empty"
+        },
+        "explicitRetry": {
+          "requested": {
+            "envelopeVersion": 1,
+            "ok": true,
+            "command": "task review",
+            "run": 1,
+            "request": 2,
+            "attempt": 2,
+            "cap": 3,
+            "retriesRemaining": 1,
+            "review": {
+              "cap": 3,
+              "attempts": [
+                {
+                  "runId": 2,
+                  "attempt": 1,
+                  "outcome": "failed",
+                  "reason": "interrupted",
+                  "runner": "worker",
+                  "provider": "claude",
+                  "model": "fixture",
+                  "startedAt": "2026-09-12T05:59:10.339Z",
+                  "finishedAt": "2026-09-12T06:00:40.465Z",
+                  "requestId": 1
+                }
+              ],
+              "openRequest": {
+                "id": 2,
+                "requestedBy": "fixture",
+                "basis": "human",
+                "origin": "operator",
+                "requestedAt": "2026-09-12T06:00:42.458Z"
+              },
+              "live": null,
+              "latest": {
+                "runId": 2,
+                "attempt": 1,
+                "outcome": "failed",
+                "reason": "interrupted",
+                "runner": "worker",
+                "provider": "claude",
+                "model": "fixture",
+                "startedAt": "2026-09-12T05:59:10.339Z",
+                "finishedAt": "2026-09-12T06:00:40.465Z",
+                "requestId": 1
+              },
+              "succeeded": null,
+              "state": "queued",
+              "retriesUsed": 0,
+              "retriesRemaining": 1,
+              "nextAttempt": 2
+            }
+          },
+          "tick": [
+            {
+              "id": "review of run 1",
+              "outcome": "reviewed",
+              "reason": "0 comment(s), 2 judgement(s)",
+              "attempt": 2
+            }
+          ],
+          "review": {
+            "cap": 3,
+            "attempts": [
+              {
+                "runId": 2,
+                "attempt": 1,
+                "outcome": "failed",
+                "reason": "interrupted",
+                "runner": "worker",
+                "provider": "claude",
+                "model": "fixture",
+                "startedAt": "2026-09-12T05:59:10.339Z",
+                "finishedAt": "2026-09-12T06:00:40.465Z",
+                "requestId": 1
+              },
+              {
+                "runId": 3,
+                "attempt": 2,
+                "outcome": "no-change",
+                "reason": "reviewed — 0 comment(s), 2 judgement(s)",
+                "runner": "worker",
+                "provider": "claude",
+                "model": "fixture",
+                "startedAt": "2026-09-12T06:00:42.736Z",
+                "finishedAt": "2026-09-12T06:00:42.783Z",
+                "requestId": 2
+              }
+            ],
+            "openRequest": null,
+            "live": null,
+            "latest": {
+              "runId": 3,
+              "attempt": 2,
+              "outcome": "no-change",
+              "reason": "reviewed — 0 comment(s), 2 judgement(s)",
+              "runner": "worker",
+              "provider": "claude",
+              "model": "fixture",
+              "startedAt": "2026-09-12T06:00:42.736Z",
+              "finishedAt": "2026-09-12T06:00:42.783Z",
+              "requestId": 2
+            },
+            "succeeded": {
+              "runId": 3,
+              "attempt": 2,
+              "outcome": "no-change",
+              "reason": "reviewed — 0 comment(s), 2 judgement(s)",
+              "runner": "worker",
+              "provider": "claude",
+              "model": "fixture",
+              "startedAt": "2026-09-12T06:00:42.736Z",
+              "finishedAt": "2026-09-12T06:00:42.783Z",
+              "requestId": 2
+            },
+            "state": "succeeded",
+            "retriesUsed": 1,
+            "retriesRemaining": 0,
+            "nextAttempt": null
+          },
+          "dispatch": {
+            "condition": "terminal",
+            "code": "complete",
+            "summary": "Complete",
+            "detail": "The task finished and its independent review succeeded on attempt 2 of 3; open its result for proof.",
+            "action": "open-result",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": {
+              "sourceRun": 1,
+              "state": "succeeded",
+              "attempt": 2,
+              "cap": 3,
+              "retriesUsed": 1,
+              "retriesRemaining": 0,
+              "latestRun": 3,
+              "latestReason": "reviewed — 0 comment(s), 2 judgement(s)",
+              "interrupted": false,
+              "queued": null
+            }
+          },
+          "closed": "already-reviewed",
+          "duplicateAfterRetry": "empty",
+          "providerStarts": 2
+        },
+        "final": {
+          "state": "done",
+          "scope": true,
+          "proof": "verified",
+          "dispatch": {
+            "condition": "terminal",
+            "code": "complete",
+            "summary": "Complete",
+            "detail": "The task finished and its independent review succeeded on attempt 2 of 3; open its result for proof.",
+            "action": "open-result",
+            "nextAt": null,
+            "role": null,
+            "blockerTaskId": null,
+            "review": {
+              "sourceRun": 1,
+              "state": "succeeded",
+              "attempt": 2,
+              "cap": 3,
+              "retriesUsed": 1,
+              "retriesRemaining": 0,
+              "latestRun": 3,
+              "latestReason": "reviewed — 0 comment(s), 2 judgement(s)",
+              "interrupted": false,
+              "queued": null
+            }
+          },
+          "runs": [
+            {
+              "id": 3,
+              "role": "reviewer",
+              "outcome": "no-change",
+              "reason": "reviewed — 0 comment(s), 2 judgement(s)",
+              "parent": 1,
+              "head": null
+            },
+            {
+              "id": 2,
+              "role": "reviewer",
+              "outcome": "failed",
+              "reason": "interrupted",
+              "parent": 1,
+              "head": null
+            },
+            {
+              "id": 1,
+              "role": "builder",
+              "outcome": "built",
+              "reason": null,
+              "parent": null,
+              "head": "e95ef3c9f78ffe63413dedbcd5065ad6df68c4b3"
+            }
+          ]
+        },
+        "events": [
+          {
+            "name": "provider-start",
+            "pid": 45421,
+            "at": 1789192749218,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1/pool/repo/standing-orders-work-b53fdf2b",
+            "phase": "build",
+            "session": "2d8a4702-032b-4d08-8fa8-73b4579877ee"
+          },
+          {
+            "name": "provider-end",
+            "pid": 45421,
+            "at": 1789192749230,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1/pool/repo/standing-orders-work-b53fdf2b",
+            "phase": "build"
+          },
+          {
+            "name": "commit",
+            "pid": 45460,
+            "at": 1789192749497,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1/pool/repo/standing-orders-work-b53fdf2b"
+          },
+          {
+            "name": "check-start",
+            "pid": 45472,
+            "at": 1789192749850,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1/pool/repo/standing-orders-work-b53fdf2b"
+          },
+          {
+            "name": "check-end",
+            "pid": 45472,
+            "at": 1789192749850,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1/pool/repo/standing-orders-work-b53fdf2b"
+          },
+          {
+            "name": "provider-start",
+            "pid": 45499,
+            "at": 1789192750375,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1/standing-orders-review-Q5F6SL",
+            "phase": "review",
+            "session": "ad31ac83-b451-47df-8a25-40132e0c0ab7"
+          },
+          {
+            "name": "provider-end",
+            "pid": 45499,
+            "at": 1789192841317,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1/standing-orders-review-Q5F6SL",
+            "phase": "review"
+          },
+          {
+            "name": "provider-start",
+            "pid": 61320,
+            "at": 1789192842777,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1/standing-orders-review-kG7hxZ",
+            "phase": "review",
+            "session": "bba7d98b-943c-44af-87c6-3f2fabfe8436"
+          },
+          {
+            "name": "provider-end",
+            "pid": 61320,
+            "at": 1789192842777,
+            "cwd": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1/standing-orders-review-kG7hxZ",
+            "phase": "review"
+          }
+        ],
+        "openRuns": [],
+        "finalHead": "e95ef3c9f78ffe63413dedbcd5065ad6df68c4b3"
+      },
+      "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t/review-1",
+      "failures": []
+    }
+  ],
+  "retainedAt": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/standing-orders-crash-canary-mUjg5t",
+  "scope": "Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage replays the automatic review producer over the interrupted attempt under a live reviewAuto mode (it queues nothing: explicit-only retries), then continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
+  "exclusions": [
+    "real-provider recovery",
+    "real-provider review retry",
+    "Windows",
+    "reboot",
+    "detached descendants",
+    "power-loss filesystem durability"
+  ]
+}

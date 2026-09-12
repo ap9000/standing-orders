@@ -23,6 +23,11 @@ export type ParsedPlan = {
   acceptance: AcceptanceCriterion[];
   /** The plan document, markdown, rendered fenced-inert everywhere. */
   plan: string;
+  /** Why the filed contract must change (contract handoff, task 1): a
+   * planner that proposes different goal/outOfScope/touches/acceptance
+   * than the operator filed says so HERE, or the plan is malformed. Null
+   * when the plan reproduces the filed terms, or when none were filed. */
+  amendment: string | null;
 };
 
 /** A deliberately small execution plan. The signed scope remains the
@@ -171,6 +176,7 @@ export const PLAN_LIMITS = {
   touch: 200,
   touches: 32,
   document: 16 * 1024,
+  amendment: 1_000,
 } as const;
 
 function refuse(reason: string, message: string): PlanParseResult {
@@ -229,6 +235,7 @@ export function parsePlan(raw: string): PlanParseResult {
   const goal = prose(body["goal"], "goal", PLAN_LIMITS.goal, true, problems);
   const outOfScope = prose(body["outOfScope"], "outOfScope", PLAN_LIMITS.outOfScope, false, problems);
   const document = prose(body["plan"], "plan", PLAN_LIMITS.document, true, problems);
+  const amendment = prose(body["amendment"], "amendment", PLAN_LIMITS.amendment, false, problems);
 
   const touches: string[] = [];
   if (body["touches"] !== undefined && body["touches"] !== null) {
@@ -276,7 +283,7 @@ export function parsePlan(raw: string): PlanParseResult {
   if (problems.length > 0) return { ok: false, problems };
   return {
     ok: true,
-    plan: { goal: goal as string, outOfScope, touches, acceptance: acceptanceParse.criteria, plan: document as string },
+    plan: { goal: goal as string, outOfScope, touches, acceptance: acceptanceParse.criteria, plan: document as string, amendment },
   };
 }
 
