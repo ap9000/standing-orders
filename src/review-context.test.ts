@@ -325,7 +325,7 @@ describe("inherited review context (v51)", () => {
     expect(coverage.get("c1")).toMatchObject({ state: "context", inherited: true, paths: ["src/limit.ts"], items: [byPath.get("src/limit.ts")!.id], gaps: [], priorSupport: "eligible" });
     expect(coverage.get("c2")).toMatchObject({ state: "context", inherited: true, paths: ["src/guard.ts"], priorSupport: "eligible" });
     expect(coverage.get("c3")).toMatchObject({ state: "patch", inherited: true, priorSupport: "none" });
-    expect(coverage.get("c4")).toMatchObject({ state: "patch", inherited: true, paths: ["src/guard.ts", "src/limit.ts", "src/report.ts"], priorSupport: "none" });
+    expect(coverage.get("c4")).toMatchObject({ state: "context", inherited: true, paths: ["src/guard.ts", "src/limit.ts", "src/report.ts"], priorSupport: "none" });
 
     // Prior review provenance is carried with its proof, never as a verdict.
     expect(inventory.priorReview.map(one => [one.criterionId, one.support, one.judgement])).toEqual([["c1", "eligible", "upholds"], ["c2", "eligible", "upholds"]]);
@@ -344,7 +344,7 @@ describe("inherited review context (v51)", () => {
 
     // The matrix rows carry the coverage; nothing about the verdict moved.
     const matrix = adjudicateRevision(f, inventory);
-    expect(matrix.map(row => row.coverage?.state)).toEqual(["context", "context", "patch", "patch"]);
+    expect(matrix.map(row => row.coverage?.state)).toEqual(["context", "context", "patch", "context"]);
     expect(matrix.find(row => row.id === "c1")?.coverage?.items).toEqual([byPath.get("src/limit.ts")!.id]);
   });
 
@@ -432,9 +432,8 @@ describe("inherited review context (v51)", () => {
       expect(inventory.ancestry.verified).toBe(false);
       expect(inventory.priorReview.every(one => one.support === "invalid")).toBe(true);
       for (const id of ["c1", "c2"]) expect(inventory.coverage.find(one => one.id === id)?.state).toBe("gap");
-      // c4's relevant paths include the one the patch touched: judged from
-      // the patch, with the ancestry gap still named on the row.
-      expect(inventory.coverage.find(one => one.id === "c4")).toMatchObject({ state: "patch", gaps: expect.arrayContaining([expect.stringMatching(/no sealed head/)]) });
+      // Touching one path cannot hide missing ancestry for the others.
+      expect(inventory.coverage.find(one => one.id === "c4")).toMatchObject({ state: "gap", gaps: expect.arrayContaining([expect.stringMatching(/no sealed head/)]) });
     });
 
     test("byte limits, binaries, and secrets are honest gaps: oversized and binary paths are never truncated, and a redacted item cannot support its criterion", async () => {
@@ -479,6 +478,48 @@ describe("inherited review context (v51)", () => {
       expect(parseReviewContext(JSON.stringify(liar))).toMatchObject({ ok: false, problem: expect.stringMatching(/claims eligibility/) });
       expect(parseReviewContext("nope")).toMatchObject({ ok: false });
     });
+  });
+
+  test("a second revision retains grandparent paths and re-captures them at its own head", async () => {
+    const f = await seed();
+    await capture(f);
+    const proof = JSON.parse(readFileSync(join(f.evidenceRoot, f.store.getArtifact(f.sourceProofArtifact)!.key), "utf8"));
+    proof.changed = ["src/report.ts"];
+    for (const criterion of proof.criteria) criterion.evidence = [{ kind: "check", ref: "npm test" }];
+    storeEvidence(f.store, f.evidenceRoot, f.revisionRun, "proof", "proof.json", Buffer.from(JSON.stringify(proof)), "proof", T0);
+    const brief = Buffer.from(JSON.stringify({ schema: 1, sourceTask: f.revisionTaskId, sourceRun: f.revisionRun, sourceScopeDigest: f.store.getScope(f.revisionTaskId)!.digest, head: f.shas.revision, comments: [] }));
+    const key = writeEvidenceFile(f.evidenceRoot, f.revisionRun, "next-brief.json", brief);
+    const child = f.store.sealRevision({ source: { task: f.revisionTaskId, run: f.revisionRun, scopeDigest: f.store.getScope(f.revisionTaskId)!.digest }, brief: { evidenceRoot: f.evidenceRoot, key, bytes: brief.length, sha256: sha256(brief), capture: "revision brief" }, child: { id: "second-revision", title: "Next report", repair: "rename report" }, commentIds: null }, T0);
+    if (!child.ok) throw new Error(child.reason);
+    const ref = f.store.refFor("built-in", child.id).id;
+    const scope = approve(f.store, child.id, "alex", T0, f.store.getScope(child.id)!.digest, f.approverToken);
+    if (!scope.ok) throw new Error(scope.reason);
+    const head = commitFiles(f.repo, { "src/report.ts": REPORT_TS_V2 + "// next revision\n" }, "next revision");
+    const run = f.store.startRun({ taskRef: ref, leaseId: "next", runner: "builder-1", branch: "next", worktree: f.repo, provider: "claude", model: "sonnet", now: T0, ...presented(f.store, ref) });
+    f.store.stampRun(run, { scopeDigest: scope.scope.digest, baseRevision: f.shas.revision });
+    f.store.recordOutcomeFacts(run, { headRevision: head });
+    f.store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+    const captured = await captureReviewContext(f.store, exec, { runId: run, taskRef: ref, head, base: f.shas.revision, rubric: RUBRIC, patchPaths: new Set(["src/report.ts"]), worktree: f.repo, root: f.evidenceRoot, now: () => T0 });
+    expect(captured?.inventory.bindings?.map(one => one.run)).toEqual([f.sourceRun, f.revisionRun]);
+    expect(captured?.inventory.items.find(one => one.path === "src/limit.ts")).toMatchObject({ commit: head, content: LIMIT_TS, criteria: expect.arrayContaining(["c1"]) });
+    expect(captured?.inventory.coverage.find(one => one.id === "c1")).toMatchObject({ state: "context", paths: ["src/limit.ts"], gaps: [] });
+  });
+
+  test("a changed evidence requirement invalidates a previous judgement even with identical criterion text", async () => {
+    const rubric = RUBRIC.map(one => one.id === "c1" ? { ...one, evidence: ["manual-review"] as never } : one);
+    const f = await seed({ revisionRubric: rubric });
+    const captured = await capture(f, rubric);
+    expect(captured?.inventory.priorReview.find(one => one.criterionId === "c1")).toMatchObject({ statementMatches: false, support: "invalid" });
+  });
+
+  test("context paths are literal and blob bytes must agree with their Git identity", async () => {
+    const f = await seed({ extraSourceFiles: { "src/a[1].ts": "literal\n", "src/a1.ts": "pattern\n" } });
+    const good = await capture(f);
+    expect(good?.inventory.items.find(one => one.path === "src/a[1].ts")?.content).toBe("literal\n");
+    const forged = structuredClone(good!.inventory);
+    const item = forged.items[0]!;
+    item.blob = "a".repeat(40);
+    expect(parseReviewContext(serializeReviewContext(forged))).toMatchObject({ ok: false, problem: expect.stringContaining("blob identity") });
   });
 
   describe("c3 and c4: the reviewer pass over a revision", () => {
@@ -582,15 +623,15 @@ describe("inherited review context (v51)", () => {
       const rules = { ...reviewContextRules(f.inventory), sealedFiles: new Set(["REVIEW-CHECK-LOG.txt"]) };
       const patchPaths = new Set(["src/report.ts"]);
       const ids = new Set(["c1", "c2", "c3", "c4"]);
-      expect(rules.provenanceRequired).toEqual(new Set(["c1", "c2"]));
+      expect(rules.provenanceRequired).toEqual(new Set(["c1", "c2", "c4"]));
       const parse = (criteria: { id: string; judgement: string; note: string }[]) => parseReview(JSON.stringify({ version: 1, comments: [], criteria }), patchPaths, ids, rules);
       expect(parse(judgements({ judgement: "contradicts", note: "src/report.ts drops the cap" })).ok).toBe(true);
       expect(parse(judgements({ judgement: "contradicts", note: "REVIEW-CHECK-LOG.txt shows the retry test failing" })).ok).toBe(true);
       expect(parse(judgements({ judgement: "cannot-tell", note: "nothing sealed settles it" })).ok).toBe(true);
       expect(parse(judgements({ judgement: "upholds", note: "ctx-9 says so" })).ok).toBe(false);
       expect(parse(judgements({ judgement: "upholds", note: "ctx-1 says so" })).ok).toBe(true);
-      // c3 and c4 are judged from the patch: no citation is demanded.
-      expect(parse([{ id: "c1", judgement: "cannot-tell", note: "unsettled" }, { id: "c2", judgement: "cannot-tell", note: "unsettled" }, { id: "c3", judgement: "upholds", note: "fine" }, { id: "c4", judgement: "contradicts", note: "the gate is red" }]).ok).toBe(true);
+      // Only c3 is fully represented by the patch.
+      expect(parse([{ id: "c1", judgement: "cannot-tell", note: "unsettled" }, { id: "c2", judgement: "cannot-tell", note: "unsettled" }, { id: "c3", judgement: "upholds", note: "fine" }, { id: "c4", judgement: "contradicts", note: "REVIEW-CHECK-LOG.txt shows the gate is red" }]).ok).toBe(true);
       expect(parse([{ id: "c1", judgement: "cannot-tell", note: "unsettled" }, { id: "c2", judgement: "upholds", note: "fine" }, { id: "c3", judgement: "upholds", note: "fine" }, { id: "c4", judgement: "upholds", note: "fine" }])).toMatchObject({ ok: false, problems: expect.arrayContaining([{ reason: expect.stringMatching(/"c2" is outside the reviewed patch/) }]) });
       expect(citesSuppliedProvenance("see ctx-12", { itemIds: new Set(["ctx-1"]), patchPaths: new Set(), sealedFiles: new Set() })).toBe(false);
     });
@@ -602,7 +643,7 @@ describe("inherited review context (v51)", () => {
         const forged = JSON.parse(readFileSync(join(cwd, REVIEW_CONTEXT_NAME), "utf8"));
         forged.items[0].content += "\n// planted";
         writeFileSync(join(cwd, REVIEW_CONTEXT_NAME), JSON.stringify(forged, null, 1));
-        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: "ctx-1 returns 3" }) }) };
+        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: "ctx-2 returns 3" }) }) };
       });
       expect(reports[0]).toMatchObject({ outcome: "failed", detail: "dirty-scratch", attempt: 1 });
       expect(f.store.criterionReviewsFor(f.revisionRun)).toEqual([]);
@@ -620,33 +661,58 @@ describe("inherited review context (v51)", () => {
       expect(f.store.reviewRetryStateOf(f.revisionRun)?.attempts[0]).toMatchObject({ outcome: "failed", reason: "reviewer-evidence" });
     });
 
-    test("c3: atomic ingestion refuses an inventory added after materialization (empty-to-added) and one removed, keeping every failed attempt", async () => {
-      // Empty-to-added: the run carries no inventory when the reviewer is
-      // sealed; one appears while the agent works.
+    test("c3: missing revision context refuses before spend, and removed context refuses at ingestion", async () => {
       const added = await readyForReview();
-      const artifactRow = added.store.getArtifact(added.contextArtifact)!;
       added.store.raw().prepare("DELETE FROM artifact WHERE id = ?").run(added.contextArtifact);
-      let sawContext = true;
-      const addedReports = await passOnce(added, async (_file, _args, options) => {
-        sawContext = existsSync(join(options?.cwd ?? "", REVIEW_CONTEXT_NAME));
-        storeEvidence(added.store, added.evidenceRoot, added.revisionRun, "review-context", "review-context-late.json", Buffer.from(serializeReviewContext(added.inventory), "utf8"), "late", T0, { captureStatus: "ok" });
-        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "cannot-tell", note: "no context was sealed" }) }) };
+      let calls = 0;
+      const addedReports = await passOnce(added, async () => {
+        calls++;
+        return { ...OK, stdout: spoken({ version: 1, comments: [] }) };
       });
-      expect(sawContext).toBe(false);
-      expect(addedReports[0]).toMatchObject({ outcome: "failed", detail: "stale-evidence" });
-      expect(added.store.reviewRetryStateOf(added.revisionRun)?.attempts[0]).toMatchObject({ outcome: "failed", reason: "reviewer-stale-evidence" });
+      expect(calls).toBe(0);
+      expect(addedReports[0]).toMatchObject({ outcome: "failed", detail: "evidence" });
       expect(added.store.criterionReviewsFor(added.revisionRun)).toEqual([]);
-      void artifactRow;
 
       // Removed: the inventory the reviewer was sealed disappears before ingest.
       const removed = await readyForReview();
       const removedReports = await passOnce(removed, async () => {
         removed.store.raw().prepare("DELETE FROM artifact WHERE id = ?").run(removed.contextArtifact);
-        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: "ctx-1 returns 3" }) }) };
+        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: "ctx-2 returns 3" }) }) };
       });
       expect(removedReports[0]).toMatchObject({ outcome: "failed", detail: "stale-evidence", attempt: 1, retriesRemaining: 2 });
       expect(removed.store.criterionReviewsFor(removed.revisionRun)).toEqual([]);
       expect(removed.store.getRun(removed.store.reviewRetryStateOf(removed.revisionRun)!.attempts[0]!.runId)?.outcome).toBe("failed");
+    });
+
+    test("an unrelated context item cannot justify an inherited criterion", async () => {
+      const f = await readyForReview();
+      const guard = f.inventory.items.find(one => one.path === "src/guard.ts")!;
+      const reports = await passOnce(f, async () => ({ ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: `${guard.id} proves the limiter` }) }) }));
+      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "malformed-review" });
+      expect(f.store.criterionReviewsFor(f.revisionRun)).toEqual([]);
+    });
+
+    test.each(["check-log", "screenshot", "proof-bytes", "reviewer-lineage"] as const)("source %s changes while the reviewer runs refuse atomic ingestion", async kind => {
+      const f = await readyForReview();
+      const reports = await passOnce(f, async () => {
+        if (kind === "proof-bytes") writeFileSync(join(f.evidenceRoot, f.store.getArtifact(f.sourceProofArtifact)!.key), "tampered");
+        else if (kind === "reviewer-lineage") {
+          const reviewer = f.store.criterionReviewsFor(f.sourceRun)[0]!.reviewerRun;
+          f.store.raw().prepare("UPDATE run SET parent_run = NULL WHERE id = ?").run(reviewer);
+        } else storeEvidence(f.store, f.evidenceRoot, f.sourceRun, kind, `late-${kind}`, Buffer.from("late evidence"), "late", T0, { captureStatus: "ok" });
+        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: `${f.inventory.items.find(one => one.path === "src/limit.ts")!.id} returns 3` }) }) };
+      });
+      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "stale-evidence" });
+      expect(f.store.criterionReviewsFor(f.revisionRun)).toEqual([]);
+    });
+
+    test("source evidence drift after capture refuses before provider spend", async () => {
+      const f = await readyForReview();
+      storeEvidence(f.store, f.evidenceRoot, f.sourceRun, "check-log", "late-log", Buffer.from("late"), "late", T0);
+      let calls = 0;
+      const reports = await passOnce(f, async () => { calls++; return OK; });
+      expect(calls).toBe(0);
+      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "evidence" });
     });
 
     test("c4: reviewer isolation and retry bounds are untouched — a second inventory is ambiguous and refused, and three failed roots exhaust the allowance", async () => {

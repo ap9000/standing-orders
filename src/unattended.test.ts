@@ -348,6 +348,7 @@ describe("v40: a drafted, unapproved repair moves the idle-spend invariant not a
     if (!sealed.ok) throw new Error(`the fixture approval was refused: ${sealed.reason}`);
     const sourceRun = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "builder-1", branch: "b", worktree: "/wt", now: T0, ...presented(store, ref.id, "builder") });
     store.stampRun(sourceRun, { scopeDigest: store.getScope("t-guard")!.digest });
+    store.recordOutcomeFacts(sourceRun, { headRevision: (await git(["rev-parse", "HEAD"])).stdout.trim() });
     store.finishRun(sourceRun, { outcome: "built", committed: true, now: T0 });
     // The source task delivered (its short proof is what drafts the repair);
     // only the DRAFT could dispatch on the next tick.

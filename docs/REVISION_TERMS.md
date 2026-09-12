@@ -16,9 +16,9 @@ Inside the seal's transaction, against live rows, before anything is created:
 | --- | --- |
 | The source task exists. | `source-task` |
 | The source run is that task's own attempt. | `source-run` |
-| The source scope's digest is still the one the caller read (or the caller saw no scope and there is still none). | `stale-source` |
+| The source scope's digest matches both the caller and the actual source run (legacy empty run stamps normalize to no scope). | `stale-source` |
 | The stored terms read back exactly (the raw terms verdict is clean). | `source-terms` |
-| The brief file re-reads and re-hashes under the evidence root, within its cap, and names this exact source task and run. | `brief-custody` |
+| The brief file re-reads and re-hashes under the evidence root, within its cap, and names this exact source task, run, scope digest, head, and full annotation batch. | `brief-custody` |
 | The comment batch is still whole (annotation road). | `comments-taken` |
 | The deterministic child id, or the repair chain's `source_run`, is unclaimed. | `duplicate` |
 
@@ -27,7 +27,7 @@ enclosing transaction (the annotation road wraps the seal with its mode
 coverage) can never commit half a child. A brief file whose seal refused is
 an orphan on disk, not authority — no artifact row points at it. Two
 concurrent seals of the same source have exactly one winner; the loser
-refuses in words with zero rows.
+refuses in words with zero rows (including named SQLite contention).
 
 ## The policy, field by field
 
@@ -70,12 +70,18 @@ covers them:
 - strikes, holds, and the source's runs.
 
 **Fresh from a live mode, only when the caller re-proved coverage inside the
-same transaction**: the escalated posture and the budget default. Coverage
-is never carried across transactions or from the parent.
+same transaction**: the budget default may tighten the inherited ceiling.
+A scoped source whose sealed profile or durable task posture is `auto` stays
+`auto`; a mode cannot widen it. Coverage is never carried across transactions
+or from the parent.
 
 A source with no scope (a legacy filing) has nothing to inherit: the child
 files the placeholder rubric and today's defaults, and every projection says
 the source had no scope.
+
+A new revision build starts from the exact source head recorded in its
+verified brief. An explicit base or existing revision branch must contain that
+head. Missing or stale source identity refuses before a lease or provider spend.
 
 ## Approval semantics
 
@@ -99,7 +105,9 @@ highest, and a signed mode's `repairMaxAttempts` counts every attempt
 already spent. A stop settles the row the task continues when it is still
 open, and records its own settled row otherwise. Nothing is stored beyond
 `task_ref.revision_of` and the existing `repair_chain` rows, so a restart
-reads the same lineage.
+reads the same lineage. Cycles, missing ancestors, and ancestry beyond the
+64-task bound refuse visibly. Repair draft creation proves the canonical root
+and next ordinal again inside its transaction, including the signed cap.
 
 ## Projections
 

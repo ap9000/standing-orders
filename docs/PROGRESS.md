@@ -1,5 +1,29 @@
 # Progress
 
+**2026-09-12 UTC — Contract handoffs integrated; certification in progress.**
+All three implementation tasks completed through Standing Orders, followed by
+operator-led integration hardening. This is assisted implementation. The Agor
+source assessment supports using existing task/run/artifact records, explicit
+ancestry, and bounded context instead of adding a memory platform.
+
+Planning now proves the recorded source bytes and full contract again at
+atomic finalization; stale identity releases the claim, and lost evidence or
+undeclared amendments cannot land a plan. Decision history beyond the explicit
+five-answer limit refuses visibly. Revision creation binds the actual source
+run/scope/head and full annotation batch, retains permission and budget ceilings,
+and preserves bounded repair ancestry. New revision builds start at the verified
+source head. Review inventories retain paths across successive revisions, bind
+ancestor evidence and reviewer lineage, verify Git blob identities, require
+criterion-relevant citations, and recheck input custody at atomic ingestion.
+Mixed patch/inherited coverage and missing context are represented explicitly.
+
+A private backup of the live schema-49 database upgraded to 51 twice-opened
+successfully, with all table counts preserved and clean integrity/foreign-key
+checks. The live controller remains on schema 49. Full integrated and real
+provider evidence will be recorded in the final handoff assessment; the earlier
+per-task certificates below describe their own source snapshots.
+
+
 **2026-09-11 — Revision terms preserved through one boundary (contract
 handoff task 2).** Annotation revisions, CI repair drafts, and criterion
 repair drafts now file through one `Store.sealRevision` under one

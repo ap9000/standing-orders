@@ -1,9 +1,10 @@
 # Preserve the task contract through every handoff
 
-Assessed 2026-09-12 UTC against `b96d53e`, now integrated into local main.
-Tasks 1 and 2 are implemented and undergoing integration hardening. Task 3
-is running through Standing Orders. The real-provider completion gate has
-not run. [Agor assessment](assessments/AGOR_CONTEXT.md) keeps this milestone
+Assessed 2026-09-12 UTC. All three bounded tasks ran through Standing Orders
+and are integrated on `codex/contract-handoffs`, with additional operator-led
+hardening. Main through `68ff7eb` is published. This feature is undergoing its
+integrated validation; the real-provider completion gate is still pending.
+The [Agor assessment](assessments/AGOR_CONTEXT.md) keeps the implementation
 focused on existing task, run, artifact, and approval boundaries.
 
 
@@ -35,7 +36,7 @@ unattended.
 ### 1. Preserve the filed request during planning
 
 **Status (2026-09-11, branch `standing-orders/preserve-filed-planning-contract`,
-unmerged):** implemented over the existing scope row, plan artifact, and
+integrated with additional boundary hardening):** implemented over the existing scope row, plan artifact, and
 `finalizePlanFenced` transaction, with focused regressions in
 `src/planner.test.ts` ("the filed contract reaches planning and survives
 it"), `src/planner-source.test.ts`, and
@@ -93,7 +94,7 @@ does not drop context. Include empty/legacy input and byte-limit cases.
 
 *Implemented 2026-09-11 on `standing-orders/preserve-revision-contract-terms`;
 the policy and its coverage are recorded in [REVISION_TERMS.md](REVISION_TERMS.md).
-Tasks 1 and 3 remain open.*
+All three tasks are integrated; final certification remains open.*
 
 Define one field-by-field policy at the existing revision creation boundary,
 used by annotation revisions, CI repair, and semantic repair. Bind the source
@@ -124,10 +125,10 @@ context from git objects at the exact head, verified ancestor artifacts,
 prior review as proved context, per-criterion coverage on the shared matrix,
 identical evidence for both subscription reviewers, provenance-citing
 judgements, and the distinct semantic-coverage projection on task, run, chat,
-and CLI. Not changed here: revision branches still grow from the project's
-checked-out branch, so a source head outside the revision's history is a
-visible `stale-ancestry` gap, not verified context; tasks 1 and 2 remain
-separate.*
+and CLI. Integration now starts a new revision at its verified source head.
+Successive revisions retain a bounded ancestor inventory, re-capturing relevant
+files at the new head. Source evidence, review lineage, and criterion-specific
+provenance are rechecked before spend and at atomic ingestion.*
 
 Extend the existing sealed evidence inventory with bounded context from the
 exact source and accepted head. Prefer criterion-relevant source files and
@@ -209,6 +210,6 @@ the merge did not rerun the real-provider release pilot.
 | `standing-orders/nightly-deps-20260812-1534` (`f2f0985`) | Only adds `docs/DEPS.md`. Its upstream claims were explicitly not checked against a registry. Retain as historical notes; regenerate from current manifests and primary sources if dependency review becomes a priority. |
 | `origin/codex/control-app` (`15a1d9c`) | Assessed and selectively integrated over current main. Native shell, setup, provider/model discovery, and calendar schedules are adapted; superseded engines are omitted. See [the full disposition and remaining forward ports](CONTROL_APP_INTEGRATION.md). |
 
-No branches or worktrees were deleted. The merge is local; publishing main and
-upgrading the live schema-v49 controller are separate delivery steps. The live
+No branches or worktrees were deleted. Main through `68ff7eb` has been pushed to GitHub. Upgrading the live
+schema-v49 controller remains a separate delivery step. The live
 controller remains on its stable reliability worktree.

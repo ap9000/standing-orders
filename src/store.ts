@@ -31,6 +31,7 @@ import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
+import { parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
 import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
 import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, scopeAuthorityOf, routeParityProblem, parseAcceptanceCriteria, exactAcceptance, exactStringList, exactSafeIntegerOrNull, exactKeys, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, exactPinOf, routeOfTask, agentChoicesFor } from "./agentconfig.js";
@@ -9238,6 +9239,7 @@ export class Store {
   ingestReview(
     args: {
       reviewerRunId: number;
+      evidenceRoot?: string;
       runId: number;
       artifactId: number;
       author: string;
@@ -9280,6 +9282,19 @@ export class Store {
         terminalDiff.sha256 !== args.bindings.diffSha
       ) {
         throw new ReviewBindingError(`run ${args.runId}'s terminal diff no longer matches what the reviewer was shown — nothing is ingested`);
+      }
+      // Context is an input inventory with ancestor dependencies. Re-read
+      // its bytes and every bound ancestor inside the same write transaction.
+      const contexts = this.artifactsFor(args.runId).filter(one => one.kind === "review-context");
+      if (contexts.length > 0 || args.bindings.context != null) {
+        const context = contexts[0];
+        if (contexts.length !== 1 || context === undefined || args.bindings.context == null || context.id !== args.bindings.context.artifactId || context.sha256 !== args.bindings.context.sha256 || args.evidenceRoot === undefined) throw new ReviewBindingError("the review context inventory or evidence root is missing or changed");
+        const verified = readVerifiedArtifact(args.evidenceRoot, context);
+        if (!verified.ok) throw new ReviewBindingError("the review context bytes no longer verify");
+        const parsed = parseReviewContext(verified.content.toString("utf8"));
+        if (!parsed.ok) throw new ReviewBindingError(parsed.problem);
+        const problem = reviewContextCustodyProblem(this, args.evidenceRoot, parsed.inventory);
+        if (problem !== null) throw new ReviewBindingError(problem);
       }
       const commentIds = this.addReviewerComments(
         { reviewerRunId: args.reviewerRunId, runId: args.runId, artifactId: args.artifactId, author: args.author, comments: args.comments },

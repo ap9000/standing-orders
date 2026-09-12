@@ -32,8 +32,8 @@
  *    bindings intact — and never as an automatic judgement for this run.
  *
  * `coverage` is the per-criterion projection every surface reads: `patch`
- * (judged from this revision's own diff), `context` (inherited, untouched
- * by the patch, every relevant path sealed here), or `gap` (inherited but
+ * (judged from this revision's own diff), `context` (inherited, partly or wholly outside
+ * the patch, every relevant path sealed here), or `gap` (inherited but
  * some relevant context could not be supplied — the reasons are listed).
  */
 
@@ -57,6 +57,7 @@ export const REVIEW_CONTEXT_LIMITS = {
   candidatePaths: 200,
   /** Prior review rows carried as context. */
   priorReviews: 48,
+  ancestors: 16,
 } as const;
 
 export type ContextGapReason =
@@ -130,8 +131,8 @@ export type CriterionContextCoverage = {
   id: string;
   /** `patch`: judged from this revision's own diff (a criterion new to this
    * rubric, or one whose relevant code the patch touches). `context`:
-   * inherited, untouched by the patch, every relevant path sealed as an
-   * item. `gap`: inherited, untouched, and some relevant context is
+   * inherited, partly or wholly outside the patch, every relevant path sealed as an
+   * item. `gap`: inherited and some relevant context is
    * missing — see `gaps`. */
   state: "patch" | "context" | "gap";
   /** Same id AND same statement as the source run's signed rubric. */
@@ -144,6 +145,7 @@ export type CriterionContextCoverage = {
 
 export type ReviewContextInventory = {
   schema: 1;
+  bindings?: { run: number; sha256: string }[];
   run: number;
   head: string;
   base: string | null;
@@ -163,6 +165,59 @@ export type ReviewContextInventory = {
   coverage: CriterionContextCoverage[];
   limits: { itemBytes: number; aggregateBytes: number; items: number };
 };
+
+const CONTEXT_INPUT_KINDS = new Set<Artifact["kind"]>(["terminal-diff", "diff-stat", "proof", "check-log", "screenshot", "review-context"]);
+
+/** A terminal reviewer can have one correction child. Follow its recorded
+ * ancestry, never another task's judgement, with a fixed traversal bound. */
+function historicalReviewerLineage(store: Store, reviewerId: number) {
+  const rows = [];
+  const seen = new Set<number>();
+  let id: number | null = reviewerId;
+  for (let depth = 0; id !== null && depth < 4 && !seen.has(id); depth++) {
+    seen.add(id);
+    const run = store.getRun(id);
+    if (run === null) break;
+    rows.push({ id: run.id, taskRef: run.taskRef, role: run.role, parentRun: run.parentRun, outcome: run.outcome });
+    if (run.role !== "reviewer") break;
+    id = run.parentRun;
+  }
+  return rows;
+}
+
+/** Fingerprint every input the ancestor review depended on, including
+ * absent inputs and later additions. No transcript or checkout is copied. */
+export function reviewContextBindingOf(store: Store, runId: number): { run: number; sha256: string } {
+  const run = store.getRun(runId);
+  const taskId = run === null ? null : store.externalIdFor(run.taskRef);
+  const scope = taskId === null ? null : store.getScope(taskId);
+  const ref = taskId === null ? null : store.lookupRef(taskId);
+  const state = {
+    task: taskId, head: run?.headRevision ?? null, base: run?.baseRevision ?? null, scopeDigest: run?.scopeDigest ?? null,
+    currentScope: scope?.digest ?? null, termsProblem: scope?.termsProblem ?? null,
+    revisionOf: ref?.revisionOf ?? null, revisionBrief: ref?.revisionBriefArtifact ?? null,
+    artifacts: store.artifactsFor(runId).filter(one => CONTEXT_INPUT_KINDS.has(one.kind)),
+    reviews: store.criterionReviewsFor(runId),
+    reviewerLineages: [...new Set(store.criterionReviewsFor(runId).map(one => one.reviewerRun))].map(id => historicalReviewerLineage(store, id)),
+  };
+  return { run: runId, sha256: createHash("sha256").update(JSON.stringify(state)).digest("hex") };
+}
+
+/** Re-prove sealed context before spending and inside final ingestion. */
+export function reviewContextCustodyProblem(store: Store, root: string, inventory: ReviewContextInventory): string | null {
+  const run = store.getRun(inventory.run);
+  const source = run === null ? null : store.revisionSourceOf(run.taskRef);
+  if (run === null || run.headRevision !== inventory.head || run.baseRevision !== inventory.base || source?.sourceRun !== inventory.source.run || source.sourceTask !== inventory.source.task) return "the review context's run, head, base or revision ancestry changed";
+  if (!inventory.bindings?.length || inventory.bindings.length > REVIEW_CONTEXT_LIMITS.ancestors || !inventory.bindings.some(one => one.run === inventory.source.run)) return "the review context has no complete bounded source binding";
+  for (const binding of inventory.bindings) {
+    if (reviewContextBindingOf(store, binding.run).sha256 !== binding.sha256) return `ancestor run #${binding.run}'s scope, ancestry, evidence inventory or review context changed`;
+    for (const artifact of store.artifactsFor(binding.run).filter(one => CONTEXT_INPUT_KINDS.has(one.kind))) {
+      try { if (!readVerifiedArtifact(root, artifact).ok) return `ancestor run #${binding.run}'s ${artifact.kind} bytes no longer verify`; }
+      catch { return `ancestor run #${binding.run}'s ${artifact.kind} cannot be read`; }
+    }
+  }
+  return null;
+}
 
 const SHA1 = /^[0-9a-f]{40}$/;
 const ITEM_ID = /^ctx-[1-9][0-9]{0,3}$/;
@@ -201,6 +256,8 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   if (!Number.isSafeInteger(r["run"]) || Number(r["run"]) <= 0) return { ok: false, problem: "run must be a positive integer" };
   if (!str(r["head"], 40) || !SHA1.test(r["head"])) return { ok: false, problem: "head must be a 40-hex commit" };
   if (!optionalStr(r["base"], 40)) return { ok: false, problem: "base must be a string or null" };
+  const bindings = r["bindings"];
+  if (bindings !== undefined && (!Array.isArray(bindings) || bindings.length > REVIEW_CONTEXT_LIMITS.ancestors || !bindings.every(one => one !== null && typeof one === "object" && Number.isSafeInteger(one.run) && one.run > 0 && typeof one.sha256 === "string" && /^[0-9a-f]{64}$/.test(one.sha256)) || new Set(bindings.map(one => one.run)).size !== bindings.length)) return { ok: false, problem: "source bindings are malformed" };
   const source = r["source"];
   if (source === null || typeof source !== "object" || Array.isArray(source)) return { ok: false, problem: "source must be an object" };
   const so = source as Record<string, unknown>;
@@ -219,13 +276,14 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   const items: ReviewContextItem[] = [];
   if (!Array.isArray(r["items"]) || r["items"].length > REVIEW_CONTEXT_LIMITS.items) return { ok: false, problem: `items must be an array of at most ${REVIEW_CONTEXT_LIMITS.items}` };
   const ids = new Set<string>();
+  const paths = new Set<string>();
   let aggregate = 0;
   for (const [index, one] of (r["items"] as unknown[]).entries()) {
     if (one === null || typeof one !== "object" || Array.isArray(one)) return { ok: false, problem: `item ${index}: not an object` };
     const it = one as Record<string, unknown>;
     if (!str(it["id"], 12) || !ITEM_ID.test(it["id"]) || ids.has(it["id"])) return { ok: false, problem: `item ${index}: id must be a unique ctx-<n> token` };
-    if (!str(it["path"], 300) || !safeContextPath(it["path"])) return { ok: false, problem: `item ${index}: path is not a safe repository path` };
-    if (!str(it["commit"], 40) || !SHA1.test(it["commit"])) return { ok: false, problem: `item ${index}: commit must be a 40-hex commit` };
+    if (!str(it["path"], 300) || !safeContextPath(it["path"]) || paths.has(it["path"])) return { ok: false, problem: `item ${index}: path is not a safe repository path` };
+    if (!str(it["commit"], 40) || !SHA1.test(it["commit"]) || it["commit"] !== r["head"]) return { ok: false, problem: `item ${index}: commit must be a 40-hex commit` };
     if (!str(it["blob"], 40) || !SHA1.test(it["blob"])) return { ok: false, problem: `item ${index}: blob must be a 40-hex object id` };
     if (typeof it["content"] !== "string" || it["content"].includes("\u0000")) return { ok: false, problem: `item ${index}: content must be a NUL-free string` };
     const bytes = Buffer.byteLength(it["content"], "utf8");
@@ -241,6 +299,8 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     }
     if (it["unchangedSinceSource"] !== null && typeof it["unchangedSinceSource"] !== "boolean") return { ok: false, problem: `item ${index}: unchangedSinceSource must be boolean or null` };
     if (typeof it["redacted"] !== "boolean") return { ok: false, problem: `item ${index}: redacted must be boolean` };
+    if (it["redacted"] === false && createHash("sha1").update(`blob ${bytes}\0`).update(it["content"], "utf8").digest("hex") !== it["blob"]) return { ok: false, problem: `item ${index}: git blob identity does not match its content` };
+    paths.add(it["path"]);
     ids.add(it["id"]);
     items.push({
       id: it["id"],
@@ -311,7 +371,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     ) {
       return { ok: false, problem: `coverage ${index}: malformed` };
     }
-    if ((c["items"] as string[]).some(id => !ids.has(id))) return { ok: false, problem: `coverage ${index}: names an item that is not in the inventory` };
+    if ((c["items"] as string[]).some(id => !ids.has(id) || !items.find(item => item.id === id)?.criteria.includes(String(c["id"])))) return { ok: false, problem: `coverage ${index}: names an item that is not in the inventory` };
     coverageIds.add(c["id"]);
     coverage.push({
       id: c["id"], state: c["state"] as CriterionContextCoverage["state"], inherited: c["inherited"], paths: [...(c["paths"] as string[])],
@@ -323,6 +383,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     ok: true,
     inventory: {
       schema: 1,
+      ...(bindings === undefined ? {} : { bindings: bindings as { run: number; sha256: string }[] }),
       run: Number(r["run"]),
       head: r["head"],
       base: r["base"],
@@ -361,7 +422,7 @@ export function citesSuppliedProvenance(
 
 type GitRunner = (file: string, args: readonly string[], options?: { cwd?: string; maxBuffer?: number }) => Promise<ExecResult>;
 
-const GIT_READ = ["--no-lazy-fetch", "--no-replace-objects", "--no-optional-locks"] as const;
+const GIT_READ = ["--literal-pathspecs", "--no-lazy-fetch", "--no-replace-objects", "--no-optional-locks"] as const;
 
 /** One `ls-tree -l` entry: mode, type, object id, size (null for gitlinks). */
 type TreeEntry = { mode: string; type: string; object: string; size: number | null };
@@ -451,6 +512,7 @@ export async function deriveReviewContext(
   const sourceProblems: string[] = [];
   const inventory: ReviewContextInventory = {
     schema: 1,
+    bindings: [reviewContextBindingOf(store, lineage.sourceRun)],
     run: args.runId,
     head: args.head,
     base: args.base,
@@ -519,8 +581,7 @@ export async function deriveReviewContext(
       sourceProblems.push("the source run's diff-stat is not JSON");
     }
   }
-  const sourceDiffOk = sourceArtifacts.some(one => one.kind === "terminal-diff" && one.captureStatus !== "failed" && !one.truncated);
-  if (!sourceDiffOk) sourceProblems.push("the source run has no complete sealed terminal diff");
+  const sourceDiffOk = verifiedOne("terminal-diff", "terminal diff") !== null;
   inventory.source.verified = sourceProof !== null && sourceDiffPaths !== null && sourceDiffOk && sourceHead !== null;
 
   // 2. The source rubric: only the exact scope the source run built under
@@ -555,17 +616,36 @@ export async function deriveReviewContext(
   // 4. Relevance: which paths matter to which criterion, from the source
   // proof only — criterion-cited changed paths first, then every changed
   // path of the source build for criteria that cited none.
-  const generalPaths = [...new Set([...(sourceProof?.changed ?? []), ...(sourceDiffPaths ?? [])])].filter(safeContextPath).sort();
+  // A revision of a revision keeps the parent's verified path inventory.
+  // Capture those paths anew at THIS head; prior bytes are never substituted.
+  let parentContext: ReviewContextInventory | null = null;
+  if (sourceArtifacts.some(one => one.kind === "review-context")) {
+    const bytes = verifiedOne("review-context", "review context");
+    const parsed = bytes === null ? null : parseReviewContext(bytes.toString("utf8"));
+    if (parsed?.ok) {
+      const problem = reviewContextCustodyProblem(store, args.root, parsed.inventory);
+      const combined = new Map([...(parsed.inventory.bindings ?? []), ...inventory.bindings!].map(one => [one.run, one]));
+      if (problem === null && combined.size <= REVIEW_CONTEXT_LIMITS.ancestors) {
+        parentContext = parsed.inventory;
+        inventory.bindings = [...combined.values()];
+      } else gapAll("source-unverified", problem ?? "the inherited context exceeds the ancestor bound");
+    } else gapAll("source-unverified", "the source revision's inherited context cannot be verified");
+  } else if (store.revisionSourceOf(sourceRun.taskRef) !== null) {
+    gapAll("source-unverified", "the source revision has no inherited context inventory");
+  }
+  const generalPaths = [...new Set([...(sourceProof?.changed ?? []), ...(sourceDiffPaths ?? []), ...(parentContext?.coverage.flatMap(one => one.paths) ?? [])])].filter(safeContextPath).sort();
   const specificFor = new Map<string, string[]>();
   for (const criterion of sourceProof?.criteria ?? []) {
     const cited = [...new Set(criterion.evidence.filter(one => one.kind === "changed-path").map(one => one.ref))].filter(safeContextPath).sort();
-    if (cited.length > 0) specificFor.set(criterion.id, cited);
+    const inherited = parentContext?.coverage.find(one => one.id === criterion.id)?.paths ?? [];
+    const combined = [...new Set([...cited, ...inherited])].filter(safeContextPath).sort();
+    if (combined.length > 0) specificFor.set(criterion.id, combined);
   }
   type Plan = { id: string; knownInSource: boolean; inherited: boolean; paths: string[]; changedText: boolean };
   const plans: Plan[] = args.rubric.map(criterion => {
     const inSource = sourceCriteria.get(criterion.id);
     const knownInSource = inSource !== undefined;
-    const inherited = knownInSource && inSource.statement.trim() === criterion.statement.trim();
+    const inherited = knownInSource && inSource.statement.trim() === criterion.statement.trim() && [...inSource.evidence].sort().join(",") === [...criterion.evidence].sort().join(",");
     if (knownInSource && !inherited) {
       gaps.push({ reason: "criterion-changed", path: null, criteria: [criterion.id], detail: `criterion "${criterion.id}" reads differently now than in the source run's signed rubric — its earlier judgement cannot support it` });
     }
@@ -617,6 +697,8 @@ export async function deriveReviewContext(
         const read = await git("git", [...GIT_READ, "cat-file", "blob", entry.object], { cwd: args.worktree, maxBuffer: REVIEW_CONTEXT_LIMITS.itemBytes + 4096 });
         if (read.code !== 0) { gap("capture-failed", `blob ${entry.object} could not be read (git exit ${read.code})`); continue; }
         if (read.stdout.includes("\u0000") || read.stdout.includes("\uFFFD") || Buffer.byteLength(read.stdout, "utf8") !== entry.size) { gap("binary", "not UTF-8 text"); continue; }
+        const blobHash = createHash("sha1").update(`blob ${entry.size}\0`).update(read.stdout, "utf8").digest("hex");
+        if (blobHash !== entry.object) { gap("capture-failed", "the returned bytes do not match the named Git blob"); continue; }
         const hits = scanForSecrets(read.stdout);
         const content = hits.length > 0 ? redactSecretLines(read.stdout, hits) : read.stdout;
         const bytes = Buffer.byteLength(content, "utf8");
@@ -654,9 +736,22 @@ export async function deriveReviewContext(
     if (!plan.inherited) reasons.push("the criterion's signed text changed since the source review");
     if (!inventory.ancestry.verified) reasons.push("the source head is not verified ancestry of this head");
     if (!inventory.source.verified) reasons.push("the source run's sealed artifacts do not all verify");
-    const relevantUnchanged = plan.paths.length > 0 && plan.paths.every(path => itemsByPath.get(path)?.unchangedSinceSource === true);
+    const relevantUnchanged = plan.paths.length > 0 && plan.paths.every(path => itemsByPath.get(path)?.unchangedSinceSource === true && !itemsByPath.get(path)?.redacted);
     if (!relevantUnchanged) reasons.push(plan.paths.length === 0 ? "no relevant source paths are known for this criterion" : "relevant code is not byte-identical between the source head and this head, or could not be sealed");
+    const singularMatches = (kind: Artifact["kind"], bound: { artifact: number; sha256: string } | null) => {
+      const entries = sourceArtifacts.filter(one => one.kind === kind);
+      return bound === null ? entries.length === 0 : entries.length === 1 && entries[0]!.id === bound.artifact && entries[0]!.sha256 === bound.sha256;
+    };
+    const shots = sourceArtifacts.filter(one => one.kind === "screenshot");
+    const screenshotsMatch = shots.length === row.screenshots.length && shots.every(one => row.screenshots.some(shot => shot.artifact === one.id && shot.sha256 === one.sha256 && shot.path === one.capture));
+    const reviewerLineage = historicalReviewerLineage(store, row.reviewerRun);
+    const reviewerVerified = reviewerLineage.length >= 2 && reviewerLineage.at(-1)?.id === sourceRun.id && reviewerLineage.slice(0, -1).every(one => one.role === "reviewer" && one.taskRef === sourceRun.taskRef && one.outcome === "no-change");
+    const allBytesVerify = sourceArtifacts.filter(one => CONTEXT_INPUT_KINDS.has(one.kind)).every(one => {
+      try { return !one.truncated && one.captureStatus !== "failed" && readVerifiedArtifact(args.root, one).ok; } catch { return false; }
+    });
     const bindingsVerified =
+      allBytesVerify && reviewerVerified &&
+      singularMatches("check-log", row.checkLog) && singularMatches("review-context", row.context) && screenshotsMatch &&
       row.headSha === sourceHead &&
       row.scopeDigest === sourceRun.scopeDigest &&
       sourceDiff !== null && row.artifact === sourceDiff.id && row.artifactSha === sourceDiff.sha256 &&
@@ -684,13 +779,13 @@ export async function deriveReviewContext(
     const prior = inventory.priorReview.filter(one => one.criterionId === plan.id);
     const priorSupport: CriterionContextCoverage["priorSupport"] = prior.length === 0 ? "none" : prior.some(one => one.support === "eligible") ? "eligible" : "invalid";
     const relevantGaps = gaps.filter(one => one.criteria.includes(plan.id)).map(one => one.detail);
-    if (!plan.knownInSource) return { ...patchOnly(plan.id, false, relevantGaps), priorSupport };
+    if (!plan.knownInSource) return { ...patchOnly(plan.id, false, relevantGaps), ...(sourceScopeVerified ? {} : { state: "gap" as const }), priorSupport };
     const items = plan.paths.flatMap(path => (itemsByPath.has(path) ? [itemsByPath.get(path)!.id] : []));
     // "Judged from the patch" needs KNOWN relevance: only a verified source
     // proof can say the patch touched what this criterion is about.
     const touched = sourceProof !== null && plan.paths.some(path => args.patchPaths.has(path));
     const complete = plan.paths.length > 0 && plan.paths.every(path => itemsByPath.has(path) && !itemsByPath.get(path)!.redacted) && inventory.source.verified && inventory.ancestry.verified;
-    const state: CriterionContextCoverage["state"] = touched ? "patch" : complete && relevantGaps.length === 0 ? "context" : "gap";
+    const state: CriterionContextCoverage["state"] = complete && relevantGaps.length === 0 ? (touched && plan.paths.every(path => args.patchPaths.has(path)) ? "patch" : "context") : "gap";
     const gapsFor = state === "gap" && relevantGaps.length === 0 ? [plan.paths.length === 0 ? "no relevant source paths are known" : "inherited context is incomplete"] : relevantGaps;
     return { id: plan.id, state, inherited: plan.inherited, paths: plan.paths, items, gaps: gapsFor, priorSupport };
   });

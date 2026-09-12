@@ -46,7 +46,7 @@ import { EVIDENCE_CAPS, readVerifiedArtifact } from "./evidence.js";
 export const PLANNER_SOURCE_VERSION = 1;
 
 export const PLANNER_SOURCE_LIMITS = {
-  /** The whole recorded source, as the bytes the brief quotes. Equal to
+  /** The whole recorded source before lossless prompt fencing. Equal to
    * the evidence cap for its artifact kind, so a recorded source is never
    * truncated: what the record holds is exactly what the planner read. */
   bytes: EVIDENCE_CAPS["plan-contract"],
@@ -296,7 +296,7 @@ export function plannerSourceProblemOf(store: Store, taskId: string): string | n
   return null;
 }
 
-/** The exact bytes recorded as evidence and quoted into the brief. */
+/** The exact bytes recorded as evidence; prompt fencing preserves the JSON value. */
 export function encodePlannerSource(source: PlannerSource): Buffer {
   return Buffer.from(JSON.stringify(source, null, 2), "utf8");
 }
@@ -490,7 +490,7 @@ export function fenceSourceLine(text: string): string {
 }
 
 /**
- * The brief's source block: the recorded bytes, verbatim, between markers,
+ * The brief's source block: the recorded JSON value, losslessly fenced between markers,
  * followed by the rules that make the filed terms a contract to preserve
  * or amend explicitly — never authorization, never a guess to overwrite.
  */

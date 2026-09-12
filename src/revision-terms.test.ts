@@ -639,18 +639,29 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
         const result = store.sealRevision(args, new Date(${JSON.stringify(T0.toISOString())}));
         store.close(); process.send({result}, () => process.disconnect());
       });`;
-    const children = Array.from({ length: 2 }, () => spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code, dbPath], { stdio: ["ignore", "ignore", "pipe", "ipc"] }));
+    const children: ReturnType<typeof spawn>[] = [];
+    const results: Promise<ReturnType<Store["sealRevision"]>>[] = [];
     try {
-      const results = children.map(child => new Promise<ReturnType<Store["sealRevision"]>>((resolve, reject) => {
-        child.on("message", message => { const data = message as { result?: ReturnType<Store["sealRevision"]> }; if (data.result !== undefined) resolve(data.result); });
-        child.on("error", reject);
-        child.on("exit", code => { if (code !== 0) reject(new Error(`race process exited ${code}`)); });
-      }));
-      await Promise.all(children.map(child => new Promise<void>((resolve, reject) => {
-        child.on("message", message => { if ((message as { ready?: boolean }).ready) resolve(); });
-        child.on("error", reject);
-        child.on("exit", code => reject(new Error(`race process exited before ready: ${code}`)));
-      })));
+      // Initialize connections in order: startup DDL is a separate boundary.
+      // Both initialized processes still wait at the same seal barrier.
+      for (let n = 0; n < 2; n++) {
+        const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code, dbPath], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+        children.push(child);
+        let stderr = "";
+        child.stderr!.on("data", data => { stderr = (stderr + String(data)).slice(-4000); });
+        const result = new Promise<ReturnType<Store["sealRevision"]>>((resolve, reject) => {
+          child.on("message", message => { const data = message as { result?: ReturnType<Store["sealRevision"]> }; if (data.result !== undefined) resolve(data.result); });
+          child.on("error", reject);
+          child.on("exit", code => { if (code !== 0) reject(new Error(`race process exited ${code}: ${stderr}`)); });
+        });
+        void result.catch(() => {}); // readiness may fail before results are awaited
+        results.push(result);
+        await new Promise<void>((resolve, reject) => {
+          child.on("message", message => { if ((message as { ready?: boolean }).ready) resolve(); });
+          child.on("error", reject);
+          child.on("exit", code => reject(new Error(`race process exited before ready: ${code}: ${stderr}`)));
+        });
+      }
       for (const child of children) child.send(args);
       const answers = await Promise.all(results);
       expect(answers.filter(one => one.ok)).toHaveLength(1);
