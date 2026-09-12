@@ -59,8 +59,11 @@ upheld and eight screenshot artifacts verified. The executable hash stayed
 
 See [the integration report](assessments/CONTRACT_HANDOFF_RESULT.md) and
 [compact machine-readable evidence](assessments/evidence/contract-handoffs.json).
-Implementation included operator-led hardening. The live controller remains
-on schema 49. The earlier crash matrix below has a different runtime identity;
+Implementation included operator-led hardening. The live controller was on
+schema 49 at that checkpoint and has since been upgraded to schema 52; see
+[the deployment record](assessments/LIVE_UPGRADE_2026-09-12.md) and
+[the Stop/Resume certification](assessments/STOP_RESUME_CERTIFICATION_2026-09-12.md).
+The earlier crash matrix below has a different runtime identity;
 it has not been relabeled as a crash certificate for this integration.
 
 ## Earlier crash matrix and real-task pilot
@@ -100,8 +103,8 @@ replayed over the interrupted attempt and proven to queue nothing (explicit-only
 retries). Automatic review retry does not exist and is not certified;
 the explicit retry is certified with fixture providers only, never a real
 model. The pilot used fixed scopes approved before dispatch, with the
-exclusions described below. The original main checkout and live worker were
-not upgraded.
+exclusions described below. That earlier pilot did not upgrade main or the live
+worker; the subsequent deployment is recorded in the links above.
 
 ## Earlier bounded provider baseline
 

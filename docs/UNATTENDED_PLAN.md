@@ -49,8 +49,9 @@ Main was still `917bc5b` when this plan was prepared.
 
 - **2026-09-12 integration:** local main fast-forwarded from `984fb49` to
   `b96d53e`, including the reliability/routing stack and final schema-v50 review
-  retry fixes. The live controller remains on the stable schema-v49 runtime;
-  this merge does not upgrade it or publish main. Earlier statements below
+  retry fixes. At that checkpoint the live controller remained on schema 49;
+  that merge alone did not upgrade it or publish main. The later authorized
+  [deployment](assessments/LIVE_UPGRADE_2026-09-12.md) now runs schema 52. Earlier statements below
   about unmerged branches describe their historical checkpoints. The next
   implementation body is the [contract handoff plan](CONTRACT_HANDOFF_PLAN.md),
   based on the assisted planner/revision/review journey in runs 1511–1518.

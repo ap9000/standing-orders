@@ -1,5 +1,35 @@
 # Live controller upgrade
 
+## Current installation: schema 52
+
+At 2026-09-12 09:38:50 UTC, the installed desktop controller was upgraded to
+schema 52 after [PR #2](https://github.com/ap9000/standing-orders/pull/2) merged
+to main as `4c70a8c`. The production source is `82d0d28`; subsequent changes
+only record certification and deployment. The installed executable hash is
+`657506173dc5b16e20e7940adcd67d60594861631813bc5eed6de09c626257fa`, matching
+both real-provider Stop/Resume certificates and the staged signed app.
+[All six checks on the final PR head passed](https://github.com/ap9000/standing-orders/actions/runs/34686200623).
+
+The existing controller was stopped with no active runs or claims. A fresh
+private schema-51 backup and the previous app are retained under the normal
+configuration backup directory. The actual migration preserved every historical
+value across 93 tables; integrity and foreign-key checks passed before restart.
+The modern `com.standing-orders.desktop` service is running on localhost:4180,
+the legacy service remains unloaded, and the same three projects reconnect.
+The fresh desktop challenge/HMAC and saved login passed. Authenticated desktop
+and phone pages fit their viewports; a new post-deployment runner heartbeat and
+zero open runs were confirmed at 09:40:15 UTC.
+
+The private state directory now records `deployed-runtime.json`, including the
+source, merge commit, executable hash, installation time and backup location.
+Local verification artifacts are `output/task-control/installed-v52.json` and
+`live-v52-migration.json`. [Certification and remaining process-containment
+boundaries](STOP_RESUME_CERTIFICATION_2026-09-12.md) are recorded separately.
+Unlocked native window/Keychain and physical login/reboot recovery checks remain
+unverified; ordinary service health does not establish automatic OS recovery.
+
+## Earlier schema-51 upgrade
+
 The operator authorized upgrading the installed controller and pushing main on
 2026-09-12. PR #1 merged as `7b9bebe`; main and origin/main agree. The six
 Linux/macOS Node 22/24 and Windows baseline CI jobs passed on the reviewed head.

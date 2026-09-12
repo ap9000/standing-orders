@@ -1,8 +1,8 @@
 # Product priorities
 
-Current milestone (2026-09-12): contract handoffs passed both real-provider
-journeys and the 20-case pilot, merged to main, and reached the live desktop
-controller. See [deployment evidence](assessments/LIVE_UPGRADE_2026-09-12.md).
+Current milestone (2026-09-12): contract handoffs and per-task Stop/Resume
+are merged to main and installed in the live schema-52 desktop controller.
+The latest wave passes both real providers, seven crash cases and 2,550 tests. See [deployment evidence](assessments/LIVE_UPGRADE_2026-09-12.md).
 The [per-task stop and resume](TASK_CONTROL_PLAN.md) wave now passes its
 [independent certification](assessments/STOP_RESUME_CERTIFICATION_2026-09-12.md).
 The next reliability body is kernel-level process containment and physical

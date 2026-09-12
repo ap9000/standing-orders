@@ -52,15 +52,16 @@ under the integration worktree's `output/` directory.
 
 Native window interaction and the Keychain/launchd UI journey remain unverified:
 macOS was locked during the visual check. The direct controller lifecycle test
-is not a substitute for that final packaging check. No production app was
-installed and the live schema-49 controller/database was not upgraded.
+is not a substitute for that final packaging check. That integration check
+itself did not install a production app or upgrade the schema-49 database.
 
 ## Subsequent delivery
 
-The handoff milestone is merged on main as `7b9bebe` and its certified runtime
-now runs in the installed desktop service. The live database migrated from
-49 to 51 with preserved data. See [the deployment record](assessments/LIVE_UPGRADE_2026-09-12.md).
-The next wave is [per-task stop and resume](TASK_CONTROL_PLAN.md). The original
+The handoff milestone merged as `7b9bebe`, followed by per-task Stop/Resume
+as `4c70a8c`. The installed desktop now runs the certified schema-52 runtime;
+both live migrations preserved historical data. See
+[the deployment record](assessments/LIVE_UPGRADE_2026-09-12.md).
+The [per-task Stop/Resume wave](TASK_CONTROL_PLAN.md) is delivered. The original
 verification section above records what was checked at integration time.
 
 ## Original sequence

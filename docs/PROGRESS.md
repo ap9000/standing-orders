@@ -1,13 +1,22 @@
 # Progress
 
+**2026-09-12 09:40 UTC — Installed controller upgraded and verified.**
+Main includes PR #2 (`4c70a8c`), and the live desktop runs the certified
+`82d0d28` runtime on schema 52. Both real providers passed Stop/Resume without
+rescue, all seven crash scenarios passed, the full suite passed 2,550 tests,
+and all six final PR CI jobs passed. The actual live migration preserved all
+historical data, the saved login works, and a fresh heartbeat was verified.
+See the [deployment record](assessments/LIVE_UPGRADE_2026-09-12.md) and
+[certification boundaries](assessments/STOP_RESUME_CERTIFICATION_2026-09-12.md).
+
 **2026-09-12 — Safe task stop and resume (schema 52).** An authenticated
 operator stops ONE exact active attempt: `task stop <id> --run <n>` or the
 console's Stop, which name the run and are recorded — who, when, from where —
 in `run_stop` BEFORE any process is signalled. The answer is *Stopping…*,
 never *Stopped*: the attempt's own process tree (provider, repair turns,
 setup and check children, or a held session through its supervisor) is
-ended through the handle the worker holds under a per-run owner tag, and
-the stop settles only at the fenced interruption seal
+ended through the handle the worker holds under a database-and-run owner tag. Settlement requires both observed
+process exit and the fenced interruption seal
 (`finalizeInterruptedFenced`: claim released as `interrupted`, the run and
 every owned descendant `failed / interrupted`, the task requeued under the
 stop's own `stop`-owned hold — no strike, no backoff, no incident, no
@@ -18,8 +27,9 @@ never accepted; a finished attempt refuses a stop and its completion
 stands; a run that already admitted a publication refuses in those words.
 Descendants sharing the stopped run's lease inherit the stop; a successor
 under a fresh claim never does. Crash recovery (dead runner and dead
-incarnation) settles a pending stop as `recovered`, preserving evidence,
-commits, and dirty worktrees; the held supervisor settles as `held`.
+incarnation) keeps a stop pending while observed descendants remain live;
+only proven quiescence settles it as `recovered`, preserving evidence,
+commits and dirty worktrees. The held supervisor settles as `held`.
 Resume (`task resume`, or the console's password ceremony over a durable
 nonce bound to the run, its settlement, and the scope approval) refuses
 until the exact attempt is quiescent — settled, owned runs ended, no live
@@ -54,7 +64,9 @@ Mixed patch/inherited coverage and missing context are represented explicitly.
 
 A private backup of the live schema-49 database upgraded to 51 twice-opened
 successfully, with all table counts preserved and clean integrity/foreign-key
-checks. The live controller remains on schema 49. The full suite passes 132 files / 2,507 tests (12 existing skips). Both real
+checks. The live controller was still on schema 49 at that certification
+checkpoint; it has since reached schema 52 as recorded above. That suite passed
+132 files / 2,507 tests (12 existing skips). Both real
 provider handoff journeys and the broader 20-case pilot pass without rescue
 interventions. See [the integration report](assessments/CONTRACT_HANDOFF_RESULT.md)
 and its compact certificate. Earlier per-task certificates below describe their
