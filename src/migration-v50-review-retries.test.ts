@@ -344,7 +344,9 @@ describe("schema v50: bounded review retries upgrade a v49 database without rewr
       const dying = dyingAt(at);
       expect(() => openStore(file, { connect: dying.connect })).toThrow(new RegExp(`injected interruption at ${at}`));
       expect(dying.died()).toBe(true);
-      dying.raw()?.close();
+      // Failed openers now close their connection themselves, releasing
+      // migration locks even when the controller process remains alive.
+      expect(() => dying.raw()!.prepare("SELECT 1").get()).toThrow(/not open/);
       // The column and the classification went together: none of it is
       // on disk, every request row reads exactly as it did (the v49 road's
       // own reviewer_run binding aside — that pass commits on its own and

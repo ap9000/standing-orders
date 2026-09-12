@@ -44,6 +44,28 @@ test("the built desktop helper starts the existing controller, enrolls only sele
     const cookie = response.headers.get("set-cookie")!.split(";")[0]!;
     const page = await (await fetch(base + "/projects", { headers: { cookie } })).text();
     expect(page).toContain(repo); expect(page).not.toContain(process.cwd());
+    // A real CLI writer and the live helper must coexist. Before bounded
+    // SQLite busy handling this CLI open failed immediately, and a watch
+    // could lose the whole controller to the same short competing write.
+    const writer = spawn(process.execPath, ["--input-type=module", "-e", `
+      import { DatabaseSync } from 'node:sqlite';
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec('BEGIN IMMEDIATE'); process.send('locked');
+      setTimeout(() => { db.exec('COMMIT'); db.close(); process.disconnect(); }, 300);
+    `, config.databaseFile], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    const writerExited = new Promise<void>(done => writer.once("exit", () => done()));
+    try {
+      await new Promise<void>((done, reject) => { writer.once("message", () => done()); writer.once("error", reject); });
+      const cli = spawn(process.execPath, [resolve("dist/bin.js"), "task", "add", "Concurrent filing", "--id", "concurrent-filing", "--db", config.databaseFile, "--repo", repo, "--json"], { stdio: ["ignore", "pipe", "pipe"] });
+      let reply = ""; cli.stdout.on("data", chunk => { reply += String(chunk); });
+      expect(await new Promise<number | null>((done, reject) => { cli.once("exit", done); cli.once("error", reject); })).toBe(0);
+      expect(JSON.parse(reply).ok).toBe(true);
+      await writerExited;
+      expect((await fetch(base + "/projects", { headers: { cookie } })).status).toBe(200);
+      expect(child.exitCode).toBeNull();
+    } finally {
+      if (writer.exitCode === null && writer.signalCode === null) { writer.kill(); await writerExited; }
+    }
     const unselected = createRepo("unselected");
     await updateRepos(join(root, "repos.json"), existing => addRepos(existing, [unselected]));
     const second = createRepo("added-later"); const running = openDesktopStore(config.databaseFile);
@@ -54,7 +76,7 @@ test("the built desktop helper starts the existing controller, enrolls only sele
     expect(await exited).toBe(0);
     expect(output).toContain("stopped cleanly"); expect(output).not.toContain(login.password);
     const after = openDesktopStore(config.databaseFile);
-    try { expect(after.listTasks()).toHaveLength(0); expect(after.listRunners()).toHaveLength(1); expect(after.listRunners()[0]?.retiredAt).toEqual(expect.any(String)); }
+    try { expect(after.listTasks().map(task => task.id)).toEqual(["concurrent-filing"]); expect(after.listRunners()).toHaveLength(1); expect(after.listRunners()[0]?.retiredAt).toEqual(expect.any(String)); }
     finally { after.close(); }
   } finally {
     if (child.exitCode === null) { child.kill("SIGKILL"); await exited; }

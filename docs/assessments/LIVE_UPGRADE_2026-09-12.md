@@ -34,3 +34,30 @@ first account for that new work.
 
 The next distinct implementation wave is
 [per-task stop and resume](../TASK_CONTROL_PLAN.md).
+
+## First-use contention regression
+
+Filing that task exposed a real failure after initial health checks: an
+overlapping CLI write returned `database is locked`, and the watch subsequently
+exited on the same error. The approved task remained queued with no open run.
+An isolated two-process reproduction failed both at CLI schema opening and at
+the non-migrating desktop connection's `BEGIN IMMEDIATE`.
+
+All database opening paths now install SQLite's connection-local five-second
+busy timeout before issuing statements. SQLite waits at its lock boundary; the
+application never reruns a transaction body. A persistent lock still refuses in
+finite time. Failed migrating opens close their connection, releasing any
+remaining locks. This follows [SQLite's busy-handler semantics](https://www.sqlite.org/c3ref/busy_timeout.html).
+
+Real-process regressions prove a short writer can finish, the waiting action
+executes once, a persistent writer permits no partial action, and reporting
+remains read-only. The actual built desktop helper also accepts a CLI filing
+during contention and continues serving authenticated pages. The full gate
+passes 133 test files, 2,511 tests and 12 existing skips, plus typecheck and build.
+
+An isolated launchd probe in this session did not automatically relaunch its
+deliberately failed process within 15 seconds. The same result occurred with
+conditional and unconditional KeepAlive and Interactive process type. Explicit
+kickstart worked. No speculative plist change was applied to the app, and no
+automatic OS crash-restart claim is made from these checks. An unlocked-session
+restart/login test remains a deployment certification gap.

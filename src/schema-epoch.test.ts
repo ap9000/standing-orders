@@ -62,8 +62,8 @@ describe("the non-migrating door", () => {
     back.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION - 1);
     back.close();
 
-    // A connect wrapper whose db proxies exec(): at the FIRST exec — the
-    // fresh-SCHEMA exec, the first DDL openStore runs — read the version
+    // A connect wrapper whose db proxies exec(): at the FIRST DDL exec —
+    // after connection-local busy handling — read the version
     // row through a SECOND, independent connection to the same file. If the
     // epoch stamp were ordered after any DDL (the race the review named), a
     // non-migrating reader at this instant would see new shapes under an
@@ -75,7 +75,7 @@ describe("the non-migrating door", () => {
         prepare: sql => real.prepare(sql),
         close: () => real.close(),
         exec: sql => {
-          if (versionAtFirstExec === null) {
+          if (versionAtFirstExec === null && sql.trim() !== "PRAGMA busy_timeout = 5000") {
             const peek = new DatabaseSync(path);
             const row = peek.prepare("SELECT version FROM schema_version").get();
             versionAtFirstExec = row === undefined ? Number.NaN : Number(row["version"]);

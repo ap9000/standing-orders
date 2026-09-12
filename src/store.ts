@@ -3244,6 +3244,13 @@ export type OpenOptions = {
   connect?: (file: string) => Database;
 };
 
+/** A brief competing CLI/worker write queues at SQLite's lock boundary.
+ * This is per connection, including non-migrating desktop/MCP connections.
+ * It does not replay a transaction body or conceal a persistent lock. */
+function waitForConcurrentWriter(db: Database): void {
+  db.exec("PRAGMA busy_timeout = 5000");
+}
+
 /**
  * Open the database, creating it and its directory if needed. The import is
  * inside the function rather than at the top of the file so that a command
@@ -3257,6 +3264,18 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
   if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
 
   const db = connect(file);
+  try {
+    waitForConcurrentWriter(db);
+    return initializeStore(db, file);
+  } catch (error) {
+    // An unsuccessful open must not retain an unfinished migration's lock
+    // for the lifetime of a long-running caller.
+    try { db.close(); } catch { /* Preserve the original opening failure. */ }
+    throw error;
+  }
+}
+
+function initializeStore(db: Database, file: string): Store {
   // THE EPOCH, BEFORE ANY DDL (implementation review, finding 3): even
   // the fresh-SCHEMA exec below adds this build's new tables and indexes
   // to an old database, so the sentinel commits FIRST — a non-migrating
@@ -3500,6 +3519,7 @@ export function openStoreNoMigrate(
     return { ok: false, reason: "missing", message: `${file} does not exist — run \`standing-orders\` once to create it` };
   }
   const db = connect(file);
+  waitForConcurrentWriter(db);
   // The same referential law every migrating connection gets from SCHEMA —
   // this door never execs SCHEMA, so the pragma is explicit (review f9).
   db.exec("PRAGMA foreign_keys = ON");
@@ -6121,6 +6141,7 @@ export function openStoreReadOnly(file: string): Store | null {
       DatabaseSync: new (path: string, options: { readOnly: boolean }) => Database;
     };
     db = new DatabaseSync(file, { readOnly: true });
+    waitForConcurrentWriter(db);
     const version = readSchemaVersion(db);
     if (!version.ok || version.version !== SCHEMA_VERSION) {
       db.close();
