@@ -61,3 +61,15 @@ conditional and unconditional KeepAlive and Interactive process type. Explicit
 kickstart worked. No speculative plist change was applied to the app, and no
 automatic OS crash-restart claim is made from these checks. An unlocked-session
 restart/login test remains a deployment certification gap.
+
+The contention fix shipped to main as `60a10de`, passed all six CI jobs
+(run `34681979691`), and replaced the installed bundle. After explicit startup,
+the live controller admitted task `safe-task-stop-and-resume` as run #1520 on
+that exact base commit. Authenticated desktop and phone captures fit their
+viewports, and fresh runner heartbeats continued during real provider work.
+
+The earlier merge's Windows Node 22 job had one graph-test timeout: its 15-second
+test ceiling was shorter than discovery's sequential 10-second local and
+20-second network ceilings. The same code subsequently passed on both Windows
+versions. The test now allows those bounded operations to settle before fixture
+cleanup, and the Windows gate includes the new real-process contention tests.

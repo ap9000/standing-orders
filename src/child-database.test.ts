@@ -82,7 +82,9 @@ describe("self-hosted commands cannot migrate the supervising store", () => {
     }
     expect(readFileSync(file)).toEqual(bytes);
     expect(readdirSync(dir)).toEqual(files);
-  });
+  // Graph discovery has separate 10s local and 20s network probe ceilings.
+  // Let both settle before cleanup, including on a slow native Windows host.
+  }, 40_000);
 
   test("read-only opening cannot create a missing store or write a current one", () => {
     const dir = temp();
