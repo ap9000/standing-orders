@@ -29,8 +29,14 @@
  * those exact bytes through the D8 transaction. An agent that read the
  * world can still only SAY things about the sealed patch, in its one
  * final message, signed as the agent it was. One logical review per
- * request, with at most two same-session response corrections, one review
- * per source run ever (R4 + one_review_per_source).
+ * request, with at most two same-session response corrections; one
+ * SUCCESSFUL review per source run ever, and at most REVIEW_ROOT_ATTEMPTS
+ * root attempts (v50, bounded review retries): a failed or interrupted
+ * attempt may be retried EXPLICITLY — `task review` again, or the console's
+ * Retry review — at most twice, each retry a fresh request, a fresh
+ * admission under the source build's current sealed authority, and a
+ * fresh sealed scratch re-verified from the artifacts. Nothing here ever
+ * retries by itself.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -530,6 +536,9 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     admittedReviewer === null ||
     admittedReviewer.role !== "reviewer" ||
     admittedReviewer.outcome !== null ||
+    // A ROOT attempt (v50): the admission stamped its ordinal; a
+    // correction child, or a row with none, is not a pass to run.
+    admittedReviewer.reviewAttempt == null ||
     admittedReviewer.parentRun !== source.id ||
     admittedReviewer.taskRef !== source.taskRef ||
     store.externalIdFor(source.taskRef) !== request.taskId ||
@@ -1173,6 +1182,12 @@ export type ReviewPassReport = {
   run: number;
   outcome: "reviewed" | "failed" | "skipped";
   detail: string;
+  /** v50: which root attempt this pass ran (1..REVIEW_ROOT_ATTEMPTS);
+   * absent on a skipped request that opened no run. */
+  attempt?: number;
+  /** v50: on a failed attempt, how many EXPLICIT retries the source run
+   * still admits (0 = exhausted) — the tick reports it, never acts on it. */
+  retriesRemaining?: number;
   /** v40: set when this pass folded at least one criterion judgement — the
    * tick's repair trigger reads this to decide whether a draft is owed. */
   verdict?: ProofVerdict;
@@ -1185,10 +1200,15 @@ export type ReviewPassReport = {
  * ONE admission transaction (`admitReview`): the request is claimed, a
  * mode-derived request re-proves the EXACT digest it was queued under
  * (R-REVOKE: a renewal is a new signature and inherits nothing), the
- * daily rail is reserved, and the reviewer run opens — one winner under
- * concurrent passes. A railed request stays OPEN for a later pass; a
- * dead mode's request is spent unrun and review falls back to the human
- * ask.
+ * source run's bounded retry allowance is re-proved (v50: no successful
+ * review, no live root, fewer than REVIEW_ROOT_ATTEMPTS roots), the daily
+ * rail is reserved, and the reviewer run opens with its attempt ordinal —
+ * one winner under concurrent passes. A railed request stays OPEN for a
+ * later pass; a dead mode's request, or one the allowance no longer
+ * admits, is spent unrun and review falls back to the human ask. An
+ * explicit retry is simply the next open request: it takes this same road,
+ * re-proves the same authority, and seals a brand-new scratch from the
+ * verified artifacts — the failed attempt it follows stays on record.
  */
 export async function reviewPass(
   store: Store,
@@ -1294,6 +1314,7 @@ export async function reviewPass(
         requestId: request.id,
         run: request.run,
         outcome: "reviewed",
+        attempt: admitted.attempt,
         detail: `${result.commentCount} comment(s)${judged}`,
         ...(result.verdict === null ? {} : { verdict: result.verdict }),
       });
@@ -1317,7 +1338,16 @@ export async function reviewPass(
         now: clock(),
       });
       store.stampReviewRequestOutcome(request.id, storedReason);
-      reports.push({ requestId: request.id, run: request.run, outcome: "failed", detail: result.reason });
+      // The report names the attempt and what the operator may still do
+      // (v50): a retry is explicit, never this pass's own next move.
+      reports.push({
+        requestId: request.id,
+        run: request.run,
+        outcome: "failed",
+        attempt: admitted.attempt,
+        retriesRemaining: store.reviewRetryStateOf(request.run)?.retriesRemaining ?? 0,
+        detail: result.reason,
+      });
     }
   }
   return reports;

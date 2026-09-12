@@ -10283,6 +10283,172 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(cockpit).toContain(`<a href="/r/${run}">Full build history and evidence →</a>`);
     expect(cockpit).toContain('href="/t/t-link"');
   });
+
+  test("the Retry review action (v50): consistent queued, running, retry, exhausted, and reviewed states on the task page and the cockpit; the form posts through the one store door; every refusal is words", async () => {
+    const ref = seed("t-retry", "retry my review");
+    const run = build("t-retry", ref, {
+      patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+      stat: [{ path: "x", additions: 1, deletions: 1 }],
+      handoff: { conclusion: "Built." },
+      verdict: { verdict: "verified" },
+    });
+    await boot();
+    const cookie = await login();
+    const pages = async () => ({
+      task: await (await fetch(url("/t/t-retry"), { headers: { cookie } })).text(),
+      cockpit: await (await fetch(url("/review?result=t-retry"), { headers: { cookie } })).text(),
+    });
+    const panelOf = (html: string): string => /<div class="[^"]*review-retry"[^>]*>.*?<\/div>\s*(?:<ol class="review-attempts".*?<\/ol>)?\s*(?:<div class="review-retry-actions">.*?<\/div>)?<\/div>/s.exec(html)?.[0] ?? "";
+
+    // Never asked: no panel at all.
+    let both = await pages();
+    expect(both.task).not.toContain("data-review-state=");
+    expect(both.cockpit).not.toContain("data-review-state=");
+
+    // Queued: the same disabled control on both pages, attempt 1 of 3.
+    const first = store.requestReview(run, "alex", T0);
+    if (!first.ok) throw new Error(first.reason);
+    both = await pages();
+    for (const html of [both.task, both.cockpit]) {
+      expect(html).toContain('data-review-state="queued" data-review-attempts="0" data-review-cap="3" data-review-remaining="2"');
+      expect(html).toContain("<strong>Review queued</strong>");
+      expect(html).toContain('<button type="button" class="review-retry-button" disabled aria-disabled="true">Retry queued</button>');
+      expect(html).not.toContain("/retry-review");
+    }
+    // Running: attempt 1 of 3, no act.
+    const admitted = store.admitReview(first.id, { runner: "night-shift-1", token: "tok-night-shift-1", provider: "claude", model: "sonnet" }, T0);
+    if (!admitted.ok) throw new Error(admitted.reason);
+    both = await pages();
+    for (const html of [both.task, both.cockpit]) {
+      expect(html).toContain('data-review-state="running" data-review-attempts="1"');
+      expect(html).toContain("<strong>Reviewing · attempt 1 of 3</strong>");
+      expect(html).toContain(">Reviewing…</button>");
+      expect(html).toContain(`data-review-attempt="1" data-review-outcome="open"`);
+    }
+    // Failed: the retry act appears — the task page's form returns to the
+    // task, the cockpit's form returns to the cockpit — with the attempt
+    // it would run and the retries that would remain.
+    store.finishRun(admitted.reviewerRunId, { outcome: "failed", reason: "reviewer-agent", now: T0 });
+    store.stampReviewRequestOutcome(first.id, "reviewer-agent");
+    both = await pages();
+    for (const html of [both.task, both.cockpit]) {
+      expect(html).toContain('data-review-state="retryable" data-review-attempts="1" data-review-cap="3" data-review-remaining="2"');
+      expect(html).toContain("<strong>Review failed · attempt 1 of 3</strong>");
+      expect(html).toContain("Review attempt 1 of 3 failed (reviewer-agent).");
+      expect(html).toContain("2 explicit retries left.");
+      expect(html).toContain(`data-review-attempt="1" data-review-outcome="failed"><span class="review-attempt-ordinal">attempt 1</span> <a href="/r/${admitted.reviewerRunId}">run #${admitted.reviewerRunId}</a> <span class="meta">failed · reviewer-agent</span>`);
+      expect(html).toContain('<form method="post" action="/t/t-retry/retry-review" class="inline review-retry-form">');
+      expect(html).toContain(`<input type="hidden" name="run" value="${run}">`);
+      expect(html).toContain(">Retry review · attempt 2 of 3</button>");
+    }
+    expect(panelOf(both.task)).not.toContain('name="return"');
+    expect(panelOf(both.cockpit)).toContain('<input type="hidden" name="return" value="/review?result=t-retry">');
+    const csrf = csrfOf(both.task);
+    // No token: refused at the existing gate, nothing queued.
+    expect((await post(cookie, "/t/t-retry/retry-review", { run: String(run) })).status).toBe(403);
+    expect(store.reviewRetryStateOf(run)).toMatchObject({ state: "retryable" });
+    // A page rendered over another build refuses rather than retrying the wrong one.
+    const stale = await post(cookie, "/t/t-retry/retry-review", { csrf, run: "999" });
+    expect(stale.status).toBe(409);
+    expect(await stale.text()).toContain("reload and decide again");
+    expect(store.reviewRetryStateOf(run)).toMatchObject({ state: "retryable" });
+    // The act: one request, attempt 2, back to where it was asked from.
+    const asked = await post(cookie, "/t/t-retry/retry-review", { csrf, run: String(run), return: "/review?result=t-retry" });
+    expect(asked.status).toBe(303);
+    expect(asked.headers.get("location")).toBe("/review?result=t-retry");
+    expect(store.reviewRetryStateOf(run)).toMatchObject({ state: "queued", nextAttempt: 2, retriesRemaining: 1 });
+    expect(store.openReviewRequests()).toMatchObject([{ run, requestedBy: "alex" }]);
+    // Asked again while queued: words, no second request.
+    const twice = await post(cookie, "/t/t-retry/retry-review", { csrf, run: String(run) });
+    expect(twice.status).toBe(409);
+    expect(await twice.text()).toContain(`a review of build #${run} is already queued (attempt 2 of 3)`);
+    expect(store.openReviewRequests()).toHaveLength(1);
+    both = await pages();
+    for (const html of [both.task, both.cockpit]) {
+      expect(html).toContain('data-review-state="queued" data-review-attempts="1" data-review-cap="3" data-review-remaining="1"');
+      expect(html).toContain("<strong>Review retry queued · attempt 2 of 3</strong>");
+      expect(html).toContain("1 explicit retry left after it.");
+    }
+    // Any other return shape lands on the task page's status card.
+    const request2 = store.openReviewRequests()[0]!.id;
+    const second = store.admitReview(request2, { runner: "night-shift-1", token: "tok-night-shift-1", provider: "claude", model: "sonnet" }, T0);
+    if (!second.ok) throw new Error(second.reason);
+    store.finishRun(second.reviewerRunId, { outcome: "failed", reason: "interrupted", now: T0 });
+    both = await pages();
+    expect(both.task).toContain("<strong>Review interrupted · attempt 2 of 3</strong>");
+    expect(both.task).toContain("Review attempt 2 of 3 was interrupted.");
+    expect(both.task).toContain("1 explicit retry left.");
+    expect(both.task).toContain(">Retry review · attempt 3 of 3</button>");
+    const elsewhere = await post(cookie, "/t/t-retry/retry-review", { csrf, run: String(run), return: "https://evil.example/review?result=t-retry" });
+    expect(elsewhere.status).toBe(303);
+    expect(elsewhere.headers.get("location")).toBe("/t/t-retry#run-status");
+    // Exhausted: the last attempt fails, the control says so, and the act refuses.
+    const request3 = store.openReviewRequests()[0]!.id;
+    const third = store.admitReview(request3, { runner: "night-shift-1", token: "tok-night-shift-1", provider: "claude", model: "sonnet" }, T0);
+    if (!third.ok) throw new Error(third.reason);
+    store.finishRun(third.reviewerRunId, { outcome: "failed", reason: "reviewer-timeout", now: T0 });
+    both = await pages();
+    for (const html of [both.task, both.cockpit]) {
+      expect(html).toContain('data-review-state="exhausted" data-review-attempts="3" data-review-cap="3" data-review-remaining="0"');
+      expect(html).toContain("<strong>Review retries exhausted · 3 of 3</strong>");
+      expect(html).toContain("All 3 review attempts ended without a review (latest: failed (reviewer-timeout)). Nothing retries a fourth time");
+      expect(html).toContain(">No retries left</button>");
+      expect(html).not.toContain("/retry-review");
+      expect(html).toContain('data-review-attempt="3" data-review-outcome="failed"');
+    }
+    const spent = await post(cookie, "/t/t-retry/retry-review", { csrf, run: String(run) });
+    expect(spent.status).toBe(409);
+    expect(await spent.text()).toContain(`build #${run} has spent all 3 review attempts`);
+    expect(store.runsFor(ref).filter(one => one.role === "reviewer")).toHaveLength(3);
+    expect(store.openReviewRequests()).toEqual([]);
+
+    // Reviewed: a success closes the allowance and reads as such everywhere.
+    const won = seed("t-won", "review landed");
+    const wonRun = build("t-won", won, { patch: "diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-a\n+b\n", verdict: { verdict: "verified" } });
+    const wonAsk = store.requestReview(wonRun, "alex", T0);
+    if (!wonAsk.ok) throw new Error(wonAsk.reason);
+    const wonRoot = store.admitReview(wonAsk.id, { runner: "night-shift-1", token: "tok-night-shift-1", provider: "claude", model: "sonnet" }, T0);
+    if (!wonRoot.ok) throw new Error(wonRoot.reason);
+    store.finishRun(wonRoot.reviewerRunId, { outcome: "failed", reason: "reviewer-agent", now: T0 });
+    const wonRetry = store.requestReview(wonRun, "alex", new Date(T0.getTime() + 1_000));
+    if (!wonRetry.ok) throw new Error(wonRetry.reason);
+    const wonSecond = store.admitReview(wonRetry.id, { runner: "night-shift-1", token: "tok-night-shift-1", provider: "claude", model: "sonnet" }, T0);
+    if (!wonSecond.ok) throw new Error(wonSecond.reason);
+    store.stampProviderStart(wonSecond.reviewerRunId, T0);
+    const diff = store.artifactsFor(wonRun).find(one => one.kind === "terminal-diff")!;
+    store.ingestReview({ reviewerRunId: wonSecond.reviewerRunId, runId: wonRun, artifactId: diff.id, author: "reviewer:claude", comments: [], judgements: [], bindings: { diffSha: diff.sha256, scopeDigest: null, headSha: "b".repeat(40), proof: null, checkLog: null, screenshots: [] } }, T0);
+    const wonTask = await (await fetch(url("/t/t-won"), { headers: { cookie } })).text();
+    expect(wonTask).toContain('data-review-state="succeeded" data-review-attempts="2" data-review-cap="3" data-review-remaining="0"');
+    expect(wonTask).toContain("<strong>Reviewed · attempt 2 of 3</strong>");
+    expect(wonTask).toContain("landed after 1 explicit retry; a successful review is never retried.");
+    expect(wonTask).toContain(">Reviewed</button>");
+    expect(wonTask).not.toContain("/retry-review");
+    const refusedWin = await post(cookie, "/t/t-won/retry-review", { csrf, run: String(wonRun) });
+    expect(refusedWin.status).toBe(409);
+    expect(await refusedWin.text()).toContain("a successful review is never retried");
+
+    // A viewer sees the same facts and a control that names whose act it is.
+    const viewer = addApprover(store, "vera", T0, { name: "alex", token: approverToken });
+    if (!viewer.ok) throw new Error("viewer add");
+    store.raw().prepare("UPDATE approver SET role = 'viewer' WHERE name = 'vera'").run();
+    const login2 = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name: "vera", token: viewer.token }), redirect: "manual" });
+    const viewerCookie = (login2.headers.get("set-cookie") ?? "").split(";")[0] as string;
+    const fresh = seed("t-view", "watched retry");
+    const freshRun = build("t-view", fresh, { patch: "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-a\n+b\n", verdict: { verdict: "verified" } });
+    const freshAsk = store.requestReview(freshRun, "alex", T0);
+    if (!freshAsk.ok) throw new Error(freshAsk.reason);
+    const freshRoot = store.admitReview(freshAsk.id, { runner: "night-shift-1", token: "tok-night-shift-1", provider: "claude", model: "sonnet" }, T0);
+    if (!freshRoot.ok) throw new Error(freshRoot.reason);
+    store.finishRun(freshRoot.reviewerRunId, { outcome: "failed", reason: "reviewer-agent", now: T0 });
+    const watched = await (await fetch(url("/t/t-view"), { headers: { cookie: viewerCookie } })).text();
+    expect(watched).toContain('data-review-state="retryable"');
+    expect(watched).toContain(">Retry review · approvers only</button>");
+    expect(watched).not.toContain("/retry-review");
+    const viewerCsrf = csrfOf(watched);
+    const watchedPost = await post(viewerCookie, "/t/t-view/retry-review", { csrf: viewerCsrf, run: String(freshRun) });
+    expect(watchedPost.status).toBe(403);
+    expect(store.reviewRetryStateOf(freshRun)).toMatchObject({ state: "retryable" });
+  });
 });
 
 describe("the phase route on the console (v47): one projection on the task page, in the ceremony, and in the focused chat", () => {

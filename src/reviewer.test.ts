@@ -445,20 +445,33 @@ describe("the reviewer role in the store", () => {
     ).toThrow();
   });
 
-  test("one review per source run, ever — the partial unique holds, and a spent request admits nothing", () => {
+  test("one LIVE root review per source run — the partial uniques hold, and a spent request admits nothing (v50)", () => {
     const asked = askReview(builtRun);
-    store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0, ...presented(store, taskRef, "reviewer"), ...asked });
-    // The request was consumed by the admission that answered it.
-    expect(store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(asked.request)).toEqual({ consumed_reason: "dispatched" });
+    const root = store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0, ...presented(store, taskRef, "reviewer"), ...asked });
+    // The request was consumed by the admission that answered it, and
+    // bound to the root that answers it; the root is attempt 1.
+    expect(store.raw().prepare("SELECT consumed_reason, reviewer_run FROM review_request WHERE id = ?").get(asked.request)).toEqual({ consumed_reason: "dispatched", reviewer_run: root });
+    expect(store.getRun(root)?.reviewAttempt).toBe(1);
     expect(() =>
       store.startRun({ taskRef, leaseId: "review:2", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0, ...presented(store, taskRef, "reviewer"), ...asked }),
     ).toThrow(/is not run #\d+'s open request/);
-    // A second ask refuses (already reviewed), so no second request can exist.
-    expect(store.requestReview(builtRun, "alex", T0)).toEqual({ ok: false, reason: "already-reviewed" });
-    // The unique index itself, for a row that arrives some other way.
+    // A second ask refuses while the root is live, so no second request can exist.
+    expect(store.requestReview(builtRun, "alex", T0)).toMatchObject({ ok: false, reason: "review-running" });
+    // The live-root unique index itself, for a row that arrives some other way.
     expect(() =>
-      store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, started_at) VALUES (?, 'x', 'r', 'reviewer', 'claude', ?, ?)").run(taskRef, builtRun, T0.toISOString()),
+      store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, started_at, review_attempt) VALUES (?, 'x', 'r', 'reviewer', 'claude', ?, ?, 2)").run(taskRef, builtRun, T0.toISOString()),
     ).toThrow();
+    // …and the ordinal index: a second attempt 1 never exists.
+    store.finishRun(root, { outcome: "failed", reason: "reviewer-agent", now: T0 });
+    expect(() =>
+      store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, started_at, review_attempt) VALUES (?, 'x', 'r', 'reviewer', 'claude', ?, ?, 1)").run(taskRef, builtRun, T0.toISOString()),
+    ).toThrow();
+    // v29's one-root-ever index is gone; the four v50 backstops stand.
+    const indexes = store.raw().prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('run', 'review_request')").all().map(row => String(row["name"]));
+    expect(indexes).not.toContain("one_review_per_source");
+    for (const name of ["root_review_attempt_ordinal", "one_live_root_review_per_source", "one_successful_root_review_per_source", "one_correction_per_reviewer", "one_root_review_per_request"]) {
+      expect(indexes).toContain(name);
+    }
   });
 
   test("requestReview: every refusal road is typed", () => {
@@ -479,14 +492,14 @@ describe("the reviewer role in the store", () => {
     expect(store.requestReview(broken.runId, "alex", T0)).toEqual({ ok: false, reason: "diff-capture-failed" });
 
     const first = store.requestReview(builtRun, "alex", T0);
-    expect(first.ok).toBe(true);
+    expect(first).toMatchObject({ ok: true, attempt: 1 });
     expect(store.requestReview(builtRun, "alex", T0)).toEqual({ ok: false, reason: "already-requested" });
 
     // A run that already HAS its review refuses a fresh ask.
     const other = seedBuilt();
     const reviewer = store.startRun({ taskRef: store.refFor("built-in", "t-1").id, leaseId: "review:3", runner: "builder-1", role: "reviewer", parentRun: other.runId, now: T0, ...presented(store, store.refFor("built-in", "t-1").id, "reviewer"), ...askReview(other.runId) });
     store.finishRun(reviewer, { outcome: "no-change", reason: "reviewed — 0 comment(s)", now: T0 });
-    expect(store.requestReview(other.runId, "alex", T0)).toEqual({ ok: false, reason: "already-reviewed" });
+    expect(store.requestReview(other.runId, "alex", T0)).toMatchObject({ ok: false, reason: "already-reviewed" });
 
     // And a review itself is not reviewable.
     expect(store.requestReview(reviewer, "alex", T0)).toEqual({ ok: false, reason: "not-reviewable" });
@@ -1067,13 +1080,301 @@ describe("the reviewer role in the store", () => {
       expect(again[0]).toMatchObject({ outcome: "reviewed" });
     });
 
+    describe("v50: bounded explicit review retries", () => {
+      /** A reviewer that initialized, spoke, and then died: a typed `agent`
+       * failure, the shape a real outage mid-review leaves behind. */
+      const failingAgent: Runner = async () => ({ ...OK, code: 1, stdout: SAID, stderr: "simulated reviewer outage" });
+      const retryState = () => store.reviewRetryStateOf(builtRun)!;
+      const rootsOf = (source: number) => store.runsFor(taskRef).filter(one => one.role === "reviewer" && one.parentRun === source).sort((a, b) => a.id - b.id);
+
+      test("lifecycle: a failed root admits an explicit retry, at most twice; the fourth ask refuses without opening a run", async () => {
+        expect(retryState()).toMatchObject({ state: "unrequested", cap: 3, attempts: [], retriesUsed: 0, retriesRemaining: 2, nextAttempt: 1 });
+        const first = store.requestReview(builtRun, "alex", T0);
+        expect(first).toMatchObject({ ok: true, attempt: 1 });
+        expect(retryState()).toMatchObject({ state: "queued", retriesRemaining: 2, nextAttempt: 1 });
+        expect(await passOnce(failingAgent)).toEqual([{ requestId: (first as { id: number }).id, run: builtRun, outcome: "failed", attempt: 1, retriesRemaining: 2, detail: "agent" }]);
+        expect(retryState()).toMatchObject({ state: "retryable", retriesUsed: 0, retriesRemaining: 2, nextAttempt: 2 });
+        expect(retryState().latest).toMatchObject({ attempt: 1, outcome: "failed", reason: "reviewer-agent", requestId: (first as { id: number }).id });
+
+        // The explicit retry: the SAME door, a NEW request, attempt 2.
+        const second = store.requestReview(builtRun, "alex", new Date(T0.getTime() + 1_000));
+        expect(second).toMatchObject({ ok: true, attempt: 2 });
+        expect(store.requestReview(builtRun, "alex", T0)).toEqual({ ok: false, reason: "already-requested" });
+        expect(retryState()).toMatchObject({ state: "queued", retriesRemaining: 1, nextAttempt: 2 });
+        // A live root refuses a further ask — one attempt at a time.
+        const admitted = store.admitReview((second as { id: number }).id, { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null }, T0);
+        expect(admitted).toMatchObject({ ok: true, attempt: 2 });
+        if (!admitted.ok) return;
+        expect(store.getRun(admitted.reviewerRunId)?.reviewAttempt).toBe(2);
+        expect(retryState()).toMatchObject({ state: "running", retriesRemaining: 0 });
+        expect(store.requestReview(builtRun, "alex", T0)).toMatchObject({ ok: false, reason: "review-running" });
+        store.finishRun(admitted.reviewerRunId, { outcome: "failed", reason: "interrupted", now: T0 });
+        store.stampReviewRequestOutcome((second as { id: number }).id, "interrupted");
+        expect(retryState()).toMatchObject({ state: "retryable", retriesUsed: 1, retriesRemaining: 1, nextAttempt: 3 });
+
+        // The last retry: attempt 3 of 3.
+        const third = store.requestReview(builtRun, "alex", new Date(T0.getTime() + 2_000));
+        expect(third).toMatchObject({ ok: true, attempt: 3 });
+        expect(retryState()).toMatchObject({ state: "queued", retriesRemaining: 0, nextAttempt: 3 });
+        expect(await passOnce(failingAgent)).toEqual([{ requestId: (third as { id: number }).id, run: builtRun, outcome: "failed", attempt: 3, retriesRemaining: 0, detail: "agent" }]);
+        expect(retryState()).toMatchObject({ state: "exhausted", retriesUsed: 2, retriesRemaining: 0, nextAttempt: null });
+
+        // Exhausted: the fourth ask refuses, and no road opens a fourth root.
+        expect(store.requestReview(builtRun, "alex", T0)).toMatchObject({ ok: false, reason: "retries-exhausted" });
+        expect(() =>
+          store.startRun({ taskRef, leaseId: "review:4", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0, ...presented(store, taskRef, "reviewer"), request: (third as { id: number }).id }),
+        ).toThrow(/is not run #\d+'s open request/);
+        expect(() =>
+          store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, started_at, review_attempt) VALUES (?, 'x', 'r', 'reviewer', 'claude', ?, ?, 3)").run(taskRef, builtRun, T0.toISOString()),
+        ).toThrow();
+        // History is immutable and queryable: three roots, ordinals 1..3,
+        // each bound to the request that was spent on it.
+        const roots = rootsOf(builtRun);
+        expect(roots.map(one => [one.reviewAttempt, one.outcome, one.reason])).toEqual([[1, "failed", "reviewer-agent"], [2, "failed", "interrupted"], [3, "failed", "reviewer-agent"]]);
+        expect(store.raw().prepare("SELECT id, reviewer_run, consumed_reason FROM review_request WHERE run = ? ORDER BY id").all(builtRun)).toEqual([
+          { id: (first as { id: number }).id, reviewer_run: roots[0]!.id, consumed_reason: "reviewer-agent" },
+          { id: (second as { id: number }).id, reviewer_run: roots[1]!.id, consumed_reason: "interrupted" },
+          { id: (third as { id: number }).id, reviewer_run: roots[2]!.id, consumed_reason: "reviewer-agent" },
+        ]);
+        expect(retryState().attempts.map(one => one.requestId)).toEqual([(first as { id: number }).id, (second as { id: number }).id, (third as { id: number }).id]);
+        expect(store.getRun(builtRun)).toMatchObject({ outcome: "built", headRevision: "head-aaa" });
+        expect(readdirSync(scratchRoot)).toHaveLength(0);
+      });
+
+      test("a successful retry ends the allowance: the review lands once, and a later ask refuses already-reviewed", async () => {
+        const first = store.requestReview(builtRun, "alex", T0);
+        expect(await passOnce(failingAgent)).toMatchObject([{ outcome: "failed", attempt: 1 }]);
+        const retry = store.requestReview(builtRun, "alex", new Date(T0.getTime() + 1_000));
+        expect(retry).toMatchObject({ ok: true, attempt: 2 });
+        const reports = await passOnce(reviewingAgent({ version: 1, comments: [{ path: "src/payouts.ts", line: 2, note: "never awaited", severity: "question" }] }));
+        expect(reports).toEqual([{ requestId: (retry as { id: number }).id, run: builtRun, outcome: "reviewed", attempt: 2, detail: "1 comment(s)" }]);
+        expect(retryState()).toMatchObject({ state: "succeeded", retriesUsed: 1, retriesRemaining: 0, nextAttempt: null });
+        expect(retryState().succeeded).toMatchObject({ attempt: 2, outcome: "no-change" });
+        expect(store.liveDiffComments(builtRun)).toHaveLength(1);
+        expect(store.requestReview(builtRun, "alex", T0)).toMatchObject({ ok: false, reason: "already-reviewed" });
+        // The failed first attempt and its request stay exactly as they were.
+        const roots = rootsOf(builtRun);
+        expect(roots.map(one => [one.reviewAttempt, one.outcome])).toEqual([[1, "failed"], [2, "no-change"]]);
+        expect(store.raw().prepare("SELECT reviewer_run, consumed_reason FROM review_request WHERE id = ?").get((first as { id: number }).id)).toEqual({ reviewer_run: roots[0]!.id, consumed_reason: "reviewer-agent" });
+        // The successful-root unique index refuses a second landed review by any road.
+        expect(() =>
+          store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, started_at, outcome, review_attempt) VALUES (?, 'x', 'r', 'reviewer', 'claude', ?, ?, 'no-change', 3)").run(taskRef, builtRun, T0.toISOString()),
+        ).toThrow();
+      });
+
+      test("an interrupted root is retryable, and its late output can no longer ingest once the retry is the live bound root", async () => {
+        const first = store.requestReview(builtRun, "alex", T0);
+        if (!first.ok) throw new Error(first.reason);
+        store.acquireWatchLease("builder-1", REPO, "watch-a", 60_000, T0);
+        const admitted = store.admitReview(first.id, { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null, watchIncarnation: "watch-a" }, T0);
+        if (!admitted.ok) throw new Error(admitted.reason);
+        store.stampProviderStart(admitted.reviewerRunId, T0);
+        // The watch dies; its successor closes the attempt as interrupted.
+        const later = new Date(T0.getTime() + 60_001);
+        store.acquireWatchLease("builder-1", REPO, "watch-b", 60_000, later);
+        expect(store.recoverIncarnation("builder-1", "watch-a", later)).toBe(1);
+        expect(store.getRun(admitted.reviewerRunId)).toMatchObject({ outcome: "failed", reason: "interrupted", reviewAttempt: 1 });
+        expect(store.raw().prepare("SELECT consumed_reason, reviewer_run FROM review_request WHERE id = ?").get(first.id)).toEqual({ consumed_reason: "interrupted", reviewer_run: admitted.reviewerRunId });
+        expect(retryState()).toMatchObject({ state: "retryable", retriesRemaining: 2, nextAttempt: 2 });
+
+        const retry = store.requestReview(builtRun, "alex", later);
+        expect(retry).toMatchObject({ ok: true, attempt: 2 });
+        if (!retry.ok) return;
+        const second = store.admitReview(retry.id, { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null, watchIncarnation: "watch-b" }, later);
+        expect(second).toMatchObject({ ok: true, attempt: 2 });
+        if (!second.ok) return;
+        store.stampProviderStart(second.reviewerRunId, later);
+        const ingest = (reviewerRunId: number) =>
+          store.ingestReview(
+            {
+              reviewerRunId,
+              runId: builtRun,
+              artifactId: diffArtifact,
+              author: "reviewer:claude",
+              comments: [{ path: "src/payouts.ts", line: 2, note: "late", severity: "note" }],
+              judgements: [],
+              bindings: { diffSha: store.artifactsFor(builtRun)[0]!.sha256, scopeDigest: null, headSha: "head-aaa", proof: null, checkLog: null, screenshots: [] },
+            },
+            later,
+          );
+        // The interrupted attempt's late reply: refused whole, nothing lands.
+        expect(() => ingest(admitted.reviewerRunId)).toThrow(/no longer has a live, provider-started admitted lineage|runner custody/);
+        expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+        expect(store.getRun(second.reviewerRunId)?.outcome).toBeNull();
+        // The live bound root ingests exactly once.
+        expect(ingest(second.reviewerRunId).commentIds).toHaveLength(1);
+        expect(store.getRun(second.reviewerRunId)).toMatchObject({ outcome: "no-change", reviewAttempt: 2 });
+        expect(retryState()).toMatchObject({ state: "succeeded" });
+      });
+
+      test("admitReview re-proves the allowance inside its transaction: a queued request overtaken by success, a live root, or exhaustion is spent unrun, in words", () => {
+        const spec = { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null };
+        const rawRoot = (source: number, attempt: number, outcome: string | null) =>
+          Number(store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, started_at, outcome, review_attempt) VALUES (?, 'x', 'builder-1', 'reviewer', 'claude', ?, ?, ?, ?)").run(taskRef, source, T0.toISOString(), outcome, attempt).lastInsertRowid);
+        const ask = (source: number) => {
+          const asked = store.requestReview(source, "alex", T0);
+          if (!asked.ok) throw new Error(asked.reason);
+          return asked.id;
+        };
+        // Overtaken by a success.
+        const won = ask(builtRun);
+        rawRoot(builtRun, 1, "no-change");
+        expect(store.admitReview(won, spec, T0)).toMatchObject({ ok: false, reason: "already-reviewed" });
+        expect(store.raw().prepare("SELECT consumed_reason, reviewer_run FROM review_request WHERE id = ?").get(won)).toEqual({ consumed_reason: "already-reviewed", reviewer_run: null });
+        // Overtaken by a root that is still open.
+        const live = seedBuilt().runId;
+        const queued = ask(live);
+        rawRoot(live, 1, null);
+        expect(store.admitReview(queued, spec, T0)).toMatchObject({ ok: false, reason: "review-running" });
+        expect(store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(queued)).toEqual({ consumed_reason: "review-running" });
+        // Overtaken by exhaustion.
+        const spent = seedBuilt().runId;
+        const last = ask(spent);
+        for (const attempt of [1, 2, 3]) rawRoot(spent, attempt, "failed");
+        expect(store.admitReview(last, spec, T0)).toMatchObject({ ok: false, reason: "retries-exhausted" });
+        expect(store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(last)).toEqual({ consumed_reason: "retries-exhausted" });
+        // None of the three opened a run.
+        expect(store.runsFor(taskRef).filter(one => one.role === "reviewer" && one.outcome === null && one.parentRun !== live)).toEqual([]);
+        expect(store.openReviewRequests()).toEqual([]);
+      });
+
+      test("concurrent connections: one open request, one live root, and one landed review per source run", () => {
+        const dir = mkdtempSync(join(tmpdir(), "so-review-race-"));
+        const file = join(dir, "orders.db");
+        const raceEvidence = join(dir, "evidence");
+        const a = openStore(file);
+        try {
+          addApprover(a, "alex", T0);
+          a.createTask({ id: "t-race", title: "race" }, T0);
+          const ref = a.refFor("built-in", "t-race").id;
+          a.placeTask(ref, REPO);
+          register(a, { name: "builder-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-builder-1" });
+          const source = a.startRun({ taskRef: ref, leaseId: "lease-race", runner: "builder-1", branch: "b", worktree: "/w", now: T0, ...presented(a, ref, "builder") });
+          storeEvidence(a, raceEvidence, source, "terminal-diff", "terminal-diff.patch", Buffer.from(PATCH, "utf8"), "git diff (exit 0)", T0, { captureStatus: "ok" });
+          a.finishRun(source, { outcome: "built", committed: true, now: T0 });
+          const b = openStore(file);
+          try {
+            const spec = { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null };
+            // Two operators ask at once: exactly one request opens.
+            const asks = [a.requestReview(source, "alex", T0), b.requestReview(source, "sam", T0)];
+            expect(asks.filter(one => one.ok)).toHaveLength(1);
+            expect(asks.filter(one => !one.ok).map(one => (one as { reason: string }).reason)).toEqual(["already-requested"]);
+            const request = (asks.find(one => one.ok) as { id: number }).id;
+            // Two passes admit the same request: one root opens, the other finds it gone.
+            const admissions = [a.admitReview(request, spec, T0), b.admitReview(request, spec, T0)];
+            expect(admissions.filter(one => one.ok)).toHaveLength(1);
+            expect(admissions.filter(one => !one.ok).map(one => (one as { reason: string }).reason)).toEqual(["gone"]);
+            const root = (admissions.find(one => one.ok) as { reviewerRunId: number }).reviewerRunId;
+            expect(b.getRun(root)).toMatchObject({ reviewAttempt: 1, outcome: null });
+            // While it is live, neither connection may ask again.
+            expect(a.requestReview(source, "alex", T0)).toMatchObject({ ok: false, reason: "review-running" });
+            expect(b.requestReview(source, "sam", T0)).toMatchObject({ ok: false, reason: "review-running" });
+            a.stampProviderStart(root, T0);
+            const diff = a.artifactsFor(source).find(one => one.kind === "terminal-diff")!;
+            const args = {
+              reviewerRunId: root, runId: source, artifactId: diff.id, author: "reviewer:claude",
+              comments: [{ path: "src/payouts.ts", line: 2, note: "once", severity: "note" as const }], judgements: [],
+              bindings: { diffSha: diff.sha256, scopeDigest: null, headSha: null, proof: null, checkLog: null, screenshots: [] },
+            };
+            // The review lands exactly once: the second connection's replay
+            // finds the root closed and ingests nothing.
+            expect(a.ingestReview(args, T0).commentIds).toHaveLength(1);
+            expect(() => b.ingestReview(args, T0)).toThrow(/runner custody no longer stands|no longer has a live, provider-started admitted lineage/);
+            expect(b.liveDiffComments(source)).toHaveLength(1);
+            expect(b.reviewRetryStateOf(source)).toMatchObject({ state: "succeeded", retriesRemaining: 0 });
+            expect(b.requestReview(source, "sam", T0)).toMatchObject({ ok: false, reason: "already-reviewed" });
+          } finally {
+            b.close();
+          }
+        } finally {
+          a.close();
+          rmSync(dir, { recursive: true, force: true });
+        }
+      });
+
+      test("every retry seals a fresh scratch from the verified artifacts and re-proves route, custody, and evidence before any money", async () => {
+        store.setPhaseConfig("installation", "build", "claude", "claude-sonnet-4", "alex", T0);
+        store.setPhaseConfig("installation", "plan", "claude", "claude-sonnet-4", "alex", T0);
+        store.setPhaseConfig("installation", "review", "claude", "claude-sonnet-4", "alex", T0);
+        propose(store, { taskId: "t-1", goal: "guard the payouts", acceptance: [], now: T0, riskLevel: "high" });
+        const filed = store.getScope("t-1")!;
+        expect(approve(store, "t-1", "alex", T0, filed.digest, approverToken).ok).toBe(true);
+        const seen: { cwd: string; files: string[]; patch: string }[] = [];
+        const observing = (reply: { code: number }): Runner => async (_file, _args, options) => {
+          const cwd = options?.cwd ?? "";
+          seen.push({ cwd, files: readdirSync(cwd).sort(), patch: readFileSync(join(cwd, REVIEW_PATCH_NAME), "utf8") });
+          return { ...OK, ...reply, stdout: SAID };
+        };
+        const first = store.requestReview(builtRun, "alex", T0);
+        expect(first.ok).toBe(true);
+        expect(await passOnce(observing({ code: 1 }))).toMatchObject([{ outcome: "failed", attempt: 1, detail: "agent" }]);
+        // Attempt 2: a NEW request, a NEW root under the SAME sealed route,
+        // a NEW scratch holding exactly the same verified bytes.
+        const retry = store.requestReview(builtRun, "alex", new Date(T0.getTime() + 1_000));
+        expect(retry).toMatchObject({ ok: true, attempt: 2 });
+        expect(await passOnce(observing({ code: 0 }))).toMatchObject([{ outcome: "reviewed", attempt: 2 }]);
+        expect(seen).toHaveLength(2);
+        expect(seen[0]!.cwd).not.toBe(seen[1]!.cwd);
+        expect(seen[1]!.files).toEqual(seen[0]!.files);
+        expect(seen[1]!.patch).toBe(PATCH);
+        expect(readdirSync(scratchRoot)).toHaveLength(0);
+        const roots = rootsOf(builtRun);
+        expect(roots.map(one => [one.reviewAttempt, one.outcome])).toEqual([[1, "failed"], [2, "no-change"]]);
+        const sealedDigest = routeDigestOf(store.approvedRouteOf("t-1")!);
+        for (const root of roots) expect(store.runRoute(root.id)).toMatchObject({ phase: "review", routeDigest: sealedDigest });
+        expect(roots.map(one => one.leaseId)).toEqual([`review:${(first as { id: number }).id}:${T0.getTime().toString(36)}`, `review:${(retry as { id: number }).id}:${T0.getTime().toString(36)}`]);
+
+        // Drift between a retry's ask and its pass opens or ingests nothing:
+        // a re-approved route spends the request unrun; a tampered sealed
+        // artifact refuses before the agent is paid; a runner that lost its
+        // repo binding never spawns. Each on its own fresh source run.
+        const routed = seedBuilt().runId;
+        expect(await passOnce(observing({ code: 1 }))).toEqual([]);
+        expect(store.requestReview(routed, "alex", T0).ok).toBe(true);
+        expect(await passOnce(observing({ code: 1 }))).toMatchObject([{ run: routed, outcome: "failed", attempt: 1 }]);
+        const driftAsk = store.requestReview(routed, "alex", new Date(T0.getTime() + 2_000));
+        expect(driftAsk).toMatchObject({ ok: true, attempt: 2 });
+        const edited = store.editTaskRoute(taskRef, { by: "alex", authenticate: () => ({ ok: true }), override: { phase: "review", provider: "claude", model: "claude-opus-4-1" } }, T0);
+        if (!edited.ok) throw new Error(edited.detail);
+        expect(approve(store, "t-1", "alex", T0, edited.scope!.digest, approverToken).ok).toBe(true);
+        const calls = seen.length;
+        expect(await passOnce(observing({ code: 0 }))).toEqual([{ requestId: (driftAsk as { id: number }).id, run: routed, outcome: "skipped", detail: "route-changed: the task was approved again under a different route" }]);
+        expect(seen).toHaveLength(calls);
+        expect(rootsOf(routed)).toHaveLength(1);
+        expect(store.reviewRetryStateOf(routed)).toMatchObject({ state: "retryable", retriesRemaining: 2, nextAttempt: 2 });
+
+        const tampered = seedBuilt().runId;
+        expect(store.requestReview(tampered, "alex", T0).ok).toBe(true);
+        expect(await passOnce(observing({ code: 1 }))).toMatchObject([{ run: tampered, outcome: "failed", attempt: 1 }]);
+        expect(store.requestReview(tampered, "alex", new Date(T0.getTime() + 3_000))).toMatchObject({ ok: true, attempt: 2 });
+        const artifact = store.artifactsFor(tampered).find(one => one.kind === "terminal-diff")!;
+        writeFileSync(join(evidenceRoot, artifact.key), "diff --git a/x b/x\n+tampered\n");
+        const before = seen.length;
+        expect(await passOnce(observing({ code: 0 }))).toMatchObject([{ run: tampered, outcome: "failed", attempt: 2, detail: "evidence" }]);
+        expect(seen).toHaveLength(before);
+        expect(store.liveDiffComments(tampered)).toHaveLength(0);
+        expect(rootsOf(tampered).map(one => [one.reviewAttempt, one.outcome])).toEqual([[1, "failed"], [2, "failed"]]);
+        expect(store.reviewRetryStateOf(tampered)).toMatchObject({ state: "retryable", retriesRemaining: 1, nextAttempt: 3 });
+
+        const unowned = seedBuilt().runId;
+        expect(store.requestReview(unowned, "alex", T0).ok).toBe(true);
+        expect(await passOnce(observing({ code: 1 }))).toMatchObject([{ run: unowned, outcome: "failed", attempt: 1 }]);
+        expect(store.requestReview(unowned, "alex", new Date(T0.getTime() + 4_000))).toMatchObject({ ok: true, attempt: 2 });
+        store.bindRunnerRepos("builder-1", ["/repos/elsewhere"], T0);
+        const spawned = seen.length;
+        expect(await passOnce(observing({ code: 0 }))).toMatchObject([{ run: unowned, outcome: "failed", attempt: 2, detail: "runner-custody" }]);
+        expect(seen).toHaveLength(spawned);
+        expect(rootsOf(unowned).map(one => [one.reviewAttempt, one.outcome, one.reason])).toEqual([[1, "failed", "reviewer-agent"], [2, "failed", "reviewer-runner-custody"]]);
+      });
+    });
+
     test("manual road end to end: request → pass → comments land, run closes, request consumed", async () => {
       const asked = store.requestReview(builtRun, "alex", T0);
       expect(asked.ok).toBe(true);
       const reports = await passOnce(
         reviewingAgent({ version: 1, comments: [{ path: "src/payouts.ts", line: 2, note: "never awaited", severity: "question" }] }),
       );
-      expect(reports).toEqual([{ requestId: (asked as { id: number }).id, run: builtRun, outcome: "reviewed", detail: "1 comment(s)" }]);
+      expect(reports).toEqual([{ requestId: (asked as { id: number }).id, run: builtRun, outcome: "reviewed", attempt: 1, detail: "1 comment(s)" }]);
       const comments = store.liveDiffComments(builtRun);
       expect(comments).toHaveLength(1);
       expect(comments[0]?.author).toBe("reviewer:claude");
@@ -1187,7 +1488,7 @@ describe("the reviewer role in the store", () => {
       };
 
       const reports = await passOnce(repairingAgent);
-      expect(reports).toEqual([{ requestId: asked.id, run: builtRun, outcome: "reviewed", detail: "1 comment(s)" }]);
+      expect(reports).toEqual([{ requestId: asked.id, run: builtRun, outcome: "reviewed", attempt: 1, detail: "1 comment(s)" }]);
       expect(calls).toBe(2);
       expect(argvSeen[0]).not.toContain("--resume");
       expect(argvSeen[1]).toEqual(expect.arrayContaining(["--resume", "review-session-1", "--max-turns", "4"]));

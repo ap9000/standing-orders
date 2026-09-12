@@ -104,6 +104,10 @@ describe("two quality modes", () => {
       // too — drop them along with quality_mode so this reopen genuinely
       // exercises the v41 recognizer against the exact v34 shape it expects,
       // not today's schema with only one column missing.
+      // v50's review_attempt (and its partial uniques) came after v49's
+      // watch_incarnation; both are dropped so the file is a true v40 shape.
+      for (const index of ["root_review_attempt_ordinal", "one_live_root_review_per_source", "one_successful_root_review_per_source", "one_correction_per_reviewer"]) legacy.raw().exec(`DROP INDEX IF EXISTS ${index}`);
+      legacy.raw().exec("ALTER TABLE run DROP COLUMN review_attempt");
       legacy.raw().exec("ALTER TABLE run DROP COLUMN plan_revision");
       legacy.raw().exec("ALTER TABLE run DROP COLUMN authority_digest");
       legacy.raw().exec("ALTER TABLE run DROP COLUMN watch_incarnation");

@@ -64,8 +64,15 @@ Main was still `917bc5b` when this plan was prepared.
   `output/certification/validation-2026-09-11.md`. This closes the named macOS
   crash matrix and fixed-contract pilot, not physical Windows, real exhaustion,
   mid-flight human revisions, or direct-provider latency comparison. Interrupted
-  review now closes with a truthful attention state; bounded explicit retry
-  remains the next lifecycle change. Main and the live worker remain unchanged.
+  review now closes with a truthful attention state, and schema v50 adds the
+  bounded explicit retry: `task review <run>` (or the console's Retry review)
+  after a failed or interrupted attempt, at most twice — three root attempts
+  in all — each a fresh request and reviewer admitted under the current sealed
+  route with newly sealed, re-verified inputs, the failed history retained, a
+  successful, queued, or running review never retried, and nothing retrying by
+  itself. The CLI, the typed dispatch diagnosis, and the task/result pages state
+  the attempt count and the remaining allowance. Main and the live worker
+  remain unchanged.
 
 - The previous integrated code at `cf328cb` passed typecheck/build and the full suite:
   119 files, 2,354 tests, 12 existing skips. Version-3 real-provider canaries
@@ -435,9 +442,10 @@ Done. Waiting and recovery explain what happens next.
   applicable. Task page, chat, inbox, and CLI must agree.
 - Preserve the actual review-ingestion failure category and a safe diagnostic;
   a database error is not stale evidence. A failed ingestion must not silently
-  exhaust the only possible review forever: provide a bounded explicit retry
-  with retained failed history and newly sealed inputs. Report review-only
-  dispatch accurately, and show reviewer progress while it owns a live session.
+  exhaust the only possible review forever: the bounded explicit retry (v50)
+  keeps the failed history, seals fresh inputs, and caps a source build at
+  three root attempts. Report review-only dispatch accurately, and show
+  reviewer progress while it owns a live session.
 - Report actual requeues across the complete reconcile transaction. Releasing
   a claim can requeue first; a later recovery helper must not then announce
   "nothing requeued" merely because it performed no second state change.

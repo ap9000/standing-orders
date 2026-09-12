@@ -1,5 +1,41 @@
 # Progress
 
+**2026-09-11 — Bounded explicit review retries (schema v50).** A finished
+build's independent review that failed or was interrupted can now be retried
+by an operator — `standing-orders task review <run> --as <you> --token <t>`
+again, or the task page's and result cockpit's **Retry review** — at most
+twice: three root reviewer attempts per source build, ever, a fixed cap. The
+store carries the identity durably (`run.review_attempt` is the root's ordinal;
+`review_request.reviewer_run` binds each spent request to the root that
+answered it) and decides eligibility inside the same transactions that ask
+and admit: no successful review yet, no root still open, nothing already
+queued, fewer than three roots — refused as `already-reviewed`,
+`review-running`, `already-requested`, or `retries-exhausted`, opening no
+run. Four exact partial uniques replace v29's `one_review_per_source`: one
+ordinal per (source, attempt), one live root per source, one root that
+ingested a review per source (a root ends `no-change` only through
+`ingestReview`), one correction child per reviewer, one root per request.
+Every retry is a distinct request and root: the pass re-proves the sealed
+review route, runner/watch custody, and the complete verified artifact
+inventory, seals a brand-new scratch from the artifacts, and ingests through
+the same atomic transaction — a late reply from an interrupted attempt finds
+its root closed and lands nothing; the failed attempts, their requests,
+structured-output evidence, and diagnostics stay exactly as recorded. The
+source build is never rerun. `task show` prints the review state, the attempt
+count against the cap, every attempt's outcome, and the exact retry command;
+the typed dispatch diagnosis carries a `review` view (`queued`, `running`,
+`retryable`, `exhausted`, `succeeded`, with attempt/cap/remaining and the
+latest reason), a `retry-review` action, and a `review-exhausted` code; a
+queued retry is never hidden behind an older failed run; the tick reports the
+attempt each review pass ran and, on failure, the retries left. The v49→v50
+upgrade makes every existing root attempt 1, binds it to the one request v49
+spent on it, leaves ids, outcomes, comments, judgements, and evidence bindings
+byte for byte, reopens idempotently and foreign-key clean, and refuses in
+words any predecessor shape it cannot prove. The public crash canary's review
+stage continues through the explicit retry to attempt 2 of 3 with one build,
+one commit, and no further dispatch. Nothing retries by itself; automatic
+review retry remains deliberately absent.
+
 **2026-09-11 — Plan-first and routed execution fail closed without getting
 stuck.** A real Codex plan-first run now finishes: `codex exec resume` has no
 `--sandbox` flag (0.145.0), so every structured correction and repair-by-

@@ -162,7 +162,7 @@ import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf,
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
-import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus } from "./store.js";
+import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus, ReviewRetryState } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
 import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
@@ -1367,6 +1367,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           // shows the top of the queue; the three cases read identically.
           missing: wantedId !== null && chosen === null ? wantedId : null,
           csrf,
+          canRetryReview: who.via === "cookie" && who.role === "approver",
           noted: url.searchParams.get("noted") === "1",
           now,
         }),
@@ -2954,6 +2955,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         // its own latest run (the one that triggered a draft); a DRAFT
         // task's page finds the SAME chain by being named as the draft.
         repairChain: store.repairChainFor(latest.id) ?? store.repairChainForDraft(taskId),
+        // v50: the bounded review-retry history of this exact result —
+        // the same projection the CLI and dispatch diagnosis read.
+        reviewRetry: store.reviewRetryStateOf(latest.id),
         receipt:
           latest.outcome === "built" || latest.outcome === "no-change"
             ? completionReceiptView(store, latest, artifacts, evidenceRoot)
@@ -2969,6 +2973,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return {
         task: found,
         dispatch: diagnoseTaskDispatch(store, taskId, now),
+        canRetryReview: who.via === "cookie" && who.role === "approver",
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
         planDocument: planView?.document ?? null,
@@ -4506,7 +4511,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route|retry-review)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -6395,6 +6400,49 @@ export function createDecisionServer(options: ServeOptions): Server {
         store.acceptProof(latest.id, verifiedAuthor(who.name), note, now);
         return redirect(response, taskHref(taskId));
       }
+      case "retry-review": {
+        // The explicit review retry (v50): the console's road to the SAME
+        // door `task review` uses — an approver's browser session asks,
+        // the store's one transaction decides against live rows (no
+        // successful review, no live root, nothing queued, fewer than
+        // REVIEW_ROOT_ATTEMPTS roots), and every refusal is words on the
+        // page with no run opened. Nothing here retries by itself.
+        if (who.via !== "cookie") {
+          return refuse(response, who, 403, "asking for a review retry is a browser session's act");
+        }
+        if (who.role !== "approver") {
+          return taskScreen(response, who, taskId, "your login can watch — asking for a review retry is an approver's act", 403);
+        }
+        const latest = store.runsFor(ref.id).find(runIsTaskResult);
+        if (latest === undefined) {
+          return taskScreen(response, who, taskId, "this task has no finished attempt to review", 404);
+        }
+        // The form names the result it saw; a page rendered over an older
+        // result must not retry a newer one by accident.
+        const named = (body.get("run") ?? "").trim();
+        if (named !== "" && Number(named) !== latest.id) {
+          return taskScreen(response, who, taskId, `this page was rendered over build #${escape(named)}, but the task's latest result is build #${latest.id} — reload and decide again`, 409);
+        }
+        const asked = store.requestReview(latest.id, verifiedAuthor(who.name), now);
+        const back = body.get("return") ?? "";
+        const destination = REVIEW_RETURN.test(back) ? back : `${taskHref(taskId)}#run-status`;
+        if (!asked.ok) {
+          const state = store.reviewRetryStateOf(latest.id);
+          const cap = state?.cap ?? 3;
+          const words: Record<string, string> = {
+            "already-reviewed": `build #${latest.id} already has its review — a successful review is never retried`,
+            "review-running": `a review of build #${latest.id} is running right now (attempt ${state?.live?.attempt ?? "?"} of ${cap}) — one attempt at a time`,
+            "retries-exhausted": `build #${latest.id} has spent all ${cap} review attempts — nothing retries a fourth time; accept the result with an exception or file a revision`,
+            "already-requested": `a review of build #${latest.id} is already queued (attempt ${state?.nextAttempt ?? "?"} of ${cap})`,
+            "no-diff": `build #${latest.id} left no sealed diff to review`,
+            "diff-truncated": `build #${latest.id}'s diff was truncated at capture — a partial patch cannot be honestly reviewed`,
+            "diff-capture-failed": `build #${latest.id}'s diff capture failed — nothing verifiable to review`,
+            unfinished: `build #${latest.id} is still going`,
+          };
+          return taskScreen(response, who, taskId, words[asked.reason] ?? `${asked.reason}${asked.detail === undefined ? "" : `: ${asked.detail}`}`, 409);
+        }
+        return redirect(response, destination);
+      }
       default:
         return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
     }
@@ -6680,7 +6728,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       contest: contestOf(),
     };
     if (run === null) {
-      return { ...base, run: null, handoff: null, proof: null, terminal: null, files: [], outsideTouches: [], fileAnchors: new Map(), comments: [], reviewerFindings: [], publication: null, notes: [] };
+      return { ...base, run: null, handoff: null, proof: null, terminal: null, files: [], outsideTouches: [], fileAnchors: new Map(), comments: [], reviewerFindings: [], reviewRetry: null, publication: null, notes: [] };
     }
     const artifacts = store.artifactsFor(run.id);
     const terminal = terminalDiffView(artifacts, evidenceRoot);
@@ -6736,6 +6784,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       fileAnchors,
       comments: store.liveDiffComments(run.id),
       reviewerFindings: store.allDiffComments(run.id).filter(one => one.reviewerRun !== null),
+      reviewRetry: store.reviewRetryStateOf(run.id),
       publication:
         publication === null
           ? null
@@ -7012,6 +7061,98 @@ function repairChainHtml(chain: RepairChainRow | null): string {
     ? ""
     : `<details><summary>What it is fixing</summary><p class="meta">${escape(chain.unresolved.join(", "))}</p></details>`;
   return `<div class="card repair-chain" data-repair-outcome="${escape(chain.outcome)}"><p class="row"><strong>Automatic recovery</strong> — ${escape(outcomeWords)}${link}</p>${details}</div>`;
+}
+
+/**
+ * The bounded review-retry panel (v50), shared by the task page and the
+ * result cockpit so both say the same thing: which attempt is running or
+ * queued, how the latest one ended, every root attempt on record, and the
+ * ONE explicit act — a Retry review form — rendered only while the store's
+ * allowance admits it and this session may ask (an approver's cookie
+ * session). Every other state shows the same control disabled, in words,
+ * so a person always sees why nothing more will happen by itself. Empty
+ * when no review was ever asked for.
+ */
+function reviewRetryPanel(
+  taskId: string,
+  sourceRun: number,
+  retry: ReviewRetryState | null,
+  options: { csrf: string; canAct: boolean; returnTo: string | null },
+): string {
+  if (retry === null || retry.state === "unrequested") return "";
+  const cap = retry.cap;
+  const latest = retry.latest;
+  const ordinal = (attempt: number | null): string => `attempt ${attempt ?? retry.attempts.length} of ${cap}`;
+  const retriesLeft = retry.retriesRemaining === 1 ? "1 explicit retry left" : `${retry.retriesRemaining} explicit retries left`;
+  const wasInterrupted = latest !== null && (latest.outcome === "interrupted" || latest.reason === "interrupted");
+  const latestWords = latest === null ? "" : wasInterrupted ? "was interrupted" : `failed${latest.reason === null ? "" : ` (${escape(latest.reason)})`}`;
+  const copy: Record<ReviewRetryState["state"], { title: string; detail: string }> = {
+    unrequested: { title: "Independent review", detail: "" },
+    queued: {
+      title: retry.attempts.length === 0 ? "Review queued" : `Review retry queued · ${ordinal(retry.nextAttempt)}`,
+      detail: retry.attempts.length === 0
+        ? "The requested independent review is waiting for a worker."
+        : `The explicit retry is waiting for a worker; ${latest === null ? "" : `${ordinal(latest.attempt)} ${latestWords}. `}${retriesLeft} after it.`,
+    },
+    running: {
+      title: `Reviewing · ${ordinal(retry.live?.attempt ?? null)}`,
+      detail: "An independent reviewer is checking the sealed evidence right now. The build is preserved whatever it says.",
+    },
+    succeeded: {
+      title: `Reviewed · ${ordinal(retry.succeeded?.attempt ?? null)}`,
+      detail: retry.retriesUsed === 0 ? "The independent review landed on its first attempt." : `The independent review landed after ${retry.retriesUsed} explicit ${retry.retriesUsed === 1 ? "retry" : "retries"}; a successful review is never retried.`,
+    },
+    retryable: {
+      title: `Review ${wasInterrupted ? "interrupted" : "failed"} · ${ordinal(latest?.attempt ?? null)}`,
+      detail: `Review ${ordinal(latest?.attempt ?? null)} ${latestWords}. The build and its evidence are untouched; a retry admits a fresh reviewer under the current sealed route and re-verifies every input. ${retriesLeft}.`,
+    },
+    exhausted: {
+      title: `Review retries exhausted · ${cap} of ${cap}`,
+      detail: `All ${cap} review attempts ended without a review${latest === null ? "" : ` (latest: ${latestWords})`}. Nothing retries a fourth time — accept the result with an exception or file a revision.`,
+    },
+  };
+  const { title, detail } = copy[retry.state];
+  const attempts =
+    retry.attempts.length === 0
+      ? ""
+      : `<ol class="review-attempts" aria-label="review attempts">` +
+        retry.attempts
+          .map(one => {
+            const ended = one.outcome === null ? "running" : one.outcome === "no-change" ? "reviewed" : `${one.reason === "interrupted" ? "interrupted" : one.outcome}${one.reason === null || one.reason === "interrupted" ? "" : ` · ${escape(one.reason)}`}`;
+            return `<li data-review-attempt="${one.attempt}" data-review-outcome="${escape(one.outcome ?? "open")}"><span class="review-attempt-ordinal">attempt ${one.attempt}</span> <a href="/r/${one.runId}">run #${one.runId}</a> <span class="meta">${ended}</span></li>`;
+          })
+          .join("") +
+        `</ol>`;
+  const control = (() => {
+    if (options.csrf === "") return "";
+    if (retry.state === "retryable" && options.canAct) {
+      return (
+        `<form method="post" action="${taskHref(taskId)}/retry-review" class="inline review-retry-form">` +
+        `<input type="hidden" name="csrf" value="${escape(options.csrf)}">` +
+        `<input type="hidden" name="run" value="${sourceRun}">` +
+        (options.returnTo === null ? "" : `<input type="hidden" name="return" value="${escape(options.returnTo)}">`) +
+        `<button type="submit" class="review-retry-button">Retry review · attempt ${retry.nextAttempt ?? retry.attempts.length + 1} of ${cap}</button></form>`
+      );
+    }
+    const label =
+      retry.state === "retryable"
+        ? "Retry review · approvers only"
+        : retry.state === "queued"
+          ? "Retry queued"
+          : retry.state === "running"
+            ? "Reviewing…"
+            : retry.state === "exhausted"
+              ? "No retries left"
+              : "Reviewed";
+    return `<button type="button" class="review-retry-button" disabled aria-disabled="true">${escape(label)}</button>`;
+  })();
+  return (
+    `<div class="${retry.state === "retryable" || retry.state === "exhausted" ? "problem" : "answered"} dispatch-status review-retry" data-review-state="${escape(retry.state)}" data-review-attempts="${retry.attempts.length}" data-review-cap="${cap}" data-review-remaining="${retry.retriesRemaining}">` +
+    `<div class="dispatch-copy"><strong>${escape(title)}</strong><span class="meta">${detail}</span></div>` +
+    attempts +
+    (control === "" ? "" : `<div class="review-retry-actions">${control}</div>`) +
+    `</div>`
+  );
 }
 
 /** v40: the independent reviewer's own judgement on one criterion — a
@@ -8462,6 +8603,16 @@ const STYLE = `
     background: var(--destructive);
   }
   .dispatch-status[data-dispatch-status="needs-verification"] .dispatch-copy > strong::before { background: var(--muted-foreground); }
+  .review-retry { margin-bottom: .65rem; }
+  .review-attempts { margin: .55rem 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .2rem; font-size: .8125rem; }
+  .review-attempts li { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .45rem; min-width: 0; }
+  .review-attempts .review-attempt-ordinal { font-weight: 600; }
+  .review-attempts .meta { min-width: 0; overflow-wrap: anywhere; }
+  .review-retry-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .55rem; margin-top: .65rem; }
+  .review-retry-actions form.inline { margin: 0; }
+  .review-retry-button { width: auto; max-width: 100%; white-space: normal; }
+  .review-retry-form .review-retry-button { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600; }
+  .review-retry-button[disabled] { opacity: .65; cursor: not-allowed; }
   .proof-review-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .55rem; margin: .65rem 0; }
   .proof-review-actions > .button-link { flex: none; }
   details.proof-exception { margin: 0; }
@@ -11095,6 +11246,8 @@ function taskRecoveryHref(taskId: string, diagnosis: DispatchDiagnosis | null): 
       return "/projects";
     case "open-result":
       return task;
+    case "retry-review":
+      return `${task}#run-status`;
   }
 }
 
@@ -14239,9 +14392,15 @@ function taskBody(data: {
     proofAccepted: boolean;
     /** v40: this run's own place in a bounded repair chain, if any. */
     repairChain: RepairChainRow | null;
+    /** v50: every root review attempt of this result and what the
+     * allowance still admits; null when no review was ever asked for. */
+    reviewRetry?: ReviewRetryState | null;
     /** Priority 2's concise, shared result package. */
     receipt: CompletionReceiptView | null;
   } | null;
+  /** v50: whether this session may ask for a review retry (an approver's
+   * browser session — the same standing `task review` demands). */
+  canRetryReview?: boolean;
   decisions: Decision[];
   incidents: Incident[];
   /** Pending coordinator proposals on this task (mate arc v3), with the decisions their answer cards name. */
@@ -14415,6 +14574,15 @@ function taskBody(data: {
       if (proof === null) {
         return box("problem", "Complete, proof missing", "The task is terminal but has no finished attempt record. Treat it as unverified.");
       }
+      // v50: the independent review's own card — attempt counts, what is
+      // running or queued, the latest failure in words, and the ONE
+      // explicit act (Retry review) exactly when the allowance admits it.
+      const reviewCard = reviewRetryPanel(task.id, proof.runId, proof.reviewRetry ?? null, {
+        csrf: data.csrf,
+        canAct: data.canRetryReview === true,
+        returnTo: null,
+      });
+      const withReview = (html: string): string => reviewCard + html;
       // A no-change conclusion never owes a proof — there is no diff to
       // check acceptance criteria or a changed-path claim against — so it
       // keeps reading on the two presence facts alone, exactly as before
@@ -14422,7 +14590,7 @@ function taskBody(data: {
       if (proof.outcome === "no-change") {
         const missing = [proof.hasHandoff ? null : "agent handoff", proof.hasTerminalDiff ? null : "terminal diff"]
           .filter((one): one is string => one !== null);
-        return missing.length > 0
+        return withReview(missing.length > 0
           ? box(
               "problem",
               "Complete, proof incomplete",
@@ -14432,7 +14600,7 @@ function taskBody(data: {
               "ok",
               "Complete with evidence",
               `<a href="/r/${proof.runId}">Build #${proof.runId}</a> concluded no change was needed; its handoff and machine-captured diff are on record.`,
-            );
+            ));
       }
       // A built run's verdict is the machine's own — computed once at
       // completion by adjudicate() (Priority 2), never re-derived here.
@@ -14464,36 +14632,36 @@ function taskBody(data: {
             `<div class="dispatch-proof-body">${criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })}${machineNote}${chainHtml}</div></details>`;
       if (proof.proofVerdict === "verified") {
         const recovered = verificationRecovered(proof.proofReasons);
-        return box(
+        return withReview(box(
           "ok",
           "Complete — verified",
           recovered
             ? `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. <span data-automatic-recovery="succeeded">Standing Orders ran the approved setup automatically, then the project check passed.</span>`
             : `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`,
-        ) + proofDetails;
+        ) + proofDetails);
       }
       if (proof.proofVerdict === "attested") {
-        return box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`) + proofDetails;
+        return withReview(box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`) + proofDetails);
       }
       if (proof.proofVerdict === "refuted") {
-        return (
+        return withReview(
           box(
             accepted ? "ok" : "problem",
             accepted ? "Accepted with exception" : "Conflicting evidence",
             `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. ${escape(verificationExplanation(proof.proofVerdict, proof.proofReasons))}${accepted ? " It was accepted after a manual review." : ""}`,
             dispatchStatusToken("refuted"),
-          ) + `<div class="proof-review-actions"><a class="button-link" href="${reviewHref(task.id)}">Review evidence</a>${acceptForm}</div>` + proofDetails
+          ) + `<div class="proof-review-actions"><a class="button-link" href="${reviewHref(task.id)}">Review evidence</a>${acceptForm}</div>` + proofDetails,
         );
       }
       // "short", or no verdict at all (a legacy run, or one where
       // adjudication itself could not run) — the honest default.
-      return (
+      return withReview(
         box(
           accepted ? "ok" : "problem",
           accepted ? "Accepted with exception" : "Missing evidence",
           `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. ${escape(verificationExplanation(proof.proofVerdict, proof.proofReasons))}${accepted ? " It was accepted after a manual review." : ""}`,
           dispatchStatusToken("short"),
-        ) + `<div class="proof-review-actions"><a class="button-link" href="${reviewHref(task.id)}">Review evidence</a>${acceptForm}</div>` + proofDetails
+        ) + `<div class="proof-review-actions"><a class="button-link" href="${reviewHref(task.id)}">Review evidence</a>${acceptForm}</div>` + proofDetails,
       );
     }
     return box("problem", "Dispatch unknown", "Refresh this task before relying on its scheduler state.", "unknown");
@@ -15626,6 +15794,8 @@ type ReviewCockpitView = {
   fileAnchors: ReadonlyMap<string, string>;
   comments: DiffComment[];
   reviewerFindings: DiffComment[];
+  /** v50: the result's bounded review-retry history, null when never asked. */
+  reviewRetry: ReviewRetryState | null;
   publication: {
     state: Publication["state"];
     prNumber: number | null;
@@ -15772,6 +15942,8 @@ function reviewCockpitPage(
     beyondQueue: boolean;
     missing: string | null;
     csrf: string;
+    /** v50: an approver's session may ask for a review retry here. */
+    canRetryReview: boolean;
     noted: boolean;
     now: Date;
   },
@@ -15809,7 +15981,7 @@ function reviewCockpitPage(
     !data.beyondQueue || selected === null
       ? ""
       : `<p class="meta cockpit-beyond" data-cockpit-beyond="1">Opened directly: <span class="mono">${escape(selected.taskId)}</span> finished earlier than the newest ${data.queueCap} completions the queue lists, so it has no row there.</p>`;
-  const detail = selected === null ? `<section class="cockpit-detail"><p class="meta">Nothing to review yet.</p></section>` : reviewCockpitDetail(selected, csrf, data.noted);
+  const detail = selected === null ? `<section class="cockpit-detail"><p class="meta">Nothing to review yet.</p></section>` : reviewCockpitDetail(selected, csrf, data.noted, data.canRetryReview);
   return screen("review", [
     `<h1>review</h1>`,
     buildsViews("review"),
@@ -15825,7 +15997,7 @@ function reviewCockpitPage(
 
 /** The selected result: intent → proof → changes → publication → acts,
  * one scan path, every fact labeled by its source. */
-function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boolean): string {
+function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boolean, canRetryReview = false): string {
   const parts: string[] = [];
   const run = view.run;
   const proof = view.proof;
@@ -15982,6 +16154,9 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
     proofParts.push(
       `<details class="cockpit-evidence-group"><summary><span>Evidence and checks</span><small>${evidenceSummary}</small></summary><div class="cockpit-evidence-body">${evidenceParts.join("\n")}</div></details>`,
     );
+    // v50: the independent review's attempt counts and its one explicit
+    // act, the same panel the task page shows — the cockpit returns here.
+    proofParts.push(reviewRetryPanel(view.taskId, run.id, view.reviewRetry, { csrf, canAct: canRetryReview, returnTo: reviewHref(view.taskId) }));
     if ((proof.verdict === "short" || proof.verdict === "refuted") && proof.accepted === null && csrf !== "") {
       proofParts.push(
         `<details class="cockpit-accept"><summary>Accept with an exception</summary><p class="meta">Use this only if you verified the result another way. The reason becomes part of the record.</p>` +

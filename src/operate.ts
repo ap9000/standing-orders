@@ -36,7 +36,9 @@ import {
   parseCapabilityKey,
   verifiedAuthor,
   contestantProfileOf,
+  REVIEW_ROOT_ATTEMPTS,
   type Capability,
+  type ReviewRetryState,
   type Store,
   type TaskState,
 } from "./store.js";
@@ -1846,6 +1848,10 @@ type TickOutcome = {
   reason?: string;
   /** The gap's own words, when the reason is a capability. */
   detail?: string;
+  /** v50: a review pass's root attempt ordinal, and — on a failed one —
+   * how many explicit retries the source run still admits. */
+  attempt?: number;
+  retriesRemaining?: number;
   committed?: boolean;
   branch?: string;
   worktree?: string;
@@ -3916,6 +3922,8 @@ async function tickCommand(
         id: `review of run ${one.run}`,
         outcome: one.outcome === "reviewed" ? "reviewed" : one.outcome === "failed" ? "review-failed" : "skipped",
         reason: one.detail,
+        ...(one.attempt === undefined ? {} : { attempt: one.attempt }),
+        ...(one.retriesRemaining === undefined ? {} : { retriesRemaining: one.retriesRemaining }),
       });
     }
   }
@@ -3937,7 +3945,11 @@ async function tickCommand(
             : "no changes reported; see the result's proof status"
           : entry.outcome === "parked"
             ? `${entry.reason} — \`standing-orders decide\``
-            : entry.reason ?? "";
+            : entry.outcome === "review-failed" && entry.attempt !== undefined
+              ? `${entry.reason ?? ""} (attempt ${entry.attempt} of ${REVIEW_ROOT_ATTEMPTS}; ${entry.retriesRemaining === 0 ? "no retries left" : `${entry.retriesRemaining} explicit retr${entry.retriesRemaining === 1 ? "y" : "ies"} left — \`task review ${entry.id.replace("review of run ", "")}\``})`
+              : entry.outcome === "reviewed" && entry.attempt !== undefined && entry.attempt > 1
+                ? `${entry.reason ?? ""} (attempt ${entry.attempt} of ${REVIEW_ROOT_ATTEMPTS})`
+                : entry.reason ?? "";
       lines.push(`  ${entry.id.padEnd(24)} ${entry.outcome}  ${detail}`.trimEnd());
     }
     if (built > 0) {
@@ -4751,7 +4763,10 @@ async function planTaskCommand(
  * finished run's sealed diff (v29, R3). Queued, not run here: the next
  * pass dispatches the reviewer with the review phase's configured agent,
  * and its comments land on the run page for YOU to prune and seal —
- * sealing stays human. One review per run, ever.
+ * sealing stays human. One SUCCESSFUL review per run, ever; after a
+ * failed or interrupted attempt this same command IS the explicit retry
+ * (v50) — at most two, three root attempts in all — and every refusal
+ * (queued, running, reviewed, exhausted) is typed, opening no run.
  */
 async function reviewTaskCommand(
   positional: readonly string[],
@@ -4774,19 +4789,31 @@ async function reviewTaskCommand(
   }
   const asked = store.requestReview(runId, acting.name, clock());
   if (!asked.ok) {
+    const state = store.reviewRetryStateOf(runId);
+    const cap = state?.cap ?? REVIEW_ROOT_ATTEMPTS;
     const why: Record<string, string> = {
       "no-run": `no run ${runId}`,
       "not-reviewable": "that run IS a review — reviews review work, never each other",
       unfinished: "that run is still going — review reads the sealed diff, which exists once it finishes",
       "no-diff": "that run left no sealed diff to review",
+      "diff-capture-failed": "that run's diff capture failed — recapture it before asking for a review",
       "diff-truncated": "that run's diff was truncated at capture — a partial patch cannot be honestly reviewed",
-      "already-reviewed": "that run already has its review — one per run, ever; the comments are on its page",
-      "already-requested": "a review is already queued for that run",
+      "already-reviewed": `that run already has its review${state?.succeeded === undefined || state.succeeded === null ? "" : ` (attempt ${state.succeeded.attempt} of ${cap})`} — a successful review is never retried; the comments are on its page`,
+      "review-running": `a review is running for that run right now (attempt ${state?.live?.attempt ?? "?"} of ${cap}) — one attempt at a time; a retry is only for a failed or interrupted one`,
+      "retries-exhausted": `that run has spent all ${cap} review attempts (${state?.attempts.map(one => `#${one.runId} ${one.reason ?? one.outcome ?? "open"}`).join(", ") ?? ""}) — nothing retries a fourth time; accept the result with an exception or file a revision`,
+      "already-requested": `a review is already queued for that run${state?.nextAttempt === undefined || state.nextAttempt === null ? "" : ` (attempt ${state.nextAttempt} of ${cap})`}`,
     };
-    return fail(write, json, "task review", "refused", why[asked.reason] ?? asked.reason, EXIT.refused);
+    return fail(write, json, "task review", asked.reason, why[asked.reason] ?? asked.reason, EXIT.refused, {
+      run: runId,
+      ...(asked.detail === undefined ? {} : { detail: asked.detail }),
+      ...(state === null ? {} : { review: state }),
+    });
   }
-  return succeed(write, json, "task review", { run: runId }, () => [
-    `Run ${runId} will be reviewed: the next pass dispatches an agent over its sealed diff.`,
+  const state = store.reviewRetryStateOf(runId);
+  return succeed(write, json, "task review", { run: runId, request: asked.id, attempt: asked.attempt, cap: state?.cap ?? REVIEW_ROOT_ATTEMPTS, retriesRemaining: state?.retriesRemaining ?? 0, ...(state === null ? {} : { review: state }) }, () => [
+    asked.attempt === 1
+      ? `Run ${runId} will be reviewed: the next pass dispatches an agent over its sealed diff.`
+      : `Run ${runId} will be reviewed again — explicit retry, attempt ${asked.attempt} of ${state?.cap ?? REVIEW_ROOT_ATTEMPTS}; ${state?.retriesRemaining ?? 0} would remain after it. The next pass admits a fresh reviewer under the build's current sealed route and re-verifies every input; the failed attempt stays on record.`,
     "Its comments land on the run page beside your own, for you to prune and seal into a revision task.",
   ]);
 }
@@ -9605,6 +9632,9 @@ function showTask(positional: readonly string[], context: Context): number {
     proofReasons: proofVerdict?.reasons ?? [],
     proofMatrix: proofVerdict?.matrix ?? [],
     proofAccepted,
+    // v50: the latest build's bounded review history — every root attempt
+    // in order, the open request, and the one state they add up to.
+    review: latestFinished === null ? null : store.reviewRetryStateOf(latestFinished.id),
     dispatch: diagnoseTaskDispatch(store, id, now),
   };
 
@@ -9637,6 +9667,7 @@ function showTask(positional: readonly string[], context: Context): number {
     ...(detail.hold === null ? [] : [`  held: ${detail.hold.reason}`]),
     ...(detail.claim === null ? [] : [`  claimed by ${detail.claim.runner} until ${detail.claim.expiresAt}`]),
     ...(detail.dispatch === null ? [] : [`  dispatch: ${detail.dispatch.summary} — ${detail.dispatch.detail}`]),
+    ...reviewStatusLines(detail.review, latestFinished?.id ?? null),
     ...(scope === null
       ? ["  no scope — nothing will build this until one is written and approved"]
       : describeScope(scope, readiness)),
@@ -9650,6 +9681,26 @@ function showTask(positional: readonly string[], context: Context): number {
       .slice(0, 8)
       .map(one => `  run #${one.id}  ${one.role.padEnd(8)} ${one.route!.provider}${one.route!.model === null ? "" : ` · ${one.route!.model}`}  [${one.route!.chosen}] route ${one.route!.routeDigest}`),
   ]);
+}
+
+/** The review status lines `task show` prints (v50): the state word, the
+ * attempt count against the fixed cap, every root attempt's outcome, and
+ * the one explicit next act — never an automatic one. */
+function reviewStatusLines(review: ReviewRetryState | null, sourceRun: number | null): string[] {
+  if (review === null || sourceRun === null || review.state === "unrequested") return [];
+  const word: Record<ReviewRetryState["state"], string> = {
+    unrequested: "not requested",
+    queued: `retry queued — attempt ${review.nextAttempt ?? review.attempts.length + 1} of ${review.cap} waits for a worker`,
+    running: `running — attempt ${review.live?.attempt ?? review.attempts.length} of ${review.cap}`,
+    succeeded: `succeeded on attempt ${review.succeeded?.attempt ?? 1} of ${review.cap}`,
+    retryable: `${review.latest?.outcome === "interrupted" || review.latest?.reason === "interrupted" ? "interrupted" : "failed"} on attempt ${review.latest?.attempt ?? review.attempts.length} of ${review.cap} — ${review.retriesRemaining === 1 ? "1 explicit retry" : `${review.retriesRemaining} explicit retries`} left: \`standing-orders task review ${sourceRun} --as <you> --token <t>\``,
+    exhausted: `exhausted — all ${review.cap} attempts ended without a review; nothing retries a fourth time`,
+  };
+  const first = review.state === "queued" && review.attempts.length === 0 ? "queued — waiting for a worker" : word[review.state];
+  return [
+    `  review: ${first}`,
+    ...review.attempts.map(one => `    attempt ${one.attempt}: run #${one.runId} ${one.outcome === null ? "open" : one.outcome === "no-change" ? "reviewed" : `${one.outcome}${one.reason === null ? "" : ` (${one.reason})`}`}`),
+  ];
 }
 
 /** The route as `task show` / `task route --json` report it (v47): one

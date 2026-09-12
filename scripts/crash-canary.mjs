@@ -1,5 +1,9 @@
 #!/usr/bin/env node
-/** Kill actual CLI workers at real process barriers; no clock injection or model calls. */
+/** Kill actual CLI workers at real process barriers; no clock injection or model calls.
+ * The review stage additionally proves the bounded explicit retry (v50): the
+ * interrupted review is recovered to an attention state, retried ONCE through
+ * the public `task review` door, completes on attempt 2 of 3, leaves the one
+ * source build and commit untouched, and admits no further review dispatch. */
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -66,7 +70,17 @@ async function one(stage, round) {
   for (const path of [repo, control, tools, home]) mkdirSync(path);
   const db = join(dir, "orders.db"), pool = join(dir, "pool");
   const quote = s => "'" + s.replaceAll("'", "'\\''") + "'";
-  const check = `${quote(process.execPath)} ${quote(fixture)} check ${quote(control)}`;
+  // The approved commands are short wrappers in the control directory: a
+  // proof's check ref is capped at 300 bytes, and the literal node + fixture
+  // + control path exceeds that from a long checkout. `exec` keeps the
+  // fixture's own pid as the checkpoint process.
+  const wrapper = (name, kind) => {
+    const path = join(tools, name);
+    writeFileSync(path, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(fixture)} ${kind} ${quote(control)} "$@"\n`);
+    chmodSync(path, 0o700);
+    return quote(path);
+  };
+  const check = wrapper("check", "check");
   const acceptance = [
     { id: "c1", statement: "The result file contains recovered and a newline.", evidence: ["changed-path"] },
     { id: "c2", statement: "The approved check passes.", evidence: ["check"] },
@@ -98,7 +112,7 @@ async function one(stage, round) {
     writeFileSync(join(control,"token"), registered.token, { mode: 0o600 });
     for (const phase of ["plan", "build", "repair", "review"]) await cli(["config", "set", phase, "--provider", "claude", "--model", "fixture", ...auth]);
     await cli(["verify", "set", "--repo", repo, "--command", check, "--timeout-seconds", "240", "--yes", ...auth]);
-    if (stage === "setup") await cli(["setup", "set", "--repo", repo, "--command", `${quote(process.execPath)} ${quote(fixture)} setup ${quote(control)}`, "--timeout-seconds", "240", "--yes", ...auth]);
+    if (stage === "setup") await cli(["setup", "set", "--repo", repo, "--command", wrapper("setup", "setup"), "--timeout-seconds", "240", "--yes", ...auth]);
     await cli(["task", "add", "Write result.txt containing recovered and a newline.", "--id", "work", "--repo", repo]);
     if (stage === "planning") {
       await cli(["task", "plan", "work", "--provider", "claude", "--model", "fixture", ...auth]);
@@ -120,6 +134,8 @@ async function one(stage, round) {
     record.checks.checkpoint = checkpoint;
     record.checks.preCrashRuns = rows("SELECT id,role,phase,outcome FROM run");
     if (["after-commit", "verification"].includes(stage)) record.checks.committedBeforeCrash = execFileSync(gitBinary, ["rev-parse", "HEAD"], { cwd: checkpoint.cwd, encoding: "utf8" }).trim();
+    // The review stage's build committed BEFORE the crash; the retry below must retain exactly it.
+    if (stage === "review") record.checks.committedBeforeCrash = execFileSync(gitBinary, ["rev-parse", "standing-orders/work"], { cwd: repo, encoding: "utf8" }).trim();
     worker.child.kill("SIGKILL");
     const killed = await worker.done;
     assert.equal(killed.signal, "SIGKILL");
@@ -145,12 +161,55 @@ async function one(stage, round) {
     const before = await cli(["task", "show", "work"]);
     record.checks.afterTakeover = { state: before.task.state, dispatch: before.dispatch, runs: before.runs.map(r => ({ id:r.id,role:r.role,outcome:r.outcome,reason:r.reason })) };
     if (stage !== "review") writeFileSync(join(control,"recovery-result.json"), JSON.stringify(await start([...workerArgs, "--for", "2500"], opts).done));
-    const after = await cli(["task", "show", "work"]);
+    let after = await cli(["task", "show", "work"]);
     const runsBeforeDuplicate = rows("SELECT id FROM run ORDER BY id");
     const duplicate = await cli(["tick", "--runner", "worker", "--token", registered.token, "--repo", repo, "--pool", pool], [3]);
     assert.equal(duplicate.reason, stage === "planning" ? "nothing-dispatched" : "empty");
     assert.deepEqual(rows("SELECT id FROM run ORDER BY id"), runsBeforeDuplicate);
     record.checks.duplicateDispatch = stage === "planning" ? "refused-unapproved" : "refused-empty";
+    if (stage === "review") {
+      // THE EXPLICIT RETRY (v50). Recovery left the interrupted attempt as
+      // attempt 1 of 3 needing attention — nothing retried it by itself
+      // (the duplicate tick above dispatched nothing). One credentialed
+      // `task review` asks again; the next public tick admits attempt 2
+      // under the same sealed route, re-verifies the sealed inputs, and
+      // the deterministic fixture review lands. Then the allowance is
+      // closed: a further ask refuses and a further tick dispatches nothing.
+      record.checks.afterRecovery = { dispatch: after.dispatch, review: after.review };
+      assert.equal(after.dispatch.code, "review-failed", "the interrupted review must need attention before any retry");
+      assert.equal(after.dispatch.action, "retry-review");
+      assert.equal(after.review.state, "retryable");
+      assert.deepEqual(after.review.attempts.map(one => [one.attempt, one.outcome, one.reason]), [[1, "failed", "interrupted"]]);
+      const builder = after.runs.find(r => r.role === "builder");
+      const retried = await cli(["task", "review", String(builder.id), ...auth]);
+      assert.equal(retried.attempt, 2);
+      assert.equal(retried.retriesRemaining, 1);
+      const queued = await cli(["task", "show", "work"]);
+      assert.equal(queued.dispatch.code, "review-pending");
+      assert.equal(queued.review.state, "queued");
+      const retryTick = await cli(["tick", "--runner", "worker", "--token", registered.token, "--repo", repo, "--pool", pool]);
+      const retryReport = retryTick.dispatched.find(one => one.id === `review of run ${builder.id}`);
+      assert.equal(retryReport?.outcome, "reviewed", JSON.stringify(retryTick));
+      assert.equal(retryReport?.attempt, 2);
+      after = await cli(["task", "show", "work"]);
+      assert.equal(after.review.state, "succeeded");
+      assert.equal(after.review.succeeded.attempt, 2);
+      assert.equal(after.dispatch.code, "complete");
+      assert.equal(after.dispatch.review.state, "succeeded");
+      assert.deepEqual(after.review.attempts.map(one => [one.attempt, one.outcome]), [[1, "failed"], [2, "no-change"]]);
+      assert.equal(after.runs.filter(r => r.role === "builder").length, 1, "the retry must not rebuild the source");
+      assert.equal(after.runs.filter(r => r.role === "reviewer").length, 2, "exactly one retry root beside the interrupted one");
+      const closed = await cli(["task", "review", String(builder.id), ...auth], [3]);
+      assert.equal(closed.reason, "already-reviewed");
+      const runsAfterRetry = rows("SELECT id FROM run ORDER BY id");
+      const noMore = await cli(["tick", "--runner", "worker", "--token", registered.token, "--repo", repo, "--pool", pool], [3]);
+      assert.equal(noMore.reason, "empty");
+      assert.deepEqual(rows("SELECT id FROM run ORDER BY id"), runsAfterRetry);
+      assert.deepEqual(rows("SELECT id, consumed_reason, reviewer_run FROM review_request ORDER BY id").map(one => [one.consumed_reason, one.reviewer_run !== null]), [["interrupted", true], ["reviewed", true]]);
+      record.checks.explicitRetry = { requested: retried, tick: retryTick.dispatched, review: after.review, dispatch: after.dispatch, closed: closed.reason, duplicateAfterRetry: noMore.reason,
+        providerStarts: events().filter(e => e.name === "provider-start" && e.phase === "review").length };
+      assert.equal(record.checks.explicitRetry.providerStarts, 2, "one interrupted reviewer plus one retried reviewer, never more");
+    }
     record.checks.final = { state: after.task.state, scope: !!after.scope, proof: after.proofVerdict, dispatch: after.dispatch,
       runs: after.runs.map(r => ({ id:r.id, role:r.role, outcome:r.outcome, reason:r.reason, parent:r.parentRun, head:r.headRevision })) };
     record.checks.events = events();
@@ -160,12 +219,12 @@ async function one(stage, round) {
     if (record.checks.openRuns.length) failures.push("interrupted runs remain open after restart");
     if (stage === "planning" && !after.scope) failures.push("the interrupted planning request did not resume");
     if (!["planning","review"].includes(stage) && (after.task.state !== "done" || after.proofVerdict !== "verified")) failures.push("the preserved draft/commit did not finish with verified proof");
-    if (stage === "review" && after.dispatch.code !== "review-failed") failures.push("the interrupted review is not shown as needing attention");
+    if (stage === "review" && (after.dispatch.code !== "complete" || after.review?.state !== "succeeded" || after.proofVerdict !== "verified")) failures.push("the explicit review retry did not complete with the preserved verified build");
     if (stage !== "planning") {
       const finalHead = execFileSync(gitBinary, ["rev-parse", "standing-orders/work"], { cwd: repo, encoding: "utf8" }).trim();
       assert.equal(execFileSync(gitBinary, ["show", `${finalHead}:result.txt`], { cwd: repo, encoding: "utf8" }), "recovered\n");
       assert.equal(events().filter(e => e.name === "commit").length, 1, "recovery must not create a duplicate commit");
-      if (record.checks.committedBeforeCrash) assert.equal(finalHead, record.checks.committedBeforeCrash, "recovery must retain the original commit");
+      if (record.checks.committedBeforeCrash) assert.equal(finalHead, record.checks.committedBeforeCrash, stage === "review" ? "the review retry must retain the original build's commit" : "recovery must retain the original commit");
       record.checks.finalHead = finalHead;
     }
     record.failures = failures;
@@ -186,8 +245,8 @@ await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, 
 }));
 const certificate = { version:1, passed: cases.every(c=>c.passed) && hash()===runtime, sourceCommit:revision, runtimeSha256:runtime, runtimeUnchanged:hash()===runtime,
   platform:process.platform, node:process.versions.node, durationSeconds:(Date.now()-started)/1000, cases, retainedAt:base,
-  scope:"Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. Provider responses are fixtures, not model calls.",
-  exclusions:["real-provider recovery", "Windows", "reboot", "detached descendants", "power-loss filesystem durability"] };
+  scope:"Actual public-CLI watch processes killed with SIGKILL at deterministic external-process checkpoints; normal 90-second lease expiry; real git, SQLite, subprocesses and successor watch. The review stage continues through one explicit `task review` retry to a successful attempt 2 of 3 with the source build and commit unchanged and no further review dispatch. Provider responses are fixtures, not model calls.",
+  exclusions:["real-provider recovery", "real-provider review retry", "Windows", "reboot", "detached descendants", "power-loss filesystem durability"] };
 mkdirSync(dirname(output), { recursive:true }); writeFileSync(output, JSON.stringify(certificate,null,2)+"\n");
 console.log(`Certificate: ${output}`);
 if (!certificate.passed) process.exitCode=1;

@@ -18,6 +18,10 @@ describe("v49 review watch ownership migration", () => {
         route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" } });
       store.close();
       const raw = new DatabaseSync(file);
+      // v50's review_attempt (and its partial uniques) sits after
+      // watch_incarnation; a v48 file carried neither.
+      for (const index of ["root_review_attempt_ordinal", "one_live_root_review_per_source", "one_successful_root_review_per_source", "one_correction_per_reviewer"]) raw.exec(`DROP INDEX IF EXISTS ${index}`);
+      raw.exec("ALTER TABLE run DROP COLUMN review_attempt");
       raw.exec("ALTER TABLE run DROP COLUMN watch_incarnation");
       raw.prepare("UPDATE schema_version SET version = ?").run(epoch);
       const before = raw.prepare("SELECT * FROM run").all();
@@ -26,7 +30,7 @@ describe("v49 review watch ownership migration", () => {
       expect(upgraded.raw().prepare("SELECT version FROM schema_version").get()).toMatchObject({ version: SCHEMA_VERSION });
       expect(upgraded.getRun(1)?.watchIncarnation).toBeNull();
       const after = upgraded.raw().prepare("SELECT * FROM run").all();
-      expect(after.map(({ watch_incarnation: _binding, ...row }) => row)).toEqual(before);
+      expect(after.map(({ watch_incarnation: _binding, review_attempt: _attempt, ...row }) => row)).toEqual(before);
       upgraded.close();
       const again = openStore(file);
       expect(again.raw().prepare("SELECT * FROM run").all()).toEqual(after);

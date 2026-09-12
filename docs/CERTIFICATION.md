@@ -71,9 +71,17 @@ Local certificates are `output/certification/crash-certified-120.json` and
 links to 169 copied, hash-verified artifacts in `pilot-evidence/`.
 
 Planning recovery safely awaits approval; interrupted review recovery safely
-requires attention. Automatic review retry is not certified. The pilot used
-fixed scopes approved before dispatch, with the exclusions described below.
-The original main checkout and live worker were not upgraded.
+requires attention, and the review stage of the crash canary now continues
+through one explicit `task review` retry (schema v50, bounded review retries):
+the recovered attempt reads as attempt 1 of 3 needing attention, the retry is
+admitted as attempt 2 under the same sealed route with every sealed input
+re-verified, the fixture review lands, the source build and its commit are
+unchanged, a further ask refuses (`already-reviewed`), and a further tick
+dispatches nothing. Automatic review retry does not exist and is not certified;
+the explicit retry is certified with fixture providers only, never a real
+model. The pilot used fixed scopes approved before dispatch, with the
+exclusions described below. The original main checkout and live worker were
+not upgraded.
 
 ## Earlier bounded provider baseline
 
@@ -126,9 +134,12 @@ Every case checks exclusive writing, terminal run accounting, and duplicate
 dispatch. Build recovery must preserve the file contents and original commit,
 run the approved verification, and produce verified proof without another
 commit. Planning must produce a fresh draft awaiting approval. An interrupted
-review must close as interrupted and show that attention is needed; this does
-not certify an automatic review retry. Failed and passing fixtures are retained
-with subprocess event logs, SQLite state, and worker output.
+review must close as interrupted and show that attention is needed, and (since
+v50) must then complete through exactly one explicit retry with one source
+build, one commit, two reviewer roots, and no further review dispatch; this
+does not certify an automatic review retry, which does not exist. Failed and
+passing fixtures are retained with subprocess event logs, SQLite state, and
+worker output.
 
 The crash tests exposed planner checkout reclamation, verification-process
 ownership, post-commit proof settlement, and claimless reviewer recovery bugs.

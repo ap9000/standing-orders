@@ -1,0 +1,184 @@
+{
+ "evidence": "bounded-review-retries",
+ "capturedAt": "2026-09-12T00:50:48.555Z",
+ "plane": {
+  "kind": "isolated fixture database seeded by /tmp/so-retry-capture/seed.ts (never the live control database)",
+  "console": "standing-orders serve --db /tmp/so-retry-capture/orders.db --port 4996 --repo /tmp/so-retry-capture/repo"
+ },
+ "captures": [
+  {
+   "file": "desktop.png",
+   "page": "/t/rate-limit-payouts",
+   "expectedState": "retryable",
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "title": "task · rate-limit-payouts",
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "state": "retryable",
+   "attempts": "1",
+   "remaining": "2",
+   "button": {
+    "text": "Retry review · attempt 2 of 3",
+    "disabled": false,
+    "width": 199,
+    "height": 44,
+    "right": 807
+   },
+   "form": "/t/rate-limit-payouts/retry-review",
+   "panelTop": 140,
+   "panelBottom": 312,
+   "buttonBottom": 298,
+   "innerHeight": 900,
+   "sha256": "9ae61ace95eea2f55962d965c5bec814d53670546e200990c81a967492b5b287",
+   "bytes": 330959
+  },
+  {
+   "file": "desktop-cockpit-queued.png",
+   "page": "/review?result=rate-limit-payouts-queued",
+   "expectedState": "queued",
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "title": "review",
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "state": "queued",
+   "attempts": "1",
+   "remaining": "1",
+   "button": {
+    "text": "Retry queued",
+    "disabled": true,
+    "width": 108,
+    "height": 44,
+    "right": 741
+   },
+   "form": null,
+   "panelTop": 227,
+   "panelBottom": 400,
+   "buttonBottom": 386,
+   "innerHeight": 900,
+   "sha256": "40b71d5f2fc9b13e3e475fd8b05f519b4935af8a24c364e2d10dafe50ff1df09",
+   "bytes": 218543
+  },
+  {
+   "file": "desktop-exhausted.png",
+   "page": "/t/rate-limit-payouts-exhausted",
+   "expectedState": "exhausted",
+   "viewport": {
+    "width": 1400,
+    "height": 900
+   },
+   "title": "task · rate-limit-payouts-exhausted",
+   "scrollWidth": 1400,
+   "clientWidth": 1400,
+   "state": "exhausted",
+   "attempts": "3",
+   "remaining": "0",
+   "button": {
+    "text": "No retries left",
+    "disabled": true,
+    "width": 109,
+    "height": 44,
+    "right": 717
+   },
+   "form": null,
+   "panelTop": 140,
+   "panelBottom": 357,
+   "buttonBottom": 344,
+   "innerHeight": 900,
+   "sha256": "db7b88c882d306a40c1b47b6b25c0f52a1a38ffe7033e6ed3d48aa2563620e41",
+   "bytes": 334612
+  },
+  {
+   "file": "mobile.png",
+   "page": "/t/rate-limit-payouts",
+   "expectedState": "retryable",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "title": "task · rate-limit-payouts",
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "state": "retryable",
+   "attempts": "1",
+   "remaining": "2",
+   "button": {
+    "text": "Retry review · attempt 2 of 3",
+    "disabled": false,
+    "width": 199,
+    "height": 44,
+    "right": 247
+   },
+   "form": "/t/rate-limit-payouts/retry-review",
+   "panelTop": 140,
+   "panelBottom": 349,
+   "buttonBottom": 335,
+   "innerHeight": 844,
+   "sha256": "f39d9b238b7979ec95ff3a6b6f0d9c5053601a67702b3817d304a645fa43b874",
+   "bytes": 169127
+  },
+  {
+   "file": "mobile-cockpit-queued.png",
+   "page": "/review?result=rate-limit-payouts-queued",
+   "expectedState": "queued",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "title": "review",
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "state": "queued",
+   "attempts": "1",
+   "remaining": "1",
+   "button": {
+    "text": "Retry queued",
+    "disabled": true,
+    "width": 108,
+    "height": 44,
+    "right": 153
+   },
+   "form": null,
+   "panelTop": 140,
+   "panelBottom": 331,
+   "buttonBottom": 317,
+   "innerHeight": 844,
+   "sha256": "144c35a6161b711b1dc2838364c99a3d4f4dfd2a1736f6bac6ba2de5bbf32d17",
+   "bytes": 86131
+  },
+  {
+   "file": "mobile-exhausted.png",
+   "page": "/t/rate-limit-payouts-exhausted",
+   "expectedState": "exhausted",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "title": "task · rate-limit-payouts-exhausted",
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "state": "exhausted",
+   "attempts": "3",
+   "remaining": "0",
+   "button": {
+    "text": "No retries left",
+    "disabled": true,
+    "width": 109,
+    "height": 44,
+    "right": 157
+   },
+   "form": null,
+   "panelTop": 140,
+   "panelBottom": 394,
+   "buttonBottom": 380,
+   "innerHeight": 844,
+   "sha256": "20f19e78847f8887f08ca3f7af839d8727866167518c1dfd5a0e59db5277001c",
+   "bytes": 173115
+  }
+ ]
+}

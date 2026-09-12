@@ -71,7 +71,7 @@ import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 49;
+export const SCHEMA_VERSION = 50;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -569,6 +569,48 @@ export type RunnerWorkRecovery = {
   requeued: string[];
 };
 
+/** One ROOT review attempt of a source run (v50): the reviewer run, its
+ * ordinal, how it ended, and the request it was spent on. */
+export type ReviewAttemptRow = {
+  runId: number;
+  attempt: number;
+  outcome: Run["outcome"];
+  reason: string | null;
+  runner: string;
+  provider: string;
+  model: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  requestId: number | null;
+};
+
+/**
+ * One source run's bounded review history (v50): every root attempt in
+ * ordinal order, the open request if one is queued, and the ONE state the
+ * facts add up to. `retriesRemaining` counts explicit retries still
+ * admissible (a queued request has already spent one); `nextAttempt` is
+ * the ordinal the queued or next request runs as.
+ *
+ *   unrequested — no attempt yet and nothing queued (the plain first ask)
+ *   queued      — a request waits for a pass (attempt `nextAttempt`)
+ *   running     — a root reviewer is open right now
+ *   succeeded   — a root ingested its review; the allowance is closed
+ *   retryable   — the latest root ended failed/interrupted; a retry may be asked
+ *   exhausted   — REVIEW_ROOT_ATTEMPTS roots ended without a review
+ */
+export type ReviewRetryState = {
+  cap: number;
+  attempts: ReviewAttemptRow[];
+  openRequest: { id: number; requestedBy: string; basis: "human" | "mode"; requestedAt: string } | null;
+  live: ReviewAttemptRow | null;
+  latest: ReviewAttemptRow | null;
+  succeeded: ReviewAttemptRow | null;
+  state: "unrequested" | "queued" | "running" | "succeeded" | "retryable" | "exhausted";
+  retriesUsed: number;
+  retriesRemaining: number;
+  nextAttempt: number | null;
+};
+
 /** One build attempt. `outcome` null means it never finished — also an answer. */
 export type Run = {
   id: number;
@@ -577,6 +619,9 @@ export type Run = {
   runner: string;
   /** Explicit watch ownership for claimless review runs; null on cron/legacy reviews. */
   watchIncarnation?: string | null;
+  /** v50: a ROOT reviewer's attempt ordinal for its source run (1..3);
+   * null on correction children and every other role. */
+  reviewAttempt?: number | null;
   /** 'repair' = a resumed session mending its own park payload. Never
    * 'driver'; see the DDL. 'reviewer' (v29) = an artifact-only pass.
    * 'scout' (v34) = a read-only investigation whose deliverable is a report. */
@@ -2728,8 +2773,9 @@ CREATE TABLE IF NOT EXISTS proof_verdict (
   -- v40 (evidence-review-v1): the verdict adjudicate() computed, BEFORE an
   -- independent reviewer's judgements were folded in — NULL means "no
   -- review folded", reading back exactly as today. Never overwritten once
-  -- set: one review per source run, ever (one_review_per_source), so this
-  -- is written at most once, by the same transaction that folds it.
+  -- set: one SUCCESSFUL review per source run, ever (v50's
+  -- one_successful_root_review_per_source), so this is written at most
+  -- once, by the same transaction that folds it.
   machine_verdict TEXT CHECK (machine_verdict IS NULL OR machine_verdict IN ('verified','attested','short','refuted'))
 );
 
@@ -2858,8 +2904,11 @@ CREATE TABLE IF NOT EXISTS diff_comment (
 -- (v29, the reviewer role). Manual (task review) and automatic (a mode
 -- whose terms say reviewAuto) requests land here identically; the tick's
 -- review pass consumes them. One OPEN request per run (index after
--- migration), and the run itself may only ever gain one reviewer child
--- (one_review_per_source) — review is additive, never a loop.
+-- migration). v50 (bounded review retries): a run gains at most
+-- REVIEW_ROOT_ATTEMPTS root reviewer children — the first ask plus at most
+-- two EXPLICIT retries after a failed or interrupted attempt — never a
+-- second one while one is live or once one succeeded. Review stays
+-- additive, never a loop: nothing here ever retries by itself.
 CREATE TABLE IF NOT EXISTS review_request (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   run             INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
@@ -2879,7 +2928,13 @@ CREATE TABLE IF NOT EXISTS review_request (
   route_digest    TEXT,
   requested_at    TEXT NOT NULL,
   consumed_at     TEXT,
-  consumed_reason TEXT
+  consumed_reason TEXT,
+  -- v50: the ROOT reviewer run this request was spent on — written by the
+  -- very admission that consumed it, so a request and its attempt are one
+  -- durable fact. NULL on a request spent without a run (route-changed,
+  -- mode-ended, already-reviewed, …) and on any v49 row the migration
+  -- could not bind to exactly one root.
+  reviewer_run    INTEGER REFERENCES run(id)
 );
 
 -- Operator steering (arc 1, v22): a note that lands at the next safe
@@ -3246,11 +3301,26 @@ CREATE INDEX IF NOT EXISTS decision_undelivered
   ON decision (run, id) WHERE state = 'answered' AND delivered_turn IS NULL;
 -- v29 (the reviewer role) — after migration because run is rebuilt there
 -- and review_request arrives by IF NOT EXISTS on existing files. One
--- review per source run, ever; one OPEN request per run at a time.
-CREATE UNIQUE INDEX IF NOT EXISTS one_review_per_source
-  ON run (parent_run) WHERE role = 'reviewer';
+-- OPEN request per run at a time.
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_review_request
   ON review_request (run) WHERE consumed_at IS NULL;
+-- v50 (bounded review retries) replaces v29's one_review_per_source with
+-- four exact backstops. A ROOT reviewer carries its attempt ordinal
+-- (run.review_attempt, 1..REVIEW_ROOT_ATTEMPTS); a correction child
+-- carries NULL. Per source run: one ordinal each, at most one root still
+-- open, at most one root that ingested a review (a root ends 'no-change'
+-- ONLY through ingestReview), and per reviewer parent at most one
+-- correction child — the linear chain v29 always had.
+CREATE UNIQUE INDEX IF NOT EXISTS root_review_attempt_ordinal
+  ON run (parent_run, review_attempt) WHERE role = 'reviewer' AND review_attempt IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_root_review_per_source
+  ON run (parent_run) WHERE role = 'reviewer' AND review_attempt IS NOT NULL AND outcome IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS one_successful_root_review_per_source
+  ON run (parent_run) WHERE role = 'reviewer' AND review_attempt IS NOT NULL AND outcome = 'no-change';
+CREATE UNIQUE INDEX IF NOT EXISTS one_correction_per_reviewer
+  ON run (parent_run) WHERE role = 'reviewer' AND review_attempt IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS one_root_review_per_request
+  ON review_request (reviewer_run) WHERE reviewer_run IS NOT NULL;
 -- v30 (fallback chains): one transition per (cycle, from_index) — the
 -- durable backstop the fenced advance/skip CAS relies on (Codex foundation
 -- review, finding 1). After migration, since fallback_transition arrives by
@@ -4231,6 +4301,91 @@ function migrate(db: Database, origin: number | null): void {
   // takeover can recover them without closing concurrent cron reviews.
   // Historical rows remain unbound; never infer custody from timestamps.
   addColumn(db, "run", "watch_incarnation", "TEXT");
+
+  // v50 (bounded review retries): two additive columns, one exact data
+  // pass, one index replacement. `run.review_attempt` is the root
+  // reviewer's ordinal for its source run (1..REVIEW_ROOT_ATTEMPTS; NULL on
+  // a correction child and on every other role);
+  // `review_request.reviewer_run` binds a spent request to the root that
+  // answered it. The data pass runs exactly once, on a file whose stored
+  // version predates v50 (the v24 precedent — the origin is the magnitude
+  // of the epoch sentinel, so a resumed upgrade runs it again, and it is
+  // idempotent). v29's one_review_per_source partial unique is dropped
+  // here and replaced by the four exact backstops in the post-migration
+  // index block; every historical row, id, outcome, comment, judgement,
+  // and evidence binding is left byte for byte as it was.
+  addColumn(db, "run", "review_attempt", "INTEGER");
+  addColumn(db, "review_request", "reviewer_run", "INTEGER REFERENCES run(id)");
+  if (origin !== null && origin < 50) migrateToV50(db);
+  db.exec("DROP INDEX IF EXISTS one_review_per_source");
+}
+
+/** The bounded review-retry law (v50): a source run takes at most this
+ * many ROOT reviewer attempts, ever — the first ask plus two explicit
+ * retries. Correction children (the same-session structured-output
+ * repairs) are not attempts; they continue one. */
+export const REVIEW_ROOT_ATTEMPTS = 3;
+
+/**
+ * The v50 data pass: every existing root reviewer (a reviewer whose parent
+ * is NOT a reviewer) becomes attempt 1 of its source — v49's
+ * one_review_per_source guaranteed there was never more than one — and
+ * each such root is bound to the one request v49's admission spent on it.
+ * The binding is derived only from the one-to-one relation v29..v49
+ * guaranteed (a request consumed by an admission was stamped
+ * `dispatched`, then `reviewed`, `reviewer-…`, or `interrupted`; every
+ * other consumed reason spent a request WITHOUT a run). A root with no
+ * such request stays unbound — an omission recorded as one, never a
+ * guess. A source run whose history contradicts that relation (two roots,
+ * or two run-bearing requests for one root) is a shape this migration
+ * cannot prove, and the upgrade refuses in words rather than binding a
+ * retry allowance to it.
+ */
+function migrateToV50(db: Database): void {
+  if (!tableExists(db, "run") || !tableExists(db, "review_request")) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const roots = db
+      .prepare(
+        `SELECT reviewer.id AS id, reviewer.parent_run AS source, reviewer.review_attempt AS attempt
+           FROM run AS reviewer
+           JOIN run AS parent ON parent.id = reviewer.parent_run
+          WHERE reviewer.role = 'reviewer' AND parent.role <> 'reviewer'
+          ORDER BY reviewer.id`,
+      )
+      .all() as { id: number | bigint; source: number | bigint; attempt: number | bigint | null }[];
+    const bySource = new Map<number, number[]>();
+    for (const root of roots) {
+      const list = bySource.get(Number(root.source)) ?? [];
+      list.push(Number(root.id));
+      bySource.set(Number(root.source), list);
+    }
+    for (const [source, ids] of bySource) {
+      if (ids.length > 1) {
+        throw new Error(`run #${source} carries ${ids.length} root reviewer runs (#${ids.join(", #")}) — a shape v49 never wrote; refusing to assign review attempts to it`);
+      }
+    }
+    const bind = db.prepare("UPDATE run SET review_attempt = 1 WHERE id = ? AND review_attempt IS NULL");
+    const spent = db.prepare(
+      `SELECT id FROM review_request
+        WHERE run = ? AND consumed_at IS NOT NULL
+          AND (consumed_reason = 'dispatched' OR consumed_reason = 'reviewed' OR consumed_reason = 'interrupted' OR consumed_reason LIKE 'reviewer-%')
+        ORDER BY id`,
+    );
+    const link = db.prepare("UPDATE review_request SET reviewer_run = ? WHERE id = ? AND reviewer_run IS NULL");
+    for (const root of roots) {
+      if (root.attempt === null || root.attempt === undefined) bind.run(Number(root.id));
+      const requests = spent.all(Number(root.source)) as { id: number | bigint }[];
+      if (requests.length > 1) {
+        throw new Error(`run #${Number(root.source)} spent ${requests.length} review requests on one reviewer run (#${Number(root.id)}) — a shape v49 never wrote; refusing to bind a retry allowance to it`);
+      }
+      if (requests.length === 1) link.run(Number(root.id), Number(requests[0]!.id));
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -4407,6 +4562,15 @@ function V49_RUN_DDL(name: string): string {
   );
 }
 
+/** v50: review_attempt is one more additive column after every run-table
+ * rebuild — the same known final shape rule as v41, v44, and v49. */
+function V50_RUN_DDL(name: string): string {
+  return V49_RUN_DDL(name).replace(
+    " watch_incarnation TEXT,\n    CHECK",
+    " watch_incarnation TEXT, review_attempt INTEGER,\n    CHECK",
+  );
+}
+
 const V34_RUN_COLUMNS = [
   "id", "task_ref", "lease_id", "runner", "scope_digest", "profile_digest", "provider_version", "role", "provider",
   "parent_run", "session_id", "base_revision", "branch", "worktree", "model", "phase", "contestant", "outcome",
@@ -4430,7 +4594,8 @@ export function rebuildRunForV34(db: Database): void {
     stored === canonicalDdl(V34_RUN_DDL("run")) ||
     stored === canonicalDdl(V34_RUN_PLUS_V41_DDL("run")) ||
     stored === canonicalDdl(V34_RUN_PLUS_V41_PLUS_V44_DDL("run")) ||
-    stored === canonicalDdl(V49_RUN_DDL("run"))
+    stored === canonicalDdl(V49_RUN_DDL("run")) ||
+    stored === canonicalDdl(V50_RUN_DDL("run"))
   ) return;
   if (stored !== canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL)) {
     throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
@@ -4699,7 +4864,8 @@ function rebuildRunForV29(db: Database): void {
     stored === canonicalDdl(V34_RUN_DDL("run")) ||
     stored === canonicalDdl(V34_RUN_PLUS_V41_DDL("run")) ||
     stored === canonicalDdl(V34_RUN_PLUS_V41_PLUS_V44_DDL("run")) ||
-    stored === canonicalDdl(V49_RUN_DDL("run"))
+    stored === canonicalDdl(V49_RUN_DDL("run")) ||
+    stored === canonicalDdl(V50_RUN_DDL("run"))
   ) return;
   if (stored !== canonicalDdl(V28_RUN_DDL("run"))) {
     throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
@@ -10078,12 +10244,105 @@ export class Store {
   // ---- the reviewer role (v29) --------------------------------------------
 
   /**
+   * The bounded review-retry projection (v50): one source run's ROOT
+   * reviewer attempts in ordinal order, its open request, and the ONE
+   * state they add up to — the same facts requestReview and admitReview
+   * decide on inside their transactions, read here for the CLI, the
+   * dispatch diagnosis, and the console. A root attempt is a reviewer run
+   * carrying `review_attempt`; correction children never count. Null for
+   * a run that does not exist or is itself a review.
+   */
+  reviewRetryStateOf(sourceRunId: number): ReviewRetryState | null {
+    const source = this.getRun(sourceRunId);
+    if (source === null || source.role === "reviewer") return null;
+    const attempts = this.db
+      .prepare(
+        `SELECT run.id, run.review_attempt AS attempt, run.outcome, run.reason, run.runner, run.provider, run.model,
+                run.started_at, run.finished_at,
+                (SELECT rr.id FROM review_request rr WHERE rr.reviewer_run = run.id ORDER BY rr.id LIMIT 1) AS request
+           FROM run
+          WHERE run.parent_run = ? AND run.role = 'reviewer' AND run.review_attempt IS NOT NULL
+          ORDER BY run.review_attempt, run.id`,
+      )
+      .all(sourceRunId)
+      .map(row => ({
+        runId: Number(row["id"]),
+        attempt: Number(row["attempt"]),
+        outcome: (row["outcome"] === null ? null : String(row["outcome"])) as Run["outcome"],
+        reason: row["reason"] === null ? null : String(row["reason"]),
+        runner: String(row["runner"]),
+        provider: String(row["provider"]),
+        model: row["model"] === null ? null : String(row["model"]),
+        startedAt: String(row["started_at"]),
+        finishedAt: row["finished_at"] === null ? null : String(row["finished_at"]),
+        requestId: row["request"] === null || row["request"] === undefined ? null : Number(row["request"]),
+      }));
+    const openRow = this.db
+      .prepare("SELECT id, requested_by, basis, requested_at FROM review_request WHERE run = ? AND consumed_at IS NULL ORDER BY id LIMIT 1")
+      .get(sourceRunId) as Record<string, unknown> | undefined;
+    const openRequest =
+      openRow === undefined
+        ? null
+        : { id: Number(openRow["id"]), requestedBy: String(openRow["requested_by"]), basis: String(openRow["basis"]) as "human" | "mode", requestedAt: String(openRow["requested_at"]) };
+    const succeeded = attempts.find(one => one.outcome === "no-change") ?? null;
+    const live = attempts.find(one => one.outcome === null) ?? null;
+    const latest = attempts.length === 0 ? null : attempts[attempts.length - 1]!;
+    const cap = REVIEW_ROOT_ATTEMPTS;
+    const state: ReviewRetryState["state"] =
+      succeeded !== null ? "succeeded"
+        : live !== null ? "running"
+          : openRequest !== null ? "queued"
+            : attempts.length >= cap ? "exhausted"
+              : latest !== null ? "retryable"
+                : "unrequested";
+    // Retries are attempts beyond the first: a queued request counts as
+    // the attempt it will run; the very first ask is never a retry.
+    const retriesRemaining = succeeded !== null || live !== null ? 0 : Math.max(0, cap - Math.max(1, attempts.length + (openRequest === null ? 0 : 1)));
+    return {
+      cap,
+      attempts,
+      openRequest,
+      live,
+      latest,
+      succeeded,
+      state,
+      retriesUsed: Math.max(0, attempts.length - 1),
+      retriesRemaining,
+      nextAttempt: state === "queued" || state === "retryable" || state === "unrequested" ? attempts.length + 1 : null,
+    };
+  }
+
+  /**
+   * Why a source run admits no further ROOT reviewer right now (v50), in
+   * the words requestReview and admitReview both refuse with — or null
+   * when the next attempt may open. Decided inside the caller's
+   * transaction against live rows: one successful review ends the
+   * allowance forever, one open root is the only live attempt, and the
+   * third root is the last. A live request is the caller's own check.
+   */
+  private rootReviewAdmissionProblem(sourceRunId: number): { reason: "already-reviewed" | "review-running" | "retries-exhausted"; detail: string } | null {
+    const roots = this.db
+      .prepare("SELECT id, outcome FROM run WHERE parent_run = ? AND role = 'reviewer' AND review_attempt IS NOT NULL ORDER BY review_attempt")
+      .all(sourceRunId) as { id: number | bigint; outcome: string | null }[];
+    const succeeded = roots.find(one => one.outcome === "no-change");
+    if (succeeded !== undefined) return { reason: "already-reviewed", detail: `run #${sourceRunId} already has its review (reviewer run #${Number(succeeded.id)}) — a successful review is never retried` };
+    const live = roots.find(one => one.outcome === null);
+    if (live !== undefined) return { reason: "review-running", detail: `reviewer run #${Number(live.id)} is still open on run #${sourceRunId} — one review attempt at a time` };
+    if (roots.length >= REVIEW_ROOT_ATTEMPTS) return { reason: "retries-exhausted", detail: `run #${sourceRunId} has spent all ${REVIEW_ROOT_ATTEMPTS} review attempts — the failed attempts remain on record; nothing retries a fourth time` };
+    return null;
+  }
+
+  /**
    * Ask for an agent review of one finished run's sealed diff. Manual
-   * (`task review`, the run page) and automatic (a mode whose terms say
-   * reviewAuto) requests land through this ONE door, and every refusal is
-   * decided transactionally against the same facts the pass will re-prove:
-   * the diff must exist and be complete (a truncated artifact is refused
-   * HERE, before any money), and the run may only ever gain one review.
+   * (`task review`, the task and result pages) and automatic (a mode whose
+   * terms say reviewAuto) requests land through this ONE door, and every
+   * refusal is decided transactionally against the same facts the pass
+   * will re-prove: the diff must exist and be complete (a truncated
+   * artifact is refused HERE, before any money), and the run's bounded
+   * review allowance (v50) must still admit an attempt — no successful
+   * review yet, no root still open, no request already queued, and fewer
+   * than REVIEW_ROOT_ATTEMPTS roots so far. A second ask after a failed or
+   * interrupted attempt IS the explicit retry; nothing else retries.
    */
   requestReview(
     runId: number,
@@ -10091,7 +10350,7 @@ export class Store {
     now: Date,
     basis?: { kind: "mode"; digest: string },
   ):
-    | { ok: true; id: number }
+    | { ok: true; id: number; attempt: number }
     | {
         ok: false;
         reason:
@@ -10102,6 +10361,8 @@ export class Store {
           | "diff-capture-failed"
           | "diff-truncated"
           | "already-reviewed"
+          | "review-running"
+          | "retries-exhausted"
           | "already-requested"
           | "route-unreadable"
           | "route-unapproved"
@@ -10121,10 +10382,12 @@ export class Store {
       // nothing (Codex reviewer round 1, finding 5a).
       if (diff.captureStatus !== "ok") return { ok: false as const, reason: "diff-capture-failed" as const };
       if (diff.truncated) return { ok: false as const, reason: "diff-truncated" as const };
-      const reviewed = this.db
-        .prepare("SELECT 1 AS hit FROM run WHERE parent_run = ? AND role = 'reviewer' LIMIT 1")
-        .get(runId);
-      if (reviewed !== undefined) return { ok: false as const, reason: "already-reviewed" as const };
+      const allowance = this.rootReviewAdmissionProblem(runId);
+      if (allowance !== null) return { ok: false as const, reason: allowance.reason, detail: allowance.detail };
+      // A request already queued refuses at the insert below (the open
+      // request index is the backstop) — after the route is proved, as it
+      // always was, so a routing problem is named before a duplicate ask.
+      const attempt = this.nextRootReviewAttempt(runId);
       // v47: the request binds the task's SEALED route — admission re-proves
       // it and runs its exact review leg. A routed task whose approval does
       // not stand, whose route cannot be read, or whose review leg the
@@ -10152,8 +10415,17 @@ export class Store {
         .run(runId, by, basis === undefined ? "human" : "mode", basis === undefined ? null : basis.digest, now.toISOString(), routeDigest, runId);
       if (Number(inserted.changes) === 0) return { ok: false as const, reason: "already-requested" as const };
       this.bumpWake();
-      return { ok: true as const, id: Number(inserted.lastInsertRowid) };
+      return { ok: true as const, id: Number(inserted.lastInsertRowid), attempt };
     });
+  }
+
+  /** The ordinal the next ROOT reviewer of a source run takes (v50): one
+   * past the highest so far. The unique ordinal index backstops it. */
+  private nextRootReviewAttempt(sourceRunId: number): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(MAX(review_attempt), 0) AS last FROM run WHERE parent_run = ? AND role = 'reviewer' AND review_attempt IS NOT NULL")
+      .get(sourceRunId) as { last: number | bigint } | undefined;
+    return Number(row?.last ?? 0) + 1;
   }
 
   /** The open review asks, oldest first, with the facts the pass needs. */
@@ -10229,8 +10501,8 @@ export class Store {
     spec: { runner: string; token: string; provider: string; model: string | null; watchIncarnation?: string },
     now: Date,
   ):
-    | { ok: true; reviewerRunId: number; sourceRun: number; taskRef: number; taskId: string }
-    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "railed" | "unauthenticated" | "route-changed" | "route-mismatch" | "provider-unavailable" | "watch-custody"; rail?: string; detail?: string } {
+    | { ok: true; reviewerRunId: number; sourceRun: number; taskRef: number; taskId: string; attempt: number }
+    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "review-running" | "retries-exhausted" | "railed" | "unauthenticated" | "route-changed" | "route-mismatch" | "provider-unavailable" | "watch-custody"; rail?: string; detail?: string } {
     return this.transact(() => {
       // The reviewer road authenticates INSIDE the admission transaction
       // (review finding 4): reviewer runs hold no task claim by design,
@@ -10314,12 +10586,15 @@ export class Store {
           return { ok: false as const, reason: "mode-ended" as const };
         }
       }
-      const reviewed = this.db
-        .prepare("SELECT 1 AS hit FROM run WHERE parent_run = ? AND role = 'reviewer' LIMIT 1")
-        .get(sourceRun);
-      if (reviewed !== undefined) {
-        this.consumeReviewRequest(requestId, "already-reviewed", now);
-        return { ok: false as const, reason: "already-reviewed" as const };
+      // THE ALLOWANCE (v50): re-proved INSIDE this admission, against live
+      // rows — a request queued while the door was open but overtaken by a
+      // success, a still-open root, or the third attempt is spent unrun, in
+      // words, and no fourth root ever opens. admitRun re-proves the same
+      // facts in the insert; the four partial uniques backstop it.
+      const allowance = this.rootReviewAdmissionProblem(sourceRun);
+      if (allowance !== null) {
+        this.consumeReviewRequest(requestId, allowance.reason, now);
+        return { ok: false as const, reason: allowance.reason, detail: allowance.detail };
       }
       if (repo !== null) {
         const railed = this.reserveModeRail(repo, 1, now);
@@ -10355,6 +10630,7 @@ export class Store {
         sourceRun,
         taskRef: Number(row["taskRef"]),
         taskId: String(row["taskId"]),
+        attempt: this.getRun(reviewerRunId)?.reviewAttempt ?? 1,
       };
     });
   }
@@ -13947,6 +14223,7 @@ export class Store {
     // session and answers no request of its own. Nothing else opens as a
     // reviewer.
     let requestToConsume: number | null = null;
+    let reviewAttempt: number | null = null;
     if (role === "reviewer") {
       if (parent === null) refuse("a review reviews a run — none was named");
       const request = run.request;
@@ -13983,6 +14260,14 @@ export class Store {
         if (request === undefined) refuse(`run #${parent.id} is reviewed only through its open review request — none was presented`);
         const open = this.db.prepare("SELECT 1 AS hit FROM review_request WHERE id = ? AND run = ? AND consumed_at IS NULL").get(request, parent.id);
         if (open === undefined) refuse(`review request #${request} is not run #${parent.id}'s open request — nothing reviews without one`);
+        // THE BOUNDED ALLOWANCE (v50): a root opens only while its source
+        // has no successful review, no root still open, and fewer than
+        // REVIEW_ROOT_ATTEMPTS roots — and it takes the next ordinal, in
+        // this same insert. The partial uniques backstop every clause.
+        const allowance = this.rootReviewAdmissionProblem(parent.id);
+        if (allowance !== null) refuse(allowance.detail);
+        reviewAttempt = this.nextRootReviewAttempt(parent.id);
+        if (reviewAttempt > REVIEW_ROOT_ATTEMPTS) refuse(`run #${parent.id} has spent all ${REVIEW_ROOT_ATTEMPTS} review attempts — nothing retries a fourth time`);
         requestToConsume = request;
       }
     } else if (run.request !== undefined) {
@@ -14209,8 +14494,8 @@ export class Store {
     const inserted = this.db
       .prepare(
         `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, parent_run, session_id, contestant, quality_mode,
-                          chain_cycle, chain_index, entry_digest, auth_mode, attended_authorization, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          chain_cycle, chain_index, entry_digest, auth_mode, attended_authorization, started_at, review_attempt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.taskRef,
@@ -14233,6 +14518,10 @@ export class Store {
         // a row admitted under an authorization is bound to it from birth.
         authorizationToConsume === null ? null : authorizationToConsume.id,
         run.now.toISOString(),
+        // The root reviewer's ordinal (v50) rides the insert: a root and
+        // its attempt number are one fact, and the ordinal index refuses a
+        // duplicate before any request is consumed.
+        reviewAttempt,
       );
     const id = Number(inserted.lastInsertRowid);
     // The provenance row lands in the same transaction as the run row —
@@ -14245,9 +14534,11 @@ export class Store {
       // The request is spent by the very row that answers it — a CAS on the
       // open request proved above; a request consumed under us rolls the
       // row back.
+      // …and bound (v50) to the root that answers it: the request row
+      // names its attempt from the same transaction that opened it.
       const consumed = this.db
-        .prepare("UPDATE review_request SET consumed_at = ?, consumed_reason = 'dispatched' WHERE id = ? AND run = ? AND consumed_at IS NULL")
-        .run(run.now.toISOString(), requestToConsume, run.parentRun ?? null);
+        .prepare("UPDATE review_request SET consumed_at = ?, consumed_reason = 'dispatched', reviewer_run = ? WHERE id = ? AND run = ? AND consumed_at IS NULL AND reviewer_run IS NULL")
+        .run(run.now.toISOString(), id, requestToConsume, run.parentRun ?? null);
       if (Number(consumed.changes) !== 1) refuse(`review request #${requestToConsume} was consumed under this admission — nothing reviews without it`);
     }
     if (authorizationToConsume !== null) {
@@ -18857,8 +19148,11 @@ export class Store {
         "UPDATE run SET outcome = 'failed', reason = 'interrupted', finished_at = ? WHERE runner = ? AND watch_incarnation = ? AND role = 'reviewer' AND outcome IS NULL",
       ).run(stamp, runner, incarnation);
       extra += Number(reviews.changes);
+      // The spent request learns its attempt's fate through its v50
+      // binding — exactly the root this watch cut down, never an earlier
+      // attempt's request on the same source run.
       this.db.prepare(
-        "UPDATE review_request SET consumed_reason = 'interrupted' WHERE consumed_reason = 'dispatched' AND run IN (SELECT parent_run FROM run WHERE runner = ? AND watch_incarnation = ? AND role = 'reviewer' AND reason = 'interrupted')",
+        "UPDATE review_request SET consumed_reason = 'interrupted' WHERE consumed_reason = 'dispatched' AND reviewer_run IN (SELECT id FROM run WHERE runner = ? AND watch_incarnation = ? AND role = 'reviewer' AND review_attempt IS NOT NULL AND reason = 'interrupted')",
       ).run(runner, incarnation);
       if (claims.length + extra > 0) this.bumpWake();
       return claims.length + extra;
@@ -19480,6 +19774,7 @@ function readRun(row: Record<string, unknown>): Run {
     leaseId: String(row["lease_id"]),
     runner: String(row["runner"]),
     watchIncarnation: row["watch_incarnation"] == null ? null : String(row["watch_incarnation"]),
+    reviewAttempt: wholeNumber(row["review_attempt"]),
     role: String(row["role"] ?? "builder") as Run["role"],
     provider: String(row["provider"] ?? "claude"),
     parentRun: row["parent_run"] === null || row["parent_run"] === undefined ? null : Number(row["parent_run"]),

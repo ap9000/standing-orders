@@ -770,8 +770,16 @@ Everything below ships in 0.4.0:
   and nothing else: no worktree, no repository access — the patch is
   re-verified against its recorded hash, comments are proven
   patch-local, and they land beside your own for YOU to prune and seal
-  into a revision task. One review per build, ever; a mode can run one
-  on every finished build automatically.
+  into a revision task. One successful review per build, ever; a mode
+  can run one on every finished build automatically. A review that
+  fails or is interrupted may be retried EXPLICITLY — `task review
+  <run>` again, or the task/result page's **Retry review** — at most
+  twice (three root attempts in all). Each retry is a fresh request and
+  a fresh reviewer admitted under the build's current sealed route with
+  every sealed input re-verified; the failed attempts stay on record;
+  a review that succeeded, or one still queued or running, is never
+  retried; nothing retries by itself, and the source build is never
+  rerun.
 - **People** — invite someone with a single-use link that pins their
   powers at mint (watch everything, or approve and act), see who is
   doing what, and remove access with one ceremony that actually severs:
