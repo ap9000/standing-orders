@@ -65,6 +65,8 @@ import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, 
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
+import { starterRecipes, savedRecipes, findRecipe, importRecipe, exportRecipe, createWorkflowPreview, workflowPreview, launchWorkflow, saveWorkflowRecipe, RecipeError } from "./recipes.js";
+import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtml, recipeScript, RECIPE_CSS } from "./recipe-ui.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
@@ -170,7 +172,7 @@ import { classify, holdOwnerWords, attentionCardForUnverifiedDone } from "./boar
 import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, refreshRoutineAgents, routineAgentsState, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
-import { resolvePhaseAgent, INSTALLATION_SCOPE, routeOfTask, agentChoicesFor, type AgentChoice } from "./agentconfig.js";
+import { resolvePhaseAgent, resolveRoutineAuthority, INSTALLATION_SCOPE, routeOfTask, agentChoicesFor, type AgentChoice } from "./agentconfig.js";
 import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, agentsSummary, postureWords, RISK_CHOICES, RISK_LEVELS, PHASES as ROUTE_PHASES, type PhaseRoute, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
 import { isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
@@ -923,7 +925,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const ref = run === null ? null : store.refForId(run.taskRef);
       return { repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId, action: `${resource[1] === "d" ? "decision" : resource[1] === "i" ? "incident" : "run"} ${resource[3] ?? "view"}` };
     }
-    const known = new Set(["/tasks/add", "/queue/move", "/queue/note", "/routines/add", "/people/invite", "/people/invite-revoke", "/people/revoke", "/people/projects", "/projects/select", "/projects/open", "/mode/confirm", "/mode/sign", "/mode/revoke"]);
+    const known = new Set(["/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/tasks/add", "/queue/move", "/queue/note", "/routines/add", "/people/invite", "/people/invite-revoke", "/people/revoke", "/people/projects", "/projects/select", "/projects/open", "/mode/confirm", "/mode/sign", "/mode/revoke"]);
     const placed = ["/tasks/add", "/routines/add"].includes(url.pathname) ? body?.get("repo")?.trim() : null;
     return { repo: url.pathname.startsWith("/people/") ? null : placed ? canonicalProject(placed) ?? placed : projectOf(who, request) ?? null, taskId: null, runId: null,
       action: known.has(url.pathname) ? url.pathname.slice(1).replaceAll("/", " ") : "console request" };
@@ -932,8 +934,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
     if (!restricted()) return true;
     const path = url.pathname;
-    const read = new Set(["/", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
-    const write = new Set(["/projects/select", "/tasks/add", "/routines/add"]);
+    const read = new Set(["/recipes", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const write = new Set(["/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path)
@@ -974,6 +976,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const needsProject =
       who.via === "cookie" && project === null && !unscopedMode &&
       url.pathname !== "/" &&
+      url.pathname !== "/recipes" &&
       !/^\/t\/[^/]+$/.test(url.pathname) &&
       !url.pathname.startsWith("/d/") && !url.pathname.startsWith("/contest/") &&
       url.pathname !== "/projects" &&
@@ -2164,6 +2167,71 @@ export function createDecisionServer(options: ServeOptions): Server {
         200,
         capsPage(chromeFor(project, "caps"), store.listCapabilities(project), computeGaps(store, project, now), project, now),
       );
+    }
+
+    if (url.pathname === "/recipes" || url.pathname.startsWith("/recipes/")) {
+      try {
+        const csrf = who.via === "cookie" ? who.session.csrf : "";
+        const revision = who.via === "cookie" ? who.session.projectRevision : 0;
+        const render = (html: string) => sendScreen(response, 200, screen("Workflow recipes", html, { chrome: chromeFor(project, "recipes"), functional: { script: recipeScript() } }));
+        if (url.pathname === "/recipes") {
+          const recent = project === null ? [] : store.handle.prepare("SELECT document,task_id,routine_id FROM workflow_preview WHERE repo=? AND (task_id IS NOT NULL OR routine_id IS NOT NULL) ORDER BY created_at DESC LIMIT 12").all(project).map(row => {
+            const d = importRecipe(String(row["document"]));
+            const task = row["task_id"] === null ? null : store.getTask(String(row["task_id"]));
+            const routine = row["routine_id"] === null ? null : store.getRoutine(Number(row["routine_id"]));
+            return { name: d.name, href: task !== null ? taskHref(task.id) : `/routines/${routine?.id}`, state: task?.state ?? (routine?.approvedAt === null ? "Needs approval" : routine?.paused ? "Paused" : "Scheduled") };
+          });
+          return render(recipeLibraryHtml(starterRecipes(), project === null ? [] : savedRecipes(store, who.name, project), project, csrf, revision, recent));
+        }
+        if (project === null) return refuse(response, who, 400, "Open a project to customize a recipe.", "/projects");
+        const token = url.searchParams.get("preview");
+        const preview = token === null ? null : workflowPreview(store, who.name, project, token);
+        if (token !== null && preview === null) return refuse(response, who, 404, "No preview in this project.", "/recipes");
+        const sourceRevision = url.searchParams.get("revision");
+        if (sourceRevision !== null && !/^[1-9][0-9]{0,8}$/.test(sourceRevision)) throw new RecipeError("Choose a valid recipe version.");
+        let recipe = preview === null ? findRecipe(store, who.name, project, url.searchParams.get("recipe") ?? "", sourceRevision === null ? undefined : Number(sourceRevision))
+          : { id: preview.source, revision: 1, repo: project, document: preview.document, digest: preview.digest, author: who.name };
+        if (url.pathname === "/recipes/new") {
+          const starter = starterRecipes().find(one => one.id === "small-feature")!;
+          recipe = { ...starter, id: "custom", document: { ...starter.document, name: "", description: "", goal: "", outOfScope: null, acceptance: [] } };
+        }
+        if (url.pathname === "/recipes/start" && recipe?.id === "small-feature") {
+          // This starter supplies the process, but the person supplies the
+          // feature. Do not let instructional placeholder text become work.
+          recipe = { ...recipe, document: { ...recipe.document, goal: "" } };
+        }
+        if (url.pathname === "/recipes/from-task") {
+          const id = url.searchParams.get("task") ?? "";
+          const ref = store.lookupRef(id), task = store.getTask(id), scope = store.getScope(id);
+          if (ref?.repo !== project || task === null || scope === null) throw new RecipeError("No scoped task in this project.", 404);
+          recipe = { id: "task-copy", revision: 1, repo: project, digest: "", author: who.name, document: {
+            format: "standing-orders-recipe", version: 1, name: task.title, description: "Scope and success checks copied from a task. Dependencies, budgets, agents, and approvals use the new work's settings.", goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, acceptance: scope.acceptance,
+            planning: "auto", deliverable: ref.deliverable === "report" ? "report" : "branch", schedule: null, costCeilingUsd: null,
+          } };
+        }
+        if (url.pathname === "/recipes/preview" && preview !== null) {
+          const agents = resolveRoutineAuthority(store, project, preview.document.acceptance, now);
+          const workers = store.listRunners().filter(one => one.retiredAt === null && one.repos.includes(project) && runnerAlive(one, now));
+          const mode = store.activeMode(project, now);
+          const readiness = [
+            { title: "Project", detail: projectName(project) },
+            { title: agents.ok ? "Agents configured" : "Choose your agents", detail: agents.ok ? "The project has an exact agent route. The created work will show the agents it binds." : agents.problem, ...(!restricted() && !agents.ok ? { href: "/control" } : {}) },
+            { title: workers.length ? "Worker connected" : "Worker needed", detail: workers.length ? `${workers.length} worker${workers.length === 1 ? " is" : "s are"} answering for this project.` : "Open Standing Orders on the machine with this project. Work waits safely until a worker connects." },
+            { title: "Approval", detail: mode?.signedBy === who.name ? "Your signed project policy is available. Its scope, expiry, and approval options will be checked at filing." : "Review and approve the created work before it starts.", ...(!restricted() ? { href: "/mode" } : {}) },
+          ];
+          return render(workflowPreviewHtml(preview, csrf, revision, now, readiness, mode?.signedBy === who.name));
+        }
+        if (recipe === null) return refuse(response, who, 404, "No recipe in this project.", "/recipes");
+        if (url.pathname === "/recipes/export") {
+          response.setHeader("Content-Disposition", 'attachment; filename="standing-orders-recipe.json"');
+          return respond(response, 200, "application/json; charset=utf-8", exportRecipe(recipe.document));
+        }
+        if (["/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task"].includes(url.pathname)) return render(recipeEditorHtml(recipe, project, csrf, revision));
+        return refuse(response, who, 404, "No recipe screen here.", "/recipes");
+      } catch (error) {
+        if (error instanceof RecipeError) return refuse(response, who, error.status, error.message, "/recipes");
+        throw error;
+      }
     }
 
     if (url.pathname === "/routines") {
@@ -5330,6 +5398,56 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 409, "already acknowledged", "/chat");
       }
       return redirect(response, "/chat");
+    }
+
+    if (["/recipes/preview", "/recipes/import", "/recipes/launch", "/recipes/save"].includes(url.pathname)) {
+      const project = projectOf(who, request);
+      try {
+        if (project === null || project === undefined || !visible(project)) throw new RecipeError("Open a project first.", 403);
+        for (const field of ["repo", "projectRevision", "preview", "source", "sourceRevision", "document"]) if (body.getAll(field).length > 1) throw new RecipeError(`Duplicated ${field} field.`);
+        if (body.get("repo") !== project || (who.via === "cookie" && body.get("projectRevision") !== String(who.session.projectRevision))) throw new RecipeError("The open project changed. Reopen this recipe in the intended project.", 409);
+        const rootMode = !unscopedMode && ceiling.roots.length > 0;
+        if (rootMode && !(await authorizedProject(liveCeiling(), project))) throw new RecipeError("The project is outside this server's access.", 403);
+        const rechecked = authorizeMutation(request, who, body);
+        if (rechecked !== null) throw new RecipeError(rechecked.message, rechecked.status);
+        if (projectOf(who, request) !== project) throw new RecipeError("The open project changed. Preview the intended project again.", 409);
+        const csrf = who.via === "cookie" ? who.session.csrf : "";
+        const revision = who.via === "cookie" ? who.session.projectRevision : 0;
+        if (url.pathname === "/recipes/import") {
+          const document = importRecipe(body.get("document") ?? "");
+          return sendScreen(response, 200, screen("Imported recipe", recipeEditorHtml({ id: "imported", revision: 1, repo: project, document, digest: "", author: who.name }, project, csrf, revision), { chrome: chromeFor(project, "recipes"), functional: { script: recipeScript() } }));
+        }
+        if (url.pathname === "/recipes/preview") {
+          const source = body.get("source") ?? "custom";
+          const sourceVersion = body.get("sourceRevision") ?? "1";
+          if (!/^[1-9][0-9]{0,8}$/.test(sourceVersion)) throw new RecipeError("Choose a valid recipe version.");
+          const original = ["custom", "imported", "task-copy", "routine-copy"].includes(source) ? null : findRecipe(store, who.name, project, source, Number(sourceVersion));
+          if (original === null && !["custom", "imported", "task-copy", "routine-copy"].includes(source)) throw new RecipeError("That recipe version is not available in this project.", 404);
+          let document;
+          try { document = recipeFromForm(body); }
+          catch (error) {
+            if (!(error instanceof RecipeError)) throw error;
+            const fallback = original ?? { ...starterRecipes().find(one => one.id === "small-feature")!, id: source };
+            return sendScreen(response, error.status, screen("Customize recipe", recipeEditorHtml(fallback, project, csrf, revision, error.message, body), { chrome: chromeFor(project, "recipes"), functional: { script: recipeScript() } }));
+          }
+          const preview = createWorkflowPreview(store, who.name, project, document, source, now);
+          return redirect(response, `/recipes/preview?preview=${preview.token}`);
+        }
+        const token = body.get("preview") ?? "";
+        if (url.pathname === "/recipes/save") {
+          saveWorkflowRecipe(store, who.name, project, token, now);
+          return redirect(response, `/recipes/preview?preview=${token}`);
+        }
+        const made = launchWorkflow(store, who.name, project, token, now, who.via === "cookie");
+        if (rootMode) store.upsertProject(project, projectName(project), now);
+        if (made.taskId !== null) {
+          const context = requestContext.getStore(); if (context !== undefined) context.createdTask = made.taskId;
+        }
+        return redirect(response, made.taskId === null ? `/routines/${made.routineId}` : taskHref(made.taskId));
+      } catch (error) {
+        if (error instanceof RecipeError) return refuse(response, who, error.status, error.message, "/recipes");
+        throw error;
+      }
     }
 
     if (url.pathname === "/routines/add") {
@@ -10364,7 +10482,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
   projectScoped?: boolean;
-  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "ledger" | "mode" | "menu" | "none";
+  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "recipes" | "projects" | "settings" | "chat" | "people" | "ledger" | "mode" | "menu" | "none";
   project: string | null;
   /** The surface's scope for the scope bar — which rows this screen can
    * show. Derived from the ROUTE, not the session: portfolio and fleet are
@@ -10751,7 +10869,7 @@ function shell(
     ...(options.live?.fallbackRefresh !== true
       ? []
       : [`<noscript><meta http-equiv="refresh" content="30"><style>@view-transition { navigation: none; }</style></noscript>`]),
-    `<title>${escape(title)}</title><style>${STYLE}</style></head><body>`,
+    `<title>${escape(title)}</title><style>${STYLE}${RECIPE_CSS}</style></head><body>`,
   ].join("\n");
   const tail =
     options.live === undefined
@@ -11159,6 +11277,7 @@ function inboxPage(chrome: Chrome, data: {
               `<span class="meta">${step.detail}</span></p>`,
           )
           .join("\n") +
+        `<p><a class="new-task" href="/recipes">Start with a guided recipe →</a></p>` +
         `<p class="meta">templates \u2014 edit, then approve; nothing a template files carries authority: ` +
         TEMPLATES.map(one =>
           one.kind === "routine"
@@ -12972,7 +13091,7 @@ function routinesPage(
       : tracks.map(track => trackRow(track, chrome.project === null)).join("\n");
   return screen("routines", [
     `<h1>routines</h1>`,
-    `<p class="hint">scheduled work — anything needing a person appears in the inbox</p>`,
+    `<p class="hint">scheduled work — anything needing a person appears in the inbox</p><p><a class="new-task" href="/recipes">Create a workflow from a recipe →</a></p>`,
     list,
     capture,
   ].join("\n"), { chrome, functional: { script: scheduleEditorScript() } });
@@ -14471,6 +14590,7 @@ function workflowsRows(scoped = false): NavRow[] {
   const rows: NavRow[] = [
     { key: "workbench", href: "/workbench", label: "portfolio", hint: "every project and live build in one place" },
     { key: "work", href: "/tasks", label: "task list", hint: "everything, filterable" },
+    { key: "recipes", href: "/recipes", label: "recipes", hint: "choose, customize, and reuse a workflow" },
     { key: "routines", href: "/routines", label: "routines", hint: "scheduled tracks and their firings" },
     { key: "ledger", href: "/ledger", label: "action ledger", hint: "who acted, what happened, and the result" },
   ];
@@ -14487,7 +14607,7 @@ function adminRows(scoped = false): NavRow[] {
   return scoped ? rows.filter(row => row.key === "people") : rows;
 }
 /** Which accordion group opens by default for a given active page. */
-const WORKFLOWS_KEYS = new Set<Chrome["active"]>(["workbench", "work", "routines", "ledger"]);
+const WORKFLOWS_KEYS = new Set<Chrome["active"]>(["workbench", "work", "recipes", "routines", "ledger"]);
 const ADMIN_KEYS = new Set<Chrome["active"]>(["fleet", "caps", "people", "mode", "system"]);
 
 /** The builds screen's views (reduction pass §1): done, the review queue,
@@ -16173,6 +16293,7 @@ function taskBody(data: {
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
     `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span></h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
+    data.repo !== null && data.scope !== null ? `<p class="meta"><a href="/recipes/from-task?task=${encodeURIComponent(task.id)}">Reuse this scope as a recipe →</a></p>` : "",
     // The planner and approval cards already answer "what now?". Avoid a
     // second status box above the one action the operator came here for.
     (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested" ? dispatchStatus : "",
