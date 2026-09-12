@@ -117,6 +117,9 @@ try{
     store=openStore(db);server=createDecisionServer({store,evidenceRoot:join(retainedAt,'evidence'),repo});await new Promise(done=>server.listen(0,'127.0.0.1',done));base='http://127.0.0.1:'+server.address().port;
     const login=await fetch(base+'/login',{method:'POST',redirect:'manual',body:new URLSearchParams({name:'journey',token:password})});assert.equal(login.status,303);cookie=login.headers.getSetCookie().map(c=>c.split(';')[0]).join('; ');
     const {chromium}=await import(pathToFileURL(playwright).href);browser=await chromium.launch({headless:true});
+    const chatSetup=await fetch(base+'/chat?task=draft',{headers:{cookie}});
+    assert.equal((await submit(await readAction('start the conversation',await chatSetup.text()))).status,303);
+    record.steps.push({label:'open private chat session through its password form without sending a message'});
     watch=startWatch();console.log(provider+': waiting for the real provider to leave an opaque draft');
     const taskRef=store.lookupRef('draft').id;
     const checkpoint=await until(()=>{const run=store.runsFor(taskRef).find(r=>r.role==='builder'&&r.outcome===null);if(!run?.worktree)return null;const path=join(run.worktree,'output/checkpoint.json');return existsSync(path)?{run,checkpoint:JSON.parse(readFileSync(path,'utf8'))}:null;},15*60_000,'first checkpoint');
@@ -141,7 +144,7 @@ try{
       await chatPage.waitForFunction(()=>document.querySelector('#task-chat-live')?.textContent.includes('Stopping'),{},{timeout:15_000});
       assert.equal(await composer.inputValue(),unsent,'Polling erased the unsent chat draft');
     }finally{watch.child.kill('SIGCONT');}
-    await until(()=>store.getRun(checkpoint.run.id).outcome!==null,30_000,'durable stop settlement');
+    await until(()=>store.getRun(checkpoint.run.id).outcome!==null&&store.stopOf(checkpoint.run.id)?.settledAt!==null,30_000,'durable stop settlement');
     await until(()=>!isAlive(checkpoint.checkpoint.pid),5000,'checkpoint descendant shutdown');
     record.checks.stopSettlementMs=Date.now()-requestedAt;
     const stopped=await show('stopped');const previous=stopped.runs.find(r=>r.id===checkpoint.run.id);

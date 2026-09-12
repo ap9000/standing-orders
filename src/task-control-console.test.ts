@@ -11,7 +11,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
 import { acquire, finalizeInterruptedFenced } from "./claim.js";
@@ -50,7 +50,7 @@ describe("the exact-run control on the console (v52)", () => {
     fetch(url(path), { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields), redirect: "manual" });
   const controlOf = (html: string): string => /<section class="card task-control" id="task-control"(.*?)<\/section>/s.exec(html)?.[0] ?? "";
 
-  const seed = (id: string, repo = "/repo/main"): number => {
+  const seed = (id: string, repo = resolve("/repo/main")): number => {
     store.createTask({ id, title: `Harden ${id}` }, T0);
     const ref = store.refFor("built-in", id, "ours").id;
     store.placeTask(ref, repo);
@@ -79,8 +79,8 @@ describe("the exact-run control on the console (v52)", () => {
     if (!viewer.ok) throw new Error("viewer add");
     store.raw().prepare("UPDATE approver SET role = 'viewer' WHERE name = 'vera'").run();
     viewerToken = viewer.token;
-    register(store, { name: "mac-mini", host: "here", capacity: 4, repos: ["/repo/main", "/repo/other"], now: T0, newToken: () => "tok-mac-mini" });
-    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    register(store, { name: "mac-mini", host: "here", capacity: 4, repos: [resolve("/repo/main"), resolve("/repo/other")], now: T0, newToken: () => "tok-mac-mini" });
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: resolve("/repo/main") });
     await new Promise<void>(resolve => (server as Server).listen(0, "127.0.0.1", resolve));
     const address = (server as Server).address();
     if (typeof address !== "object" || address === null) throw new Error("no address");
@@ -162,7 +162,7 @@ describe("the exact-run control on the console (v52)", () => {
   test("c8: stop is an approver's browser act — viewer, bearer, missing csrf, a finished run, another task's run, and a foreign project are refused", async () => {
     const ref = seed("payouts");
     const { runId, leaseId } = live("payouts", ref);
-    const otherRef = seed("elsewhere", "/repo/other");
+    const otherRef = seed("elsewhere", resolve("/repo/other"));
     const other = live("elsewhere", otherRef);
     const alex = await loginAs("alex", approverToken);
     const csrf = csrfOf(await page(alex, "/t/payouts"));

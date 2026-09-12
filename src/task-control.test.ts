@@ -9,7 +9,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
 import { register } from "./runner.js";
 import { addApprover, approve, propose } from "./scope.js";
@@ -21,7 +21,7 @@ import { taskReadinessBlocker } from "./dispatch.js";
 
 const T0 = new Date("2026-09-12T08:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
-const REPO = "/repo/stop";
+const REPO = resolve("/repo/stop");
 const tok = (name: string) => `tok-${name}`;
 
 const presented = (
@@ -357,7 +357,8 @@ describe("safe task stop and resume (v52)", () => {
       const before = fresh.raw().prepare("SELECT * FROM hold ORDER BY id").all();
       fresh.close();
       // Wind the file back to the v51 shape: the hold CHECK without 'stop', no run_stop, version 51.
-      const raw = openStore(file).raw();
+      const legacy = openStore(file);
+      const raw = legacy.raw();
       raw.exec("PRAGMA foreign_keys = OFF");
       raw.exec(`CREATE TABLE hold_old (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -365,8 +366,9 @@ describe("safe task stop and resume (v52)", () => {
         owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff','contest','revision')),
         owner_id TEXT NOT NULL, reason TEXT NOT NULL, until TEXT, held_at TEXT NOT NULL, UNIQUE (owner_kind, owner_id))`);
       raw.exec("INSERT INTO hold_old (id, task_ref, owner_kind, owner_id, reason, until, held_at) SELECT id, task_ref, owner_kind, owner_id, reason, until, held_at FROM hold");
-      raw.exec("DROP TABLE hold; ALTER TABLE hold_old RENAME TO hold; DROP TABLE run_stop; UPDATE schema_version SET version = 51");
+      raw.exec("DROP TABLE hold; ALTER TABLE hold_old RENAME TO hold; DROP TABLE run_stop; DROP TABLE run_process; UPDATE schema_version SET version = 51");
       expect(() => raw.prepare("INSERT INTO hold (task_ref, owner_kind, owner_id, reason, held_at) VALUES (?, 'stop', '9', 'x', ?)").run(ref, T0.toISOString())).toThrow();
+      legacy.close();
       const upgraded = openStore(file);
       expect(Number(upgraded.raw().prepare("SELECT version FROM schema_version").get()?.["version"])).toBe(52);
       expect(upgraded.raw().prepare("SELECT * FROM hold ORDER BY id").all()).toEqual(before);
