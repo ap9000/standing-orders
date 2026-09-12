@@ -294,10 +294,16 @@ describe("bounded provider JSONL replies", () => {
     });
   });
 
-  test("codex drops oversized command telemetry without poisoning a valid result", async () => {
+  test.each(["type-first", "id-first", "type-last", "outer-last"])("codex drops oversized command telemetry with %s object keys", async (order) => {
     const script = `
       process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"codex-command-noise"}) + "\\n");
-      process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",aggregated_output:"q".repeat(${JSONL_EVENT_HARD_CAP + 2_000})}}) + "\\n");
+      const output="q".repeat(${JSONL_EVENT_HARD_CAP + 2_000});
+      const item=${JSON.stringify(order)}==='type-first'?{type:'command_execution',aggregated_output:output}:
+        ${JSON.stringify(order)}==='id-first'?{id:'item_17',type:'command_execution',aggregated_output:output}:
+        {id:'item_17',aggregated_output:output,type:'command_execution'};
+      const event=${JSON.stringify(order)}==='outer-last'?{item,type:'item.completed'}:{type:'item.completed',item};
+      const line=JSON.stringify(event)+'\\n';
+      for(let i=0;i<line.length;i+=113) process.stdout.write(line.slice(i,i+113));
       process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}) + "\\n");
       process.stdout.write(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,output_tokens:1}}) + "\\n");
     `;
@@ -308,6 +314,26 @@ describe("bounded provider JSONL replies", () => {
       sessionId: "codex-command-noise",
       finalMessage: "done",
       structuralTerminal: null,
+    });
+  });
+
+  test.each(["agent-last", "spoofed-nested", "duplicate-key", "malformed", "unknown-item"])("codex preserves overflow failure for %s", async (kind) => {
+    const script = `
+      const output='x'.repeat(${JSONL_EVENT_HARD_CAP + 2000});
+      const kind=${JSON.stringify(kind)};
+      let event={item:{text:output,type:'agent_message'},type:'item.completed'};
+      if(kind==='spoofed-nested') event={data:{type:'item.completed',item:{type:'command_execution'}},item:{text:output,type:'agent_message'},type:'item.completed'};
+      if(kind==='unknown-item') event={type:'item.completed',item:{type:'future_unknown',text:output}};
+      let line=JSON.stringify(event);
+      if(kind==='duplicate-key') line='{"type":"item.completed","item":{"type":"command_execution","text":'+JSON.stringify(output)+',"type":"agent_message"}}';
+      if(kind==='malformed') line='{"type":"item.completed","item":{"type":"command_execution","text":'+JSON.stringify(output)+',"bad":1 2}}';
+      process.stdout.write(line+'\\n');
+      process.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'looks done'}})+'\\n');
+      process.stdout.write(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}})+'\\n');
+    `;
+    const result = await runStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 15_000 });
+    expect(adapterFor("codex").parse(result.stdout)).toMatchObject({
+      structuralTerminal: { failed: true, code: "standing-orders.stream-event-overflow" },
     });
   });
 
