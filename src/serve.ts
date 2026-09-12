@@ -1512,7 +1512,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         source: url.searchParams.get("source") ?? "", taskId: (url.searchParams.get("task") ?? "").slice(0, 200),
         ...(before === null ? {} : { before: Number(before) }), limit: 51 });
       if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ entries: rows.slice(0, 50), nextBefore: rows.length > 50 ? rows[49]!.id : null }));
-      return sendScreen(response, 200, screen("Action ledger", ledgerBody(rows, projects, url.searchParams), { chrome: chromeFor(project, "ledger") }));
+      return sendScreen(response, 200, screen("Action ledger", ledgerBody(rows, projects, url.searchParams), { chrome: chromeFor(chosen === "" ? null : chosen, "ledger", undefined, chosen === "" ? "all" : "project") }));
     }
 
     if (url.pathname === "/activity") {
