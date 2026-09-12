@@ -176,6 +176,7 @@ export function plannerContractOf(store: Store, taskId: string): { ok: true; con
   const ref = store.lookupRef(taskId);
   if (ref === null) return { ok: false, reason: "no-task", message: `no task ${taskId}` };
   const scope = store.getScope(taskId);
+  if (scope?.termsProblem != null) return { ok: false, reason: "revision-brief", message: `${taskId} has unreadable scope terms: ${scope.termsProblem}` };
   let revision: PlannerContract["revision"] = null;
   if (ref.revisionOf !== null || ref.revisionBriefArtifact !== null) {
     if (ref.revisionOf === null || ref.revisionBriefArtifact === null) {
@@ -231,7 +232,7 @@ export function plannerSourceOf(
   if (task === null) return { ok: false, reason: "no-task", message: `no task ${taskId}` };
 
   if (answers.length > PLANNER_SOURCE_LIMITS.answers) {
-    return { ok: false, reason: "oversized", message: `${taskId} has more than ${PLANNER_SOURCE_LIMITS.answers} earlier answers; the planner cannot omit part of that history — consolidate the answered decisions before planning again` };
+    return { ok: false, reason: "oversized", message: `${taskId} has more than ${PLANNER_SOURCE_LIMITS.answers} earlier answers; the planner cannot omit part of that history — file a follow-up task with the consolidated decisions` };
   }
   let revisionBrief: string | null = null;
   if (contract.contract.revision !== null) {
@@ -284,6 +285,7 @@ export function plannerSourceOf(
  * word. Null when nothing here stands in the way.
  */
 export function plannerSourceProblemOf(store: Store, taskId: string): string | null {
+  if (store.answeredDecisionsFor(taskId, PLANNER_SOURCE_LIMITS.answers + 1).length > PLANNER_SOURCE_LIMITS.answers) return `more than ${PLANNER_SOURCE_LIMITS.answers} answered decisions exceed the planner history bound; file a follow-up task with the consolidated decisions`;
   const contract = plannerContractOf(store, taskId);
   if (!contract.ok) return contract.message;
   const briefBytes = contract.contract.revision === null ? 0 : (store.getArtifact(contract.contract.revision.briefArtifact)?.bytesStored ?? 0);

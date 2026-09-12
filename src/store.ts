@@ -11006,7 +11006,8 @@ export class Store {
           if (sourceScope !== null && sourceScope.termsProblem != null) {
             return refuse("source-terms", `${args.source.task}'s stored terms do not read back exactly (${sourceScope.termsProblem}) — nothing inherits from a row that is not authority`);
           }
-          if (sourceRun.scopeDigest !== args.source.scopeDigest) {
+          const sourceRunDigest = sourceRun.scopeDigest === "" ? null : sourceRun.scopeDigest;
+          if (sourceRunDigest !== args.source.scopeDigest) {
             return refuse("stale-source", `run #${sourceRun.id} was built against different terms — a newer task scope cannot stand in for that run's contract`);
           }
           const ancestry = this.revisionAncestryStatus(args.source.task);
@@ -11038,7 +11039,7 @@ export class Store {
           if (named === null || typeof named !== "object" || named.sourceTask !== args.source.task || named.sourceRun !== args.source.run) {
             return refuse("brief-custody", `the revision brief names ${String(named?.sourceTask ?? "?")} / run #${String(named?.sourceRun ?? "?")}, not ${args.source.task} / run #${args.source.run}`);
           }
-          if (named.sourceScopeDigest !== sourceRun.scopeDigest || named.head !== sourceRun.headRevision) {
+          if (named.sourceScopeDigest !== sourceRunDigest || named.head !== sourceRun.headRevision) {
             return refuse("brief-custody", "the revision brief does not bind the source run's exact scope and head");
           }
           if (args.commentIds !== null) {
