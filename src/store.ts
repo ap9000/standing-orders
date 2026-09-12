@@ -62,6 +62,7 @@ import {
 import { readAuthModeStrict } from "./keys.js";
 import { isFallbackEligible, recognizesEligible, classMatchesAuthMode, type TerminalClass } from "./exhaustion.js";
 import { modeTermsFromJson } from "./modes.js";
+import { readVerifiedArtifact } from "./evidence.js";
 import { isProviderId, type ProviderId } from "./provider.js";
 import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
@@ -10908,46 +10909,259 @@ export class Store {
       .run(revisionOf, briefArtifact, taskRef);
   }
 
+  // ---- the revision boundary: ONE field-by-field policy -------------------
+
   /**
-   * Seal a revision in ONE transaction (Codex M5-M8 audit, C-3): the task
-   * with its INHERITED scope limits, the brief's artifact row, the
-   * revision relation, and — when comments are being consumed — exactly
-   * the expected batch, or the whole seal rolls back. The brief FILE is
-   * written by the caller before this runs; a file whose transaction
-   * failed is an orphan on disk, not authority — no artifact row points
-   * at it. Two concurrent seals race on the comment consumption count and
-   * exactly one wins.
+   * Seal a revision in ONE transaction (Codex M5-M8 audit, C-3; contract
+   * handoff task 2): the SOURCE BINDING is proven here, against live rows,
+   * before anything is created — the source task must exist, the source
+   * run must be that task's own, the source scope's digest must still be
+   * the one the caller read, the stored terms must read back exactly, and
+   * the brief file the caller wrote must verify byte-for-byte AND name the
+   * same source — then the child task is filed under the inherited terms
+   * `revisionTermsOf` computes from the SOURCE ROWS (never from a caller's
+   * copy), the brief's artifact row, the revision relation, and — when
+   * comments are being consumed — exactly the expected batch, or the whole
+   * seal rolls back, nested or not (a savepoint, so an enclosing
+   * transaction can never commit half a seal). A brief FILE whose seal
+   * failed is an orphan on disk, not authority — no artifact row points at
+   * it. Two concurrent seals race on the comment consumption count, the
+   * deterministic child id, or the repair chain's `source_run UNIQUE`, and
+   * exactly one wins; the loser refuses in words with zero rows.
+   *
+   * The child is filed UNAPPROVED, always: this method never stamps an
+   * approval, never mints an attended authorization, never touches a
+   * publication or merge grant. Only the normal approval roads — the
+   * password ceremony, or a live mode's own filing coverage re-proved by
+   * the caller inside its own transaction — can approve the child.
    */
   sealRevision(
     args: {
-      task: { id?: string; title: string; repo?: string; goal: string; outOfScope?: string | null; touches?: string[]; acceptance?: unknown; budgetMicrousd?: number | null; posture?: "escalated" };
-      artifact: { run: number; kind: Artifact["kind"]; key: string; bytesOriginal: number; bytesStored: number; truncated: boolean; sha256: string; capture: string };
-      revisionOf: string;
-      /** Comments to consume, or null when the brief has no comment batch (CI repair). */
+      /** The exact source: task id, run id, and the scope digest the
+       * caller READ (null = the caller saw no scope; proven still absent). */
+      source: { task: string; run: number; scopeDigest: string | null };
+      /** The brief the caller wrote to disk BEFORE this transaction — re-read
+       * and re-hashed here, never trusted from the caller's numbers. */
+      brief: { evidenceRoot: string; key: string; sha256: string; bytes: number; capture: string };
+      /** The child's own words: an optional deterministic id, its title,
+       * and the explicitly described repair appended to the SOURCE goal. */
+      child: { id?: string; title: string; repair: string };
+      /** Comments to consume, or null when the brief has no comment batch (CI / criterion repair). */
       commentIds: readonly number[] | null;
-      sourceRun: number;
+      /** Fresh mode filing coverage, re-proved by the caller INSIDE this
+       * transaction (never carried across one): its budget default may only
+       * TIGHTEN the inherited ceiling; its escalated posture rides the
+       * filing exactly as it does on every other mode-covered filing. */
+      coverage?: { defaultBudgetMicrousd: number | null; escalated: boolean } | null;
     },
     now: Date,
-  ): { ok: true; id: string; artifactId: number } | { ok: false; reason: string } {
+  ): { ok: true; id: string; artifactId: number; terms: RevisionTerms } | { ok: false; reason: RevisionRefusal; detail: string } {
+    const refuse = (reason: RevisionRefusal, detail: string): { ok: false; reason: RevisionRefusal; detail: string } => ({ ok: false, reason, detail });
     try {
-      return this.transact(() => {
-        const made = this.createConsoleTask({ ...args.task, filedVia: "revision" }, now);
-        if (!made.ok) return { ok: false as const, reason: made.reason };
-        const artifactId = this.saveArtifact(args.artifact, now);
-        const ref = this.lookupRef(made.id);
-        if (ref === null) throw new Error("the task this transaction just created has no ref — impossible, roll back");
-        this.markRevision(ref.id, args.revisionOf, artifactId);
-        if (args.commentIds !== null) {
-          const consumed = this.consumeDiffComments(args.sourceRun, args.commentIds, made.id);
-          if (consumed !== args.commentIds.length) {
-            throw new Error("another seal took part of this batch — nothing is half-sealed, roll back");
+      return this.transact(() =>
+        this.savepoint(() => {
+          // THE SOURCE BINDING, against live rows.
+          const sourceRef = this.lookupRef(args.source.task);
+          if (sourceRef === null) return refuse("source-task", `no such source task ${args.source.task}`);
+          const sourceRun = this.getRun(args.source.run);
+          if (sourceRun === null || sourceRun.taskRef !== sourceRef.id) {
+            return refuse("source-run", `run #${args.source.run} is not an attempt of ${args.source.task} — a revision binds to its own source's run`);
           }
-        }
-        return { ok: true as const, id: made.id, artifactId };
-      });
+          const sourceScope = this.getScope(args.source.task);
+          if ((sourceScope?.digest ?? null) !== args.source.scopeDigest) {
+            return refuse(
+              "stale-source",
+              sourceScope === null
+                ? `${args.source.task} has no scope now, but the brief was drafted against one — read it again`
+                : `${args.source.task}'s scope changed while this revision was being drafted — read it again and draft against the current terms`,
+            );
+          }
+          if (sourceScope !== null && sourceScope.termsProblem != null) {
+            return refuse("source-terms", `${args.source.task}'s stored terms do not read back exactly (${sourceScope.termsProblem}) — nothing inherits from a row that is not authority`);
+          }
+          // THE BRIEF CUSTODY: the file, re-read and re-hashed under the
+          // evidence root, must be the bytes the caller claims AND name
+          // exactly this source. A brief for another run is a wrong brief.
+          const custody = readVerifiedArtifact(args.brief.evidenceRoot, {
+            id: 0,
+            run: args.source.run,
+            kind: "revision-brief",
+            key: args.brief.key,
+            bytesOriginal: args.brief.bytes,
+            bytesStored: args.brief.bytes,
+            truncated: false,
+            sha256: args.brief.sha256,
+            capture: args.brief.capture,
+            createdAt: now.toISOString(),
+            redacted: false,
+            captureStatus: null,
+          });
+          if (!custody.ok) return refuse("brief-custody", `the revision brief does not verify — ${custody.problem}`);
+          let named: { sourceTask?: unknown; sourceRun?: unknown };
+          try {
+            named = JSON.parse(custody.content.toString("utf8")) as { sourceTask?: unknown; sourceRun?: unknown };
+          } catch {
+            return refuse("brief-custody", "the revision brief is not JSON");
+          }
+          if (named === null || typeof named !== "object" || named.sourceTask !== args.source.task || named.sourceRun !== args.source.run) {
+            return refuse("brief-custody", `the revision brief names ${String(named?.sourceTask ?? "?")} / run #${String(named?.sourceRun ?? "?")}, not ${args.source.task} / run #${args.source.run}`);
+          }
+          // THE TERMS, from the source rows this transaction just proved.
+          const terms = revisionTermsOf(sourceRef, sourceScope, args.coverage ?? null, this.permissionDefault().mode, this.qualityDefault().mode);
+          const goal = `${terms.fromScope ? terms.goal : `revise ${args.source.task}`} — ${args.child.repair}`;
+          const made = this.createConsoleTask(
+            {
+              ...(args.child.id === undefined ? {} : { id: args.child.id }),
+              title: args.child.title,
+              ...(sourceRef.repo === null ? {} : { repo: sourceRef.repo }),
+              goal,
+              outOfScope: terms.outOfScope,
+              touches: terms.touches,
+              acceptance: terms.acceptance,
+              budgetMicrousd: terms.budgetMicrousd,
+              permissionMode: terms.permissionMode,
+              qualityMode: terms.qualityMode,
+              riskLevel: terms.riskLevel,
+              routeOverridesJson: terms.routeOverridesJson,
+              agentPin: terms.agentPin,
+              planPin: terms.planPin,
+              ...(terms.escalated ? { posture: "escalated" as const } : {}),
+              filedVia: "revision",
+            },
+            now,
+          );
+          if (!made.ok) return refuse(made.reason, `the revision task could not be filed: ${made.reason}`);
+          const artifactId = this.saveArtifact(
+            { run: args.source.run, kind: "revision-brief", key: args.brief.key, bytesOriginal: args.brief.bytes, bytesStored: args.brief.bytes, truncated: false, sha256: args.brief.sha256, capture: args.brief.capture },
+            now,
+          );
+          const ref = this.lookupRef(made.id);
+          if (ref === null) throw new Error("the task this transaction just created has no ref — impossible, roll back");
+          this.markRevision(ref.id, args.source.task, artifactId);
+          if (args.commentIds !== null) {
+            const consumed = this.consumeDiffComments(args.source.run, args.commentIds, made.id);
+            if (consumed !== args.commentIds.length) {
+              throw new RevisionRaced("another seal took part of this batch — nothing is half-sealed, roll back");
+            }
+          }
+          // THE NO-GRANT INVARIANT, proved on the way out: the child leaves
+          // this seal unapproved — nothing above stamps an approval, mints
+          // an authorization, or touches a grant, and a row that says
+          // otherwise is a bug: the seal rolls back rather than mint
+          // authority by accident.
+          const filed = this.getScope(made.id);
+          if (filed === null || filed.approvedAt !== null || filed.approvedDigest !== null) {
+            throw new Error("a revision left its seal approved — impossible, roll back");
+          }
+          return { ok: true as const, id: made.id, artifactId, terms };
+        }),
+      );
     } catch (error) {
-      return { ok: false, reason: String((error as Error).message ?? error) };
+      if (error instanceof RevisionRaced) return refuse("comments-taken", error.message);
+      const message = String((error as Error).message ?? error);
+      if (/UNIQUE constraint failed/.test(message)) return refuse("duplicate", `another draft won this source run — ${message}`);
+      return refuse("invariant", message);
     }
+  }
+
+  /**
+   * Walk a task's revision ancestry — itself first, then `revision_of`
+   * upward to the root — bounded and cycle-safe. Every projection of
+   * lineage (task page, chat, approval, the repair loop) reads this walk,
+   * never a caller's copy of it.
+   */
+  revisionAncestryOf(taskId: string): string[] {
+    const seen = new Set<string>();
+    const chain: string[] = [];
+    let cursor: string | null = taskId;
+    while (cursor !== null && !seen.has(cursor) && chain.length < 64) {
+      seen.add(cursor);
+      chain.push(cursor);
+      const ref = this.lookupRef(cursor);
+      cursor = ref === null ? null : ref.revisionOf;
+    }
+    return chain;
+  }
+
+  /**
+   * Which repair chain a task CONTINUES (contract handoff task 2): the
+   * nearest task in its revision ancestry — itself included — that is a
+   * repair draft names the chain; failing that, the nearest ancestor that
+   * ROOTS a chain. An annotation or CI detour between two repair attempts
+   * therefore keeps the chain's root, its attempt count, and its remaining
+   * automatic bound; nothing resets because a person annotated the draft.
+   * A task with no chain anywhere above it roots its own, as before.
+   */
+  repairLineageOf(taskId: string): RepairLineage {
+    for (const ancestor of this.revisionAncestryOf(taskId)) {
+      const asDraft = this.repairChainForDraft(ancestor);
+      if (asDraft !== null) {
+        const attempts = this.repairChainForRoot(asDraft.rootTask);
+        return { rootTask: asDraft.rootTask, attempts, continues: asDraft, via: ancestor === taskId ? null : ancestor };
+      }
+      const asRoot = this.repairChainForRoot(ancestor);
+      if (asRoot.length > 0) {
+        return { rootTask: ancestor, attempts: asRoot, continues: asRoot[asRoot.length - 1] ?? null, via: ancestor === taskId ? null : ancestor };
+      }
+    }
+    return { rootTask: taskId, attempts: [], continues: null, via: null };
+  }
+
+  /**
+   * The lineage and ACTUAL terms of a revision task, as every projection
+   * shows them (task page, chat, approval card): the source, the ancestry
+   * to the root, the terms the child really carries — read from its own
+   * scope and ref, never restated from the brief — and, when the task
+   * continues a repair chain, the attempts used against the signed cap.
+   * Null for a task that revises nothing.
+   */
+  revisionLineageOf(taskId: string, now: Date): RevisionLineage | null {
+    const ref = this.lookupRef(taskId);
+    if (ref === null || ref.revisionOf === null) return null;
+    const ancestry = this.revisionAncestryOf(taskId);
+    const scope = this.getScope(taskId);
+    const artifact = ref.revisionBriefArtifact === null ? null : this.getArtifact(ref.revisionBriefArtifact);
+    const sourceRun = artifact === null ? null : artifact.run;
+    const sourceScope = this.getScope(ref.revisionOf);
+    const lineage = this.repairLineageOf(taskId);
+    const mode = ref.repo === null ? null : this.activeMode(ref.repo, now);
+    const modeTerms = mode === null ? null : modeTermsFromJson(mode.termsJson);
+    const cap = modeTerms !== null && modeTerms.repairAuto === true ? modeTerms.repairMaxAttempts : null;
+    const attemptsUsed = lineage.attempts.length;
+    const profile = scope === null ? null : (scope.approvedProfile ?? scope.profile ?? null);
+    return {
+      sourceTask: ref.revisionOf,
+      sourceRun,
+      ancestors: ancestry.slice(1),
+      root: ancestry[ancestry.length - 1] ?? taskId,
+      terms:
+        scope === null
+          ? null
+          : {
+              riskLevel: scope.riskLevel ?? "routine",
+              qualityMode: scope.qualityMode ?? "default",
+              // The posture that will actually run: the working profile's
+              // (a live mode's escalation rides it), else the durable choice.
+              permissionMode: permissionModeOfProfile(profile) ?? ref.permissionMode ?? this.permissionDefault().mode,
+              budgetMicrousd: scope.budgetMicrousd,
+              exclusions: scope.outOfScope !== null,
+              touches: scope.touches.length,
+              criteria: scope.acceptance.length,
+              routeOverrides: ref.routeOverrides === null || ref.routeOverrides === undefined ? 0 : ref.routeOverrides.length,
+            },
+      sourceHadScope: sourceScope !== null,
+      repair:
+        lineage.attempts.length === 0
+          ? null
+          : {
+              rootTask: lineage.rootTask,
+              attemptsUsed,
+              cap,
+              remaining: cap === null ? null : Math.max(0, cap - attemptsUsed),
+              thisAttempt: this.repairChainForDraft(taskId)?.attempt ?? null,
+              via: lineage.via,
+            },
+    };
   }
 
   // ---- repair chain (v40, evidence-review-v1) -----------------------------
@@ -10962,10 +11176,9 @@ export class Store {
    */
   openRepairDraft(
     args: {
-      task: { id: string; title: string; repo?: string; goal: string; outOfScope: string | null; touches: string[]; acceptance: unknown };
-      artifact: { run: number; kind: Artifact["kind"]; key: string; bytesOriginal: number; bytesStored: number; truncated: boolean; sha256: string; capture: string };
-      revisionOf: string;
-      sourceRun: number;
+      source: { task: string; run: number; scopeDigest: string | null };
+      brief: { evidenceRoot: string; key: string; sha256: string; bytes: number; capture: string };
+      child: { id: string; title: string; repair: string };
       rootTask: string;
       attempt: number;
       basis: "human" | "mode";
@@ -10973,18 +11186,29 @@ export class Store {
       unresolved: readonly string[];
     },
     now: Date,
-  ): { ok: true; id: string; artifactId: number } | { ok: false; reason: string } {
-    return this.transact(() => {
-      const sealed = this.sealRevision({ task: args.task, artifact: args.artifact, revisionOf: args.revisionOf, commentIds: null, sourceRun: args.sourceRun }, now);
-      if (!sealed.ok) return sealed;
-      this.db
-        .prepare(
-          `INSERT INTO repair_chain (root_task, source_run, attempt, draft_task, basis, mode_digest, unresolved_json, outcome, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'drafted', ?)`,
-        )
-        .run(args.rootTask, args.sourceRun, args.attempt, sealed.id, args.basis, args.modeDigest, JSON.stringify(args.unresolved), now.toISOString());
-      return sealed;
-    });
+  ): { ok: true; id: string; artifactId: number; terms: RevisionTerms } | { ok: false; reason: RevisionRefusal; detail: string } {
+    try {
+      return this.transact(() =>
+        this.savepoint(() => {
+          const sealed = this.sealRevision({ source: args.source, brief: args.brief, child: args.child, commentIds: null }, now);
+          if (!sealed.ok) return sealed;
+          // The chain row rides the same savepoint as the seal: a second
+          // drafter of the same source run trips `source_run UNIQUE` here,
+          // and the whole draft — task, artifact row, relation — rolls back
+          // with it. Exactly one winner, in words for the loser.
+          this.db
+            .prepare(
+              `INSERT INTO repair_chain (root_task, source_run, attempt, draft_task, basis, mode_digest, unresolved_json, outcome, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'drafted', ?)`,
+            )
+            .run(args.rootTask, args.source.run, args.attempt, sealed.id, args.basis, args.modeDigest, JSON.stringify(args.unresolved), now.toISOString());
+          return sealed;
+        }),
+      );
+    } catch (error) {
+      const message = String((error as Error).message ?? error);
+      return { ok: false, reason: /UNIQUE constraint failed/.test(message) ? "duplicate" : "invariant", detail: message };
+    }
   }
 
   /** The one chain-attempt row a given source run drafted, if any. */
@@ -11382,6 +11606,16 @@ export class Store {
       /** Durable per-task evidence depth; absent inherits installation
        * default when the scope is filed. */
       qualityMode?: QualityMode;
+      /** The revision road's inherited declarations (contract handoff task
+       * 2): the source's declared risk, the approver's per-phase route
+       * overrides, and its build/plan pins — stamped on the ref BEFORE the
+       * scope resolves, so the child's route is recommended over them
+       * exactly as the source's was, never over the installation's
+       * defaults of the day. */
+      riskLevel?: RiskLevel;
+      routeOverridesJson?: string | null;
+      agentPin?: { provider: string; model: string | null } | null;
+      planPin?: { provider: string; model: string | null } | null;
       posture?: "escalated";
       /** Revision tasks inherit these from the source scope (Codex M5-M8
        * audit, IV-2): a revision that silently drops the original's
@@ -11466,6 +11700,16 @@ export class Store {
       if (spec.qualityMode !== undefined) {
         this.db.prepare("UPDATE task_ref SET quality_mode = ? WHERE id = ?").run(spec.qualityMode, ref.id);
       }
+      if (spec.riskLevel !== undefined) {
+        this.db.prepare("UPDATE task_ref SET risk_level = ? WHERE id = ?").run(spec.riskLevel, ref.id);
+      }
+      if (spec.routeOverridesJson !== undefined && spec.routeOverridesJson !== null) {
+        this.db.prepare("UPDATE task_ref SET route_overrides_json = ? WHERE id = ?").run(spec.routeOverridesJson, ref.id);
+      }
+      if (spec.agentPin !== undefined && spec.agentPin !== null) this.pinTaskAgent(ref.id, spec.agentPin.provider, spec.agentPin.model);
+      if (spec.planPin !== undefined && spec.planPin !== null) {
+        this.db.prepare("UPDATE task_ref SET plan_provider = ?, plan_model = ? WHERE id = ?").run(spec.planPin.provider, spec.planPin.model, ref.id);
+      }
       if (spec.goal !== undefined) {
         const draft = {
           goal: spec.goal.trim(),
@@ -11488,6 +11732,7 @@ export class Store {
           {
             ...(spec.permissionMode === undefined ? {} : { permissionMode: spec.permissionMode }),
             ...(spec.qualityMode === undefined ? {} : { qualityMode: spec.qualityMode }),
+            ...(spec.riskLevel === undefined ? {} : { riskLevel: spec.riskLevel }),
             ...(spec.posture === undefined ? {} : { posture: spec.posture }),
             proposedVia: spec.proposedVia ?? null,
           },
@@ -20960,6 +21205,163 @@ function readCriterionReview(row: Record<string, unknown>): CriterionReviewRow {
 
 /** One attempt in a bounded repair chain (v40, evidence-review-v1) — the
  * ledger row the single inbox item and the run/task pages read. */
+// ---- the revision policy (contract handoff task 2) ------------------------
+
+/** Why a seal refused, in one word; `detail` carries the sentence. */
+export type RevisionRefusal =
+  | "source-task"
+  | "source-run"
+  | "stale-source"
+  | "source-terms"
+  | "brief-custody"
+  | "comments-taken"
+  | "duplicate"
+  | "invariant"
+  | "backlog-full"
+  | "bad-id"
+  | "bad-title"
+  | "bad-goal"
+  | "bad-acceptance"
+  | "acceptance-required";
+
+/** The comment-batch race, thrown inside the seal so the savepoint rolls
+ * the whole seal back before the refusal is worded. */
+class RevisionRaced extends Error {}
+
+/**
+ * THE TERMS A REVISION CARRIES — computed from the SOURCE ROWS the seal
+ * just proved, one field at a time. This is the one policy every draft
+ * path (annotation revision, CI repair, criterion repair) files under:
+ *
+ *   INHERITED, verbatim, from the source (declared requirements and
+ *   constraints — never the installation's defaults of the day):
+ *     goal (the child appends its explicitly described repair), exclusions,
+ *     touches, the exact rubric, declared risk (never below the source's
+ *     signed level or its durable task choice), quality mode (strict stays
+ *     strict), permission posture (the source's durable choice, else the
+ *     posture its sealed profile ran under — never wider), the per-attempt
+ *     budget ceiling (never lifted; a mode's filing default may only
+ *     tighten it), the approver's per-phase route overrides, and the
+ *     build/plan agent pins.
+ *   RE-RESOLVED at filing, then approved afresh: the phase route and its
+ *     execution profile (recommended over the inherited risk, quality,
+ *     overrides, and pins under today's configuration), the fallback
+ *     chain (from the repository's configuration, never copied), and the
+ *     auth mode. The child's digest binds what it resolved to; a yes on
+ *     the source never covers it.
+ *   NEVER INHERITED: the approval stamp and its basis, attended
+ *     authorizations, publication and merge grants, the plan document and
+ *     its revision ledger (a revision is planned afresh, if at all; the
+ *     brief plus the source scope are its contract), strikes, holds.
+ *   FRESH from a live mode, only when the caller re-proved coverage inside
+ *     this transaction: the escalated posture and the budget default.
+ *
+ * A source with no scope (a legacy filing) has nothing to inherit: the
+ * child files the placeholder rubric and today's defaults, and every
+ * projection says the source had no scope.
+ */
+export type RevisionTerms = {
+  goal: string;
+  outOfScope: string | null;
+  touches: string[];
+  acceptance: AcceptanceCriterion[];
+  riskLevel: RiskLevel;
+  qualityMode: QualityMode;
+  permissionMode: UnattendedPermissionMode;
+  budgetMicrousd: number | null;
+  routeOverridesJson: string | null;
+  agentPin: { provider: string; model: string | null } | null;
+  planPin: { provider: string; model: string | null } | null;
+  escalated: boolean;
+  /** Whether the source had a scope to inherit from at all. */
+  fromScope: boolean;
+};
+
+const REVISION_PLACEHOLDER_RUBRIC: AcceptanceCriterion[] = [
+  { id: "c1", statement: "The operator has reviewed this revision and written a real rubric before approving it.", how: null, evidence: ["manual-review"] },
+];
+
+/** The operator-facing posture a sealed profile actually ran under. */
+export function permissionModeOfProfile(profile: ExecutionProfile | null): UnattendedPermissionMode | null {
+  if (profile === null) return null;
+  if (profile.provider === "claude") return profile.permissionArgv === "bypassPermissions" ? "bypassPermissions" : "auto";
+  if (profile.provider === "gemini") return profile.approvalArgv === "yolo" ? "bypassPermissions" : "auto";
+  return profile.sandboxMode === "danger-full-access" ? "bypassPermissions" : "auto";
+}
+
+const RISK_RANK: Record<RiskLevel, number> = { routine: 0, elevated: 1, high: 2 };
+
+export function revisionTermsOf(
+  sourceRef: Pick<TaskRef, "riskLevel" | "qualityMode" | "permissionMode" | "routeOverrides" | "agentProvider" | "agentModel" | "planProvider" | "planModel">,
+  sourceScope: Scope | null,
+  coverage: { defaultBudgetMicrousd: number | null; escalated: boolean } | null,
+  permissionDefault: UnattendedPermissionMode,
+  qualityDefault: QualityMode,
+): RevisionTerms {
+  const scopeRisk: RiskLevel = sourceScope?.riskLevel ?? "routine";
+  const refRisk: RiskLevel = sourceRef.riskLevel ?? "routine";
+  const riskLevel: RiskLevel = RISK_RANK[refRisk] > RISK_RANK[scopeRisk] ? refRisk : scopeRisk;
+  const qualityMode: QualityMode =
+    sourceScope === null
+      ? sourceRef.qualityMode ?? qualityDefault
+      : sourceScope.qualityMode === "strict" || sourceRef.qualityMode === "strict"
+        ? "strict"
+        : "default";
+  const sealedPosture = sourceScope === null ? null : permissionModeOfProfile(sourceScope.approvedProfile ?? sourceScope.profile ?? null);
+  const permissionMode: UnattendedPermissionMode = sourceRef.permissionMode ?? sealedPosture ?? permissionDefault;
+  const sourceBudget = sourceScope?.budgetMicrousd ?? null;
+  const coverageBudget = coverage?.defaultBudgetMicrousd ?? null;
+  const budgetMicrousd =
+    sourceBudget === null ? coverageBudget : coverageBudget === null ? sourceBudget : Math.min(sourceBudget, coverageBudget);
+  return {
+    goal: sourceScope?.goal ?? "",
+    outOfScope: sourceScope?.outOfScope ?? null,
+    touches: sourceScope === null ? [] : [...sourceScope.touches],
+    acceptance: sourceScope !== null && sourceScope.acceptance.length > 0 ? sourceScope.acceptance.map(one => ({ ...one, evidence: [...one.evidence] })) : REVISION_PLACEHOLDER_RUBRIC.map(one => ({ ...one, evidence: [...one.evidence] })),
+    riskLevel,
+    qualityMode,
+    permissionMode,
+    budgetMicrousd,
+    routeOverridesJson: sourceRef.routeOverrides === null || sourceRef.routeOverrides === undefined || sourceRef.routeOverrides.length === 0 ? null : canonicalOverridesJson(sourceRef.routeOverrides),
+    agentPin: sourceRef.agentProvider === null ? null : { provider: sourceRef.agentProvider, model: sourceRef.agentModel },
+    planPin: sourceRef.planProvider === null ? null : { provider: sourceRef.planProvider, model: sourceRef.planModel },
+    escalated: coverage?.escalated === true,
+    fromScope: sourceScope !== null,
+  };
+}
+
+/** Which repair chain a task continues — see `Store.repairLineageOf`. */
+export type RepairLineage = {
+  rootTask: string;
+  /** Every attempt row of that chain, in attempt order. */
+  attempts: RepairChainRow[];
+  /** The row a stop settles: the nearest ancestor draft's, or the root's latest. */
+  continues: RepairChainRow | null;
+  /** The ancestor through which the chain was found; null when the task itself is in it. */
+  via: string | null;
+};
+
+/** A revision's lineage and ACTUAL terms — see `Store.revisionLineageOf`. */
+export type RevisionLineage = {
+  sourceTask: string;
+  sourceRun: number | null;
+  /** Nearest first, up to and including the root. */
+  ancestors: string[];
+  root: string;
+  terms: {
+    riskLevel: RiskLevel;
+    qualityMode: QualityMode;
+    permissionMode: UnattendedPermissionMode;
+    budgetMicrousd: number | null;
+    exclusions: boolean;
+    touches: number;
+    criteria: number;
+    routeOverrides: number;
+  } | null;
+  sourceHadScope: boolean;
+  repair: { rootTask: string; attemptsUsed: number; cap: number | null; remaining: number | null; thisAttempt: number | null; via: string | null } | null;
+};
+
 export type RepairChainRow = {
   id: number;
   rootTask: string;

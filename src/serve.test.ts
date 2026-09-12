@@ -884,6 +884,135 @@ describe("the operations console", () => {
     expect(page2).not.toContain("approve this scope");
   });
 
+  test("a high-risk, strict revision keeps its terms on the task page, the approval card, and chat after the installation's defaults change; the CI draft reads the same (contract handoff task 2)", async () => {
+    const { propose } = await import("./scope.js");
+    store.createTask({ id: "t-strict", title: "careful work" }, T0);
+    const ref = store.refFor("built-in", "t-strict").id;
+    store.placeTask(ref, "/repo/main");
+    propose(store, {
+      taskId: "t-strict",
+      goal: "harden the payout guard",
+      outOfScope: "authentication",
+      touches: ["src/payments/"],
+      acceptance: [{ id: "c1", statement: "The guard refuses a negative payout.", evidence: ["check"] }, { id: "c2", statement: "The dashboard shows the refusal.", evidence: ["screenshot"] }],
+      budgetMicrousd: 2_000_000,
+      riskLevel: "high",
+      qualityMode: "strict",
+      permissionMode: "auto",
+      now: T0,
+    });
+    sealScopeFixture(store, "t-strict", approverToken);
+    const run = store.startRun({ taskRef: ref, leaseId: "l-strict", runner: "b-1", branch: "so/t-strict", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(run, { outcome: "built", now: T0 });
+    mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
+    const patch = Buffer.from("diff --git a/g b/g\n+guard\n", "utf8");
+    writeFileSync(join(evidenceRoot, String(run), "terminal-diff.patch"), patch);
+    store.saveArtifact(
+      { run, kind: "terminal-diff", key: `${run}/terminal-diff.patch`, bytesOriginal: patch.length, bytesStored: patch.length, truncated: false, sha256: createHash("sha256").update(patch).digest("hex"), capture: "git diff base head (exit 0)" },
+      T0,
+    );
+    // The installation changes its mind AFTER the source was signed.
+    store.setPermissionDefault("bypassPermissions", "alex", T0);
+    store.setQualityDefault("default", "alex", T0);
+
+    const cookie = await login();
+    const taskHtml = await (await fetch(url("/t/t-strict"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(taskHtml)?.[1] ?? "";
+    await fetch(url(`/r/${run}/comment`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, path: "src/payments/guard.ts", line: "4", note: "also refuse zero" }),
+      redirect: "manual",
+    });
+    const revised = await fetch(url(`/r/${run}/revise`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf }),
+      redirect: "manual",
+    });
+    expect(revised.status).toBe(303);
+    const target = revised.headers.get("location") ?? "";
+    const childId = decodeURIComponent(target.replace("/t/", ""));
+
+    // The child's ACTUAL terms: the source's, not today's defaults.
+    const child = store.getScope(childId);
+    expect(child).toMatchObject({ riskLevel: "high", qualityMode: "strict", budgetMicrousd: 2_000_000, outOfScope: "authentication", touches: ["src/payments/"], approvedAt: null });
+    expect(child?.acceptance.map(one => one.id)).toEqual(["c1", "c2"]);
+    expect(child?.profile).toMatchObject({ provider: "claude", permissionArgv: "auto" });
+    expect(store.lookupRef(childId)).toMatchObject({ revisionOf: "t-strict", riskLevel: "high", qualityMode: "strict", permissionMode: "auto" });
+
+    // The task page: the approval card restates the terms, and the lineage
+    // says where they came from and what did not come along.
+    const page = await (await fetch(url(target), { headers: { cookie } })).text();
+    const lineage = `revises t-strict (build #${run})`;
+    expect(page).toContain(lineage);
+    expect(page).toContain("inherited terms, as they stand now: High risk · Strict / release quality · auto permissions · $2.00 attempt cap · its exclusions · 1 path limit · 2 criteria");
+    expect(page).toContain("never inherited: the source&#39;s approval, attended sessions, publication and merge grants");
+    expect(page).toContain("re-resolved for this approval: the agents route and the fallback chain");
+    expect(page).toContain("quality · <strong>Strict / release</strong>");
+    expect(page).toContain('<span class="approval-chip">Auto permissions</span>');
+    expect(page).not.toContain('<span class="approval-chip">Full access</span>');
+    expect(page).toContain("also refuse zero");
+    const approveForm = /<form method="post" action="[^"]*\/approve" class="card approve-form approval-card" id="approve">(.*?)<\/form>/s.exec(page)?.[1] ?? "";
+    expect(approveForm).toContain("High risk");
+    expect(approveForm).toContain(lineage);
+    expect(approveForm).toContain("never inherited");
+
+    // Chat: the same words, from the same projection.
+    const chat = await (await fetch(url(`/chat?task=${encodeURIComponent(childId)}`), { headers: { cookie } })).text();
+    expect(chat).toContain(lineage);
+    expect(chat).toContain("inherited terms, as they stand now: High risk · Strict / release quality");
+    expect(chat).toContain("never inherited: the source&#39;s approval");
+    expect(chat).toContain("also refuse zero");
+    expect(chat).toContain("quality · <strong>Strict / release</strong>");
+
+    // The CI draft on a published run of the same source reads the same.
+    const pub = store.createPublicationIntent(
+      { run, taskRef: ref, githubRepo: "ap9000/thing", remote: "origin", base: "main", head: "so/t-strict", headSha: "c".repeat(40), bodyHash: "h3", draft: false },
+      T0,
+    );
+    store.markPublicationPushed(pub, T0);
+    store.markPublicationOpened(pub, 103, "https://github.com/ap9000/thing/pull/103", T0);
+    store.enqueueNotification({ dedupeKey: `ci:ap9000/thing:103:${"c".repeat(40)}`, kind: "ci-failed", subject: "checks failing on #103", body: "red" }, T0);
+    const drafted = await fetch(url(`/r/${run}/draft-repair`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf }),
+      redirect: "manual",
+    });
+    expect(drafted.status).toBe(303);
+    expect(store.getScope("t-strict-ci-103")).toMatchObject({ riskLevel: "high", qualityMode: "strict", budgetMicrousd: 2_000_000, approvedAt: null });
+    const ciPage = await (await fetch(url("/t/t-strict-ci-103"), { headers: { cookie } })).text();
+    expect(ciPage).toContain("the CI repair");
+    expect(ciPage).toContain(lineage);
+    expect(ciPage).toContain("inherited terms, as they stand now: High risk · Strict / release quality · auto permissions · $2.00 attempt cap");
+    expect(ciPage).toContain("quality · <strong>Strict / release</strong>");
+    expect(ciPage).toContain('<span class="approval-chip">Auto permissions</span>');
+    expect(ciPage).not.toContain('<span class="approval-chip">Full access</span>');
+
+    // A batch drafted against a scope digest the source no longer carries
+    // refuses in words and consumes nothing: the road's own seal re-reads
+    // the digest inside the transaction, so a concurrent rewrite between
+    // the page's read and the click can never seal old terms.
+    await fetch(url(`/r/${run}/comment`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, path: "src/payments/guard.ts", line: "9", note: "and log it" }),
+      redirect: "manual",
+    });
+    const sealed = store.sealRevision(
+      {
+        source: { task: "t-strict", run, scopeDigest: "0".repeat(32) },
+        brief: { evidenceRoot, key: `${run}/terminal-diff.patch`, sha256: createHash("sha256").update(patch).digest("hex"), bytes: patch.length, capture: "x" },
+        child: { title: "x", repair: "y" },
+        commentIds: store.liveDiffComments(run).map(one => one.id),
+      },
+      T0,
+    );
+    expect(sealed).toMatchObject({ ok: false, reason: "stale-source" });
+    expect(store.liveDiffComments(run)).toHaveLength(1);
+  });
+
   test("review comments on the terminal diff seal into one revision task that must be approved (M6.8)", async () => {
     store.createTask({ id: "t-rev", title: "original work" }, T0);
     const ref = store.refFor("built-in", "t-rev").id;

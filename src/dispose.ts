@@ -604,25 +604,34 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   const scope = store.getScope(ref.externalId);
   if (task === null || scope === null) return { kind: "none" };
 
-  const priorChain = store.repairChainForDraft(ref.externalId);
-  const rootTask = priorChain?.rootTask ?? ref.externalId;
-  const attempt = (priorChain?.attempt ?? 0) + 1;
+  // THE LINEAGE (contract handoff task 2): the chain this task CONTINUES
+  // is found through its revision ancestry, not only its own draft row —
+  // an annotation or CI detour between two repair attempts keeps the
+  // root, the attempts already spent, and the remaining automatic bound.
+  // The next attempt number is one past the chain's highest, whichever
+  // branch spent it; nothing resets because a person annotated a draft.
+  const lineage = store.repairLineageOf(ref.externalId);
+  const priorChain = lineage.continues;
+  const rootTask = lineage.rootTask;
+  const attempt = lineage.attempts.reduce((highest, row) => Math.max(highest, row.attempt), 0) + 1;
 
   const mode = store.activeMode(repo, now);
   const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
   const auto = terms?.repairAuto === true;
   const basis: "human" | "mode" = auto ? "mode" : "human";
   const modeDigest = auto && mode !== null ? mode.digest : null;
+  /** Settle the row this task continues when it is still open; a stop
+   * with no open row to settle records its own settled row instead. */
+  const settleOrRecord = (outcome: "integrity-refused" | "no-progress" | "attempts-spent") => {
+    if (priorChain !== null && priorChain.outcome === "drafted") store.settleRepairChain(priorChain.id, outcome, now);
+    else store.recordRepairStop({ rootTask, sourceRun: sourceRunId, attempt, basis, modeDigest, unresolved, outcome }, now);
+  };
 
   // THE INTEGRITY STOP (unconditional, both roads): a refutation that lies
   // about the signed terms is never handed back to the same machine
   // unattended — park for a human instead.
   if (isIntegrityRefutation(stored.reasons)) {
-    if (priorChain === null) {
-      store.recordRepairStop({ rootTask, sourceRun: sourceRunId, attempt, basis, modeDigest, unresolved, outcome: "integrity-refused" }, now);
-    } else {
-      store.settleRepairChain(priorChain.id, "integrity-refused", now);
-    }
+    settleOrRecord("integrity-refused");
     return { kind: "stopped", reason: "repair-refused-integrity" };
   }
 
@@ -636,7 +645,7 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
       const mid = sequence[sequence.length - 2]!;
       const first = sequence[sequence.length - 3]!;
       if (!strictlyShrunk(mid, last) && !strictlyShrunk(first, mid)) {
-        store.settleRepairChain(priorChain.id, "no-progress", now);
+        settleOrRecord("no-progress");
         return { kind: "stopped", reason: "repair-no-progress" };
       }
     }
@@ -646,7 +655,7 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   // repairMaxAttempts) — the default road's loop is already bounded by
   // requiring a fresh human "yes" for every attempt.
   if (auto && terms !== null && attempt > terms.repairMaxAttempts) {
-    if (priorChain !== null) store.settleRepairChain(priorChain.id, "attempts-spent", now);
+    settleOrRecord("attempts-spent");
     return { kind: "stopped", reason: "repair-attempts-spent" };
   }
 
@@ -671,29 +680,19 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   // gives way, the identity-bearing tail never does.
   const suffix = `-fix-${attempt}`;
   const draftId = `${rootTask.slice(0, 64 - suffix.length)}${suffix}`;
+  // The draft files through the ONE revision boundary: the source's goal,
+  // exclusions, touches, rubric, risk, quality, posture, budget, overrides
+  // and pins are read from the SOURCE ROWS inside the seal — the scope
+  // read above is only the digest this draft binds to, re-proved there.
   const drafted = store.openRepairDraft(
     {
-      task: {
+      source: { task: ref.externalId, run: sourceRunId, scopeDigest: scope.digest },
+      brief: { evidenceRoot, key, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "machine-authored repair brief (exit 0)" },
+      child: {
         id: draftId,
         title: `repair ${ref.externalId}: ${unresolved.length} criteri${unresolved.length === 1 ? "on" : "a"} unmet`,
-        repo,
-        goal: `${scope.goal} — repair exactly the unmet criteria named below; a comment cannot widen the scope. Unmet: ${unresolved.join(", ")}.`,
-        outOfScope: scope.outOfScope,
-        touches: scope.touches,
-        acceptance: scope.acceptance,
+        repair: `repair exactly the unmet criteria named below; a comment cannot widen the scope. Unmet: ${unresolved.join(", ")}.`,
       },
-      artifact: {
-        run: sourceRunId,
-        kind: "revision-brief",
-        key,
-        bytesOriginal: briefBytes.length,
-        bytesStored: briefBytes.length,
-        truncated: false,
-        sha256: createHash("sha256").update(briefBytes).digest("hex"),
-        capture: "machine-authored repair brief (exit 0)",
-      },
-      revisionOf: ref.externalId,
-      sourceRun: sourceRunId,
       rootTask,
       attempt,
       basis,

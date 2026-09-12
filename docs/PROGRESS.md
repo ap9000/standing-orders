@@ -1,5 +1,30 @@
 # Progress
 
+**2026-09-11 — Revision terms preserved through one boundary (contract
+handoff task 2).** Annotation revisions, CI repair drafts, and criterion
+repair drafts now file through one `Store.sealRevision` under one
+field-by-field policy. The seal proves the source binding inside its own
+savepoint before creating anything — source task, source run belongs to it,
+the scope digest the caller read still stands, the stored terms read back
+exactly, and the brief file re-hashes and names that exact source — and
+refuses `source-task` / `source-run` / `stale-source` / `source-terms` /
+`brief-custody` / `comments-taken` / `duplicate` with zero rows, nested or
+not. The child carries the source's goal (plus the described repair),
+exclusions, touches, exact rubric, declared risk (never below the signed
+level), quality (strict stays strict), permission posture (never wider), budget
+ceiling (a mode default may only tighten it), route overrides, and pins —
+read from the source rows, never a caller's copy — so a changed installation
+default cannot downgrade, widen, or uncap a revision. The route, profile, and
+fallback chain are re-resolved for a fresh approval; the approval stamp,
+attended authorizations, publication and merge grants, and the plan never
+inherit. The repair loop finds the chain a task continues through its
+revision ancestry (`repairLineageOf`), so an annotation or CI detour keeps
+the root, the attempts spent, and the remaining automatic bound across a
+restart; no new retry engine and no schema change. The task page's revision
+card, the approval card, and the task chat card show the actual terms and
+lineage (`revisionLineageOf`). Policy: [REVISION_TERMS.md](REVISION_TERMS.md);
+coverage in `src/revision-terms.test.ts` and `src/serve.test.ts`.
+
 **2026-09-11 — Bounded explicit review retries (schema v50).** A finished
 build's independent review that failed or was interrupted can now be retried
 by an operator — `standing-orders task review <run> --as <you> --token <t>`
