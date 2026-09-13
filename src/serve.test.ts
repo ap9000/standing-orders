@@ -5758,6 +5758,26 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       expect(plain).not.toContain("autofocus");
     });
 
+    test("follow-up on build 1540: the annotation form advertises the server's own 500-character limit, with helper text and a counter", async () => {
+      const cookie = await login();
+      const csrf = await csrfOf(cookie);
+      const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
+      // Advertised: maxlength is LIMITS.note (500), never the old 2000; the helper names it and the textarea points at the helper.
+      expect(html).toContain('<textarea name="note" rows="2" maxlength="500" placeholder="Explain what should change and why" aria-label="review comment" aria-describedby="comment-note-limit"></textarea></label><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
+      expect(html).not.toContain('maxlength="2000"');
+      // The counter rides the existing prefill script and reads the textarea's own maxlength.
+      expect(html).toContain('limit.textContent=noteBox.value.length===0?"up to "+noteBox.maxLength+" characters":noteBox.value.length+" of "+noteBox.maxLength+" characters"');
+      // Enforced: exactly 500 lands; 501 is refused by the same rule the form now advertises.
+      const post = (note: string) => fetch(url(`/r/${runId}/comment`), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, path: "src/a.ts", line: "2", note }), redirect: "manual" });
+      const full = await post("n".repeat(500));
+      expect(full.status).toBe(303);
+      expect(store.liveDiffComments(runId)).toHaveLength(1);
+      const over = await post("n".repeat(501));
+      expect(over.status).toBe(400);
+      expect(await over.text()).toContain("a note is at most 500 characters");
+      expect(store.liveDiffComments(runId)).toHaveLength(1);
+    });
+
     test("the prefill button and its script ride the page exactly when the comment form does", async () => {
       const cookie = await login();
       const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
@@ -8983,6 +9003,33 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(live.indexOf('<div class="thread">')).toBeLessThan(live.indexOf('class="card composer"'));
   });
 
+  test("follow-up on build 1540: a NEW empty conversation folds the desktop overview behind its summary and tightens the empty state", async () => {
+    const cookie = await login();
+    await mint(cookie);
+    const fresh = await page(cookie);
+    // The fresh thread: the empty state, no messages, the composer after it.
+    expect(fresh).toContain('<div class="chat-empty"><strong>What do you want to get done?</strong>');
+    expect(fresh).not.toContain('data-message-role=');
+    expect(fresh.indexOf('<div class="chat-empty">')).toBeLessThan(fresh.indexOf('class="card composer"'));
+    // The overview is folded on the server and the chrome script no longer forces it open over an empty thread;
+    // its summary still carries the two counts a reader scans.
+    expect(fresh).toContain('<details class="chat-fleet-context"><summary>Project overview<span class="meta">');
+    expect(fresh).not.toContain('<details class="chat-fleet-context" open>');
+    expect(fresh).toContain('var fleet=document.querySelector(".chat-fleet-context");if(fleet&&!document.querySelector(".chat-empty")){');
+    // On a desk the summary is visible (and focusable) only for the fresh thread, and the empty state gives up its slack.
+    expect(fresh).toContain('.chat-fleet-context > summary { display: none; }');
+    expect(fresh).toContain('.chat-fleet-context > summary .hot { color: var(--brand); font-weight: 600; }');
+    expect(fresh).toContain('.chat-main:has(.chat-empty) .chat-fleet-context > summary { display: flex; align-items: center; gap: .6rem; min-height: 2.5rem; padding: .5rem .9rem; color: var(--muted-foreground); font-size: .78rem; cursor: pointer; }');
+    expect(fresh).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin: .75rem 0 .75rem; }');
+    expect(fresh).toContain('.chat-main:has(.chat-empty) .chat-empty { padding: clamp(1.25rem, 4vh, 2.25rem) 1rem 1rem; }');
+    // The desktop rules live behind the desk breakpoint; the phone's own empty-state rules are untouched.
+    const desk = fresh.indexOf('@media (min-width: 761px) {\n    /* A fresh conversation on a desk');
+    expect(desk).toBeGreaterThan(-1);
+    expect(fresh.indexOf('.chat-main:has(.chat-empty) .chat-fleet-context > summary { display: flex;')).toBeGreaterThan(desk);
+    expect(fresh).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin-bottom: .5rem; }');
+    expect(fresh).toContain('width: 100%; min-width: 0; max-width: 100%; margin: 0; padding: 2rem 0 .75rem;');
+  });
+
   test("UI polish 2026-09-13: a membership never shows a dollar figure as a charge on the chat page", async () => {
     store.setChatConfig({ provider: "codex-subscription", model: "default", dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, "alex", T0);
     const cookie = await login();
@@ -10449,6 +10496,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     // Annotation and its return road, and no revision seal before a comment.
     expect(before).toContain(`<form method="post" action="/r/${run}/comment" class="diff-comment-form" id="comment-form">`);
     expect(before).toContain('<input type="hidden" name="return" value="/review?result=t-act">');
+    // Follow-up on build 1540: this form advertises the server's 500-character limit too, with the same helper.
+    expect(before).toContain('maxlength="500" placeholder="Explain what should change and why" aria-label="review comment" aria-describedby="comment-note-limit"></textarea></label><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
+    expect(before).not.toContain('maxlength="2000"');
     expect(before).not.toContain(`action="/r/${run}/revise"`);
     expect(before).not.toContain("draft-repair");
     expect(before).not.toContain("/contest/");
@@ -10476,7 +10526,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(after).toContain("tighten this");
     expect(after).toContain(`<form method="post" action="/r/${run}/revise" class="revision-from-comments">`);
     expect(after).toContain("2 comments ready");
-    expect(after).toContain('aria-label="review comment" autofocus>');
+    expect(after).toContain('aria-label="review comment" aria-describedby="comment-note-limit" autofocus>');
     // Still the accept decision first: it resolves the state; the seal waits below.
     expect(after).toContain('data-next-action="accept-proof"');
 

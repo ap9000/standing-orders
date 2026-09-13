@@ -133,7 +133,7 @@ import {
   type UnattendedPermissionMode,
 } from "./scope.js";
 import { isQualityMode, qualityModeTitle, type QualityMode } from "./quality.js";
-import { hasForbiddenControls, validateNote } from "./decision.js";
+import { LIMITS, hasForbiddenControls, validateNote } from "./decision.js";
 import { parseExecutionPlanDocument, PLAN_LIMITS, milestonesOf, type MilestoneState } from "./plan.js";
 import { contractChangesOf, decodePlanContractRecord, describeContractChanges, type ContractChange } from "./planner-source.js";
 import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
@@ -8981,6 +8981,7 @@ const STYLE = `
   .diff-comment-form label { margin: 0; color: var(--muted-foreground); font-size: .68rem; font-weight: 550; }
   .diff-comment-form input, .diff-comment-form textarea { margin-top: .28rem; }
   .diff-comment-form button { justify-self: start; }
+  .diff-comment-limit { margin-top: -.35rem; font-size: .66rem; font-variant-numeric: tabular-nums; }
   .revision-from-comments {
     display: flex; align-items: center; justify-content: space-between; gap: 1rem;
     margin: .75rem 0; padding: .85rem; border-color: color-mix(in srgb, var(--running) 24%, var(--glass-border));
@@ -10120,6 +10121,23 @@ const STYLE = `
   /* On a desk the overview is its own card — no second frame around it. */
   .chat-fleet-context, .chat-fleet-context[open] { margin: 0; padding: 0; border: 0; background: transparent; }
   .chat-fleet-context > summary { display: none; }
+  /* The summary's needs-you count is amber wherever the summary shows (a count, by the law). */
+  .chat-fleet-context > summary .hot { color: var(--brand); font-weight: 600; }
+  @media (min-width: 761px) {
+    /* A fresh conversation on a desk (annotation on build 1540): the
+       overview folds behind one summary row that still carries its two
+       counts, and the empty state gives up its centering slack, so the whole
+       composer and its send control sit inside the first 1280×800 viewport. */
+    .chat-main:has(.chat-empty) .chat-fleet-context { margin: 0 0 .25rem; border: 1px solid var(--glass-border); border-radius: 1rem; background: color-mix(in srgb, var(--glass) 70%, transparent); }
+    .chat-main:has(.chat-empty) .chat-fleet-context[open] { padding-bottom: .5rem; }
+    .chat-main:has(.chat-empty) .chat-fleet-context > summary { display: flex; align-items: center; gap: .6rem; min-height: 2.5rem; padding: .5rem .9rem; color: var(--muted-foreground); font-size: .78rem; cursor: pointer; }
+    .chat-main:has(.chat-empty) .chat-fleet-context > summary::before { content: "▸"; flex: none; font-size: .7rem; }
+    .chat-main:has(.chat-empty) .chat-fleet-context[open] > summary::before { content: "▾"; }
+    .chat-main:has(.chat-empty) .chat-fleet-context > summary .meta { margin-left: auto; font-size: .68rem; white-space: nowrap; }
+    .chat-main:has(.chat-empty) .chat-fleet-context .chat-overview { margin: 0 .5rem; box-shadow: none; }
+    .chat-main:has(.chat-empty) .thread { min-height: 0; margin: .75rem 0 .75rem; }
+    .chat-main:has(.chat-empty) .chat-empty { padding: clamp(1.25rem, 4vh, 2.25rem) 1rem 1rem; }
+  }
   .thinking-orb { position: relative; width: 2rem; height: 2rem; flex: none; border-radius: 999px; background: var(--running-soft); }
   .thinking-orb::after { content: ""; position: absolute; inset: .55rem; border-radius: inherit; background: var(--running); animation: pulse 1.25s ease-in-out infinite; }
   .composer {
@@ -10219,7 +10237,6 @@ const STYLE = `
     .chat-fleet-context > summary::before { content: "▸"; flex: none; margin-right: .35rem; font-size: .7rem; }
     .chat-fleet-context[open] > summary::before { content: "▾"; }
     .chat-fleet-context > summary .meta { margin-left: auto; font-size: .68rem; white-space: nowrap; }
-    .chat-fleet-context > summary .hot { color: var(--brand); font-weight: 600; }
     .chat-fleet-context .chat-overview { border: 0; box-shadow: none; margin: 0; }
     .chat-overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .chat-overview-head { align-items: flex-start; }
@@ -12563,7 +12580,7 @@ function chatActivity(activity: string | null): string {
 
 const CHAT_UI_SCRIPT =
   `(function(){var workspace=document.querySelector(".chat-workspace"),projectPanel=document.getElementById("chat-project-panel"),projectToggle=document.querySelector(".chat-project-toggle"),projectClose=document.querySelector(".chat-project-close");` +
-  `var fleet=document.querySelector(".chat-fleet-context");if(fleet){var desktop=window.matchMedia("(min-width: 761px)");fleet.open=desktop.matches;desktop.addEventListener("change",function(){fleet.open=desktop.matches;});}` +
+  `var fleet=document.querySelector(".chat-fleet-context");if(fleet&&!document.querySelector(".chat-empty")){var desktop=window.matchMedia("(min-width: 761px)");fleet.open=desktop.matches;desktop.addEventListener("change",function(){fleet.open=desktop.matches;});}` +
   `if(workspace&&projectPanel&&projectToggle){var wide=window.matchMedia("(min-width: 1200px)");var saved="";try{saved=localStorage.getItem("standing-orders:chat-projects")||"";}catch(e){}` +
   `function apply(open){workspace.classList.toggle("projects-open",open);workspace.classList.toggle("projects-hidden",!open);projectToggle.setAttribute("aria-expanded",String(open));}` +
   `function preferred(){return wide.matches&&saved==="open";}apply(preferred());` +
@@ -17293,7 +17310,8 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
             `<input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}">` +
             `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="select a line or file above" aria-label="file" class="mono"></label>` +
             `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div>` +
-            `<label>change requested<textarea name="note" rows="2" maxlength="2000" placeholder="Explain what should change and why" aria-label="review comment"${noted ? " autofocus" : ""}></textarea></label>` +
+            `<label>change requested<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="Explain what should change and why" aria-label="review comment" aria-describedby="comment-note-limit"${noted ? " autofocus" : ""}></textarea></label>` +
+            `<span class="meta diff-comment-limit" id="comment-note-limit">up to ${LIMITS.note} characters</span>` +
             `<button type="submit">Add comment</button></form>`
           : "") +
         (csrf !== "" && view.comments.length > 0
@@ -18366,7 +18384,8 @@ function runPage(
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
         `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="select a line above" aria-label="file" class="mono"></label>` +
         `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div>` +
-        `<label>change requested<textarea name="note" rows="2" maxlength="2000" placeholder="Explain what should change and why" aria-label="review comment"${noted ? " autofocus" : ""}></textarea></label>` +
+        `<label>change requested<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="Explain what should change and why" aria-label="review comment" aria-describedby="comment-note-limit"${noted ? " autofocus" : ""}></textarea></label>` +
+        `<span class="meta diff-comment-limit" id="comment-note-limit">up to ${LIMITS.note} characters</span>` +
         `<button type="submit">Add annotation</button></form>`;
   // The device-side half of the editor-link activation (arc 6, finding 1):
   // rendered only when the server capability exists and this run belongs
@@ -18481,11 +18500,15 @@ function runPage(
  * A pin or file button copies its target into the comment form and focuses
  * the note field. No fetch, endpoint, or submit: comments still leave
  * through the same CSRF'd form POST. Reads data attributes, writes input
- * values, and flips presentational state — never markup.
+ * values, and flips presentational state — never markup. The note counter
+ * (follow-up on build 1540) reads the textarea's own maxlength — the
+ * server's LIMITS.note — into the helper text, so the two cannot drift.
  */
 function prefillScript(): string {
   return (
     `(function(){var form=document.getElementById("comment-form");if(!form)return;var review=document.querySelector("[data-review-diff]");` +
+    `var noteBox=form.querySelector("[name=note]"),limit=document.getElementById("comment-note-limit");if(noteBox&&limit&&noteBox.maxLength>0){` +
+    `function tally(){limit.textContent=noteBox.value.length===0?"up to "+noteBox.maxLength+" characters":noteBox.value.length+" of "+noteBox.maxLength+" characters";}tally();noteBox.addEventListener("input",tally);}` +
     `if(review){review.setAttribute("data-mode","view");review.addEventListener("click",function(ev){` +
     `var mode=ev.target&&ev.target.closest?ev.target.closest("button[data-diff-mode]"):null;if(!mode)return;` +
     `var value=mode.getAttribute("data-diff-mode")==="annotate"?"annotate":"view";review.setAttribute("data-mode",value);` +

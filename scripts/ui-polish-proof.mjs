@@ -2,7 +2,9 @@
  * headless Chromium, captures exact-viewport screenshots, and records the
  * measurable facts the assessment cites: document overflow, composer /
  * tab-bar overlap, keyboard reach, reduced-motion computed styles, and the
- * served payload sizes of the same representative pages.
+ * served payload sizes of the same representative pages. The follow-up on
+ * build 1540 adds a NEW empty conversation per desktop viewport (1440×900,
+ * 1280×800) and the review annotation forms' advertised character limit.
  *
  *   node scripts/ui-polish-proof.mjs [--out evidence/ui-polish-2026-09-13/after] [--strict]
  *
@@ -30,7 +32,7 @@ async function loadPlaywright() {
   throw new Error('playwright not found: install it, or set PLAYWRIGHT_MODULE to its index.mjs');
 }
 
-const VIEWPORTS = { desktop: { width: 1440, height: 900 }, phone: { width: 390, height: 844 }, narrow: { width: 320, height: 740 }, wide: { width: 430, height: 932 } };
+const VIEWPORTS = { desktop: { width: 1440, height: 900 }, laptop: { width: 1280, height: 800 }, phone: { width: 390, height: 844 }, narrow: { width: 320, height: 740 }, wide: { width: 430, height: 932 } };
 const report = { generatedAt: new Date().toISOString(), out, checks: [], payloads: {}, screenshots: [] };
 const check = (name, ok, detail) => { report.checks.push({ name, ok: Boolean(ok), detail }); console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`); };
 
@@ -175,6 +177,14 @@ try {
   await payload(page, `/r/${fixture.runId}`, 'run-page');
   await page.click('button[data-diff-mode="annotate"]');
   await page.click('button.diff-annotate.pick-line >> nth=0');
+  // Follow-up on build 1540: the form advertises the server's own 500-character
+  // limit, the helper says so, the counter follows typing, and the browser
+  // stops a 501st character before any submission is discarded.
+  const noteLimit = await page.evaluate(() => { const box = document.querySelector('#comment-form textarea[name="note"]'); const helper = document.getElementById(box?.getAttribute('aria-describedby') ?? ''); return { maxlength: box?.getAttribute('maxlength'), helper: helper?.textContent ?? null }; });
+  check('followup c2 run-page annotation form advertises maxlength 500 with helper text', noteLimit.maxlength === '500' && noteLimit.helper === 'up to 500 characters', JSON.stringify(noteLimit));
+  await page.fill('#comment-form textarea[name="note"]', 'x'.repeat(600));
+  const overfull = await page.evaluate(() => ({ length: document.querySelector('#comment-form textarea[name="note"]').value.length, helper: document.getElementById('comment-note-limit')?.textContent ?? null }));
+  check('followup c2 run-page annotation form caps typing at 500 and the counter says so', overfull.length === 500 && overfull.helper === '500 of 500 characters', JSON.stringify(overfull));
   await page.fill('#comment-form textarea[name="note"]', 'Name the rounding helper and reuse it in settleAll.');
   await scrollTo(page, '[data-review-diff]');
   await shot(page, 'result-annotate-390', 'Annotate mode on the sealed diff with a line picked into the comment form (fixture)');
@@ -240,6 +250,10 @@ try {
   await shot(page, 'result-desktop', 'Finished task at 1440×900 (fixture)');
   await page.goto(`${fixture.url}/review?task=${fixture.tasks.done}`);
   await shot(page, 'review-cockpit-desktop', 'Review cockpit for the finished task at 1440×900 (fixture)');
+  const cockpitLimit = await page.evaluate(() => { const box = document.querySelector('#comment-form textarea[name="note"]'); const helper = document.getElementById(box?.getAttribute('aria-describedby') ?? ''); return { maxlength: box?.getAttribute('maxlength'), helper: helper?.textContent ?? null }; });
+  check('followup c2 review-cockpit annotation form advertises maxlength 500 with helper text', cockpitLimit.maxlength === '500' && cockpitLimit.helper === 'up to 500 characters', JSON.stringify(cockpitLimit));
+  await page.fill('#comment-form textarea[name="note"]', 'y'.repeat(12));
+  check('followup c2 review-cockpit counter follows typing', (await page.evaluate(() => document.getElementById('comment-note-limit')?.textContent)) === '12 of 500 characters');
   await desktop.ctx.close();
 
   // Confirm the ordinary scope revision LAST (it rewrites the long scope
@@ -268,6 +282,43 @@ try {
   check('c5 reduced motion removes the thinking pulse and control transitions', motion.orbAnimation === 'none' && /^(0s(, 0s)*)$/.test(motion.buttonTransition) && /^(0s(, 0s)*)$/.test(motion.tabTransition), JSON.stringify(motion));
   await waitForReply(reduced.page);
   await reduced.ctx.close();
+
+  // ---- fresh EMPTY conversation per desktop viewport (follow-up c1) ------
+  // Each size ends the conversation the phone steps built and mints a NEW
+  // one, so the measured page is the first-use state, not phone history.
+  for (const [name, viewport] of Object.entries({ '1440x900': VIEWPORTS.desktop, '1280x800': VIEWPORTS.laptop })) {
+    const fresh = await context(viewport);
+    const p = fresh.page;
+    await p.goto(`${fixture.url}/chat`);
+    if (await p.$('form[action="/chat/mate/end"]')) {
+      await p.evaluate(() => { const details = document.querySelector('.chat-session-details'); if (details) details.open = true; });
+      await submit(p, 'form[action="/chat/mate/end"] button[type="submit"]');
+    }
+    check(`followup c1 ${name} starts from no conversation`, (await p.$('form[action="/chat/mate/mint"]')) !== null && (await p.$('.composer')) === null);
+    await p.fill('form[action="/chat/mate/mint"] input[name="token"]', fixture.password);
+    await submit(p, 'form[action="/chat/mate/mint"] button[type="submit"]');
+    const state = await p.evaluate(() => ({ messages: document.querySelectorAll('.msg').length, empty: document.querySelector('.chat-empty') !== null, scrollY: window.scrollY, overviewOpen: document.querySelector('.chat-fleet-context')?.open ?? null, summary: document.querySelector('.chat-fleet-context > summary')?.textContent ?? null }));
+    check(`followup c1 ${name} conversation is new and empty`, state.messages === 0 && state.empty && state.scrollY === 0, JSON.stringify(state));
+    await shot(p, `chat-fresh-${name}`, `A NEW empty conversation at ${viewport.width}×${viewport.height}: the folded overview summary, the whole composer and send in the first viewport (fixture)`);
+    const box = await rect(p, '.composer textarea');
+    const sendButton = await rect(p, '.composer button[type="submit"]');
+    const fits = one => one !== null && one.top >= 0 && one.bottom <= viewport.height && one.left >= 0 && one.right <= viewport.width;
+    check(`followup c1 ${name} the ENTIRE textarea is inside the first viewport`, fits(box), JSON.stringify(box));
+    check(`followup c1 ${name} the ENTIRE send button is inside the first viewport`, fits(sendButton), JSON.stringify(sendButton));
+    check(`followup c1 ${name} no horizontal overflow`, (await noOverflow(p)).ok);
+    const summaryRect = await rect(p, '.chat-fleet-context > summary');
+    check(`followup c1 ${name} overview is folded behind a visible summary with its counts`, state.overviewOpen === false && summaryRect !== null && summaryRect.height > 0 && /needs? you|nothing waiting/.test(state.summary ?? '') && /building/.test(state.summary ?? ''), JSON.stringify({ open: state.overviewOpen, summary: state.summary, summaryRect }));
+    // Accessible: the summary takes focus and Enter opens the full overview.
+    await p.focus('.chat-fleet-context > summary');
+    await p.keyboard.press('Enter');
+    await p.waitForTimeout(100);
+    const opened = await p.evaluate(() => ({ open: document.querySelector('.chat-fleet-context')?.open ?? null, overview: document.querySelector('.chat-overview')?.getBoundingClientRect().height ?? 0 }));
+    check(`followup c1 ${name} overview opens by keyboard from its summary`, opened.open === true && opened.overview > 0, JSON.stringify(opened));
+    await p.keyboard.press('Enter');
+    await p.waitForTimeout(100);
+    check(`followup c1 ${name} overview closes again by keyboard`, (await p.evaluate(() => document.querySelector('.chat-fleet-context')?.open)) === false);
+    await fresh.ctx.close();
+  }
 
   // Motion properties: no transition or animation may drive layout or blur.
   const html = await (await (await browser.newContext()).newPage()).goto(`${fixture.url}/login`).then(r => r.text());

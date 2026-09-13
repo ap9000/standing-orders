@@ -101,6 +101,7 @@ Captured screenshots (viewports, not stitched pages; every one labeled
 | Chat ready, 390×844 | `after/chat-ready-390.png` (before: `before/chat-ready-390.png`) |
 | Chat ready, 320×740 / 430×932 | `after/chat-ready-320.png`, `after/chat-ready-430.png` |
 | Chat, 1440×900 | `after/chat-ready-desktop.png` (before: `before/chat-ready-desktop.png`) |
+| NEW empty conversation, 1440×900 / 1280×800 (follow-up on build 1540) | `after/chat-fresh-1440x900.png`, `after/chat-fresh-1280x800.png` |
 | Pending reply | `after/chat-pending-390.png` |
 | Hold proposal card | `after/chat-action-card-390.png` |
 | Ordinary revision (scope rewrite card) | `after/chat-scope-revision-390.png` |
@@ -119,10 +120,10 @@ Captured screenshots (viewports, not stitched pages; every one labeled
 | --- | --- |
 | `npm run typecheck` | pass (exit 0) |
 | `npm run build` | pass (exit 0) |
-| `npx vitest run src/serve.test.ts src/chat-continuity.test.ts src/mate-continuity.test.ts src/recipe-surface.test.ts src/recipes.test.ts` | 5 files, 297 tests passed |
-| `npx vitest run src/serve.test.ts src/chat-continuity.test.ts src/mate-continuity.test.ts` | 3 files, 278 passed |
-| `npx vitest run` (full suite) | 161 files; 2785 passed, 23 platform skips; 71 s |
-| `node scripts/ui-polish-proof.mjs --out evidence/ui-polish-2026-09-13/after --strict` | 55/55 checks passed, 19 screenshots (exit 0) |
+| `npx vitest run src/serve.test.ts src/chat-continuity.test.ts src/mate-continuity.test.ts src/recipe-surface.test.ts src/recipes.test.ts` | 5 files, 297 tests passed (build 1540); 299 after the follow-up below |
+| `npx vitest run src/serve.test.ts src/chat-continuity.test.ts src/mate-continuity.test.ts` | 3 files, 278 passed (build 1540) |
+| `npx vitest run` (full suite) | 161 files; 2785 passed, 23 platform skips; 71 s (build 1540) — see the follow-up section for the re-run |
+| `node scripts/ui-polish-proof.mjs --out evidence/ui-polish-2026-09-13/after --strict` | 55/55 checks passed, 19 screenshots (build 1540); 75/75 and 21 screenshots after the follow-up |
 | `node scripts/ui-polish-proof.mjs --out evidence/ui-polish-2026-09-13/before` (run against the unmodified build) | 48/54 checks passed — the six failures are the defects this pass fixes (start action at y = 946 px, 15 px composer, no Review-scope jump, pulse alive under reduced motion, `grid-template-columns` transition, `rise` animating margin); the 55th check (switcher placement) was added after the baseline run |
 
 New deterministic coverage in `src/serve.test.ts`: chat page order (start
@@ -185,6 +186,106 @@ grows 29 bytes (focus return on Escape). No page-load resource was added.
 | c4 — no overflow / overlap at 320, 390, 430; keyboard-usable | checks `c4 …`; `after/chat-ready-320.png`, `after/chat-ready-430.png`, `after/task-approval-320.png`, `after/nav-open-390.png` |
 | c5 — reduced motion, no new dependency, no animated layout/blur, payload measured | checks `c5 …`; payload table above; `package.json` unchanged |
 | c6 — build and focused continuity checks pass; assessment maps evidence | command table above; this document |
+
+## Follow-up on build 1540 (two annotations, 13 September 2026)
+
+The operator's two comments on the sealed diff of build 1540, applied as a
+narrow repair on the same branch. No dependency, migration, permission,
+backend, deployment, push, or merge; both revision modes and every approval
+term stay as they were.
+
+### Annotation 88 — the fresh desktop chat clipped its composer
+
+A NEW conversation on a desk (after the mint, before the first message)
+rendered the portfolio overview forced open above a centered empty state:
+at 1440×900 the textarea sat at y 883–939 and the send control below the
+fold; at 1280×800 both were off-screen. The earlier desktop capture
+(`after/chat-ready-desktop.png`) reused the phone's history, which is
+why the proof did not see it.
+
+- `src/serve.ts` — behind `@media (min-width: 761px)`, only while the
+  thread is empty (`.chat-main:has(.chat-empty)`): the `chat-fleet-context`
+  disclosure keeps its summary row visible (previously `display: none` on
+  a desk), so the overview folds behind "Project overview · N need you ·
+  N building"; the `<summary>` is the native disclosure control, focusable
+  and toggled by Enter/Space. The thread drops its `min(32rem, 48vh)`
+  minimum and the empty state's `clamp(3rem, 9vh, 6rem)` top padding
+  becomes `clamp(1.25rem, 4vh, 2.25rem)`. The chrome script no longer
+  forces the disclosure open when `.chat-empty` is on the page; with
+  messages present the desk behavior is unchanged (overview open, summary
+  hidden). The summary's amber needs-you rule moved from the phone block to
+  the base stylesheet so the amber law's selector list is unchanged.
+- Phone: no rule in the phone block changed; the new rules are desk-only.
+  The 320/390/430 captures from build 1540 are byte-identical after the
+  re-run (`chat-start-390`, `chat-ready-320/390/430`, `nav-open-390`),
+  and so is `chat-ready-desktop.png` (a thread with history).
+- Measured after the change (`after/report.json`, `followup c1 …`
+  checks, each on a NEW empty conversation minted in its own context after
+  ending the previous one):
+
+| Viewport | textarea (top–bottom) | send (top–bottom) | overview | page scroll |
+| --- | --- | --- | --- | --- |
+| 1440×900 | y 464–520 | y 476–520 | folded; summary y 191–231 | none (document = viewport) |
+| 1280×800 | y 460–516 | y 472–516 | folded; summary y 191–231 | none |
+
+  With the overview opened from its summary the send control still ends
+  at y 736 (1440×900) / 732 (1280×800), inside the viewport.
+
+### Annotation 89 — the annotation form advertised 2000, the server allowed 500
+
+Both review annotation textareas (the run page's "request changes" form
+and the review cockpit's form, the same `/r/:id/comment` endpoint) carried
+`maxlength="2000"` while `validateNote` in `src/decision.ts` refuses
+anything over `LIMITS.note` = 500 characters, so a long note was typed in
+full and then discarded onto the refusal page.
+
+- `src/serve.ts` — both textareas now render `maxlength="${LIMITS.note}"`
+  (500, the server's own constant, never a second number), with a helper
+  `up to 500 characters` that the textarea names through
+  `aria-describedby`. The existing prefill script (already on both pages)
+  updates the same helper to `N of 500 characters` while typing; it reads
+  the textarea's own `maxLength`, so the two cannot drift. The server rule
+  is untouched; the refusal for an over-long POST is the same sentence as
+  before.
+- Coverage: `src/serve.test.ts` — the run page advertises 500 with the
+  helper and counter, no `maxlength="2000"` remains, a 500-character note
+  lands and a 501-character note is refused with "a note is at most 500
+  characters" leaving the batch unchanged; the review cockpit form carries
+  the same attribute and helper. Browser: `followup c2 …` checks type 600
+  characters into the run-page form and read back 500 with the counter at
+  "500 of 500 characters"; the cockpit form reads "12 of 500 characters"
+  after 12 keystrokes.
+
+### Follow-up validation — exact commands and results
+
+| Command | Result |
+| --- | --- |
+| `npm run typecheck` | pass (exit 0) |
+| `npm run build` | pass (exit 0) |
+| `npx vitest run src/serve.test.ts src/chat-continuity.test.ts src/mate-continuity.test.ts src/recipe-surface.test.ts src/recipes.test.ts` | 5 files, 299 passed (297 + the two follow-up tests) |
+| `npx vitest run` (full suite) | 161 files; 2787 passed (2785 + 2), 23 platform skips; 68 s (exit 0) |
+| `node scripts/ui-polish-proof.mjs --out evidence/ui-polish-2026-09-13/after --strict` | 75/75 checks passed, 21 screenshots (exit 0): the 55 checks of build 1540 by their exact names, all passing, plus 20 `followup …` checks |
+
+New browser checks (`after/report.json`): per desktop viewport — starts
+from no conversation, the minted conversation is new and empty at scroll 0,
+the ENTIRE textarea and the ENTIRE send button lie inside the viewport, no
+horizontal overflow, the overview is folded behind a visible summary with
+its counts, the overview opens and closes again from the summary by
+keyboard (8 × 2); the two annotation forms' limit, helper, and counter (4).
+
+Re-captured screenshots: `after/chat-fresh-1440x900.png` and
+`after/chat-fresh-1280x800.png` are new; `after/review-cockpit-desktop.png`
+now shows the helper under the annotation form; `after/chat-pending-390.png`
+differs only by the thinking pulse's frame at capture time, and
+`after/result-annotate-390.png` by the scroll position after the new
+600-character fill that precedes it. Every other capture from build 1540
+(all 16) is byte-identical.
+
+Served payload, same fixture pages, build 1540 → follow-up (bytes): inline
+CSS 161 248 → 162 922 (+1 674: the desk-only fresh-thread rules, the helper
+rule, and their comments); chat JS 4 122 → 4 162 (+40); run page JS 7 554 →
+7 903 (+349, the counter); run page HTML 193 436 → 195 585. No page-load
+resource was added; `package.json` and the lockfile are untouched.
 
 ## Limitations
 

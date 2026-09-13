@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-09-13T18:44:32.242Z",
-  "out": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after",
+  "generatedAt": "2026-09-13T19:05:26.561Z",
+  "out": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after",
   "checks": [
     {
       "name": "c1 chat start action inside the first 390px viewport",
@@ -98,6 +98,16 @@
     {
       "name": "c3 result receipt renders outcome and proof",
       "ok": true
+    },
+    {
+      "name": "followup c2 run-page annotation form advertises maxlength 500 with helper text",
+      "ok": true,
+      "detail": "{\"maxlength\":\"500\",\"helper\":\"up to 500 characters\"}"
+    },
+    {
+      "name": "followup c2 run-page annotation form caps typing at 500 and the counter says so",
+      "ok": true,
+      "detail": "{\"length\":500,\"helper\":\"500 of 500 characters\"}"
     },
     {
       "name": "c3 annotation recorded on the sealed diff",
@@ -230,6 +240,15 @@
       "ok": true
     },
     {
+      "name": "followup c2 review-cockpit annotation form advertises maxlength 500 with helper text",
+      "ok": true,
+      "detail": "{\"maxlength\":\"500\",\"helper\":\"up to 500 characters\"}"
+    },
+    {
+      "name": "followup c2 review-cockpit counter follows typing",
+      "ok": true
+    },
+    {
       "name": "c3 ordinary scope revision confirmed through its card",
       "ok": true
     },
@@ -241,6 +260,80 @@
       "name": "c5 reduced motion removes the thinking pulse and control transitions",
       "ok": true,
       "detail": "{\"orbAnimation\":\"none\",\"buttonTransition\":\"0s\",\"tabTransition\":\"0s\"}"
+    },
+    {
+      "name": "followup c1 1440x900 starts from no conversation",
+      "ok": true
+    },
+    {
+      "name": "followup c1 1440x900 conversation is new and empty",
+      "ok": true,
+      "detail": "{\"messages\":0,\"empty\":true,\"scrollY\":0,\"overviewOpen\":false,\"summary\":\"Project overview2 need you · 0 building\"}"
+    },
+    {
+      "name": "followup c1 1440x900 the ENTIRE textarea is inside the first viewport",
+      "ok": true,
+      "detail": "{\"top\":464.46875,\"bottom\":520.46875,\"left\":284.1875,\"right\":1099.8125,\"width\":815.625,\"height\":56}"
+    },
+    {
+      "name": "followup c1 1440x900 the ENTIRE send button is inside the first viewport",
+      "ok": true,
+      "detail": "{\"top\":476.46875,\"bottom\":520.46875,\"left\":1111.8125,\"right\":1155.8125,\"width\":44,\"height\":44}"
+    },
+    {
+      "name": "followup c1 1440x900 no horizontal overflow",
+      "ok": true
+    },
+    {
+      "name": "followup c1 1440x900 overview is folded behind a visible summary with its counts",
+      "ok": true,
+      "detail": "{\"open\":false,\"summary\":\"Project overview2 need you · 0 building\",\"summaryRect\":{\"top\":190.609375,\"bottom\":230.609375,\"left\":273,\"right\":1167,\"width\":894,\"height\":40}}"
+    },
+    {
+      "name": "followup c1 1440x900 overview opens by keyboard from its summary",
+      "ok": true,
+      "detail": "{\"open\":true,\"overview\":262.6875}"
+    },
+    {
+      "name": "followup c1 1440x900 overview closes again by keyboard",
+      "ok": true
+    },
+    {
+      "name": "followup c1 1280x800 starts from no conversation",
+      "ok": true
+    },
+    {
+      "name": "followup c1 1280x800 conversation is new and empty",
+      "ok": true,
+      "detail": "{\"messages\":0,\"empty\":true,\"scrollY\":0,\"overviewOpen\":false,\"summary\":\"Project overview2 need you · 0 building\"}"
+    },
+    {
+      "name": "followup c1 1280x800 the ENTIRE textarea is inside the first viewport",
+      "ok": true,
+      "detail": "{\"top\":460.46875,\"bottom\":516.46875,\"left\":284.1875,\"right\":1099.8125,\"width\":815.625,\"height\":56}"
+    },
+    {
+      "name": "followup c1 1280x800 the ENTIRE send button is inside the first viewport",
+      "ok": true,
+      "detail": "{\"top\":472.46875,\"bottom\":516.46875,\"left\":1111.8125,\"right\":1155.8125,\"width\":44,\"height\":44}"
+    },
+    {
+      "name": "followup c1 1280x800 no horizontal overflow",
+      "ok": true
+    },
+    {
+      "name": "followup c1 1280x800 overview is folded behind a visible summary with its counts",
+      "ok": true,
+      "detail": "{\"open\":false,\"summary\":\"Project overview2 need you · 0 building\",\"summaryRect\":{\"top\":190.609375,\"bottom\":230.609375,\"left\":273,\"right\":1167,\"width\":894,\"height\":40}}"
+    },
+    {
+      "name": "followup c1 1280x800 overview opens by keyboard from its summary",
+      "ok": true,
+      "detail": "{\"open\":true,\"overview\":262.6875}"
+    },
+    {
+      "name": "followup c1 1280x800 overview closes again by keyboard",
+      "ok": true
     },
     {
       "name": "c5 no transition animates a layout dimension or blur",
@@ -261,111 +354,119 @@
   "payloads": {
     "chat-start": {
       "path": "/chat",
-      "htmlBytes": 179090,
-      "inlineCssBytes": 161248,
-      "inlineJsBytes": 4122
+      "htmlBytes": 180804,
+      "inlineCssBytes": 162922,
+      "inlineJsBytes": 4162
     },
     "chat-ready": {
       "path": "/chat",
-      "htmlBytes": 193666,
-      "inlineCssBytes": 161286,
-      "inlineJsBytes": 14618
+      "htmlBytes": 195380,
+      "inlineCssBytes": 162960,
+      "inlineJsBytes": 14658
     },
     "task-approval": {
       "path": "/t/ledger-export",
-      "htmlBytes": 196062,
-      "inlineCssBytes": 161248,
+      "htmlBytes": 197736,
+      "inlineCssBytes": 162922,
       "inlineJsBytes": 1037
     },
     "task-result": {
       "path": "/t/payout-rounding",
-      "htmlBytes": 196833,
-      "inlineCssBytes": 161248,
+      "htmlBytes": 198507,
+      "inlineCssBytes": 162922,
       "inlineJsBytes": 6484
     },
     "run-page": {
       "path": "/r/1",
-      "htmlBytes": 193436,
-      "inlineCssBytes": 161248,
-      "inlineJsBytes": 7554
+      "htmlBytes": 195585,
+      "inlineCssBytes": 162922,
+      "inlineJsBytes": 7903
     }
   },
   "screenshots": [
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-start-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/chat-start-390.png",
       "caption": "Chat before a conversation exists: the start action in the first 390×844 viewport (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-ready-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/chat-ready-390.png",
       "caption": "Chat ready: the composer and send control in the first 390×844 viewport (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-action-card-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/chat-action-card-390.png",
       "caption": "A hold proposal card in chat after a scripted reply (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-pending-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/chat-pending-390.png",
       "caption": "Reply in progress with the draft composer still available (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-scope-revision-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/chat-scope-revision-390.png",
       "caption": "Ordinary revision: a scope-rewrite proposal card in chat (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/nav-open-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/nav-open-390.png",
       "caption": "Mobile navigation: the project switcher open under the header (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/task-approval-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/task-approval-390.png",
       "caption": "Long task scope waiting for approval at 390×844: the next step leads (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/task-ask-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/task-ask-390.png",
       "caption": "The same task in Ask mode with the approval disclosure (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/result-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/result-390.png",
       "caption": "A finished task: outcome, changed files and proof lead (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/result-annotate-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/result-annotate-390.png",
       "caption": "Annotate mode on the sealed diff with a line picked into the comment form (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/revision-task-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/revision-task-390.png",
       "caption": "The revision task created from the annotation, its brief restated beside the approval (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-ready-320.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/chat-ready-320.png",
       "caption": "Chat ready at 320×740 (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/task-approval-320.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/task-approval-320.png",
       "caption": "Long scope approval at 320×740 (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-ready-430.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/chat-ready-430.png",
       "caption": "Chat ready at 430×932 (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-ready-desktop.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/chat-ready-desktop.png",
       "caption": "Chat at 1440×900: one conversation column, projects behind the toggle (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/task-approval-desktop.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/task-approval-desktop.png",
       "caption": "Long scope approval at 1440×900 (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/result-desktop.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/result-desktop.png",
       "caption": "Finished task at 1440×900 (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/review-cockpit-desktop.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/review-cockpit-desktop.png",
       "caption": "Review cockpit for the finished task at 1440×900 (fixture)"
     },
     {
-      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/task-rescoped-390.png",
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/task-rescoped-390.png",
       "caption": "The task after the ordinary scope revision: the rewritten terms wait for a fresh approval (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/chat-fresh-1440x900.png",
+      "caption": "A NEW empty conversation at 1440×900: the folded overview summary, the whole composer and send in the first viewport (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-revise-ux-polish-2026-09-13-from-2-annotations-on-build--bf80e5ca/evidence/ui-polish-2026-09-13/after/chat-fresh-1280x800.png",
+      "caption": "A NEW empty conversation at 1280×800: the folded overview summary, the whole composer and send in the first viewport (fixture)"
     }
   ]
 }
