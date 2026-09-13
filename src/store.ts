@@ -3358,23 +3358,31 @@ function isDatabaseBusy(error: unknown): boolean {
 }
 
 /**
- * BEGIN IMMEDIATE with its wait bounded by the monotonic clock, not by
+ * BEGIN IMMEDIATE with its wait charged by the monotonic clock, not by
  * SQLite's busy handler alone.
  *
  * The busy handler sleeps in steps (1, 2, 5 … 100 ms) and gives up when the
- * sleep it ASKED for adds up to busy_timeout — it never reads a clock. On
- * macOS every process in a launchd job without ProcessType=Interactive (the
- * desktop host, and so the worker, the verifier and its tests) runs under
- * background timer coalescing, which stretches each of those sleeps by up
- * to ~100 ms: five nominal seconds took ~12 real ones, and a persistent lock
- * overran the ten-second test bound in builds 1540/1541
- * (docs/assessments/WORKSPACE_0_RESULT_2026-09-13.md). Here each attempt
- * spends one short slice in SQLite and the budget is charged by
- * performance.now(), so the refusal lands within the budget plus at most
- * one slice in every scheduling tier. Only the BEGIN itself is retried: a
- * body never runs before its connection holds the write lock, so nothing
- * is partially written or replayed. The connection's own busy_timeout is
- * restored whichever way the loop ends.
+ * sleep it ASKED for adds up to busy_timeout — it never reads a clock. In
+ * the process tree where builds 1540/1541 ran (a launchd job that sets no
+ * ProcessType; measurements in docs/assessments/WORKSPACE_0_RESULT_2026-09-13.md)
+ * each of those sleeps was observed stretched by up to ~100 ms, so five
+ * nominal seconds took ~12 real ones and a persistent lock overran the
+ * ten-second test bound. Here each attempt spends one short slice in
+ * SQLite and the budget is accounted in elapsed performance.now() time:
+ * the loop stops retrying once the budget has elapsed, so the refusal
+ * lands within the budget plus the ACTUAL latency of one attempt. That is
+ * elapsed-time accounting, not a hard deadline — one attempt is a blocking
+ * SQLite call, and if the OS suspends or stretches it (sleep, heavy
+ * throttling) the refusal can arrive later than budget + one nominal slice.
+ * Only the BEGIN itself is retried: a body never runs before its
+ * connection holds the write lock, so nothing is partially written or
+ * replayed. The connection's own busy_timeout is restored whichever way
+ * the loop ends.
+ *
+ * Coverage: only Store.transact begins its write through this door.
+ * Autocommit statements and the other BEGIN IMMEDIATEs in this file
+ * (migrate and the per-version table rebuilds) keep the plain busy_timeout
+ * wait, which is still counted in nominal sleep.
  */
 function beginWriteWithin(db: Database, budgetMs: number): void {
   const deadline = performance.now() + budgetMs;
