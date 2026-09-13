@@ -3857,7 +3857,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     });
     // And chat now answers on this very page.
     const on = await (await fetch(url("/chat"), { headers: { cookie } })).text();
-    expect(on).toContain("answering with");
+    expect(on).toContain('<details class="chat-limits"><summary>Model &amp; limits');
 
     // Off again — password too.
     const off = await fetch(url("/chat/config"), {
@@ -3906,7 +3906,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
 
       // Chat is ON with the stored key; the page shows a tail, never the key.
       html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
-      expect(html).toContain("answering with");
+      expect(html).toContain('<details class="chat-limits"><summary>Model &amp; limits');
       expect(html).toContain("stored");
       expect(html).not.toContain(secret);
       // The database carries no key anywhere.
@@ -5370,8 +5370,10 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     // for free; no bespoke widget or extra ARIA wiring was added for it.
     expect(home).toContain('button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }');
     expect(home).toContain('.nav-group > summary .chevron { width: .875rem; height: .875rem; flex: none; transition: transform .15s; }');
-    // The rotation is real motion, so it dies under prefers-reduced-motion.
-    expect(home).toContain('.app, button, .side nav a, .nav-group > summary .chevron, .chat-project-card { transition: none; }');
+    // The rotation is real motion, so it dies under prefers-reduced-motion —
+    // universally, since the UI polish pass (2026-09-13): every animation
+    // and transition, not a hand-kept list of selectors.
+    expect(home).toContain('@media (prefers-reduced-motion: reduce) {\n  *, *::before, *::after { animation: none !important; transition: none !important; }');
   });
 
   test("the board keeps its poller privileges: connect-src, the noscript opt-out, and swap preservation", async () => {
@@ -5455,7 +5457,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     expect(ceremonyMarker).toBeGreaterThan(-1);
     const approveForm = page.slice(ceremonyStart, ceremonyEnd);
     const ceremonyAcceptance = approveForm.indexOf(">acceptance<");
-    const ceremonySeal = approveForm.indexOf("your password, typed again");
+    const ceremonySeal = approveForm.indexOf('<div class="approval-confirm" id="approval-confirm">');
     expect(ceremonyAcceptance).toBeGreaterThan(-1);
     expect(ceremonyAcceptance).toBeLessThan(ceremonySeal);
     expect(approveForm).toContain("<code>c1</code> The payout guard rejects a negative amount.");
@@ -5704,6 +5706,24 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       await activate(cookie, false);
       const off = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
       expect(off).not.toContain("vscode://");
+    });
+
+    test("UI polish 2026-09-13: a finished build leads with its result and diff; the machine facts fold under Build details", async () => {
+      const cookie = await login();
+      const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
+      const details = html.indexOf('<details class="run-facts-details"><summary>Build details<span class="meta">builder-1 · claude · built</span></summary><div id="run-facts">');
+      const diff = html.indexOf('<div class="diff-review" data-review-diff>');
+      const review = html.indexOf('<h2 id="review">Review and revise</h2>');
+      expect(details).toBeGreaterThan(-1);
+      expect(diff).toBeGreaterThan(-1);
+      expect(review).toBeGreaterThan(diff);
+      expect(details).toBeGreaterThan(review);
+      // The annotation road is intact: the mode switch, the line pins, the form, no revision until a comment exists.
+      expect(html).toContain('<button type="button" data-diff-mode="annotate" aria-pressed="false">Annotate</button>');
+      expect(html).toContain('id="comment-form"');
+      expect(html).not.toContain("Create revision from annotations");
+      // No stamp region on a finished build: nothing polls the folded facts.
+      expect(html).not.toContain('id="run-facts-stamp"');
     });
 
     test("a run owned by ANOTHER runner never links and never offers", async () => {
@@ -8322,6 +8342,25 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(page).toContain('<span class="approval-kicker">ready to run · approve exactly this:</span>');
     expect(page).toContain("Review the proposed scope");
     expect(page).toContain('href="#scope">Edit details</a>');
+    // The orientation (UI polish 2026-09-13): the wait, the size of the
+    // terms, the "Review scope" road — then every term in full, grouped,
+    // and the confirm block reachable by its own anchor. Nothing trims.
+    const orient = page.indexOf('<div class="approval-orient" data-approval-orient>');
+    const terms = page.indexOf('<div class="approval-terms" id="approval-terms">');
+    const confirm = page.indexOf('<div class="approval-confirm" id="approval-confirm">');
+    expect(orient).toBeGreaterThan(ceremony);
+    expect(terms).toBeGreaterThan(orient);
+    expect(confirm).toBeGreaterThan(terms);
+    expect(page).toContain("<strong>Waiting for your approval.</strong> Nothing builds until your password confirms the exact terms below.");
+    expect(page).toContain("0 acceptance criteria · 1 path limit · exclusions stated · every term is shown in full.");
+    expect(page).toContain('<a class="button-link" href="#approval-terms">Review scope ↓</a><a href="#approval-confirm">Approve after reading ↓</a>');
+    expect(page.slice(terms, confirm)).toContain('<p class="approval-goal">the goal</p>');
+    expect(page.slice(terms, confirm)).toContain('<ul class="approval-paths"><li><span class="mono">src/a.ts</span></li></ul>');
+    expect(page.slice(terms, confirm)).toContain("not that");
+    // The recipe road rides with the scope section, off the title-to-action path.
+    expect(page.indexOf("Reuse this scope as a recipe")).toBeGreaterThan(page.indexOf('<details class="section" id="scope"'));
+    // Both views stay one tap apart.
+    expect(page).toContain('<a href="/t/t-yes" class="active" aria-current="page">Overview</a><a href="/chat?task=t-yes">Ask</a>');
     expect(page).toContain('name="username" autocomplete="username" class="visually-hidden"');
     expect(page).toContain('<details class="section" id="scope"><summary><h2>scope</h2></summary>');
     expect(page).toContain("approve exactly this:");
@@ -8515,7 +8554,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toContain("use your judgment");
     expect(thread).toContain('>new task</button>');
     expect(thread).toContain("this conversation: $0.00 of $5.00");
-    expect(thread).toContain("stays live until you end it");
+    expect(thread).toContain("It stays open until you end it");
     expect(thread).toContain('action="/chat/mate/end"');
   });
 
@@ -8905,6 +8944,56 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).not.toContain('class="thread"');
   });
 
+  test("UI polish 2026-09-13: the start action leads the chat page, the overview folds, and provider limits sit under one disclosure", async () => {
+    const cookie = await login();
+    const before = await page(cookie);
+    const mintAt = before.indexOf('<div class="card mate-mint" id="latest">');
+    const overviewAt = before.indexOf('<details class="chat-fleet-context"><summary>Project overview<span class="meta">');
+    const limitsAt = before.indexOf('<details class="chat-limits"><summary>Model &amp; limits');
+    expect(mintAt).toBeGreaterThan(-1);
+    expect(overviewAt).toBeGreaterThan(mintAt);
+    expect(limitsAt).toBeGreaterThan(overviewAt);
+    // The overview is not forced open on the server; the chrome script
+    // opens it on a desk, so a phone reads the start card first.
+    expect(before).not.toContain('<details class="chat-fleet-context" open>');
+    // The start card speaks plainly and its act is the primary button.
+    expect(before).toContain("<strong>Start a conversation</strong>");
+    expect(before).toContain("<button type=\"submit\">Start the conversation</button>");
+    expect(before).not.toContain("talk to the mate");
+    expect(before).not.toContain(">unified workspace</span>");
+    // The provider bar is gone from the top: no bare "answering with" row.
+    expect(before).not.toContain("answering with");
+    expect(before).toContain('<div class="chat-budget"><span class="mono">anthropic-api · claude-sonnet-5</span><span>0 / 50 turns today</span><span>this week $0.00 of $100.00</span></div>');
+    // The project rail defaults to closed everywhere; the toggle says so.
+    expect(before).toContain('class="chat-project-toggle quiet" aria-controls="chat-project-panel" aria-expanded="false"');
+    expect(before).toContain('return wide.matches&&saved==="open";');
+    // Escape closes the drawer and returns focus to its toggle.
+    expect(before).toContain('if(ev.key==="Escape"&&workspace.classList.contains("projects-open")){apply(false);projectToggle.focus();}');
+
+    // Once a conversation is live: the same disclosure carries the
+    // session's own ceiling, the top of the page is heading → overview
+    // (folded) → thread, and "conversation live" is the only badge.
+    await mint(cookie);
+    const live = await page(cookie);
+    expect(live).toContain('<span class="badge badge-running">conversation live</span>');
+    expect(live).not.toContain("answering with");
+    expect(live).toContain('<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">anthropic-api</span></summary>');
+    expect(live).toContain("<span>this conversation: $0.00 of $50.00</span>");
+    expect(live.indexOf('<details class="chat-fleet-context"><summary>Project overview<span class="meta">')).toBeLessThan(live.indexOf('<div class="thread">'));
+    expect(live.indexOf('<div class="thread">')).toBeLessThan(live.indexOf('class="card composer"'));
+  });
+
+  test("UI polish 2026-09-13: a membership never shows a dollar figure as a charge on the chat page", async () => {
+    store.setChatConfig({ provider: "codex-subscription", model: "default", dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, "alex", T0);
+    const cookie = await login();
+    const html = await page(cookie);
+    expect(html).toContain('<details class="chat-limits"><summary>Model &amp; limits<span class="meta">membership</span></summary>');
+    expect(html).toContain("<span>membership login · no dollar ceiling</span>");
+    expect(html).toContain("Uses your logged-in Codex membership. No dollar maximum applies.");
+    const limits = /<details class="chat-limits">.*?<\/details>/s.exec(html)?.[0] ?? "";
+    expect(limits).not.toContain("$0.00");
+  });
+
   test("a viewer sees no mint card and cannot mint; a stale-ceiling GET writes nothing", async () => {
     const cookie = await login();
     const csrf = csrfFrom(await page(cookie));
@@ -8926,7 +9015,12 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const live = store.activeMateSession("alex")!;
     store.handle.prepare("UPDATE mate_session SET ceiling_digest = ? WHERE id = ?").run("f".repeat(64), live.id);
     const html = await page(cookie);
-    expect(html).toContain("the admitted projects changed since your mate session was minted");
+    expect(html).toContain("Your projects changed since this conversation started. Start a new conversation below to continue");
+    // Plain words, not internals (UI polish 2026-09-13): no "admitted",
+    // "minted", or "ceiling" reaches the person; the required road — a
+    // new password ceremony — is still the only one offered.
+    expect(html).not.toContain("admitted projects");
+    expect(html).not.toContain("minted");
     expect(html).toContain('action="/chat/mate/mint"');
     expect(store.activeMateSession("alex")).not.toBeNull();
   });
@@ -9738,6 +9832,8 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
         ".lane-attention h2::before",
         ".command-metric.attention .label::before",
         ".chat-project-stats span.hot, .chat-project-stats span.hot b",
+        // The folded chat overview's needs-you count (UI polish 2026-09-13): a count, by the law.
+        ".chat-fleet-context > summary .hot",
         ".workspace-stats .pulse-stat.hot b",
         ".workspace-bar .seg.attention",
       ].sort(),

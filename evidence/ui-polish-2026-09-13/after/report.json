@@ -1,0 +1,371 @@
+{
+  "generatedAt": "2026-09-13T18:44:32.242Z",
+  "out": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after",
+  "checks": [
+    {
+      "name": "c1 chat start action inside the first 390px viewport",
+      "ok": true,
+      "detail": "{\"top\":575.734375,\"bottom\":619.734375,\"left\":41,\"right\":349,\"width\":308,\"height\":44}"
+    },
+    {
+      "name": "c1 project context is collapsed by default on the phone",
+      "ok": true,
+      "detail": "projects-open=false"
+    },
+    {
+      "name": "c1 overview disclosure is compact (closed) on the phone before a conversation",
+      "ok": true,
+      "detail": "open=false"
+    },
+    {
+      "name": "c1 start page has no horizontal overflow at 390",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "c1 composer send control inside the first 390px viewport",
+      "ok": true,
+      "detail": "{\"top\":510.5625,\"bottom\":554.5625,\"left\":321.8125,\"right\":365.8125,\"width\":44,\"height\":44}"
+    },
+    {
+      "name": "c4 composer input is at least 16px",
+      "ok": true,
+      "detail": "16px"
+    },
+    {
+      "name": "c1 plain-language session guidance is present",
+      "ok": true,
+      "detail": "Connected · changes appear as cards for you to confirm."
+    },
+    {
+      "name": "c2 hold proposal card rendered",
+      "ok": true
+    },
+    {
+      "name": "c2 hold proposal confirmed through the card",
+      "ok": true
+    },
+    {
+      "name": "c1 pending state keeps the composer visible and disabled send",
+      "ok": true
+    },
+    {
+      "name": "c3 ordinary revision card rendered",
+      "ok": true
+    },
+    {
+      "name": "c4 mobile switcher open has no horizontal overflow",
+      "ok": true
+    },
+    {
+      "name": "c4 the open switcher menu sits inside the viewport, below the header",
+      "ok": true,
+      "detail": "{\"menu\":{\"top\":96,\"bottom\":245,\"left\":8,\"right\":382,\"width\":374,\"height\":149},\"header\":{\"top\":0,\"bottom\":101,\"left\":0,\"right\":390,\"width\":390,\"height\":101}}"
+    },
+    {
+      "name": "c2 exact goal text is present in full on the approval page",
+      "ok": true
+    },
+    {
+      "name": "c2 every acceptance criterion id is on the approval page",
+      "ok": true
+    },
+    {
+      "name": "c2 Ask and Overview are both retained",
+      "ok": true
+    },
+    {
+      "name": "c2 a clear Review scope jump exists",
+      "ok": true
+    },
+    {
+      "name": "c2 the next step is inside the first 390px viewport",
+      "ok": true,
+      "detail": "{\"top\":233.6875,\"bottom\":273.46875,\"left\":49,\"right\":341,\"width\":292,\"height\":39.78125}"
+    },
+    {
+      "name": "c2 approve button and password remain on the page",
+      "ok": true
+    },
+    {
+      "name": "c4 approval page has no horizontal overflow at 390",
+      "ok": true
+    },
+    {
+      "name": "c2 Ask mode carries the approval disclosure",
+      "ok": true
+    },
+    {
+      "name": "c3 result receipt renders outcome and proof",
+      "ok": true
+    },
+    {
+      "name": "c3 annotation recorded on the sealed diff",
+      "ok": true
+    },
+    {
+      "name": "c3 revision task created from annotations and its brief restates the comment",
+      "ok": true
+    },
+    {
+      "name": "c4 revision page has no horizontal overflow at 390",
+      "ok": true
+    },
+    {
+      "name": "c4 send control reachable by keyboard within 80 tabs",
+      "ok": true
+    },
+    {
+      "name": "c4 project drawer opens by keyboard, closes on Escape, focus returns to its toggle",
+      "ok": true,
+      "detail": "opened=true closedAndReturned=true"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 320px on /chat",
+      "ok": true,
+      "detail": "{\"scrollWidth\":320,\"clientWidth\":320,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 320px on /t/ledger-export",
+      "ok": true,
+      "detail": "{\"scrollWidth\":320,\"clientWidth\":320,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 320px on /t/payout-rounding",
+      "ok": true,
+      "detail": "{\"scrollWidth\":320,\"clientWidth\":320,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 320px on /r/1",
+      "ok": true,
+      "detail": "{\"scrollWidth\":320,\"clientWidth\":320,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 320px on /menu",
+      "ok": true,
+      "detail": "{\"scrollWidth\":320,\"clientWidth\":320,\"ok\":true}"
+    },
+    {
+      "name": "c4 composer does not sit under the bottom navigation at 320px",
+      "ok": true,
+      "detail": "send.bottom=470.53125 tabbar.top=683"
+    },
+    {
+      "name": "c4 approve action clears the bottom navigation at 320px",
+      "ok": true,
+      "detail": "approve.bottom=448.625 tabbar.top=683"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 390px on /chat",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 390px on /t/ledger-export",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 390px on /t/payout-rounding",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 390px on /r/1",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 390px on /menu",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "c4 composer does not sit under the bottom navigation at 390px",
+      "ok": true,
+      "detail": "send.bottom=531.3125 tabbar.top=787"
+    },
+    {
+      "name": "c4 approve action clears the bottom navigation at 390px",
+      "ok": true,
+      "detail": "approve.bottom=448.359375 tabbar.top=787"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 430px on /chat",
+      "ok": true,
+      "detail": "{\"scrollWidth\":430,\"clientWidth\":430,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 430px on /t/ledger-export",
+      "ok": true,
+      "detail": "{\"scrollWidth\":430,\"clientWidth\":430,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 430px on /t/payout-rounding",
+      "ok": true,
+      "detail": "{\"scrollWidth\":430,\"clientWidth\":430,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 430px on /r/1",
+      "ok": true,
+      "detail": "{\"scrollWidth\":430,\"clientWidth\":430,\"ok\":true}"
+    },
+    {
+      "name": "c4 no document horizontal overflow at 430px on /menu",
+      "ok": true,
+      "detail": "{\"scrollWidth\":430,\"clientWidth\":430,\"ok\":true}"
+    },
+    {
+      "name": "c4 composer does not sit under the bottom navigation at 430px",
+      "ok": true,
+      "detail": "send.bottom=638.59375 tabbar.top=875"
+    },
+    {
+      "name": "c4 approve action clears the bottom navigation at 430px",
+      "ok": true,
+      "detail": "approve.bottom=428.90625 tabbar.top=875"
+    },
+    {
+      "name": "c4 desktop chat has no horizontal overflow",
+      "ok": true
+    },
+    {
+      "name": "c3 ordinary scope revision confirmed through its card",
+      "ok": true
+    },
+    {
+      "name": "c3 the rewritten scope waits for approval on the task",
+      "ok": true
+    },
+    {
+      "name": "c5 reduced motion removes the thinking pulse and control transitions",
+      "ok": true,
+      "detail": "{\"orbAnimation\":\"none\",\"buttonTransition\":\"0s\",\"tabTransition\":\"0s\"}"
+    },
+    {
+      "name": "c5 no transition animates a layout dimension or blur",
+      "ok": true,
+      "detail": "none"
+    },
+    {
+      "name": "c5 no keyframe animates a layout dimension or blur",
+      "ok": true,
+      "detail": "none"
+    },
+    {
+      "name": "c5 every transition is 220 ms or shorter",
+      "ok": true,
+      "detail": "max 160 ms across 17 declarations"
+    }
+  ],
+  "payloads": {
+    "chat-start": {
+      "path": "/chat",
+      "htmlBytes": 179090,
+      "inlineCssBytes": 161248,
+      "inlineJsBytes": 4122
+    },
+    "chat-ready": {
+      "path": "/chat",
+      "htmlBytes": 193666,
+      "inlineCssBytes": 161286,
+      "inlineJsBytes": 14618
+    },
+    "task-approval": {
+      "path": "/t/ledger-export",
+      "htmlBytes": 196062,
+      "inlineCssBytes": 161248,
+      "inlineJsBytes": 1037
+    },
+    "task-result": {
+      "path": "/t/payout-rounding",
+      "htmlBytes": 196833,
+      "inlineCssBytes": 161248,
+      "inlineJsBytes": 6484
+    },
+    "run-page": {
+      "path": "/r/1",
+      "htmlBytes": 193436,
+      "inlineCssBytes": 161248,
+      "inlineJsBytes": 7554
+    }
+  },
+  "screenshots": [
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-start-390.png",
+      "caption": "Chat before a conversation exists: the start action in the first 390×844 viewport (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-ready-390.png",
+      "caption": "Chat ready: the composer and send control in the first 390×844 viewport (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-action-card-390.png",
+      "caption": "A hold proposal card in chat after a scripted reply (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-pending-390.png",
+      "caption": "Reply in progress with the draft composer still available (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-scope-revision-390.png",
+      "caption": "Ordinary revision: a scope-rewrite proposal card in chat (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/nav-open-390.png",
+      "caption": "Mobile navigation: the project switcher open under the header (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/task-approval-390.png",
+      "caption": "Long task scope waiting for approval at 390×844: the next step leads (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/task-ask-390.png",
+      "caption": "The same task in Ask mode with the approval disclosure (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/result-390.png",
+      "caption": "A finished task: outcome, changed files and proof lead (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/result-annotate-390.png",
+      "caption": "Annotate mode on the sealed diff with a line picked into the comment form (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/revision-task-390.png",
+      "caption": "The revision task created from the annotation, its brief restated beside the approval (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-ready-320.png",
+      "caption": "Chat ready at 320×740 (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/task-approval-320.png",
+      "caption": "Long scope approval at 320×740 (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-ready-430.png",
+      "caption": "Chat ready at 430×932 (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/chat-ready-desktop.png",
+      "caption": "Chat at 1440×900: one conversation column, projects behind the toggle (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/task-approval-desktop.png",
+      "caption": "Long scope approval at 1440×900 (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/result-desktop.png",
+      "caption": "Finished task at 1440×900 (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/review-cockpit-desktop.png",
+      "caption": "Review cockpit for the finished task at 1440×900 (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ux-polish-2026-09-13-9ed1523f/evidence/ui-polish-2026-09-13/after/task-rescoped-390.png",
+      "caption": "The task after the ordinary scope revision: the rewritten terms wait for a fresh approval (fixture)"
+    }
+  ]
+}

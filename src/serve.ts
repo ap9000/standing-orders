@@ -2393,7 +2393,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           problem:
             url.searchParams.get("said") ??
             focusProblem ??
-            (ceilingStale ? "the admitted projects changed since your mate session was minted — start a new conversation below; that ends the old one" : null) ??
+            (ceilingStale ? "Your projects changed since this conversation started. Start a new conversation below to continue — the earlier one closes when you do." : null) ??
             takeMateNote(who.session.csrf, null),
           ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled, focusTask === null ? "/chat" : taskChatHref(focusTask.id)) } : {}),
           ...(who.role === "approver" ? { coordinatorProposals: coordinatorProposalsSection(coordinatorRows, decisionsFor(store, coordinatorRows), who.session.csrf, now, true, focusTask === null ? null : taskChatHref(focusTask.id)) } : {}),
@@ -7927,6 +7927,33 @@ function semanticCoverageHtml(matrix: readonly CriterionMatrixRow[], qualityMode
   );
 }
 
+/** The exact path limits, one per line (UI polish 2026-09-13): a long
+ * comma run was the least readable term on a phone. Every path, verbatim. */
+function approvalPathsHtml(touches: readonly string[]): string {
+  if (touches.length === 0) return `<p>anything</p>`;
+  return `<ul class="approval-paths">${touches.map(one => `<li><span class="mono">${escape(one)}</span></li>`).join("")}</ul>`;
+}
+
+/** The ceremony's orientation row (UI polish 2026-09-13): the wait, the
+ * size of the terms, and the "Review scope" road into them. It counts
+ * what is below; it never restates or trims a term. */
+function approvalOrientHtml(scope: Pick<Scope, "goal" | "outOfScope" | "touches" | "acceptance">, race: TournamentTerms | null, revision: RevisionView | null | undefined): string {
+  const facts = [
+    `${scope.acceptance.length} acceptance criteri${scope.acceptance.length === 1 ? "on" : "a"}`,
+    scope.touches.length === 0 ? "no path limit" : `${scope.touches.length} path limit${scope.touches.length === 1 ? "" : "s"}`,
+    scope.outOfScope === null ? "no exclusions" : "exclusions stated",
+    ...(race === null ? [] : [race.kind === "comparison" ? "a comparison" : "a tournament"]),
+    ...(revision === null || revision === undefined || "problem" in revision ? [] : ["a revision brief"]),
+  ];
+  return (
+    `<div class="approval-orient" data-approval-orient>` +
+    `<p class="approval-orient-lead"><strong>Waiting for your approval.</strong> Nothing builds until your password confirms the exact terms below.</p>` +
+    `<p class="meta approval-orient-facts">${escape(facts.join(" · "))} · every term is shown in full.</p>` +
+    `<div class="approval-orient-actions"><a class="button-link" href="#approval-terms">Review scope ↓</a><a href="#approval-confirm">Approve after reading ↓</a></div>` +
+    `</div>`
+  );
+}
+
 /** The rubric, restated above the seal (v39) — the same claim the digest
  * line already makes ("approval binds to this exact wording") extended to
  * the acceptance terms: an id in Plex Mono (a machine fact the proof must
@@ -8780,7 +8807,9 @@ const STYLE = `
   .receipt-facts strong, .receipt-facts small { display: block; overflow-wrap: anywhere; }
   .receipt-facts strong { font-size: .78rem; font-weight: 600; }
   .receipt-facts small { margin-top: .18rem; color: var(--muted-foreground); font-size: .68rem; line-height: 1.35; }
-  .receipt-visuals { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: .55rem; margin-top: .75rem; }
+  /* Thumbnails, never a full-width poster: auto-fill leaves a lone
+     screenshot at thumbnail size (UI polish 2026-09-13). */
+  .receipt-visuals { display: grid; grid-template-columns: repeat(auto-fill, minmax(8rem, 14rem)); gap: .55rem; margin-top: .75rem; }
   .receipt-shot { display: grid; gap: .35rem; color: var(--muted-foreground); font-size: .7rem; text-decoration: none; }
   .receipt-shot img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: var(--muted); }
   .receipt-shot:hover { color: var(--foreground); }
@@ -9004,7 +9033,8 @@ const STYLE = `
   }
 
   /* The workspace shell: sidebar + content, an optional list pane between. */
-  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; transition: grid-template-columns .18s ease; }
+  /* The rail collapse is instant: a layout dimension is never animated (UI polish 2026-09-13). */
+  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
   .side {
     border-right: 1px solid var(--glass-border);
     background: color-mix(in srgb, var(--glass-strong) 88%, transparent);
@@ -9433,6 +9463,22 @@ const STYLE = `
   .approval-confirm { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; align-items: end; margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--glass-border); }
   .approval-confirm label { margin: 0; }
   .approval-confirm button { min-height: 2.5rem; }
+  /* The ceremony's orientation and exact-terms group (UI polish 2026-09-13). */
+  /* Neutral by law: amber belongs to the count and the approve act alone. */
+  .approval-orient { margin: .85rem 0 .25rem; padding: .85rem .95rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 2px); background: color-mix(in srgb, var(--muted) 55%, transparent); }
+  .approval-orient-lead { margin: 0; font-size: .9rem; line-height: 1.5; }
+  .approval-orient-facts { margin: .3rem 0 0; }
+  .approval-orient-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; margin-top: .7rem; }
+  .approval-orient-actions .button-link { min-height: 2.5rem; }
+  .approval-orient-actions a:not(.button-link) { font-size: .8125rem; color: var(--muted-foreground); }
+  .approval-terms { scroll-margin-top: 5rem; }
+  .approval-confirm { scroll-margin-top: 5rem; }
+  .approval-paths { margin: 0; padding: 0; list-style: none; display: grid; gap: .15rem; }
+  .approval-paths li { color: var(--muted-foreground); font-size: .8rem; overflow-wrap: anywhere; }
+  .run-facts-details { margin-top: 1.25rem; }
+  .run-facts-details > summary { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+  .run-facts-details > summary .meta { font-family: var(--font-mono); font-size: .68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-main-title, .chat-project-name strong, .proposal h3 { overflow-wrap: anywhere; }
   .planner-plan { margin-top: .75rem; padding: 1.15rem 1.2rem; overflow: hidden; background: color-mix(in srgb, var(--glass) 82%, transparent); }
   .execution-plan-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: .95rem; }
   .execution-plan-head h2 { margin: .15rem 0 0; font-size: 1.05rem; letter-spacing: -.025em; }
@@ -9585,10 +9631,14 @@ const STYLE = `
     }
     .mobile-top .project-pill > summary .name { display: inline-flex; align-items: center; gap: .25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .mobile-top a.project-pill:active, .mobile-top .project-pill > summary:active { background: var(--muted); }
-    /* On a phone the menu is a sheet above the tab bar, within thumb reach. */
+    /* On a phone the menu drops from the header it belongs to (UI polish
+       2026-09-13). It was a fixed sheet, but the header's backdrop-filter
+       makes the header the containing block for fixed descendants, so the
+       sheet landed above the header, off-screen. Absolute to the sticky
+       header is exact, and never taller than the screen. */
     .mobile-top .switcher-menu {
-      position: fixed; left: .5rem; right: .5rem; top: auto; max-width: none;
-      bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem)); z-index: 45;
+      position: absolute; left: .5rem; right: .5rem; top: calc(100% - .25rem); bottom: auto; max-width: none;
+      max-height: calc(100dvh - 8rem); overflow-y: auto; z-index: 45;
     }
     .mobile-top .switcher-menu button { min-height: 2.75rem; }
     .mobile-top .pill-status {
@@ -9902,6 +9952,13 @@ const STYLE = `
     white-space: nowrap; padding: .32rem .58rem; border: 1px solid var(--glass-border);
     border-radius: 999px; background: color-mix(in srgb, var(--glass) 74%, transparent);
   }
+  /* Provider, model, and limits behind one quiet disclosure (UI polish 2026-09-13). */
+  .chat-limits { margin: .5rem 0 .75rem; padding: 0 .9rem; border-color: var(--glass-border); background: color-mix(in srgb, var(--glass) 70%, transparent); }
+  .chat-limits > summary { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-height: 2.5rem; padding: .45rem 0; font-size: .75rem; }
+  .chat-limits > summary .meta { font-family: var(--font-mono); font-size: .65rem; }
+  .chat-limits[open] { padding-bottom: .6rem; }
+  .chat-limits .chat-budget { margin: .2rem 0 .1rem; }
+  .chat-main .chat-limits + .chat-fleet-context, .chat-main .chat-fleet-context + .chat-limits { margin-top: .5rem; }
   .chat-overview {
     margin: 0 0 1.35rem; padding: 1rem; border-radius: calc(var(--radius) + 2px);
     background:
@@ -10032,6 +10089,9 @@ const STYLE = `
   .proposal-actions { padding: 0 .85rem .85rem; }
   .proposal-actions .acts { display: flex; align-items: center; gap: .5rem; }
   .proposal-actions form { margin: 0; }
+  /* The confirm is the card's one primary; dismiss stays quiet (UI polish 2026-09-13). */
+  .proposal-actions .acts form:first-child button[type=submit] { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600; }
+  .proposal-actions .acts form:first-child button[type=submit]:hover { background: color-mix(in srgb, var(--primary) 85%, var(--background)); border-color: color-mix(in srgb, var(--primary) 85%, var(--background)); }
   .proposal-actions .done, .proposal-actions .refused, .proposal-wait { margin: 0; padding: .55rem .65rem; border-radius: calc(var(--radius) - 5px); font-size: .72rem; }
   .proposal-actions .done { color: var(--success); background: var(--success-soft); }
   .proposal-actions .refused { color: var(--destructive); background: var(--destructive-soft); }
@@ -10057,7 +10117,8 @@ const STYLE = `
   .chat-thinking p strong, .chat-thinking p span { display: block; }
   .chat-thinking p span { margin-top: .08rem; }
   .chat-thinking form { margin: 0; }
-  .chat-fleet-context { margin: 0; }
+  /* On a desk the overview is its own card — no second frame around it. */
+  .chat-fleet-context, .chat-fleet-context[open] { margin: 0; padding: 0; border: 0; background: transparent; }
   .chat-fleet-context > summary { display: none; }
   .thinking-orb { position: relative; width: 2rem; height: 2rem; flex: none; border-radius: 999px; background: var(--running-soft); }
   .thinking-orb::after { content: ""; position: absolute; inset: .55rem; border-radius: inherit; background: var(--running); animation: pulse 1.25s ease-in-out infinite; }
@@ -10152,8 +10213,13 @@ const STYLE = `
     .chat-budget > span { padding: .25rem .48rem; }
     .chat-budget > span:first-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
     .chat-overview { padding: .8rem; }
-    .chat-fleet-context { border: 1px solid var(--glass-border); border-radius: 1rem; background: var(--glass); }
-    .chat-fleet-context > summary { display: list-item; min-height: 2.75rem; padding: .75rem .9rem; color: var(--muted-foreground); font-size: .8rem; cursor: pointer; }
+    .chat-fleet-context { margin: .5rem 0 .75rem; border: 1px solid var(--glass-border); border-radius: 1rem; background: var(--glass); }
+    .chat-fleet-context[open] { padding-bottom: .25rem; }
+    .chat-fleet-context > summary { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-height: 2.75rem; padding: .75rem .9rem; color: var(--muted-foreground); font-size: .8rem; cursor: pointer; }
+    .chat-fleet-context > summary::before { content: "▸"; flex: none; margin-right: .35rem; font-size: .7rem; }
+    .chat-fleet-context[open] > summary::before { content: "▾"; }
+    .chat-fleet-context > summary .meta { margin-left: auto; font-size: .68rem; white-space: nowrap; }
+    .chat-fleet-context > summary .hot { color: var(--brand); font-weight: 600; }
     .chat-fleet-context .chat-overview { border: 0; box-shadow: none; margin: 0; }
     .chat-overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .chat-overview-head { align-items: flex-start; }
@@ -10199,7 +10265,7 @@ const STYLE = `
     .chat-main:has(.chat-empty) .chat-empty > .meta { max-width: 22rem; margin-inline: auto; }
     .chat-main:has(.chat-empty) .chat-empty > .meta { margin-top: .45rem; }
     .chat-main:has(.chat-empty) .composer { position: static; width: 100%; margin-top: .5rem; }
-    .composer textarea { min-height: 2.75rem; padding: .55rem .65rem; font-size: .9375rem; }
+    .composer textarea { min-height: 2.75rem; padding: .55rem .65rem; font-size: 1rem; }
   }
   main:has(.mate-mint) { max-width: 68rem; }
   main:has(.mate-mint) > h1 { margin-top: .5rem; font-size: 1.7rem; letter-spacing: -.04em; }
@@ -10214,6 +10280,9 @@ const STYLE = `
   .mate-mint > p:first-child { min-height: 3rem; margin: 0; padding: .15rem 0 1.25rem 4rem; font-size: .95rem; }
   .mate-mint > p:first-child strong { display: block; margin-bottom: .2rem; font-size: 1.1rem; letter-spacing: -.02em; }
   .mate-mint form { border-top: 1px solid var(--glass-border); padding-top: .5rem; }
+  /* The start act is the page's one primary (UI polish 2026-09-13). */
+  .mate-mint form > button[type=submit] { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600; }
+  .mate-mint form > button[type=submit]:hover { background: color-mix(in srgb, var(--primary) 85%, var(--background)); border-color: color-mix(in srgb, var(--primary) 85%, var(--background)); }
   .mate-terms { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; padding: .35rem 0; }
   .mate-terms .inline-field { white-space: nowrap; }
   button.quiet { background: transparent; color: var(--fg-muted); border-color: var(--border); }
@@ -10290,6 +10359,8 @@ const STYLE = `
     .agents-roles { grid-template-columns: 1fr; }
     .agents-risk-guide div, .agents-role-row { grid-template-columns: 1fr; }
     .approval-card { padding: 1rem; }
+    /* The orientation block says the wait on a phone; the kicker would say it twice. */
+    .approval-card .approval-kicker { display: none; }
     .approval-boundaries, .approval-confirm { grid-template-columns: 1fr; }
     /* The approval stays IN FLOW on phones: the password field comes
        first and the button follows it — never a sticky control floating
@@ -10458,25 +10529,33 @@ button { min-height: 44px; }
 ::view-transition-old(root), ::view-transition-new(root) {
   animation-duration: 140ms; animation-timing-function: ease-out;
 }
+/* UI polish 2026-09-13 — the motion contract. Feedback transitions run
+   140–200 ms on color, border, shadow, opacity, and transform only; an
+   overlay's entrance is at most 220 ms of opacity + transform. Nothing
+   animates a width, height, margin, grid track, or blur, and nothing
+   pulses for decoration. The reduce block below is universal: every
+   animation and transition dies, and no page reads differently for it. */
 @media (prefers-reduced-motion: no-preference) {
   .tabbar a, .side nav a { transition: color .15s, background .15s; }
   button:active { transform: scale(.985); }
   .palette, .kbd-help { animation: rise 120ms ease-out; }
+  .chat-workspace.projects-open .chat-projects { animation: rise 200ms ease-out; }
+  .chat-workspace.projects-open::before { animation: fade 180ms ease-out; }
+  .switcher[open] .switcher-menu { animation: rise 160ms ease-out; }
   @media (hover: hover) and (pointer: fine) {
-    .lane-card, .decide-card, .menu-row { transition: border-color .15s, transform .15s, box-shadow .15s; }
+    .lane-card, .decide-card, .menu-row, .chat-overview-item, .proposal { transition: border-color .15s, transform .15s, box-shadow .15s; }
     .lane-card:hover, .decide-card:hover, .menu-row:hover {
       transform: translateY(-1px);
       box-shadow: 0 2px 8px -2px rgb(0 0 0 / .35);
     }
   }
 }
-@keyframes rise { from { opacity: 0; margin-top: 4px; } }
+@keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+@keyframes fade { from { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
   ::view-transition-group(*), ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
-  .pulse, .fire-live { animation: none; }
-  .palette, .kbd-help { animation: none; }
-  .app, button, .side nav a, .nav-group > summary .chevron, .chat-project-card { transition: none; }
-  button:hover, .side nav a:hover, .chat-project-card:hover { transform: none; }
+  button:active, button:hover, .side nav a:hover, .chat-project-card:hover, .lane-card:hover, .decide-card:hover, .menu-row:hover { transform: none; }
 }
 
 /* The shortcuts overlay: display-only, toggled by the chrome layer, absent
@@ -12170,7 +12249,7 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
     (approval.coordinator === null ? "" : `<p class="meta">Filed by <span class="mono">${escape(approval.coordinator.label)}</span>${approval.coordinator.filedAgo === null ? "" : ` · ${escape(approval.coordinator.filedAgo)}`}.</p>`) +
     `<div class="chat-approval-section"><span class="approval-label">goal</span><p class="approval-goal">${escape(scope.goal)}</p></div>` +
     `<div class="approval-boundaries"><div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>` +
-    `<div class="approval-boundary"><p class="approval-label">may touch</p><p>${scope.touches.length === 0 ? "anything" : scope.touches.map(escape).join(", ")}</p></div></div>` +
+    `<div class="approval-boundary"><p class="approval-label">may touch</p>${approvalPathsHtml(scope.touches)}</div></div>` +
     acceptanceCeremonyHtml(scope.acceptance) + revision + race +
     `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
     (permission === null ? "" : `<span class="approval-chip">${escape(permission)}</span>`) +
@@ -12249,6 +12328,15 @@ function chatWorkspace(content: string, projects: readonly ChatProjectPulse[], c
   return focus === null
     ? `<div class="chat-workspace">${chatProjectRail(projects, csrf, inert)}<section class="chat-main">${content}</section></div>`
     : `<div class="chat-workspace task-chat-workspace">${taskChatContext(focus)}<section class="chat-main">${content}</section></div>`;
+}
+
+/** The folded overview's one-line summary (UI polish 2026-09-13): the
+ * two counts a phone reader scans before deciding to open it. */
+function chatOverviewSummaryHtml(projects: readonly ChatProjectPulse[]): string {
+  const total = (key: keyof ProjectPeek): number => projects.reduce((sum, one) => sum + (one.peek?.[key] ?? 0), 0);
+  const needsYou = total("waiting");
+  const running = total("running");
+  return `<summary>Project overview<span class="meta">${needsYou > 0 ? `<span class="hot">${needsYou} need${needsYou === 1 ? "s" : ""} you</span>` : "nothing waiting"} · ${running} building</span></summary>`;
 }
 
 /** A live, server-derived portfolio card. It is deliberately independent
@@ -12415,10 +12503,11 @@ function chatHeading(copy: string, projectCount: number, live: boolean, showProj
     `<div class="chat-head"><div><h1>chat</h1><p class="meta">${escape(copy)}</p></div>` +
     `<div class="chat-head-actions">` +
     (showProjectToggle
-      ? `<button type="button" class="chat-project-toggle quiet" aria-controls="chat-project-panel" aria-expanded="true" title="show or hide projects">` +
+      ? `<button type="button" class="chat-project-toggle quiet" aria-controls="chat-project-panel" aria-expanded="false" title="show or hide projects">` +
         `${strokeIcon(`<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>`)}<span>projects</span><span class="badge">${projectCount}</span></button>`
       : "") +
-    `<span class="badge${live ? " badge-running" : ""}">${live ? "conversation live" : "unified workspace"}</span></div></div>`
+    // "conversation live" means something; a badge for the idle state did not.
+    (live ? `<span class="badge badge-running">conversation live</span>` : "") + `</div></div>`
   );
 }
 
@@ -12477,11 +12566,11 @@ const CHAT_UI_SCRIPT =
   `var fleet=document.querySelector(".chat-fleet-context");if(fleet){var desktop=window.matchMedia("(min-width: 761px)");fleet.open=desktop.matches;desktop.addEventListener("change",function(){fleet.open=desktop.matches;});}` +
   `if(workspace&&projectPanel&&projectToggle){var wide=window.matchMedia("(min-width: 1200px)");var saved="";try{saved=localStorage.getItem("standing-orders:chat-projects")||"";}catch(e){}` +
   `function apply(open){workspace.classList.toggle("projects-open",open);workspace.classList.toggle("projects-hidden",!open);projectToggle.setAttribute("aria-expanded",String(open));}` +
-  `function preferred(){return wide.matches&&saved!=="closed";}apply(preferred());` +
+  `function preferred(){return wide.matches&&saved==="open";}apply(preferred());` +
   `projectToggle.addEventListener("click",function(){var next=!workspace.classList.contains("projects-open");apply(next);if(wide.matches){saved=next?"open":"closed";try{localStorage.setItem("standing-orders:chat-projects",saved);}catch(e){}}});` +
-  `if(projectClose)projectClose.addEventListener("click",function(){apply(false);});` +
+  `if(projectClose)projectClose.addEventListener("click",function(){apply(false);projectToggle.focus();});` +
   `document.addEventListener("click",function(ev){if(wide.matches||!workspace.classList.contains("projects-open"))return;var target=ev.target;if(target instanceof Node&&!projectPanel.contains(target)&&!projectToggle.contains(target))apply(false);});` +
-  `wide.addEventListener("change",function(){apply(preferred());});document.addEventListener("keydown",function(ev){if(ev.key==="Escape"&&!wide.matches&&workspace.classList.contains("projects-open"))apply(false);});}` +
+  `wide.addEventListener("change",function(){apply(preferred());});document.addEventListener("keydown",function(ev){if(ev.key==="Escape"&&workspace.classList.contains("projects-open")){apply(false);projectToggle.focus();}});}` +
   `var taskLive=document.getElementById("task-chat-live");function refreshTask(){if(!taskLive||taskLive.getAttribute("data-poll")!=="1")return;` +
   `if(document.hidden){setTimeout(refreshTask,5000);return;}var source=taskLive.getAttribute("data-source");if(!source)return;` +
   `fetch(source,{cache:"no-store",signal:AbortSignal.timeout(10000)}).then(function(r){if(r.status===401||r.status===403||r.redirected){location.href="/login";return null;}if(!r.ok)throw new Error("connection");return r.text();})` +
@@ -12491,6 +12580,22 @@ const CHAT_UI_SCRIPT =
   `var box=document.querySelector(".composer textarea");if(box){` +
   `function size(){box.style.height="auto";box.style.height=Math.min(box.scrollHeight,208)+"px";}size();box.addEventListener("input",size);` +
   `box.addEventListener("keydown",function(ev){if(ev.isComposing||ev.key!=="Enter"||ev.shiftKey||!window.matchMedia("(min-width: 761px)").matches)return;ev.preventDefault();if(box.value.trim()!=="")box.form.requestSubmit();});}})();`;
+
+/** Provider, model, and limits under ONE disclosure (UI polish
+ * 2026-09-13): the facts stay one tap away on every chat surface, and a
+ * membership never shows a dollar figure as if it were a charge. */
+function chatLimitsHtml(facts: {
+  provider: string; model: string; turnsToday: number; dailyTurns: number; subscription: boolean;
+  weekly: { spent: number; ceiling: number } | null;
+}): string {
+  const rows: string[] = [
+    `<span class="mono">${escape(facts.provider)} · ${escape(facts.model)}</span>`,
+    `<span>${facts.turnsToday} / ${facts.dailyTurns} turns today</span>`,
+  ];
+  if (facts.subscription) rows.push(`<span>membership login · no dollar ceiling</span>`);
+  else if (facts.weekly !== null) rows.push(`<span>this week ${chatMoney(facts.weekly.spent)} of ${chatMoney(facts.weekly.ceiling)}</span>`);
+  return `<details class="chat-limits"><summary>Model &amp; limits<span class="meta">${escape(facts.subscription ? "membership" : facts.provider)}</span></summary><div class="chat-budget">${rows.join("")}</div></details>`;
+}
 
 function chatPage(chrome: Chrome, data: {
   enabled: { ok: true } & Record<string, unknown> | { ok: false; why: string };
@@ -12568,7 +12673,7 @@ function chatPage(chrome: Chrome, data: {
   };
   const parts: string[] = [
     data.focusTask === null
-      ? chatHeading("one place to understand every project and shape what happens next", data.projects.length, false, data.enabled.ok)
+      ? chatHeading("Ask about any project. Changes come back as cards you confirm.", data.projects.length, false, data.enabled.ok)
       : taskChatHeading(data.focusTask),
     data.focusTask === null ? "" : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
   ];
@@ -12591,17 +12696,19 @@ function chatPage(chrome: Chrome, data: {
   }
   const config = (data.enabled as unknown as { config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
   const subscription = isSubscriptionChatProvider(config.provider);
-  parts.push(
-    `<div class="chat-budget"><span class="mono">answering with ${escape(config.provider)} · ${escape(config.model)}</span>` +
-      `<span>${data.turnsToday} / ${config.dailyTurns} turns today</span>` +
-      `<span>${subscription ? "membership login · no dollar ceiling" : `${chatMoney(data.weeklySpent)} of ${chatMoney(config.weeklyCeilingMicrousd)} this week`}</span></div>`,
-    data.focusTask === null ? chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, false) : "",
-  );
+  // The start action leads (UI polish 2026-09-13): the mint card is the
+  // one thing a person can do here, so it is the first card; the portfolio
+  // overview follows, folded on phones and opened by the chrome script on
+  // a desk; provider, model, and limits sit under one disclosure.
   if (!data.canManage) {
     parts.push(`<div class="card chat-readonly"><strong>Read-only view</strong><p class="meta">An approver can start the unified conversation and confirm its proposed actions. You can still open every live card and project board here.</p></div>`);
   }
   if (data.canManage && data.mateMint !== undefined) parts.push(data.mateMint);
   if (data.canManage && data.coordinatorProposals !== undefined) parts.push(data.coordinatorProposals);
+  parts.push(
+    data.focusTask === null ? `<details class="chat-fleet-context">${chatOverviewSummaryHtml(data.projects)}${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, false)}</details>` : "",
+    chatLimitsHtml({ provider: config.provider, model: config.model, turnsToday: data.turnsToday, dailyTurns: config.dailyTurns, subscription, weekly: subscription ? null : { spent: data.weeklySpent, ceiling: config.weeklyCeilingMicrousd } }),
+  );
   for (const turn of data.latched) {
     parts.push(
       `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
@@ -12609,7 +12716,7 @@ function chatPage(chrome: Chrome, data: {
     );
   }
   if (data.pending !== null) {
-    parts.push(`<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>Working on it</strong><span class="meta">turn #${data.pending.id} · up to ${chatMoney(data.pending.reservedMicrousd)} reserved · this page refreshes itself</span></p></div>`);
+    parts.push(`<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>Working on it</strong><span class="meta">turn #${data.pending.id}${subscription ? " · membership-backed" : ` · up to ${chatMoney(data.pending.reservedMicrousd)} reserved`} · this page refreshes itself</span></p></div>`);
     parts.push(`<p class="meta"><a href="/chat">refresh now</a></p>`);
     return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null }, refreshSeconds: 3 });
   }
@@ -12685,7 +12792,7 @@ function chatPage(chrome: Chrome, data: {
       parts.push(
         `<p class="row"><span class="mono">#${turn.id}</span> ${escape(turn.state)}` +
           `${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`}` +
-          ` <span class="right meta">${turn.tokensIn ?? "–"} in / ${turn.tokensOut ?? "–"} out · ${chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}${turn.settledMicrousd === null ? " reserved" : ""}</span></p>`,
+          ` <span class="right meta">${turn.tokensIn ?? "–"} in / ${turn.tokensOut ?? "–"} out · ${subscription ? "membership" : `${chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}${turn.settledMicrousd === null ? " reserved" : ""}`}</span></p>`,
       );
     }
   }
@@ -12719,20 +12826,20 @@ function mateMintCard(
   const subscription = enabled.billing === "subscription";
   return [
     `<div class="card mate-mint" id="latest">`,
-    `<p><strong>talk to the mate.</strong> <span class="meta">one conversation across every project this console serves — it reads, recaps, and proposes; you confirm each act on a card</span></p>`,
+    `<p><strong>Start a conversation</strong> <span class="meta">Ask about any project, get a recap, and confirm each proposed change on a card. Nothing changes without your confirmation.</span></p>`,
     `<form method="post" action="/chat/mate/mint">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<input type="hidden" name="return" value="${escape(returnTo)}">`,
     `<div class="mate-terms">`,
     subscription
-      ? `<span>using your logged-in ${enabled.config.provider === "codex-subscription" ? "Codex" : "Anthropic"} membership · no dollar maximum</span>`
+      ? `<span>Uses your logged-in ${enabled.config.provider === "codex-subscription" ? "Codex" : "Anthropic"} membership. No dollar maximum applies.</span>`
       : `<label>this conversation may spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span></label>`,
     `</div>`,
     subscription
-      ? `<p class="meta">the conversation stays active until you end it; the daily turn limit and your membership's own plan limits remain upstream</p>`
-      : `<p class="meta">the conversation stays active until you end it; the weekly chat ceiling (${chatMoney(enabled.config.weeklyCeilingMicrousd)}) still binds above this total</p>`,
-    `<label>your password <span class="meta">(once — this mints the session; messages need no password after)</span><input type="password" name="token" autocomplete="current-password"></label>`,
-    `<button type="submit">start the conversation</button>`,
+      ? `<p class="meta">The conversation stays open until you end it. The daily turn limit and your membership's own plan limits still apply.</p>`
+      : `<p class="meta">The conversation stays open until you end it. The weekly chat ceiling (${chatMoney(enabled.config.weeklyCeilingMicrousd)}) still binds above this total.</p>`,
+    `<label>Your password <span class="meta">(once, to start — messages need no password after)</span><input type="password" name="token" autocomplete="current-password"></label>`,
+    `<button type="submit">Start the conversation</button>`,
     `</form>`,
     `</div>`,
   ].join("\n");
@@ -12812,7 +12919,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
         ["deliverable", payload["report"] === true ? "report only" : "branch"],
         ["planning", planningWords],
         ["out of scope", escape(text("not"))],
-        ["may touch", Array.isArray(payload["touches"]) ? escape((payload["touches"] as string[]).join(", ")) : ""],
+        ["may touch", Array.isArray(payload["touches"]) ? (payload["touches"] as string[]).map(one => `<span class="mono">${escape(one)}</span>`).join("<br>") : ""],
       );
   } else if (view.kind === "next") {
     what = `<h3>Move <a href="${taskHref(task)}">${escape(task)}</a> to the front</h3>` + facts(["current position", `${escape(String(payload["position"] ?? "?"))} of ${escape(String(payload["of"] ?? "?"))}`], ["project", `<span class="mono">${escape(repoId)}</span>`]);
@@ -12858,7 +12965,8 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   } else if (view.kind === "scope") {
     what =
       `<h3>Rewrite <a href="${taskHref(task)}">${escape(task)}</a></h3><p class="proposal-summary">${escape(text("goal"))}</p>` +
-      facts(["out of scope", escape(text("not"))], ["may touch", Array.isArray(payload["touches"]) ? escape((payload["touches"] as string[]).join(", ")) : ""], ["project", `<span class="mono">${escape(repoId)}</span>`]);
+      // One path per line (UI polish 2026-09-13): a comma run broke mid-token on a phone.
+      facts(["out of scope", escape(text("not"))], ["may touch", Array.isArray(payload["touches"]) ? (payload["touches"] as string[]).map(one => `<span class="mono">${escape(one)}</span>`).join("<br>") : ""], ["project", `<span class="mono">${escape(repoId)}</span>`]);
   } else if (view.kind === "repair") {
     const blocker = text("blocker");
     const operation = text("operation");
@@ -13017,16 +13125,12 @@ function matePage(chrome: Chrome, data: {
   const returnTo = data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id);
   const conversation: string[] = [
     data.focusTask === null
-      ? chatHeading("one conversation across every project · understand, prioritize, and act from here", data.projects.length, true)
+      ? chatHeading("Ask about any project. Changes come back as cards you confirm.", data.projects.length, true)
       : taskChatHeading(data.focusTask),
-    `<div class="chat-budget"><span class="mono">answering with ${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
-      (subscription
-        ? `<span>membership login · no dollar ceiling</span>`
-        : `<span>this conversation: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
-          `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
-      `<span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span></div>`,
     data.focusTask === null ? "" : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
-    data.focusTask === null ? `<details class="chat-fleet-context" open><summary>Project overview</summary>${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null)}</details>` : "",
+    // The overview folds by default (UI polish 2026-09-13): the chrome
+    // script opens it on a desk; a phone keeps the conversation first.
+    data.focusTask === null ? `<details class="chat-fleet-context">${chatOverviewSummaryHtml(data.projects)}${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null)}</details>` : "",
   ];
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
@@ -13087,15 +13191,21 @@ function matePage(chrome: Chrome, data: {
     `<p class="meta composer-hint" id="chat-connection" role="status" aria-live="polite">${data.pending === null ? "Changes appear as cards for you to confirm." : "Reply in progress. You can draft your next message or come back later."}</p>`,
     data.messages.length === 0 ? matePromptStarters(data.csrf, data.focusTask) : "",
     data.focusTask === null ? `<p class="meta composer-hint">One message is enough. I’ll infer the title, scope, and proof; say “use your judgment” to accept sensible reversible defaults.</p>` : "",
-    `<details><summary class="meta">this conversation</summary>`,
-    `<p class="meta">started ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z · stays live until you end it · only bounded recent context is sent to the model</p>`,
+    `<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">${escape(subscription ? "membership" : data.config.provider)}</span></summary>`,
+    `<div class="chat-budget"><span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span><span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span>` +
+      (subscription
+        ? `<span>membership login · no dollar ceiling</span>`
+        : `<span>this conversation: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
+          `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
+      `</div>`,
+    `<p class="meta">Started ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z. It stays open until you end it; only bounded recent context is sent to the model.</p>`,
     `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><button type="submit" class="quiet">end the conversation and forget the thread</button></form>`,
     data.recent.length === 0
       ? ""
       : `<p class="meta">recent turns: ${data.recent
           .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${subscription ? "membership" : chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
           .join(" · ")}</p>`,
-    `<p class="meta">chat settings live on this page once the conversation ends</p>`,
+    `<p class="meta">Chat settings return to this page once the conversation ends.</p>`,
     `</details>`,
   );
   return screen(
@@ -15820,6 +15930,12 @@ function taskBody(data: {
           `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">`,
           `<div class="ceremony-head"><span class="approval-title"><span class="approval-kicker">ready to run · approve exactly this:</span>` +
             `<strong>Review the proposed scope</strong></span><a href="#scope">Edit details</a></div>`,
+          // The orientation (UI polish 2026-09-13): what this page waits
+          // for, how much there is to read, and one explicit road to the
+          // exact terms — which follow IN FULL, never summarized away. The
+          // counts are facts about the terms below, not a substitute.
+          approvalOrientHtml(scope, data.raceTerms ?? null, data.revision ?? null),
+          `<div class="approval-terms" id="approval-terms">`,
           // The deliverable INSIDE the ceremony (mate arc §10): a yes on a
           // scout task authorizes a read-only session and a report, never
           // a branch — said where the signature is given.
@@ -15835,12 +15951,13 @@ function taskBody(data: {
           `<p class="approval-label">goal</p><p class="approval-goal">${escape(scope.goal)}</p>`,
           `<div class="approval-boundaries">`,
           `<div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>`,
-          `<div class="approval-boundary"><p class="approval-label">touches</p><p>${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p></div>`,
+          `<div class="approval-boundary"><p class="approval-label">touches</p>${approvalPathsHtml(scope.touches)}</div>`,
           `</div>`,
           acceptanceCeremonyHtml(scope.acceptance),
           // The contract amendment INSIDE the ceremony (contract handoff,
           // task 1): what the yes accepts that the operator did not file.
           data.plan === "drafted" ? planContractHtml(data.planContract ?? null, "ceremony") : "",
+          `</div>`,
           `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
             (approvalPermission === null ? "" : `<span class="approval-chip">${escape(approvalPermission)}</span>`) +
             `</div>`,
@@ -15878,7 +15995,7 @@ function taskBody(data: {
                 `Each may spend $${(data.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} plus a ` +
                 `$${(data.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} overrun reserve; the whole tournament is capped at ` +
                 `$${(data.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)}. You will compare the results and pick one.</p>`,
-          `<div class="approval-confirm"><label>your password, typed again <span class="meta">— confirms this exact scope</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>`,
+          `<div class="approval-confirm" id="approval-confirm"><label>Your password <span class="meta">— confirms exactly the terms above</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>`,
           `<div class="sticky-actions"><button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "Approve & start" : data.raceTerms.kind === "comparison" ? "Approve comparison" : "Approve tournament"}</button></div></div>`,
           `</form>`,
         ].join("\n");
@@ -16351,7 +16468,6 @@ function taskBody(data: {
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
     `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span></h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
-    data.repo !== null && data.scope !== null ? `<p class="meta"><a href="/recipes/from-task?task=${encodeURIComponent(task.id)}">Reuse this scope as a recipe →</a></p>` : "",
     // The planner and approval cards already answer "what now?". Avoid a
     // second status box above the one action the operator came here for.
     (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested" ? dispatchStatus : "",
@@ -16458,7 +16574,9 @@ function taskBody(data: {
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
     section(
       "scope",
-      ["<h2>scope</h2>", scopeCard, agentsCardHtml(task.id, data.route, data.csrf, data.canEditRoute === true), revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
+      // The recipe road rides with the scope it reuses (UI polish
+      // 2026-09-13), off the title-to-action path.
+      ["<h2>scope</h2>", scopeCard, data.repo !== null && data.scope !== null ? `<p class="meta"><a href="/recipes/from-task?task=${encodeURIComponent(task.id)}">Reuse this scope as a recipe →</a></p>` : "", agentsCardHtml(task.id, data.route, data.csrf, data.canEditRoute === true), revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
       data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan),
     ),
     dependencyChoiceNeeded ? "" : section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
@@ -18320,10 +18438,16 @@ function runPage(
         `<button type="submit">read the terms</button>` +
         `</form>`;
 
+  // Outcome first (UI polish 2026-09-13): a finished build leads with its
+  // result, proof, and diff; the machine facts fold under "Build details".
+  // A live build keeps the facts open — they are what a watcher polls.
+  const facts =
+    running
+      ? `<div id="run-facts">${rows}</div><p class="meta" id="run-facts-stamp"></p>`
+      : `<details class="run-facts-details"><summary>Build details<span class="meta">${escape([run.runner, run.provider, run.outcome ?? "never finished"].join(" · "))}</span></summary><div id="run-facts">${rows}</div></details>`;
   return screen(`build #${run.id}`, [
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
-    `<div id="run-facts">${rows}</div>`,
-    running ? `<p class="meta" id="run-facts-stamp"></p>` : "",
+    running ? facts : "",
     conversation,
     transcript,
     peek,
@@ -18332,6 +18456,7 @@ function runPage(
     terminal === null ? "" : terminalDiffCard(terminal, run.id, editor, commentForm !== ""),
     reviewCard,
     continueCard,
+    running ? "" : facts,
     evidence,
     notesCard,
   ].join("\n"), {
