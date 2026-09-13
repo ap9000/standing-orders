@@ -12,7 +12,7 @@ import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
 import { acquire, release } from "./claim.js";
 import { register, hashToken } from "./runner.js";
-import { addApprover, approvalOf, approve, propose } from "./scope.js";
+import { addApprover, approvalOf, approve, hashPassword, propose } from "./scope.js";
 import { approveRoutine, fireRoutine, refreshRoutineAgents, routineDigestOf } from "./routine.js";
 import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
@@ -1594,7 +1594,7 @@ describe("the operations console", () => {
     const cookie = await login();
     const task = await (await fetch(url("/t/t-receipt"), { headers: { cookie } })).text();
     expect(task).toContain('data-card-kind="result-receipt"');
-    expect(task).toContain('data-proof-state="verified"');
+    expect(task).toContain('data-work-status="ready-to-review"');
     expect(task).toContain("Shipped the compact result receipt.");
     expect(task).toContain("1/1 acceptance criteria passed");
     expect(task).toContain("2 files · +14 −3");
@@ -1871,7 +1871,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     expect(home).toContain("+ new task");
     // The sole configured repo opened itself — no forced detour.
     expect(home).toContain("inbox");
-    expect(home).toContain(">builds<");
+    expect(home).toContain(">work<");
   });
 
   test("a task outside the ceiling does not exist: page, mutations, list", async () => {
@@ -5322,20 +5322,25 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     }
   });
 
-  test("settings is pinned outside both accordion groups, and only where the console offers it", async () => {
+  test("settings is secondary: the first row of the settings group, only where the console offers it, and never a primary destination", async () => {
     const cookie = await login();
     const html = await (await fetch(url("/done"), { headers: { cookie } })).text();
     const side = /<aside class="side">(.*?)<\/aside>/s.exec(html)?.[1] ?? "";
-    expect(side).toMatch(/<nav class="nav-settings"><a href="\/settings" aria-label="settings" title="settings"><span class="glyph"><svg.*?<\/svg><\/span>settings<\/a><\/nav>/s);
-    expect(side.indexOf('<nav class="nav-groups">')).toBeLessThan(side.indexOf('<nav class="nav-settings">'));
-    const workflows = /<details class="nav-group" data-group="workflows"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
-    const admin = /<details class="nav-group" data-group="admin"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
-    expect(workflows).not.toContain("/settings");
-    expect(admin).not.toContain("/settings");
+    const primary = /<nav>(.*?)<\/nav>/s.exec(side)?.[1] ?? "";
+    expect(primary).not.toContain("/settings");
+    expect(side).not.toContain('class="nav-settings"');
+    const tools = /<details class="nav-group" data-group="tools"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
+    const settings = /<details class="nav-group" data-group="settings"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
+    expect(tools).not.toContain("/settings");
+    expect(settings).toMatch(/^<summary>settings<svg.*?<nav class="nav-group-items"><a href="\/settings" aria-label="settings" title="settings">settings<\/a>/s);
     // The phone's overflow drawer mirrors it — its own headed section, last.
     const menu = await (await fetch(url("/menu"), { headers: { cookie } })).text();
     expect(menu).toContain('<h2 class="menu-group-label">settings</h2>');
     expect(menu).toContain('<a class="menu-row" href="/settings">');
+    // And the phone's tab bar never carries it: settings is a header action.
+    const tabbar = /<nav class="tabbar">(.*?)<\/nav>/s.exec(html)?.[1] ?? "";
+    expect(tabbar).not.toContain("/settings");
+    expect(html).toContain('<a class="mobile-more" href="/menu" aria-label="tools and settings"');
   });
 
   test("the active page's accordion group opens itself; the other stays collapsed", async () => {
@@ -5344,20 +5349,20 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
       const html = await (await fetch(url(path), { headers: { cookie } })).text();
       const side = /<aside class="side">(.*?)<\/aside>/s.exec(html)?.[1] ?? "";
       return {
-        workflows: /<details class="nav-group" data-group="workflows"([^>]*)>/.exec(side)?.[1],
-        admin: /<details class="nav-group" data-group="admin"([^>]*)>/.exec(side)?.[1],
+        workflows: /<details class="nav-group" data-group="tools"([^>]*)>/.exec(side)?.[1],
+        admin: /<details class="nav-group" data-group="settings"([^>]*)>/.exec(side)?.[1],
       };
     };
-    // /workbench is a workflows destination: its own group opens, admin stays shut.
+    // /workbench is a work-tools destination: its own group opens, settings stays shut.
     const onWorkbench = await groupsOf("/workbench");
     expect(onWorkbench.workflows).toBe(" open");
     expect(onWorkbench.admin).toBe("");
-    // /fleet is an admin destination: the reverse.
+    // /fleet is a settings destination: the reverse.
     const onFleet = await groupsOf("/fleet");
     expect(onFleet.workflows).toBe("");
     expect(onFleet.admin).toBe(" open");
-    // Neither destination's page opens a group it does not own.
-    const onDone = await groupsOf("/done");
+    // A page under Work itself (done is a builds view) opens no group.
+    const onDone = await groupsOf("/work");
     expect(onDone.workflows).toBe("");
     expect(onDone.admin).toBe("");
   });
@@ -6877,20 +6882,19 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     const queueBar = scopeBarOf(queue);
     expect(queueBar).toContain('<summary class="name">main<svg');
 
-    // One visible /projects link per breakpoint (portfolio arc §1, amended
-    // by the mobile pass, then the reduction pass): the rail's projects row
-    // on desktop, and "manage projects" inside the phone's project switcher.
-    // Exactly those two links live in chrome.
+    // One visible /projects link per surface (portfolio arc §1, amended by
+    // the mobile pass, the reduction pass, then workspace package 1): the
+    // rail's projects row on desktop, "manage projects" inside the phone's
+    // project switcher, and the phone's Projects tab. Exactly those three.
     expect(home).toContain('<details class="project-pill switcher"><summary><span class="name">main<svg');
     expect(home).toContain('<span class="pill-status">');
-    expect((home.match(/href="\/projects"/g) ?? []).length).toBe(2);
+    expect((home.match(/href="\/projects"/g) ?? []).length).toBe(3);
 
-    // The rail (reduction pass §1): four rows, then the more group where
-    // the portfolio now lives — order, not mere presence.
+    // The rail (workspace package 1): chat · work · projects, then the
+    // work-tools group where the portfolio lives — order, not mere presence.
     expect(home).toContain(">portfolio<");
-    expect(home.indexOf(">inbox<")).toBeLessThan(home.indexOf(">board<"));
-    expect(home.indexOf(">board<")).toBeLessThan(home.indexOf(">builds<"));
-    expect(home.indexOf(">builds<")).toBeLessThan(home.indexOf(">projects<"));
+    expect(home.indexOf(">chat<")).toBeLessThan(home.indexOf(">work<"));
+    expect(home.indexOf(">work<")).toBeLessThan(home.indexOf(">projects<"));
     expect(home.indexOf('<nav class="nav-groups">')).toBeLessThan(home.indexOf(">portfolio<"));
 
     // Fleet and the rolled-up board are all-project; the scoped board is not.
@@ -7557,7 +7561,13 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(bare).toContain('data-dispatch-status="needs-verification"');
     expect(bare).not.toContain('data-dispatch-status="complete-with-evidence"');
     expect(bare).toContain('data-card-kind="result-receipt"');
-    expect(bare).toContain("What shipped");
+    // Workspace package 1: the receipt names what the record supports —
+    // changes saved locally — never an unconditional "shipped".
+    expect(bare).not.toContain("What shipped");
+    expect(bare).toContain("<h2>Changes saved</h2>");
+    expect(bare).toContain('data-receipt-publication="none">Saved on the build branch — not published, merged, or deployed.</p>');
+    expect(bare).toContain('data-work-status="verification-needed"');
+    expect(bare).toContain("Result saved — verification needed");
     expect(bare).toContain(`href="/r/${run}">Review full evidence</a>`);
     expect(bare).toContain('href="/chat?task=t-proof">Discuss or request changes →</a>');
 
@@ -7583,12 +7593,15 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const attested = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
     expect(attested).toContain('data-dispatch-status="complete-with-evidence"');
     expect(attested).toContain(`Build #${run}`);
-    expect(attested).toContain("acceptance criteria, checks, and machine-captured diff");
+    expect(attested).toContain("the checks listed are the agent's own report");
+    expect(attested).toContain("Result saved — checks reported by the agent");
+    expect(attested).not.toContain("Ready to review");
 
     store.saveProofVerdict(run, "verified", ["the approved verification command passed"], T0);
     const verified = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
     expect(verified).toContain('data-dispatch-status="complete-verified"');
-    expect(verified).toContain('data-proof-state="verified"');
+    expect(verified).toContain('data-work-status="ready-to-review"');
+    expect(verified).toContain("Ready to review");
 
     store.saveProofVerdict(run, "verified", ["the approved verification command passed after the approved setup command ran"], T0);
     const recovered = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
@@ -7647,13 +7660,20 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(refuted).toContain("src/other.ts");
     expect(refuted).toContain('name="csrf"');
     expect(refuted).toContain("Accept with exception");
+    // A mismatched changed-path claim is NOT a failed check: the words say
+    // the evidence does not match, and never that checks failed.
+    expect(refuted).toContain("Result saved, but its evidence does not match");
+    expect(refuted).not.toContain("checks failed");
 
     // Accepting flips the class, never the token — every surface still
     // agrees on WHAT happened; a person has simply signed off on it.
     store.acceptProof(run, "alex", "seen it, shipping anyway", T0);
     const accepted = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
     expect(accepted).toContain('data-dispatch-status="proof-refuted"');
-    expect(accepted).toContain("It was accepted after a manual review");
+    expect(accepted).toContain('data-work-status="accepted-exception"');
+    expect(accepted).toContain("Accepted with an exception");
+    expect(accepted).toContain("the checks were not passed by the machine");
+    expect(accepted).not.toContain("Checks passed");
     expect(accepted).not.toContain("Accept with exception</button>");
   });
 
@@ -8097,8 +8117,8 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0c0e">');
     expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: light)" content="#fafafa">');
     // Sidebar primary rows carry a drawn icon; the foot's rows stay text.
-    expect(html).toMatch(/<a href="\/"[^>]*><span class="glyph"><svg/);
-    expect(html).toMatch(/<a href="\/runs"><span class="glyph"><svg/);
+    expect(html).toMatch(/<a href="\/work"[^>]*><span class="glyph"><svg/);
+    expect(html).toMatch(/<a href="\/projects"[^>]*><span class="glyph"><svg/);
     expect(html).toMatch(/<a href="\/workbench" aria-label="portfolio" title="portfolio">portfolio<\/a>/);
     // Section headers speak sans; status labels are quiet rounded rectangles,
     // while numeric counts retain the conventional pill silhouette.
@@ -8231,7 +8251,8 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     // the bottom bar stays focused on the five daily destinations.
     expect(board).toContain('<details class="project-pill switcher"><summary>');
     expect(board).toContain('<a class="manage" href="/projects">manage projects</a>');
-    expect((board.match(/href="\/projects"/g) ?? []).length).toBe(2);
+    // The rail's row, the switcher's manage link, and the phone's Projects tab.
+    expect((board.match(/href="\/projects"/g) ?? []).length).toBe(3);
     // The chrome layer folds an open switcher on an outside tap.
     expect(board).toContain('details.switcher[open]');
   });
@@ -9754,7 +9775,7 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     rmSync(evidenceRoot, { recursive: true, force: true });
   });
 
-  test("the rail is chat · inbox · board · builds · projects and two collapsed accordion groups (workflows, admin); the tab bar mirrors it; the queue and the switch link are gone from chrome", async () => {
+  test("the rail is chat · work · projects and two collapsed accordion groups (work tools, settings); the tab bar carries the same three; the queue and the switch link are gone from chrome", async () => {
     parkOne();
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
@@ -9763,28 +9784,34 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect(side).toContain('class="side-toggle" aria-label="collapse sidebar" aria-expanded="true"');
     expect(home).toContain("standing-orders:sidebar-collapsed");
     expect(home).toContain(".app.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }");
-    expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/", "/board", "/runs", "/projects"]);
-    // The count rides the inbox row only; every primary row wears an icon.
-    expect(primary).toMatch(/<a href="\/" aria-label="inbox" title="inbox" class="active" data-waiting="1"><span class="glyph"><svg.*?<span class="count badge badge-open">1<\/span><\/a>/s);
-    expect((primary.match(/<span class="glyph">/g) ?? []).length).toBe(5);
+    // Workspace package 1: three primary destinations, nothing else.
+    expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/work", "/projects"]);
+    // The count rides the Work row (the inbox lives under it); every
+    // primary row wears an icon; the inbox page lights Work.
+    expect(primary).toMatch(/<a href="\/work" aria-label="work" title="work" class="active" aria-current="page" data-waiting="1"><span class="glyph"><svg.*?<span class="count badge badge-open">1<\/span><\/a>/s);
+    expect((primary.match(/<span class="glyph">/g) ?? []).length).toBe(3);
 
-    // Both groups collapsed by default: neither carries the inbox's group.
-    const workflows = /<details class="nav-group" data-group="workflows"([^>]*)>(.*?)<\/details>/s.exec(side);
-    const admin = /<details class="nav-group" data-group="admin"([^>]*)>(.*?)<\/details>/s.exec(side);
-    expect(workflows?.[1]).toBe("");
-    expect(admin?.[1]).toBe("");
-    expect(workflows?.[2]).toContain("<summary>workflows");
-    expect(admin?.[2]).toContain("<summary>admin");
-    const workflowsRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(workflows?.[2] ?? "")?.[1] ?? "";
-    const adminRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(admin?.[2] ?? "")?.[1] ?? "";
-    expect([...workflowsRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
-      "portfolio /workbench",
+    // Both groups collapsed by default: neither carries the inbox's group open.
+    const tools = /<details class="nav-group" data-group="tools"([^>]*)>(.*?)<\/details>/s.exec(side);
+    const settings = /<details class="nav-group" data-group="settings"([^>]*)>(.*?)<\/details>/s.exec(side);
+    expect(tools?.[1]).toBe(" open");
+    expect(settings?.[1]).toBe("");
+    expect(tools?.[2]).toContain("<summary>work tools");
+    expect(settings?.[2]).toContain("<summary>settings");
+    const toolRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(tools?.[2] ?? "")?.[1] ?? "";
+    const settingsRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(settings?.[2] ?? "")?.[1] ?? "";
+    expect([...toolRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
+      "inbox /",
+      "board /board",
       "task list /tasks",
       "recipes /recipes",
       "routines /routines",
+      "portfolio /workbench",
       "action ledger /ledger",
     ]);
-    expect([...adminRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
+    // Settings is the group's first row only where the console offers it
+    // (this serve has no telegram token file, so it does not).
+    expect([...settingsRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
       "fleet /fleet",
       "requirements /caps",
       "people /people",
@@ -9793,8 +9820,8 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     ]);
     // The group rows stay text, the way Linear's does — only the rail's
     // primary rows and the chevrons wear a drawn icon.
-    expect(workflowsRows).not.toContain("<svg");
-    expect(adminRows).not.toContain("<svg");
+    expect(toolRows).not.toContain("<svg");
+    expect(settingsRows).not.toContain("<svg");
     expect(side).not.toContain('href="/queue"');
     expect(side).not.toContain('class="nav-settings"');
     expect(home).not.toContain("switch project");
@@ -9802,19 +9829,20 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect(home).toContain('document.querySelectorAll(".nav-group")');
 
     const tabbar = /<nav class="tabbar">(.*?)<\/nav>/s.exec(home)?.[1] ?? "";
-    expect([...tabbar.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/", "/board", "/runs", "/menu"]);
+    expect([...tabbar.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/work", "/projects"]);
     // A phone tab says THAT something waits — a dot, never a number.
     expect(tabbar).toContain('<span class="dot-badge" role="img" aria-label="1 waiting"></span>');
     expect(tabbar).not.toContain("badge-open");
     expect(home).toContain('<a class="manage" href="/projects">manage projects</a>');
+    // Tools and settings are a header action on the phone, never a tab.
+    expect(home).toContain('<a class="mobile-more" href="/menu" aria-label="tools and settings" title="tools and settings">');
 
     // /menu mirrors the same two groups, nothing else.
     const menu = await (await fetch(url("/menu"), { headers: { cookie } })).text();
-    expect(menu).toContain('<h2 class="menu-group-label">workflows</h2>');
-    expect(menu).toContain('<h2 class="menu-group-label">admin</h2>');
-    expect(menu).not.toContain('<h2 class="menu-group-label">settings</h2>');
+    expect(menu).toContain('<h2 class="menu-group-label">work tools</h2>');
+    expect(menu).toContain('<h2 class="menu-group-label">settings</h2>');
     const rows = [...menu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1]);
-    expect(rows).toEqual(["/workbench", "/tasks", "/recipes", "/routines", "/ledger", "/fleet", "/caps", "/people", "/mode", "/system"]);
+    expect(rows).toEqual(["/", "/board", "/tasks", "/recipes", "/routines", "/workbench", "/ledger", "/fleet", "/caps", "/people", "/mode", "/system"]);
   });
 
   test("every retired destination still answers: the queue redirects to the board's order view; done, review, and activity are views of builds", async () => {
@@ -9826,7 +9854,8 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect((await fetch(url("/queue?fragment=1"), { headers: { cookie } })).status).toBe(200);
     for (const [path, current] of [["/done", "done"], ["/review", "review"], ["/activity", "activity"], ["/runs", "builds"]] as const) {
       const html = await (await fetch(url(path), { headers: { cookie } })).text();
-      expect(html).toContain('<a href="/runs" class="active">');
+      // Every builds view lights the Work destination (workspace package 1).
+      expect(html).toContain('<a href="/work" aria-label="work" title="work" class="active" aria-current="page"');
       const strip = /<p class="meta board-view">(.*?)<\/p>/s.exec(html)?.[1] ?? "";
       expect(strip).toContain(`<strong>${current}</strong>`);
       for (const other of ["builds", "done", "review", "activity"].filter(one => one !== current)) {
@@ -9837,14 +9866,16 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
       expect((await fetch(url(path), { headers: { cookie } })).status).toBe(200);
     }
     const order = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
-    expect(order).toContain('<a href="/board" class="active">');
+    expect(order).toContain('<a href="/work" aria-label="work" title="work" class="active" aria-current="page"');
+    expect(order).toContain('<a href="/board" aria-label="board" title="board" class="active">');
   });
 
   test("every count is a road: the header's counts, and a project card's name and chips, open what they count", async () => {
     parkOne();
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
-    expect(home).toContain('<span class="scope-status"><a class="hot" href="/">1 needs you</a><a href="/runs">');
+    // The needs-you count opens Work's Needs-you view (workspace package 1).
+    expect(home).toContain('<span class="scope-status"><a class="hot" href="/work?view=needs-you">1 needs you</a><a href="/runs">');
     expect(home).toMatch(/<a href="\/board\?view=order">\d+ queued<\/a><\/span>/);
     // The phone pill keeps plain text inside its summary — the pill is the switcher.
     const pill = /<details class="project-pill switcher"><summary>(.*?)<\/summary>/s.exec(home)?.[1] ?? "";
@@ -10140,7 +10171,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const empty = await (await fetch(url("/review"), { headers: { cookie } })).text();
     expect(empty).toContain("No finished tasks yet.");
     expect(empty).toContain("Nothing to review yet.");
-    expect(empty).toContain('<a href="/runs" class="active">');
+    expect(empty).toContain('<a href="/work" aria-label="work" title="work" class="active" aria-current="page"');
 
     // Two visible done tasks, one still running, one done in a repo outside the ceiling.
     seed("t-ours", "ours — the <b>title</b>");
@@ -10264,7 +10295,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
 
     const manual = await (await fetch(url("/review?result=t-manual"), { headers: { cookie } })).text();
     expect(manual).toContain('data-review-task="t-manual"');
-    expect(manual).toContain("No build record");
+    expect(manual).toContain("Marked done without a build record");
+    expect(manual).toContain('data-work-status="no-build-record"');
     expect(manual).toContain("no build record");
     expect(manual).toContain("No scope was filed for this task");
     expect(manual).toContain("no finished build record");
@@ -10273,7 +10305,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(mainOf(manual)).not.toContain("<form");
 
     const legacy = await (await fetch(url("/review?result=t-legacy"), { headers: { cookie } })).text();
-    expect(legacy).toContain("Unverified");
+    expect(legacy).toContain("Result saved — verification needed");
+    expect(legacy).toContain('data-work-status="verification-needed"');
     expect(legacy).toContain("no verification result");
     expect(legacy).toContain("This older build has no verification result or captured evidence");
     expect(legacy).toContain("no final diff or change summary was captured for this build");
@@ -10536,7 +10569,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(store.proofAcceptance(run)?.approver).toBe("alex");
     const done = await (await fetch(url("/review?result=t-act"), { headers: { cookie } })).text();
     expect(done).not.toContain("accept-proof");
-    expect(done).toContain("Accepted with exception");
+    expect(done).toContain('data-work-status="accepted-exception"');
+    expect(done).toContain("Accepted with an exception");
+    expect(done).not.toContain("Checks passed");
     expect(done).toContain("Accepted with an exception by <span class=\"mono\">alex</span>");
     expect(done).toContain("read it myself");
     expect(done).toContain("missing evidence — accepted with exception");
@@ -10591,8 +10626,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(old).toContain('data-cockpit-beyond="1"');
     expect(old).toContain('Opened directly: <span class="mono">t-old</span> finished earlier than the newest 100 completions the queue lists');
     expect(old).not.toContain("is in view here");
-    expect(old).not.toContain('aria-current="page"');
-    expect(old).toContain("Evidence captured");
+    expect(old).not.toContain('class="cockpit-row current"');
+    expect(old).toContain("Result saved — checks reported by the agent");
     expect(old).toContain(`href="/r/${oldRun}">Full build history and evidence →</a>`);
     expect(old).toContain(`<form method="post" action="/r/${oldRun}/comment" class="diff-comment-form" id="comment-form">`);
     expect(old).toContain('data-next-action="annotate"');
@@ -10620,12 +10655,14 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     build("t-nc-bare", bareRef, { outcome: "no-change", finishedAt: at(2) });
     await boot();
     const cookie = await login();
-    const chipOf = (html: string): string => /<span class="receipt-proof" data-proof-state="([a-z]+)"><i aria-hidden="true"><\/i>([^<]+)<\/span>/.exec(html)?.slice(1).join(" · ") ?? "(no chip)";
+    // The shared status line (workspace package 1): its token and words.
+    const chipOf = (html: string): string => /<span class="status-line" data-work-status="([a-z-]+)" data-tone="[a-z]+"><i class="status-dot" aria-hidden="true"><\/i><span class="status-label">([^<]+)<\/span>/.exec(html)?.slice(1).join(" · ") ?? "(no chip)";
 
     for (const [id, expected] of [
-      ["t-nc-refuted", "problem · Conflicting evidence"],
-      ["t-nc-attested", "attested · Evidence captured"],
-      ["t-nc-bare", "unknown · Unverified"],
+      ["t-nc-refuted", "evidence-mismatch · Result saved, but its evidence does not match"],
+      ["t-nc-attested", "no-change · No changes were needed"],
+      // No handoff, no diff, no verdict: the record is incomplete, and says so.
+      ["t-nc-bare", "record-incomplete · No-change result, record incomplete"],
     ] as const) {
       const cockpit = await (await fetch(url(`/review?result=${id}`), { headers: { cookie } })).text();
       const receipt = await (await fetch(url(`/t/${id}`), { headers: { cookie } })).text();
@@ -11167,5 +11204,372 @@ describe("the phase route on the console (v47): one projection on the task page,
     store.raw().prepare("UPDATE task_scope SET route_era = NULL, proposed_route_json = NULL WHERE task_id = 'payouts'").run();
     const legacy = agentsCardOf(await page(cookie, "/t/payouts"));
     expect(legacy).toContain("claude · opus builds and repairs (repair model opus); the planner and reviewer come from configuration at run time");
+  });
+});
+
+describe("workspace package 1: one navigation shell, Work views, and one truthful status projection", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let root: string;
+  let alpha: string;
+  let beta: string;
+  let approverToken: string;
+  const now = new Date("2026-09-13T12:00:00.000Z");
+  const memberPassword = "member-password-1234";
+  const url = (path: string): string => `${base}${path}`;
+  const login = async (name = "alex", token = approverToken): Promise<string> => {
+    const response = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name, token }), redirect: "manual" });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+  const page = async (cookie: string, path: string): Promise<string> => (await fetch(url(path), { headers: { cookie } })).text();
+  const csrfOf = (html: string): string => /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] ?? "";
+  const openProject = async (cookie: string, path: string): Promise<void> => {
+    const csrf = csrfOf(await page(cookie, "/projects"));
+    const response = await fetch(url("/projects/open"), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, path, return: "/work" }), redirect: "manual" });
+    expect(response.status).toBe(303);
+  };
+  const seedTask = (id: string, title: string, repo: string): number => {
+    store.createTask({ id, title }, new Date(now.getTime() - 3_600_000));
+    const ref = store.refFor("built-in", id).id;
+    store.placeTask(ref, repo);
+    return ref;
+  };
+  /** A finished built run with the verdict the plane would have stored. */
+  const finished = (id: string, title: string, repo: string, verdict: { verdict: "verified" | "attested" | "short" | "refuted"; reasons: string[] } | null, extra: { accept?: string; publication?: { pr: number; remote?: string } } = {}): { ref: number; run: number } => {
+    const ref = seedTask(id, title, repo);
+    sealScopeFixture(store, id, approverToken, `do ${title}`);
+    const run = store.startRun({ taskRef: ref, leaseId: `lease-${id}`, runner: "night-shift-1", provider: "claude", branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: new Date(now.getTime() - 1_800_000), ...presented(store, ref, "builder") });
+    storeEvidence(store, root, run, "terminal-diff", "terminal-diff.patch", Buffer.from("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", "utf8"), "git diff --no-ext-diff 0000..HEAD (exit 0)", now, { captureStatus: "ok" });
+    storeEvidence(store, root, run, "handoff", "handoff.json", Buffer.from(JSON.stringify({ schema: 1, outcome: "built", committed: true, conclusion: `Finished ${title}.`, changes: [], verification: [], followUps: [], decisionsIncorporated: [] }), "utf8"), "composed at completion", now);
+    store.finishRun(run, { outcome: "built", committed: true, now: new Date(now.getTime() - 1_200_000) });
+    if (verdict !== null) store.saveProofVerdict(run, verdict.verdict, verdict.reasons, now);
+    store.setTaskState(id, "done", new Date(now.getTime() - 1_200_000));
+    if (extra.accept !== undefined) store.acceptProof(run, "alex", extra.accept, now);
+    if (extra.publication !== undefined) {
+      const publication = store.createPublicationIntent({ run, taskRef: ref, githubRepo: "owner/repo", remote: "origin", base: "main", head: `standing-orders/${id}`, headSha: "a".repeat(40), bodyHash: "b".repeat(64), draft: false }, now);
+      store.markPublicationPushed(publication, now);
+      store.markPublicationOpened(publication, extra.publication.pr, `https://github.com/owner/repo/pull/${extra.publication.pr}`, now);
+      if (extra.publication.remote !== undefined) store.recordPublicationRemoteState(publication, extra.publication.remote, now);
+    }
+    return { ref, run };
+  };
+  const statusOf = (html: string): { token: string; label: string }[] =>
+    [...html.matchAll(/<span class="status-line" data-work-status="([^"]+)" data-tone="[a-z]+"><i class="status-dot" aria-hidden="true"><\/i><span class="status-label">([^<]+)<\/span>/g)].map(m => ({ token: m[1] as string, label: m[2] as string }));
+  const rowsOf = (html: string): { id: string; token: string; views: string[]; label: string }[] =>
+    [...html.matchAll(/<article class="work-row" data-task="([^"]+)" data-work-status="([^"]+)" data-work-views="([^"]+)">[\s\S]*?<span class="status-label">([^<]+)<\/span>/g)].map(m => ({ id: m[1] as string, token: m[2] as string, views: (m[3] as string).split(" "), label: m[4] as string }));
+  const countsOf = (html: string): Record<string, number> =>
+    Object.fromEntries([...(/<nav class="work-views"[^>]*>(.*?)<\/nav>/s.exec(html)?.[1] ?? "").matchAll(/>([A-Za-z ]+)<span class="count">(\d+)<\/span>/g)].map(m => [m[1] as string, Number(m[2])]));
+
+  beforeEach(async () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "so-workspace-1-")));
+    alpha = join(root, "alpha");
+    beta = join(root, "beta");
+    mkdirSync(alpha);
+    mkdirSync(beta);
+    // Opening a project requires a repository, not merely a configured path.
+    const { execSync } = await import("node:child_process");
+    execSync("git init -q", { cwd: alpha });
+    execSync("git init -q", { cwd: beta });
+    store = openStore(":memory:");
+    for (const phase of ["plan", "build", "review"]) store.setPhaseConfig("installation", phase, "claude", "sonnet", "test", now);
+    const added = addApprover(store, "alex", now);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot: root, repos: [alpha, beta], clock: () => now });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("chat, work, and projects are the only primary destinations on desktop and phone; every old page lights Work; tools and settings stay reachable and role-bounded", async () => {
+    seedTask("t-a", "alpha work", alpha);
+    const cookie = await login();
+    await openProject(cookie, alpha);
+    const primaryOf = (html: string): string[] => [...(/<aside class="side">.*?<nav>(.*?)<\/nav>/s.exec(html)?.[1] ?? "").matchAll(/<a href="([^"]+)"/g)].map(m => m[1] as string);
+    const tabsOf = (html: string): string[] => [...(/<nav class="tabbar">(.*?)<\/nav>/s.exec(html)?.[1] ?? "").matchAll(/<a href="([^"]+)"/g)].map(m => m[1] as string);
+    const activeOf = (html: string): string | undefined => /<aside class="side">.*?<nav>.*?<a href="([^"]+)"[^>]*class="active" aria-current="page"/s.exec(html)?.[1];
+    // Old routes, query parameters, and deep links all still answer, and
+    // every one of them lights the destination it now lives under.
+    for (const [path, expected] of [
+      ["/", "/work"], ["/work", "/work"], ["/work?view=needs-you", "/work"], ["/tasks", "/work"], ["/tasks?state=queued", "/work"], ["/board", "/work"], ["/board?view=order", "/work"],
+      ["/runs", "/work"], ["/done", "/work"], ["/review", "/work"], ["/activity", "/work"], ["/t/t-a", "/work"], ["/recipes", "/work"], ["/routines", "/work"], ["/ledger", "/work"], ["/workbench", "/work"],
+      ["/projects", "/projects"], ["/chat", "/chat"], ["/chat?task=t-a", "/chat"], ["/fleet", undefined], ["/system", undefined], ["/caps", undefined], ["/people", undefined], ["/menu", undefined],
+    ] as const) {
+      const response = await fetch(url(path), { headers: { cookie } });
+      expect(response.status, path).toBe(200);
+      const html = await response.text();
+      expect(primaryOf(html), path).toEqual(["/chat", "/work", "/projects"]);
+      expect(tabsOf(html), path).toEqual(["/chat", "/work", "/projects"]);
+      expect(activeOf(html), path).toBe(expected);
+      expect(html, path).toContain('<a class="mobile-more" href="/menu" aria-label="tools and settings"');
+      for (const gone of [">inbox</a>", ">builds</a>", ">board</a>"]) expect(/<nav>(.*?)<\/nav>/s.exec(html)?.[1] ?? "", path).not.toContain(gone);
+    }
+    // The settings group lights on its own pages, with the same rows the
+    // admin group carried before.
+    const fleet = await page(cookie, "/fleet");
+    expect(/<details class="nav-group" data-group="settings"([^>]*)>/.exec(fleet)?.[1]).toBe(" open");
+    expect(fleet).toContain('<a href="/fleet" aria-label="fleet" title="fleet" class="active">fleet</a>');
+    const menu = await page(cookie, "/menu");
+    expect([...menu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1])).toEqual(["/", "/board", "/tasks", "/recipes", "/routines", "/workbench", "/ledger", "/fleet", "/caps", "/people", "/mode", "/system"]);
+    // The queue's old address still answers as before.
+    const queue = await fetch(url("/queue"), { headers: { cookie }, redirect: "manual" });
+    expect(queue.status).toBe(303);
+    expect(queue.headers.get("location")).toBe("/board?view=order");
+
+    // A project-scoped login sees the SAME reduced tools it saw before —
+    // no portfolio, no fleet/requirements/mode/system, no chat, no settings.
+    const minted = store.mintInvite("approver", "alex", now, undefined, [alpha]);
+    expect(store.consumeInviteAndCreateAccount({ tokenValue: minted.token, name: "member", credentialHash: hashPassword(memberPassword) }, now).ok).toBe(true);
+    const member = await login("member", memberPassword);
+    const memberWork = await page(member, "/work");
+    expect(primaryOf(memberWork)).toEqual(["/work", "/projects"]);
+    expect(tabsOf(memberWork)).toEqual(["/work", "/projects"]);
+    const memberMenu = await page(member, "/menu");
+    expect([...memberMenu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1])).toEqual(["/", "/board", "/tasks", "/recipes", "/routines", "/ledger", "/people"]);
+    expect(memberMenu).not.toContain("/settings");
+    for (const path of ["/fleet", "/system", "/caps", "/workbench", "/chat", "/settings"]) expect((await fetch(url(path), { headers: { cookie: member } })).status, path).toBe(403);
+  });
+
+  test("Work's All, Needs you, Running, and Completed views count and list queued, waiting, held, failed, cancelled, running, and every finished-evidence state truthfully, with meaningful empty states", async () => {
+    // Nothing yet: All says so and offers the two ways in.
+    const cookie = await login();
+    await openProject(cookie, alpha);
+    const empty = await page(cookie, "/work");
+    expect(empty).toContain('data-work-empty="all"');
+    expect(empty).toContain("Nothing is in progress.");
+    expect(countsOf(empty)).toEqual({ All: 0, "Needs you": 0, Running: 0, Completed: 0 });
+    expect(empty).toContain('<a href="/work" class="active" aria-current="page">All<span class="count">0</span></a>');
+
+    // Approved and waiting for a builder; chained behind it; on hold;
+    // failed; cancelled; running under a live claim; and finished builds.
+    const builder = seedTask("t-builder", "Stream the CSV writer", alpha);
+    sealScopeFixture(store, "t-builder", approverToken, "stream it");
+    const chained = seedTask("t-chained", "Show export progress", alpha);
+    sealScopeFixture(store, "t-chained", approverToken, "show progress");
+    store.addEdge("t-chained", "t-builder");
+    const held = seedTask("t-held", "Document the columns", alpha);
+    sealScopeFixture(store, "t-held", approverToken, "document");
+    store.hold(held, "wait for the names to settle", null, now);
+    seedTask("t-failed", "Benchmark the export", alpha);
+    store.setTaskState("t-failed", "failed", now);
+    seedTask("t-cancelled", "Remove the old exporter", alpha);
+    store.cancelTask("t-cancelled", now, "superseded");
+    const live = seedTask("t-live", "Prove the DST boundary", alpha);
+    sealScopeFixture(store, "t-live", approverToken, "prove it");
+    register(store, { name: "night-shift-1", host: "here", capacity: 2, repos: [alpha], now, newToken: () => "tok-night-1" });
+    const taken = acquire(store, live, "night-shift-1", { token: "tok-night-1", now, ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error("claim refused");
+    store.startRun({ taskRef: live, leaseId: taken.claim.leaseId, runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-live", worktree: "/pool/t-live", now, ...presented(store, live, "builder") });
+    store.setTaskState("t-live", "running", now);
+    finished("t-checks", "Escape quotes", alpha, { verdict: "refuted", reasons: ["the repository's approved verification command exited 1"] });
+    finished("t-mismatch", "Make the range inclusive", alpha, { verdict: "refuted", reasons: ["claimed changed path not in the sealed diff: src/ledger.ts"] });
+    finished("t-missing", "Add subtotal rows", alpha, { verdict: "short", reasons: ["no proof was written"] });
+    finished("t-attested", "Emit a BOM", alpha, { verdict: "attested", reasons: ["the proof agrees with the sealed diff; no verification command is configured to re-run"] });
+    finished("t-accepted", "Keep the button reachable", alpha, { verdict: "short", reasons: ["no proof was written"] }, { accept: "checked by hand" });
+    finished("t-verified", "Round at cent precision", alpha, { verdict: "verified", reasons: ["the approved verification command passed"] });
+    finished("t-pr", "Handle DST", alpha, { verdict: "verified", reasons: ["the approved verification command passed"] }, { publication: { pr: 482 } });
+    finished("t-merged", "Fix the timezone", alpha, { verdict: "verified", reasons: ["the approved verification command passed"] }, { publication: { pr: 479, remote: "MERGED" } });
+    void builder; void chained;
+
+    const all = await page(cookie, "/work");
+    const rows = rowsOf(all);
+    const byId = Object.fromEntries(rows.map(row => [row.id, row]));
+    expect(byId).toMatchObject({
+      "t-builder": { token: "ready", views: ["all"], label: "Ready to run" },
+      "t-chained": { token: "waiting-dependency", views: ["all"], label: "Waiting for another task" },
+      "t-held": { token: "held", views: ["all", "needs-you"], label: "On hold" },
+      "t-failed": { token: "failed", views: ["all", "needs-you"], label: "Needs a retry" },
+      "t-cancelled": { token: "cancelled", views: ["all"], label: "Cancelled" },
+      "t-live": { token: "running", views: ["all", "running"], label: "Running now" },
+      "t-checks": { token: "checks-failed", views: ["all", "needs-you", "completed"], label: "Changes saved, but checks failed" },
+      "t-mismatch": { token: "evidence-mismatch", views: ["all", "needs-you", "completed"], label: "Result saved, but its evidence does not match" },
+      "t-missing": { token: "verification-needed", views: ["all", "needs-you", "completed"], label: "Result saved — verification needed" },
+      "t-attested": { token: "agent-attested", views: ["all", "completed"], label: "Result saved — checks reported by the agent" },
+      "t-accepted": { token: "accepted-exception", views: ["all", "completed"], label: "Accepted with an exception" },
+      "t-verified": { token: "ready-to-review", views: ["all", "completed"], label: "Ready to review" },
+      "t-pr": { token: "pr-opened", views: ["all", "completed"], label: "PR opened" },
+      "t-merged": { token: "merge-observed", views: ["all", "completed"], label: "Merge observed" },
+    });
+    expect(rows.length).toBe(14);
+    // All sorts what needs a person first, then live work, then queued
+    // and waiting, then finished, then cancelled — and lists every one.
+    const order = rows.map(row => row.token);
+    expect(order.indexOf("running")).toBeGreaterThan(order.lastIndexOf("checks-failed"));
+    expect(order.indexOf("waiting-dependency")).toBeGreaterThan(order.indexOf("running"));
+    expect(order.indexOf("ready")).toBeGreaterThan(order.indexOf("running"));
+    expect(order.indexOf("ready-to-review")).toBeGreaterThan(order.indexOf("waiting-dependency"));
+    expect(order.indexOf("cancelled")).toBe(order.length - 1);
+    // The counts are the same rows' view memberships.
+    expect(countsOf(all)).toEqual({ All: 14, "Needs you": 5, Running: 1, Completed: 8 });
+    // Each view lists exactly its members, and marks itself active.
+    for (const [view, expected] of [
+      ["needs-you", ["t-held", "t-failed", "t-checks", "t-mismatch", "t-missing"]],
+      ["running", ["t-live"]],
+      ["completed", ["t-checks", "t-mismatch", "t-missing", "t-attested", "t-accepted", "t-verified", "t-pr", "t-merged"]],
+    ] as const) {
+      const html = await page(cookie, `/work?view=${view}`);
+      expect(rowsOf(html).map(row => row.id).sort(), view).toEqual([...expected].sort());
+      expect(html, view).toContain(`<a href="/work?view=${view}" class="active" aria-current="page">`);
+    }
+    // The rows lead with the title; the id stays secondary; no raw "done"
+    // badge, and nothing says shipped, deployed, or verified where it is not.
+    expect(all).toContain('<a class="work-title" href="/t/t-checks">Escape quotes</a>');
+    expect(all).toMatch(/<p class="work-meta"><span class="mono">t-checks<\/span>/);
+    expect(all).not.toContain('badge-done">done');
+    expect(all).not.toMatch(/\bshipped\b/i);
+    expect(all).not.toContain("Deployed");
+    expect(all).toContain("Deployment is not confirmed by any record here.");
+    // The next action names the act: the failed check, the exception, the PR.
+    expect(all).toContain('href="/review?result=t-checks">Review the failed check →</a>');
+    expect(all).toContain('href="/review?result=t-accepted">Review the recorded exception →</a>');
+    expect(all).toContain('href="https://github.com/owner/repo/pull/482">Open the pull request →</a>');
+    // Bad view values fall back to All; an unknown view is never an error.
+    expect(await page(cookie, "/work?view=bogus")).toContain('<a href="/work" class="active" aria-current="page">All');
+    // Every shortcut view has its own honest empty state.
+    store.cancelTask("t-live", now); // a live claim refuses; the row stays — so check the empty copy on a fresh project instead
+    await openProject(cookie, beta);
+    for (const view of ["needs-you", "running", "completed"] as const) {
+      const html = await page(cookie, `/work?view=${view}`);
+      expect(html, view).toContain(`data-work-empty="${view}"`);
+      expect(html, view).toContain('<a href="/work">See all work →</a>');
+    }
+    expect(await page(cookie, "/work?view=running")).toContain("Nothing is building right now.");
+    expect(await page(cookie, "/work?view=needs-you")).toContain("Nothing needs you right now.");
+    expect(await page(cookie, "/work?view=completed")).toContain("No finished work yet.");
+  });
+
+  test("the same run's status agrees across Work, the task page, the focused chat, and the review cockpit — and never calls failed, missing, or agent-attested evidence verified, or local changes shipped", async () => {
+    finished("t-checks", "Escape quotes", alpha, { verdict: "refuted", reasons: ["the repository's approved verification command exited 1"] });
+    finished("t-mismatch", "Make the range inclusive", alpha, { verdict: "refuted", reasons: ["claimed changed path not in the sealed diff: src/ledger.ts"] });
+    finished("t-missing", "Add subtotal rows", alpha, null);
+    finished("t-attested", "Emit a BOM", alpha, { verdict: "attested", reasons: ["the proof agrees with the sealed diff; no verification command is configured to re-run"] });
+    finished("t-accepted", "Keep the button reachable", alpha, { verdict: "refuted", reasons: ["the repository's approved verification command exited 2"] }, { accept: "checked by hand" });
+    finished("t-verified", "Round at cent precision", alpha, { verdict: "verified", reasons: ["the approved verification command passed"] });
+    finished("t-pr", "Handle DST", alpha, { verdict: "verified", reasons: ["the approved verification command passed"] }, { publication: { pr: 482 } });
+    const cookie = await login();
+    await openProject(cookie, alpha);
+    const work = await page(cookie, "/work");
+    const expected: Record<string, [string, string]> = {
+      "t-checks": ["checks-failed", "Changes saved, but checks failed"],
+      "t-mismatch": ["evidence-mismatch", "Result saved, but its evidence does not match"],
+      "t-missing": ["verification-needed", "Result saved — verification needed"],
+      "t-attested": ["agent-attested", "Result saved — checks reported by the agent"],
+      "t-accepted": ["accepted-exception", "Accepted with an exception"],
+      "t-verified": ["ready-to-review", "Ready to review"],
+      "t-pr": ["pr-opened", "PR opened"],
+    };
+    for (const [id, [token, label]] of Object.entries(expected)) {
+      const row = rowsOf(work).find(one => one.id === id);
+      expect(row, id).toMatchObject({ token, label });
+      const task = await page(cookie, `/t/${id}`);
+      const chat = await page(cookie, `/chat?task=${id}`);
+      const review = await page(cookie, `/review?result=${id}`);
+      // The task page: the title's status, the status box, and the receipt.
+      expect(task, id).toContain(`<div class="problem dispatch-status" id="run-status" data-dispatch-status="`.slice(0, 0) + `data-work-status="${token}"`);
+      expect(statusOf(task).map(one => one.label), id).toEqual([label, label]);
+      expect(/<h1 class="task-main-title">[^<]*<span class="status-line" data-work-status="([^"]+)"/.exec(task)?.[1], id).toBe(token);
+      expect(task, id).not.toContain('class="badge badge-done">done');
+      // The focused chat: the journey headline and the receipt.
+      expect(/<section class="card task-journey"[^>]*data-work-status="([^"]+)"/.exec(chat)?.[1], id).toBe(token);
+      expect(/<span class="eyebrow">task journey<\/span><h2>([^<]+)<\/h2>/.exec(chat)?.[1], id).toBe(label);
+      expect(statusOf(chat).map(one => one.label), id).toEqual([label]);
+      // The review cockpit's headline chip.
+      expect(/<header class="cockpit-head"[^>]*>.*?<p class="cockpit-chips">(.*?)<\/p>/s.exec(review)?.[1], id).toContain(`data-work-status="${token}"`);
+      expect(statusOf(review)[0]?.label, id).toBe(label);
+      // No surface calls anything shipped or deployed; the receipt names
+      // what the record supports.
+      for (const [name, html] of [["task", task], ["chat", chat], ["review", review]] as const) {
+        expect(html, `${id} ${name}`).not.toContain("What shipped");
+        expect(html, `${id} ${name}`).not.toContain("deployed</");
+        expect(html, `${id} ${name}`).not.toMatch(/\bshipped\b/i);
+      }
+    }
+    // A failed check, missing proof, and agent-attested evidence are never
+    // "Verified"/"Ready to review"; acceptance is never "Checks passed".
+    for (const id of ["t-checks", "t-mismatch", "t-missing", "t-attested", "t-accepted"]) {
+      const task = await page(cookie, `/t/${id}`);
+      expect(task, id).not.toContain("Ready to review");
+      expect(task, id).not.toContain('data-work-status="ready-to-review"');
+      expect(task, id).not.toContain("Checks passed");
+    }
+    // A failed check versus mismatched evidence: only the former says a
+    // check failed, and it names the exit code.
+    expect(await page(cookie, "/t/t-checks")).toContain("The project check failed (exit 1).");
+    expect(await page(cookie, "/t/t-mismatch")).not.toContain("checks failed");
+    expect(await page(cookie, "/t/t-mismatch")).toContain("src/ledger.ts");
+    // The receipt heading and publication line: local changes are saved;
+    // a PR is "PR opened", and neither claims a merge or a deployment.
+    const local = await page(cookie, "/t/t-verified");
+    expect(local).toContain("<h2>Changes saved</h2>");
+    expect(local).toContain("Saved on the build branch — not published, merged, or deployed.");
+    const pr = await page(cookie, "/t/t-pr");
+    expect(pr).toContain("<h2>PR opened</h2>");
+    expect(pr).toContain('data-receipt-publication="opened">PR #482 is open on GitHub. Merging stays a person');
+    expect(pr).not.toContain("Merge observed");
+    // The accepted exception keeps its original failed check visible.
+    const accepted = await page(cookie, "/t/t-accepted");
+    expect(accepted).toContain("The project check failed (exit 2).");
+    expect(accepted).toContain("the checks were not passed by the machine");
+  });
+
+  test("an admitted run's deep link opens from All projects without weakening visibility: a run outside the ceiling or the account still 404s, and the project gate stays for project-bound pages", async () => {
+    const { run: alphaRun } = finished("t-alpha", "alpha result", alpha, { verdict: "verified", reasons: ["the approved verification command passed"] });
+    const { run: betaRun } = finished("t-beta", "beta result", beta, { verdict: "verified", reasons: ["the approved verification command passed"] });
+    const outsideRef = seedTask("t-outside", "outside the ceiling", join(root, "forbidden"));
+    const outsideRun = store.startRun({ taskRef: outsideRef, leaseId: "lease-outside", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-outside", worktree: "/pool/t-outside", now, ...presented(store, outsideRef, "builder") });
+    store.finishRun(outsideRun, { outcome: "built", committed: true, now });
+    const cookie = await login();
+    // A fresh session with two served projects has none open.
+    expect(/<span class="name">all projects/.test(await page(cookie, "/work"))).toBe(true);
+    for (const [path, status] of [[`/r/${alphaRun}`, 200], [`/r/${betaRun}`, 200], [`/r/${outsideRun}`, 404], ["/r/999999", 404]] as const) {
+      const response = await fetch(url(path), { headers: { cookie }, redirect: "manual" });
+      expect(response.status, path).toBe(status);
+      expect(response.headers.get("location"), path).toBeNull();
+    }
+    const runPage = await page(cookie, `/r/${alphaRun}`);
+    expect(runPage).toContain(`build #${alphaRun}`);
+    expect(runPage).toContain("t-alpha");
+    // Selected-result links keep working through the same door, and the
+    // Work roll-up lists both projects with their labels.
+    const work = await page(cookie, "/work");
+    expect(rowsOf(work).map(row => row.id).sort()).toEqual(["t-alpha", "t-beta"]);
+    expect(work).toContain('<span class="project-label">alpha</span>');
+    expect(work).toContain('<span class="project-label">beta</span>');
+    expect(work).not.toContain("t-outside");
+    // Project-bound pages still defer to the opener exactly as before.
+    const tasks = await fetch(url("/tasks"), { headers: { cookie }, redirect: "manual" });
+    expect(tasks.status).toBe(303);
+    expect(tasks.headers.get("location")).toBe("/projects");
+    // A project-scoped account gets 404 for the other project's run — the
+    // same answer as before, whatever project its session holds.
+    const minted = store.mintInvite("approver", "alex", now, undefined, [alpha]);
+    expect(store.consumeInviteAndCreateAccount({ tokenValue: minted.token, name: "member", credentialHash: hashPassword(memberPassword) }, now).ok).toBe(true);
+    const member = await login("member", memberPassword);
+    expect((await fetch(url(`/r/${alphaRun}`), { headers: { cookie: member } })).status).toBe(200);
+    expect((await fetch(url(`/r/${betaRun}`), { headers: { cookie: member } })).status).toBe(404);
+    expect(rowsOf(await page(member, "/work")).map(row => row.id)).toEqual(["t-alpha"]);
+  });
+
+  test("the task list leads with the project label and wraps the raw path; the receipt never says shipped", async () => {
+    const long = join(root, "clients", "northwind-operations", "ops-console-with-a-very-long-repository-name-for-overflow-checks");
+    mkdirSync(long, { recursive: true });
+    const cookie = await login();
+    // Served projects are the two configured; the long path is an opened
+    // project only through the ceiling, so drive the intro with alpha.
+    await openProject(cookie, alpha);
+    const tasks = await page(cookie, "/tasks");
+    expect(tasks).toContain(`work you want done in <strong>alpha</strong>`);
+    expect(tasks).toContain(`<p class="meta path-words"><span class="mono">${alpha}</span></p>`);
+    expect(tasks).toContain(".path-words { overflow-wrap: anywhere; word-break: break-word; }");
+    expect(tasks).not.toContain(`in <span class="mono">${alpha}</span> —`);
   });
 });

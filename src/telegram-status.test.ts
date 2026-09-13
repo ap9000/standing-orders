@@ -108,7 +108,8 @@ describe("read-only phone status", () => {
     store.markPublicationPushed(publication, NOW);
     store.markPublicationOpened(publication, 7, "https://github.com/owner/repo/pull/7", NOW);
     const detail = phoneTask(store, [REPO], "accepted", NOW);
-    expect(detail).toContain("Complete with recorded acceptance");
+    expect(detail).toContain("Accepted with an exception");
+    expect(detail).not.toContain("Checks passed");
     expect(detail).toContain("Required evidence is missing");
     expect(detail).toContain("does not upgrade its evidence");
     expect(detail).toContain("Pull request #7 opened; not recorded as merged");

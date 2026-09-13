@@ -71,6 +71,10 @@ import { starterRecipes, savedRecipes, findRecipe, importRecipe, exportRecipe, c
 import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtml, recipeScript, RECIPE_CSS, recipeDefinitionPreviewHtml, recipeRunHtml, recipeAnswersFromForm } from "./recipe-ui.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
+import {
+  WORK_VIEWS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, workStatusOf, workCounts, compareWorkRows, primaryDestinationOf, needsPerson,
+  type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts,
+} from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
   buildDataDocument,
@@ -938,7 +942,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
     if (!restricted()) return true;
     const path = url.pathname;
-    const read = new Set(["/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const read = new Set(["/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
     const write = new Set(["/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
@@ -977,11 +981,17 @@ export function createDecisionServer(options: ServeOptions): Server {
     // Nothing open and more than one thing to choose: land on the opener.
     // Decisions and their evidence stay reachable — answering must never be
     // blocked by project state — and the opener itself must not loop.
+    // A run's page and its evidence (workspace package 1): a bookmarked
+    // `/r/<id>` from All projects used to bounce to the opener until a
+    // project was chosen. The handler below re-proves the run's repo
+    // against the ceiling and the account (`runVisible`) before a byte
+    // renders, so letting the path through widens nothing.
     const needsProject =
       who.via === "cookie" && project === null && !unscopedMode &&
-      url.pathname !== "/" &&
+      url.pathname !== "/" && url.pathname !== "/work" &&
       url.pathname !== "/recipes" &&
       !/^\/t\/[^/]+$/.test(url.pathname) &&
+      !/^\/r\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(url.pathname) &&
       !url.pathname.startsWith("/d/") && !url.pathname.startsWith("/contest/") &&
       url.pathname !== "/projects" &&
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
@@ -1180,6 +1190,37 @@ export function createDecisionServer(options: ServeOptions): Server {
             const lastHeard = runners.map(one => one.heartbeatAt).sort().at(-1) ?? null;
             return { answering: answering.length, registered: runners.length, lastHeard };
           })(),
+          now,
+        }),
+      );
+    }
+
+    if (url.pathname === "/work") {
+      // The Work destination (workspace package 1): every task in view as
+      // one row wearing the shared status projection, with All, Needs you,
+      // Running, and Completed as shortcuts over the same rows — never a
+      // persisted state. With no project open in scoped mode this rolls
+      // up like the inbox: admission binds the query and every row's repo
+      // is re-proved here.
+      const view = parseWorkView(url.searchParams.get("view"));
+      const rollup = project === null && !unscopedMode;
+      const admission = rollup ? admissionList() : null;
+      const admitted = new Set(admission ?? []);
+      const fetched = store.listTasksScoped(project, undefined, rollup ? 500 : WORK_PAGE, null)
+        .filter(task => visible(task.repo) && (admission === null || task.repo === null || admitted.has(task.repo)));
+      const bounded = fetched.slice(0, WORK_PAGE);
+      const rows = bounded.map(task => workRowOf(task, now));
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      return sendScreen(
+        response,
+        200,
+        workPage(chromeFor(project, "work", undefined, rollup ? "all" : undefined), {
+          view,
+          rows,
+          truncated: fetched.length > bounded.length,
+          cap: WORK_PAGE,
+          multiProject: new Set(bounded.map(task => task.repo ?? "")).size > 1,
+          csrf,
           now,
         }),
       );
@@ -1996,14 +2037,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         `<h2 class="menu-group-label">${label}</h2><div class="menu-list">` +
         rows.map(row => `<a class="menu-row" href="${row.href}"><strong>${row.label}</strong><span class="meta">${row.hint}</span></a>`).join("\n") +
         `</div>`;
-      const settingsSection = chrome.settings
-        ? section("settings", [{ key: "settings" as const, href: "/settings", label: "settings", hint: "agent defaults, alerts, credentials" }])
-        : "";
       return page(response, 200, shell("menu", [
-        `<h1>more</h1>`,
-        section("workflows", workflowsRows(chrome.projectScoped)),
-        section("admin", adminRows(chrome.projectScoped)),
-        settingsSection,
+        `<h1>tools and settings</h1>`,
+        `<p class="hint">Chat, Work, and Projects are the tabs below. Everything else lives here.</p>`,
+        section("work tools", workToolRows(chrome.projectScoped)),
+        section("settings", settingsRows(chrome.projectScoped, chrome.settings)),
       ].join("\n"), { chrome }));
     }
 
@@ -2148,6 +2186,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           structuredHandoffView(artifacts, evidenceRoot),
           proofBundleView(store, found, artifacts, evidenceRoot),
           store.runRoute(found.id),
+          store.publicationForRun(found.id),
         ),
       );
     }
@@ -2319,7 +2358,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const chatProjects = repos.map((repo, index) => {
         let peek: ProjectPeek | null = null;
         try {
-          peek = store.projectPeek(repo, now);
+          peek = { ...store.projectPeek(repo, now), waiting: needsYouBadge(repo).count };
         } catch {
           // The project rail is orientation, like chrome's project peek: a
           // failed count must not make the conversation itself disappear.
@@ -2885,6 +2924,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   function paletteIndexTag(project: string | null): string {
     const admitted = project === null ? admissionList() : null;
     const entries: { label: string; href: string }[] = [
+      { label: "work", href: "/work" },
+      { label: "needs you", href: "/work?view=needs-you" },
       { label: "inbox", href: "/" },
       { label: "board", href: "/board?scope=all" },
       { label: "queue", href: QUEUE_VIEW },
@@ -2907,7 +2948,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       entries.push({ label: `${one.id} — ${one.title}`, href: `/t/${encodeURIComponent(one.id)}` });
     }
     const saturated = open.length > 200;
-    const safeEntries = restricted() ? entries.filter(one => ["/", "/board", "/routines", "/done", "/review", "/tasks", "/runs", "/projects", "/ledger"].includes(one.href) || one.href.startsWith("/t/")) : entries;
+    const safeEntries = restricted() ? entries.filter(one => ["/work", "/work?view=needs-you", "/", "/board", "/routines", "/done", "/review", "/tasks", "/runs", "/projects", "/ledger"].includes(one.href) || one.href.startsWith("/t/")) : entries;
     const json = JSON.stringify(saturated ? [...safeEntries, { label: "… more in the task list", href: "/tasks" }] : safeEntries)
       .replace(/</g, "\\u003c");
     return `<script type="application/json" id="palette-index">${json}</script>`;
@@ -2978,6 +3019,20 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   /** The badge cache: five seconds per project — mutations invalidate it. */
   const badgeCache = new Map<string, { at: number; count: number; saturated: boolean }>();
+  /** The needs-you count every surface wears for a project (workspace
+   * package 1): Work's own Needs-you membership, cached per viewer and
+   * project, so the rail, the phone tab, the scope bar, the project cards,
+   * the chat overview, and the Needs-you tab never disagree. */
+  function needsYouBadge(project: string | null): { count: number; saturated: boolean } {
+    const actor = requestContext.getStore()?.actor;
+    const key = `${actor ?? ""}:${actor === undefined ? "" : store.accountOf(actor)?.generation}:${project ?? ""}`;
+    const cached = badgeCache.get(key);
+    if (cached !== undefined && Date.now() - cached.at <= 5_000) return cached;
+    const counted = needsYouCount(project);
+    const badge = { at: Date.now(), count: counted.count, saturated: counted.saturated };
+    badgeCache.set(key, badge);
+    return badge;
+  }
   const bustBadge = (): void => {
     badgeCache.clear();
     paletteCache.clear();
@@ -2992,20 +3047,13 @@ export function createDecisionServer(options: ServeOptions): Server {
   ): Chrome {
     if (restricted() && !visible(project)) project = null;
     const actor = requestContext.getStore()?.actor;
-    const key = `${actor ?? ""}:${actor === undefined ? "" : store.accountOf(actor)?.generation}:${project ?? ""}`;
-    const cached = badgeCache.get(key);
-    let badge = cached;
-    if (badge === undefined || Date.now() - badge.at > 5_000) {
-      const counted = store.countInboxScoped(project, clock(), 100, project === null ? admissionList() : null);
-      badge = { at: Date.now(), count: counted.count, saturated: counted.saturated };
-      badgeCache.set(key, badge);
-    }
+    const badge = needsYouBadge(project);
     const liveMode = project === null ? null : store.activeMode(project, clock());
     const liveModeTerms = liveMode === null ? null : modeTermsFromJson(liveMode.termsJson);
     let projectPeek: ProjectPeek | null | undefined = project === null ? null : undefined;
     if (project !== null) {
       try {
-        projectPeek = store.projectPeek(project, clock());
+        projectPeek = { ...store.projectPeek(project, clock()), waiting: badge.count };
       } catch {
         // Chrome is orientation, never a reason to fail the actual screen.
         projectPeek = undefined;
@@ -3056,6 +3104,65 @@ export function createDecisionServer(options: ServeOptions): Server {
     };
   }
 
+  /** The Needs-you count the chrome wears: the tasks in view whose
+   * diagnosis says a person must act, over the same bounded page Work
+   * lists. Saturated when the page is full — never a sum of unbounded reads. */
+  function needsYouCount(project: string | null): { count: number; saturated: boolean } {
+    const now = clock();
+    const rollup = project === null && !unscopedMode;
+    const admission = rollup ? admissionList() : null;
+    const admitted = new Set(admission ?? []);
+    const rows = store.listTasksScoped(project, undefined, rollup ? 500 : WORK_PAGE, null)
+      .filter(task => visible(task.repo) && (admission === null || task.repo === null || admitted.has(task.repo)))
+      .slice(0, WORK_PAGE);
+    let count = 0;
+    for (const task of rows) if (task.state !== "cancelled" && needsPerson(diagnoseTaskDispatch(store, task.id, now))) count += 1;
+    return { count, saturated: rows.length >= WORK_PAGE };
+  }
+
+  /**
+   * One Work row's facts (workspace package 1), from the records the task
+   * page already reads: the dispatch diagnosis, the latest finished
+   * builder/scout run with its machine verdict and any acceptance, the
+   * run's publication, and the live claim. The words come from the pure
+   * projection so this row, the task page, the focused chat, and the
+   * review cockpit cannot disagree about the same run.
+   */
+  function workRowOf(task: Task & { repo: string | null }, now: Date): WorkRow {
+    const ref = store.lookupRef(task.id);
+    const runs = ref === null ? [] : store.runsFor(ref.id);
+    const latest = runs.find(runIsTaskResult) ?? null;
+    const verdict = latest === null ? null : store.proofVerdictFor(latest.id);
+    const live = runs.find(one => runIsLive(one)) ?? null;
+    const facts: WorkFacts = {
+      id: task.id,
+      title: task.title,
+      repo: task.repo,
+      state: task.state,
+      updatedAt: task.updatedAt,
+      dispatch: diagnoseTaskDispatch(store, task.id, now),
+      result:
+        task.state !== "done"
+          ? null
+          : latest === null
+            ? null
+            : {
+                runId: latest.id,
+                role: latest.role,
+                outcome: latest.outcome,
+                verdict: verdict?.verdict ?? null,
+                reasons: verdict?.reasons ?? [],
+                accepted: store.proofAcceptance(latest.id) !== null,
+                ...(latest.outcome !== "no-change"
+                  ? {}
+                  : { recordComplete: (() => { const kinds = new Set(store.artifactsFor(latest.id).map(one => one.kind)); return kinds.has("handoff") && kinds.has("terminal-diff"); })() }),
+              },
+      publication: latest === null ? null : publicationFactsOf(store.publicationForRun(latest.id)),
+      liveRunId: live === null ? null : live.id,
+    };
+    return { ...facts, status: workStatusOf(facts), resultRunId: latest === null ? null : latest.id };
+  }
+
   /** The compact task list for the master pane, the current row marked. */
   function taskListPane(project: string | null, currentId: string | null): string {
     const rows = store.listTasksScoped(project, undefined, 100, currentId);
@@ -3065,7 +3172,10 @@ export function createDecisionServer(options: ServeOptions): Server {
           `<a class="item${task.id === currentId ? " current" : ""}" href="${taskHref(task.id)}">` +
           `<span class="t">${escape(task.title)}</span>` +
           `<span class="m"><span class="mono">${escape(task.id)}</span>` +
-          `<span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></span></a>`,
+          // The pane names the raw state except "done", which alone is a
+          // claim: a finished build is the fact, its evidence is judged on
+          // the task page beside it (workspace package 1).
+          `<span class="badge badge-${escape(task.state)}">${escape(task.state === "done" ? "finished" : task.state)}</span></span></a>`,
       )
       .join("\n");
     return `<h2>tasks</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
@@ -3155,7 +3265,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // COUNTs each, scoped to the exact repo.
     const peekOf = (path: string) => {
       try {
-        return store.projectPeek(path, now);
+        return { ...store.projectPeek(path, now), waiting: needsYouBadge(path).count };
       } catch {
         return null;
       }
@@ -7334,6 +7444,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       ...base,
       run: {
         id: run.id,
+        role: run.role,
         outcome: run.outcome,
         runner: run.runner,
         provider: run.provider,
@@ -8791,16 +8902,9 @@ const STYLE = `
   }
   .receipt-head { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
   .receipt-head h2 { margin: .15rem 0 0; font-size: 1.15rem; }
-  .receipt-proof { display: inline-flex; align-items: center; gap: .4rem; flex: none; color: var(--muted-foreground); font-size: .75rem; font-weight: 600; }
-  .receipt-proof i { width: .48rem; height: .48rem; border-radius: 50%; background: var(--muted-foreground); box-shadow: 0 0 0 3px color-mix(in srgb, var(--muted-foreground) 12%, transparent); }
-  .receipt-proof[data-proof-state="verified"] { color: var(--success); }
-  .receipt-proof[data-proof-state="verified"] i { background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 13%, transparent); }
-  .receipt-proof[data-proof-state="attested"] { color: var(--running); }
-  .receipt-proof[data-proof-state="attested"] i { background: var(--running); box-shadow: 0 0 0 3px color-mix(in srgb, var(--running) 13%, transparent); }
-  /* A failed check is serious, but it is not the page's colour theme.
-     Keep the words neutral and reserve one small red mark for scanning. */
-  .receipt-proof[data-proof-state="problem"] { color: var(--foreground); }
-  .receipt-proof[data-proof-state="problem"] i { background: var(--destructive); box-shadow: none; }
+  /* The receipt's status line is the shared component (.status-line);
+     the head keeps it from wrapping under the heading. */
+  .receipt-head .status-line { flex: none; font-size: .8125rem; }
   .receipt-summary { position: relative; z-index: 1; max-width: 43rem; margin: .75rem 0 1rem; font-size: 1rem; line-height: 1.55; }
   .receipt-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .55rem; }
   .receipt-facts > span { min-width: 0; padding: .7rem .75rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--glass-strong) 64%, transparent); }
@@ -9607,6 +9711,77 @@ const STYLE = `
     .plan-revision-pending button { width: 100%; }
   }
 
+  /* Work (workspace package 1): a quiet list of rows and dividers, never
+     another grid of cards. The status line is the same component every
+     surface renders for a run — a small dot in the tone, neutral words. */
+  .work-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .work-head h1 { margin-bottom: .25rem; }
+  .work-tools { position: relative; flex: none; margin: .25rem 0 0; border: 0; padding: 0; background: none; border-radius: 0; }
+  .work-tools > summary {
+    list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: .3rem;
+    min-height: 2.25rem; padding: 0 .75rem; border: 1px solid var(--border); border-radius: 999px;
+    font-size: .8125rem; font-weight: 500; color: var(--foreground); background: var(--card);
+  }
+  .work-tools > summary::-webkit-details-marker { display: none; }
+  .work-tools > summary .chevron { width: .875rem; height: .875rem; }
+  .work-tools[open] > summary .chevron { transform: rotate(180deg); }
+  .work-tools-menu {
+    position: absolute; right: 0; top: calc(100% + .375rem); z-index: 20; min-width: 11rem;
+    display: flex; flex-direction: column; padding: .375rem; border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
+    background: var(--card); box-shadow: var(--shadow);
+  }
+  .work-tools-menu a { display: block; padding: .5rem .625rem; border-radius: .5rem; text-decoration: none; color: var(--foreground); font-size: .875rem; }
+  .work-tools-menu a:hover { background: var(--muted); }
+  .work-views { display: flex; gap: .25rem; margin: .75rem 0 .5rem; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+  .work-views::-webkit-scrollbar { display: none; }
+  .work-views a {
+    display: inline-flex; align-items: center; gap: .4rem; flex: none; min-height: 2.5rem; padding: 0 .625rem;
+    margin-bottom: -1px; border-bottom: 2px solid transparent; text-decoration: none;
+    color: var(--muted-foreground); font-size: .875rem; font-weight: 500;
+  }
+  .work-views a .count { font-family: var(--font-mono); font-size: .6875rem; font-variant-numeric: tabular-nums; color: var(--muted-foreground); }
+  .work-views a.active { color: var(--foreground); border-bottom-color: var(--foreground); }
+  .work-views a.active .count { color: var(--foreground); }
+  .work-list { display: flex; flex-direction: column; }
+  .work-row {
+    display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: .5rem 1.5rem; align-items: start;
+    padding: .875rem 0; border-bottom: 1px solid var(--border);
+  }
+  .work-row:last-child { border-bottom: 0; }
+  .work-row-main, .work-row-status { min-width: 0; }
+  .work-title { display: block; font-weight: 600; font-size: .9375rem; line-height: 1.35; color: var(--foreground); text-decoration: none; overflow-wrap: anywhere; }
+  .work-title:hover { text-decoration: underline; }
+  .work-meta { display: flex; flex-wrap: wrap; gap: .25rem .625rem; margin: .25rem 0 0; font-size: .75rem; color: var(--muted-foreground); }
+  .work-meta .mono { overflow-wrap: anywhere; }
+  .project-label { display: inline-block; padding: 0 .4rem; border: 1px solid var(--border); border-radius: 999px; font-size: .6875rem; line-height: 1.5; color: var(--foreground); }
+  .work-detail { margin: .2rem 0 0; font-size: .8125rem; line-height: 1.45; color: var(--muted-foreground); overflow-wrap: anywhere; }
+  .work-action { display: inline-block; margin-top: .3rem; font-size: .8125rem; font-weight: 500; }
+  .work-empty { padding: 2rem 0 1rem; max-width: 34rem; }
+  .work-empty p { margin: 0 0 .75rem; color: var(--muted-foreground); line-height: 1.5; }
+  .work-empty .row { display: flex; align-items: center; gap: 1rem; }
+  .work-bound { margin-top: .75rem; }
+  .status-line { display: inline-flex; align-items: center; gap: .45rem; min-width: 0; font-size: .875rem; font-weight: 600; color: var(--foreground); }
+  .status-line .status-label { min-width: 0; overflow-wrap: anywhere; }
+  .status-line .status-dot { flex: none; width: .5rem; height: .5rem; border-radius: 50%; background: var(--muted-foreground); }
+  .status-line[data-tone="attention"] .status-dot { background: var(--warning); }
+  .status-line[data-tone="problem"] .status-dot { background: var(--destructive); }
+  .status-line[data-tone="live"] .status-dot { background: var(--running); box-shadow: 0 0 0 3px var(--running-soft); }
+  .status-line[data-tone="ready"] .status-dot, .status-line[data-tone="done"] .status-dot { background: var(--success); }
+  .status-line[data-tone="muted"] { color: var(--muted-foreground); font-weight: 500; }
+  .status-line[data-tone="muted"] .status-dot { background: var(--border); }
+  .receipt-publication { position: relative; z-index: 1; margin: .35rem 0 0; font-size: .8125rem; color: var(--muted-foreground); }
+  /* A raw repository path in ordinary copy wraps at any point rather than
+     widening the page (the phone task-list overflow, package 1). */
+  .path-words { overflow-wrap: anywhere; word-break: break-word; }
+  @media (max-width: 760px) {
+    .work-row { grid-template-columns: minmax(0, 1fr); gap: .375rem; }
+    .work-views { gap: 0; }
+    .work-views a { padding: 0 .5rem; font-size: .8125rem; gap: .3rem; }
+    .work-head { flex-direction: column; align-items: stretch; }
+    .work-tools { align-self: flex-start; }
+    .work-tools-menu { right: auto; left: 0; }
+  }
+
   /* The phone shell: the sidebar disappears; a top bar carries the project
      and quick capture; a bottom tab bar carries the destinations a thumb
      visits. Desktop is untouched. */
@@ -9625,12 +9800,16 @@ const STYLE = `
     .mobile-top .brand-mini { font-weight: 600; font-size: .9375rem; text-decoration: none; color: var(--foreground); font-family: var(--font-mono); }
     .mobile-top .project-pill { flex: 1; min-width: 0; position: static; }
     .mobile-top a.project-pill, .mobile-top .project-pill > summary {
-      min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: .0625rem;
+      /* align-items: stretch, not the switcher's center: a centered column
+         item takes its content width, and a long project name then widens
+         the document (the 320px overflow, workspace package 1). */
+      min-width: 0; display: flex; flex-direction: column; justify-content: center; align-items: stretch; gap: .0625rem;
       border: 1px solid var(--border); border-radius: 1.375rem; background: var(--card);
       min-height: 2.75rem; padding: .25rem .875rem; text-decoration: none; color: var(--foreground);
       font-size: .875rem; font-weight: 500; line-height: 1.25; cursor: pointer;
     }
-    .mobile-top .project-pill > summary .name { display: inline-flex; align-items: center; gap: .25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mobile-top .project-pill > summary .name { display: inline-flex; align-items: center; gap: .25rem; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mobile-top .project-pill > summary .name .chevron { flex: none; }
     .mobile-top a.project-pill:active, .mobile-top .project-pill > summary:active { background: var(--muted); }
     /* On a phone the menu drops from the header it belongs to (UI polish
        2026-09-13). It was a fixed sheet, but the header's backdrop-filter
@@ -9655,6 +9834,15 @@ const STYLE = `
       background: var(--secondary); border: 1px solid var(--border); color: var(--foreground);
       font-weight: 500; font-size: .875rem; text-decoration: none;
     }
+    /* Tools and settings: a header action, never a fourth tab (workspace
+       package 1). A 44px target, the same quiet pill as quick capture. */
+    .mobile-top .mobile-more {
+      flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
+      width: 2.75rem; min-height: 2.75rem; border-radius: 999px;
+      border: 1px solid var(--border); background: var(--card); color: var(--foreground);
+    }
+    .mobile-top .mobile-more svg { width: 1.125rem; height: 1.125rem; }
+    @media (max-width: 360px) { .mobile-top .mobile-new { padding: 0 .625rem; } }
     .tabbar {
       display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
       background: color-mix(in srgb, var(--glass-strong) 92%, transparent); border-top: 1px solid var(--glass-border);
@@ -10473,7 +10661,7 @@ button { min-height: 44px; }
   .task-scope-needed { padding: .85rem 1rem; }
   .task-scope-needed p { margin: .2rem 0; }
   .receipt-head { display: grid; gap: .45rem; }
-  .receipt-proof { justify-self: start; }
+  .receipt-head .status-line { justify-self: start; }
   .receipt-facts { grid-template-columns: 1fr; }
   .receipt-actions { display: grid; grid-template-columns: 1fr; }
   .receipt-actions .button-link { width: 100%; box-sizing: border-box; text-align: center; }
@@ -11052,7 +11240,7 @@ function shell(
   const scopeStatus = peekCounts === null
     ? ""
     : `<span class="scope-status">` +
-      (peekCounts.waiting > 0 ? `<a class="hot" href="/">${peekCounts.waiting} needs you</a>` : `<a href="/">0 needs you</a>`) +
+      (peekCounts.waiting > 0 ? `<a class="hot" href="/work?view=needs-you">${peekCounts.waiting} needs you</a>` : `<a href="/work?view=needs-you">0 needs you</a>`) +
       `<a href="/runs">${peekCounts.running} live</a><a href="/board?view=order">${peekCounts.queued} queued</a></span>`;
   const scopeName = effectiveScope === "project" && chrome.project !== null ? escape(projectName(chrome.project)) : "all projects";
   // The switcher (board pass): the scope's name opens a menu of every
@@ -11090,37 +11278,41 @@ function shell(
     `</div>`;
   // The rail's own accordion (sidebar rework): open the group holding the
   // active page, closed otherwise — the client toggle keeps it exclusive.
-  const navGroup = (key: "workflows" | "admin", label: string, rows: NavRow[], open: boolean): string =>
+  const navGroup = (key: "tools" | "settings", label: string, rows: NavRow[], open: boolean): string =>
     `<details class="nav-group" data-group="${key}"${open ? " open" : ""}>` +
     `<summary>${label}${CHEVRON_ICON}</summary>` +
     `<nav class="nav-group-items">${rows.map(row => item(row.key, row.href, row.label)).join("")}</nav>` +
     `</details>`;
+  // The three primary destinations (workspace package 1): Chat, Work,
+  // Projects — every old page keeps its own active key and lights the
+  // destination it now lives under. The count rides Work: it is the
+  // saturated needs-you count, exactly as the inbox row wore it.
+  const primary = primaryDestinationOf(chrome.active);
+  const primaryItem = (key: "chat" | "work" | "projects", href: string, label: string, count?: number): string =>
+    `<a href="${href}" aria-label="${escape(label)}" title="${escape(label)}"${primary === key ? ' class="active" aria-current="page"' : ""}${key === "work" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
+    `<span class="glyph">${NAV_ICONS[key] ?? ""}</span>${label}` +
+    `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
   const side = [
     `<aside class="side">`,
-    `<div class="side-head"><a class="brand" href="/"><span class="brand-long">standing<span class="dot">·</span>orders</span><span class="brand-short">s·o</span></a>`,
+    `<div class="side-head"><a class="brand" href="/work"><span class="brand-long">standing<span class="dot">·</span>orders</span><span class="brand-short">s·o</span></a>`,
     ...(options.sidebarToggle === true
       ? [`<button type="button" class="side-toggle" aria-label="collapse sidebar" aria-expanded="true" title="collapse sidebar">${strokeIcon(`<path d="m15 18-6-6 6-6"/>`)}</button>`]
       : []),
     `</div>`,
     `<nav>`,
-    // Task-first IA: chat, inbox, board, builds, projects — always visible,
-    // always in this order, each with an icon, active, focus, and count
-    // treatment. Chat is present only where the ceiling ever allows it
-    // (unchanged gating); everything else is a dim text row inside one of
-    // the two accordion groups below, or settings pinned under them.
-    ...(chrome.chat === true && !chrome.projectScoped ? [item("chat", "/chat", "chat")] : []),
-    item("inbox", "/", "inbox", chrome.inboxCount),
-    item("board", "/board", "board"),
-    item("runs", "/runs", "builds"),
-    item("projects", "/projects", "projects"),
+    // Chat is present only where the ceiling ever allows it (unchanged
+    // gating); Work and Projects always. Every specialist tool is a dim
+    // text row inside one of the two accordion groups below.
+    ...(chrome.chat === true && !chrome.projectScoped ? [primaryItem("chat", "/chat", "chat")] : []),
+    primaryItem("work", "/work", "work", chrome.inboxCount),
+    primaryItem("projects", "/projects", "projects"),
     `</nav>`,
     `<a class="new-task" href="/tasks/new" aria-label="new task">+ new task</a>`,
     `<nav class="nav-groups">`,
-    navGroup("workflows", "workflows", workflowsRows(chrome.projectScoped), WORKFLOWS_KEYS.has(chrome.active)),
-    navGroup("admin", "admin", adminRows(chrome.projectScoped), ADMIN_KEYS.has(chrome.active)),
+    navGroup("tools", "work tools", workToolRows(chrome.projectScoped), TOOL_KEYS.has(chrome.active)),
+    navGroup("settings", "settings", settingsRows(chrome.projectScoped, chrome.settings), SETTINGS_KEYS.has(chrome.active)),
     `</nav>`,
     `<span class="grow"></span>`,
-    ...(chrome.settings ? [`<nav class="nav-settings">${item("settings", "/settings", "settings")}</nav>`] : []),
     `</aside>`,
   ].join("\n");
 
@@ -11151,7 +11343,7 @@ function shell(
   // these only below 760px; desktop keeps the sidebar untouched.
   const mobileTop = [
     `<header class="mobile-top">`,
-    `<a class="brand-mini" href="/">s·o</a>`,
+    `<a class="brand-mini" href="/work">s·o</a>`,
     // On a phone the pill IS the scope row (mobile pass): the project's
     // name, its three counts, and the one /projects link at that
     // breakpoint — the scope bar hides below 760px so the header is one
@@ -11164,6 +11356,9 @@ function shell(
           scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`
         }</a>`,
     `<a class="mobile-new" href="/tasks/new">+ task</a>`,
+    // Settings and the specialist tools are a header action on a phone,
+    // never a fourth primary tab (workspace package 1).
+    `<a class="mobile-more" href="/menu" aria-label="tools and settings" title="tools and settings">${strokeIcon(`<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>`)}</a>`,
     `</header>`,
   ].join("");
   // Drawn icons, one stroke weight, inline and CSP-safe — never unicode
@@ -11172,23 +11367,21 @@ function shell(
     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
   const TAB_ICONS = {
     chat: icon(CHAT_PATHS),
-    inbox: icon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
-    board: icon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
-    runs: icon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
-    menu: icon(`<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>`),
+    work: icon(WORK_PATHS),
+    projects: icon(FOLDER_PATHS),
   } as const;
-  const tab = (key: keyof typeof TAB_ICONS & Chrome["active"], href: string, label: string, count?: number): string =>
+  const tab = (key: keyof typeof TAB_ICONS, href: string, label: string, count?: number): string =>
     // A phone tab says THAT something waits, with a dot; the number is on
-    // the inbox itself (Linear Mobile's rule — the count is one tap away).
-    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}><span class="glyph">${TAB_ICONS[key]}</span>${label}` +
+    // the Work views themselves (Linear Mobile's rule — one tap away).
+    `<a href="${href}"${primary === key ? ' class="active" aria-current="page"' : ""}><span class="glyph">${TAB_ICONS[key]}</span>${label}` +
     `${count !== undefined && count > 0 ? `<span class="dot-badge" role="img" aria-label="${count} waiting"></span>` : ""}</a>`;
+  // Three primary tabs, the same three as the rail: chat where allowed,
+  // work, projects. Tools and settings sit behind the header's menu action.
   const tabbar = [
     `<nav class="tabbar">`,
     ...(chrome.chat === true ? [tab("chat", "/chat", "chat")] : []),
-    tab("inbox", "/", "inbox", chrome.inboxCount),
-    tab("board", "/board", "board"),
-    tab("runs", "/runs", "builds"),
-    tab("menu", "/menu", "more"),
+    tab("work", "/work", "work", chrome.inboxCount),
+    tab("projects", "/projects", "projects"),
     `</nav>`,
   ].join("");
 
@@ -12294,7 +12487,12 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     return `<li class="${state}"><i aria-hidden="true">${state === "complete" ? "✓" : index + 1}</i><span>${label}</span></li>`;
   }).join("");
   const displayState = taskControlState(focus.state, focus.control);
-  const summary = focus.dispatch?.summary ?? (hasResult ? "Result ready" : "Checking task status");
+  // The journey's headline is the shared projection (package 1): for a
+  // done task the dispatch summary already carries `resultStatusOf`'s
+  // words, and the card wears the same token the task page and Work do.
+  const resultStatus = focus.state === "done" && focus.result !== null ? receiptStatusOf(focus.result) : null;
+  const workToken = resultStatus?.token ?? focus.dispatch?.code ?? "unknown";
+  const summary = focus.dispatch?.summary ?? resultStatus?.label ?? (hasResult ? "Result ready" : "Checking task status");
   const detail = focus.dispatch?.detail ?? "This status comes from the task scheduler.";
   const fallback = focus.state === "done" || focus.state === "cancelled" || focus.approval !== null || ["stopping", "paused", "review-stopped"].includes(focus.control.kind)
     ? null
@@ -12302,7 +12500,7 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
   const polling = !inert && ((focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled" || focus.control.kind === "stopping" || focus.control.kind === "stop");
   return (
     `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}">` +
-    `<section class="card task-journey" aria-label="task progress"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div><span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span></div>` +
+    `<section class="card task-journey" aria-label="task progress" data-work-status="${escape(workToken)}"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div>${resultStatus === null ? `<span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span>` : `<span class="badge" data-tone="${escape(resultStatus.tone)}">${escape(resultStatus.tone === "problem" ? "needs attention" : resultStatus.tone === "done" || resultStatus.tone === "ready" ? "finished" : "saved")}</span>`}</div>` +
     `<ol>${steps}</ol><p class="meta">${escape(detail)}</p>` +
     (focus.liveRun === null ? "" : `<p class="task-live-build"><span class="live-dot" aria-hidden="true"></span><strong>Build #${focus.liveRun.id}</strong> · ${escape(focus.liveRun.runner)} · <time data-elapsed-since="${escape(focus.liveRun.startedAt)}"></time> <a href="/r/${focus.liveRun.id}">watch details →</a></p>`) +
     (fallback === null ? "" : `<a class="button-link task-journey-action" href="${fallback}">Open the next step →</a>`) +
@@ -13657,6 +13855,100 @@ function taskComposerHtml(data: {
   ].join("\n");
 }
 
+/** A task list page's ceiling: the newest rows, the bound printed. */
+const WORK_PAGE = 200;
+
+type WorkRow = WorkFacts & { status: WorkStatus; resultRunId: number | null };
+
+function publicationFactsOf(publication: Publication | null): PublicationFacts {
+  return publication === null
+    ? null
+    : { state: publication.state, prNumber: publication.prNumber, prUrl: publication.prUrl, remoteState: publication.remoteState, lastCheckState: publication.lastCheckState };
+}
+
+/** Where a status's next act lives, for a row that links out. */
+function statusActionHref(status: DisplayStatus, taskId: string, runId: number | null, prUrl: string | null): string | null {
+  if (status.action === null) return null;
+  switch (status.action.kind) {
+    case "open-result": return runId === null ? taskHref(taskId) : `/r/${runId}`;
+    case "open-review": return reviewHref(taskId);
+    case "open-run": return runId === null ? taskHref(taskId) : `/r/${runId}`;
+    case "open-pr": return safePrUrl(prUrl) ?? reviewHref(taskId);
+    case "open-task":
+    default: return taskHref(taskId);
+  }
+}
+
+/** The one status line every surface renders: a dot in the tone, the
+ * label, and the `data-work-status` token tests and CSS key off. */
+function statusLineHtml(status: DisplayStatus, extra = ""): string {
+  return `<span class="status-line" data-work-status="${escape(status.token)}" data-tone="${escape(status.tone)}"><i class="status-dot" aria-hidden="true"></i><span class="status-label">${escape(status.label)}</span>${extra}</span>`;
+}
+
+function workPage(
+  chrome: Chrome,
+  data: {
+    view: WorkView;
+    rows: readonly WorkRow[];
+    truncated: boolean;
+    cap: number;
+    /** Rows span more than one project — every row wears its label. */
+    multiProject: boolean;
+    csrf: string;
+    now: Date;
+  },
+): Screen {
+  const counts = workCounts(data.rows.map(row => row.status));
+  const shown = data.rows.filter(row => row.status.views.includes(data.view)).sort((a, b) => compareWorkRows({ rank: a.status.rank, updatedAt: a.updatedAt }, { rank: b.status.rank, updatedAt: b.updatedAt }));
+  const tabs =
+    `<nav class="work-views" aria-label="work views">` +
+    WORK_VIEWS.map(
+      one =>
+        `<a href="${one.key === "all" ? "/work" : `/work?view=${one.key}`}"${one.key === data.view ? ' class="active" aria-current="page"' : ""}>` +
+        `${one.label}<span class="count">${counts[one.key]}</span></a>`,
+    ).join("") +
+    `</nav>`;
+  const current = WORK_VIEWS.find(one => one.key === data.view) ?? WORK_VIEWS[0]!;
+  const rowHtml = (row: WorkRow): string => {
+    const actionHref = statusActionHref(row.status, row.id, row.status.action?.kind === "open-run" && row.liveRunId !== null ? row.liveRunId : row.resultRunId, row.publication?.prUrl ?? null);
+    const action = row.status.action === null || actionHref === null ? "" : `<a class="work-action" href="${escape(actionHref)}">${escape(row.status.action.label)} →</a>`;
+    // The human-readable title leads; the stable id stays secondary; the
+    // project label appears when rows span projects (or the row is unplaced).
+    const project = data.multiProject || row.repo === null ? `<span class="project-label">${row.repo === null ? "unplaced" : escape(projectName(row.repo))}</span>` : "";
+    return (
+      `<article class="work-row" data-task="${escape(row.id)}" data-work-status="${escape(row.status.token)}" data-work-views="${row.status.views.join(" ")}">` +
+      `<div class="work-row-main"><a class="work-title" href="${taskHref(row.id)}">${escape(row.title)}</a>` +
+      `<p class="work-meta">${project}<span class="mono">${escape(row.id)}</span><span>${escape(relativeAge(row.updatedAt, data.now))}</span></p></div>` +
+      `<div class="work-row-status">${statusLineHtml(row.status)}<p class="work-detail">${escape(row.status.detail)}</p>${action}</div>` +
+      `</article>`
+    );
+  };
+  const list =
+    shown.length === 0
+      ? `<div class="work-empty" data-work-empty="${data.view}"><p>${escape(current.empty)}</p>` +
+        (data.view === "all"
+          ? `<p class="row"><a class="button-link" href="${chrome.chat === true ? "/chat" : "/tasks/new"}">${chrome.chat === true ? "Start in chat" : "Add a task"}</a> <a href="/tasks/new">Use a form →</a></p>`
+          : `<p class="row"><a href="/work">See all work →</a></p>`) +
+        `</div>`
+      : `<div class="work-list">${shown.map(rowHtml).join("\n")}</div>`;
+  const bound = data.truncated
+    ? `<p class="meta work-bound">Showing the newest ${data.cap} tasks in view. Older tasks stay in the <a href="/tasks">task list</a>, filtered by state.</p>`
+    : "";
+  const tools =
+    `<details class="work-tools"><summary>Work tools${CHEVRON_ICON}</summary><nav class="work-tools-menu">` +
+    [
+      ["/", "inbox"], ["/board", "board"], ["/board?view=order", "order"], ["/tasks", "task list"], ["/recipes", "recipes"], ["/routines", "routines"],
+      ...(chrome.projectScoped ? [] : [["/workbench", "portfolio"]]), ["/ledger", "action ledger"],
+    ].map(([href, label]) => `<a href="${href}">${label}</a>`).join("") +
+    `</nav></details>`;
+  return screen("work", [
+    `<div class="work-head"><div><h1>work</h1><p class="hint">${escape(current.hint)}</p></div>${tools}</div>`,
+    tabs,
+    list,
+    bound,
+  ].join("\n"), { chrome });
+}
+
 function tasksPage(
   chrome: Chrome,
   tasks: Task[],
@@ -13687,7 +13979,8 @@ function tasksPage(
           .join("\n");
   return screen("tasks", [
     "<h1>tasks</h1>",
-    `<p class="meta">work you want done${repo === null ? "" : ` in <span class="mono">${escape(repo)}</span>`} \u2014 a task builds unattended only after its scope is approved; open one to write or approve its scope</p>`,
+    `<p class="meta">work you want done${repo === null ? "" : ` in <strong>${escape(projectName(repo))}</strong>`} \u2014 a task builds unattended only after its scope is approved; open one to write or approve its scope</p>`,
+    repo === null ? "" : `<p class="meta path-words"><span class="mono">${escape(repo)}</span></p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<p class="meta">filter: <a href="/tasks">all</a> · ${filters}</p>`,
     rows,
@@ -14748,40 +15041,43 @@ const strokeIcon = (paths: string): string =>
 const QUEUE_VIEW = "/board?view=order";
 const FOLDER_PATHS = `<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>`;
 const CHAT_PATHS = `<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`;
+const WORK_PATHS = `<path d="M9 6h11"/><path d="M9 12h11"/><path d="M9 18h11"/><path d="m4 6 1 1 2-2"/><path d="m4 12 1 1 2-2"/><path d="m4 18 1 1 2-2"/>`;
 const NAV_ICONS: Partial<Record<Chrome["active"], string>> = {
   chat: strokeIcon(CHAT_PATHS),
-  inbox: strokeIcon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
-  board: strokeIcon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
-  runs: strokeIcon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
+  work: strokeIcon(WORK_PATHS),
   projects: strokeIcon(FOLDER_PATHS),
-  settings: strokeIcon(`<path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/>`),
 };
 
 /** One grouped destination inside an accordion group or the /menu overflow. */
 type NavRow = { key: Chrome["active"]; href: string; label: string; hint: string };
 
 /**
- * Task-first IA: the rail's five always-visible rows (chat, inbox, board,
- * builds, projects) sit above two accordion groups. Workflows is where
- * work is planned, worked, and scheduled; Admin is who and what the fleet
- * runs on. Both draw from the same two lists on a desk (accordion groups)
- * and on a phone (/menu sections), so the two never disagree. activity,
- * done, and the review queue are views of builds, not rows; the queue is
- * the board's order view; peek hangs off builds; settings is pinned
- * outside both groups, never inside one.
+ * The workspace shell (package 1): three primary rows (chat, work,
+ * projects) above two accordion groups. Work tools is where work is
+ * arranged, planned, and scheduled — the board, its order view, the
+ * flat task list, recipes, routines, the portfolio, and the action
+ * ledger. Settings is who and what the fleet runs on — fleet,
+ * requirements, people, operating mode, system — plus the agent-defaults
+ * page where the console offers it. Both draw from the same two lists on
+ * a desk (accordion groups) and on a phone (/menu sections), so the two
+ * never disagree, and a project-scoped login sees exactly the rows it
+ * saw before: moving a link never widens role or project visibility.
  */
-function workflowsRows(scoped = false): NavRow[] {
+function workToolRows(scoped = false): NavRow[] {
   const rows: NavRow[] = [
-    { key: "workbench", href: "/workbench", label: "portfolio", hint: "every project and live build in one place" },
-    { key: "work", href: "/tasks", label: "task list", hint: "everything, filterable" },
+    { key: "inbox", href: "/", label: "inbox", hint: "questions, approvals, and repairs to act on" },
+    { key: "board", href: "/board", label: "board", hint: "lanes by state, with the order view" },
+    { key: "tasks", href: "/tasks", label: "task list", hint: "everything, filterable by state" },
     { key: "recipes", href: "/recipes", label: "recipes", hint: "choose, customize, and reuse a workflow" },
     { key: "routines", href: "/routines", label: "routines", hint: "scheduled tracks and their firings" },
+    { key: "workbench", href: "/workbench", label: "portfolio", hint: "every project and live build in one place" },
     { key: "ledger", href: "/ledger", label: "action ledger", hint: "who acted, what happened, and the result" },
   ];
   return scoped ? rows.filter(row => row.key !== "workbench") : rows;
 }
-function adminRows(scoped = false): NavRow[] {
+function settingsRows(scoped = false, offersSettings = false): NavRow[] {
   const rows: NavRow[] = [
+    ...(offersSettings ? [{ key: "settings" as const, href: "/settings", label: "settings", hint: "agent defaults, alerts, credentials" }] : []),
     { key: "fleet", href: "/fleet", label: "fleet", hint: "who is working, and on what" },
     { key: "caps", href: "/caps", label: "requirements", hint: "tools and credentials builds need" },
     { key: "people", href: "/people", label: "people", hint: "who can sign in, and what they have done" },
@@ -14791,8 +15087,8 @@ function adminRows(scoped = false): NavRow[] {
   return scoped ? rows.filter(row => row.key === "people") : rows;
 }
 /** Which accordion group opens by default for a given active page. */
-const WORKFLOWS_KEYS = new Set<Chrome["active"]>(["workbench", "work", "recipes", "routines", "ledger"]);
-const ADMIN_KEYS = new Set<Chrome["active"]>(["fleet", "caps", "people", "mode", "system"]);
+const TOOL_KEYS = new Set<Chrome["active"]>(["inbox", "board", "queue", "tasks", "workbench", "recipes", "routines", "ledger"]);
+const SETTINGS_KEYS = new Set<Chrome["active"]>(["settings", "fleet", "caps", "people", "mode", "system"]);
 
 /** The builds screen's views (reduction pass §1): done, the review queue,
  * and activity are ways of looking at builds, not destinations. */
@@ -15478,6 +15774,27 @@ function taskBody(data: {
   const { task, scope } = data;
   const displayState = taskControlState(task.state, data.control);
   const stopControlsActive = data.control !== undefined && ["stopping", "paused", "review-stopped"].includes(data.control.kind);
+  // The result's shared status (workspace package 1): the same projection
+  // the Work row, the focused chat, and the review cockpit render for this
+  // run, so a done task with failed or missing proof never wears a bare
+  // "done" badge here while another surface says otherwise.
+  const resultStatus =
+    task.state !== "done"
+      ? null
+      : resultStatusOf(
+          data.completion === null || data.completion === undefined
+            ? null
+            : {
+                runId: data.completion.runId,
+                role: data.runs.find(one => one.id === data.completion?.runId)?.role ?? null,
+                outcome: data.completion.outcome,
+                verdict: data.completion.proofVerdict,
+                reasons: data.completion.proofReasons,
+                accepted: data.completion.proofAccepted,
+                recordComplete: data.completion.hasHandoff && data.completion.hasTerminalDiff,
+              },
+          publicationFactsOf(data.publication ?? null),
+        );
   const act = (verb: string, label: string, extra = ""): string =>
     [
       `<form method="post" action="${taskHref(task.id)}/${verb}" class="inline">`,
@@ -15531,8 +15848,11 @@ function taskBody(data: {
   // gives the nearest concrete repair rather than making the operator infer
   // it from the rest of the page.
   const dispatchStatus = (() => {
+    // data-work-status is the shared projection's token (package 1) —
+    // the same one the Work row, chat, and cockpit carry for this task.
+    const workToken = resultStatus?.token ?? data.dispatch?.code ?? "unknown";
     const box = (kind: "ok" | "problem", title: string, detail: string, status?: string, controls = ""): string =>
-      `<div class="${kind === "problem" ? "problem" : "answered"} dispatch-status" id="run-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}">` +
+      `<div class="${kind === "problem" ? "problem" : "answered"} dispatch-status" id="run-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}" data-work-status="${escape(workToken)}">` +
       `<div class="dispatch-copy"><strong>${escape(title)}</strong><span class="meta">${detail}</span></div>${controls}</div>`;
 
     if (task.state !== "done") {
@@ -15618,8 +15938,8 @@ function taskBody(data: {
 
     if (task.state === "done") {
       const proof = data.completion ?? null;
-      if (proof === null) {
-        return box("problem", "Complete, proof missing", "The task is terminal but has no finished attempt record. Treat it as unverified.");
+      if (proof === null || resultStatus === null) {
+        return box("problem", "Marked done without a build record", "The task is done, but no finished attempt is recorded, so there is nothing to verify.", "no-build-record");
       }
       // v50: the independent review's own card — attempt counts, what is
       // running or queued, the latest failure in words, and the ONE
@@ -15640,13 +15960,15 @@ function taskBody(data: {
         return withReview(missing.length > 0
           ? box(
               "problem",
-              "Complete, proof incomplete",
+              resultStatus.label,
               `<a href="/r/${proof.runId}">Build #${proof.runId}</a> concluded no change was needed, but its ${escape(missing.join(" and "))} is missing.`,
+              resultStatus.token,
             )
           : box(
               "ok",
-              "Complete with evidence",
+              resultStatus.label,
               `<a href="/r/${proof.runId}">Build #${proof.runId}</a> concluded no change was needed; its handoff and machine-captured diff are on record.`,
+              resultStatus.token,
             ));
       }
       // A built run's verdict is the machine's own — computed once at
@@ -15681,38 +16003,33 @@ function taskBody(data: {
           ? ""
           : `<details class="dispatch-proof-details"><summary>${proof.proofMatrix.length === 0 ? "Verification details" : `${proof.proofMatrix.length} requirement${proof.proofMatrix.length === 1 ? "" : "s"}`} · View details</summary>` +
             `<div class="dispatch-proof-body">${criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })}${coverageHtml}${machineNote}${chainHtml}</div></details>`;
-      if (proof.proofVerdict === "verified") {
+      // The publication fact is separate from the evidence fact: a PR or
+      // an observed merge is named from its record; nothing is "deployed".
+      const publicationWords = data.publication === null || data.publication === undefined ? "" : ` ${escape(receiptPublicationWords(publicationFactsOf(data.publication)))}`;
+      if (proof.proofVerdict === "verified" && !accepted) {
         const recovered = verificationRecovered(proof.proofReasons);
         return withReview(box(
           "ok",
-          "Complete — verified",
-          recovered
+          resultStatus.label,
+          (recovered
             ? `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. <span data-automatic-recovery="succeeded">Standing Orders ran the approved setup automatically, then the project check passed.</span>`
-            : `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`,
+            : `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`) + publicationWords,
+          dispatchStatusToken("verified"),
         ) + proofDetails);
       }
-      if (proof.proofVerdict === "attested") {
-        return withReview(box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`) + proofDetails);
+      if (proof.proofVerdict === "attested" && !accepted) {
+        return withReview(box("ok", resultStatus.label, `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. No independent project check ran: the checks listed are the agent's own report, and each item below is labeled by source.${publicationWords}`, dispatchStatusToken("attested")) + proofDetails);
       }
-      if (proof.proofVerdict === "refuted") {
-        return withReview(
-          box(
-            accepted ? "ok" : "problem",
-            accepted ? "Accepted with exception" : "Conflicting evidence",
-            `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. ${escape(verificationExplanation(proof.proofVerdict, proof.proofReasons))}${accepted ? " It was accepted after a manual review." : ""}`,
-            dispatchStatusToken("refuted"),
-          ) + `<div class="proof-review-actions"><a class="button-link" href="${reviewHref(task.id)}">Review evidence</a>${acceptForm}</div>` + proofDetails,
-        );
-      }
-      // "short", or no verdict at all (a legacy run, or one where
-      // adjudication itself could not run) — the honest default.
+      // A refuted, short, or absent verdict — and an accepted one, which
+      // stays visibly an exception: the words never say checks passed.
+      const machineToken = proof.proofVerdict === "refuted" ? dispatchStatusToken("refuted") : dispatchStatusToken("short");
       return withReview(
         box(
           accepted ? "ok" : "problem",
-          accepted ? "Accepted with exception" : "Missing evidence",
-          `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. ${escape(verificationExplanation(proof.proofVerdict, proof.proofReasons))}${accepted ? " It was accepted after a manual review." : ""}`,
-          dispatchStatusToken("short"),
-        ) + `<div class="proof-review-actions"><a class="button-link" href="${reviewHref(task.id)}">Review evidence</a>${acceptForm}</div>` + proofDetails,
+          resultStatus.label,
+          `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. ${escape(verificationExplanation(proof.proofVerdict, proof.proofReasons))}${accepted ? " An approver accepted it by hand; the checks were not passed by the machine." : ""}${publicationWords}`,
+          machineToken,
+        ) + `<div class="proof-review-actions"><a class="button-link" href="${reviewHref(task.id)}">${accepted ? "Review the recorded exception" : resultStatus.action?.label ?? "Review evidence"}</a>${acceptForm}</div>` + proofDetails,
       );
     }
     return box("problem", "Dispatch unknown", "Refresh this task before relying on its scheduler state.", "unknown");
@@ -16484,7 +16801,7 @@ function taskBody(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
-    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span></h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
+    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)} ${resultStatus === null ? `<span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span>` : statusLineHtml(resultStatus)}</h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
     // The planner and approval cards already answer "what now?". Avoid a
     // second status box above the one action the operator came here for.
     (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested" ? dispatchStatus : "",
@@ -16848,6 +17165,7 @@ type ReviewCockpitView = {
   /** null = the task is done with no finished build attempt on record. */
   run: {
     id: number;
+    role: string;
     outcome: string | null;
     runner: string;
     provider: string;
@@ -16897,9 +17215,17 @@ function priorityChip(priority: ReviewPriority): string {
  * refuted proof reads as refuted, never as "no change needed". The one
  * word the receipt never needs is "No build record": a manual completion
  * has no receipt to share it with. */
-function proofStateChip(verdict: ProofVerdict | null, accepted: boolean, run: boolean): string {
-  const chip = run ? proofStateWords(verdict, accepted) : { word: "No build record", state: "unknown" };
-  return `<span class="receipt-proof" data-proof-state="${chip.state}"><i aria-hidden="true"></i>${escape(chip.word)}</span>`;
+/** The cockpit's headline status: the shared projection over the same
+ * verdict, acceptance, and publication rows the task page reads. */
+function cockpitStatusOf(view: ReviewCockpitView): DisplayStatus {
+  return resultStatusOf(
+    view.run === null
+      ? null
+      : { runId: view.run.id, role: view.run.role, outcome: view.run.outcome, verdict: view.proof?.verdict ?? null, reasons: view.proof?.reasons ?? [], accepted: view.proof?.accepted !== null && view.proof?.accepted !== undefined, recordComplete: view.handoff !== null && view.terminal !== null },
+    view.publication === null
+      ? null
+      : { state: view.publication.state, prNumber: view.publication.prNumber, prUrl: view.publication.prUrl, remoteState: view.publication.remoteState, lastCheckState: view.publication.lastCheckState },
+  );
 }
 
 /** Turn verifier records into one sentence a project owner can act on.
@@ -17082,7 +17408,7 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
     `<header class="cockpit-head" data-review-task="${escape(view.taskId)}">` +
       `<p class="eyebrow mono">${run === null ? "no build" : `build #${run.id}`} · <a href="${taskHref(view.taskId)}">open task</a>${projectChip(view.repo)}</p>` +
       `<h2>${escape(view.title)}</h2>` +
-      `<p class="cockpit-chips">${proofStateChip(proof?.verdict ?? null, accepted, run !== null)}</p>` +
+      `<p class="cockpit-chips">${statusLineHtml(cockpitStatusOf(view))}</p>` +
       `</header>`,
   );
 
@@ -17630,10 +17956,20 @@ type ProofBundleView = {
  * used by the run page—not a new persistence layer or another verdict. */
 type CompletionReceiptView = {
   runId: number;
+  /** The run's role — a scout's receipt is a report, not a diff. */
+  role: string;
   outcome: string | null;
   summary: string | null;
   verdict: ProofVerdict | null;
+  /** The verdict's recorded reasons — what tells a failed check from
+   * mismatched evidence (package 1). */
+  reasons: string[];
   accepted: boolean;
+  /** A no-change conclusion's two records — handoff and sealed diff. */
+  recordComplete: boolean;
+  /** The run's own publication record, when one exists: the heading names
+   * a PR or a merge only from this, never from the outcome. */
+  publication: PublicationFacts;
   matrix: CriterionMatrixRow[];
   /** v51: the semantic-coverage lines (`coverageWords`) — independent
    * review standing under the run's policy, plus every named context gap.
@@ -17709,10 +18045,14 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
   const stat = terminal?.stat ?? null;
   return {
     runId: run.id,
+    role: run.role,
     outcome: run.outcome,
     summary: handoff?.conclusion ?? run.handoff,
     verdict: proof?.verdict ?? null,
+    reasons: proof?.reasons ?? [],
     accepted: proof?.accepted !== null && proof?.accepted !== undefined,
+    recordComplete: handoff !== null && terminal !== null,
+    publication: publicationFactsOf(store.publicationForRun(run.id)),
     matrix: proof?.matrix ?? [],
     diff:
       stat === null || "problem" in stat
@@ -18028,13 +18368,16 @@ function terminalDiffCard(
  * screenshot as a thumbnail linking to the full image. Renders nothing
  * when the run predates the proof system.
  */
-function evidenceBundleCard(view: ProofBundleView | null, runId: number): string {
+function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | "role" | "outcome">, publication: PublicationFacts = null): string {
   if (view === null) return "";
+  const runId = run.id;
   const parts: string[] = ["<h2>verification and evidence</h2>"];
 
   if (view.verdict !== null) {
-    const state = proofStateWords(view.verdict, view.accepted !== null);
-    parts.push(`<p class="row" data-proof-verdict="${escape(dispatchStatusToken(view.verdict))}"><strong>${escape(state.word)}</strong> <span class="meta">${escape(verificationExplanation(view.verdict, view.reasons))}</span></p>`);
+    // The same status line every other surface renders for this run
+    // (workspace package 1), beside the verdict's own explanation.
+    const status = resultStatusOf({ runId, role: run.role, outcome: run.outcome, verdict: view.verdict, reasons: view.reasons, accepted: view.accepted !== null }, publication);
+    parts.push(`<p class="row" data-proof-verdict="${escape(dispatchStatusToken(view.verdict))}">${statusLineHtml(status)} <span class="meta">${escape(verificationExplanation(view.verdict, view.reasons))}</span></p>`);
   }
   if (view.accepted !== null) {
     parts.push(
@@ -18105,20 +18448,16 @@ function evidenceBundleCard(view: ProofBundleView | null, runId: number): string
 /** The receipt's proof-state word and tone, from the stored verdict and
  * the operator's acceptance alone — shared with the review cockpit's
  * header chip so the two surfaces never name one state differently. */
-function proofStateWords(verdict: ProofVerdict | null, accepted: boolean): { word: string; state: "unknown" | "verified" | "attested" | "problem" } {
-  return verdict === null
-    ? { word: "Unverified", state: "unknown" }
-    : verdict === "verified"
-      ? { word: "Verified", state: "verified" }
-      : verdict === "attested"
-        ? { word: "Evidence captured", state: "attested" }
-        : verdict === "refuted"
-          ? { word: accepted ? "Accepted with exception" : "Conflicting evidence", state: "problem" }
-          : { word: accepted ? "Accepted with exception" : "Missing evidence", state: "problem" };
+/** The receipt's facts as the shared projection reads them. */
+function receiptStatusOf(view: CompletionReceiptView): DisplayStatus {
+  return resultStatusOf(
+    { runId: view.runId, role: view.role, outcome: view.outcome, verdict: view.verdict, reasons: view.reasons, accepted: view.accepted, recordComplete: view.recordComplete },
+    view.publication,
+  );
 }
 
 function completionReceiptCard(view: CompletionReceiptView, taskId: string, place: "task" | "chat"): string {
-  const proof = proofStateWords(view.verdict, view.accepted);
+  const status = receiptStatusOf(view);
   const passed = view.matrix.length === 0 ? null : passFraction(view.matrix);
   const diff =
     view.diff === null
@@ -18158,10 +18497,15 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
       : `<div class="receipt-coverage" data-semantic-coverage=""><strong>Independent review</strong><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
   return (
     `<section class="card completion-receipt" data-card-kind="result-receipt">` +
-    `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>What shipped</h2></div>` +
-    `<span class="receipt-proof" data-proof-state="${proof.state}"><i aria-hidden="true"></i>${escape(proof.word)}</span></div>` +
+    `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>${escape(receiptHeadingOf(view.outcome, view.publication))}</h2></div>` +
+    `${statusLineHtml(status)}</div>` +
+    // The agent's handoff is its narrative, labeled as such; the
+    // publication line is the observed record — never "shipped".
     `<p class="receipt-summary">${escape(view.summary ?? (view.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff."))}</p>` +
-    `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>against the approved scope</small></span>` +
+    `<p class="receipt-publication" data-receipt-publication="${escape(view.publication === null ? "none" : view.publication.state)}">${escape(receiptPublicationWords(view.publication))}</p>` +
+    // The matrix count is the proof's own citation; it reads as verified
+    // only when the machine verified the result (workspace package 1).
+    `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>${status.tone === "problem" ? "cited by the agent — not verified" : status.token === "agent-attested" ? "cited by the agent, no independent check" : "against the approved scope"}</small></span>` +
     `<span><strong>${escape(diff)}</strong><small>from the sealed final diff</small></span>` +
     `<span><strong>${view.screenshots.length} screenshot${view.screenshots.length === 1 ? "" : "s"}</strong><small>${view.screenshots.length === 0 ? "none required or captured" : "validated visual proof"}</small></span></div>` +
     shots + coverage + caveats +
@@ -18259,6 +18603,7 @@ function runPage(
   structuredHandoff: StructuredHandoffView | null = null,
   proofBundle: ProofBundleView | null = null,
   route: RouteStamp | null = null,
+  publicationRow: Publication | null = null,
 ): Screen {
   const rows = runFactsRows(run, taskId, running, route);
   // The conversation (Phase 2E, v2 S1g): every stdin injection as the
@@ -18471,7 +18816,7 @@ function runPage(
     transcript,
     peek,
     handoff,
-    evidenceBundleCard(proofBundle, run.id),
+    evidenceBundleCard(proofBundle, run, publicationFactsOf(publicationRow)),
     terminal === null ? "" : terminalDiffCard(terminal, run.id, editor, commentForm !== ""),
     reviewCard,
     continueCard,

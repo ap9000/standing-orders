@@ -107,10 +107,21 @@ describe("Never Stuck dispatch diagnosis", () => {
     store.setTaskState("t-proof", "done", T0);
     // A historical review row must never replace the build's result.
     store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, outcome, started_at, finished_at) VALUES (?, 'lease-proof', 'worker', 'reviewer', 'claude', ?, 'no-change', ?, ?)").run(ref, run, T0.toISOString(), T0.toISOString());
-    expect(diagnoseTaskDispatch(store, "t-proof", T0)).toMatchObject({ condition: "waiting", code: "proof-refuted", summary: "Proof correction needed", action: "open-result" });
+    // A refuted verdict whose reason is NOT a failed check (here: a changed
+    // signed statement) reads as mismatched evidence — never as "checks
+    // failed" (workspace package 1's truthful-status contract).
+    expect(diagnoseTaskDispatch(store, "t-proof", T0)).toMatchObject({ condition: "waiting", code: "proof-refuted", summary: "Result saved, but its evidence does not match", action: "open-result" });
     expect(diagnosisIsDispatchable(diagnoseTaskDispatch(store, "t-proof", T0))).toBe(false);
+    // The same verdict with the verify command's own failure reason names
+    // the failed check and its exit code.
+    store.saveProofVerdict(run, "refuted", ["the repository's approved verification command exited 1"], T0);
+    expect(diagnoseTaskDispatch(store, "t-proof", T0)).toMatchObject({ code: "proof-refuted", summary: "Changes saved, but checks failed" });
+    expect(diagnoseTaskDispatch(store, "t-proof", T0)?.detail).toContain("(exit 1)");
     store.acceptProof(run, "operator", "Reviewed the exact exception", T0);
-    expect(diagnoseTaskDispatch(store, "t-proof", T0)).toMatchObject({ condition: "terminal", code: "complete", summary: "Complete with recorded acceptance" });
+    // Acceptance stays an exception: it never becomes "checks passed".
+    const accepted = diagnoseTaskDispatch(store, "t-proof", T0);
+    expect(accepted).toMatchObject({ condition: "terminal", code: "complete", summary: "Accepted with an exception" });
+    expect(accepted?.detail).toContain("were not passed by the machine");
   });
 
   test("a finished build shows pending, live, failed, queued-retry, exhausted, and succeeded review states with attempt counts (v50)", () => {
@@ -180,7 +191,7 @@ describe("Never Stuck dispatch diagnosis", () => {
     store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, started_at, finished_at, outcome, reason, review_attempt) VALUES (?, 'x', 'worker', 'reviewer', 'claude', ?, ?, ?, 'failed', 'reviewer-timeout', 1)").run(other, won, T0.toISOString(), T0.toISOString());
     store.raw().prepare("INSERT INTO run (task_ref, lease_id, runner, role, provider, parent_run, started_at, finished_at, outcome, reason, review_attempt) VALUES (?, 'y', 'worker', 'reviewer', 'claude', ?, ?, ?, 'no-change', 'reviewed — 0 comment(s)', 2)").run(other, won, T0.toISOString(), T0.toISOString());
     const complete = diagnoseTaskDispatch(store, "t-review-won", T0);
-    expect(complete).toMatchObject({ condition: "terminal", code: "complete", summary: "Complete", action: "open-result", review: { state: "succeeded", attempt: 2, retriesUsed: 1, retriesRemaining: 0 } });
+    expect(complete).toMatchObject({ condition: "terminal", code: "complete", summary: "Ready to review", action: "open-result", review: { state: "succeeded", attempt: 2, retriesUsed: 1, retriesRemaining: 0 } });
     expect(complete?.detail).toContain("succeeded on attempt 2 of 3");
   });
 

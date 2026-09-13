@@ -11,6 +11,7 @@ import { isAlive } from "./runner.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { approvalOf, type ExecutionProfile } from "./scope.js";
 import { plannerSourceProblemOf } from "./planner-source.js";
+import { resultStatusOf } from "./workspace-ui.js";
 import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRequestOrigin, type ReviewRetryState, type Store, type TaskState } from "./store.js";
 
 export const DEFAULT_MAX_OPEN_DECISIONS = 5;
@@ -322,16 +323,32 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
         );
       }
     }
-    if (!accepted && proof?.verdict === "refuted") return answer("proof-refuted", "waiting", "Proof correction needed", "The build finished, but its evidence conflicts with the approved result. Open the proof to correct it or record an explicit acceptance.", { action: "open-result", review });
-    if (!accepted && proof?.verdict === "short") return answer("needs-verification", "waiting", "Verification needed", "The build finished with missing evidence. Open the result for the exact criteria still needing verification.", { action: "open-result", review });
-    if (!accepted && proof === null) return answer("needs-verification", "waiting", "Result needs verification", "The task is marked done, but no verified completion receipt is available.", { action: "open-result", review });
+    // The words are the workspace's shared projection (package 1): the
+    // same label the Work rows, task page, focused chat, and review
+    // cockpit render for this exact result. The codes stay the contract.
+    // A no-change conclusion owes no proof beyond its handoff and sealed
+    // diff (the task page's own "attested floor"); with both on record it
+    // is complete, not verification-needed.
+    const noChangeRecord =
+      result === undefined || result.outcome !== "no-change"
+        ? undefined
+        : (() => { const kinds = new Set(store.artifactsFor(result.id).map(one => one.kind)); return kinds.has("handoff") && kinds.has("terminal-diff"); })();
+    const status = resultStatusOf(
+      result === undefined
+        ? null
+        : { runId: result.id, role: result.role, outcome: result.outcome, verdict: proof?.verdict ?? null, reasons: proof?.reasons ?? [], accepted, ...(noChangeRecord === undefined ? {} : { recordComplete: noChangeRecord }) },
+      result === undefined ? null : store.publicationForRun(result.id),
+    );
+    if (!accepted && proof?.verdict === "refuted") return answer("proof-refuted", "waiting", status.label, `${status.detail} Review the evidence to correct it, or record an explicit acceptance.`, { action: "open-result", review });
+    if (!accepted && proof?.verdict === "short") return answer("needs-verification", "waiting", status.label, `${status.detail} Open the result for the exact criteria still needing verification.`, { action: "open-result", review });
+    if (!accepted && proof === null && noChangeRecord !== true) return answer("needs-verification", "waiting", status.label, status.detail, { action: "open-result", review });
     return answer(
       "complete",
       "terminal",
-      accepted ? "Complete with recorded acceptance" : "Complete",
+      status.label,
       review?.state === "succeeded" && review.attempt !== null && review.attempt > 1
-        ? `The task finished and its independent review succeeded on attempt ${review.attempt} of ${review.cap}; open its result for proof.`
-        : "The task finished; open its result for proof.",
+        ? `${status.detail} Its independent review succeeded on attempt ${review.attempt} of ${review.cap}.`
+        : status.detail,
       { action: "open-result", review },
     );
   }
