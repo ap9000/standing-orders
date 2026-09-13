@@ -3335,11 +3335,62 @@ export type OpenOptions = {
   connect?: (file: string) => Database;
 };
 
+/** Every connection's wait at SQLite's lock boundary, in milliseconds. */
+const CONCURRENT_WRITER_WAIT_MS = 5000;
+
 /** A brief competing CLI/worker write queues at SQLite's lock boundary.
  * This is per connection, including non-migrating desktop/MCP connections.
  * It does not replay a transaction body or conceal a persistent lock. */
 function waitForConcurrentWriter(db: Database): void {
-  db.exec("PRAGMA busy_timeout = 5000");
+  db.exec(`PRAGMA busy_timeout = ${CONCURRENT_WRITER_WAIT_MS}`);
+}
+
+/** How long one BEGIN IMMEDIATE attempt in beginWriteWithin sits in
+ * SQLite's busy handler before the clock is consulted — nominal ms, so
+ * brief contention still queues inside SQLite without a round trip. */
+const WRITE_WAIT_SLICE_MS = 100;
+
+/** SQLITE_BUSY in its primary or any extended form (node:sqlite reports
+ * the extended code as `errcode`; the low byte is the primary code). */
+function isDatabaseBusy(error: unknown): boolean {
+  const code = (error as { errcode?: unknown } | null)?.errcode;
+  return typeof code === "number" && (code & 0xff) === 5;
+}
+
+/**
+ * BEGIN IMMEDIATE with its wait bounded by the monotonic clock, not by
+ * SQLite's busy handler alone.
+ *
+ * The busy handler sleeps in steps (1, 2, 5 … 100 ms) and gives up when the
+ * sleep it ASKED for adds up to busy_timeout — it never reads a clock. On
+ * macOS every process in a launchd job without ProcessType=Interactive (the
+ * desktop host, and so the worker, the verifier and its tests) runs under
+ * background timer coalescing, which stretches each of those sleeps by up
+ * to ~100 ms: five nominal seconds took ~12 real ones, and a persistent lock
+ * overran the ten-second test bound in builds 1540/1541
+ * (docs/assessments/WORKSPACE_0_RESULT_2026-09-13.md). Here each attempt
+ * spends one short slice in SQLite and the budget is charged by
+ * performance.now(), so the refusal lands within the budget plus at most
+ * one slice in every scheduling tier. Only the BEGIN itself is retried: a
+ * body never runs before its connection holds the write lock, so nothing
+ * is partially written or replayed. The connection's own busy_timeout is
+ * restored whichever way the loop ends.
+ */
+function beginWriteWithin(db: Database, budgetMs: number): void {
+  const deadline = performance.now() + budgetMs;
+  db.exec(`PRAGMA busy_timeout = ${WRITE_WAIT_SLICE_MS}`);
+  try {
+    for (;;) {
+      try {
+        db.exec("BEGIN IMMEDIATE");
+        return;
+      } catch (error) {
+        if (!isDatabaseBusy(error) || performance.now() >= deadline) throw error;
+      }
+    }
+  } finally {
+    waitForConcurrentWriter(db);
+  }
 }
 
 /**
@@ -6968,7 +7019,7 @@ export class Store {
    */
   transact<T>(body: () => T): T {
     if (this.transacting) return body();
-    this.db.exec("BEGIN IMMEDIATE");
+    beginWriteWithin(this.db, CONCURRENT_WRITER_WAIT_MS);
     this.transacting = true;
     try {
       const result = body();
