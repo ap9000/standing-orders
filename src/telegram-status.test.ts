@@ -1,0 +1,275 @@
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { openStore, type Store } from "./store.js";
+import { addApprover } from "./scope.js";
+import { bridgePass, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport } from "./telegram.js";
+import { PHONE_HELP, phoneCommand, phoneStatus, phoneTask } from "./telegram-status.js";
+import { diagnoseTaskDispatch } from "./dispatch.js";
+import { runOperate, EXIT } from "./operate.js";
+import { saveRepos } from "./repos.js";
+
+const NOW = new Date("2026-09-13T06:00:00Z");
+const REPO = "/private/projects/standing-orders";
+const FOREIGN = "/private/projects/secret-project";
+const BOT = "777000";
+const CHAT = 4242;
+const USER = 31337;
+const command = (id: number, text: string, extra: Record<string, unknown> = {}) => ({
+  update_id: id,
+  message: { message_id: 1000 + id, chat: { id: CHAT, type: "private" }, from: { id: USER }, text, ...extra },
+});
+
+function scripted() {
+  const updates: unknown[][] = [];
+  const calls: { method: string; params: Record<string, unknown> }[] = [];
+  const transport: TelegramTransport = async (method, params) => {
+    calls.push({ method, params });
+    return { ok: true, result: method === "getUpdates" ? updates.shift() ?? [] : { message_id: calls.length + 100 } };
+  };
+  return { updates, calls, transport, texts: () => calls.filter(c => c.method === "sendMessage").map(c => String(c.params["text"])) };
+}
+
+describe("read-only phone status", () => {
+  let store: Store;
+  let dir: string;
+  let db: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "so-phone-status-"));
+    db = join(dir, "orders.db");
+    store = openStore(db);
+    expect(addApprover(store, "operator", NOW).ok).toBe(true);
+  });
+  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+
+  function task(id = "mobile-nav", repo: string | null = REPO, title = "Polish mobile navigation") {
+    store.createTask({ id, title }, NOW);
+    const ref = store.refFor("built-in", id).id;
+    if (repo !== null) store.placeTask(ref, repo);
+    return ref;
+  }
+
+  function result(id: string, verdict: "verified" | "attested" | "short" | "refuted" | null = "verified") {
+    const ref = task(id);
+    const run = store.startRun({ taskRef: ref, runner: "worker", leaseId: `lease-${id}`, branch: `standing-orders/${id}`, worktree: REPO,
+      route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" }, now: NOW });
+    store.setRunPhase(run, "verifying-proof");
+    store.finishRun(run, { outcome: "built", committed: true, now: NOW });
+    if (verdict !== null) store.saveProofVerdict(run, verdict, [], NOW);
+    store.setTaskState(id, "done", NOW);
+    return { ref, run };
+  }
+
+  function pair() {
+    const code = mintPairingCode();
+    store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "operator", by: "operator", ttlMs: PAIRING_TTL_MS }, NOW);
+    expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: BOT, chatId: String(CHAT), userId: String(USER), updateId: 1 }, NOW).ok).toBe(true);
+  }
+
+  const pass = (s: ReturnType<typeof scripted>, readProjects: () => Promise<readonly string[]> = async () => [REPO]) =>
+    bridgePass(store, { botId: BOT, transport: s.transport, clock: () => NOW, deliver: false, readProjects });
+
+  test("commands are explicit, bounded, and never interpret prose or shell syntax", () => {
+    expect(phoneCommand("/task mobile-nav")).toEqual({ kind: "task", id: "mobile-nav" });
+    expect(phoneCommand("/status")).toEqual({ kind: "status" });
+    expect(phoneCommand("/start")).toEqual({ kind: "help" });
+    expect(phoneCommand("/task x; delete everything")).toEqual({ kind: "help" });
+    expect(phoneCommand("/task " + "x".repeat(65))).toEqual({ kind: "help" });
+    expect(phoneCommand("/status@someone_else")).toBeNull();
+    expect(phoneCommand("cancel all my tasks")).toBeNull();
+  });
+
+  test("projects are admitted before reading rows; null and foreign projects stay invisible", () => {
+    task(); task("foreign", FOREIGN, "hidden-title"); task("unplaced", null, "unplaced-title");
+    const read = phoneStatus(store, [REPO], NOW);
+    expect(read).toContain("mobile-nav");
+    expect(read).not.toMatch(/hidden-title|unplaced-title|secret-project|\/private/);
+    expect(phoneTask(store, [REPO], "foreign", NOW)).toBe(phoneTask(store, [REPO], "does-not-exist", NOW));
+    expect(phoneStatus(store, [], NOW)).toContain("No connected projects");
+    expect(phoneTask(store, [], "mobile-nav", NOW)).not.toContain("Polish");
+  });
+
+  test.each(["short", "refuted", null] as const)("a done row with %s proof is not presented as finished", verdict => {
+    result("needs-proof", verdict);
+    const overview = phoneStatus(store, [REPO], NOW);
+    expect(overview).toContain("Needs attention · 1");
+    expect(overview).not.toContain("Finished ·");
+    const detail = phoneTask(store, [REPO], "needs-proof", NOW);
+    expect(detail).toContain(diagnoseTaskDispatch(store, "needs-proof", NOW)!.summary);
+    expect(detail).not.toContain("verifying-proof");
+    expect(detail).toContain("Result saved locally; no publication recorded");
+  });
+
+  test("operator acceptance preserves weak evidence and publication never means merge", () => {
+    const { ref, run } = result("accepted", "short");
+    store.acceptProof(run, "operator", "Reviewed the exception", NOW);
+    const publication = store.createPublicationIntent({ run, taskRef: ref, githubRepo: "owner/repo", remote: "origin", base: "main", head: "standing-orders/accepted", headSha: "a".repeat(40), bodyHash: "b".repeat(64), draft: true }, NOW);
+    store.markPublicationPushed(publication, NOW);
+    store.markPublicationOpened(publication, 7, "https://github.com/owner/repo/pull/7", NOW);
+    const detail = phoneTask(store, [REPO], "accepted", NOW);
+    expect(detail).toContain("Complete with recorded acceptance");
+    expect(detail).toContain("Required evidence is missing");
+    expect(detail).toContain("does not upgrade its evidence");
+    expect(detail).toContain("Pull request #7 opened; not recorded as merged");
+    store.recordPublicationRemoteState(publication, "MERGED", NOW);
+    expect(phoneTask(store, [REPO], "accepted", NOW)).toContain("Merge observed on GitHub");
+  });
+
+  test("an independent review waiting for a worker is not a finished result or a new approval request", () => {
+    const { run } = result("review-me");
+    store.raw().prepare("INSERT INTO review_request (run, requested_by, basis, requested_at) VALUES (?, 'operator', 'human', ?)").run(run, NOW.toISOString());
+    expect(phoneStatus(store, [REPO], NOW)).toContain("Waiting / next up · 1");
+    expect(phoneStatus(store, [REPO], NOW)).not.toContain("Finished ·");
+    expect(phoneTask(store, [REPO], "review-me", NOW)).toContain("The review is already requested");
+  });
+
+  test("known backoff is visible without claiming the task will definitely run then", () => {
+    const ref = task();
+    const until = new Date(NOW.getTime() + 60_000);
+    store.holdOwned({ taskRef: ref, ownerKind: "backoff", ownerId: "attempt-1", reason: "temporary failure", until }, NOW);
+    const detail = phoneTask(store, [REPO], "mobile-nav", NOW);
+    expect(detail).toContain("Retry scheduled");
+    expect(detail).toContain(`Earliest recorded wake: ${until.toISOString()}`);
+    expect(detail).toContain("a connected worker is still required");
+  });
+
+  test("a hidden dependency's ID is not disclosed by the shared diagnosis", () => {
+    task(); task("sensitive-blocker", FOREIGN);
+    store.addEdge("mobile-nav", "sensitive-blocker");
+    const detail = phoneTask(store, [REPO], "mobile-nav", NOW);
+    expect(detail).toContain("outside this phone view");
+    expect(detail).not.toContain("sensitive-blocker");
+  });
+
+  test("long histories and hostile display text stay bounded and explicitly incomplete", () => {
+    for (let n = 0; n < 65; n++) task(`task-${n}`, REPO, "😀".repeat(500));
+    const text = phoneStatus(store, [REPO], NOW);
+    expect(text.length).toBeLessThanOrEqual(3900);
+    expect(text).toContain("Newest 60 tasks only — older work may still need attention");
+    expect(text).toContain("+58 more in the console");
+    expect(phoneTask(store, [REPO], "task-0", NOW)).toContain("task-0"); // direct reads bypass the snapshot window
+    task("secret-title", REPO, "token sk-" + "X".repeat(40));
+    expect(phoneTask(store, [REPO], "secret-title", NOW)).not.toContain("X".repeat(40));
+    task("path-title", REPO, "Inspect C:\\Users\\private\\app and /Users/private/project\n\u202e fake status");
+    const detail = phoneTask(store, [REPO], "path-title", NOW);
+    expect(detail).not.toMatch(/C:\\Users|\/Users|\u202e/);
+    expect(detail.length).toBeLessThanOrEqual(3900);
+  });
+
+  test("projection reads change zero SQLite rows", () => {
+    task(); result("complete");
+    const changes = () => store.raw().prepare("SELECT total_changes() AS n").get()!["n"];
+    const before = changes();
+    phoneStatus(store, [REPO], NOW); phoneTask(store, [REPO], "complete", NOW);
+    expect(changes()).toBe(before);
+  });
+
+  test("authenticated phone commands reply without changing tasks or admitting any work", async () => {
+    pair(); task();
+    const s = scripted();
+    const before = store.getTask("mobile-nav");
+    s.updates.push([command(2, "/status"), command(3, "/task mobile-nav"), command(4, "/help")]);
+    const got = await pass(s);
+    expect(got).toMatchObject({ ok: true, report: { statusReplies: 3, sent: 0, answered: 0 } });
+    expect(s.texts()).toHaveLength(3);
+    expect(s.texts()[2]).toBe(PHONE_HELP);
+    expect(s.calls.filter(c => c.method === "sendMessage").every(c => c.params["parse_mode"] === undefined && c.params["reply_markup"] === undefined)).toBe(true);
+    expect(store.getTask("mobile-nav")).toEqual(before);
+    for (const table of ["run", "claim", "mate_turn", "chat_turn", "mate_proposal", "telegram_action", "publication"]) {
+      expect(store.raw().prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!["n"]).toBe(0);
+    }
+  });
+
+  test.each([
+    { from: { id: USER + 1 } }, { chat: { id: CHAT + 1, type: "private" } },
+    { chat: { id: CHAT, type: "group" } }, { forward_origin: {} }, { forward_date: 1 },
+    { via_bot: {} }, { sender_chat: {} }, { caption: "forwarded" },
+  ])("untrusted command envelope %j stays silent before reading projects", async extra => {
+    pair(); task();
+    const s = scripted(); const readProjects = vi.fn(async () => [REPO]);
+    s.updates.push([command(2, "/status", extra)]);
+    expect(await pass(s, readProjects)).toMatchObject({ ok: true, report: { ignored: 1 } });
+    expect(readProjects).not.toHaveBeenCalled(); expect(s.texts()).toEqual([]);
+  });
+
+  test("unpaired, rotated, and role-downgraded identities cannot read status", async () => {
+    task(); const s = scripted();
+    s.updates.push([command(2, "/status")]); await pass(s);
+    pair(); store.raw().prepare("UPDATE approver SET generation = generation + 1 WHERE name = 'operator'").run();
+    s.updates.push([command(3, "/status")]); await pass(s);
+    store.raw().prepare("UPDATE approver SET generation = generation - 1, role = 'viewer' WHERE name = 'operator'").run();
+    s.updates.push([command(4, "/status")]); await pass(s);
+    expect(s.texts()).toEqual([]);
+  });
+
+  test("unpairing during async project loading prevents both the read and send", async () => {
+    pair(); task(); const s = scripted();
+    const snapshot = vi.spyOn(store, "chatSnapshot");
+    s.updates.push([command(2, "/status")]);
+    await pass(s, async () => { store.unpairTelegram(BOT, "operator", NOW); return [REPO]; });
+    expect(snapshot).not.toHaveBeenCalled(); expect(s.texts()).toEqual([]);
+  });
+
+  test("read failures are sanitized, send failures are reported, and replays stay consumed after restart", async () => {
+    pair(); task(); const s = scripted();
+    s.updates.push([command(2, "/status")]);
+    expect(await pass(s, async () => { throw new Error("secret /Users/private password=bad"); })).toMatchObject({ ok: true, report: { statusReplies: 1, problems: ["phone status could not read the current project records"] } });
+    expect(s.texts()[0]).toContain("No tasks were changed");
+    expect(s.texts()[0]).not.toContain("password");
+    s.updates.push([command(3, "/status")]);
+    const base = s.transport;
+    s.transport = async (method, params) => method === "sendMessage" ? { ok: false, description: "secret" } : base(method, params);
+    expect(await pass(s)).toMatchObject({ ok: true, report: { problems: ["phone status reply failed for update 3; send a new command to retry"] } });
+    store.close(); store = openStore(db);
+    const replay = scripted(); replay.updates.push([command(2, "/status"), command(3, "/status")]);
+    await pass(replay); expect(replay.texts()).toEqual([]);
+    replay.updates.push([command(4, "/status")]); await pass(replay);
+    expect(replay.texts()).toHaveLength(1);
+  });
+
+  test("slash-prefixed decision replies are still notes, never status commands", async () => {
+    pair(); const ref = task();
+    const run = store.startRun({ taskRef: ref, runner: "worker", leaseId: "decision-lease", branch: "standing-orders/mobile-nav", worktree: REPO, route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" }, now: NOW });
+    const decision = store.saveDecision({ run, urgency: "blocking", recap: "Pick a layout", question: "Which layout?", options: [{ id: "compact", label: "Compact", consequence: "Less spacing", reversible: true }, { id: "roomy", label: "Roomy", consequence: "More spacing", reversible: true }], recommendation: "compact" }, NOW);
+    const binding = store.liveTelegramBinding(BOT)!;
+    store.recordTelegramDecisionMessage(binding.id, binding.chatId, "123", decision, NOW);
+    const s = scripted(); s.updates.push([command(2, "/status", { reply_to_message: { message_id: 123 } })]);
+    expect(await pass(s)).toMatchObject({ ok: true, report: { noted: 1, answered: 0 } });
+    expect(s.texts()[0]).toContain("| /status");
+    expect(store.getDecision(decision)!.state).toBe("open");
+  });
+
+  test("follower reloads the read ceiling and counts replies without a new scheduler", async () => {
+    pair(); task(); const s = scripted(); const controller = new AbortController();
+    s.updates.push([command(2, "/status")], []);
+    let cycles = 0;
+    const report = await followBridge(store, { botId: BOT, transport: s.transport, signal: controller.signal, clock: () => NOW, deliver: false,
+      readProjects: async () => cycles === 0 ? [REPO] : [],
+      onCycle: () => { if (++cycles === 1) s.updates.push([command(3, "/status")], []); else controller.abort(); },
+      sleep: async () => {},
+    });
+    expect(report.statusReplies).toBe(2);
+    expect(s.texts()[0]).toContain("mobile-nav");
+    expect(s.texts()[1]).toContain("No connected projects");
+  });
+
+  test("public CLI reads enrollment, not opened projects, and status-only activity is successful", async () => {
+    vi.stubEnv(TOKEN_ENV, "");
+    pair(); task(); task("foreign", FOREIGN, "private-foreign-title");
+    store.upsertProject(FOREIGN, "opened-is-not-enrolled", NOW);
+    await saveRepos(join(dir, "repos.json"), [REPO]);
+    saveBotToken(join(dir, "telegram-token"), `${BOT}:${"x".repeat(25)}`);
+    const s = scripted(); s.updates.push([command(2, "/status")]);
+    const lines: string[] = [];
+    const code = await runOperate("bridge", ["telegram", "--inbound-only", "--json"], line => lines.push(line), { databaseFile: db, now: NOW, telegramTransport: s.transport });
+    expect(code).toBe(EXIT.ok);
+    expect(lines.join("\n")).toContain('"statusReplies": 1');
+    expect(s.texts()[0]).toContain("mobile-nav");
+    expect(s.texts()[0]).not.toContain("private-foreign-title");
+    writeFileSync(join(dir, "repos.json"), "malformed");
+    s.updates.push([command(3, "/status")]);
+    expect(await runOperate("bridge", ["telegram", "--inbound-only"], () => {}, { databaseFile: db, now: NOW, telegramTransport: s.transport })).toBe(EXIT.failed);
+    expect(s.texts()[1]).toContain("couldn't read");
+  });
+});

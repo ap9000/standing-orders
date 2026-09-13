@@ -1,5 +1,10 @@
 # Final branch integration and desktop rollout — 2026-09-12
 
+**Superseded deployment status:** the [2026-09-13 rollout record](DESKTOP_ROLLOUT_2026-09-13.md)
+records the post-reboot startup pass and installation of schema-57 main. The
+installed service still needs Documents access and end-to-end health checks;
+the older working-schema-52 description below is historical, not current.
+
 ## Branch disposition
 
 All three branches with commits outside the previous main (`ebe9d4b`) were
@@ -60,6 +65,28 @@ Settings remained accessible. Any protected permission dialog must be handled
 by the operator; the refusal was not worked around.
 
 ## Remaining sequence
+
+### Permission recheck at 23:28 UTC
+
+After the operator cleared the prompts, the exact staged preview's Documents
+canary passed. The disposable project was accessible; clean controller exit
+recovered in 1.939 seconds, SIGKILL recovered in 182.104 seconds, and explicit
+stop succeeded, with no manual rescue. The executable hash remained
+`b21be444ff26e4ed946240f8d71d5690ba27a826f63fb9ac67eefd5c35132b64`.
+Local receipt: `output/certification/unblocked-desktop-recovery-2026-09-12.json`.
+
+The separate launchd certificate still failed automatic relaunch after clean
+exit. Its targeted system log again reported `pending spawn, domain in
+on-demand-only mode`. System Settings showed **Update Scheduled**, macOS Tahoe
+26.6.2 scheduled for tonight, **Restart Now** available, and 26.5.2 still
+installed. No reboot was triggered. Both disposable services were unloaded;
+the live schema-52 controller and app were not replaced. Local receipt:
+`output/certification/unblocked-launchd-2026-09-12.json`.
+
+Documents access is no longer the current blocker. Complete the pending OS
+restart, then repeat the automatic-start gate. Recheck the app-specific gate
+if the staged runtime changes before deployment; this permission recheck does
+not certify newer commits merely because its harness ran from newer main.
 
 1. Save open work and use the macOS **Restart Now** update action, then sign in.
    Settings estimates about 20 minutes. This is a physical OS operation, not

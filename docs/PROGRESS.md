@@ -1,5 +1,105 @@
 # Progress
 
+**2026-09-13 UTC — npm/browser deployment preflight (not deployed).**
+Separated the npm/browser installation path from publisher-only Mac signing.
+The current source built and its 262-file npm tarball installed successfully
+offline in a disposable prefix; the packaged CLI reports 0.4.3. The current
+schema-57 database is compatible and has no open runs, claims, conversations,
+held sessions or unsettled stops. The old desktop supervisor is loaded but
+its authenticated console health check fails. A disposable launchd job using
+the packaged project's access checker and the intended Node runtime timed out
+on all three saved Documents projects. The probe job was removed; no live
+service, database, project registry, app or permission was changed. This does
+not establish whether the cause is a pending prompt or another access problem.
+An unlocked-session access check remains necessary before switching services.
+The next product milestone is a measured ten-task pilot, expanding to 30–50
+mixed tasks after repairs, with explicit proof and rescue-rate criteria. See
+[preflight evidence and next actions](assessments/NPM_DEPLOYMENT_2026-09-13.md).
+
+**2026-09-13 UTC — Automatic update recovery (local, not deployed).**
+A temporary macOS recovery job now survives updater/supervisor crashes without
+reopening the app or pressing Resume. Durable attempt budgets, updater-only
+hang detection, transient retry and automatic old-app restoration reuse the
+existing update journal and service lifecycle. Explicit Stop remains off;
+current task data is never replaced by an old backup. Real final-artifact
+trials passed supervisor SIGKILL (28.405 s), updater SIGKILL after swap
+(15.655 s), early updater SIGKILL (8.810 s), cancellation during drain (9.239 s)
+and Stop after swap (13.327 s), with zero manual rescues and automatic
+recovery-job cleanup. A separate injected health failure with real app/service
+restoration passed in 11.072 s and preserved newer task data. A service-template
+compatibility regression was found and fixed in the real trials. Final full
+suite: **2,782 passed, 23 platform skips, 161 files**; typecheck/native build
+and signature verification passed. One earlier loaded-suite held-transport
+failure did not reproduce in focused/full reruns; its cause is not claimed
+fixed. No live installation or OS permissions changed. Signed installed
+acceptance, physical reboot and Windows remain release gates. See
+[failure matrix, evidence and limits](assessments/AUTOMATIC_UPDATE_RECOVERY_2026-09-13.md).
+
+**2026-09-13 UTC — Controlled update and recovery (local, not deployed).**
+File → Install app update / Update status now manage same-schema app updates:
+pause new work, drain current work, verify a private backup, atomically swap,
+verify the new worker and restore the previous app on failure without restoring
+old task data. Cancellation and interrupted operation recovery preserve the
+service's prior state. A real forced-interruption test exposed a status-lock
+race; the fix and cross-process regression were added before acceptance.
+The final native artifact passed forced updater death → Resume → verified
+update in **8.461 seconds**, and rejected candidate health → verified previous
+app in **11.114 seconds**, with newer task data preserved. Full regression:
+**2,761 passed, 23 platform skips**; final focused desktop checks: **47 passed**,
+including the additional shutdown-recovery regression. Typecheck/build and
+native signature checks passed. No live installation, queue or OS permission
+was changed. Signed update/access persistence, physical reboot and Windows
+acceptance remain separate release gates. See [scope, limits and retained
+evidence](assessments/CONTROLLED_UPDATE_2026-09-13.md).
+
+**2026-09-13 UTC — Installation/update safety (local, not deployed).** Builds
+now produce separate non-overwriting artifacts. Stop/Status survive database
+failures; Start refuses incompatible or missing data before touching launchd.
+An established installation cannot recreate a disappeared database as an empty
+queue. Build IDs participate in the native service definition, and File →
+Check installation provides recovery diagnostics even when startup fails.
+A candidate's `database-status` preflight is read-only and does not create
+desktop state. Typecheck/build and **2,737 tests** passed (**160 files, 23
+platform skips**); the native preview compiled and its signature verified.
+Its temporary-folder copy recovered from clean exit in **1.744 seconds** and
+forced crash in **182.361 seconds**, with **zero manual rescues**, fresh worker
+access and retained data. The Documents-located preview failed to reach a
+heartbeat; both outcomes are retained rather than calling platform access fixed.
+Signed access-persistence, native-window, installed update/reboot and physical
+Windows checks remain explicit gates. No installed app, real queue or privacy
+grant was changed. See [the checkpoint and qualification bar](assessments/INSTALLATION_SAFETY_2026-09-13.md).
+
+**2026-09-13 UTC — Conversational phone control in the existing chatbot
+(local, not deployed).** Mobile Chat/Ask is the primary experience; Telegram
+is optional. Browser sends now have a session-bound, content/task-bound durable
+receipt in the existing mutation ledger, so a lost response or duplicate tap
+does not create another turn after completion/restart. Pending replies retain
+an editable composer, tab drafts survive navigation, and visible reconnect
+polling replaces repeated full-page refreshes. A focused draft or approval form
+is never interrupted to load a new reply. Mobile projects use a dismissible
+drawer, portfolio context starts collapsed, and the empty composer precedes
+starter prompts. Desktop keeps its expanded context. The full suite passed:
+**159 files, 2,725 tests, 23 platform skips** (47.52 seconds), followed by
+**275 focused tests** after the final composer ordering adjustment. Typecheck
+and build passed. A scripted-provider, isolated-browser journey verified
+natural-language request → proposal → confirmed pause, 390/320px layouts, and
+offline/reconnect draft preservation. No real provider run, native permission
+change, deployment, or real-phone keyboard certification is claimed. See
+[phone usage](PHONE_STATUS.md) and [evidence](assessments/PHONE_CHAT_2026-09-13.md).
+
+**2026-09-13 UTC — Read-only phone status (local, not deployed).** The existing
+Telegram bridge answers `/status`, `/task <id>`, and `/help` without model calls
+or task mutations. Views reuse dispatch/proof/publication records, distinguish
+unfinished review and weak proof from completion, and label local versus
+published results. Enrollment and pairing are re-proved; replies are bounded,
+recent-history limits are explicit, and decision notes keep their existing
+semantics. Typecheck/build and the full suite passed: **157 files, 2,707 tests,
+23 platform skips**, 242.18 seconds. This includes the prior local desktop
+signing/access foundation, which remains uninstalled. No production queue,
+bot, or OS permissions changed. No live Telegram or real-provider execution
+is claimed. See [usage](PHONE_STATUS.md), [validation](assessments/PHONE_STATUS_2026-09-13.md),
+and the [updated work order](PRIORITIES.md#next-sequence).
+
 **2026-09-12 — Recipe creator and frequent-work launch (schema 57).** Authors
 can save reusable instructions with questions for the parts that change. Each
 use asks only those questions, freezes their answers into the existing durable

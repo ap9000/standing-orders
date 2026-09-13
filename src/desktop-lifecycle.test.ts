@@ -1,11 +1,11 @@
 import { test, expect } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { updateRepos, addRepos } from "./repos.js";
-import { loadOrCreateDesktopConfig, writeDesktopConfig, openDesktopStore, pairDesktopLogin, addDesktopProjects } from "./desktop-host.js";
+import { loadOrCreateDesktopConfig, readDesktopConfig, writeDesktopConfig, openDesktopStore, pairDesktopLogin, addDesktopProjects } from "./desktop-host.js";
 
 test("the built desktop helper starts the existing controller, enrolls only selected projects, and stops cleanly", async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "so-desktop-lifecycle-")));
@@ -24,7 +24,10 @@ test("the built desktop helper starts the existing controller, enrolls only sele
   pairDesktopLogin(store, join(root, "up-login.txt"), login);
   const repo = createRepo("selected"); await addDesktopProjects(root, store, [repo]); store.close();
   // cwd is this source checkout: it must not be implicitly added by `up`.
-  const child = spawn(process.execPath, [resolve("dist/desktop-host.js"), "serve", "--state", root], { cwd: process.cwd(), env: { ...process.env, XDG_CONFIG_HOME: join(root, "config") }, stdio: ["ignore", "pipe", "pipe"] });
+  let entry = resolve("dist/desktop-host.js");
+  if (process.platform !== "win32") { const alias = join(root,"desktop-alias.js"); symlinkSync(entry,alias); entry = alias; }
+  const child = spawn(process.execPath, [entry, "serve", "--state", root], { cwd: process.cwd(), env: { ...process.env, XDG_CONFIG_HOME: join(root, "config") }, stdio: ["ignore", "pipe", "pipe"] });
+  const helper = (verb: string) => JSON.parse(execFileSync(process.execPath,[resolve("dist/desktop-host.js"),verb,"--state",root],{encoding:"utf8",timeout:10000,stdio:["ignore","pipe","pipe"]}));
   let output = ""; for (const stream of [child.stdout, child.stderr]) stream.on("data", chunk => { output = (output + String(chunk)).slice(-500_000); });
   const exited = new Promise<number | null>(done => child.once("exit", code => done(code)));
   const base = `http://127.0.0.1:${config.port}`;
@@ -39,6 +42,13 @@ test("the built desktop helper starts the existing controller, enrolls only sele
   };
   try {
     await poll(async () => (await fetch(base + "/desktop/health?challenge=" + "b".repeat(64))).status === 200);
+    await poll(async () => helper("access-status").ready);
+    const initialAccess = JSON.parse(readFileSync(join(root,"project-access.json"),"utf8"));
+    const supervised = JSON.parse(readFileSync(join(root,"controller-supervisor.json"),"utf8"));
+    expect(initialAccess.controllerPid).toBe(supervised.controllerPid);
+    expect(initialAccess.controllerPid).not.toBe(process.pid);
+    expect(helper("access-recheck")).toEqual({ok:true});
+    await poll(async () => helper("access-status").ready && JSON.parse(readFileSync(join(root,"project-access.json"),"utf8")).request !== initialAccess.request);
     const response = await fetch(base + "/login", { method: "POST", body: new URLSearchParams({ name: login.name, token: login.password }), redirect: "manual" });
     expect(response.status).toBe(303);
     const cookie = response.headers.get("set-cookie")!.split(";")[0]!;
@@ -72,8 +82,13 @@ test("the built desktop helper starts the existing controller, enrolls only sele
     try { await addDesktopProjects(root, running, [second]); } finally { running.close(); }
     await poll(async () => (await (await fetch(base + "/projects", { headers: { cookie } })).text()).includes(second));
     expect(await (await fetch(base + "/projects", { headers: { cookie } })).text()).not.toContain(unselected);
+    await poll(async () => helper("access-status").ready);
+    const current = readDesktopConfig(root); current.repos.push(join(root,"disconnected-project")); writeDesktopConfig(root,current);
+    await poll(async () => helper("access-status").projects.some((project: {state:string}) => project.state === "missing"));
+    expect(helper("access-status").ready).toBe(false);
     child.kill("SIGTERM");
     expect(await exited).toBe(0);
+    expect(helper("access-status").ready).toBe(false);
     expect(output).toContain("stopped cleanly"); expect(output).not.toContain(login.password);
     const after = openDesktopStore(config.databaseFile);
     try { expect(after.listTasks().map(task => task.id)).toEqual(["concurrent-filing"]); expect(after.listRunners()).toHaveLength(1); expect(after.listRunners()[0]?.retiredAt).toEqual(expect.any(String)); }

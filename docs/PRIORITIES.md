@@ -1,14 +1,81 @@
 # Product priorities
 
-Current milestone (2026-09-12): contract handoffs and per-task Stop/Resume
-are merged to main and installed in the live schema-52 desktop controller.
-The latest wave passes both real providers, seven crash cases and 2,550 tests. See [deployment evidence](assessments/LIVE_UPGRADE_2026-09-12.md).
-The [per-task stop and resume](TASK_CONTROL_PLAN.md) wave now passes its
-[independent certification](assessments/STOP_RESUME_CERTIFICATION_2026-09-12.md).
-The next reliability body is kernel-level process containment and physical
-machine restart certification; Telegram conversation/media over the existing
-mate engine remains the next feature expansion.
-Earlier milestone narratives below remain implementation history.
+Current checkpoint (2026-09-13 UTC): main includes contract handoffs,
+Stop/Resume, platform process containment, and workflow recipes through schema
+57. The installed desktop reached that schema, but its selected Documents
+projects remain behind the [recorded Mac access gate](assessments/DESKTOP_ROLLOUT_2026-09-13.md).
+New [stable signing and worker-access checks](assessments/STABLE_DESKTOP_ACCESS_2026-09-13.md)
+are implemented and tested locally, not installed or certified for permission
+persistence. The operator is away; do not keep attempting permission changes.
+The [mobile chatbot is the primary phone-control surface](PHONE_STATUS.md),
+with read-only Telegram status as an optional shortcut. Conversation continuity
+is implemented locally over the existing mate engine. Earlier milestone narratives below are
+implementation history, not current deployment claims.
+
+### Next sequence
+
+1. **Active: dependable installation and updates.** Local hardening now stages
+   separate artifacts, pins build identity in the service definition, keeps
+   Stop/Status usable with a broken or incompatible database, and refuses to
+   replace a disappeared database with an empty queue. See the
+   [installation checkpoint](assessments/INSTALLATION_SAFETY_2026-09-13.md).
+   The same-schema controlled update/recovery flow is now implemented locally:
+   drain admission, verify a private backup, atomically swap apps, verify the
+   new worker, and restore the app (never old task data) on health failure.
+   Native File-menu controls expose progress, cancel and resumable recovery.
+   See the [controlled-update record](assessments/CONTROLLED_UPDATE_2026-09-13.md).
+   Automatic recovery now survives updater and recovery-supervisor crashes
+   without reopening the app or pressing Resume. Real disposable macOS runs
+   verified interruption after the atomic swap, cancellation and explicit Stop;
+   retries are bounded and current task data is preserved. See the
+   [failure-scenario results](assessments/AUTOMATIC_UPDATE_RECOVERY_2026-09-13.md).
+   **Two distribution paths:** the npm/browser service does not require Apple
+   publisher credentials. Official native Mac releases require centrally managed
+   Developer ID signing/notarization; end users do not set up certificates.
+   Do not make native signing a prerequisite for the npm path. The signed app
+   still needs two-build access persistence and native-window/reboot acceptance.
+   The September 13 npm candidate built, packed and installed in isolation,
+   but the real background probe timed out on all three saved Documents projects.
+   No live switch was attempted. Close that access gate in an unlocked session,
+   verify one working controller, retained login/projects and fresh watch leases,
+   then qualify restart/login recovery. Packaging alone does not grant folder
+   access. See the [npm deployment preflight](assessments/NPM_DEPLOYMENT_2026-09-13.md).
+   Physical Windows acceptance is separate; Mac passes cannot substitute for it.
+2. **Qualify reliability on mixed real work — the next route to a credible 9.**
+   After npm/browser installation acceptance, start with ten varied approved
+   tasks, fix reproduced failures through the existing paths, then expand to
+   30–50 tasks through Standing Orders with recorded
+   outcomes, evidence, elapsed time and manual-rescue counts. Report actual
+   completion and rescue rates, not a reliability rating inferred from a test
+   count. Include UI and backend changes, tests, dependency setup, interrupted
+   work, unavailable providers, a lost browser connection and a revision from
+   the phone. Each successful task needs the requested behavior, passing checks,
+   reviewable diff and appropriate evidence (viewport screenshots for UI work).
+   Keep initial failures in the report even when a later version fixes them.
+   Proposed acceptance: at least 95% of the defined task set completes without
+   manual technical rescue; every remaining task identifies its gate and next
+   action; zero lost work, duplicate dispatches or falsely verified results.
+   Legitimate human decisions are not technical rescues. A small pilot is a
+   release checkpoint, not a statistical guarantee across arbitrary projects.
+   Test package-service update/recovery separately from native app swapping.
+3. **Phone conversation: use the existing mobile Chat/Ask experience.** Free-form
+   requests, task revisions, confirmation cards, and recorded results already
+   share the mate engine. Local improvements now preserve tab drafts, prevent
+   duplicate sends across restart, keep a pending composer available, and show
+   reconnect state without repeated full-page refreshes. Verify the installed
+   phone-to-real-result journey after the native access gate is resolved.
+   Free-form Telegram conversation and media delivery remain optional later
+   adapters, not prerequisites for conversational phone control. No second
+   engine, approval policy, or polling agent.
+   The optional `/status`, `/task <id>`, and `/help` Telegram shortcut is also
+   implemented locally; delivery still needs the updated runtime and paired bot.
+4. **After that: small, provenance-backed project learning.** Reuse verified
+   commands and repository conventions with visible sources and reset controls.
+   Start with proven facts, not a general memory platform.
+
+Keep real exhausted-subscription fallback certification fail-closed. No new
+task-duration caps, unlimited repair loops, or mandatory extra reviewer stages
+are required for these steps.
 
 Standing Orders should be the place where a person can hand off an outcome,
 leave, and return to a result they can trust. These priorities are ordered by
@@ -170,15 +237,11 @@ started.
 
 ## Current focus
 
-The reliability/routing stack and bounded explicit review retries are integrated
-in main at `b96d53e`. The next body of work is
-[preserving the task contract through every handoff](CONTRACT_HANDOFF_PLAN.md):
-filed requirements reach the planner, revision terms retain their intended risk
-and quality, and independent review can assess inherited criteria from sealed
-context. The retry feature's self-hosted journey needed operator assistance at
-each of those boundaries. Complete this journey without rescue before expanding
-the desktop/shared-chat branch or starting project memory. The linked plan also
-records the remaining branch inventory and integration decisions.
+The current work order is the dated sequence at the top of this document.
+The [contract handoff body](CONTRACT_HANDOFF_PLAN.md) is integrated and has its
+own bounded real-provider certification. That closes the earlier planner,
+revision-term, and inherited-review-context defects; it does not close the
+installed Mac's project-access gate or physical Windows acceptance.
 
 Priority 1 is active again under the [unattended completion plan](UNATTENDED_PLAN.md).
 The earlier pre-Windows gates passed, but subsequent real work exposed gaps

@@ -8,6 +8,7 @@
  */
 
 import { isAlive } from "./runner.js";
+import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { approvalOf, type ExecutionProfile } from "./scope.js";
 import { plannerSourceProblemOf } from "./planner-source.js";
 import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRequestOrigin, type ReviewRetryState, type Store, type TaskState } from "./store.js";
@@ -41,6 +42,7 @@ export type DispatchAction =
   | "resume-run";
 
 export type DispatchDiagnosisCode =
+  | "updating"
   | "complete"
   | "needs-verification"
   | "proof-refuted"
@@ -337,6 +339,7 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
   if (task.state === "failed") return answer("failed", "terminal", "Needs a retry", "The last attempt stopped; review its incident, then retry it.", { action: "retry-task" });
   if (store.hasLiveClaim(ref.id, now)) return answer("running", "running", "Running now", "A worker owns the current live claim.");
   if (task.state === "running") return answer("vanished-run", "waiting", "Build vanished", "The task says running, but no current claim owns it; reconcile it before retrying.", { action: "retry-task" });
+  if (updateAdmissionPaused(store.raw())) return answer("updating", "waiting", "Waiting for app update", UPDATE_PAUSED);
 
   const local = taskReadinessBlocker(store, ref.id, now);
   if (local?.code === "hold") {

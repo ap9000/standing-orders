@@ -1,4 +1,5 @@
 import { ledgerBody } from "./ledger-view.js";
+import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
 import { authorizePlanUnderMode, applyModeToNewFiling, planAutoPending } from "./plan-auto.js";
 import { LEDGER_CSV_HEADER, ledgerCsvRows } from "./ledger-csv.js";
 import { Readable } from "node:stream";
@@ -60,6 +61,7 @@ import { requestTaskStop, resumeTaskStop, taskControlOf, type TaskControlView } 
 import { WorktreePool } from "./worktree.js";
 import { PLEX_SANS_400, PLEX_SANS_500, PLEX_SANS_600, PLEX_MONO_400, PLEX_MONO_500, PLEX_MONO_600 } from "./fonts.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, opendirSync, readFileSync, readSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -534,7 +536,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     void handle(request, response).catch(error => {
       if (process.env["STANDING_ORDERS_SERVE_DEBUG"] === "1") console.error("SERVE ERROR:", error);
       if (!response.headersSent) {
-        respond(response, 500, "text/plain; charset=utf-8", "something broke");
+        const updating = error instanceof Error && error.message.includes(UPDATE_PAUSED);
+        if (updating) response.setHeader("Retry-After", "5");
+        respond(response, updating ? 503 : 500, "text/plain; charset=utf-8", updating ? UPDATE_PAUSED : "something broke");
       } else {
         response.end();
       }
@@ -2265,6 +2269,20 @@ export function createDecisionServer(options: ServeOptions): Server {
               }
             : null,
       }));
+    }
+
+    if (url.pathname === "/chat/mate/status") {
+      if (who.via !== "cookie" || who.role !== "approver") return respond(response, 403, "application/json", JSON.stringify({ error: "session" }));
+      const session = store.activeMateSession(who.name);
+      const principal = matePrincipal(who);
+      if (session === null || principal === null || session.ceilingDigest !== principal.ceilingDigest || session.approverGeneration !== principal.generation) {
+        return respond(response, 200, "application/json", JSON.stringify({ session: null }));
+      }
+      store.sweepStaleMateTurns(now);
+      const request = url.searchParams.get("request") ?? "";
+      const receipt = /^[a-f0-9]{32}$/.test(request) ? store.mateRequestReceipt(session.id, request) : null;
+      const latest = store.recentMateTurns(who.name, 1)[0];
+      return respond(response, 200, "application/json", JSON.stringify({ session: session.id, version: latest === undefined ? "" : `${latest.id}:${latest.state}`, pending: store.liveMateTurnFor(who.name) !== null, received: receipt !== null }));
     }
 
     if (url.pathname === "/chat") {
@@ -5213,7 +5231,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/chat") {
       if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface");
       const requestedTask = body.get("task");
-      const focusTask = taskChatFocus(requestedTask, now);
+      const focusTask = taskChatFocus(requestedTask, now, who);
       if (requestedTask !== null && focusTask === null) {
         return redirect(response, chatReturnWithSaid("/chat", "That task is not available in this workspace."));
       }
@@ -5225,6 +5243,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       // its own terms and the thread shows why.
       const mateSession = who.role === "approver" ? store.activeMateSession(who.name) : null;
       if (mateSession !== null) {
+        const requestId = body.get("request");
+        if (requestId !== null && (body.getAll("request").length !== 1 || body.getAll("request-session").length !== 1 || body.get("request-session") !== String(mateSession.id))) {
+          return redirect(response, chatReturnWithSaid(back, "This conversation changed. Reload it before sending your message."));
+        }
         const principal = matePrincipal(who);
         if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", back);
         const message = (body.get("message") ?? "").trim();
@@ -5232,7 +5254,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return redirect(response, chatReturnWithSaid(back, `a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`));
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Keep this turn about that task unless the operator explicitly asks to broaden it.` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(requestId === null ? {} : { requestId }), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Keep this turn about that task unless the operator explicitly asks to broaden it.` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
           })
@@ -10035,6 +10057,8 @@ const STYLE = `
   .chat-thinking p strong, .chat-thinking p span { display: block; }
   .chat-thinking p span { margin-top: .08rem; }
   .chat-thinking form { margin: 0; }
+  .chat-fleet-context { margin: 0; }
+  .chat-fleet-context > summary { display: none; }
   .thinking-orb { position: relative; width: 2rem; height: 2rem; flex: none; border-radius: 999px; background: var(--running-soft); }
   .thinking-orb::after { content: ""; position: absolute; inset: .55rem; border-radius: inherit; background: var(--running); animation: pulse 1.25s ease-in-out infinite; }
   .composer {
@@ -10087,8 +10111,11 @@ const STYLE = `
   @media (max-width: 760px) {
     main:has(.chat-workspace) { padding: 1rem 1rem calc(9rem + env(safe-area-inset-bottom, 0rem)); }
     .chat-workspace, .chat-workspace.projects-hidden { display: block; }
-    .chat-workspace.projects-hidden .chat-projects { display: block; }
-    .chat-project-toggle, .chat-project-close { display: none; }
+    .chat-workspace.projects-hidden .chat-projects, .chat-projects { display: none; }
+    .chat-project-toggle { display: inline-flex; min-height: 2.75rem; }
+    .chat-project-close { display: grid; place-items: center; min-height: 2.75rem; min-width: 2.75rem; }
+    .chat-workspace.projects-open::before { content: ""; position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / .18); backdrop-filter: blur(3px); }
+    .chat-workspace.projects-open .chat-projects { display: block; position: fixed; top: 6rem; left: 1rem; right: 1rem; width: auto; max-height: calc(100dvh - 11rem); overflow-y: auto; z-index: 31; }
     .chat-project-list { display: flex; gap: .625rem; overflow-x: auto; padding: .125rem 0 .5rem; scroll-snap-type: x proximity; }
     .chat-project-card {
       flex: 0 0 min(16rem, 78vw); scroll-snap-align: start; padding: .6rem .65rem;
@@ -10125,6 +10152,9 @@ const STYLE = `
     .chat-budget > span { padding: .25rem .48rem; }
     .chat-budget > span:first-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
     .chat-overview { padding: .8rem; }
+    .chat-fleet-context { border: 1px solid var(--glass-border); border-radius: 1rem; background: var(--glass); }
+    .chat-fleet-context > summary { display: list-item; min-height: 2.75rem; padding: .75rem .9rem; color: var(--muted-foreground); font-size: .8rem; cursor: pointer; }
+    .chat-fleet-context .chat-overview { border: 0; box-shadow: none; margin: 0; }
     .chat-overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .chat-overview-head { align-items: flex-start; }
     .chat-overview-copy strong, .chat-overview-copy span { white-space: normal; }
@@ -10144,6 +10174,7 @@ const STYLE = `
     .chat-prompts form, .chat-prompts button { min-width: 0; width: 100%; }
     .chat-prompts form:last-child:nth-child(odd) { grid-column: 1 / -1; }
     .chat-main { padding-bottom: 6rem; }
+    .chat-main #latest { scroll-margin-top: 7rem; }
     .chat-workspace .composer {
       position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));
       z-index: 29; margin: 0; padding: .45rem; border-radius: 1.1rem; box-shadow: var(--shadow-overlay);
@@ -12443,6 +12474,7 @@ function chatActivity(activity: string | null): string {
 
 const CHAT_UI_SCRIPT =
   `(function(){var workspace=document.querySelector(".chat-workspace"),projectPanel=document.getElementById("chat-project-panel"),projectToggle=document.querySelector(".chat-project-toggle"),projectClose=document.querySelector(".chat-project-close");` +
+  `var fleet=document.querySelector(".chat-fleet-context");if(fleet){var desktop=window.matchMedia("(min-width: 761px)");fleet.open=desktop.matches;desktop.addEventListener("change",function(){fleet.open=desktop.matches;});}` +
   `if(workspace&&projectPanel&&projectToggle){var wide=window.matchMedia("(min-width: 1200px)");var saved="";try{saved=localStorage.getItem("standing-orders:chat-projects")||"";}catch(e){}` +
   `function apply(open){workspace.classList.toggle("projects-open",open);workspace.classList.toggle("projects-hidden",!open);projectToggle.setAttribute("aria-expanded",String(open));}` +
   `function preferred(){return wide.matches&&saved!=="closed";}apply(preferred());` +
@@ -12452,8 +12484,8 @@ const CHAT_UI_SCRIPT =
   `wide.addEventListener("change",function(){apply(preferred());});document.addEventListener("keydown",function(ev){if(ev.key==="Escape"&&!wide.matches&&workspace.classList.contains("projects-open"))apply(false);});}` +
   `var taskLive=document.getElementById("task-chat-live");function refreshTask(){if(!taskLive||taskLive.getAttribute("data-poll")!=="1")return;` +
   `if(document.hidden){setTimeout(refreshTask,5000);return;}var source=taskLive.getAttribute("data-source");if(!source)return;` +
-  `fetch(source,{cache:"no-store"}).then(function(r){if(r.status===401||r.status===403||r.redirected){location.href="/login";return null;}return r.ok?r.text():null;})` +
-  `.then(function(html){if(!html||!taskLive)return;var parsed=new DOMParser().parseFromString(html,"text/html"),next=parsed.getElementById("task-chat-live");if(!next)return;taskLive.replaceWith(next);taskLive=next;` +
+  `fetch(source,{cache:"no-store",signal:AbortSignal.timeout(10000)}).then(function(r){if(r.status===401||r.status===403||r.redirected){location.href="/login";return null;}if(!r.ok)throw new Error("connection");return r.text();})` +
+  `.then(function(html){if(html===null||!taskLive)return;var parsed=new DOMParser().parseFromString(html,"text/html"),next=parsed.getElementById("task-chat-live");if(!next)throw new Error("response");taskLive.replaceWith(next);taskLive=next;` +
   `if(taskLive.getAttribute("data-poll")==="1")setTimeout(refreshTask,5000);}).catch(function(){setTimeout(refreshTask,10000);});}` +
   `if(taskLive&&taskLive.getAttribute("data-poll")==="1")setTimeout(refreshTask,5000);` +
   `var box=document.querySelector(".composer textarea");if(box){` +
@@ -12994,7 +13026,7 @@ function matePage(chrome: Chrome, data: {
           `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
       `<span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span></div>`,
     data.focusTask === null ? "" : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
-    data.focusTask === null ? chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null) : "",
+    data.focusTask === null ? `<details class="chat-fleet-context" open><summary>Project overview</summary>${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null)}</details>` : "",
   ];
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
@@ -13010,12 +13042,14 @@ function matePage(chrome: Chrome, data: {
     byTurn.set(one.turn, list);
   }
   const inert = data.pending !== null;
+  const lastMessage = data.messages.at(-1);
+  const latestReply = data.pending === null && lastMessage?.role === "assistant" ? lastMessage.id : null;
   conversation.push(coordinatorProposalsSection(data.coordinatorProposals, data.decisions, data.csrf, data.now, true, data.focusTask === null ? null : returnTo));
   conversation.push(`<div class="thread">`);
   if (data.messages.length === 0) {
     conversation.push(
       `<div class="chat-empty"><strong>${data.focusTask === null ? "What do you want to get done?" : "What do you want to understand or change?"}</strong>` +
-      `<p class="meta">${data.focusTask === null ? "Describe the outcome in your own words. I’ll infer the routine details and only ask when a choice materially changes the result." : "I’ll read the current task first. Ask naturally, or choose a useful starting point."}</p>${matePromptStarters(data.csrf, data.focusTask)}</div>`,
+      `<p class="meta">${data.focusTask === null ? "Describe the outcome in your own words. I’ll infer the routine details and only ask when a choice materially changes the result." : "I’ll read the current task first. Ask naturally, or choose a useful starting point."}</p></div>`,
     );
   }
   for (const message of data.messages) {
@@ -13025,7 +13059,7 @@ function matePage(chrome: Chrome, data: {
     }
     const cards = message.turn === null ? [] : (byTurn.get(message.turn) ?? []);
     conversation.push(
-      `<div class="msg mate" data-message-role="assistant">` +
+      `<div class="msg mate" data-message-role="assistant"${message.id === latestReply ? ' id="latest"' : ""}>` +
         renderChatText(message.text) +
         cards.map(one => mateProposalCard(one, data.csrf, inert, data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null, data.focusTask === null ? null : returnTo)).join("") +
         `<div class="chat-message-foot">${chatActivity(message.activity)}<time datetime="${escape(message.createdAt)}">${escape(relativeAge(message.createdAt, data.now))}</time></div>` +
@@ -13040,16 +13074,18 @@ function matePage(chrome: Chrome, data: {
       `<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="turn" value="${data.pending.id}">` +
       `<button type="submit" class="quiet">stop</button></form></div>`,
     );
-    return screen("chat", chatWorkspace(conversation.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null }, refreshSeconds: 3 });
   }
   conversation.push(
-    data.messages.length === 0 ? "" : matePromptStarters(data.csrf, data.focusTask),
-    `<form method="post" action="/chat" class="card composer" id="latest" aria-label="message the mate">`,
+    data.messages.length === 0 || data.pending !== null ? "" : matePromptStarters(data.csrf, data.focusTask),
+    `<form method="post" action="/chat" class="card composer" id="${latestReply === null && data.pending === null ? "latest" : "chat-composer"}" aria-label="message the mate" data-chat-session="${data.session.id}" data-chat-task="${escape(data.focusTask?.id ?? "")}" data-chat-busy="${data.pending === null ? "0" : "1"}" data-chat-version="${data.recent[0] === undefined ? "" : `${data.recent[0].id}:${data.recent[0].state}`}">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    `<input type="hidden" name="request" value="${randomBytes(16).toString("hex")}"><input type="hidden" name="request-session" value="${data.session.id}">`,
     data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,
     `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask === null ? "Describe what you want done…" : "Ask about status, revise scope, or steer the next attempt…"}"></textarea></label>`,
-    `<button type="submit" aria-label="send message">send</button>`,
+    `<button type="submit" aria-label="${data.pending === null ? "send message" : "wait for the current reply before sending"}"${data.pending === null ? "" : " disabled"}>send</button>`,
     `</form>`,
+    `<p class="meta composer-hint" id="chat-connection" role="status" aria-live="polite">${data.pending === null ? "Changes appear as cards for you to confirm." : "Reply in progress. You can draft your next message or come back later."}</p>`,
+    data.messages.length === 0 ? matePromptStarters(data.csrf, data.focusTask) : "",
     data.focusTask === null ? `<p class="meta composer-hint">One message is enough. I’ll infer the title, scope, and proof; say “use your judgment” to accept sensible reversible defaults.</p>` : "",
     `<details><summary class="meta">this conversation</summary>`,
     `<p class="meta">started ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z · stays live until you end it · only bounded recent context is sent to the model</p>`,
@@ -13065,7 +13101,7 @@ function matePage(chrome: Chrome, data: {
   return screen(
     "chat",
     chatWorkspace(conversation.join("\n"), data.projects, data.csrf, false, data.focusTask),
-    { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null } },
+    { chrome, functional: { script: CHAT_CONTINUITY_SCRIPT + CHAT_UI_SCRIPT, fetches: true } },
   );
 }
 
@@ -18653,6 +18689,7 @@ function settingsPage(
     "</form>",
     `<p class="meta">Written owner-only beside the database. Then pair your chat:`,
     ` <code>standing-orders bridge telegram pair --as you --token …</code> and send the code to your bot.</p>`,
+    `<p class="meta">Once paired, send <code>/status</code> for recent work, <code>/task &lt;id&gt;</code> for a task's evidence and next step, or <code>/help</code>. These are read-only and use no AI model. The computer and bridge must be awake and connected.</p>`,
   ].join("\n"), { chrome, ...(pushScript === null ? {} : { functional: { script: pushScript, fetches: true } }) });
 }
 

@@ -234,6 +234,7 @@ import { run, terminateLiveProviders, run as execRun } from "./exec.js";
 import { containmentStatus, currentContainment, describeContainment, resolveContainment } from "./containment.js";
 import { readPulls } from "./pulls.js";
 import { startMaintenance } from "./maintenance.js";
+import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
 
@@ -822,6 +823,17 @@ type Context = {
  */
 function registryPathOf(context: { databaseFile: string }): string {
   return join(dirname(context.databaseFile), "repos.json");
+}
+
+/** Phone reads use enrollment, never opened-project history or a worker's
+ * incidental single-project view. Reload per request so removal takes effect
+ * without restarting the follower; no Git/filesystem access to projects. */
+function telegramReadProjects(context: { databaseFile: string }): () => Promise<readonly string[]> {
+  return async () => {
+    const loaded = await loadProjectRegistry(registryPathOf(context));
+    if ("error" in loaded) throw new Error("project registry unavailable");
+    return loaded.repos;
+  };
 }
 
 async function dispatch(
@@ -1980,6 +1992,7 @@ async function tickCommand(
   if (!auth.ok) {
     return fail(write, json, "tick", auth.reason, describeAuth(auth.reason, runner), EXIT.refused);
   }
+  if (updateAdmissionPaused(store.raw())) return fail(write, json, "tick", "updating", UPDATE_PAUSED, EXIT.refused);
 
   const maxGiven = text(flags, "max");
   const max = maxGiven === undefined ? 1 : Number(maxGiven);
@@ -7482,6 +7495,7 @@ async function runWatchLoop(args: {
     const transport = context.telegramTransport ?? createTransport(followSource.token);
     const followerPrimary = effectivePrimary(process.env, dirname(context.databaseFile), true);
     follower = followBridge(store, {
+      readProjects: telegramReadProjects(context),
       ...(followerPrimary.channel === "telegram" ? {} : { deliver: false }),
       botId: followSource.botId,
       transport,
@@ -7492,6 +7506,7 @@ async function runWatchLoop(args: {
         // watch (round-4 finding 12).
         progress(
           `watch: bridge sent ${cycle.sent}, answered ${cycle.answered}, paired ${cycle.paired}` +
+            ((cycle.statusReplies ?? 0) > 0 ? `, status replies ${cycle.statusReplies}` : "") +
             (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s)` : ""),
         );
       },
@@ -7514,8 +7529,9 @@ async function runWatchLoop(args: {
   };
   let reconciliationReady = false;
   let reconciliationFailure: string | null = null;
-  const admissionStopped = (): boolean => stopping() || !reconciliationReady;
-  const quietContext: Context = { ...context, write: sink, json: true, shouldStop: stopping, shouldPauseAdmission: () => !reconciliationReady };
+  const paused = (): boolean => !reconciliationReady || updateAdmissionPaused(store.raw()) || context.shouldPauseAdmission?.() === true;
+  const admissionStopped = (): boolean => stopping() || paused();
+  const quietContext: Context = { ...context, write: sink, json: true, shouldStop: stopping, shouldPauseAdmission: paused };
 
   const startedAt = Date.now();
   const deadline = runFor === null ? null : startedAt + runFor;
@@ -7563,8 +7579,8 @@ async function runWatchLoop(args: {
     // Startup recovery still precedes the first dispatch.
     await maintenance.runNow();
     while (!stopping() && (deadline === null || Date.now() < deadline)) {
-      if (!reconciliationReady) {
-        await sleep(50);
+      if (paused()) {
+        await sleep(250);
         continue;
       }
       const seqBefore = store.wakeSeq();
@@ -8711,6 +8727,7 @@ async function bridgeCommand(
     if (!json) write(`Following bot ${source.botId} — taps apply as they arrive. Ctrl-C stops it.`);
     try {
       const report = await followBridge(store, {
+        readProjects: telegramReadProjects(context),
         botId: source.botId,
         transport,
         signal: controller.signal,
@@ -8720,13 +8737,14 @@ async function bridgeCommand(
           if (!json) {
             write(
               `bridge: sent ${cycle.sent}, answered ${cycle.answered}, paired ${cycle.paired}` +
+                ((cycle.statusReplies ?? 0) > 0 ? `, status replies ${cycle.statusReplies}` : "") +
                 (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s)` : ""),
             );
           }
         },
       });
       return succeed(write, json, "bridge follow", { report }, () => [
-        `Followed for ${report.cycles} cycle(s): sent ${report.sent}, answered ${report.answered}, paired ${report.paired}, ignored ${report.ignored}.`,
+        `Followed for ${report.cycles} cycle(s): sent ${report.sent}, answered ${report.answered}, paired ${report.paired}, ignored ${report.ignored}, status replies ${report.statusReplies ?? 0}.`,
         ...report.problems.slice(-5).map(problem => `  problem: ${problem}`),
       ]);
     } finally {
@@ -8737,6 +8755,7 @@ async function bridgeCommand(
   }
 
   const passed = await bridgePass(store, {
+    readProjects: telegramReadProjects(context),
     botId: source.botId,
     transport,
     clock,
@@ -8748,9 +8767,9 @@ async function bridgeCommand(
 
   const { report } = passed;
   const broke = report.problems.length > 0;
-  const idle = report.sent === 0 && report.answered === 0 && report.paired === 0;
+  const idle = report.sent === 0 && report.answered === 0 && report.paired === 0 && (report.statusReplies ?? 0) === 0;
   const lines = () => [
-    `Sent ${report.sent}, answered ${report.answered}, paired ${report.paired}, ignored ${report.ignored}.`,
+    `Sent ${report.sent}, answered ${report.answered}, paired ${report.paired}, ignored ${report.ignored}, status replies ${report.statusReplies ?? 0}.`,
     ...(report.backlog ? ["Telegram still holds more updates than one pass's budget — run it again."] : []),
     ...report.problems.map(problem => `  problem: ${problem}`),
   ];

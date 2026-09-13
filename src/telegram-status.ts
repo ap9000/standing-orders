@@ -1,0 +1,140 @@
+/** Read-only phone views over the same dispatch and proof records as chat.
+ * No provider calls, repository access, new workflow state, or inferred success. */
+import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
+import { scanForSecrets } from "./evidence.js";
+import type { Store } from "./store.js";
+
+export type PhoneCommand = { kind: "status" } | { kind: "help" } | { kind: "task"; id: string };
+
+export function phoneCommand(text: string): PhoneCommand | null {
+  if (/^\/(?:help|start)\s*$/.test(text)) return { kind: "help" };
+  if (/^\/status\s*$/.test(text)) return { kind: "status" };
+  const task = /^\/task\s+([A-Za-z0-9][A-Za-z0-9._-]{0,63})\s*$/.exec(text);
+  if (task !== null) return { kind: "task", id: task[1]! };
+  // A mistyped command gets help, but arbitrary prose is not a command.
+  return /^\/(?:status|task|help|start)(?:\s|$)/.test(text) ? { kind: "help" } : null;
+}
+
+export const PHONE_HELP = [
+  "Standing Orders on your phone",
+  "",
+  "/status — recent work across your connected projects",
+  "/task <id> — status, evidence, and the next step for one task",
+  "/help — these commands",
+  "",
+  "These commands only read status; they do not use an AI model or change tasks. To answer an agent's question, tap its decision buttons. Reply to that decision message to attach a note.",
+  "",
+  "New tasks, revisions, approvals, and publishing still use the Standing Orders console. The computer and bridge must be awake and connected to reply.",
+].join("\n");
+
+/** A third-party transport receives a small display copy, not logs, paths,
+ * credentials, or arbitrary markup. Scan BEFORE truncation/normalization. */
+function plain(value: string, cap: number): string {
+  if (scanForSecrets(value).length > 0 || /\b\d{5,}:[A-Za-z0-9_-]{20,}\b/.test(value)) return "[sensitive text hidden]";
+  const text = value
+    .replace(/(?:[A-Za-z]:[\\/]|\\\\)[^\s"'<>]+/g, "[path]")
+    .replace(/(^|[\s"'`(<[=:,])\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+/g, "$1[path]")
+    .replace(/\b[0-9a-f]{32,}\b/gi, "[digest]")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g, " ")
+    .replace(/\s+/g, " ").trim();
+  // Keep surrogate pairs intact while bounding Telegram's UTF-16 ceiling.
+  return text.length <= cap ? text : text.slice(0, cap - 2).replace(/[\uD800-\uDBFF]$/, "") + "…";
+}
+
+function projectLabel(repo: string): string {
+  return plain(repo.split(/[\\/]/).filter(Boolean).pop() ?? "project", 48);
+}
+
+function groupOf(d: DispatchDiagnosis): string {
+  if (d.condition === "running") return "Working";
+  if (d.code === "cancelled") return "Cancelled";
+  if (d.code === "complete") return "Finished";
+  if (d.code === "review-pending" || d.action === null) return "Waiting / next up";
+  return "Needs attention";
+}
+
+function nextStep(d: DispatchDiagnosis): string {
+  if (d.code === "review-pending") return "The review is already requested. A connected worker must pass the usual readiness checks before it starts.";
+  switch (d.action) {
+    case "open-result": return "Open this task's result in the console to review its evidence and available actions.";
+    case "retry-task": return "Open this task in the console, review why it stopped, and use the available retry action.";
+    case "place-task": return "Choose a project for this task in the console.";
+    case "write-scope": return "Describe the goal and success checks in the console, or ask the planner to draft them.";
+    case "select-agent": return "Open this task in the console and review its agent settings or provider availability.";
+    case "approve-scope": return "Review the proposed work in the console and approve it if it is right.";
+    case "answer-decision": return "Answer the waiting question using its decision buttons or the console.";
+    case "unhold": return "Open this task in the console and release its hold when you want it to continue.";
+    case "inspect-hold": return "Open this task in the console to see what must change before it can continue.";
+    case "repair-dependency": return "Open this task in the console. Retry the required task, choose a different task to wait for, or explicitly stop waiting for it.";
+    case "repair-capability": return "Open this task's requirements in the console and fix the named setup issue.";
+    case "start-worker": return "Reopen Standing Orders on the computer and finish any project-access setup. Approved work can resume when the builder reconnects.";
+    case "retry-review": return "Open the preserved result in the console and choose Retry review. This does not rebuild the task.";
+    case "resume-run": return "Open this task in the console and choose Resume after its stopped attempt has finished stopping.";
+    case null: return d.condition === "running" ? "No action needed from you right now." : d.code === "cancelled" ? "Nothing else will run for this task." : "Standing Orders can reconsider this task when its waiting condition clears.";
+  }
+}
+
+/** repos is the transport's explicit enrollment ceiling, never opened-project
+ * history. This snapshot is intentionally bounded and advertises that bound. */
+export function phoneStatus(store: Store, repos: readonly string[], now: Date): string {
+  if (repos.length === 0) return "No connected projects are available to this bridge. Add a project in Standing Orders, then send /status again.";
+  return store.transact(() => {
+    const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(repos, now), now);
+    const lines = ["Recent work", `As of ${now.toISOString().replace("T", " ").slice(0, 19)} UTC · ${repos.length} project(s)`, ""];
+    if (snapshot.tasksSaturated) lines.push("Newest 60 tasks only — older work may still need attention.", "");
+    if (snapshot.tasks.length === 0) lines.push("No tasks are recorded in these projects.");
+    for (const group of ["Needs attention", "Working", "Waiting / next up", "Finished", "Cancelled"]) {
+      const rows = snapshot.tasks.filter(t => t.dispatch !== null && t.dispatch !== undefined && groupOf(t.dispatch) === group);
+      if (rows.length === 0) continue;
+      lines.push(`${group} · ${rows.length}${snapshot.tasksSaturated ? " in this snapshot" : ""}`);
+      for (const task of rows.slice(0, 2)) {
+        lines.push(`${plain(task.id, 64)} · ${projectLabel(repos[task.repoIndex]!)}`, `  ${plain(task.title, 64)} — ${plain(task.dispatch!.summary, 80)}`);
+      }
+      if (rows.length > 2) lines.push(`  +${rows.length - 2} more in the console`);
+      lines.push("");
+    }
+    lines.push("Send /task <id> for the next step. Status is a snapshot, not a promise that the next attempt will succeed.");
+    return lines.join("\n");
+  });
+}
+
+export function phoneTask(store: Store, repos: readonly string[], id: string, now: Date): string {
+  return store.transact(() => {
+    const ref = store.lookupRef(id);
+    // Check admission before reading a title, run, proof, or diagnosis.
+    const task = ref?.repo != null && repos.includes(ref.repo) ? store.getTask(id) : null;
+    if (task === null || ref?.repo == null) return "No such task in your connected projects. Send /status for task IDs.";
+    const d = diagnoseTaskDispatch(store, id, now);
+    if (d === null) return "This task's status is unavailable. Open it in the console before retrying.";
+    const lines = [plain(task.title, 140), `${plain(id, 64)} · ${projectLabel(ref.repo)}`, `As of ${now.toISOString().replace("T", " ").slice(0, 19)} UTC`, "", plain(d.summary, 160)];
+    const blocker = d.blockerTaskId === null ? null : store.lookupRef(d.blockerTaskId);
+    const hiddenDependency = blocker !== null && (blocker.repo === null || !repos.includes(blocker.repo));
+    lines.push(hiddenDependency ? "A required task outside this phone view has not finished. Review the dependency in the console." : plain(d.detail, 650));
+    if (d.nextAt !== null) lines.push(`Earliest recorded wake: ${plain(d.nextAt, 40)} (a connected worker is still required).`);
+
+    const runs = store.runsFor(ref.id);
+    const result = task.state === "done" ? runs.find(r => (r.role === "builder" || r.role === "scout") && (r.outcome === "built" || r.outcome === "no-change") && r.finishedAt !== null) : undefined;
+    const latest = result ?? runs[0];
+    if (latest !== undefined) {
+      lines.push("", `${result === undefined ? "Latest recorded attempt" : "Saved result"}: #${latest.id} · ${plain(latest.provider, 40)}${latest.model === null ? "" : ` / ${plain(latest.model, 80)}`}`);
+      // Terminal status wins; a leftover internal phase must never read as activity.
+      if (latest.finishedAt !== null) lines.push(`Attempt ended: ${plain(latest.finishedAt, 40)}`);
+      else if (d.condition === "running") {
+        const checkpoint = store.latestCheckpointForRun(latest.id);
+        lines.push(checkpoint === null ? "No milestone progress has been recorded for this attempt." : `Latest agent-reported milestone update: ${plain(checkpoint.createdAt, 40)} (not independent proof).`);
+      }
+    }
+    if (result !== undefined) {
+      const proof = store.proofVerdictFor(result.id);
+      const proofWords = { verified: "Checks verified at completion", attested: "Agent-reported evidence, not independently verified checks", short: "Required evidence is missing", refuted: "Evidence conflicts with the approved result" };
+      lines.push(`Recorded evidence: ${proof === null ? "No completion proof recorded" : proofWords[proof.verdict]}.`);
+      if (proof !== null && proof.matrix.length > 0) lines.push(`Acceptance checks: ${proof.matrix.filter(row => row.state === "pass").length}/${proof.matrix.length} satisfied in the recorded evidence.`);
+      if (store.proofAcceptance(result.id) !== null) lines.push("An operator accepted this result; that does not upgrade its evidence.");
+      const publication = store.publicationForRun(result.id);
+      const delivery = publication?.remoteState === "MERGED" ? "Merge observed on GitHub" : publication?.remoteState === "CLOSED" ? "Pull request closed, not merged" : publication?.state === "opened" ? `Pull request #${publication.prNumber ?? "?"} opened; not recorded as merged` : publication?.state === "pushed" ? "Branch pushed; pull request not yet recorded" : publication?.state === "intended" ? "Publication queued; not yet confirmed" : publication?.state === "failed" ? "Publication failed; the local result is preserved" : result.role === "scout" ? "Report saved locally" : "Result saved locally; no publication recorded";
+      lines.push(`Delivery: ${delivery}.`);
+    }
+    lines.push("", `Next: ${nextStep(d)}`, "", "Read-only status. Evidence files and full actions are in the console.");
+    return lines.join("\n");
+  });
+}

@@ -15,6 +15,7 @@
  * (finding 8); and everything the model sees passed `mateView` (finding 9).
  */
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import type { ChatConfig, DirectChatProviderId, MateProposalKind, MateSession, MateThread, Store, SubscriptionChatProviderId } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
 import { isVerifiedApprover, reproveApprover } from "./principal.js";
@@ -55,6 +56,9 @@ export type MateTurnInput = {
   /** Direct API key; subscription providers use their cached harness login. */
   key: string | null;
   message: string;
+  /** Stable browser send identity. A retry returns the original turn,
+   * including a failed one; it never dispatches the provider again. */
+  requestId?: string;
   /** Safe, server-authored context for this turn only. Kept out of the
    * visible thread so a task-scoped composer still reads like a normal
    * conversation. */
@@ -81,12 +85,15 @@ export type MateRefusal =
   | "daily-cap"
   | "session-exhausted"
   | "session-ended"
-  | "over-budget";
+  | "over-budget"
+  | "invalid-request"
+  | "request-changed";
 
 export type MateFailure = "provider-error" | "timeout" | "malformed-reply" | "secret-refused" | "latched" | "revoked" | "superseded";
 
 export type MateTurnOutcome =
-  | { ok: true; turn: number; reply: string; activity: string; proposals: number; steps: number; stoppedAtCap: boolean; settledMicrousd: number }
+  | { ok: true; replayed?: false; turn: number; reply: string; activity: string; proposals: number; steps: number; stoppedAtCap: boolean; settledMicrousd: number }
+  | { ok: true; replayed: true; turn: number }
   | { ok: false; refused: MateRefusal; message: string }
   | { ok: false; turn: number; failed: MateFailure; message: string; unknownSpend: boolean };
 
@@ -105,6 +112,8 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
   "session-exhausted": "this mate session's spend ceiling would be exceeded — mint a new one to continue",
   "session-ended": "this mate session has ended — mint a new one to continue",
   "over-budget": "the weekly chat spend ceiling would be exceeded",
+  "invalid-request": "This message could not be identified. Reload the conversation before sending it.",
+  "request-changed": "That send was already received with different text or task context. Reload the conversation before sending a new message.",
 };
 
 const READ_TOOLS = new Set(["recap", "list_repos", "list_tasks", "get_task", "list_decisions", "get_decision", "queue"]);
@@ -164,6 +173,20 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     ? credentialKeyOf(directProvider, input.key as string)
     : subscriptionCredentialKey(subscriptionProvider as SubscriptionChatProviderId);
 
+  const request = input.requestId;
+  if (request !== undefined && !/^[a-f0-9]{32}$/.test(request)) return refuse("invalid-request");
+  // Replays are read-only, but still require today's authority, not the
+  // session/thread snapshots supplied by a previous browser page.
+  const liveSession = store.getMateSession(session.id);
+  const liveThread = store.getMateThread(thread.id);
+  if (liveSession?.approver !== who.name || liveThread?.approver !== who.name || liveSession.credentialKey !== credentialKey) return refuse("not-yours");
+  if (liveSession.endedAt !== null) return refuse("session-ended");
+  if (liveThread.closedAt !== null) return refuse("thread-closed");
+  if (liveSession.ceilingDigest !== who.ceilingDigest || liveThread.ceilingDigest !== who.ceilingDigest) return refuse("ceiling-changed");
+  const digest = createHash("sha256").update(JSON.stringify([thread.id, message, input.context ?? null])).digest("hex");
+  const receipt = request === undefined ? null : store.mateRequestReceipt(session.id, request);
+  if (receipt !== null) return receipt.digest === digest ? { ok: true, replayed: true, turn: receipt.turn } : refuse("request-changed");
+
   let now = clock();
   store.sweepStaleMateTurns(now);
 
@@ -184,25 +207,37 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   if (scanForSecrets(base).length > 0) return refuse("secret-in-context");
   const reserved = direct ? mateWorstCaseForPrice(price as NonNullable<typeof price>, Buffer.byteLength(base, "utf8")) : 0;
 
-  const opened = store.openMateTurn(
-    {
-      approver: who.name,
-      session: session.id,
-      thread: thread.id,
-      credentialKey,
-      reservedMicrousd: reserved,
-      dailyTurns: config.dailyTurns,
-      weeklyCeilingMicrousd: config.weeklyCeilingMicrousd,
-      deadlineMs: TURN_WALL_CLOCK_MS + 10_000,
-    },
-    now,
-  );
-  if (!opened.ok) return refuse(opened.reason);
-  const turnId = opened.id;
-  const started = store.startMateTurn(turnId, now);
-  if (!started.ok) return refuse("concurrent");
+  const admitted = store.transact(() => {
+    const existing = request === undefined ? null : store.mateRequestReceipt(session.id, request);
+    if (existing !== null) return existing.digest === digest
+      ? { ok: true as const, replayed: true as const, turnId: existing.turn }
+      : { ok: false as const, reason: "request-changed" as const };
+    const opened = store.openMateTurn(
+      {
+        approver: who.name,
+        session: session.id,
+        thread: thread.id,
+        credentialKey,
+        reservedMicrousd: reserved,
+        dailyTurns: config.dailyTurns,
+        weeklyCeilingMicrousd: config.weeklyCeilingMicrousd,
+        deadlineMs: TURN_WALL_CLOCK_MS + 10_000,
+      },
+      now,
+    );
+    if (!opened.ok) return opened;
+    const turnId = opened.id;
+    const started = store.startMateTurn(turnId, now);
+    if (!started.ok) throw new Error("new mate turn could not start");
+    store.appendMateMessage({ thread: thread.id, turn: turnId, role: "operator", text: message }, now);
+    if (request !== undefined) store.replay({ idempotencyKey: `mate-send:${session.id}:${request}`, actor: who.name, at: now }, "mate-send", () => ({ digest, turn: turnId }));
+    return { ok: true as const, turnId, generation: started.generation };
+  });
+  if (!admitted.ok) return refuse(admitted.reason);
+  if ("replayed" in admitted) return { ok: true, replayed: true, turn: admitted.turnId };
+  const turnId = admitted.turnId;
+  const started = { generation: admitted.generation };
   const turnStartedAt = now.getTime();
-  store.appendMateMessage({ thread: thread.id, turn: turnId, role: "operator", text: message }, now);
 
   let proposals = 0;
   let reads = 0;

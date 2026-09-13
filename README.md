@@ -644,6 +644,17 @@ cadence. A decision, and anything that needs a person now (a stalled
 task, a malformed payload, a gap that blocks work), still pages the
 moment it lands. `bridge telegram status` says how many facts are held.
 
+**Check work from your phone.** In the paired private chat, send `/status`
+for recent work across enrolled projects, `/task <id>` for one task's exact
+state, recorded evidence, delivery status and next step, or `/help` for the
+available commands. These read existing workflow records without a model call
+or task mutation. A saved branch, a pending review, and a merged PR stay
+distinct. `/status` covers the newest 60 tasks, explicitly says when older
+work is omitted, and shows up to two rows per group; `/task` can look up older
+tasks directly. The computer and bridge must be awake and connected. These
+commands are not yet free-form task creation or revision chat; use the console
+for those. See [phone status and its limits](docs/PHONE_STATUS.md).
+
 A chat is not a person: pairing binds one private chat and one immutable
 Telegram user id to one approver credential. Buttons carry opaque one-time
 tokens whose meaning lives in the local database — a stolen bot token can
@@ -952,5 +963,13 @@ The workflow this formalizes comes from [Jason Ku's agentic engineering session]
 
 A local macOS shell, guided project setup, provider/model discovery, and weekly
 schedules with timezones use the same controller and approval flow as the CLI.
+The local native build also includes **File → Install app update** and
+**Update status**: same-schema updates drain current work, verify a private
+backup, atomically swap the app, and restore the previous app on failed health
+checks without replacing newer task data. An independent temporary macOS job
+automatically recovers an interrupted updater without reopening the window;
+bounded retries and a persistent Stop request prevent endless recovery or
+restarting work you stopped. Signed-release permission persistence
+and physical reboot acceptance remain release gates, not claims from unit tests.
 See [build and usage instructions](docs/control-app.md) and
 [the integration assessment](docs/CONTROL_APP_INTEGRATION.md).

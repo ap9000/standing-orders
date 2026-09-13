@@ -335,6 +335,7 @@ describe("the daemon plan", () => {
     const desktop = planDesktopService({ node: "/opt/node/bin/node", helper: "/Applications/Standing Orders.app/Contents/Resources/dist/desktop-host.js", stateDir: dir, label: "com.standing-orders.desktop", home: dir, pathEnv: "/opt/node/bin:/usr/bin" });
     expect(desktop.unitContent).toMatch(/<key>KeepAlive<\/key>\s*<true\/>/);
     expect(desktop.unitContent).toContain("<string>serve</string>");
+    expect(desktop.unitContent).toContain("<key>AssociatedBundleIdentifiers</key>\n  <array><string>com.standing-orders.desktop</string></array>");
     expect(desktop.unitContent).toContain("<string>--state</string>");
     expect(desktop.unitContent).toContain(`<string>${dir}</string>`);
     expect(desktop.logPath).toBe(join(dir, "service.log"));
@@ -343,10 +344,20 @@ describe("the daemon plan", () => {
     expect(portablePath(desktop.unitPath)).toContain("Library/LaunchAgents/com.standing-orders.desktop.plist");
     // The CLI daemon's plist is the same document shape.
     const cli = plan("darwin");
+    expect(cli.unitContent).not.toContain("AssociatedBundleIdentifiers");
     for (const key of ["RunAtLoad", "KeepAlive", "ThrottleInterval", "ExitTimeOut", "StandardOutPath"]) {
       expect(desktop.unitContent).toContain(`<key>${key}</key>`);
       expect(cli.unitContent).toContain(`<key>${key}</key>`);
     }
+  });
+
+  test("preview service attribution is separate from release and included in the reload digest", () => {
+    const args = { node:process.execPath,helper:"/x/desktop-host.js",stateDir:dir,label:"preview",home:dir };
+    const production = planDesktopService(args);
+    const preview = planDesktopService({...args,associatedBundleId:"com.standing-orders.desktop.development"});
+    expect(preview.unitContent).toContain("<string>com.standing-orders.desktop.development</string>");
+    expect(loadedDigest(preview.unitContent)).not.toBe(loadedDigest(production.unitContent));
+    expect(() => planDesktopService({...args,associatedBundleId:'invalid</string>'})).toThrow(/bundle identifier/);
   });
 
   test("the shared launchd road is the desktop's start: idempotent on a running unchanged definition", async () => {

@@ -242,6 +242,11 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
     return runMateTurn({ store, who, session: live, thread, config, key, message, ...(seams.fetcher === undefined ? {} : { fetcher: seams.fetcher }), ...(seams.subscriptionRunner === undefined ? {} : { subscriptionRunner: seams.subscriptionRunner }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), clock });
   };
   const report = (outcome: MateTurnOutcome): void => {
+    if (outcome.ok && outcome.replayed) {
+      emit(outcome);
+      say(`Message already received as turn #${outcome.turn}.`);
+      return;
+    }
     if (outcome.ok) {
       emit({ ok: true, turn: outcome.turn, reply: outcome.reply, activity: outcome.activity, steps: outcome.steps, settledMicrousd: outcome.settledMicrousd, proposals: pendingProposals().map(one => ({ id: one.id, ordinal: ordinalOf(one), kind: one.kind, payload: one.payload })) });
       say(`  ${outcome.activity}`);

@@ -23,6 +23,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
 import type { Store, Decision, Notification, TelegramBinding } from "./store.js";
+import { phoneCommand, phoneStatus, phoneTask, PHONE_HELP } from "./telegram-status.js";
+
+/** Read the enrolled project list on demand. No callback means no task data,
+ * never an implicit all-database ceiling. Shared by pass and embedded follower. */
+export type TelegramReadProjects = () => Promise<readonly string[]>;
 
 /** The environment name — and therefore the name the builder strips from agents. */
 export const TOKEN_ENV = "STANDING_ORDERS_TELEGRAM_TOKEN";
@@ -175,6 +180,8 @@ export type BridgeReport = {
   noted?: number;
   /** Digests sent this pass (away mode). */
   digests?: number;
+  /** Successful replies to read-only phone commands, separate from outbox sends. */
+  statusReplies?: number;
 };
 
 type Effect = () => Promise<void>;
@@ -195,6 +202,7 @@ export async function bridgePass(
     /** false: inbound only — another channel is primary and carries the
      * pages; taps and replies still land here. */
     deliver?: boolean;
+    readProjects?: TelegramReadProjects;
   },
 ): Promise<{ ok: true; report: BridgeReport } | { ok: false; reason: "bridge-busy"; message: string }> {
   const clock = options.clock ?? (() => new Date());
@@ -216,7 +224,7 @@ export async function bridgePass(
     if (options.deliver !== false) {
       await deliverOutbox(store, botId, transport, owner, clock, report);
     }
-    await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report);
+    await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report, 0, undefined, options.readProjects);
   } finally {
     // Handed back so the next cron firing is not told busy for the rest of
     // this pass's TTL. A crash skips this and the lease expires instead —
@@ -247,6 +255,7 @@ export type FollowReport = {
   paired: number;
   ignored: number;
   problems: string[];
+  statusReplies?: number;
 };
 
 /**
@@ -274,6 +283,7 @@ export async function followBridge(
     owner?: string;
     /** false: inbound only; another channel is primary. */
     deliver?: boolean;
+    readProjects?: TelegramReadProjects;
     pollSeconds?: number;
     /** One line per cycle that did something — the follower's narration hook. */
     onCycle?: (report: BridgeReport) => void;
@@ -319,7 +329,7 @@ export async function followBridge(
         await deliverOutbox(store, botId, transport, owner, clock, report);
       }
       await drainUpdates(
-        store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal,
+        store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal, options.readProjects,
       );
 
       total.cycles++;
@@ -327,8 +337,9 @@ export async function followBridge(
       total.answered += report.answered;
       total.paired += report.paired;
       total.ignored += report.ignored;
+      if (report.statusReplies !== undefined) total.statusReplies = (total.statusReplies ?? 0) + report.statusReplies;
       total.problems.push(...report.problems);
-      if (report.sent > 0 || report.answered > 0 || report.paired > 0 || report.problems.length > 0) {
+      if (report.sent > 0 || report.answered > 0 || report.paired > 0 || (report.statusReplies ?? 0) > 0 || report.problems.length > 0) {
         options.onCycle?.(report);
       }
 
@@ -621,6 +632,7 @@ type Context = {
   transport: TelegramTransport;
   clock: () => Date;
   report: BridgeReport;
+  readProjects?: TelegramReadProjects | undefined;
 };
 
 async function drainUpdates(
@@ -634,8 +646,9 @@ async function drainUpdates(
   report: BridgeReport,
   pollSeconds = 0,
   signal?: AbortSignal,
+  readProjects?: TelegramReadProjects,
 ): Promise<void> {
-  const context: Context = { store, botId, transport, clock, report };
+  const context: Context = { store, botId, transport, clock, report, readProjects };
   let offset = cursor + 1;
 
   for (let page = 0; page < PAGE_BUDGET; page++) {
@@ -711,6 +724,9 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
   const pair = /^\/pair\s+([0-9a-f]{32})\s*$/.exec(message.text ?? "");
 
   if (pair === null && chat !== undefined && from !== undefined) {
+    // Replies to decisions retain their existing note meaning, even if the
+    // note starts with a slash. New read commands are direct messages only.
+    if (message.reply_to_message === undefined && applyPhoneRead(context, update, effects)) return;
     // Not a pairing: maybe a free-text note. Every condition or silence.
     applyNote(context, update, effects);
     return;
@@ -748,10 +764,66 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
     // "paired" line is annoying; a paired chat that never heard so is worse.
     await transport("sendMessage", {
       chat_id: chatId,
-      text: `paired: this chat now answers as ${approver}`,
+      text: `paired: this chat now answers as ${approver}\n\nSend /status to check recent work, /task <id> for one task, or /help for your options.`,
       link_preview_options: { is_disabled: true },
     });
   });
+}
+
+function applyPhoneRead(context: Context, update: Update, effects: Effect[]): boolean {
+  const { store, botId, transport, clock, report } = context;
+  const message = update.message!;
+  const command = phoneCommand(message.text ?? "");
+  if (command === null) return false;
+  const binding = store.liveTelegramBinding(botId);
+  if (
+    binding === null || store.accountOf(binding.approver)?.role !== "approver" ||
+    message.chat?.type !== "private" || String(message.chat.id) !== binding.chatId ||
+    message.from === undefined || String(message.from.id) !== binding.userId ||
+    message.forward_origin !== undefined || message.forward_date !== undefined ||
+    message.via_bot !== undefined || message.sender_chat !== undefined || message.caption !== undefined
+  ) {
+    report.ignored++;
+    return true;
+  }
+  // Like decision-message edits, a read reply is best-effort after the update
+  // was consumed. A crash or send failure cannot turn replay into a new action.
+  effects.push(async () => {
+    const stillPaired = (): boolean => {
+      const live = store.liveTelegramBinding(botId);
+      return live?.id === binding.id && live.approverGeneration === binding.approverGeneration && store.accountOf(binding.approver)?.role === "approver";
+    };
+    if (!stillPaired()) return;
+    let response = PHONE_HELP;
+    if (command.kind !== "help") {
+      try {
+        const repos = [...new Set(await context.readProjects?.() ?? [])];
+        if (!stillPaired()) return;
+        response = command.kind === "status" ? phoneStatus(store, repos, clock()) : phoneTask(store, repos, command.id, clock());
+      } catch {
+        // No registry paths, SQLite errors, credentials, or stale snapshots
+        // leave on the failure road. A new request can try again.
+        response = "I couldn't read the current project status. No tasks were changed. Try /status again; if it persists, check Standing Orders on the computer.";
+        report.problems.push("phone status could not read the current project records");
+      }
+    }
+    if (!stillPaired()) return;
+    // Each view fits one message. Fail visibly if a future change violates
+    // that contract, rather than cutting off the important next action.
+    if (response.length > PART_CAP) {
+      response = "This status is too large for one phone message. Open the console for the full view, or send /task <id> for one task.";
+      report.problems.push("phone status exceeded its message bound");
+    }
+    const sent = await transport("sendMessage", {
+      chat_id: binding.chatId,
+      text: response,
+      reply_parameters: { message_id: message.message_id },
+      link_preview_options: { is_disabled: true },
+    });
+    if (sent.ok) report.statusReplies = (report.statusReplies ?? 0) + 1;
+    else report.problems.push(`phone status reply failed for update ${update.update_id}; send a new command to retry`);
+  });
+  return true;
 }
 
 /**

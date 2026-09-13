@@ -1,5 +1,9 @@
 # Live controller upgrade
 
+**Latest:** [2026-09-13 desktop rollout](DESKTOP_ROLLOUT_2026-09-13.md) installed
+schema-57 main with all 99 historical tables preserved. Its project-access and
+native UI gates remain unresolved. The schema-52 installation below is history.
+
 The subsequent [final rollout record](FINAL_ROLLOUT_2026-09-12.md) supersedes
 the deployment-gate status below and records the newer prompt-fix preview.
 

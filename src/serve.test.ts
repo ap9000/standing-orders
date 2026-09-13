@@ -8519,6 +8519,47 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toContain('action="/chat/mate/end"');
   });
 
+  test("browser send receipts survive repeated POSTs without duplicating a completed turn", async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    const html = await page(cookie);
+    const request = /name="request" value="([a-f0-9]{32})"/.exec(html)![1]!;
+    const session = store.activeMateSession("alex")!.id;
+    const fields = { csrf, message: "What needs me?", request, "request-session": String(session) };
+    script.push(() => answer([{ type: "text", text: "Here is the current picture." }]));
+    expect((await post(cookie, "/chat", fields)).status).toBe(303); await settle();
+    expect((await post(cookie, "/chat", fields)).status).toBe(303); await settle();
+    expect(store.recentMateTurns("alex", 10)).toHaveLength(1);
+    const state = await fetch(url(`/chat/mate/status?request=${request}`), { headers: { cookie } });
+    expect(await state.json()).toMatchObject({ session, received: true, pending: false, version: expect.stringMatching(/:answered$/) });
+    expect(await (await fetch(url("/chat/mate/status?request=bad"), { headers: { cookie } })).json()).toMatchObject({ received: false });
+    await post(cookie, "/chat", { ...fields, message: "Different work" }); await settle();
+    expect(store.recentMateTurns("alex", 10)).toHaveLength(1);
+    expect(await page(cookie)).toContain("different text or task context");
+    const wrongSession = await post(cookie, "/chat", { ...fields, "request-session": String(session + 1) });
+    expect(decodeURIComponent(wrongSession.headers.get("location")!)).toContain("conversation changed");
+    expect((await post(cookie, "/chat", { ...fields, csrf: "bad" })).status).toBe(403);
+    expect((await fetch(url("/chat/mate/status"), { redirect: "manual" })).status).toBe(303);
+    expect((await fetch(url("/chat/mate/status"), { headers: { authorization: `Bearer alex:${approverToken}` } })).status).toBe(403);
+  });
+
+  test("a pending chat retains its mobile composer without timed full-page refreshes", async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    // A hung deterministic provider keeps the pending page visible, then the
+    // ordinary stop action ends it. No real provider or worker is involved.
+    let finish!: (value: Response) => void;
+    script.push(() => new Promise<Response>(resolve => { finish = resolve; }) as unknown as Response);
+    await post(cookie, "/chat", { csrf, message: "Help me review the task" });
+    const pending = await page(cookie);
+    expect(pending).toContain('data-chat-busy="1"');
+    expect(pending).toContain('class="card composer"');
+    expect(pending).toContain("draft your next message");
+    expect(pending).not.toMatch(/<meta http-equiv="refresh" content="5">/);
+    expect(pending).toContain("/chat/mate/status");
+    const turn = store.liveMateTurnFor("alex")!.id;
+    await post(cookie, "/chat/mate/stop", { csrf, turn: String(turn) });
+    finish(answer([{ type: "text", text: "Stopped." }])); await settle();
+  });
+
   test("a task's Ask view stays in the unified thread and confirms guidance without losing context", async () => {
     const cookie = await login();
     const taskHtml = await (await fetch(url("/t/a"), { headers: { cookie } })).text();

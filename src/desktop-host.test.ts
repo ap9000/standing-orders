@@ -1,8 +1,107 @@
-import { test, expect } from "vitest";
-import { mkdtempSync, rmSync, realpathSync, symlinkSync, mkdirSync, readFileSync, writeFileSync, statSync, existsSync } from "node:fs";
+import { test, expect, vi } from "vitest";
+import { mkdtempSync, rmSync, realpathSync, symlinkSync, mkdirSync, readFileSync, writeFileSync, statSync, existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readDesktopConfig, writeDesktopConfig, loadOrCreateDesktopConfig, openDesktopStore, pairDesktopLogin, addDesktopProjects } from "./desktop-host.js";
+import { readDesktopConfig, writeDesktopConfig, loadOrCreateDesktopConfig, openDesktopStore, openConfiguredDesktopStore, pairDesktopLogin, addDesktopProjects, desktopMain, desktopDatabaseStatus, desktopServiceDefinition } from "./desktop-host.js";
+
+test("first setup creates one database; a disappeared established database never becomes an empty replacement queue", () => {
+  const root = mkdtempSync(join(tmpdir(), "so-desktop-missing-database-"));
+  try {
+    const config = loadOrCreateDesktopConfig(root, true);
+    expect(config.databaseInitialized).toBe(false);
+    const store = openConfiguredDesktopStore(root);
+    pairDesktopLogin(store, join(root, "up-login.txt"), { name: "fixture", password: "retained-password" }); store.close();
+    expect(readDesktopConfig(root).databaseInitialized).toBe(true);
+    const saved = join(root, "retained.db"); renameSync(config.databaseFile, saved);
+    expect(() => openConfiguredDesktopStore(root)).toThrow(/cannot be read/);
+    expect(existsSync(config.databaseFile)).toBe(false);
+    // An older installation has no setup marker. It must not assume missing
+    // data means the user wanted to create a different queue.
+    const legacy = readDesktopConfig(root); delete legacy.databaseInitialized; writeDesktopConfig(root, legacy);
+    expect(() => openConfiguredDesktopStore(root)).toThrow(/cannot be read/);
+    expect(existsSync(config.databaseFile)).toBe(false);
+    renameSync(saved, config.databaseFile);
+    const reopened = openConfiguredDesktopStore(root);
+    expect(authenticateApprover(reopened, "fixture", "retained-password").ok).toBe(true); reopened.close();
+    expect(readDesktopConfig(root).databaseInitialized).toBe(true);
+    expect(readDesktopConfig(root).identity).toBe(config.identity);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("candidate-build database preflight never bootstraps missing desktop state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "so-desktop-preflight-"));
+  const capture = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const missing = join(root, "not-set-up");
+    await expect(desktopMain(["database-status", "--state", missing])).rejects.toThrow();
+    expect(existsSync(missing)).toBe(false);
+    const config = loadOrCreateDesktopConfig(root, true);
+    const before = readFileSync(join(root, "desktop.json"));
+    await desktopMain(["database-status", "--state", root]);
+    expect(JSON.parse(String(capture.mock.calls.at(-1)?.[0])).ready).toBe(false);
+    expect(existsSync(config.databaseFile)).toBe(false);
+    expect(readFileSync(join(root, "desktop.json"))).toEqual(before);
+  } finally { capture.mockRestore(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test.each(["missing", "older", "newer", "interrupted", "damaged"])("Stop and Status remain available with a %s database; Start refuses incompatible data", async kind => {
+  const root = mkdtempSync(join(tmpdir(), "so-desktop-recovery-controls-"));
+  const capture = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const config = loadOrCreateDesktopConfig(root, true);
+    config.repos = [join(root, "disconnected-project")]; writeDesktopConfig(root, config);
+    if (kind === "damaged") writeFileSync(config.databaseFile, "not a database; preserve me");
+    else if (kind !== "missing") {
+      const store = openDesktopStore(config.databaseFile); store.close();
+      const db = new DatabaseSync(config.databaseFile);
+      db.exec(`UPDATE schema_version SET version = ${kind === "older" ? SCHEMA_VERSION - 1 : kind === "newer" ? SCHEMA_VERSION + 1 : -(SCHEMA_VERSION - 1)}`); db.close();
+    }
+    const before = existsSync(config.databaseFile) ? readFileSync(config.databaseFile) : null;
+    const configBefore = readFileSync(join(root, "desktop.json"));
+    const calls: string[][] = [];
+    const supervise = async (_file: string, args: readonly string[]) => {
+      calls.push([...args]);
+      return { code: args[0] === "print" ? 113 : 0, stdout: args[0] === "print-disabled" ? '"com.standing-orders.test.recovery" => true' : "", stderr: "", timedOut: false, notFound: false };
+    };
+    const args = ["--state", root, "--node", process.execPath, "--helper", join(root, "missing-helper.js"), "--label", "com.standing-orders.test.recovery"];
+    await desktopMain(["service-stop", ...args], supervise);
+    expect(calls.map(args => args[0])).toEqual(["disable", "bootout", "print"]);
+    expect(JSON.parse(String(capture.mock.calls.at(-1)?.[0])).ok).toBe(true);
+    calls.length = 0;
+    await desktopMain(["service-status", ...args], supervise);
+    const status = JSON.parse(String(capture.mock.calls.at(-1)?.[0]));
+    expect(status).toMatchObject({ ok: true, state: "disabled", database: { ready: false, expectedSchema: SCHEMA_VERSION } });
+    expect(JSON.stringify(status)).not.toContain(config.identity);
+    expect(calls.map(args => args[0])).toEqual(["print", "print-disabled"]);
+    calls.length = 0;
+    await expect(desktopMain(["service-start", ...args], supervise)).rejects.toThrow();
+    expect(calls).toEqual([]);
+    expect(existsSync(config.databaseFile) ? readFileSync(config.databaseFile) : null).toEqual(before);
+    expect(readFileSync(join(root, "desktop.json"))).toEqual(configBefore);
+  } finally { capture.mockRestore(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("database diagnostics are read-only, recognize a compatible database, and do not initialize an empty file", () => {
+  const root = mkdtempSync(join(tmpdir(), "so-desktop-database-status-"));
+  try {
+    const file = join(root, "orders.db");
+    expect(desktopDatabaseStatus(file).ready).toBe(false); expect(existsSync(file)).toBe(false);
+    writeFileSync(file, ""); expect(desktopDatabaseStatus(file).ready).toBe(false); expect(statSync(file).size).toBe(0);
+    const store = openStore(file); store.close();
+    const before = readFileSync(file);
+    expect(desktopDatabaseStatus(file)).toMatchObject({ ready: true, expectedSchema: SCHEMA_VERSION });
+    expect(readFileSync(file)).toEqual(before);
+    expect(desktopDatabaseStatus(root).ready).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a new desktop build at the same path has a new service definition, while reopening the same build is stable", () => {
+  const args = { node: process.execPath, helper: "/fixture/desktop-host.js", label: "com.standing-orders.test.build", home: "/fixture", buildId: "build-a" };
+  const first = desktopServiceDefinition("/fixture/state", args);
+  expect(first.unitContent).toContain("STANDING_ORDERS_DESKTOP_BUILD");
+  expect(desktopServiceDefinition("/fixture/state", args).unitContent).toBe(first.unitContent);
+  expect(desktopServiceDefinition("/fixture/state", { ...args, buildId: "build-b" }).unitContent).not.toBe(first.unitContent);
+});
 
 test("repository aliases resolve together and missing checkouts retain the installation identity", () => {
   const root = mkdtempSync(join(tmpdir(), "so-desktop-config-"));

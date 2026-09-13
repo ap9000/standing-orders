@@ -331,6 +331,7 @@ describe("the mate's turn", () => {
     const outcome = await turn("keep looking", script.fetcher);
     expect(outcome).toMatchObject({ ok: true, steps: MATE_MAX_STEPS, stoppedAtCap: true });
     if (!outcome.ok) throw new Error("unreachable");
+    if (outcome.replayed) throw new Error("unreachable replay");
     expect(outcome.reply).toBe(`step ${MATE_MAX_STEPS}\n\n(stopped after ${MATE_MAX_STEPS} steps)`);
     expect(script.bodies).toHaveLength(MATE_MAX_STEPS);
   });

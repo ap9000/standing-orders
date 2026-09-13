@@ -20924,6 +20924,14 @@ export class Store {
 
   // ---- idempotency --------------------------------------------------------
 
+  /** A chat send receipt contains no message text. The session is part of
+   * its namespace; callers must prove that session before reading it. */
+  mateRequestReceipt(session: number, request: string): { digest: string; turn: number } | null {
+    const row = this.db.prepare("SELECT result FROM mutation WHERE idempotency_key = ? AND operation = 'mate-send'")
+      .get(`mate-send:${session}:${request}`);
+    return row === undefined ? null : JSON.parse(String(row["result"])) as { digest: string; turn: number };
+  }
+
   /**
    * Run `body` once per key, ever.
    *

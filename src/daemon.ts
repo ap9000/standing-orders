@@ -138,7 +138,9 @@ function launchdUid(): number {
  * controller exits independently. Login/OS-service recovery requires the
  * physical certification, not just a valid plist.
  */
-export function launchdPlist(args: { label: string; command: readonly string[]; workingDirectory: string; pathEnv: string; logPath: string; environment?: Record<string, string> }): string {
+export function launchdPlist(args: { label: string; command: readonly string[]; workingDirectory: string; pathEnv: string; logPath: string; environment?: Record<string, string>; associatedBundleId?: string; keepAlive?: boolean; startInterval?: number }): string {
+  if (args.startInterval !== undefined && (!Number.isSafeInteger(args.startInterval) || args.startInterval < 1)) throw Error("Invalid launchd start interval.");
+  if (args.associatedBundleId !== undefined && !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(args.associatedBundleId)) throw new Error("Invalid associated app bundle identifier.");
   const escaped = args.command.map(part => `    <string>${xml(part)}</string>`).join("\n");
   const digest = createHash("sha256").update(JSON.stringify(args));
   // Include executable and package code identity so an update at the same
@@ -159,6 +161,7 @@ export function launchdPlist(args: { label: string; command: readonly string[]; 
 <dict>
   <key>Label</key>
   <string>${xml(args.label)}</string>
+${args.associatedBundleId ? `  <key>AssociatedBundleIdentifiers</key>\n  <array><string>${xml(args.associatedBundleId)}</string></array>` : ""}
   <key>ProgramArguments</key>
   <array>
 ${escaped}
@@ -172,7 +175,7 @@ ${environment}
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <${args.keepAlive === false ? "false" : "true"}/>${args.startInterval === undefined ? "" : `\n  <key>StartInterval</key>\n  <integer>${args.startInterval}</integer>`}
   <key>ThrottleInterval</key>
   <integer>15</integer>
   <key>ExitTimeOut</key>
@@ -340,6 +343,7 @@ export function planDesktopService(args: {
   home?: string;
   pathEnv?: string;
   environment?: Record<string, string>;
+  associatedBundleId?: string;
 }): ServiceDefinition {
   const home = args.home ?? homedir();
   const logPath = join(args.stateDir, "service.log");
@@ -353,6 +357,7 @@ export function planDesktopService(args: {
       workingDirectory: args.stateDir,
       pathEnv: args.pathEnv ?? process.env["PATH"] ?? "",
       logPath,
+      associatedBundleId: args.associatedBundleId ?? "com.standing-orders.desktop",
       ...(args.environment === undefined ? {} : { environment: args.environment }),
     }),
     logPath,
