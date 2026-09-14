@@ -1,6 +1,6 @@
 # Standing Orders: one workspace from request to result
 
-Date: September 13, 2026. Status: **packages 0 and 1 approved and in execution; packages 2–5 remain planned**. The baseline findings below describe the state when this plan was written; live execution and gates are recorded in [the execution record](WORKSPACE_0_1_EXECUTION_2026-09-13.md).
+Date: September 13, 2026. Status: **packages 0 and 1 and the user's added concise-UI pass are implemented and verified locally; packages 2–5 otherwise remain planned**. Nothing is merged or deployed. The baseline findings below describe the state when this plan was written; final execution and gates are recorded in [the execution record](WORKSPACE_0_1_EXECUTION_2026-09-13.md).
 
 ## 1. The outcome
 
