@@ -77,6 +77,11 @@ import {
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
+  RESULT_TABS, RESULT_REVIEW_SCRIPT, parseResultTab, resultLeadOf, evidenceProblemsOf, resultFactsAttributes, resultReturnTarget, commentSourceKey, REQUEST_TOKEN,
+  type ResultTab, type ResultScreenshot, type SharedResultFacts,
+} from "./result-review.js";
+import { parseReport } from "./scout-report.js";
+import {
   buildDataDocument,
   composeRequest,
   credentialKeyOf,
@@ -1535,7 +1540,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const chosen = inQueue ?? (beyondRow === null ? null : { ...beyondRow, priority: reviewPriorityOf(beyondRow) });
       const selectedRow = chosen ?? ranked[0] ?? null;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
-      const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow);
+      const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who);
       return sendScreen(
         response,
         200,
@@ -1550,7 +1555,9 @@ export function createDecisionServer(options: ServeOptions): Server {
           missing: wantedId !== null && chosen === null ? wantedId : null,
           csrf,
           canRetryReview: who.via === "cookie" && who.role === "approver",
-          noted: url.searchParams.get("noted") === "1",
+          noted: url.searchParams.get("noted") !== null,
+          tab: parseResultTab(url.searchParams.get("tab")),
+          user: who.name,
           now,
         }),
       );
@@ -2164,7 +2171,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           who.via === "cookie"
             ? { on: who.session.editorLinks === true }
             : null,
-          url.searchParams.get("noted") === "1",
+          url.searchParams.get("noted") !== null,
           (() => {
             const held = store.heldSessionOf(found.id);
             if (held === null) return null;
@@ -2191,6 +2198,10 @@ export function createDecisionServer(options: ServeOptions): Server {
           store.runRoute(found.id),
           store.publicationForRun(found.id),
           reviewFactsFor(found.id),
+          // The shared result presentation (package 3) for a finished result.
+          !running && (found.outcome === "built" || found.outcome === "no-change")
+            ? { detail: resultDetailOf(found, who), tab: parseResultTab(url.searchParams.get("tab")), user: who.name, requestToken: randomBytes(16).toString("hex") }
+            : null,
         ),
       );
     }
@@ -2369,9 +2380,37 @@ export function createDecisionServer(options: ServeOptions): Server {
       sweepChatDrafts(Date.now());
       const requestedTask = url.searchParams.get("task");
       const focusTask = taskChatFocus(requestedTask, now, who);
+      // The result detail (package 3): `?result=<run>` names one finished
+      // build OF THIS TASK; anything else — another task's run, a live or
+      // failed attempt, a number that is no run — says so and shows the
+      // conversation alone. The task lens is never inferred from the run.
+      const requestedResult = url.searchParams.get("result");
+      const resultRun = (() => {
+        if (focusTask === null || requestedResult === null || !/^[0-9]{1,15}$/.test(requestedResult)) return null;
+        const found = store.getRun(Number(requestedResult));
+        if (found === null || !runVisible(found) || store.externalIdFor(found.taskRef) !== focusTask.id) return null;
+        if (runIsLive(found) || (found.outcome !== "built" && found.outcome !== "no-change")) return null;
+        return found;
+      })();
+      const resultPanel =
+        resultRun === null
+          ? null
+          : resultPanelHtml(resultDetailOf(resultRun, who), {
+              place: "chat",
+              tab: parseResultTab(url.searchParams.get("tab")),
+              csrf: who.session.csrf,
+              user: who.name,
+              noted: url.searchParams.get("noted") !== null,
+              requestToken: randomBytes(16).toString("hex"),
+              hrefFor: one => chatResultHref(focusTask?.id ?? "", resultRun.id, one),
+              returnTo: chatResultHref(focusTask?.id ?? "", resultRun.id),
+              back: { href: taskChatHref(focusTask?.id ?? ""), label: "Back to chat" },
+            });
       const focusProblem = requestedTask !== null && focusTask === null
         ? "That task is not available in this workspace."
-        : null;
+        : requestedResult !== null && focusTask !== null && resultRun === null
+          ? "That result is not available for this task. The conversation is shown without it."
+          : null;
       // Pending cards, and the recently answered ones so the door's words are read (last 30).
       const repos = managedRepos();
       const allCoordinatorRows = who.role === "approver" ? store.listCoordinatorProposals({ repos, states: ["pending", "confirmed", "refused"], limit: 30 }) : [];
@@ -2428,6 +2467,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               csrf: who.session.csrf,
               problem: url.searchParams.get("said") ?? focusProblem ?? said,
               now,
+              resultPanel,
             }),
           );
         }
@@ -2463,6 +2503,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             focusProblem ??
             (ceilingStale ? "Your projects changed since this conversation started. Start a new conversation below to continue — the earlier one closes when you do." : null) ??
             takeMateNote(who.session.csrf, null),
+          resultPanel,
           ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled, focusTask === null ? "/chat" : taskChatHref(focusTask.id)) } : {}),
           ...(who.role === "approver" ? { coordinatorProposals: coordinatorProposalsSection(coordinatorRows, decisionsFor(store, coordinatorRows), who.session.csrf, now, true, focusTask === null ? null : taskChatHref(focusTask.id)) } : {}),
         }),
@@ -5814,40 +5855,50 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (found === null || !visible(taskRepoOf(found.taskRef))) {
         return refuse(response, who, 404, "no such run");
       }
+      // Where the reader came from (package 3): the cockpit's deep link,
+      // the chat's result view, or the run page — validated to those exact
+      // shapes. A refusal sends them back THERE, where the browser has kept
+      // their draft, so a failed submission is recoverable in place.
+      const back = resultReturnTarget(body.get("return"), id);
       const terminal = store.artifactsFor(id).find(one => one.kind === "terminal-diff");
       if (terminal === undefined) {
-        return refuse(response, who, 400, "this run has no terminal diff to comment on", `/r/${id}`);
+        return refuse(response, who, 400, "this run has no terminal diff to comment on", back);
       }
       // The bytes must VERIFY before words attach to them (audit IV-10):
       // "a comment on the exact reviewed bytes" is a lie if the bytes are
       // gone or no longer hash to their record.
       const proven = readVerifiedArtifact(evidenceRoot, terminal);
       if (!proven.ok) {
-        return refuse(response, who, 409, `the terminal diff no longer verifies (${proven.problem}) — nothing to comment on`, `/r/${id}`);
+        return refuse(response, who, 409, `the terminal diff no longer verifies (${proven.problem}) — nothing to comment on`, back);
       }
       const note = validateNote(body.get("note") ?? "");
-      if (!note.ok) return refuse(response, who, 400, note.problem, `/r/${id}`);
+      if (!note.ok) return refuse(response, who, 400, note.problem, back);
       const rawPath = (body.get("path") ?? "").trim();
       if (rawPath.length > 300 || hasForbiddenControls(rawPath)) {
-        return refuse(response, who, 400, "that path is not a path", `/r/${id}`);
+        return refuse(response, who, 400, "that path is not a path", back);
       }
       const rawLine = (body.get("line") ?? "").trim();
       const line = rawLine === "" ? null : Number(rawLine);
       if (line !== null && (!Number.isInteger(line) || line < 1 || line > 1_000_000)) {
-        return refuse(response, who, 400, "that line number is not a line number", `/r/${id}`);
+        return refuse(response, who, 400, "that line number is not a line number", back);
       }
+      // The form's own request token (package 3) is the dedupe key: a
+      // replayed or double submission finds its note already recorded and
+      // lands on the same receipt instead of a second note. The token is
+      // bound to the account, so nobody else's replay can consume it.
+      const request = body.get("request");
+      const sourceKey = commentSourceKey(who.name, request);
       store.addDiffComment(
-        { artifactId: terminal.id, runId: id, path: rawPath === "" ? null : rawPath, line, note: note.note, author: who.name },
+        { artifactId: terminal.id, runId: id, path: rawPath === "" ? null : rawPath, line, note: note.note, author: who.name, ...(sourceKey === undefined ? {} : { sourceKey }) },
         now,
       );
-      // Land back AT the review card with the note field ready — writing
-      // five comments in a row must cost five keystrokes of navigation,
-      // not five scrolls (arc 6, finding 5/6: this REDUCES the unsent-note
-      // hazard; the seal below remains the real batch operation). The
-      // review cockpit (Priority 5) names itself as the return road; only
-      // that exact shape is honored — anything else lands on the run page.
-      const back = body.get("return") ?? "";
-      return redirect(response, REVIEW_RETURN.test(back) ? `${back}&noted=1#annotate` : `/r/${id}?noted=1#review`);
+      // Land back AT the request-changes form with the note field ready —
+      // writing five notes in a row must cost five keystrokes of
+      // navigation, not five scrolls (arc 6, finding 5/6). The receipt
+      // names the request token, so the browser clears exactly the draft
+      // that landed and no other.
+      const receipt = sourceKey === undefined ? "1" : (request as string);
+      return redirect(response, `${back}${back.includes("?") ? "&" : "?"}noted=${receipt}#request-changes`);
     }
 
     if (url.pathname === "/session/editor-links") {
@@ -5908,9 +5959,15 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (found === null || !visible(taskRepoOf(found.taskRef))) {
         return refuse(response, who, 404, "no such run");
       }
+      const back = resultReturnTarget(body.get("return"), id);
       const comments = store.liveDiffComments(id);
       if (comments.length === 0) {
-        return refuse(response, who, 400, "add at least one annotation before creating a revision", `/r/${id}`);
+        // A replayed or double submission (package 3): the batch it meant
+        // was already sealed — the seal consumed every note — so the
+        // reader lands on that revision, and no second one is minted.
+        const sealedAlready = store.revisionsFromRun(id).at(-1);
+        if (sealedAlready !== undefined) return redirect(response, taskHref(sealedAlready.id));
+        return refuse(response, who, 400, "add at least one note before creating a revision", back);
       }
       const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
       const sourceScope = store.getScope(sourceTaskId);
@@ -5919,7 +5976,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (terminal !== undefined) {
         const proven = readVerifiedArtifact(evidenceRoot, terminal);
         if (!proven.ok) {
-          return refuse(response, who, 409, `the reviewed diff no longer verifies (${proven.problem}) — the batch cannot seal against it`, `/r/${id}`);
+          return refuse(response, who, 409, `the reviewed diff no longer verifies (${proven.problem}) — the batch cannot seal against it`, back);
         }
       }
       // The brief is serialized and size-checked BEFORE anything is created
@@ -5944,7 +6001,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       };
       const briefBytes = Buffer.from(JSON.stringify(brief, null, 2), "utf8");
       if (briefBytes.length > EVIDENCE_CAPS["revision-brief"]) {
-        return refuse(response, who, 400, "this batch is too large for one brief — seal it in parts", `/r/${id}`);
+        return refuse(response, who, 400, "this batch is too large for one brief — seal it in parts", back);
       }
       // The file first, under a nonce name — a file whose seal fails is an
       // orphan on disk, never authority. Then ONE transaction: task with
@@ -5995,7 +6052,14 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return result;
       });
-      if (!sealed.ok) return refuse(response, who, 409, `could not seal the revision: ${sealed.detail}`, `/r/${id}`);
+      if (!sealed.ok) {
+        // Two sealers of one batch race on the consumption count; the
+        // loser is sent to the winner's revision when one exists, so a
+        // double click lands on ONE revision either way.
+        const winner = sealed.reason === "duplicate" || sealed.reason === "comments-taken" ? store.revisionsFromRun(id).at(-1) : undefined;
+        if (winner !== undefined) return redirect(response, taskHref(winner.id));
+        return refuse(response, who, 409, `could not seal the revision: ${sealed.detail}`, back);
+      }
       return redirect(response, taskHref(sealed.id));
     }
 
@@ -7467,11 +7531,76 @@ export function createDecisionServer(options: ServeOptions): Server {
    * exactly what they are. Only the selected result is enriched — the
    * queue rows carry the done list's own facts and nothing more.
    */
-  function reviewCockpitViewOf(row: RankedReviewRow): ReviewCockpitView {
+  /**
+   * The result detail (workspace package 3): every verified record one
+   * finished run's result presentation reads, assembled once for the run
+   * page, the review cockpit, and the chat's result view. Read-only.
+   */
+  function resultDetailOf(run: Run, who: Who): ResultDetail {
+    const taskId = store.externalIdFor(run.taskRef) ?? "?";
+    const scope = store.getScope(taskId);
+    const artifacts = store.artifactsFor(run.id);
+    const terminal = terminalDiffView(artifacts, evidenceRoot);
+    const proof = proofBundleView(store, run, artifacts, evidenceRoot);
+    const handoff = structuredHandoffView(artifacts, evidenceRoot);
+    const review = reviewFactsFor(run.id);
+    const receipt = completionReceiptView(store, run, artifacts, evidenceRoot, review);
+    // File anchors come from the PARSED sealed patch — a stat path with no
+    // hunk in the patch gets no anchor, never a dangling one.
+    const patch = terminal?.patch ?? null;
+    const patchOk = patch !== null && !("problem" in patch);
+    const parsedPaths = patchOk ? parseReviewDiff(patch.text).files.filter(one => one.hunks.length > 0).map(one => one.path) : [];
+    const fileAnchors = new Map(parsedPaths.map(path => [path, diffFileAnchor(path)] as const));
+    const statFiles = terminal?.stat !== null && terminal?.stat !== undefined && !("problem" in terminal.stat) ? terminal.stat.files : [];
+    const cited = new Set<string>();
+    for (const criterion of proof?.matrix ?? []) for (const answer of criterion.answered) if (answer.kind === "changed-path") cited.add(answer.ref);
+    const touches = scope?.touches ?? [];
+    const files = orderChangedFiles(
+      statFiles.map(file => ({
+        path: file.path,
+        additions: file.additions,
+        deletions: file.deletions,
+        renamedFrom: file.renamedFrom ?? null,
+        anchor: fileAnchors.get(file.path) ?? null,
+        outsideTouches: touches.length > 0 && !withinSignedTouches(file.path, touches),
+        cited: cited.has(file.path),
+      })),
+      cited.size > 0,
+    );
+    const publication = store.publicationForRun(run.id);
+    return {
+      taskId,
+      run,
+      receipt,
+      handoff,
+      proof,
+      terminal,
+      publication,
+      ciFailing: publication !== null && publication.prNumber !== null && store.hasOpenCiEpisode(publication.githubRepo, publication.prNumber),
+      files,
+      outsideTouches: files.filter(one => one.outsideTouches).map(one => one.path),
+      fileAnchors,
+      comments: store.liveDiffComments(run.id),
+      reviewerFindings: store.allDiffComments(run.id).filter(one => one.reviewerRun !== null),
+      revisions: store.revisionsFromRun(run.id).map(one => ({ id: one.id, title: one.title, state: one.state, approved: one.approved })),
+      route: store.runRoute(run.id),
+      // Editor links (arc 6): the deployment capability, THIS machine's
+      // runner owning the run, the session's own device-side yes, and a
+      // checkout to open — or nothing renders.
+      editor:
+        options.editorLinks !== undefined && options.localRunner !== undefined && run.runner === options.localRunner && who.via === "cookie" && who.session.editorLinks === true && run.worktree !== null
+          ? { worktree: run.worktree }
+          : null,
+      signedCriteria: scope?.acceptance.length ?? 0,
+      canAnnotate: who.via === "cookie" && patchOk && patch.text.trim() !== "",
+    };
+  }
+
+  function reviewCockpitViewOf(row: RankedReviewRow, who: Who): ReviewCockpitView {
     const ref = store.lookupRef(row.taskId);
     const scope = store.getScope(row.taskId);
-    // The result run, read once: the contest road and the artifact
-    // projection below both hang off this one record.
+    // The result run, read once: the contest road and the shared result
+    // detail below both hang off this one record.
     const run = row.runId === null ? null : store.getRun(row.runId);
     const intent: ReviewCockpitView["intent"] =
       scope === null
@@ -7513,39 +7642,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       contest: contestOf(),
     };
     if (run === null) {
-      return { ...base, run: null, handoff: null, proof: null, terminal: null, files: [], outsideTouches: [], fileAnchors: new Map(), comments: [], reviewerFindings: [], reviewRetry: null, review: null, publication: null, notes: [] };
+      return { ...base, run: null, detail: null, reviewRetry: null, review: null, notes: [] };
     }
-    const artifacts = store.artifactsFor(run.id);
-    const terminal = terminalDiffView(artifacts, evidenceRoot);
-    const proof = proofBundleView(store, run, artifacts, evidenceRoot);
-    const handoff = structuredHandoffView(artifacts, evidenceRoot);
-    // File anchors come from the PARSED sealed patch — a stat path with no
-    // hunk in the patch gets no anchor, never a dangling one.
-    const parsedPaths =
-      terminal?.patch !== null && terminal?.patch !== undefined && !("problem" in terminal.patch)
-        ? parseReviewDiff(terminal.patch.text).files.filter(one => one.hunks.length > 0).map(one => one.path)
-        : [];
-    const fileAnchors = new Map(parsedPaths.map(path => [path, diffFileAnchor(path)] as const));
-    const statFiles =
-      terminal?.stat !== null && terminal?.stat !== undefined && !("problem" in terminal.stat) ? terminal.stat.files : [];
-    const cited = new Set<string>();
-    for (const criterion of proof?.matrix ?? []) {
-      for (const answer of criterion.answered) if (answer.kind === "changed-path") cited.add(answer.ref);
-    }
-    const touches = intent?.touches ?? [];
-    const files = orderChangedFiles(
-      statFiles.map(file => ({
-        path: file.path,
-        additions: file.additions,
-        deletions: file.deletions,
-        renamedFrom: file.renamedFrom ?? null,
-        anchor: fileAnchors.get(file.path) ?? null,
-        outsideTouches: touches.length > 0 && !withinSignedTouches(file.path, touches),
-        cited: cited.has(file.path),
-      })),
-      cited.size > 0,
-    );
-    const publication = store.publicationForRun(run.id);
+    const detail = resultDetailOf(run, who);
     return {
       ...base,
       run: {
@@ -7560,33 +7659,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         headRevision: run.headRevision,
         ranMinutes: row.ranMinutes,
         cost: runCostWords(run, false),
-        summary: handoff?.conclusion ?? run.handoff,
+        summary: detail.handoff?.conclusion ?? run.handoff,
       },
-      handoff,
-      proof,
-      terminal,
-      files,
-      outsideTouches: files.filter(one => one.outsideTouches).map(one => one.path),
-      fileAnchors,
-      comments: store.liveDiffComments(run.id),
-      reviewerFindings: store.allDiffComments(run.id).filter(one => one.reviewerRun !== null),
+      detail,
       reviewRetry: store.reviewRetryStateOf(run.id),
       review: reviewFactsFor(run.id),
-      publication:
-        publication === null
-          ? null
-          : {
-              state: publication.state,
-              prNumber: publication.prNumber,
-              prUrl: safePrUrl(publication.prUrl),
-              githubRepo: publication.githubRepo,
-              remoteState: publication.remoteState,
-              lastCheckState: publication.lastCheckState,
-              lastCheckAt: publication.lastCheckAt,
-              lastError: publication.lastError,
-              attempts: publication.attempts,
-              ciFailing: publication.prNumber !== null && store.hasOpenCiEpisode(publication.githubRepo, publication.prNumber),
-            },
       notes: store.notesForRun(run.id),
     };
   }
@@ -9863,6 +9940,86 @@ const STYLE = `
   }
   .work-tools-menu a { display: block; padding: .5rem .625rem; border-radius: .5rem; text-decoration: none; color: var(--foreground); font-size: .875rem; }
   .work-tools-menu a:hover { background: var(--muted); }
+  /* The result panel (workspace package 3): one presentation of a finished
+     result for the run page, the review cockpit, and the chat's result
+     detail — the deliverable first, problems ahead of readiness words,
+     three local views, and Request changes beside it. */
+  .result-panel { position: relative; padding: 1.1rem 1.2rem 1rem; min-width: 0; }
+  .result-back { margin: 0 0 .6rem; font-size: .8125rem; }
+  .result-back a { display: inline-flex; align-items: center; min-height: 2.25rem; text-decoration: none; font-weight: 550; }
+  .result-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+  .result-head h2 { margin: .15rem 0 0; font-size: 1.15rem; }
+  .result-head .eyebrow { overflow-wrap: anywhere; }
+  .result-head .status-line { flex: none; font-size: .8125rem; }
+  .result-summary { max-width: 46rem; margin: .7rem 0 .5rem; font-size: .95rem; line-height: 1.55; }
+  .result-attention { margin: .75rem 0 .25rem; padding: .7rem .85rem; border-left: 3px solid var(--warning); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: var(--warning-soft); font-size: .8125rem; }
+  .result-attention strong { display: block; font-size: .78rem; }
+  .result-attention ul { margin: .3rem 0 0; padding-left: 1.15rem; }
+  .result-attention li { margin: .15rem 0; overflow-wrap: anywhere; }
+  .result-tabs { display: flex; gap: .25rem; margin: .9rem 0 .75rem; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+  .result-tabs::-webkit-scrollbar { display: none; }
+  .result-tabs a {
+    display: inline-flex; align-items: center; gap: .4rem; flex: none; min-height: 2.5rem; padding: 0 .625rem;
+    margin-bottom: -1px; border-bottom: 2px solid transparent; text-decoration: none;
+    color: var(--muted-foreground); font-size: .875rem; font-weight: 500;
+  }
+  .result-tabs a .count { font-family: var(--font-mono); font-size: .6875rem; font-variant-numeric: tabular-nums; color: var(--muted-foreground); }
+  .result-tabs a[aria-selected="true"] { color: var(--foreground); border-bottom-color: var(--foreground); }
+  .result-tabs a[aria-selected="true"] .count { color: var(--foreground); }
+  .result-view { min-width: 0; }
+  .result-view[hidden] { display: none; }
+  .result-visuals { margin-top: .25rem; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); }
+  .result-unavailable { margin: .5rem 0 0; padding-left: 1.15rem; font-size: .78rem; }
+  .result-changes { margin: .25rem 0 .5rem; padding-left: 1.15rem; font-size: .875rem; }
+  .result-changes li { margin: .2rem 0; overflow-wrap: anywhere; }
+  .result-files-lead { margin: .25rem 0 .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
+  .result-report h3 { margin: .2rem 0 .3rem; font-size: 1rem; }
+  .result-report .plan-doc { max-height: 28rem; overflow: auto; }
+  .result-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .5rem; margin: .9rem 0 0; }
+  .result-facts > div { min-width: 0; padding: .6rem .7rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--glass-strong) 64%, transparent); }
+  .result-facts dt { color: var(--muted-foreground); font: 500 .6rem/1.2 var(--font-mono); text-transform: uppercase; letter-spacing: .05em; }
+  .result-facts dd { margin: .2rem 0 0; font-size: .78rem; line-height: 1.4; overflow-wrap: anywhere; }
+  .result-facts dd p { margin: 0; }
+  .result-facts dd form { margin: .35rem 0 0; }
+  .result-stat { margin: .2rem 0 .4rem; }
+  .result-files { margin: .4rem 0 .6rem; }
+  .result-label { display: block; margin: .5rem 0 .25rem; font: 600 .6875rem/1.3 var(--font-mono); color: var(--muted-foreground); letter-spacing: .06em; text-transform: uppercase; }
+  .result-verdict { align-items: center; }
+  .result-request { margin-top: 1.1rem; padding-top: .9rem; border-top: 1px solid var(--border); }
+  .result-request h3 { margin: 0 0 .5rem; font-size: .8rem; letter-spacing: .02em; text-transform: uppercase; color: var(--muted-foreground); }
+  .result-request .diff-comment-form { margin: .5rem 0 0; padding: 0; border: 0; background: none; box-shadow: none; }
+  .result-request .diff-comment-form textarea { width: 100%; box-sizing: border-box; }
+  .result-pin, .result-pin[open] { margin: 0; padding: 0 .2rem; border: 0; background: none; }
+  .result-pin > summary { min-height: 2.25rem; display: flex; align-items: center; flex-wrap: wrap; gap: .35rem; font-size: .78rem; font-weight: 550; cursor: pointer; list-style: none; }
+  .result-pin > summary::-webkit-details-marker { display: none; }
+  .result-pin > summary::before { content: "▸"; }
+  .result-pin[open] > summary::before { content: "▾"; }
+  .result-pin > summary .meta { font-weight: 400; }
+  .result-pin .diff-comment-target { margin: .25rem 0 .5rem; }
+  .result-revision { margin: .6rem 0; padding: .6rem .75rem; border: 1px solid color-mix(in srgb, var(--running) 24%, var(--glass-border)); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--running) 6%, var(--glass-strong)); font-size: .8125rem; overflow-wrap: anywhere; }
+  .result-links { display: flex; flex-wrap: wrap; gap: .25rem .5rem; margin: .9rem 0 0; }
+  .result-links a { font-weight: 550; }
+  .result-links a + a::before { content: "·"; margin-right: .5rem; color: var(--muted-foreground); font-weight: 400; }
+  .cockpit-detail .result-panel { margin: .85rem 0; }
+  .cockpit-accept { margin-top: .75rem; }
+  /* The result beside the conversation (package 3): with room, two
+     columns and no second auxiliary panel; without it, the dedicated
+     result view with Back to chat and the conversation out of the way. */
+  .chat-result { min-width: 0; }
+  .task-chat-workspace.result-open { grid-template-columns: minmax(0, 30rem) minmax(0, 1fr); align-items: start; }
+  .task-chat-workspace.result-open .chat-main { max-width: none; }
+  /* Said once: while the result detail is open beside the conversation,
+     the receipt in the thread keeps its heading, status, and roads only. */
+  .result-open .completion-receipt > :not(.receipt-head):not(.receipt-actions) { display: none; }
+  @media (max-width: 1199px) {
+    .task-chat-workspace.result-open { display: block; }
+    .task-chat-workspace.result-open .chat-main, .task-chat-workspace.result-open .task-chat-agents { display: none; }
+    main:has(.chat-workspace.result-open) { padding-bottom: calc(5rem + env(safe-area-inset-bottom, 0rem)); }
+  }
+  @media (max-width: 359px) {
+    .result-tabs a .count { display: none; }
+    .result-panel { padding-inline: .7rem; }
+  }
   .work-views { display: flex; gap: .25rem; margin: .75rem 0 .5rem; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
   .work-views::-webkit-scrollbar { display: none; }
   .work-views a {
@@ -10591,6 +10748,17 @@ const STYLE = `
     .chat-head h1 { font-size: 1.4rem; }
     .chat-head-actions { align-items: flex-start; }
     .task-chat-workspace .task-chat-context { display: none; }
+    .result-panel { padding: .9rem .85rem .85rem; }
+    .result-head { display: grid; gap: .45rem; }
+    .result-head .status-line { justify-self: start; }
+    .result-tabs { gap: 0; }
+    .result-tabs a { flex: 1 1 auto; min-width: 0; justify-content: center; padding: 0 .25rem; font-size: .8125rem; gap: .3rem; white-space: nowrap; min-height: 2.75rem; overflow: hidden; }
+    .result-facts { grid-template-columns: 1fr; }
+    .result-request .diff-comment-form button, .result-request .revision-from-comments button { width: 100%; }
+    .result-request .revision-from-comments { display: grid; }
+    .result-links { display: grid; gap: 0; }
+    .result-links a { min-height: 2.5rem; display: inline-flex; align-items: center; }
+    .result-links a + a::before { content: none; }
     .task-chat-head { display: block; }
     .task-chat-head > .badge { display: none; }
     .task-chat-title-line { display: grid; gap: .65rem; }
@@ -12628,6 +12796,9 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
     ? ""
     : `<div class="chat-approval-section"><span class="approval-label">${approval.revision.kind === "ci-repair" ? "CI repair" : approval.revision.kind === "criterion-repair" ? "criterion repair" : "revision notes"}</span>` +
       (approval.revision.comments.length === 0 ? "" : `<ul class="recap">${approval.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul>`) +
+      // The link back (package 3): the original result stays on record
+      // and one tap away from the revision it produced, in both directions.
+      `<p class="meta"><a href="${escape(chatResultHref(approval.revision.sourceTask, approval.revision.sourceRun))}" data-revision-source>Original result: build #${approval.revision.sourceRun} →</a></p>` +
       revisionLineageHtml(approval.revision.lineage) +
       `</div>`;
   const race = approval.raceTerms === null
@@ -12756,10 +12927,16 @@ function taskChatHeading(focus: TaskChatFocus): string {
   );
 }
 
-function chatWorkspace(content: string, projects: readonly ChatProjectPulse[], csrf: string, inert: boolean, focus: TaskChatFocus | null): string {
-  return focus === null
-    ? `<div class="chat-workspace">${chatProjectRail(projects, csrf, inert)}<section class="chat-main">${content}</section></div>`
-    : `<div class="chat-workspace task-chat-workspace">${taskChatContext(focus)}<section class="chat-main">${content}</section></div>`;
+function chatWorkspace(content: string, projects: readonly ChatProjectPulse[], csrf: string, inert: boolean, focus: TaskChatFocus | null, resultPanel: string | null = null): string {
+  if (focus === null) return `<div class="chat-workspace">${chatProjectRail(projects, csrf, inert)}<section class="chat-main">${content}</section></div>`;
+  // The result detail (package 3) is the ONE auxiliary panel when open:
+  // it takes the context panel's place beside the conversation on a wide
+  // screen and becomes the dedicated view, with Back to chat, when the
+  // screen has no room for both (CSS decides; the markup is the same).
+  if (resultPanel !== null) {
+    return `<div class="chat-workspace task-chat-workspace result-open" data-chat-result-open><section class="chat-main">${content}</section><aside class="chat-result" aria-label="result">${resultPanel}</aside></div>`;
+  }
+  return `<div class="chat-workspace task-chat-workspace">${taskChatContext(focus)}<section class="chat-main">${content}</section></div>`;
 }
 
 /** The folded overview's one-line summary (UI polish 2026-09-13): the
@@ -13050,6 +13227,8 @@ function chatPage(chrome: Chrome, data: {
   mateMint?: string;
   /** Pending coordinator proposals as cards (mate arc v3), approvers only. */
   coordinatorProposals?: string;
+  /** The task's result detail (package 3), when the URL opened one. */
+  resultPanel?: string | null;
 }): Screen {
   const configForm = (current: import("./store.js").ChatConfig | null): string => {
     const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
@@ -13121,7 +13300,7 @@ function chatPage(chrome: Chrome, data: {
     if (data.canManage && (code === "unconfigured" || code === "unpriced" || code === "no-key")) {
       parts.push(`<h2>${code === "unconfigured" ? "set it up" : "reconfigure"}</h2>`, configForm(data.config));
     }
-    return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null } });
+    return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask, data.resultPanel ?? null), { chrome, functional: { script: CHAT_UI_SCRIPT + (data.focusTask === null ? "" : RESULT_REVIEW_SCRIPT), fetches: data.focusTask !== null } });
   }
   const config = (data.enabled as unknown as { config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
   const subscription = isSubscriptionChatProvider(config.provider);
@@ -13147,7 +13326,7 @@ function chatPage(chrome: Chrome, data: {
   if (data.pending !== null) {
     parts.push(`<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>Working on it</strong><span class="meta">turn #${data.pending.id}${subscription ? " · membership-backed" : ` · up to ${chatMoney(data.pending.reservedMicrousd)} reserved`} · this page refreshes itself</span></p></div>`);
     parts.push(`<p class="meta"><a href="/chat">refresh now</a></p>`);
-    return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null }, refreshSeconds: 3 });
+    return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask, data.resultPanel ?? null), { chrome, functional: { script: CHAT_UI_SCRIPT + (data.focusTask === null ? "" : RESULT_REVIEW_SCRIPT), fetches: data.focusTask !== null }, refreshSeconds: 3 });
   }
   const last = data.chat?.lastTurn ?? null;
   if (last !== null) {
@@ -13225,7 +13404,7 @@ function chatPage(chrome: Chrome, data: {
       );
     }
   }
-  return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null } });
+  return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask, data.resultPanel ?? null), { chrome, functional: { script: CHAT_UI_SCRIPT + (data.focusTask === null ? "" : RESULT_REVIEW_SCRIPT), fetches: data.focusTask !== null } });
 }
 
 function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string): Screen {
@@ -13651,6 +13830,8 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
   csrf: string;
   problem: string | null;
   now: Date;
+  /** The task's result detail (package 3), when the URL opened one. */
+  resultPanel?: string | null;
 }): Screen {
   const subscription = isSubscriptionChatProvider(data.config.provider);
   const returnTo = data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id);
@@ -13712,8 +13893,8 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
   );
   return screen(
     "chat",
-    chatWorkspace(conversation.join("\n"), data.projects, data.csrf, false, data.focusTask),
-    { chrome, functional: { script: CHAT_CONTINUITY_SCRIPT + CHAT_UI_SCRIPT, fetches: true } },
+    chatWorkspace(conversation.join("\n"), data.projects, data.csrf, false, data.focusTask, data.resultPanel ?? null),
+    { chrome, functional: { script: CHAT_CONTINUITY_SCRIPT + CHAT_UI_SCRIPT + (data.focusTask === null ? "" : RESULT_REVIEW_SCRIPT), fetches: true } },
   );
 }
 
@@ -17505,30 +17686,13 @@ type ReviewCockpitView = {
     cost: string;
     summary: string | null;
   } | null;
-  handoff: StructuredHandoffView | null;
-  proof: ProofBundleView | null;
-  terminal: TerminalDiffView | null;
-  files: (ReviewFileRow & { priority: ReviewPriority })[];
-  outsideTouches: string[];
-  fileAnchors: ReadonlyMap<string, string>;
-  comments: DiffComment[];
-  reviewerFindings: DiffComment[];
+  /** The shared result detail (package 3) — the same records, the same
+   * panel, as the run page and the chat's result view. */
+  detail: ResultDetail | null;
   /** v50: the result's bounded review-retry history, null when never asked. */
   reviewRetry: ReviewRetryState | null;
   /** The same history as the shared projection's facts (review fixes). */
   review: ReviewFacts | null;
-  publication: {
-    state: Publication["state"];
-    prNumber: number | null;
-    prUrl: string | null;
-    githubRepo: string;
-    remoteState: string | null;
-    lastCheckState: string | null;
-    lastCheckAt: string | null;
-    lastError: string | null;
-    attempts: number;
-    ciFailing: boolean;
-  } | null;
   notes: { id: number; author: string; note: string; createdAt: string }[];
 };
 
@@ -17548,14 +17712,10 @@ function priorityChip(priority: ReviewPriority): string {
 /** The cockpit's headline status: the shared projection over the same
  * verdict, acceptance, and publication rows the task page reads. */
 function cockpitStatusOf(view: ReviewCockpitView): DisplayStatus {
-  return resultStatusOf(
-    view.run === null
-      ? null
-      : { runId: view.run.id, role: view.run.role, outcome: view.run.outcome, verdict: view.proof?.verdict ?? null, reasons: view.proof?.reasons ?? [], accepted: view.proof?.accepted !== null && view.proof?.accepted !== undefined, recordComplete: view.handoff !== null && view.terminal !== null, review: view.review },
-    view.publication === null
-      ? null
-      : { state: view.publication.state, prNumber: view.publication.prNumber, prUrl: view.publication.prUrl, remoteState: view.publication.remoteState, lastCheckState: view.publication.lastCheckState },
-  );
+  // The receipt's own status (package 3): the same projection the chat
+  // receipt and the run page print, read from the shared detail.
+  if (view.run === null || view.detail === null) return resultStatusOf(null, null);
+  return receiptStatusOf(view.detail.receipt);
 }
 
 /** Turn verifier records into one sentence a project owner can act on.
@@ -17650,14 +17810,11 @@ function verificationRecovered(reasons: readonly string[]): boolean {
   );
 }
 
-/** Whether a reviewer can annotate this result's diff here: a build with
- * a verified, non-empty sealed patch, read by a session that holds a CSRF
- * token. The one rule behind the file "comment" buttons, the annotation
- * form, and the line-picker script — decided once. */
+/** Whether a reviewer can annotate this result's diff here: the shared
+ * detail's own answer (a verified, non-empty sealed patch read by a
+ * session that holds a CSRF token) — decided once, in `resultDetailOf`. */
 function canAnnotateDiff(view: ReviewCockpitView | null, csrf: string): boolean {
-  if (view === null || view.run === null || csrf === "") return false;
-  const patch = view.terminal?.patch ?? null;
-  return patch !== null && !("problem" in patch) && patch.text.trim() !== "";
+  return view !== null && view.detail !== null && csrf !== "" && view.detail.canAnnotate;
 }
 
 function reviewCockpitPage(
@@ -17674,6 +17831,9 @@ function reviewCockpitPage(
     /** v50: an approver's session may ask for a review retry here. */
     canRetryReview: boolean;
     noted: boolean;
+    /** Package 3: the selected local result view and the panel's draft keys. */
+    tab: ResultTab;
+    user: string;
     now: Date;
   },
 ): Screen {
@@ -17710,7 +17870,7 @@ function reviewCockpitPage(
     !data.beyondQueue || selected === null
       ? ""
       : `<p class="meta cockpit-beyond" data-cockpit-beyond="1">Opened directly: <span class="mono">${escape(selected.taskId)}</span> finished earlier than the newest ${data.queueCap} completions the queue lists, so it has no row there.</p>`;
-  const detail = selected === null ? `<section class="cockpit-detail"><p class="meta">Nothing to review yet.</p></section>` : reviewCockpitDetail(selected, csrf, data.noted, data.canRetryReview);
+  const detail = selected === null ? `<section class="cockpit-detail"><p class="meta">Nothing to review yet.</p></section>` : reviewCockpitDetail(selected, csrf, data.noted, data.canRetryReview, data.tab, data.user);
   return screen("review", [
     `<h1>review</h1>`,
     buildsViews("review"),
@@ -17720,16 +17880,16 @@ function reviewCockpitPage(
     `<div class="cockpit">${queuePane}${detail}</div>`,
   ].join("\n"), {
     chrome,
-    functional: { script: reviewEvidenceScript() + (canAnnotateDiff(selected, csrf) ? prefillScript() : ""), fetches: false },
+    functional: { script: reviewEvidenceScript() + (selected !== null && selected.detail !== null ? RESULT_REVIEW_SCRIPT : ""), fetches: false },
   });
 }
 
 /** The selected result: intent → proof → changes → publication → acts,
  * one scan path, every fact labeled by its source. */
-function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boolean, canRetryReview = false): string {
+function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boolean, canRetryReview = false, tab: ResultTab = "summary", user = ""): string {
   const parts: string[] = [];
   const run = view.run;
-  const proof = view.proof;
+  const proof = view.detail?.proof ?? null;
   const accepted = proof?.accepted !== null && proof?.accepted !== undefined;
   const canAnnotate = canAnnotateDiff(view, csrf);
 
@@ -17770,7 +17930,7 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
     );
   }
 
-  if (run === null) {
+  if (run === null || view.detail === null) {
     parts.push(
       `<section class="card cockpit-section" id="verification" data-cockpit-section="proof"><h3>verification</h3>` +
         `<p class="meta">This task has no finished build record, so there are no captured changes or checks to review.</p>` +
@@ -17779,234 +17939,35 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
     return `<section class="cockpit-detail">${parts.join("\n")}</section>`;
   }
 
-  // Proof: the stored verdict, the criterion-to-evidence matrix (with
-  // changed-path citations linking to the matching sealed file), and each
-  // evidence source under its own label.
-  const proofParts: string[] = [`<h3>evidence</h3>`];
-  if (run.outcome === "no-change") {
-    proofParts.push(`<p class="meta">The build concluded that no repository change was needed. A no-change conclusion owes no proof — its handoff and machine-captured diff are the record.</p>`);
-  }
-  if (proof === null) {
-    proofParts.push(
-      run.outcome === "no-change"
-        ? ""
-        : `<p class="meta">This older build has no verification result or captured evidence. Review its recorded changes manually.</p>`,
-    );
-  } else {
-    const evidenceParts: string[] = [];
-    if (proof.verdict !== null) {
-      evidenceParts.push(
-        `<p class="cockpit-proof-summary" data-proof-verdict="${escape(dispatchStatusToken(proof.verdict))}"><strong>Standing Orders</strong><span class="meta">${escape(verificationExplanation(proof.verdict, proof.reasons))}</span></p>`,
-      );
-    } else if (run.outcome !== "no-change") {
-      evidenceParts.push(`<p class="meta">No verification result is available for this build.</p>`);
-    }
-    if (proof.machineVerdict !== null && proof.machineVerdict !== proof.verdict) {
-      evidenceParts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
-    }
-    if (proof.accepted !== null) {
-      proofParts.push(`<p class="meta">Accepted with an exception by <span class="mono">${escape(proof.accepted.by)}</span> · ${escape(when(proof.accepted.at))}${proof.accepted.note === null ? "" : ` — ${escape(proof.accepted.note)}`}</p>`);
-    }
-    if (proof.matrix.length === 0) {
-      evidenceParts.push(
-        view.intent !== null && view.intent.acceptance.length > 0
-          ? `<p class="meta">The approved scope has ${view.intent.acceptance.length} requirement${view.intent.acceptance.length === 1 ? "" : "s"}, but this build has no requirement-by-requirement verification.</p>`
-          : `<p class="meta">This older scope has no acceptance checks.</p>`,
-      );
-    } else {
-      evidenceParts.push(`<details class="cockpit-proof-group"${proof.checkLog === null ? " data-primary-evidence" : ""}><summary>${proof.matrix.length} requirement${proof.matrix.length === 1 ? "" : "s"} · View details</summary>${criterionMatrixHtml(proof.matrix, { runId: run.id, links: proof.matrixLinks, fileAnchors: view.fileAnchors })}</details>`);
-    }
-    evidenceParts.push(repairChainHtml(proof.repairChain));
-    if (view.outsideTouches.length > 0) {
-      evidenceParts.push(
-        `<p class="problem cockpit-drift" data-cockpit-drift="${view.outsideTouches.length}"><strong>${view.outsideTouches.length} changed file${view.outsideTouches.length === 1 ? "" : "s"} outside the approved paths</strong> — ` +
-          view.outsideTouches.map(path => `<span class="mono">${escape(path)}</span>`).join(", ") +
-          `. Review these files before accepting the result.</p>`,
-      );
-    }
-    // Reviewer judgements and findings — an independent pass, named.
-    const judgements = proof.matrix.filter(one => one.review !== null);
-    if (judgements.length > 0 || view.reviewerFindings.length > 0) {
-      evidenceParts.push(
-        `<div class="result-section" data-cockpit-source="reviewer"><strong>independent review</strong><ul>` +
-          judgements
-            .map(one => `<li>${reviewJudgementBadge(one.review)} <code>${escape(one.id)}</code> <span class="meta">${escape(one.review?.author ?? "")}: ${escape(one.review?.note ?? "")}</span></li>`)
-            .join("") +
-          view.reviewerFindings
-            .map(one => `<li><span class="badge${one.severity === "problem" ? " badge-failed" : ""}">${escape(one.severity ?? "note")}</span> ${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`)
-            .join("") +
-          `</ul></div>`,
-      );
-    }
-    if (proof.proofProblem !== null) {
-      evidenceParts.push(`<p class="problem">Verification details are unavailable: ${escape(proof.proofProblem)}</p>`);
-    }
-    // Machine re-run — labeled as the plane's own, never the agent's.
-    evidenceParts.push(
-      proof.checkLog === null
-        ? `<p class="meta" data-cockpit-source="machine">No automated check was configured for this build.</p>`
-        : `<details data-cockpit-source="machine" data-primary-evidence><summary>Check output${proof.checkLog.truncated ? " (shortened)" : ""}</summary>` +
-            `<pre class="mono" style="overflow-x:auto;max-height:18rem">${escape(proof.checkLog.text)}</pre></details>` +
-            `<p class="meta"><a href="/r/${run.id}/evidence/${proof.checkLog.artifactId}">Open the full check log</a></p>`,
-    );
-    // Agent-reported checks — the agent's own claim, labeled as such.
-    evidenceParts.push(
-      proof.proof === null || proof.proof.checks.length === 0
-        ? `<p class="meta" data-cockpit-source="agent">The agent reported no checks.</p>`
-        : `<details class="cockpit-proof-group" data-cockpit-source="agent"><summary>Agent checks · ${proof.proof.checks.length}</summary><div class="result-section"><ul>` +
-            proof.proof.checks.map(one => `<li><span class="mono">${escape(one.command)}</span> <span class="meta">(exit ${one.exitCode}) — ${escape(one.summary)}</span></li>`).join("") +
-            `</ul></div></details>`,
-    );
-    // Screenshots — validated images only, or an honest absence.
-    const screenshotRequired = proof.matrix.some(one => one.requiredEvidence.includes("screenshot"));
-    evidenceParts.push(
-      proof.screenshots.length === 0
-        ? `<p class="meta" data-cockpit-source="screenshots">No screenshots${screenshotRequired ? " were captured, although one was required" : " were needed"}.</p>`
-        : `<details class="cockpit-proof-group" data-cockpit-source="screenshots"><summary>Screenshots · ${proof.screenshots.length}</summary><div class="receipt-visuals" aria-label="validated screenshots">` +
-            proof.screenshots
-              .map(shot => `<a class="receipt-shot" href="/r/${run.id}/evidence/${shot.artifactId}"><img src="/r/${run.id}/evidence/${shot.artifactId}" alt="${escape(shot.caption)}"><span>${escape(shot.caption)} · <span class="mono">${escape(shot.path)}</span></span></a>`)
-              .join("") +
-            `</div></details>`,
-    );
-    // Caveats — the agent's own, plus follow-ups from the handoff.
-    const caveats = [...(proof.proof?.caveats ?? []), ...(view.handoff?.followUps ?? []).map(one => `follow-up: ${one}`)];
-    evidenceParts.push(
-      caveats.length === 0
-        ? `<p class="meta" data-cockpit-source="caveats">No caveats were reported.</p>`
-        : `<details class="cockpit-proof-group" data-cockpit-source="caveats"><summary>Notes before accepting · ${caveats.length}</summary><div class="receipt-caveats"><ul>${caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div></details>`,
-    );
-    const evidenceSummary = [
-      `${proof.matrix.length} requirement${proof.matrix.length === 1 ? "" : "s"}`,
-      `${proof.proof?.checks.length ?? 0} agent check${(proof.proof?.checks.length ?? 0) === 1 ? "" : "s"}`,
-      `${proof.screenshots.length} screenshot${proof.screenshots.length === 1 ? "" : "s"}`,
-    ].join(" · ");
-    proofParts.push(
-      `<details class="cockpit-evidence-group"><summary><span>Evidence and checks</span><small>${evidenceSummary}</small></summary><div class="cockpit-evidence-body">${evidenceParts.join("\n")}</div></details>`,
-    );
-    // v50: the independent review's attempt counts and its one explicit
-    // act, the same panel the task page shows — the cockpit returns here.
-    proofParts.push(reviewRetryPanel(view.taskId, run.id, view.reviewRetry, { csrf, canAct: canRetryReview, returnTo: reviewHref(view.taskId) }));
-    if ((proof.verdict === "short" || proof.verdict === "refuted") && proof.accepted === null && csrf !== "") {
-      proofParts.push(
-        `<details class="cockpit-accept"><summary>Accept with an exception</summary><p class="meta">Use this only if you verified the result another way. The reason becomes part of the record.</p>` +
-          `<form method="post" action="${taskHref(view.taskId)}/accept-proof" class="cockpit-accept-form"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
-          `<input type="text" name="note" maxlength="500" placeholder="Why is this safe to accept?" aria-label="exception reason" required><button type="submit">Accept with exception</button></form></details>`,
-      );
-    }
-  }
-  parts.push(`<section class="card cockpit-section" id="verification" data-cockpit-section="proof">${proofParts.join("\n")}</section>`);
-
-  // The agent's conclusion — the handoff, labeled as the agent's words.
-  if (run.summary !== null) {
-    parts.push(
-      `<details class="card cockpit-section cockpit-disclosure" data-cockpit-section="handoff"><summary><h3>Agent summary<small>What the builder reports it changed</small></h3><span class="cockpit-disclosure-action">View</span></summary><div class="cockpit-disclosure-body"><p class="recap">${escape(run.summary)}</p>` +
-        (view.handoff === null || view.handoff.changes.length === 0 ? "" : `<ul>${view.handoff.changes.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`) +
-        `<p class="meta">${escape(run.runner)} · ${escape(run.provider)}${run.model === null ? "" : ` · ${escape(run.model)}`}${run.ranMinutes === null ? "" : ` · ran ${run.ranMinutes}m`} · ${escape(run.cost)}${run.branch === null ? "" : ` · <span class="mono">${escape(run.branch)}</span>`}</p>` +
-        `</div></details>`,
-    );
-  }
-
-  // Changed files: capture health, the priority-ordered list with anchors
-  // into the sealed patch, then the patch itself in its own order.
-  const changeParts: string[] = [`<h3>changes</h3>`];
-  const terminal = view.terminal;
-  if (terminal === null) {
-    changeParts.push(`<p class="meta">no final diff or change summary was captured for this build — a legacy record, or a capture that never ran</p>`);
-  } else {
-    if (terminal.stat === null) changeParts.push(`<p class="meta">no change summary was captured</p>`);
-    else if ("problem" in terminal.stat) changeParts.push(`<p class="problem">change summary: ${escape(terminal.stat.problem)}</p>`);
-    else {
-      const s = terminal.stat;
-      changeParts.push(
-        `<p class="row"><span class="mono">${escape(s.base.slice(0, 12))} → ${escape(s.head.slice(0, 12))}</span> — ` +
-          (s.fileCount === 0
-            ? "no changes, verified"
-            : `${s.fileCount} file${s.fileCount === 1 ? "" : "s"} · +${s.additions} −${s.deletions}${s.binaryCount > 0 ? ` · ${s.binaryCount} binary` : ""}${s.filesTruncated ? " · file list cut, counts complete" : ""}`) +
-          `</p>`,
-      );
-    }
-    if (view.files.length > 0) {
-      changeParts.push(
-        `<p class="meta">Potentially risky files appear first.</p>` +
-          `<ol class="cockpit-files">` +
-          view.files
-            .map(file => {
-              const name = file.anchor === null ? `<span class="mono">${escape(file.path)}</span>` : `<a class="mono" href="#${file.anchor}">${escape(file.path)}</a>`;
-              const counts = file.additions === null || file.deletions === null ? "binary" : `+${file.additions} −${file.deletions}`;
-              const flags =
-                (file.outsideTouches ? ` <span class="badge badge-failed" data-outside-touches="1">outside touches</span>` : "") +
-                (file.cited ? ` <span class="badge badge-done">cited</span>` : "");
-              const why = file.priority.reasons.length === 0 ? "" : ` <span class="meta">— ${file.priority.reasons.map(escape).join("; ")}</span>`;
-              return `<li data-file-priority="${file.priority.band}">${name}${file.renamedFrom === null ? "" : ` <span class="meta">(was ${escape(file.renamedFrom)})</span>`} <span class="meta">${counts}</span>${flags}${canAnnotate ? ` <button type="button" class="pick-file" data-path="${escape(file.path)}">comment</button>` : ""}${why}</li>`;
-            })
-            .join("") +
-          `</ol>`,
-      );
-    }
-    if (terminal.patch === null) changeParts.push(`<p class="meta">the final diff was not captured for this build</p>`);
-    else if ("problem" in terminal.patch) changeParts.push(`<p class="problem">patch: ${escape(terminal.patch.problem)}</p>`);
-    else if (terminal.patch.text.trim() === "") changeParts.push(`<p class="meta">empty diff — captured successfully, nothing changed</p>`);
-    else changeParts.push(reviewDiffHtml(terminal.patch, terminal.stat, run.id, canAnnotate, view.fileAnchors));
-  }
-  parts.push(`<section class="card cockpit-section" data-cockpit-section="changes">${changeParts.join("\n")}</section>`);
-
-  // Annotations and the revision seal — the run page's own forms, posting
-  // to the run page's own guarded endpoints.
-  if (canAnnotate || view.comments.length > 0) {
-    const rows = view.comments
-      .map(one => `<div class="diff-comment"><span class="diff-comment-pin" aria-hidden="true"></span><p>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span></div>`)
-      .join("\n");
-    parts.push(
-      `<section class="card cockpit-section" data-cockpit-section="annotate" id="annotate"><h3>request changes</h3>` +
-        `<p class="meta">Select a line or file above, then describe what should change.</p>` +
-        (rows === "" ? "" : `<div class="diff-comments">${rows}</div>`) +
-        (canAnnotate
-          ? `<form method="post" action="/r/${run.id}/comment" class="diff-comment-form" id="comment-form">` +
-            `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-            `<input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}">` +
-            `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="select a line or file above" aria-label="file" class="mono"></label>` +
-            `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div>` +
-            `<label>change requested<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="Explain what should change and why" aria-label="review comment" aria-describedby="comment-note-limit"${noted ? " autofocus" : ""}></textarea></label>` +
-            `<span class="meta diff-comment-limit" id="comment-note-limit">up to ${LIMITS.note} characters</span>` +
-            `<button type="submit">Add comment</button></form>`
-          : "") +
-        (csrf !== "" && view.comments.length > 0
-          ? `<form method="post" action="/r/${run.id}/revise" class="revision-from-comments"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
-            `<div><strong>${view.comments.length} comment${view.comments.length === 1 ? "" : "s"} ready</strong><span class="meta">Creates one revision from these comments. You approve it before anything runs.</span></div>` +
-            `<button type="submit">Create revision</button></form>`
-          : "") +
-        `</section>`,
-    );
-  }
-
-  // Publication: observed facts only — what the watcher saw, never a green
-  // inferred from silence.
-  const publication = view.publication;
+  // The result itself (package 3): the same panel the run page and the
+  // chat's result view render — Summary / Changes / Checks with Request
+  // changes beside it. The cockpit adds its own acts under Checks: the
+  // v50 review-retry panel and the accept-with-exception form.
+  const extraChecks =
+    reviewRetryPanel(view.taskId, run.id, view.reviewRetry, { csrf, canAct: canRetryReview, returnTo: reviewHref(view.taskId) }) +
+    ((proof?.verdict === "short" || proof?.verdict === "refuted") && proof?.accepted === null && csrf !== ""
+      ? `<details class="cockpit-accept"><summary>Accept with an exception</summary><p class="meta">Use this only if you verified the result another way. The reason becomes part of the record.</p>` +
+        `<form method="post" action="${taskHref(view.taskId)}/accept-proof" class="cockpit-accept-form"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<input type="text" name="note" maxlength="500" placeholder="Why is this safe to accept?" aria-label="exception reason" required><button type="submit">Accept with exception</button></form></details>`
+      : "");
+  const here = reviewHref(view.taskId);
   parts.push(
-    `<section class="card cockpit-section" data-cockpit-section="publication"><h3>delivery</h3>` +
-      (publication === null
-        ? `<p class="meta">Not published — this build was not set to create a branch or pull request.</p>`
-        : `<p class="row">${
-            publication.prNumber === null
-              ? `<span class="badge">${escape(publication.state)}</span> ${publication.state === "failed" ? `publication failed after ${publication.attempts} attempt${publication.attempts === 1 ? "" : "s"}${publication.lastError === null ? "" : ` — ${escape(oneLineOf(publication.lastError, 200))}`}` : `${escape(publication.githubRepo)} · the branch ${publication.state === "pushed" ? "is pushed; no PR yet" : "is intended for publication"}`}`
-              : `${publication.prUrl === null ? `<span class="badge badge-open">PR #${publication.prNumber}</span>` : `<a href="${escape(publication.prUrl)}" class="badge badge-open">PR #${publication.prNumber}</a>`} <span class="meta">${escape(publication.githubRepo)}${publication.remoteState === null ? "" : ` · ${escape(publication.remoteState.toLowerCase())} on GitHub`}</span>`
-          }</p>` +
-          (publication.prNumber === null
-            ? ""
-            : `<p class="meta" data-ci-observed="${escape(publication.ciFailing ? "failing" : (publication.lastCheckState ?? "none"))}">${
-                publication.ciFailing
-                  ? "CI failing — last checked by Standing Orders"
-                  : publication.lastCheckState === "passing"
-                    ? `CI passing — observed ${escape(when(publication.lastCheckAt))}`
-                    : publication.lastCheckState === "running"
-                      ? "CI still running at the last observation"
-                      : "No CI checks were found. Verify on GitHub."
-              }</p>`) +
-          (publication.ciFailing && csrf !== ""
-            ? `<form method="post" action="/r/${run.id}/draft-repair" class="row"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">draft a repair task</button><span class="meta"> — one unapproved task; you approve its scope before anything builds</span></form>`
-            : "")) +
-      `<p class="row"><a href="/r/${run.id}">Full build history and evidence →</a>${view.contest === null ? "" : ` <a href="/contest/${view.contest.id}">${view.contest.state === "pick-wait" ? `compare the ${contestNoun(view.contest.kind)} and pick →` : `the ${contestNoun(view.contest.kind)} (${escape(view.contest.state)}) →`}</a>`}</p>` +
-      `</section>`,
+    `<div id="verification" data-cockpit-section="result">` +
+      resultPanelHtml(view.detail, {
+        place: "review",
+        tab,
+        csrf,
+        user,
+        noted,
+        requestToken: randomBytes(16).toString("hex"),
+        hrefFor: one => (one === "summary" ? here : `${here}&tab=${one}`),
+        returnTo: here,
+        back: null,
+        extraChecks,
+        headStatus: false,
+      }) +
+      (view.contest === null ? "" : `<p class="row"><a href="/contest/${view.contest.id}">${view.contest.state === "pick-wait" ? `compare the ${contestNoun(view.contest.kind)} and pick →` : `the ${contestNoun(view.contest.kind)} (${escape(view.contest.state)}) →`}</a></p>`) +
+      `</div>`,
   );
 
   if (view.notes.length > 0) {
@@ -18026,34 +17987,36 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
  * bearer session (no token) sees the road named, never a form. */
 function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boolean, canAnnotate: boolean): string {
   const run = view.run;
-  const card = (kind: string, title: string, detail: string, control: string): string =>
-    `<div class="card cockpit-next" data-next-action="${escape(kind)}"><div><strong>${escape(title)}</strong><span class="meta">${escape(detail)}</span></div>${control}</div>`;
-  if (run === null) {
+  const detail = view.detail;
+  const card = (kind: string, title: string, detailWords: string, control: string): string =>
+    `<div class="card cockpit-next" data-next-action="${escape(kind)}"><div><strong>${escape(title)}</strong><span class="meta">${escape(detailWords)}</span></div>${control}</div>`;
+  if (run === null || detail === null) {
     return card("inspect-task", "No build to review", "This task was marked complete without a build record.", `<a class="button-link" href="${taskHref(view.taskId)}">Open the task</a>`);
   }
-  const verdict = view.proof?.verdict ?? null;
+  const verdict = detail.proof?.verdict ?? null;
   if ((verdict === "short" || verdict === "refuted") && !accepted) {
     return card(
       "accept-proof",
       "Review before accepting",
-      verificationExplanation(verdict, view.proof?.reasons ?? []),
-      `<a class="button-link" href="#verification" data-open-evidence>Review evidence</a>`,
+      verificationExplanation(verdict, detail.proof?.reasons ?? []),
+      `<a class="button-link" href="${escape(`${reviewHref(view.taskId)}&tab=checks#result`)}" data-open-evidence>Review evidence</a>`,
     );
   }
   if (view.contest !== null && view.contest.state === "pick-wait") {
     return card("compare-contest", `Compare the ${contestNoun(view.contest.kind)}`, `${view.contest.agents} agents finished — compare their results side by side and pick one.`, `<a class="button-link" href="/contest/${view.contest.id}">Compare results</a>`);
   }
-  if (view.publication !== null && view.publication.ciFailing && csrf !== "") {
+  if (detail.ciFailing && csrf !== "") {
     return card("draft-repair", "CI is failing on its pull request", "Standing Orders confirmed the failure. Draft one repair task, then approve it before it runs.", `<form method="post" action="/r/${run.id}/draft-repair"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">Draft a repair task</button></form>`);
   }
-  if (view.comments.length > 0 && csrf !== "") {
-    return card("revise", `${view.comments.length} comment${view.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these comments. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">Create revision</button></form>`);
+  if (detail.comments.length > 0 && csrf !== "") {
+    return card("revise", `${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these notes. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}"><button type="submit">Create revision</button></form>`);
   }
-  if (view.publication !== null && view.publication.prNumber !== null && view.publication.prUrl !== null) {
-    return card("publication", `Review PR #${view.publication.prNumber} on GitHub`, "The evidence below matches the recorded result. The pull request was last seen open; no merge is recorded here.", `<a class="button-link" href="${escape(view.publication.prUrl)}">Open the pull request</a>`);
+  const prUrl = detail.publication === null ? null : safePrUrl(detail.publication.prUrl);
+  if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) {
+    return card("publication", `Review PR #${detail.publication.prNumber} on GitHub`, "The evidence below matches the recorded result. The pull request was last seen open; no merge is recorded here.", `<a class="button-link" href="${escape(prUrl)}">Open the pull request</a>`);
   }
   if (canAnnotate) {
-    return card("annotate", "Review the changes", "Nothing needs your attention. Comment on any line to request a revision.", `<a class="button-link" href="#annotate">Review changes</a>`);
+    return card("annotate", "Review the changes", "Nothing needs your attention. Add a note, or annotate a line, to request a revision.", `<a class="button-link" href="${escape(`${reviewHref(view.taskId)}&tab=changes#result`)}">Review changes</a>`);
   }
   return card("inspect-run", "Review the build", "Nothing needs your attention. Open the full history and evidence if you want the details.", `<a class="button-link" href="/r/${run.id}">Open the build</a>`);
 }
@@ -18265,7 +18228,12 @@ type ProofBundleView = {
   proof: { criteria: { statement: string; verdict: string; how: string }[]; checks: { command: string; exitCode: number; summary: string }[]; caveats: string[] } | null;
   proofProblem: string | null;
   checkLog: { text: string; artifactId: number; truncated: boolean } | null;
-  screenshots: { path: string; caption: string; artifactId: number }[];
+  /** Every stored screenshot artifact; one whose bytes no longer verify
+   * carries its `problem` and is never rendered or called validated
+   * (workspace package 3). */
+  screenshots: ResultScreenshot[];
+  /** Screenshot paths the proof cites that no stored artifact answers. */
+  uncapturedScreenshots: string[];
   /** v39: the criterion-to-evidence matrix, one row per signed criterion —
    * `[]` when the scope this run built against signed no rubric. */
   matrix: CriterionMatrixRow[];
@@ -18316,9 +18284,78 @@ type CompletionReceiptView = {
     | { fileCount: number; additions: number; deletions: number; binaryCount: number; filesTruncated: boolean }
     | { problem: string }
     | null;
-  screenshots: { path: string; caption: string; artifactId: number }[];
+  screenshots: ResultScreenshot[];
   caveats: string[];
+  /** The run's own report artifact (a scout's deliverable), verified at
+   * render — the investigation's result leads with it (package 3). */
+  report: RunReportView | null;
+  /** The facts every result surface prints identically (package 3). */
+  facts: SharedResultFacts;
 };
+
+/** A scout run's report as this run stored it: verified and parsed, or
+ * the reason it cannot be shown. The download link serves the exact
+ * stored bytes as text — never as a page. */
+type RunReportView =
+  | { ok: true; artifactId: number; title: string; summary: string; document: string; followUps: number; truncated: boolean }
+  | { ok: false; artifactId: number; problem: string };
+
+function runReportView(artifacts: Artifact[], root: string): RunReportView | null {
+  const artifact = [...artifacts].reverse().find(one => one.kind === "report");
+  if (artifact === undefined) return null;
+  let read: ReturnType<typeof readVerifiedArtifact>;
+  try {
+    read = readVerifiedArtifact(root, artifact);
+  } catch {
+    return { ok: false, artifactId: artifact.id, problem: "the report file could not be read" };
+  }
+  if (!read.ok) return { ok: false, artifactId: artifact.id, problem: read.problem };
+  const parsed = parseReport(read.content.toString("utf8"));
+  if (!parsed.ok) return { ok: false, artifactId: artifact.id, problem: "the stored report is not a report this console can read" };
+  return { ok: true, artifactId: artifact.id, title: parsed.report.title, summary: parsed.report.summary, document: parsed.report.report, followUps: parsed.report.followUps.length, truncated: artifact.truncated };
+}
+
+/** The shared facts (package 3), computed ONCE from the same verified
+ * records every surface reads: the head from the sealed diff summary when
+ * it verifies (else the run record, and the source is named), the signed
+ * criteria passed from the machine's matrix, the proof's caveats, every
+ * evidence problem in words, and the observed publication state. */
+function sharedResultFactsOf(
+  run: Run,
+  proof: ProofBundleView | null,
+  terminal: TerminalDiffView | null,
+  handoff: StructuredHandoffView | null,
+  report: RunReportView | null,
+  publication: PublicationFacts,
+): SharedResultFacts {
+  const stat = terminal?.stat ?? null;
+  const statOk = stat !== null && !("problem" in stat);
+  const passed = proof === null || proof.matrix.length === 0 ? null : passFraction(proof.matrix);
+  const patch = terminal?.patch ?? null;
+  const evidenceProblems = evidenceProblemsOf({
+    proofProblem: proof?.proofProblem ?? null,
+    diff: patch === null ? null : "problem" in patch ? { problem: patch.problem } : { truncated: patch.truncated },
+    stat: stat === null ? null : "problem" in stat ? { problem: stat.problem } : { filesTruncated: stat.filesTruncated },
+    checkLog: proof?.checkLog === null || proof?.checkLog === undefined ? null : { truncated: proof.checkLog.truncated },
+    screenshots: proof?.screenshots ?? [],
+    uncapturedScreenshots: proof?.uncapturedScreenshots ?? [],
+    report: report === null ? null : report.ok ? { ok: true } : { problem: report.problem },
+    reportExpected: run.role === "scout",
+    handoffPresent: handoff !== null,
+    outcome: run.outcome,
+  });
+  return {
+    runId: run.id,
+    base: statOk ? stat.base : run.baseRevision,
+    head: statOk ? stat.head : run.headRevision,
+    headSource: statOk ? "sealed diff" : run.headRevision === null ? null : "run record",
+    checks: passed === null ? null : { passed: passed.passed, total: passed.total },
+    caveats: proof?.proof?.caveats ?? [],
+    evidenceProblems,
+    publicationState: publication === null ? "none" : publication.state,
+    publicationWords: receiptPublicationWords(publication),
+  };
+}
 
 const SCREENSHOT_CAPTURE = /^agent-claimed screenshot at (.+) \(validated (?:png|jpeg)\)/;
 
@@ -18335,11 +18372,23 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
 
   const proof = proofView !== null && proofView.ok ? proofView.proof : null;
   const captionFor = (path: string): string => proof?.screenshots.find(one => one.path === path)?.caption ?? path;
-  const screenshots = screenshotArtifacts.flatMap(artifact => {
+  const screenshots = screenshotArtifacts.flatMap((artifact): ResultScreenshot[] => {
     const path = SCREENSHOT_CAPTURE.exec(artifact.capture)?.[1];
     if (path === undefined) return [];
-    return [{ path, caption: captionFor(path), artifactId: artifact.id }];
+    // The bytes are re-verified at render (workspace package 3): a shot
+    // whose file is gone or altered is named as unavailable, never shown
+    // as validated visual proof.
+    let problem: string | null = null;
+    try {
+      const read = readVerifiedArtifact(root, artifact);
+      if (!read.ok) problem = read.problem;
+    } catch {
+      problem = "the file could not be read";
+    }
+    return [{ path, caption: captionFor(path), artifactId: artifact.id, problem }];
   });
+  const stored = new Set(screenshots.map(one => one.path));
+  const uncapturedScreenshots = (proof?.screenshots ?? []).map(one => one.path).filter(path => !stored.has(path));
 
   let checkLog: ProofBundleView["checkLog"] = null;
   if (checkLogArtifact !== null) {
@@ -18364,6 +18413,7 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
     proofProblem: proofView !== null && !proofView.ok ? proofView.problem : null,
     checkLog,
     screenshots,
+    uncapturedScreenshots,
     matrix: verdictRow?.matrix ?? [],
     matrixLinks: evidenceLinksFor(artifacts),
     machineVerdict: verdictRow?.machineVerdict ?? null,
@@ -18379,8 +18429,10 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
   const handoff = structuredHandoffView(artifacts, root);
   const proof = proofBundleView(store, run, artifacts, root);
   const terminal = terminalDiffView(artifacts, root);
+  const report = runReportView(artifacts, root);
   const stat = terminal?.stat ?? null;
   const coverage = semanticCoverage(proof?.matrix ?? [], run.qualityMode ?? "default");
+  const publication = publicationFactsOf(store.publicationForRun(run.id));
   return {
     runId: run.id,
     role: run.role,
@@ -18390,7 +18442,7 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
     reasons: proof?.reasons ?? [],
     accepted: proof?.accepted !== null && proof?.accepted !== undefined,
     recordComplete: handoff !== null && terminal !== null,
-    publication: publicationFactsOf(store.publicationForRun(run.id)),
+    publication,
     review,
     matrix: proof?.matrix ?? [],
     diff:
@@ -18407,6 +18459,8 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
     caveats: proof?.proof?.caveats ?? [],
     coverage: coverageWords(coverage),
     coverageSecondary: coverage.contextGaps.length === 0 && (coverage.satisfied === true || (coverage.satisfied === null && !coverage.required)),
+    report,
+    facts: sharedResultFactsOf(run, proof, terminal, handoff, report, publication),
   };
 }
 
@@ -18802,7 +18856,9 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
   // count's source label reads from it, never from the review's tone.
   const stored = receiptStatusOf(view, null);
   const inReview = REVIEW_TOKENS.has(status.token);
-  const passed = view.matrix.length === 0 ? null : passFraction(view.matrix);
+  const facts = view.facts;
+  const shown = view.screenshots.filter(one => one.problem === null);
+  const unavailable = view.screenshots.length - shown.length;
   const diff =
     view.diff === null
       ? "Change summary unavailable"
@@ -18814,25 +18870,35 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
             (view.diff.binaryCount > 0 ? ` · ${view.diff.binaryCount} binary` : "") +
             (view.diff.filesTruncated ? " · list shortened" : "");
   const criteria =
-    passed === null
+    facts.checks === null
       ? "No signed rubric"
-      : `${passed.passed}/${passed.total} acceptance criteria passed`;
-  const shots =
-    view.screenshots.length === 0
-      ? ""
-      : `<div class="receipt-visuals" aria-label="visual proof">${view.screenshots
-          .slice(0, 4)
-          .map(
-            shot =>
-              `<a class="receipt-shot" href="/r/${view.runId}/evidence/${shot.artifactId}">` +
-              `<img src="/r/${view.runId}/evidence/${shot.artifactId}" alt="${escape(shot.caption)}">` +
-              `<span>${escape(shot.caption)}</span></a>`,
-          )
-          .join("")}</div>`;
+      : `${facts.checks.passed}/${facts.checks.total} acceptance criteria passed`;
+  // The deliverable leads (package 3): a scout's report by its title, UI
+  // work by its validated screenshots. Unverifiable shots are counted as
+  // unavailable, never shown, never called validated.
+  const lead =
+    view.report !== null
+      ? view.report.ok
+        ? `<p class="receipt-report"><strong>${escape(view.report.title)}</strong> <span class="meta">${escape(oneLineOf(view.report.summary, 240))}</span></p>`
+        : `<p class="receipt-report problem">The report cannot be shown: ${escape(view.report.problem)}.</p>`
+      : shown.length === 0
+        ? ""
+        : `<div class="receipt-visuals" aria-label="validated screenshots">${shown
+            .slice(0, 4)
+            .map(
+              shot =>
+                `<a class="receipt-shot" href="/r/${view.runId}/evidence/${shot.artifactId}">` +
+                `<img src="/r/${view.runId}/evidence/${shot.artifactId}" alt="${escape(shot.caption)}">` +
+                `<span>${escape(shot.caption)}</span></a>`,
+            )
+            .join("")}</div>`;
+  // Caveats and evidence problems stay in the open, ahead of the counts
+  // and any readiness words below them.
+  const attention = [...facts.evidenceProblems, ...view.caveats];
   const caveats =
-    view.caveats.length === 0
+    attention.length === 0
       ? ""
-      : `<div class="receipt-caveats"><strong>Before you move on</strong><ul>${view.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+      : `<div class="receipt-caveats" data-result-attention="${attention.length}"><strong>Before you move on</strong><ul>${attention.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
   // v51: semantic coverage, distinct from the machine proof word above —
   // the same lines the CLI prints, so chat and terminal cannot disagree.
   // Nothing owed (optional and unsettled, or satisfied) folds behind a
@@ -18843,32 +18909,389 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
       : view.coverageSecondary
         ? `<details class="receipt-coverage" data-semantic-coverage="secondary"><summary>Independent review</summary><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></details>`
         : `<div class="receipt-coverage" data-semantic-coverage=""><strong>Independent review</strong><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+  const resultHref = place === "chat" ? chatResultHref(taskId, view.runId) : `/r/${view.runId}`;
   return (
-    `<section class="card completion-receipt" data-card-kind="result-receipt">` +
+    `<section class="card completion-receipt" data-card-kind="result-receipt"${resultFactsAttributes(facts)}>` +
     `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>${escape(receiptHeadingOf(view.outcome, view.publication))}</h2></div>` +
     `${statusLineHtml(status)}</div>` +
     // The agent's handoff is its narrative, labeled as such; the
     // publication line is the observed record — never "shipped".
     `<p class="receipt-summary">${escape(view.summary ?? (view.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff."))}</p>` +
-    `<p class="receipt-publication" data-receipt-publication="${escape(view.publication === null ? "none" : view.publication.state)}">${escape(receiptPublicationWords(view.publication))}</p>` +
+    `<p class="receipt-publication" data-receipt-publication="${escape(facts.publicationState)}">${escape(facts.publicationWords)}</p>` +
     // A review in flight is the receipt's primary status too (its chip
     // above); the detail — the earlier verdict as history (review fixes,
     // finding 4) — is secondary, behind a native disclosure that reads the
     // same words on the task page and in chat.
     (inReview ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
+    caveats +
+    lead +
     // The matrix count is the proof's own citation; it reads as verified
     // only when the machine verified the result (workspace package 1).
     `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>${stored.tone === "problem" ? "cited by the agent — not verified" : stored.token === "agent-attested" ? "cited by the agent, no independent check" : "against the approved scope"}</small></span>` +
-    `<span><strong>${escape(diff)}</strong><small>from the sealed final diff</small></span>` +
-    `<span><strong>${view.screenshots.length} screenshot${view.screenshots.length === 1 ? "" : "s"}</strong><small>${view.screenshots.length === 0 ? "none required or captured" : "validated visual proof"}</small></span></div>` +
-    shots + coverage + caveats +
-    `<div class="receipt-actions"><a class="button-link" href="/r/${view.runId}">${place === "chat" ? "Review & annotate" : "Review full evidence"}</a>` +
+    `<span><strong>${escape(diff)}</strong><small>${facts.head === null ? "no commit recorded" : `head ${escape(facts.head.slice(0, 12))} · ${escape(facts.headSource ?? "")}`}</small></span>` +
+    `<span><strong>${view.screenshots.length} screenshot${view.screenshots.length === 1 ? "" : "s"}</strong><small>${view.screenshots.length === 0 ? "none required or captured" : unavailable === 0 ? "validated visual proof" : `${unavailable} unavailable — not validated`}</small></span></div>` +
+    coverage +
+    `<div class="receipt-actions"><a class="button-link" href="${escape(resultHref)}" data-open-result>Open result</a>` +
     (place === "task"
-      ? `<a href="${taskChatHref(taskId)}">Discuss or request changes →</a>`
-      : `<a href="#latest">Request changes in chat →</a>`) +
+      ? `<a href="${taskChatHref(taskId)}">Discuss in chat →</a>`
+      : `<a href="/r/${view.runId}">Full build record →</a>`) +
     // The cockpit (Priority 5): the same records, arranged for a reviewer.
     `<a href="${reviewHref(taskId)}">Open in the review cockpit →</a>` +
     `</div></section>`
+  );
+}
+
+/** The chat's result detail (package 3): the same panel the run page
+ * and the cockpit render, opened beside the conversation when the screen
+ * has room and as a dedicated view with Back to chat when it does not. */
+const chatResultHref = (taskId: string, runId: number, tab: ResultTab = "summary"): string =>
+  `/chat?task=${encodeURIComponent(taskId)}&result=${runId}${tab === "summary" ? "" : `&tab=${tab}`}`;
+
+/**
+ * ONE result presentation (workspace package 3) for the run page, the
+ * review cockpit, and the chat's result detail. Every fact here comes
+ * from the same verified records the receipt reads; the surfaces differ
+ * only in where the panel sits and which links lead away from it.
+ */
+type ResultDetail = {
+  taskId: string;
+  run: Run;
+  receipt: CompletionReceiptView;
+  handoff: StructuredHandoffView | null;
+  proof: ProofBundleView | null;
+  terminal: TerminalDiffView | null;
+  publication: Publication | null;
+  ciFailing: boolean;
+  files: (ReviewFileRow & { priority: ReviewPriority })[];
+  outsideTouches: string[];
+  fileAnchors: ReadonlyMap<string, string>;
+  comments: DiffComment[];
+  reviewerFindings: DiffComment[];
+  /** Revisions already sealed from this run — the forward link. */
+  revisions: { id: string; title: string; state: TaskState; approved: boolean }[];
+  route: RouteStamp | null;
+  editor: { worktree: string } | null;
+  /** Signed criteria on the scope this run built against. */
+  signedCriteria: number;
+  /** Whether a reviewer can annotate here (sealed non-empty patch verifies, cookie session). */
+  canAnnotate: boolean;
+};
+
+type ResultPanelOptions = {
+  place: "run" | "review" | "chat";
+  tab: ResultTab;
+  csrf: string;
+  /** The server-named account, for the browser's bounded draft keys. */
+  user: string;
+  /** The page carries a receipt for a just-posted note: focus the box. */
+  noted: boolean;
+  /** This render's request token for the note form (replay dedupe). */
+  requestToken: string;
+  hrefFor: (tab: ResultTab) => string;
+  /** Where the forms send the reader back (validated server-side too). */
+  returnTo: string;
+  back: { href: string; label: string } | null;
+  /** Surface-specific acts that belong under Checks (the cockpit's review
+   * retry panel and its accept-with-exception form). */
+  extraChecks?: string;
+  /** The cockpit's header already carries the status chip: said once. */
+  headStatus?: boolean;
+};
+
+function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
+  const { run, receipt, proof, terminal, handoff } = detail;
+  const facts = receipt.facts;
+  const status = receiptStatusOf(receipt);
+  const stored = receiptStatusOf(receipt, null);
+  const runId = run.id;
+  const shots = proof?.screenshots ?? [];
+  const shown = shots.filter(one => one.problem === null);
+  const stat = terminal?.stat ?? null;
+  const statOk = stat !== null && !("problem" in stat);
+  const patch = terminal?.patch ?? null;
+  const patchOk = patch !== null && !("problem" in patch);
+  const lead = resultLeadOf({ role: run.role, report: receipt.report !== null, screenshots: shown.length, diff: (patchOk && patch.text.trim() !== "") || (statOk && stat.fileCount > 0) });
+  const tabHref = (tab: ResultTab): string => escape(o.hrefFor(tab));
+
+  // ---- attention: problems and caveats, ahead of every readiness word ----
+  const attention: string[] = [];
+  if (stored.tone === "problem" || stored.tone === "attention") attention.push(verificationExplanation(receipt.verdict, receipt.reasons));
+  attention.push(...facts.evidenceProblems);
+  if (detail.outsideTouches.length > 0) attention.push(`${detail.outsideTouches.length} changed file${detail.outsideTouches.length === 1 ? "" : "s"} outside the approved paths: ${detail.outsideTouches.join(", ")}.`);
+  attention.push(...receipt.caveats);
+  attention.push(...(handoff?.followUps ?? []).map(one => `Follow-up: ${one}`));
+  const attentionHtml =
+    attention.length === 0
+      ? ""
+      : `<div class="result-attention" data-result-attention="${attention.length}"><strong>Before you rely on this</strong><ul>${attention.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+
+  // ---- summary: the deliverable first ----------------------------------
+  const summaryParts: string[] = [];
+  const report = receipt.report;
+  if (lead === "report") {
+    if (report === null) {
+      summaryParts.push(`<p class="problem" data-result-report="missing">This investigation stored no report.</p>`);
+    } else if (!report.ok) {
+      summaryParts.push(`<p class="problem" data-result-report="problem">The report cannot be shown: ${escape(report.problem)}.</p>`);
+    } else {
+      // Escaped text in a fenced block, never markup, never a page: the
+      // download serves the exact stored bytes as text.
+      summaryParts.push(
+        `<article class="result-report" data-result-report="ok"><h3>${escape(report.title)}</h3><p class="recap">${escape(report.summary)}</p>` +
+          `<pre class="recap plan-doc">${escape(report.document)}</pre>` +
+          `<p class="meta"><a href="/r/${runId}/evidence/${report.artifactId}">Download the report</a>${report.truncated ? " · shortened when stored" : ""}${report.followUps === 0 ? "" : ` · ${report.followUps} proposed follow-up${report.followUps === 1 ? "" : "s"} on <a href="${taskHref(detail.taskId)}">the task</a>`}</p></article>`,
+      );
+    }
+  } else if (lead === "screenshots") {
+    summaryParts.push(
+      `<div class="receipt-visuals result-visuals" aria-label="validated screenshots">${shown
+        .map(shot => `<a class="receipt-shot" href="/r/${runId}/evidence/${shot.artifactId}"><img src="/r/${runId}/evidence/${shot.artifactId}" alt="${escape(shot.caption)}"><span>${escape(shot.caption)}</span></a>`)
+        .join("")}</div>`,
+    );
+  }
+  const unavailableShots = shots.filter(one => one.problem !== null);
+  if (unavailableShots.length > 0 && lead !== "report") {
+    summaryParts.push(
+      `<ul class="result-unavailable meta" data-result-unavailable="${unavailableShots.length}">${unavailableShots.map(one => `<li>Screenshot unavailable — <span class="mono">${escape(one.path)}</span>: ${escape(one.problem ?? "")}</li>`).join("")}</ul>`,
+    );
+  }
+  // The agent's own list of what it changed rides every Summary, after
+  // whatever leads — it is the handoff's words, labeled by the section.
+  if (handoff !== null && handoff.changes.length > 0) summaryParts.push(`<ul class="result-changes">${handoff.changes.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`);
+  if (lead === "changes" || lead === "summary") {
+    if (lead === "changes") {
+      summaryParts.push(
+        `<p class="result-files-lead">${detail.files.length === 0 ? "" : `<span class="mono">${detail.files.slice(0, 6).map(one => escape(one.path)).join("</span>, <span class=\"mono\">")}</span>${detail.files.length > 6 ? ` and ${detail.files.length - 6} more` : ""} — `}<a href="${tabHref("changes")}" data-result-goto="changes">see the diff</a></p>`,
+      );
+    }
+    if (run.outcome === "no-change" && summaryParts.length === 0) summaryParts.push(`<p class="meta">The agent found that no repository change was needed${statOk && stat.fileCount === 0 ? "; the sealed diff is empty" : ""}.</p>`);
+  }
+  const evidenceSources = [
+    ...(report !== null ? [report.ok ? "verified report" : "report (unverifiable)"] : []),
+    ...(patch !== null ? [patchOk ? `sealed diff${patch.truncated ? " (shortened)" : ""}` : "diff (unverifiable)"] : []),
+    ...(proof === null ? [] : proof.proofProblem !== null ? ["proof (unreadable)"] : proof.proof !== null ? ["agent proof"] : []),
+    ...(proof?.checkLog !== null && proof?.checkLog !== undefined ? [`check log${proof.checkLog.truncated ? " (shortened)" : ""}`] : []),
+    ...(shots.length > 0 ? [`${shown.length} validated screenshot${shown.length === 1 ? "" : "s"}${unavailableShots.length > 0 ? `, ${unavailableShots.length} unavailable` : ""}`] : []),
+  ];
+  const publication = detail.publication;
+  const prUrl = publication === null ? null : safePrUrl(publication.prUrl);
+  const publicationHtml =
+    `<p class="result-publication" data-receipt-publication="${escape(facts.publicationState)}">${escape(facts.publicationWords)}` +
+    (publication !== null && publication.state === "failed"
+      ? ` <span class="meta">After ${publication.attempts} attempt${publication.attempts === 1 ? "" : "s"}${publication.lastError === null ? "" : ` — ${escape(oneLineOf(publication.lastError, 200))}`}.</span>`
+      : "") +
+    (publication === null || publication.prNumber === null
+      ? ""
+      : ` ${prUrl === null ? `<span class="mono">PR #${publication.prNumber}</span>` : `<a href="${escape(prUrl)}">PR #${publication.prNumber}</a>`}` +
+        `<span class="meta" data-ci-observed="${escape(detail.ciFailing ? "failing" : (publication.lastCheckState ?? "none"))}"> · ${
+          detail.ciFailing ? "CI failing at the last check" : publication.lastCheckState === "passing" ? `CI passing, observed ${escape(when(publication.lastCheckAt))}` : publication.lastCheckState === "running" ? "CI still running at the last check" : "no CI checks found — verify on GitHub"
+        }</span>`) +
+    `</p>` +
+    (detail.ciFailing && o.csrf !== ""
+      ? `<form method="post" action="/r/${runId}/draft-repair" class="row"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><button type="submit">Draft a repair task</button><span class="meta"> — one unapproved task; you approve its scope before anything builds</span></form>`
+      : "");
+  const agent = runAgentWords(detail.route);
+  summaryParts.push(
+    `<dl class="result-facts">` +
+      `<div><dt>Build</dt><dd>#${runId} · ${escape(run.runner)}${agent === null ? ` · ${escape(run.provider)}` : ""}${run.finishedAt === null ? "" : ` · ${escape(when(run.finishedAt))}`}</dd></div>` +
+      (agent === null ? "" : `<div><dt>Agent</dt><dd>${escape(agent)}</dd></div>`) +
+      `<div><dt>Commits</dt><dd>${
+        facts.head === null
+          ? facts.base === null ? "no commit recorded" : `<span class="mono">${escape(facts.base.slice(0, 12))}</span> <span class="meta">base · no head recorded</span>`
+          : `<span class="mono">${facts.base === null ? "" : `${escape(facts.base.slice(0, 12))} → `}${escape(facts.head.slice(0, 12))}</span> <span class="meta">from the ${escape(facts.headSource ?? "record")}</span>`
+      }</dd></div>` +
+      `<div><dt>Evidence</dt><dd>${evidenceSources.length === 0 ? "nothing was captured" : escape(evidenceSources.join(" · "))}</dd></div>` +
+      `<div><dt>Publication</dt><dd>${publicationHtml}</dd></div>` +
+      `</dl>`,
+  );
+
+  // ---- changes -----------------------------------------------------------
+  const changeParts: string[] = [];
+  if (terminal === null) {
+    changeParts.push(`<p class="meta">No final diff or change summary was captured for this build${run.role === "scout" ? " — an investigation changes nothing in the repository" : ""}.</p>`);
+  } else {
+    if (stat === null) changeParts.push(`<p class="meta">No change summary was captured.</p>`);
+    else if (!statOk) changeParts.push(`<p class="problem">Change summary unavailable: ${escape(stat.problem)}.</p>`);
+    else {
+      changeParts.push(
+        `<p class="row result-stat"><span class="mono">${escape(stat.base.slice(0, 12))} → ${escape(stat.head.slice(0, 12))}</span> — ` +
+          (stat.fileCount === 0
+            ? "no changes, verified"
+            : `${stat.fileCount} file${stat.fileCount === 1 ? "" : "s"} · +${stat.additions} −${stat.deletions}${stat.binaryCount > 0 ? ` · ${stat.binaryCount} binary` : ""}${stat.filesTruncated ? " · file list cut, counts complete" : ""}`) +
+          `</p>`,
+      );
+    }
+    if (detail.outsideTouches.length > 0) {
+      changeParts.push(`<p class="problem cockpit-drift" data-cockpit-drift="${detail.outsideTouches.length}"><strong>${detail.outsideTouches.length} changed file${detail.outsideTouches.length === 1 ? "" : "s"} outside the approved paths</strong> — ${detail.outsideTouches.map(path => `<span class="mono">${escape(path)}</span>`).join(", ")}. Review these files before accepting the result.</p>`);
+    }
+    if (detail.files.length > 0) {
+      const fileName = (file: ReviewFileRow): string => {
+        const href = detail.editor === null ? null : editorFileHref(detail.editor.worktree, file.path);
+        if (href !== null) return `<a class="mono" href="${escape(href)}">${escape(file.path)}</a>`;
+        return file.anchor === null ? `<span class="mono">${escape(file.path)}</span>` : `<a class="mono" href="#${file.anchor}">${escape(file.path)}</a>`;
+      };
+      changeParts.push(
+        `<ol class="cockpit-files result-files">` +
+          detail.files
+            .map(file => {
+              const counts = file.additions === null || file.deletions === null ? "binary" : `+${file.additions} −${file.deletions}`;
+              const flags = (file.outsideTouches ? ` <span class="badge badge-failed" data-outside-touches="1">outside touches</span>` : "") + (file.cited ? ` <span class="badge badge-done">cited</span>` : "");
+              const why = file.priority.reasons.length === 0 ? "" : ` <span class="meta">— ${file.priority.reasons.map(escape).join("; ")}</span>`;
+              return `<li data-file-priority="${file.priority.band}">${fileName(file)}${file.renamedFrom === null ? "" : ` <span class="meta">(was ${escape(file.renamedFrom)})</span>`} <span class="meta">${counts}</span>${flags}${detail.canAnnotate ? ` <button type="button" class="pick-file" data-path="${escape(file.path)}">comment</button>` : ""}${why}</li>`;
+            })
+            .join("") +
+          `</ol>` +
+          (detail.editor === null ? "" : `<p class="meta">File links open in VS Code on THIS device — if the build's worktree is gone, a link opens nothing.</p>`),
+      );
+    }
+    if (patch === null) changeParts.push(`<p class="meta">The final diff was not captured for this build.</p>`);
+    else if (!patchOk) changeParts.push(`<p class="problem">Diff unavailable: ${escape(patch.problem)}.</p>`);
+    else if (patch.text.trim() === "") changeParts.push(`<p class="meta">Empty diff — captured successfully, nothing changed.</p>`);
+    else changeParts.push(reviewDiffHtml(patch, stat, runId, detail.canAnnotate, detail.fileAnchors));
+  }
+
+  // ---- checks --------------------------------------------------------------
+  const checkParts: string[] = [];
+  if (run.outcome === "no-change") checkParts.push(`<p class="meta">The build concluded that no repository change was needed. A no-change conclusion owes no proof — its handoff and machine-captured diff are the record.</p>`);
+  if (proof === null) {
+    if (run.outcome !== "no-change") checkParts.push(`<p class="meta" data-proof-verdict="none">This build has no verification result or captured evidence. Review its recorded changes yourself.</p>`);
+  } else {
+    if (proof.verdict !== null) {
+      // The same status line the panel leads with (one status per surface,
+      // workspace package 1), beside the machine verdict's own explanation.
+      checkParts.push(`<p class="row result-verdict" data-proof-verdict="${escape(dispatchStatusToken(proof.verdict))}">${statusLineHtml(status)} <span class="meta">${escape(verificationExplanation(proof.verdict, proof.reasons))}</span></p>`);
+    } else if (run.outcome !== "no-change") {
+      checkParts.push(`<p class="meta" data-proof-verdict="none">No verification result is available for this build.</p>`);
+    }
+    if (proof.accepted !== null) checkParts.push(`<p class="meta">Accepted with an exception by <span class="mono">${escape(proof.accepted.by)}</span> · ${escape(when(proof.accepted.at))}${proof.accepted.note === null ? "" : ` — ${escape(proof.accepted.note)}`}</p>`);
+    if (proof.matrix.length === 0) {
+      checkParts.push(detail.signedCriteria > 0 ? `<p class="meta">The approved scope has ${detail.signedCriteria} requirement${detail.signedCriteria === 1 ? "" : "s"}, but this build has no requirement-by-requirement verification.</p>` : `<p class="meta">This scope signed no acceptance checks.</p>`);
+    } else {
+      checkParts.push(`<div class="result-matrix"><strong class="result-label">${proof.matrix.length} requirement${proof.matrix.length === 1 ? "" : "s"}</strong>${criterionMatrixHtml(proof.matrix, { runId, links: proof.matrixLinks, fileAnchors: detail.fileAnchors })}</div>`);
+    }
+    checkParts.push(semanticCoverageHtml(proof.matrix, proof.qualityMode));
+    if (proof.machineVerdict !== null && proof.machineVerdict !== proof.verdict) checkParts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
+    checkParts.push(repairChainHtml(proof.repairChain));
+    const judgements = proof.matrix.filter(one => one.review !== null);
+    if (judgements.length > 0 || detail.reviewerFindings.length > 0) {
+      checkParts.push(
+        `<div class="result-section" data-cockpit-source="reviewer"><strong>independent review</strong><ul>` +
+          judgements.map(one => `<li>${reviewJudgementBadge(one.review)} <code>${escape(one.id)}</code> <span class="meta">${escape(one.review?.author ?? "")}: ${escape(one.review?.note ?? "")}</span></li>`).join("") +
+          detail.reviewerFindings.map(one => `<li><span class="badge${one.severity === "problem" ? " badge-failed" : ""}">${escape(one.severity ?? "note")}</span> ${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("") +
+          `</ul></div>`,
+      );
+    }
+    if (proof.proofProblem !== null) checkParts.push(`<p class="problem">Verification details are unavailable: ${escape(proof.proofProblem)}</p>`);
+    checkParts.push(
+      proof.checkLog === null
+        ? `<p class="meta" data-cockpit-source="machine">No automated check was configured for this build.</p>`
+        : `<details data-cockpit-source="machine"><summary>Check output${proof.checkLog.truncated ? " (shortened)" : ""}</summary><pre class="mono" style="overflow-x:auto;max-height:18rem">${escape(proof.checkLog.text)}</pre></details>` +
+          `<p class="meta"><a href="/r/${runId}/evidence/${proof.checkLog.artifactId}">Open the full check log</a></p>`,
+    );
+    checkParts.push(
+      proof.proof === null || proof.proof.checks.length === 0
+        ? `<p class="meta" data-cockpit-source="agent">The agent reported no checks.</p>`
+        : `<details class="cockpit-proof-group" data-cockpit-source="agent"><summary>Agent checks · ${proof.proof.checks.length}</summary><div class="result-section"><ul>` +
+          proof.proof.checks.map(one => `<li><span class="mono">${escape(one.command)}</span> <span class="meta">(exit ${one.exitCode}) — ${escape(one.summary)}</span></li>`).join("") +
+          `</ul></div></details>`,
+    );
+    const screenshotRequired = proof.matrix.some(one => one.requiredEvidence.includes("screenshot"));
+    checkParts.push(
+      shots.length === 0
+        ? `<p class="meta" data-cockpit-source="screenshots">No screenshots${screenshotRequired ? " were captured, although one was required" : " were needed"}.</p>`
+        : lead === "screenshots"
+          ? `<p class="meta" data-cockpit-source="screenshots">${shown.length} validated screenshot${shown.length === 1 ? "" : "s"} shown in Summary${unavailableShots.length > 0 ? `; ${unavailableShots.length} unavailable` : ""}.</p>`
+          : `<details class="cockpit-proof-group" data-cockpit-source="screenshots"><summary>Screenshots · ${shown.length}${unavailableShots.length > 0 ? ` (${unavailableShots.length} unavailable)` : ""}</summary><div class="receipt-visuals" aria-label="validated screenshots">` +
+            shown.map(shot => `<a class="receipt-shot" href="/r/${runId}/evidence/${shot.artifactId}"><img src="/r/${runId}/evidence/${shot.artifactId}" alt="${escape(shot.caption)}"><span>${escape(shot.caption)}</span></a>`).join("") +
+            `</div></details>`,
+    );
+    checkParts.push(
+      receipt.caveats.length === 0
+        ? `<p class="meta" data-cockpit-source="caveats">No caveats were reported.</p>`
+        : `<div class="receipt-caveats" data-cockpit-source="caveats"><strong>Caveats · ${receipt.caveats.length}</strong><ul>${receipt.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`,
+    );
+  }
+  // The handoff's own account of its checks — the agent's words, labeled
+  // as such, whether or not a proof exists.
+  if (handoff !== null && handoff.verification.length > 0) checkParts.push(`<div class="result-section" data-cockpit-source="agent-words"><strong>the agent's own account</strong><ul>${handoff.verification.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`);
+  if (o.extraChecks !== undefined) checkParts.push(o.extraChecks);
+
+  // ---- request changes: both feedback styles, one sealed road ------------
+  const requestParts: string[] = [`<h3>Request changes</h3>`];
+  const pathWords = (path: string, line: number | null): string => {
+    const shownPath = `${path}${line === null ? "" : `:${line}`}`;
+    const href = detail.editor === null ? null : editorFileHref(detail.editor.worktree, path, line);
+    return href === null ? `<span class="mono">${escape(shownPath)}</span> ` : `<a class="mono" href="${escape(href)}">${escape(shownPath)}</a> `;
+  };
+  if (detail.comments.length > 0) {
+    requestParts.push(
+      `<div class="diff-comments" data-result-notes="${detail.comments.length}">` +
+        detail.comments.map(one => `<div class="diff-comment"><span class="diff-comment-pin" aria-hidden="true"></span><p>${one.path === null ? "" : pathWords(one.path, one.line)}${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span></div>`).join("") +
+        `</div>`,
+    );
+    if (o.csrf !== "") {
+      requestParts.push(
+        `<form method="post" action="/r/${runId}/revise" class="card revision-from-comments"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="return" value="${escape(o.returnTo)}">` +
+          `<div><strong>${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready</strong><span class="meta">Creates one revision carrying exactly these notes. You approve its scope before anything builds.</span></div>` +
+          `<button type="submit">Create revision</button></form>`,
+      );
+    }
+  }
+  for (const revision of detail.revisions) {
+    const standing = revision.state === "done" ? "finished" : revision.state === "cancelled" ? "cancelled" : revision.state === "failed" ? "failed" : revision.approved ? "approved — building or queued" : "waiting for your approval";
+    requestParts.push(`<p class="result-revision" data-result-revision="${escape(revision.id)}"><strong>Proposed revision</strong> <a href="${taskHref(revision.id)}">${escape(revision.title)}</a> <span class="meta">· ${escape(standing)} · this result stays on record</span></p>`);
+  }
+  if (o.csrf === "") {
+    requestParts.push(`<p class="meta">Sign in with a browser session to request changes.</p>`);
+  } else if (!detail.canAnnotate) {
+    requestParts.push(`<p class="meta" data-result-feedback="unavailable">${terminal === null ? "This result has no sealed diff to attach notes to." : "The sealed diff no longer verifies, so notes cannot attach to it."} <a href="${taskChatHref(detail.taskId)}">Discuss in chat →</a></p>`);
+  } else {
+    requestParts.push(
+      `<form method="post" action="/r/${runId}/comment" class="diff-comment-form" id="comment-form">` +
+        `<input type="hidden" name="csrf" value="${escape(o.csrf)}">` +
+        `<input type="hidden" name="return" value="${escape(o.returnTo)}">` +
+        `<input type="hidden" name="request" value="${escape(o.requestToken)}">` +
+        `<label>What should change?<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="Describe the change and why" aria-label="review comment" aria-describedby="comment-note-limit"${o.noted ? " autofocus" : ""}></textarea></label>` +
+        `<span class="meta diff-comment-limit" id="comment-note-limit">up to ${LIMITS.note} characters</span>` +
+        `<details class="result-pin"><summary>Pin to a file or line <span class="meta">(optional — or choose Annotate in Changes)</span></summary>` +
+        `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="src/…" aria-label="file" class="mono"></label>` +
+        `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div></details>` +
+        `<button type="submit">Add note</button></form>`,
+    );
+  }
+
+  // ---- the panel ---------------------------------------------------------
+  const tabCounts: Record<ResultTab, string> = {
+    summary: "",
+    changes: statOk ? (stat.fileCount === 0 ? "none" : `${stat.fileCount} file${stat.fileCount === 1 ? "" : "s"}`) : terminal === null ? "none" : "",
+    checks: facts.checks === null ? (proof === null ? "none" : "") : `${facts.checks.passed}/${facts.checks.total}`,
+  };
+  const tabs =
+    `<nav class="result-tabs" role="tablist" aria-label="result views">` +
+    RESULT_TABS.map(tab => `<a role="tab" href="${tabHref(tab.key)}" data-result-tab="${tab.key}" aria-selected="${tab.key === o.tab ? "true" : "false"}"${tab.key === o.tab ? "" : ' tabindex="-1"'}>${tab.label}${tabCounts[tab.key] === "" ? "" : `<span class="count">${escape(tabCounts[tab.key])}</span>`}</a>`).join("") +
+    `</nav>`;
+  const view = (tab: ResultTab, parts: string[]): string =>
+    `<div class="result-view" role="tabpanel" data-result-view="${tab}"${tab === o.tab ? "" : " hidden"}>${parts.join("\n")}</div>`;
+  const heading = receiptHeadingOf(run.outcome, receipt.publication);
+  const links: string[] = [];
+  if (o.place !== "run") links.push(`<a href="/r/${runId}">Full build record →</a>`);
+  if (o.place !== "review") links.push(`<a href="${reviewHref(detail.taskId)}">Review cockpit →</a>`);
+  if (o.place !== "chat") links.push(`<a href="${taskChatHref(detail.taskId)}">Discuss in chat →</a>`);
+  links.push(`<a href="${taskHref(detail.taskId)}">Task overview →</a>`);
+  return (
+    `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
+      (o.back === null ? "" : `<p class="result-back"><a href="${escape(o.back.href)}" data-result-back>← ${escape(o.back.label)}</a></p>`) +
+      `<header class="result-head"><div><span class="eyebrow">result · build #${runId} · <span class="mono">${escape(detail.taskId)}</span></span><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status)}</header>` +
+      `<p class="result-summary">${escape(receipt.summary ?? (run.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff."))}</p>` +
+      (REVIEW_TOKENS.has(status.token) ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
+      attentionHtml +
+      tabs +
+      view("summary", summaryParts) +
+      view("changes", changeParts) +
+      view("checks", checkParts) +
+      `<section class="result-request" id="request-changes">${requestParts.join("\n")}</section>` +
+      `<p class="result-links meta">${links.join("")}</p>` +
+    `</section>`
   );
 }
 
@@ -18958,6 +19381,7 @@ function runPage(
   route: RouteStamp | null = null,
   publicationRow: Publication | null = null,
   review: ReviewFacts | null = null,
+  result: { detail: ResultDetail; tab: ResultTab; user: string; requestToken: string } | null = null,
 ): Screen {
   const rows = runFactsRows(run, taskId, running, route);
   // The conversation (Phase 2E, v2 S1g): every stdin injection as the
@@ -19163,16 +19587,38 @@ function runPage(
     running
       ? `<div id="run-facts">${rows}</div><p class="meta" id="run-facts-stamp"></p>`
       : `<details class="run-facts-details"><summary>Build details<span class="meta">${escape([run.runner, run.provider, run.outcome ?? "never finished"].join(" · "))}</span></summary><div id="run-facts">${rows}</div></details>`;
+  // A finished result (package 3) is the ONE shared panel — Summary /
+  // Changes / Checks with Request changes beside it — the same markup the
+  // review cockpit and the chat's result view render. Every other run
+  // (live, failed, interrupted) keeps its record-by-record page.
+  const resultPanel =
+    result === null
+      ? null
+      : resultPanelHtml(result.detail, {
+          place: "run",
+          tab: result.tab,
+          csrf,
+          user: result.user,
+          noted,
+          requestToken: result.requestToken,
+          hrefFor: one => (one === "summary" ? `/r/${run.id}` : `/r/${run.id}?tab=${one}`),
+          returnTo: `/r/${run.id}`,
+          back: null,
+        });
   return screen(`build #${run.id}`, [
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     running ? facts : "",
     conversation,
     transcript,
     peek,
-    handoff,
-    evidenceBundleCard(proofBundle, run, publicationFactsOf(publicationRow), review),
-    terminal === null ? "" : terminalDiffCard(terminal, run.id, editor, commentForm !== ""),
-    reviewCard,
+    ...(resultPanel === null
+      ? [
+          handoff,
+          evidenceBundleCard(proofBundle, run, publicationFactsOf(publicationRow), review),
+          terminal === null ? "" : terminalDiffCard(terminal, run.id, editor, commentForm !== ""),
+          reviewCard,
+        ]
+      : [resultPanel, editorToggleForm]),
     continueCard,
     running ? "" : facts,
     evidence,
@@ -19180,13 +19626,14 @@ function runPage(
   ].join("\n"), {
     chrome,
     // One composed functional script (arc 4 contract): the pollers when the
-    // run is live, the comment prefill when the form exists. Prefill alone
-    // never fetches — it earns neither connect-src nor the noscript refresh.
-    ...(liveScript === undefined && commentForm === ""
+    // run is live, the result panel's tabs/draft script or the legacy
+    // comment prefill when a form exists. Neither fetches — they earn
+    // neither connect-src nor the noscript refresh.
+    ...(liveScript === undefined && commentForm === "" && resultPanel === null
       ? {}
       : {
           functional: {
-            script: (liveScript ?? "") + (commentForm === "" ? "" : prefillScript()),
+            script: (liveScript ?? "") + (resultPanel !== null ? RESULT_REVIEW_SCRIPT : commentForm === "" ? "" : prefillScript()),
             fetches: liveScript !== undefined,
           },
         }),
@@ -19221,15 +19668,13 @@ function prefillScript(): string {
   );
 }
 
-/** The primary review act opens the disclosure it names. The anchor still
- * lands on the evidence card without JavaScript; this only removes the
- * otherwise confusing second click. */
+/** The primary review act opens the Checks view it names. The anchor
+ * still lands on the result without JavaScript (the server honours
+ * `?tab=checks`); this only removes the reload. */
 function reviewEvidenceScript(): string {
   return (
-    `(function(){var link=document.querySelector("[data-open-evidence]"),evidence=document.querySelector(".cockpit-evidence-group");` +
-    `if(!link||!evidence)return;link.addEventListener("click",function(ev){ev.preventDefault();evidence.setAttribute("open","");` +
-    `var primary=evidence.querySelector("[data-primary-evidence]");if(primary)primary.setAttribute("open","");` +
-    `(primary||evidence).scrollIntoView({behavior:"smooth",block:"start"});});})();`
+    `(function(){var link=document.querySelector("[data-open-evidence]"),tab=document.querySelector('[data-result-tab="checks"]'),panel=document.getElementById("result");` +
+    `if(!link||!tab||!panel)return;link.addEventListener("click",function(ev){ev.preventDefault();tab.click();panel.scrollIntoView({behavior:"smooth",block:"start"});});})();`
   );
 }
 

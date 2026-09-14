@@ -11574,6 +11574,31 @@ export class Store {
   }
 
   /**
+   * The revision tasks sealed FROM one reviewed run (workspace package 3):
+   * every task whose brief artifact belongs to the run, oldest first, with
+   * the child's current state and whether its own approval was given. A
+   * result page links forward to these; the child's approval card already
+   * links back to the source task and build. Read-only — the seal itself
+   * is `sealRevision`.
+   */
+  revisionsFromRun(runId: number): { id: string; title: string; state: TaskState; approved: boolean; createdAt: string }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT task_ref.external_id AS id
+         FROM task_ref JOIN artifact ON artifact.id = task_ref.revision_brief_artifact
+         WHERE artifact.run = ? AND task_ref.revision_of IS NOT NULL
+         ORDER BY task_ref.id`,
+      )
+      .all(runId) as { id: string }[];
+    return rows.flatMap(row => {
+      const task = this.getTask(row.id);
+      if (task === null) return [];
+      const scope = this.getScope(row.id);
+      return [{ id: task.id, title: task.title, state: task.state, approved: scope !== null && scope.approvedAt !== null, createdAt: task.createdAt }];
+    });
+  }
+
+  /**
    * Which repair chain a task CONTINUES (contract handoff task 2): the
    * nearest task in its revision ancestry — itself included — that is a
    * repair draft names the chain; failing that, the nearest ancestor that

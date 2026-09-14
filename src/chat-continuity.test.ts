@@ -580,3 +580,93 @@ test("a fragment set that lacks a region this page has — after the composer, o
   expect(window.document.querySelector("#task-chat-live h2")!.textContent).toBe("Building");
   expect(window.document.querySelector('[data-key="m2"] p')!.textContent).toBe("Paused.");
 });
+
+// ---- workspace package 3 (2026-09-13): the result detail beside the chat --
+import { RESULT_REVIEW_SCRIPT } from "./result-review.js";
+
+const panel = (run = "9") =>
+  `<div class="chat-workspace task-chat-workspace result-open"><section class="chat-main">${html({ live: live("", false) })}</section>` +
+  `<aside class="chat-result"><section class="card result-panel" id="result" data-result-panel data-result-place="chat" data-result-task="task-a" data-result-user="alex" data-result-run="${run}">` +
+  `<nav class="result-tabs" role="tablist"><a role="tab" href="/chat?task=task-a&result=${run}" data-result-tab="summary" aria-selected="true">Summary</a><a role="tab" href="/chat?task=task-a&result=${run}&tab=changes" data-result-tab="changes" aria-selected="false" tabindex="-1">Changes</a><a role="tab" href="/chat?task=task-a&result=${run}&tab=checks" data-result-tab="checks" aria-selected="false" tabindex="-1">Checks</a></nav>` +
+  `<div class="result-view" data-result-view="summary">summary</div><div class="result-view" data-result-view="changes" hidden><div class="diff-review" data-review-diff><button type="button" data-diff-mode="view" aria-pressed="true">View</button><button type="button" data-diff-mode="annotate" aria-pressed="false">Annotate</button><button type="button" class="pick-line" data-path="src/a.ts" data-line="2" data-side="new">pin</button></div></div><div class="result-view" data-result-view="checks" hidden>checks</div>` +
+  `<section class="result-request" id="request-changes"><form method="post" action="/r/${run}/comment" class="diff-comment-form" id="comment-form"><input type="hidden" name="csrf" value="c"><input type="hidden" name="return" value="/chat?task=task-a&result=${run}"><input type="hidden" name="request" value="${"b".repeat(32)}">` +
+  `<textarea name="note" maxlength="500"></textarea><span id="comment-note-limit"></span><details class="result-pin"><summary>Pin</summary><input type="text" name="path"><input type="text" name="line"></details><button type="submit">Add note</button></form></section></section></aside></div>`;
+const reviewKey = "standing-orders:review-draft:alex:task-a:9";
+const noteBox = () => window.document.querySelector('#comment-form [name="note"]') as HTMLTextAreaElement;
+const noteForm = () => window.document.getElementById("comment-form")!;
+const type = (text: string) => { noteBox().value = text; noteBox().dispatchEvent(new window.Event("input", { bubbles: true })); };
+
+test("package 3: beside the chat, the note form posts natively ONCE (the conversation's latch owns it), the review draft is kept under account/task/run beside the chat draft, and a pin fills the form", () => {
+  mount(panel());
+  window.eval(CHAT_CONTINUITY_SCRIPT); window.eval(RESULT_REVIEW_SCRIPT);
+  enter("Unsent chat words");
+  type("Round the footer too.");
+  expect(JSON.parse(window.sessionStorage.getItem(key)!)).toMatchObject({ text: "Unsent chat words" });
+  expect(JSON.parse(window.sessionStorage.getItem(reviewKey)!)).toMatchObject({ note: "Round the footer too.", path: "", line: "", request: "b".repeat(32) });
+  expect(window.document.getElementById("comment-note-limit")!.textContent).toBe("21 of 500 characters");
+  // A pin from Annotate mode fills the target and opens the disclosure; the draft follows.
+  (window.document.querySelector('button[data-diff-mode="annotate"]') as HTMLButtonElement).click();
+  expect(window.document.querySelector("[data-review-diff]")!.getAttribute("data-mode")).toBe("annotate");
+  (window.document.querySelector("button.pick-line") as HTMLButtonElement).click();
+  expect((noteForm().querySelector('[name="path"]') as HTMLInputElement).value).toBe("src/a.ts");
+  expect((noteForm().querySelector('[name="line"]') as HTMLInputElement).value).toBe("2");
+  expect((noteForm().querySelector("details.result-pin") as HTMLDetailsElement).open).toBe(true);
+  expect(JSON.parse(window.sessionStorage.getItem(reviewKey)!)).toMatchObject({ note: "Round the footer too.", path: "src/a.ts", line: "2" });
+  // The native POST goes through once; a second submit is latched — by the conversation's handler, not refused by the panel's.
+  expect(submit(noteForm())).toBe(true);
+  expect(noteForm().getAttribute("aria-busy")).toBe("true");
+  expect(submit(noteForm())).toBe(false);
+  expect(posts()).toHaveLength(0);
+  // Nothing was cleared by submitting: a refused post finds the draft waiting.
+  expect(JSON.parse(window.sessionStorage.getItem(reviewKey)!)).toMatchObject({ note: "Round the footer too." });
+  expect(JSON.parse(window.sessionStorage.getItem(key)!)).toMatchObject({ text: "Unsent chat words" });
+});
+
+test("package 3: the review draft is restored on return and cleared only by the receipt for ITS request token; another account's draft on the same tab is dropped, never shown", async () => {
+  window.sessionStorage.setItem(reviewKey, JSON.stringify({ note: "Kept across Back", path: "src/a.ts", line: "2", request: "b".repeat(32), at: Date.now() }));
+  window.sessionStorage.setItem("standing-orders:review-draft:sam:task-a:9", JSON.stringify({ note: "Sam's words", path: "", line: "", request: "c".repeat(32), at: Date.now() }));
+  window.sessionStorage.setItem("standing-orders:review-draft:alex:task-a:9", JSON.stringify({ note: "Kept across Back", path: "src/a.ts", line: "2", request: "b".repeat(32), at: Date.now() }));
+  mount(panel());
+  window.eval(CHAT_CONTINUITY_SCRIPT); window.eval(RESULT_REVIEW_SCRIPT);
+  expect(noteBox().value).toBe("Kept across Back");
+  expect((noteForm().querySelector('[name="path"]') as HTMLInputElement).value).toBe("src/a.ts");
+  expect((noteForm().querySelector("details.result-pin") as HTMLDetailsElement).open).toBe(true);
+  expect((noteForm().querySelector('[name="request"]') as HTMLInputElement).value).toBe("b".repeat(32));
+  expect(window.sessionStorage.getItem("standing-orders:review-draft:sam:task-a:9")).toBeNull();
+  // A receipt for a DIFFERENT token leaves the draft; the receipt for this token clears it.
+  await window.happyDOM.close();
+  window = new Window({ url: `https://standing.test/chat?task=task-a&result=9&noted=${"d".repeat(32)}` });
+  window.sessionStorage.setItem(reviewKey, JSON.stringify({ note: "Kept across Back", path: "", line: "", request: "b".repeat(32), at: Date.now() }));
+  mount(panel());
+  window.eval(RESULT_REVIEW_SCRIPT);
+  expect(noteBox().value).toBe("Kept across Back");
+  await window.happyDOM.close();
+  window = new Window({ url: `https://standing.test/chat?task=task-a&result=9&noted=${"b".repeat(32)}` });
+  window.sessionStorage.setItem(reviewKey, JSON.stringify({ note: "Kept across Back", path: "", line: "", request: "b".repeat(32), at: Date.now() }));
+  mount(panel());
+  window.eval(RESULT_REVIEW_SCRIPT);
+  expect(noteBox().value).toBe("");
+  expect(window.sessionStorage.getItem(reviewKey)).toBeNull();
+  // Another run of the same task keeps its own draft key.
+  await window.happyDOM.close();
+  window = new Window({ url: "https://standing.test/chat?task=task-a&result=10" });
+  window.sessionStorage.setItem(reviewKey, JSON.stringify({ note: "For run 9", path: "", line: "", request: "b".repeat(32), at: Date.now() }));
+  mount(panel("10"));
+  window.eval(RESULT_REVIEW_SCRIPT);
+  expect(noteBox().value).toBe("");
+  expect(JSON.parse(window.sessionStorage.getItem(reviewKey)!)).toMatchObject({ note: "For run 9" });
+});
+
+test("package 3: a tab switches in place and records ?tab= in the URL; the diff hides its pins until Annotate", async () => {
+  await window.happyDOM.close();
+  window = new Window({ url: "https://standing.test/chat?task=task-a&result=9" });
+  mount(panel());
+  window.eval(RESULT_REVIEW_SCRIPT);
+  const changes = window.document.querySelector('[data-result-tab="changes"]') as HTMLAnchorElement;
+  changes.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+  expect((window.document.querySelector('[data-result-view="changes"]') as HTMLElement).hidden).toBe(false);
+  expect((window.document.querySelector('[data-result-view="summary"]') as HTMLElement).hidden).toBe(true);
+  expect(changes.getAttribute("aria-selected")).toBe("true");
+  expect(window.location.href).toBe("https://standing.test/chat?task=task-a&result=9&tab=changes");
+  expect(window.document.querySelector("[data-review-diff]")!.getAttribute("data-mode")).toBe("view");
+});

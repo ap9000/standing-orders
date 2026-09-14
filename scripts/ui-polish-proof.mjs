@@ -194,8 +194,14 @@ try {
   // ---- result: receipt, annotated diff revision -------------------------
   await payload(page, `/t/${fixture.tasks.done}`, 'task-result');
   await shot(page, 'result-390', 'A finished task: outcome, changed files and proof lead (fixture)');
-  check('c3 result receipt renders outcome and proof', (await page.$('.completion-receipt')) !== null && /verified|evidence/i.test(await page.evaluate(() => document.querySelector('.completion-receipt')?.textContent ?? '')));
+  // Workspace package 3: the receipt's proof facts read "N/N acceptance
+  // criteria passed" and "validated visual proof"; the evidence itself
+  // opens through Open result.
+  check('c3 result receipt renders outcome and proof', (await page.$('.completion-receipt')) !== null && /acceptance criteria passed|validated|verified|evidence/i.test(await page.evaluate(() => document.querySelector('.completion-receipt')?.textContent ?? '')));
   await payload(page, `/r/${fixture.runId}`, 'run-page');
+  // Workspace package 3: the sealed diff lives under the result panel's
+  // Changes view (a real tab link the server honours); open it first.
+  await page.click('[data-result-tab="changes"]');
   await page.click('button[data-diff-mode="annotate"]');
   await page.click('button.diff-annotate.pick-line >> nth=0');
   // Follow-up on build 1540: the form advertises the server's own 500-character

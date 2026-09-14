@@ -1,6 +1,6 @@
 # Standing Orders: one workspace from request to result
 
-Date: September 13, 2026. Status: **packages 0–2 and the user's added concise-UI pass are implemented, verified, and merged into main; packages 3–5 remain planned**. The installed app is not updated by this merge. The baseline findings below describe the state when this plan was written; gates are recorded in [the packages 0/1 execution record](WORKSPACE_0_1_EXECUTION_2026-09-13.md) and [the package 2 independent acceptance](WORKSPACE_2_INDEPENDENT_REVIEW_2026-09-13.md).
+Date: September 13, 2026. Status: **packages 0–2 and the user's added concise-UI pass are implemented, verified, and merged into main; package 3 is implemented on branch `standing-orders/workspace-3-result-review-20260913` and awaits independent inspection; packages 4–5 remain planned**. The installed app is not updated by this merge. The baseline findings below describe the state when this plan was written; gates are recorded in [the packages 0/1 execution record](WORKSPACE_0_1_EXECUTION_2026-09-13.md), [the package 2 independent acceptance](WORKSPACE_2_INDEPENDENT_REVIEW_2026-09-13.md), and [the package 3 result](WORKSPACE_3_RESULT_REVIEW_2026-09-13.md).
 
 ## 1. The outcome
 
@@ -194,6 +194,8 @@ The extra repetition is justified by the two observed timing failures, not a per
 Unsent drafts remain same-tab storage with the existing expiry; no cloud draft sync or promise of survival after closing the tab. Durable sent messages/results can be reopened from another authorized device through existing access.
 
 ### Package 3 — result-first review and one revision loop
+
+**Status (2026-09-13):** implemented on `standing-orders/workspace-3-result-review-20260913`; see [the package 3 result](WORKSPACE_3_RESULT_REVIEW_2026-09-13.md) for what changed, the browser proof, and the limitations. Not yet independently inspected, merged, or installed.
 
 **Change:** the deliverable becomes the center of the experience, with regular feedback and annotations as two entrances to the same existing revision workflow.
 

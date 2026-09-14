@@ -21,6 +21,7 @@ import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
 import { resolveRoutineAuthority, routeOfTask } from "./agentconfig.js";
 import { projectRoute, readinessWords } from "./phase-routing.js";
 import type { MateProviderAnswer } from "./converse.js";
+import { resultFactsFromHtml } from "./result-review.js";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -1052,8 +1053,8 @@ describe("the operations console", () => {
 
     const runView = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
     expect(runView).toContain("tighten the guard here");
-    expect(runView).toContain("1 annotation ready");
-    expect(runView).toContain("Create revision from annotations");
+    expect(runView).toContain("1 note ready");
+    expect(runView).toContain(">Create revision</button>");
 
     const revised = await fetch(url(`/r/${run}/revise`), {
       method: "POST",
@@ -1073,14 +1074,18 @@ describe("the operations console", () => {
     expect(taskView).toContain("t-rev");
     expect(taskView).toContain("approve");
 
-    // The batch is consumed: a second seal has nothing to work with.
+    // The batch is consumed: a second seal has nothing to work with, so a
+    // replayed or double submission lands on the SAME revision (package 3)
+    // and mints no twin.
     const again = await fetch(url(`/r/${run}/revise`), {
       method: "POST",
       headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ csrf }),
       redirect: "manual",
     });
-    expect(again.status).toBe(400);
+    expect(again.status).toBe(303);
+    expect(again.headers.get("location")).toBe(target);
+    expect(store.revisionsFromRun(run).map(one => one.id)).toEqual([target.replace("/t/", "")]);
   });
 
   test("the review cockpit ranks an observed CI failure first and the plane never merges (M8.19); a red episode earns the repair draft from the cockpit and the run page (M8.18)", async () => {
@@ -1127,24 +1132,27 @@ describe("the operations console", () => {
     // The failing result is selected by default; its publication card says
     // exactly what the watcher saw, and offers the repair draft.
     expect(queue).toContain('data-review-task="t-pr2"');
-    expect(queue).toContain("CI failing — last checked by Standing Orders");
+    expect(queue).toContain("CI failing at the last check");
+    expect(queue).toContain('data-ci-observed="failing"');
     expect(queue).toContain(`action="/r/${run2}/draft-repair"`);
     expect(queue).toContain('data-next-action="draft-repair"');
-    // Read-only where it matters: no merge button anywhere, and the only
-    // forms post to endpoints that already exist.
-    expect(queue).not.toMatch(/merge/i);
+    // Read-only where it matters: no merge button or link anywhere (the
+    // publication words may SAY "no merge is recorded"), and the only forms
+    // post to endpoints that already exist.
+    expect(queue).not.toMatch(/<(?:button|a)\b[^>]*>[^<]*merge/i);
+    expect(queue).not.toMatch(/action="[^"]*merge/i);
     // The quiet PR, selected by its stable link, reads the observed green.
     const quiet = await (await fetch(url("/review?result=t-pr1"), { headers: { cookie } })).text();
     expect(quiet).toContain('data-review-task="t-pr1"');
-    expect(quiet).toContain("CI passing — observed");
+    expect(quiet).toContain("CI passing, observed");
     expect(quiet).toContain('data-next-action="publication"');
     expect(quiet).not.toContain("draft-repair");
 
     // The failing run's page carries the draft button; the quiet one does not.
     const failingRun = await (await fetch(url(`/r/${run2}`), { headers: { cookie } })).text();
-    expect(failingRun).toContain("draft a repair task");
+    expect(failingRun).toContain("Draft a repair task");
     const quietRun = await (await fetch(url(`/r/${run1}`), { headers: { cookie } })).text();
-    expect(quietRun).not.toContain("draft a repair task");
+    expect(quietRun).not.toMatch(/draft a repair task/i);
 
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(failingRun)?.[1] ?? "";
     const drafted = await fetch(url(`/r/${run2}/draft-repair`), {
@@ -1545,9 +1553,12 @@ describe("the operations console", () => {
     const screen = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
     expect(screen).toContain("$0.42");
     expect(screen).toContain("Wired the guard; tests added.");
-    expect(screen).toContain('class="card result-card"');
+    // Package 3: the finished result is the ONE shared panel — the
+    // handoff's conclusion leads it, its changes ride Summary, and the
+    // agent's own account of its checks sits under Checks.
+    expect(screen).toContain('class="card result-panel" id="result" data-result-panel data-result-place="run"');
     expect(screen).toContain("Added the payout boundary");
-    expect(screen).toContain("checks reported by the agent");
+    expect(screen).toContain("the agent's own account");
     expect(screen).toContain("Focused tests pass");
     expect(screen).toContain("Watch the first production run");
   });
@@ -1600,18 +1611,21 @@ describe("the operations console", () => {
     expect(task).toContain("2 files · +14 −3");
     expect(task).toContain("Physical Windows presentation is still awaiting certification.");
     expect(task).toContain(`src="/r/${run}/evidence/${screenshot}"`);
-    expect(task).toContain('href="/chat?task=t-receipt">Discuss or request changes →</a>');
+    // Package 3: one primary road — Open result — to the shared panel (the
+    // run page from the task, the chat's own result view from chat).
+    expect(task).toContain(`href="/r/${run}" data-open-result>Open result</a>`);
+    expect(task).toContain('href="/chat?task=t-receipt">Discuss in chat →</a>');
     expect(task).not.toContain("hold next attempt");
 
     const chat = await (await fetch(url("/chat?task=t-receipt"), { headers: { cookie } })).text();
     expect(chat).toContain('data-card-kind="result-receipt"');
     expect(chat).toContain("1/1 acceptance criteria passed");
     expect(chat).toContain("2 files · +14 −3");
-    expect(chat).toContain(`href="/r/${run}">Review & annotate</a>`);
-    expect(chat).toContain('href="#latest">Request changes in chat →</a>');
+    expect(chat).toContain(`href="/chat?task=t-receipt&amp;result=${run}" data-open-result>Open result</a>`);
+    expect(chat).toContain(`href="/r/${run}">Full build record →</a>`);
     expect(chat).toContain('aria-label="task progress"');
     expect(chat).toContain("Complete");
-    expect(chat).not.toContain("Discuss or request changes →");
+    expect(chat).not.toContain("Discuss in chat →");
     expect(chat).not.toContain("Get this task running");
   });
 
@@ -5713,20 +5727,21 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       expect(off).not.toContain("vscode://");
     });
 
-    test("UI polish 2026-09-13: a finished build leads with its result and diff; the machine facts fold under Build details", async () => {
+    test("UI polish 2026-09-13 / package 3: a finished build leads with its result panel and diff; the machine facts fold under Build details", async () => {
       const cookie = await login();
       const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
       const details = html.indexOf('<details class="run-facts-details"><summary>Build details<span class="meta">builder-1 · claude · built</span></summary><div id="run-facts">');
+      const panel = html.indexOf('class="card result-panel" id="result"');
       const diff = html.indexOf('<div class="diff-review" data-review-diff>');
-      const review = html.indexOf('<h2 id="review">Review and revise</h2>');
-      expect(details).toBeGreaterThan(-1);
-      expect(diff).toBeGreaterThan(-1);
+      const review = html.indexOf('<section class="result-request" id="request-changes">');
+      expect(panel).toBeGreaterThan(-1);
+      expect(diff).toBeGreaterThan(panel);
       expect(review).toBeGreaterThan(diff);
       expect(details).toBeGreaterThan(review);
-      // The annotation road is intact: the mode switch, the line pins, the form, no revision until a comment exists.
+      // The annotation road is intact: the mode switch, the line pins, the form, no revision until a note exists.
       expect(html).toContain('<button type="button" data-diff-mode="annotate" aria-pressed="false">Annotate</button>');
       expect(html).toContain('id="comment-form"');
-      expect(html).not.toContain("Create revision from annotations");
+      expect(html).not.toContain(">Create revision</button>");
       // No stamp region on a finished build: nothing polls the folded facts.
       expect(html).not.toContain('id="run-facts-stamp"');
     });
@@ -5755,12 +5770,15 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
         redirect: "manual",
       });
       expect(posted.status).toBe(303);
-      expect(posted.headers.get("location")).toBe(`/r/${runId}?noted=1#review`);
+      // Package 3: the receipt names the request token when the form
+      // carried one (so the browser clears exactly that draft) and "1"
+      // for a bare post; either way the reader lands on the form.
+      expect(posted.headers.get("location")).toBe(`/r/${runId}?noted=1#request-changes`);
       const noted = await (await fetch(url(`/r/${runId}?noted=1`), { headers: { cookie } })).text();
-      expect(noted).toContain('id="review"');
+      expect(noted).toContain('id="request-changes"');
       expect(noted).toMatch(/name="note"[^>]* autofocus/);
       const plain = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
-      expect(plain).not.toContain("autofocus");
+      expect(plain).not.toMatch(/name="note"[^>]* autofocus/);
     });
 
     test("follow-up on build 1540: the annotation form advertises the server's own 500-character limit, with helper text and a counter", async () => {
@@ -5768,10 +5786,10 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       const csrf = await csrfOf(cookie);
       const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
       // Advertised: maxlength is LIMITS.note (500), never the old 2000; the helper names it and the textarea points at the helper.
-      expect(html).toContain('<textarea name="note" rows="2" maxlength="500" placeholder="Explain what should change and why" aria-label="review comment" aria-describedby="comment-note-limit"></textarea></label><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
+      expect(html).toContain('<textarea name="note" rows="2" maxlength="500" placeholder="Describe the change and why" aria-label="review comment" aria-describedby="comment-note-limit"></textarea></label><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
       expect(html).not.toContain('maxlength="2000"');
-      // The counter rides the existing prefill script and reads the textarea's own maxlength.
-      expect(html).toContain('limit.textContent=noteBox.value.length===0?"up to "+noteBox.maxLength+" characters":noteBox.value.length+" of "+noteBox.maxLength+" characters"');
+      // The counter rides the result panel's script and reads the textarea's own maxlength.
+      expect(html).toContain("limit.textContent=noteBox.value.length===0?'up to '+noteBox.maxLength+' characters':noteBox.value.length+' of '+noteBox.maxLength+' characters'");
       // Enforced: exactly 500 lands; 501 is refused by the same rule the form now advertises.
       const post = (note: string) => fetch(url(`/r/${runId}/comment`), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, path: "src/a.ts", line: "2", note }), redirect: "manual" });
       const full = await post("n".repeat(500));
@@ -5796,8 +5814,8 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       expect(html).toContain('aria-label="Annotate src/a.ts, new line 2"');
       expect(html).toContain('data-diff-mode="view" aria-pressed="true"');
       expect(html).toContain('data-diff-mode="annotate" aria-pressed="false"');
-      expect(html).toContain('closest("button.pick-file,button.pick-line")');
-      expect(html).toContain('form.scrollIntoView({behavior:"smooth",block:"center"})');
+      expect(html).toContain("closest('button.pick-file,button.pick-line')");
+      expect(html).toContain("form.scrollIntoView({behavior:'smooth',block:'center'})");
       // prefill alone earns no network: script-src yes, connect-src no
       const csp = (await fetch(url(`/r/${runId}`), { headers: { cookie } })).headers.get("content-security-policy") ?? "";
       expect(csp).toMatch(/script-src 'nonce-/);
@@ -7568,8 +7586,8 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(bare).toContain('data-receipt-publication="none">Saved on the build branch. No publication, merge, or deployment is recorded here.</p>');
     expect(bare).toContain('data-work-status="verification-needed"');
     expect(bare).toContain("Result saved — verification needed");
-    expect(bare).toContain(`href="/r/${run}">Review full evidence</a>`);
-    expect(bare).toContain('href="/chat?task=t-proof">Discuss or request changes →</a>');
+    expect(bare).toContain(`href="/r/${run}" data-open-result>Open result</a>`);
+    expect(bare).toContain('href="/chat?task=t-proof">Discuss in chat →</a>');
 
     const sha256 = createHash("sha256").update("").digest("hex");
     for (const kind of ["handoff", "terminal-diff"] as const) {
@@ -7650,9 +7668,9 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // model-authored summary or a separate result record.
     const chat = await (await fetch(url("/chat?task=t-proof"), { headers: { cookie } })).text();
     expect(chat).toContain('class="card completion-receipt" data-card-kind="result-receipt"');
-    expect(chat).toContain(`href="/r/${run}">Review & annotate</a>`);
-    expect(chat).toContain('href="#latest">Request changes in chat →</a>');
-    expect(chat).not.toContain("Discuss or request changes →");
+    expect(chat).toContain(`href="/chat?task=t-proof&amp;result=${run}" data-open-result>Open result</a>`);
+    expect(chat).toContain(`href="/r/${run}">Full build record →</a>`);
+    expect(chat).not.toContain("Discuss in chat →");
 
     store.saveProofVerdict(run, "refuted", ["claimed changed path not in the sealed diff: src/other.ts"], T0);
     const refuted = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
@@ -10618,7 +10636,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(receipt).not.toContain(`build #${correction}`);
 
     const cockpit = await (await fetch(url("/review?result=t-result-lineage"), { headers: { cookie } })).text();
-    expect(cockpit).toContain(`href="/r/${built}">Full build history and evidence`);
+    expect(cockpit).toContain(`href="/r/${built}">Full build record →`);
     expect(cockpit).not.toContain(`href="/r/${correction}">Full build history and evidence`);
   });
 
@@ -10657,17 +10675,22 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(legacy).toContain("Result saved — verification needed");
     expect(legacy).toContain('data-work-status="verification-needed"');
     expect(legacy).toContain("no verification result");
-    expect(legacy).toContain("This older build has no verification result or captured evidence");
-    expect(legacy).toContain("no final diff or change summary was captured for this build");
+    expect(legacy).toContain("This build has no verification result or captured evidence");
+    expect(legacy).toContain("No final diff or change summary was captured for this build");
     expect(legacy).toContain('data-next-action="inspect-run"');
     expect(legacy).toContain(`href="/r/${legacyRun}">Open the build</a>`);
     // No diff means no annotation form — the endpoint would refuse it anyway.
     expect(legacy).not.toContain('id="comment-form"');
 
     const broken = await (await fetch(url("/review?result=t-broken"), { headers: { cookie } })).text();
-    expect(broken).toContain("patch: stored but unverifiable");
-    expect(broken).toContain("change summary: capture failed");
+    expect(broken).toContain("Diff unavailable: stored but unverifiable");
+    expect(broken).toContain("Change summary unavailable: capture failed");
     expect(broken).toContain("Check output (shortened)");
+    // Package 3: every evidence problem is also named in the open, ahead
+    // of the tabs, and the shared facts count them.
+    expect(broken).toContain("The sealed diff is unavailable: stored but unverifiable");
+    expect(broken).toContain("The check output was shortened when it was stored.");
+    expect(broken).toMatch(/data-result-evidence="problems:[0-9]+"/);
     expect(broken).not.toContain("tampered</code>");
     expect(broken).not.toContain('id="comment-form"');
     // The raw record is still one click away, exactly as stored.
@@ -10750,7 +10773,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     // Drift: two files outside src/payout/ are named, first in the list.
     expect(html).toContain('data-cockpit-drift="2"');
     expect(html).toContain("2 changed files outside the approved paths");
-    const files = /<ol class="cockpit-files">(.*?)<\/ol>/s.exec(html)?.[1] ?? "";
+    const files = /<ol class="cockpit-files result-files">(.*?)<\/ol>/s.exec(html)?.[1] ?? "";
     const items = [...files.matchAll(/<li data-file-priority="(\d)">.*?<a class="mono" href="#[^"]+">([^<]+)<\/a>/g)].map(m => [m[1], m[2]]);
     expect(items).toEqual([["0", "docs/we&quot;ird.md"], ["0", "package-lock.json"], ["2", "src/payout/guard.ts"]]);
     expect(files).toContain('data-outside-touches="1"');
@@ -10822,8 +10845,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const cookie = await login();
 
     const html = await (await fetch(url("/review?result=t-rich"), { headers: { cookie } })).text();
-    expect(html).toContain('data-proof-verdict="proof-refuted"');
-    expect(html).toContain("<strong>Standing Orders</strong>");
+    expect(html).toContain('class="row result-verdict" data-proof-verdict="proof-refuted"');
     expect(html).toContain("An independent review found conflicting evidence");
     expect(html).toContain('data-cockpit-source="machine"');
     expect(html).toContain("Check output");
@@ -10838,10 +10860,10 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(html).toMatch(new RegExp(`<img src="/r/${rich}/evidence/\\d+" alt="x after the change">`));
     expect(html).toContain('data-cockpit-source="caveats"');
     expect(html).toContain("The staging flag is still off.");
-    expect(html).toContain("follow-up: watch the first deploy");
+    expect(html).toContain("Follow-up: watch the first deploy");
     expect(html).toContain("Made it work.");
     expect(html).toContain("<li>changed x</li>");
-    expect(html).toContain("Not published — this build was not set to create a branch or pull request");
+    expect(html).toContain('data-receipt-publication="none">Saved on the build branch. No publication, merge, or deployment is recorded here.');
 
     const plain = await (await fetch(url("/review?result=t-bare"), { headers: { cookie } })).text();
     expect(plain).toContain("No automated check was configured for this build");
@@ -10849,7 +10871,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(plain).toContain("No screenshots were needed");
     expect(plain).toContain("No caveats were reported");
     expect(plain).toContain('data-matrix-state="missing"');
-    expect(plain).toContain('<span class="badge">failed</span> publication failed after 1 attempt — remote: permission denied');
+    expect(plain).toContain('data-receipt-publication="failed">The last publication attempt failed; no pull request or merge is recorded here. <span class="meta">After 1 attempt — remote: permission denied.</span>');
   });
 
   test("actions: only applicable roads appear, each through its existing endpoint with the session's CSRF; a bearer session sees no forms", async () => {
@@ -10866,10 +10888,11 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     // The primary act opens the captured check; the audited exception stays
     // beside the evidence and posts to the task's existing endpoint.
     expect(before).toContain('data-next-action="accept-proof"');
-    expect(before).toContain('href="#verification" data-open-evidence>Review evidence</a>');
-    expect(before).toContain('evidence.setAttribute("open","")');
-    expect(before).toContain('primary.setAttribute("open","")');
-    expect(before).toContain('data-primary-evidence');
+    // Package 3: the act opens the Checks view of the shared result panel —
+    // a real link the server honours, switched in place by the script.
+    expect(before).toContain('href="/review?result=t-act&amp;tab=checks#result" data-open-evidence>Review evidence</a>');
+    expect(before).toContain("tab.click()");
+    expect(before).toContain('data-result-tab="checks"');
     expect(before).toContain('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;');
     expect(before).not.toContain('<img src=x onerror="alert(1)">');
     expect(before).toContain('<form method="post" action="/t/t-act/accept-proof" class="cockpit-accept-form">');
@@ -10879,7 +10902,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(before).toContain(`<form method="post" action="/r/${run}/comment" class="diff-comment-form" id="comment-form">`);
     expect(before).toContain('<input type="hidden" name="return" value="/review?result=t-act">');
     // Follow-up on build 1540: this form advertises the server's 500-character limit too, with the same helper.
-    expect(before).toContain('maxlength="500" placeholder="Explain what should change and why" aria-label="review comment" aria-describedby="comment-note-limit"></textarea></label><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
+    expect(before).toContain('maxlength="500" placeholder="Describe the change and why" aria-label="review comment" aria-describedby="comment-note-limit"></textarea></label><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
     expect(before).not.toContain('maxlength="2000"');
     expect(before).not.toContain(`action="/r/${run}/revise"`);
     expect(before).not.toContain("draft-repair");
@@ -10888,7 +10911,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const forms = [...mainOf(before).matchAll(/<form[^>]*>(.*?)<\/form>/gs)];
     expect(forms.length).toBe(2);
     for (const form of forms) expect(form[1]).toContain('name="csrf"');
-    expect(before).toContain('document.getElementById("comment-form")');
+    expect(before).toContain("document.getElementById('comment-form')");
     const csrf = csrfOf(before);
 
     // No token: refused at the existing gate, nothing accepted.
@@ -10899,15 +10922,15 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     // An annotation from the cockpit lands back on the cockpit, focused.
     const noted = await post(cookie, `/r/${run}/comment`, { csrf, path: "x", line: "1", note: "tighten this", return: "/review?result=t-act" });
     expect(noted.status).toBe(303);
-    expect(noted.headers.get("location")).toBe("/review?result=t-act&noted=1#annotate");
+    expect(noted.headers.get("location")).toBe("/review?result=t-act&noted=1#request-changes");
     // Any other return shape falls back to the run page.
     const elsewhere = await post(cookie, `/r/${run}/comment`, { csrf, path: "x", line: "1", note: "and this", return: "https://evil.example/review?result=t-act" });
-    expect(elsewhere.headers.get("location")).toBe(`/r/${run}?noted=1#review`);
+    expect(elsewhere.headers.get("location")).toBe(`/r/${run}?noted=1#request-changes`);
 
     const after = await (await fetch(url("/review?result=t-act&noted=1"), { headers: { cookie } })).text();
     expect(after).toContain("tighten this");
-    expect(after).toContain(`<form method="post" action="/r/${run}/revise" class="revision-from-comments">`);
-    expect(after).toContain("2 comments ready");
+    expect(after).toContain(`<form method="post" action="/r/${run}/revise" class="card revision-from-comments">`);
+    expect(after).toContain("2 notes ready");
     expect(after).toContain('aria-label="review comment" aria-describedby="comment-note-limit" autofocus>');
     // Still the accept decision first: it resolves the state; the seal waits below.
     expect(after).toContain('data-next-action="accept-proof"');
@@ -10977,7 +11000,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(old).not.toContain("is in view here");
     expect(old).not.toContain('class="cockpit-row current"');
     expect(old).toContain("Result saved — checks reported by the agent");
-    expect(old).toContain(`href="/r/${oldRun}">Full build history and evidence →</a>`);
+    expect(old).toContain(`href="/r/${oldRun}">Full build record →</a>`);
     expect(old).toContain(`<form method="post" action="/r/${oldRun}/comment" class="diff-comment-form" id="comment-form">`);
     expect(old).toContain('data-next-action="annotate"');
 
@@ -11032,18 +11055,21 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     await boot();
     const cookie = await login();
     const empty = await (await fetch(url("/review?result=t-empty"), { headers: { cookie } })).text();
-    expect(empty).toContain("empty diff — captured successfully, nothing changed");
+    expect(empty).toContain("Empty diff — captured successfully, nothing changed.");
     expect(empty).not.toContain('id="comment-form"');
     expect(empty).not.toContain('class="pick-file"');
-    expect(empty).not.toContain('document.getElementById("comment-form")');
+    expect(empty).not.toContain('<div class="diff-review" data-review-diff>');
+    // Package 3: the request-changes region says why no note can attach.
+    expect(empty).toContain('data-result-feedback="unavailable"');
     expect(empty).toContain('data-next-action="inspect-run"');
     const full = await (await fetch(url("/review?result=t-full"), { headers: { cookie } })).text();
     expect(full).toContain(`action="/r/${fullRun}/comment"`);
     expect(full).toContain('class="pick-file"');
-    expect(full).toContain('document.getElementById("comment-form")');
+    expect(full).toContain("document.getElementById('comment-form')");
     const bearer = await (await fetch(url("/review?result=t-full"), { headers: { authorization: `Bearer alex:${approverToken}` } })).text();
     expect(bearer).not.toContain('class="pick-file"');
-    expect(bearer).not.toContain('document.getElementById("comment-form")');
+    expect(bearer).not.toContain('id="comment-form"');
+    expect(bearer).toContain("Sign in with a browser session to request changes.");
   });
 
   test("the archive and the result receipt lead into the cockpit; the cockpit leads back to the sealed record", async () => {
@@ -11061,7 +11087,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const task = await (await fetch(url("/t/t-link"), { headers: { cookie } })).text();
     expect(task).toContain('<a href="/review?result=t-link">Open in the review cockpit →</a>');
     const cockpit = await (await fetch(url("/review?result=t-link"), { headers: { cookie } })).text();
-    expect(cockpit).toContain(`<a href="/r/${run}">Full build history and evidence →</a>`);
+    expect(cockpit).toContain(`<a href="/r/${run}">Full build record →</a>`);
     expect(cockpit).toContain('href="/t/t-link"');
   });
 
@@ -11232,6 +11258,252 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const watchedPost = await post(viewerCookie, "/t/t-view/retry-review", { csrf: viewerCsrf, run: String(freshRun) });
     expect(watchedPost.status).toBe(403);
     expect(store.reviewRetryStateOf(freshRun)).toMatchObject({ state: "retryable" });
+  });
+
+  // ---- workspace package 3 (2026-09-13): result-first review -------------
+  const factsOf = (html: string) => resultFactsFromHtml(html);
+  const PATCH = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,3 +1,3 @@\n keep\n-old value\n+edited\n end\n";
+  const RICH = {
+    patch: PATCH,
+    stat: [{ path: "src/a.ts", additions: 1, deletions: 1 }],
+    handoff: { conclusion: "Edited the value.", changes: ["changed src/a.ts"], verification: ["ran the focused test"], followUps: [] },
+    proof: { version: 1, criteria: [{ id: "c1", statement: "It works", verdict: "met", how: "ran it", evidence: [{ kind: "check", ref: "npm test" }, { kind: "screenshot", ref: "evidence/x.png" }] }], checks: [{ command: "npm test", exitCode: 0, summary: "12 passed" }], changed: ["src/a.ts"], caveats: ["Only the USD path was exercised."], screenshots: [{ path: "evidence/x.png", caption: "x after the change" }] },
+    checkLog: "$ npm test\n12 passed\n",
+    screenshot: { path: "evidence/x.png", caption: "x after the change" },
+    verdict: { verdict: "verified" as const, reasons: ["the approved verification command passed"], matrix: [row("c1", "It works", "pass", [{ kind: "check", ref: "npm test" }, { kind: "screenshot", ref: "evidence/x.png" }])] },
+  };
+
+  test("package 3 c1: the task receipt, the chat receipt, the chat's result detail, the run page, and the cockpit stamp identical shared facts and lead with the deliverable", async () => {
+    const ref = seed("t-shared", "one result, five surfaces", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const run = build("t-shared", ref, RICH);
+    await boot();
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+    const pages = { task: await read("/t/t-shared"), chat: await read("/chat?task=t-shared"), detail: await read(`/chat?task=t-shared&result=${run}`), run: await read(`/r/${run}`), review: await read("/review?result=t-shared") };
+    const expected = { run: String(run), head: "b".repeat(12), base: "a".repeat(12), "head-source": "sealed diff", checks: "1/1", caveats: "1", evidence: "ok", publication: "none" };
+    for (const [name, html] of Object.entries(pages)) {
+      const stamped = factsOf(html);
+      expect(stamped.length, name).toBeGreaterThan(0);
+      for (const facts of stamped) expect(facts, name).toEqual(expected);
+    }
+    // The receipt's one primary road opens the shared detail; the detail
+    // itself is the same panel on every surface, and the deliverable leads.
+    expect(pages.chat).toContain(`href="/chat?task=t-shared&amp;result=${run}" data-open-result>Open result</a>`);
+    expect(pages.task).toContain(`href="/r/${run}" data-open-result>Open result</a>`);
+    for (const html of [pages.detail, pages.run, pages.review]) {
+      expect(html).toContain('data-result-panel');
+      expect(html).toContain('data-result-lead="screenshots"');
+      expect(html).toMatch(/data-result-view="summary"[^>]*><div class="receipt-visuals result-visuals"/);
+      expect(html).toContain('<nav class="result-tabs" role="tablist" aria-label="result views">');
+      expect(html).toContain('data-result-attention="1"');
+      expect(html).toContain("Only the USD path was exercised.");
+      expect(html).toContain('<section class="result-request" id="request-changes">');
+    }
+    expect(pages.detail).toContain('data-result-place="chat"');
+    expect(pages.run).toContain('data-result-place="run"');
+    expect(pages.review).toContain('data-result-place="review"');
+    // The caveat sits ahead of the tabs on every surface — before any readiness words below.
+    for (const html of [pages.detail, pages.run, pages.review]) expect(html.indexOf('data-result-attention="1"')).toBeLessThan(html.indexOf('class="result-tabs"'));
+    // The chat detail is the ONE auxiliary panel: the context aside steps aside, Back to chat leads.
+    expect(pages.detail).toContain('<div class="chat-workspace task-chat-workspace result-open" data-chat-result-open>');
+    expect(pages.detail).not.toContain('class="task-chat-context"');
+    expect(pages.detail).toContain('<a href="/chat?task=t-shared" data-result-back>← Back to chat</a>');
+    // The tab links are real URLs the server honours; the selected view is the only one shown.
+    expect(pages.run).toContain(`<a role="tab" href="/r/${run}?tab=changes" data-result-tab="changes" aria-selected="false" tabindex="-1">Changes<span class="count">1 file</span></a>`);
+    const changes = await read(`/r/${run}?tab=changes`);
+    expect(changes).toContain('<div class="result-view" role="tabpanel" data-result-view="changes">');
+    expect(changes).toContain('<div class="result-view" role="tabpanel" data-result-view="summary" hidden>');
+    expect(changes).toContain('<div class="diff-review" data-review-diff>');
+    expect(await read(`/r/${run}?tab=<script>`)).toContain('<div class="result-view" role="tabpanel" data-result-view="summary">');
+  });
+
+  test("package 3 c2: a tampered screenshot, a shortened check log, a failed change-summary capture, and an unverifiable report are named in the open, never rendered, never called validated; an investigation's report is escaped text", async () => {
+    const ref = seed("t-damaged", "evidence damaged after sealing", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const run = build("t-damaged", ref, { ...RICH, checkLog: "x".repeat(70 * 1024), stat: undefined });
+    storeEvidence(store, evidenceRoot, run, "diff-stat", "diff-stat.json", Buffer.from("{}"), "git diff --numstat (exit 128)", T0, { captureStatus: "failed" });
+    const shot = store.artifactsFor(run).find(one => one.kind === "screenshot");
+    if (shot === undefined) throw new Error("no screenshot");
+    writeFileSync(join(evidenceRoot, shot.key), Buffer.from("not the image any more"));
+    // An investigation: a scout run whose deliverable is a report.
+    const scoutRef = seed("t-scout", "investigate the drift", "/repo/main", { acceptance: [{ id: "c1", statement: "A report names the drift", evidence: ["manual-review"] }] });
+    const scoutRun = store.startRun({ taskRef: scoutRef, leaseId: "lease-scout", runner: "night-shift-1", provider: "claude", role: "scout", branch: "standing-orders/t-scout", worktree: "/pool/t-scout", now: T0, ...presented(store, scoutRef, "builder") });
+    const report = { title: "Where the drift lives", summary: "Two rounding sites disagree.", report: "# Drift\n\n<script>alert(1)</script> is text here.", followUps: [{ title: "Round the footer", goal: "Sum rounded rows." }] };
+    storeEvidence(store, evidenceRoot, scoutRun, "report", "report.json", Buffer.from(JSON.stringify(report), "utf8"), "scout report (validated)", T0);
+    storeEvidence(store, evidenceRoot, scoutRun, "handoff", "handoff.json", Buffer.from(JSON.stringify({ conclusion: "Found two sites.", changes: [], verification: [], followUps: [] }), "utf8"), "composed at completion", T0);
+    store.finishRun(scoutRun, { outcome: "no-change", committed: false, now: T0 });
+    store.setTaskState("t-scout", "done", T0);
+    // A second scout whose report was altered after sealing.
+    const brokenRef = seed("t-scout-broken", "a report that no longer verifies", "/repo/main", null);
+    const brokenRun = store.startRun({ taskRef: brokenRef, leaseId: "lease-scout-2", runner: "night-shift-1", provider: "claude", role: "scout", branch: "standing-orders/t-scout-broken", worktree: "/pool/t-scout-broken", now: T0, ...presented(store, brokenRef, "builder") });
+    storeEvidence(store, evidenceRoot, brokenRun, "report", "report.json", Buffer.from(JSON.stringify(report), "utf8"), "scout report (validated)", T0);
+    const reportArtifact = store.artifactsFor(brokenRun).find(one => one.kind === "report");
+    if (reportArtifact === undefined) throw new Error("no report");
+    writeFileSync(join(evidenceRoot, reportArtifact.key), "{}");
+    store.finishRun(brokenRun, { outcome: "no-change", committed: false, now: T0 });
+    store.setTaskState("t-scout-broken", "done", T0);
+    await boot();
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+
+    for (const html of [await read(`/r/${run}`), await read("/review?result=t-damaged"), await read(`/chat?task=t-damaged&result=${run}`)]) {
+      const facts = factsOf(html);
+      expect(facts.length).toBeGreaterThan(0);
+      for (const one of facts) expect(one.evidence).toBe("problems:3");
+      const attention = /<div class="result-attention" data-result-attention="([0-9]+)">([\s\S]*?)<\/div>/.exec(html);
+      expect(attention).not.toBeNull();
+      expect(attention?.[2]).toContain("Screenshot evidence/x.png no longer verifies (the file&#39;s size no longer matches its record) and is not shown.");
+      expect(attention?.[2]).toContain("The change summary is unavailable: capture failed");
+      expect(attention?.[2]).toContain("The check output was shortened when it was stored.");
+      expect(attention?.[2]).toContain("Only the USD path was exercised.");
+      // Nothing renders the tampered bytes or calls them validated.
+      expect(html).not.toContain(`<img src="/r/${run}/evidence/${shot.id}"`);
+      expect(html).not.toContain("validated visual proof");
+      expect(html).toContain("0 validated screenshots, 1 unavailable");
+      expect(html).toContain('data-result-lead="changes"');
+      expect(html).toContain("Check output (shortened)");
+      expect(html).toContain('<p class="problem">Change summary unavailable: capture failed');
+    }
+    // The receipt counts it honestly too, on the task page and in chat.
+    for (const html of [await read("/t/t-damaged"), await read("/chat?task=t-damaged")]) {
+      expect(html).toContain("<strong>1 screenshot</strong><small>1 unavailable — not validated</small>");
+      expect(html).not.toContain(`<img src="/r/${run}/evidence/${shot.id}"`);
+      expect(factsOf(html)[0]?.evidence).toBe("problems:3");
+    }
+    // The evidence road refuses the bytes.
+    expect((await fetch(url(`/r/${run}/evidence/${shot.id}`), { headers: { cookie } })).status).toBe(410);
+
+    // The investigation leads with its escaped report and a text download; it owes no diff.
+    const scout = await read(`/r/${scoutRun}`);
+    expect(scout).toContain('data-result-lead="report"');
+    expect(scout).toContain('<article class="result-report" data-result-report="ok"><h3>Where the drift lives</h3>');
+    expect(scout).toContain("&lt;script&gt;alert(1)&lt;/script&gt; is text here.");
+    expect(scout).not.toContain("<script>alert(1)</script>");
+    expect(scout).toContain(`/evidence/${store.artifactsFor(scoutRun).find(one => one.kind === "report")?.id}">Download the report</a>`);
+    expect(scout).toContain("1 proposed follow-up on <a href=\"/t/t-scout\">the task</a>");
+    expect(scout).toContain("an investigation changes nothing in the repository");
+    expect(scout).not.toContain("no-change conclusion is not verified");
+    expect(factsOf(scout)[0]).toMatchObject({ evidence: "ok", checks: "none" });
+    const downloaded = await fetch(url(`/r/${scoutRun}/evidence/${store.artifactsFor(scoutRun).find(one => one.kind === "report")?.id}`), { headers: { cookie } });
+    expect(downloaded.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(downloaded.headers.get("content-disposition")).toMatch(/^attachment/);
+    // The altered report is a named problem, not a rendered document.
+    const broken = await read(`/r/${brokenRun}`);
+    expect(broken).toContain('<p class="problem" data-result-report="problem">The report cannot be shown: ');
+    expect(broken).not.toContain('data-result-report="ok"');
+    expect(factsOf(broken)[0]?.evidence).toBe("problems:1");
+    expect(broken).toContain("The report cannot be shown:");
+  });
+
+  test("package 3 c3: a plain note and a line annotation are one batch and one sealed revision; a replayed note and a replayed seal mint nothing; the links run both ways; approval is untouched", async () => {
+    const ref = seed("t-loop", "one revision loop", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const run = build("t-loop", ref, RICH);
+    // The run built against the signed scope — the seal re-proves this binding.
+    store.stampRun(run, { scopeDigest: store.getScope("t-loop")!.digest });
+    await boot();
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+    const detail = await read(`/chat?task=t-loop&result=${run}`);
+    const csrf = csrfOf(detail);
+    const request = /name="request" value="([a-f0-9]{32})"/.exec(detail.slice(detail.indexOf('id="comment-form"')))?.[1] ?? "";
+    expect(request).toMatch(/^[a-f0-9]{32}$/);
+    expect(detail).toContain(`<input type="hidden" name="return" value="/chat?task=t-loop&amp;result=${run}">`);
+    // A plain note, from the chat's result view: back to that view, receipt named.
+    const noted = await post(cookie, `/r/${run}/comment`, { csrf, note: "Also round the footer.", request, return: `/chat?task=t-loop&result=${run}` });
+    expect(noted.status).toBe(303);
+    expect(noted.headers.get("location")).toBe(`/chat?task=t-loop&result=${run}&noted=${request}#request-changes`);
+    // The same submission again (a double click, a replayed POST): the same receipt, no second note.
+    const replayed = await post(cookie, `/r/${run}/comment`, { csrf, note: "Also round the footer.", request, return: `/chat?task=t-loop&result=${run}` });
+    expect(replayed.status).toBe(303);
+    expect(replayed.headers.get("location")).toBe(noted.headers.get("location"));
+    expect(store.liveDiffComments(run)).toHaveLength(1);
+    // Another account's replay of the same token is not this account's note.
+    const other = addApprover(store, "sam", T0, { name: "alex", token: approverToken });
+    if (!other.ok) throw new Error("sam");
+    const samLogin = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name: "sam", token: other.token }), redirect: "manual" });
+    const samCookie = (samLogin.headers.get("set-cookie") ?? "").split(";")[0] as string;
+    const samCsrf = csrfOf(await (await fetch(url(`/r/${run}`), { headers: { cookie: samCookie } })).text());
+    expect((await post(samCookie, `/r/${run}/comment`, { csrf: samCsrf, note: "Sam agrees.", request })).status).toBe(303);
+    expect(store.liveDiffComments(run).map(one => one.author)).toEqual(["alex", "sam"]);
+    // A pinned annotation through the same form.
+    const pinned = await post(cookie, `/r/${run}/comment`, { csrf, path: "src/a.ts", line: "2", note: "Name the helper." });
+    expect(pinned.status).toBe(303);
+    expect(pinned.headers.get("location")).toBe(`/r/${run}?noted=1#request-changes`);
+    const batch = store.liveDiffComments(run);
+    expect(batch.map(one => [one.path, one.line])).toEqual([[null, null], [null, null], ["src/a.ts", 2]]);
+    // The panel shows the batch beside the result with ONE seal, and the focused note box after a receipt.
+    const ready = await read(`/chat?task=t-loop&result=${run}&noted=${request}`);
+    expect(ready).toContain('<div class="diff-comments" data-result-notes="3">');
+    expect(ready).toContain("<strong>3 notes ready</strong>");
+    expect(ready).toMatch(/name="note"[^>]* autofocus/);
+    expect((ready.match(new RegExp(`action="/r/${run}/revise"`, "g")) ?? []).length).toBe(1);
+    // The seal: one revision, unapproved, exact lineage, the original evidence untouched.
+    const sealed = await post(cookie, `/r/${run}/revise`, { csrf, return: `/chat?task=t-loop&result=${run}` });
+    expect(sealed.status, await sealed.text()).toBe(303);
+    const revisionId = (sealed.headers.get("location") ?? "").replace("/t/", "");
+    expect(store.revisionsFromRun(run).map(one => one.id)).toEqual([revisionId]);
+    expect(store.getScope(revisionId)?.approvedAt).toBeNull();
+    expect(store.revisionLineageOf(revisionId, T0)).toMatchObject({ sourceTask: "t-loop", sourceRun: run });
+    expect(store.liveDiffComments(run)).toHaveLength(0);
+    expect(store.allDiffComments(run).every(one => one.consumedBy === revisionId)).toBe(true);
+    // Replays of the seal: the SAME revision, never a twin.
+    const again = await post(cookie, `/r/${run}/revise`, { csrf, return: `/chat?task=t-loop&result=${run}` });
+    expect(again.status).toBe(303);
+    expect(again.headers.get("location")).toBe(`/t/${revisionId}`);
+    expect(store.revisionsFromRun(run)).toHaveLength(1);
+    // Both directions: the result names the revision; the revision names the result (task page and chat card).
+    const after = await read(`/r/${run}`);
+    expect(after).toContain(`<p class="result-revision" data-result-revision="${revisionId}"><strong>Proposed revision</strong> <a href="/t/${revisionId}">`);
+    expect(after).toContain("waiting for your approval · this result stays on record");
+    expect(after).toContain('<div class="diff-review" data-review-diff>');
+    expect(after).toContain(`<img src="/r/${run}/evidence/`);
+    expect(after).not.toContain(`action="/r/${run}/revise"`);
+    const revisionTask = await read(`/t/${revisionId}`);
+    expect(revisionTask).toContain(`href="/r/${run}">build #${run}</a>`);
+    expect(revisionTask).toContain("Also round the footer.");
+    expect(revisionTask).toContain("Name the helper.");
+    expect(revisionTask).toContain('type="password"');
+    const revisionChat = await read(`/chat?task=${revisionId}`);
+    expect(revisionChat).toContain(`href="/chat?task=t-loop&amp;result=${run}" data-revision-source>Original result: build #${run} →</a>`);
+    // Looks good never became a publication or an approval.
+    expect(store.publicationForRun(run)).toBeNull();
+    expect(store.getScope(revisionId)?.approvedBy ?? null).toBeNull();
+  });
+
+  test("package 3 c4: a refused note sends the reader back to the view they came from; a result id that is not this task's is refused for the lens; the browser script rides every result surface", async () => {
+    const ref = seed("t-back", "recoverable", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const run = build("t-back", ref, RICH);
+    const otherRef = seed("t-other", "another task", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const otherRun = build("t-other", otherRef, RICH);
+    await boot();
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+    const csrf = csrfOf(await read(`/r/${run}`));
+    for (const back of [`/chat?task=t-back&result=${run}`, "/review?result=t-back", `/r/${run}`]) {
+      const refused = await post(cookie, `/r/${run}/comment`, { csrf, note: "x", line: "abc", return: back });
+      expect(refused.status).toBe(400);
+      expect(await refused.text()).toContain(`<a href="${back.replace(/&/g, "&amp;")}">`);
+    }
+    const foreign = await post(cookie, `/r/${run}/comment`, { csrf, note: "x", line: "abc", return: `/chat?task=t-back&result=${otherRun}` });
+    expect(await foreign.text()).toContain(`<a href="/r/${run}">`);
+    expect(store.liveDiffComments(run)).toHaveLength(0);
+    // The chat lens never shows another task's run as its result.
+    const wrong = await read(`/chat?task=t-back&result=${otherRun}`);
+    expect(wrong).not.toContain('<section class="card result-panel"');
+    expect(wrong).toContain("That result is not available for this task. The conversation is shown without it.");
+    expect(wrong).toContain('data-task="t-back"');
+    const nonsense = await read("/chat?task=t-back&result=abc");
+    expect(nonsense).not.toContain('<section class="card result-panel"');
+    expect(nonsense).toContain("That result is not available for this task.");
+    // The script that keeps drafts, the view, and the position rides the chat lens, the detail, the run page, and the cockpit — keyed by account, task, run.
+    for (const html of [await read("/chat?task=t-back"), await read(`/chat?task=t-back&result=${run}`), await read(`/r/${run}`), await read("/review?result=t-back")]) {
+      expect(html).toContain("draftPrefix+user+':'+task+':'+run");
+    }
+    expect(await read(`/r/${run}`)).toContain(`data-result-task="t-back" data-result-user="alex"`);
+    // A bearer session (no CSRF) sees the facts and no form, with the reason.
+    const bearer = await (await fetch(url(`/r/${run}`), { headers: { authorization: `Bearer alex:${approverToken}` } })).text();
+    expect(bearer).toContain("data-result-panel");
+    expect(bearer).not.toContain('id="comment-form"');
+    expect(bearer).toContain("Sign in with a browser session to request changes.");
   });
 });
 

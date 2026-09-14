@@ -29,6 +29,12 @@
  *     scope that waits for approval), used by the request → confirm →
  *     task focus → concise plan → exact approval journey; "slowly" still
  *     delays a plain reply so a live update can land while typing.
+ *   - workspace package 3 (2026-09-13): a finished scout INVESTIGATION
+ *     whose result is a verified report (no diff), and a finished build
+ *     whose evidence is damaged after sealing — a screenshot file altered
+ *     on disk, a diff-stat capture that failed, and a check log stored
+ *     shortened — so the result presentation must name what it cannot
+ *     show and never call it validated.
  *
  * Build first (`npm run build`), then `node scripts/ui-polish-fixture.mjs`
  * prints one JSON line with the URL and login. `scripts/ui-polish-proof.mjs`
@@ -371,16 +377,93 @@ export function startFixture(options = {}) {
   results.reviewing = reviewed('csv-null-cells', 'Render empty cells as empty strings', 14, 'running');
   results.reviewFailed = reviewed('csv-large-file', 'Stream files over ten thousand rows', 15, 'failed');
 
+  // --- workspace package 3: an investigation and damaged evidence ----------
+  const scout = fileTaskProposal(store, {
+    id: 'export-audit', title: 'Investigate where the export totals drift', repo,
+    goal: 'Read the export and settlement code paths and report where the totals can drift; change nothing.',
+    outOfScope: 'No code changes.', touches: [],
+    acceptance: [{ id: 'c1', statement: 'A written report names each drift source with file references.', how: null, evidence: ['manual-review'] }],
+    filedVia: 'console', planning: 'skip', deliverable: 'report',
+  }, hoursAgo(5));
+  if (!scout.ok) throw new Error(`fixture scout: ${scout.reason}`);
+  const scoutScope = store.getScope('export-audit');
+  approve(store, 'export-audit', 'polish-fixture', hoursAgo(4.9), scoutScope.digest, login.token);
+  const scoutRef = store.refFor('built-in', 'export-audit').id;
+  const scoutRun = store.startRun({
+    taskRef: scoutRef, leaseId: 'fixture-lease-scout', runner: 'night-shift-2', role: 'scout', branch: 'standing-orders/export-audit', worktree: join(repo, '.fixture-worktree-scout'),
+    now: hoursAgo(4.5), provider: 'codex', model: 'default', ...liveRoute('export-audit', 'build'),
+  });
+  const REPORT = {
+    title: 'Where the export totals drift',
+    summary: 'Two rounding sites disagree: settle() rounds per row while the CSV footer sums unrounded cents, so files over a few thousand rows drift by whole cents. Nothing else in the export path loses precision.',
+    report: '# Where the export totals drift\n\n## 1. Per-row rounding (src/payout.ts:41)\n\n`settle()` rounds each row to the cent.\n\n## 2. Footer sums unrounded cents (src/export/csv.ts:118)\n\nThe subtotal row sums `row.cents * rate` before rounding, so it disagrees with the rows above it once the half-cents accumulate.\n\n## What is NOT a problem\n\n- The JSON export uses the same rounded values everywhere.\n- Timezone handling does not touch amounts.\n\n<script>alert("this is text, never markup")</script>',
+    followUps: [{ title: 'Round the CSV footer the way settle() rounds rows', goal: 'Sum rounded row values in the subtotal row so the footer reconciles with the rows above it.' }],
+  };
+  storeEvidence(store, evidenceRoot, scoutRun, 'report', 'report.json', Buffer.from(JSON.stringify(REPORT, null, 2), 'utf8'), 'scout report (validated) [fixture: synthetic]', hoursAgo(4.2));
+  storeEvidence(store, evidenceRoot, scoutRun, 'handoff', 'handoff.json', Buffer.from(JSON.stringify({ schema: 1, outcome: 'no-change', committed: false, conclusion: 'Found two rounding sites that disagree; the report names both with file references and proposes one follow-up.', changes: [], verification: ['Read both code paths end to end; no command was run.'], followUps: [], decisionsIncorporated: [] }, null, 2), 'utf8'), 'composed at completion [fixture: synthetic]', hoursAgo(4.2));
+  store.finishRun(scoutRun, { outcome: 'no-change', committed: false, now: hoursAgo(4.1) });
+  store.setTaskState('export-audit', 'done', hoursAgo(4.1));
+  results.investigation = { taskId: 'export-audit', runId: scoutRun, ref: scoutRef };
+
+  // Damaged after sealing: the screenshot bytes are altered on disk, the
+  // diff-stat capture failed (exit 128), and the check log was stored
+  // shortened. The verdict stays what the machine recorded at completion.
+  const damaged = (() => {
+    const id = 'csv-footer';
+    const filed = fileTaskProposal(store, {
+      id, title: 'Sum the CSV footer from rounded rows', repo,
+      goal: 'Make the subtotal row sum the rounded row values so the footer reconciles.',
+      outOfScope: 'No ledger schema changes.', touches: ['src/payout.ts', 'src/payout.test.ts'],
+      acceptance: [
+        { id: 'c1', statement: 'Ledger-fixture tests demonstrate the half-cent drift is gone.', how: null, evidence: ['check', 'changed-path'] },
+        { id: 'c2', statement: 'The console formatter still renders payout dashboards.', how: null, evidence: ['screenshot'] },
+      ],
+      filedVia: 'console', planning: 'skip',
+    }, hoursAgo(3.5));
+    if (!filed.ok) throw new Error(`fixture ${id}: ${filed.reason}`);
+    const scope = store.getScope(id);
+    approve(store, id, 'polish-fixture', hoursAgo(3.4), scope.digest, login.token);
+    const ref = store.refFor('built-in', id).id;
+    const runId = store.startRun({
+      taskRef: ref, leaseId: `fixture-lease-${id}`, runner: 'night-shift-2', branch: `standing-orders/${id}`, worktree: join(repo, `.fixture-worktree-${id}`),
+      now: hoursAgo(3.3), provider: 'codex', model: 'default', ...liveRoute(id, 'build'),
+    });
+    store.stampRun(runId, { baseRevision: '4b825dc642cb6eb9a060e54bf8d69288fbee4904', scopeDigest: scope.digest });
+    storeEvidence(store, evidenceRoot, runId, 'terminal-diff', 'terminal-diff.patch', Buffer.from(PATCH, 'utf8'), 'git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [fixture: synthetic]', hoursAgo(3.2), { captureStatus: 'ok' });
+    storeEvidence(store, evidenceRoot, runId, 'diff-stat', 'diff-stat.json', Buffer.from('{}', 'utf8'), 'git diff --numstat -z (exit 128) [fixture: synthetic]', hoursAgo(3.2), { captureStatus: 'failed' });
+    storeEvidence(store, evidenceRoot, runId, 'handoff', 'handoff.json', Buffer.from(JSON.stringify(HANDOFF, null, 2), 'utf8'), 'composed at completion [fixture: synthetic]', hoursAgo(3.1));
+    storeEvidence(store, evidenceRoot, runId, 'proof', 'proof.json', Buffer.from(JSON.stringify({ ...PROOF, caveats: ['The footer test covers USD only; other currencies were not exercised.'] }, null, 2), 'utf8'), 'agent-authored proof (validated) [fixture: synthetic]', hoursAgo(3.1));
+    storeEvidence(store, evidenceRoot, runId, 'screenshot', 'screenshot-fixture.png', png, 'agent-claimed screenshot at evidence/payout-dashboard.png (validated png) [fixture: synthetic]', hoursAgo(3.1));
+    storeEvidence(store, evidenceRoot, runId, 'check-log', 'check-log.txt', Buffer.alloc(70 * 1024, 'x'), 'sh -c "npm test" (exit 0) [fixture: synthetic]', hoursAgo(3.1));
+    const verdict = adjudicate({
+      proofArtifactPresent: true, proofParse: parseProof(JSON.stringify(PROOF)), handoffPresent: true, terminalDiffPresent: true, terminalDiffCaptureStatus: 'ok',
+      diffStat: { captured: false, truncated: false, paths: new Set() },
+      verifyCommand: { configured: true, ran: true, exitCode: 0 },
+      screenshots: [{ path: 'evidence/payout-dashboard.png', ok: true, bytes: png.length, dims: imageDimensions(png, 'png') }],
+      approvedCriteria: scope.acceptance,
+    });
+    store.saveProofVerdict(runId, verdict.verdict, verdict.reasons, hoursAgo(3), verdict.matrix);
+    store.finishRun(runId, { outcome: 'built', committed: true, now: hoursAgo(3) });
+    store.setTaskState(id, 'done', hoursAgo(3));
+    // The damage, after sealing: the image file no longer hashes to its record.
+    const shot = store.artifactsFor(runId).find(one => one.kind === 'screenshot');
+    writeFileSync(join(evidenceRoot, shot.key), Buffer.concat([png.subarray(0, 64), Buffer.from('tampered after sealing')]));
+    return { taskId: id, runId, ref };
+  })();
+  results.damaged = damaged;
+
   const statusTasks = {
     failedChecks: results.failedChecks.taskId, mismatched: results.mismatched.taskId, missingProof: results.missingProof.taskId,
     attested: results.attested.taskId, accepted: results.accepted.taskId, published: results.published.taskId, merged: results.merged.taskId,
     waitingForBuilder: waitingForBuilder.taskId, chained: chained.taskId, held: held.taskId, failed: failed.taskId, cancelled: cancelled.taskId,
     running: running.taskId, paused: paused.taskId,
     pendingReview: results.pendingReview.taskId, reviewing: results.reviewing.taskId, reviewFailed: results.reviewFailed.taskId,
+    investigation: results.investigation.taskId, damaged: results.damaged.taskId,
   };
   const statusRuns = {
     failedChecks: results.failedChecks.runId, mismatched: results.mismatched.runId, missingProof: results.missingProof.runId, attested: results.attested.runId, accepted: results.accepted.runId, published: results.published.runId, merged: results.merged.runId, running: liveRun, paused: pausedRun,
     pendingReview: results.pendingReview.runId, reviewing: results.reviewing.runId, reviewFailed: results.reviewFailed.runId,
+    investigation: results.investigation.runId, damaged: results.damaged.runId,
   };
 
   // --- the scripted conversation ------------------------------------------
