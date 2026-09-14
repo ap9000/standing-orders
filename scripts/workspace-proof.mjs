@@ -311,7 +311,7 @@ async function densityPass() {
     const kind = name === 'phone' ? 'phone' : 'desktop';
     await page.goto(`${fixture.url}/chat?task=${T.failedChecks}`);
     await page.fill('.composer textarea', 'What is the state of this task, and what should I do next?');
-    await submit(page, '.composer button[type="submit"]');
+    await page.click('.composer button[type="submit"]'); // package 2: the enhanced send stays on this document; the reply lands live
     for (let i = 0; i < 40 && (await page.$('.msg.mate')) === null; i++) { await page.waitForTimeout(500); if (i % 4 === 3) await page.reload(); }
     await scrollTo(page, '.msg.op', 96);
     await record(`chat-focused-populated-${kind}`, page, viewport, `density-${kind}-chat-focused-populated`, `A populated focused conversation at ${viewport.width}×${viewport.height}, scrolled to the operator's message (fixture)`);
@@ -669,7 +669,8 @@ try {
         headMeta: document.querySelector('.chat-head > div > p.meta')?.textContent ?? null,
         emptyLines: [...document.querySelectorAll('.chat-empty p')].map(p => p.textContent),
         starters: [...document.querySelectorAll('.chat-prompts form button')].map(b => b.textContent),
-        hints: [...document.querySelectorAll('.composer-hint')].map(p => p.textContent),
+        // Package 2: the hidden Reconnect control is a composer hint too; only a VISIBLE second hint would break the concise contract.
+        hints: [...document.querySelectorAll('.composer-hint')].filter(p => !p.hidden).map(p => p.textContent),
         connection: document.getElementById('chat-connection')?.textContent ?? null,
         oneMessage: document.body.textContent.includes('One message is enough'),
       }));
@@ -683,7 +684,7 @@ try {
       }));
       check(`c6 ${name}: a fresh focused conversation keeps the task title, one sentence, three starters, and the journey headline`, focusedFresh.titleMeta === null && focusedFresh.emptyLines.length === 1 && focusedFresh.starters.length === 3 && focusedFresh.journey === 'Changes saved, but checks failed', JSON.stringify(focusedFresh));
       await page.fill('.composer textarea', 'What is the state of this task, and what should I do next?');
-      await submit(page, '.composer button[type="submit"]');
+      await page.click('.composer button[type="submit"]'); // package 2: the enhanced send stays on this document; the reply lands live
       for (let i = 0; i < 40 && (await page.$('.msg.mate')) === null; i++) { await page.waitForTimeout(500); if (i % 4 === 3) await page.reload(); }
       const populated = await page.evaluate(() => ({
         operator: [...document.querySelectorAll('.msg.op')].map(m => m.textContent.trim()),

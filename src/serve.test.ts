@@ -8475,6 +8475,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
   let repoDir: string;
   let script: (() => Response)[];
   let subscriptionAnswers: MateProviderAnswer[];
+  /** What the scripted subscription runner was handed (package 2): the
+   * exact history — with its task context — the provider would see. */
+  let subscriptionRequests: { history: { role: string; text?: string }[] }[];
   let clockNow: Date;
 
   const url = (path: string) => `${base}${path}`;
@@ -8521,6 +8524,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     clockNow = T0;
     script = [];
     subscriptionAnswers = [];
+    subscriptionRequests = [];
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
@@ -8540,7 +8544,8 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
         if (next === undefined) throw new Error("the script ran out");
         return next();
       }) as typeof fetch,
-      subscriptionChatRunner: async () => {
+      subscriptionChatRunner: async request => {
+        subscriptionRequests.push(request as unknown as { history: { role: string; text?: string }[] });
         const next = subscriptionAnswers.shift();
         if (next === undefined) throw new Error("the subscription script ran out");
         return { ok: true, answer: next };
@@ -8558,6 +8563,12 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     rmSync(evidenceRoot, { recursive: true, force: true });
     rmSync(repoDir, { recursive: true, force: true });
   });
+
+  /** The status poll's JSON (package 2). */
+  const status = async (cookie: string, query = ""): Promise<Record<string, unknown>> => (await fetch(url(`/chat/mate/status${query}`), { headers: { cookie } })).json() as Promise<Record<string, unknown>>;
+  /** The enhanced send: the same endpoint and fields, asking for JSON. */
+  const sendJson = (cookie: string, fields: Record<string, string>) =>
+    fetch(url("/chat"), { method: "POST", headers: { cookie, origin: base, accept: "application/json" }, body: new URLSearchParams(fields), redirect: "manual" });
 
   test("the mint card is the one password ceremony; the thread then takes messages without one", async () => {
     const cookie = await login();
@@ -8628,7 +8639,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect((await post(cookie, "/chat", fields)).status).toBe(303); await settle();
     expect(store.recentMateTurns("alex", 10)).toHaveLength(1);
     const state = await fetch(url(`/chat/mate/status?request=${request}`), { headers: { cookie } });
-    expect(await state.json()).toMatchObject({ session, received: true, pending: false, version: expect.stringMatching(/:answered$/) });
+    expect(await state.json()).toMatchObject({ session, task: "", received: true, pending: false, version: expect.stringMatching(/^[a-f0-9]{16}$/) });
     expect(await (await fetch(url("/chat/mate/status?request=bad"), { headers: { cookie } })).json()).toMatchObject({ received: false });
     await post(cookie, "/chat", { ...fields, message: "Different work" }); await settle();
     expect(store.recentMateTurns("alex", 10)).toHaveLength(1);
@@ -8670,7 +8681,13 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain('aria-label="current task"');
     expect(html).toContain('href="/chat?task=a" class="active" aria-current="page">Ask</a>');
     expect(html).toContain('aria-label="task progress"');
-    expect(html).toContain("Review the plan & start");
+    // Package 2: a concise plan leads, ONE Review plan action opens the
+    // exact terms, and Approve & start is the only submit.
+    expect(html).toContain('<section class="card chat-action-card chat-plan" id="task-chat-action" data-approval="');
+    expect(html).toContain("Plan ready — approve to start");
+    expect(html).toContain('<dl class="chat-plan-brief"><div><dt>Goal</dt><dd><p>do a</p></dd></div>');
+    expect(html).toContain('<summary><span class="button-link">Review plan</span>');
+    expect(html.match(/<button type="submit">Approve & start<\/button>/g)).toHaveLength(1);
     expect(html).toContain('action="/t/a/approve"');
     expect(html).toContain('name="return" value="/chat?task=a"');
     expect(html).toContain('data-poll="0"');
@@ -8703,7 +8720,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     // starters, and an idle status line with nothing to say — no intro
     // sentence under the title and no second hint under the composer.
     const focusedFresh = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
-    expect(focusedFresh).toContain('<div class="chat-empty"><strong>What do you want to understand or change?</strong><p class="meta">I read the task first — ask anything, or start below.</p></div>');
+    expect(focusedFresh).toContain('<div class="chat-empty" data-key="empty"><strong>What do you want to understand or change?</strong><p class="meta">I read the task first — ask anything, or start below.</p></div>');
     expect(focusedFresh).not.toContain("Ask, steer, or revise this task in the same unified conversation.");
     expect(focusedFresh).not.toContain("choose a useful starting point");
     expect(focusedFresh).not.toContain("Changes appear as cards for you to confirm.");
@@ -8733,7 +8750,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain("without changing the task’s scope");
     expect(html).toContain('name="task" value="a"');
     expect(html).toContain('name="return" value="/chat?task=a"');
-    expect(html).toContain('data-message-role="operator"><p style="white-space:pre-wrap">Make the next pass focus on the mobile navigation.</p>');
+    expect(html).toContain('data-message-role="operator" data-key="m1"><p style="white-space:pre-wrap">Make the next pass focus on the mobile navigation.</p>');
     expect(html).not.toContain("Current task: a.");
     // The populated thread keeps every real message and card; the empty-state sentence is gone with the emptiness.
     expect(html).not.toContain('<div class="chat-empty">');
@@ -8852,10 +8869,21 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const taskId = typeof proposal?.outcome?.["taskId"] === "string" ? proposal.outcome["taskId"] : null;
     if (taskId === null) throw new Error("the task proposal did not file");
     expect(store.lookupRef(taskId)?.plan).toBe("requested");
+    // Package 2: the confirmation leads to the task it actually created —
+    // the id is the door's recorded outcome — and the card names it.
+    expect(confirmed.headers.get("location")).toBe(`/chat?task=${taskId}#task-chat-live`);
     html = await page(cookie);
     expect(html).toContain("the planner is reading the project before you approve anything");
-    expect(html).toContain(`href="/chat?task=${taskId}">continue in chat</a>`);
+    expect(html).toContain(`<a class="button-link" href="/chat?task=${taskId}" data-filed-task="${taskId}">Open task <span class="mono">${taskId}</span> →</a>`);
     expect(html).toContain(`href="/t/${taskId}">overview</a>`);
+    const focused = await (await fetch(url(`/chat?task=${taskId}`), { headers: { cookie } })).text();
+    expect(focused).toContain("The planner is preparing a scope for you");
+    expect(focused).toContain(`data-chat-task="${taskId}"`);
+    // Confirming again creates no second task: the door says so, no redirect into a lens.
+    const again = await post(cookie, "/chat/proposal/1/confirm", { csrf });
+    expect(again.headers.get("location")).toBe("/chat#latest");
+    expect(store.listTasks().filter(one => one.title === "Polish the result cockpit")).toHaveLength(1);
+    expect(store.getMateProposal(1)?.state).toBe("confirmed");
   });
 
   test("a logged-in Codex membership has no dollar maximum in setup, minting, or the live conversation", async () => {
@@ -8915,7 +8943,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const turn = store.recentMateTurns("alex", 1)[0];
     expect(turn).toMatchObject({ state: "answered", steps: 2 });
     let html = await page(cookie);
-    expect(html).toContain('<div class="msg op" data-message-role="operator"><p style="white-space:pre-wrap">what is queued?</p></div>');
+    expect(html).toContain('<div class="msg op" data-message-role="operator" data-key="m1"><p style="white-space:pre-wrap">what is queued?</p></div>');
     expect(html).toContain("I propose moving b to the front.");
     expect(html).toContain('class="chat-activity"');
     expect(html).toContain("read 1");
@@ -9053,8 +9081,8 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(live).not.toContain("answering with");
     expect(live).toContain('<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">anthropic-api</span></summary>');
     expect(live).toContain("<span>this conversation: $0.00 of $50.00</span>");
-    expect(live.indexOf('<details class="chat-fleet-context"><summary>Project overview<span class="meta">')).toBeLessThan(live.indexOf('<div class="thread">'));
-    expect(live.indexOf('<div class="thread">')).toBeLessThan(live.indexOf('class="card composer"'));
+    expect(live.indexOf('<details class="chat-fleet-context"><summary>Project overview<span class="meta">')).toBeLessThan(live.indexOf('<div class="thread" data-key="thread" data-chat-list>'));
+    expect(live.indexOf('<div class="thread" data-key="thread" data-chat-list>')).toBeLessThan(live.indexOf('class="card composer"'));
   });
 
   test("follow-up on build 1540: a NEW empty conversation folds the desktop overview behind its summary and tightens the empty state", async () => {
@@ -9062,9 +9090,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     await mint(cookie);
     const fresh = await page(cookie);
     // The fresh thread: the empty state, no messages, the composer after it.
-    expect(fresh).toContain('<div class="chat-empty"><strong>What do you want to get done?</strong>');
+    expect(fresh).toContain('<div class="chat-empty" data-key="empty"><strong>What do you want to get done?</strong>');
     expect(fresh).not.toContain('data-message-role=');
-    expect(fresh.indexOf('<div class="chat-empty">')).toBeLessThan(fresh.indexOf('class="card composer"'));
+    expect(fresh.indexOf('<div class="chat-empty" data-key="empty">')).toBeLessThan(fresh.indexOf('class="card composer"'));
     // The overview is folded on the server and the chrome script no longer forces it open over an empty thread;
     // its summary still carries the two counts a reader scans.
     expect(fresh).toContain('<details class="chat-fleet-context"><summary>Project overview<span class="meta">');
@@ -9219,6 +9247,207 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).not.toContain("malformed and was discarded");
     const bearer = await fetch(url("/chat/mate/mint"), { method: "POST", headers: { authorization: `Bearer ${approverToken}`, origin: base }, body: new URLSearchParams({ "ceiling-usd": "5", token: approverToken }), redirect: "manual" });
     expect([401, 403]).toContain(bearer.status);
+  });
+  test("package 2: the status poll versions the displayed facts — no churn on time or minted nonces — and returns fragments only on change, bound to the lens", async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    const html = await page(cookie);
+    const version = /data-chat-version="([a-f0-9]{16})"/.exec(html)?.[1];
+    if (version === undefined) throw new Error("no version on the composer");
+    expect(html).toContain('data-chat-task=""');
+    expect(html).toContain('<div id="chat-thread" data-chat-region="thread">');
+    expect(html).toContain('<button type="button" class="chat-new-update" id="chat-new-update" hidden>New update ↓</button>');
+    expect(html).toContain('<p class="meta composer-hint" id="chat-reconnect" hidden><button type="button" class="quiet">Reconnect</button></p>');
+    const same = await status(cookie, `?version=${version}`);
+    expect(same).toEqual({ session: 1, task: "", version, pending: false, received: false, approval: "" });
+    // Ten minutes later, with nothing changed, the version is the same:
+    // relative ages are not facts, and no token was minted.
+    clockNow = new Date(T0.getTime() + 10 * 60_000);
+    expect((await status(cookie, `?version=${version}`))["fragments"]).toBeUndefined();
+    expect((await status(cookie, `?version=${version}`))["version"]).toBe(version);
+    // A caller with an older version gets the three fragments.
+    const fragments = (await status(cookie, "?version=stale"))["fragments"] as Record<string, string | null>;
+    expect(fragments["thread"]).toContain('<div id="chat-thread" data-chat-region="thread">');
+    expect(fragments["thread"]).toContain('<div class="chat-empty" data-key="empty">');
+    expect(fragments["after"]).toContain('<div id="chat-after-composer" data-chat-region="after"><div class="chat-prompts"');
+    expect(fragments["live"]).toBeNull();
+    // A reply changes the version; the fragment carries the keyed message
+    // and card, and the thinking card while a turn is live.
+    let finish!: (value: Response) => void;
+    script.push(() => new Promise<Response>(resolve => { finish = resolve; }) as unknown as Response);
+    await post(cookie, "/chat", { csrf, message: "What is queued?" });
+    const live = await status(cookie, `?version=${version}`);
+    expect(live["pending"]).toBe(true);
+    expect(live["version"]).not.toBe(version);
+    expect((live["fragments"] as Record<string, string>)["thread"]).toContain('data-key="pending"');
+    expect((live["fragments"] as Record<string, string>)["thread"]).toContain('data-key="m1"><p style="white-space:pre-wrap">What is queued?</p>');
+    finish(answer([{ type: "text", text: "Two tasks are queued." }])); await settle();
+    const answered = await status(cookie, `?version=${String(live["version"])}`);
+    expect(answered["pending"]).toBe(false);
+    expect(answered["version"]).not.toBe(live["version"]);
+    expect((answered["fragments"] as Record<string, string>)["thread"]).toContain('data-message-role="assistant" data-key="m2" id="latest"');
+    expect((answered["fragments"] as Record<string, string>)["thread"]).toContain('data-key="starters"');
+    expect((answered["fragments"] as Record<string, string>)["after"]).toBe('<div id="chat-after-composer" data-chat-region="after"></div>');
+    // The task lens: its own version, its approval digest, a live fragment
+    // WITHOUT a password or a nonce, and no churn across polls.
+    const focused = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    const focusedVersion = /data-chat-version="([a-f0-9]{16})"/.exec(focused)?.[1] ?? "";
+    const digest = /name="digest" value="([0-9a-f]+)"/.exec(focused)?.[1];
+    expect(focused).toContain(`data-chat-approval="${digest}"`);
+    expect(focused).toContain(`id="task-chat-live" aria-live="polite" data-task="a" data-source="/chat/task-status?task=a" data-poll="0" data-approval="${digest}" data-plan=""`);
+    const lens = await status(cookie, `?task=a&version=${focusedVersion}`);
+    expect(lens).toMatchObject({ session: 1, task: "a", version: focusedVersion, approval: digest });
+    expect(lens["fragments"]).toBeUndefined();
+    const lensFragments = (await status(cookie, "?task=a&version=stale"))["fragments"] as Record<string, string | null>;
+    expect(lensFragments["live"]).toContain('id="task-chat-live"');
+    expect(lensFragments["live"]).toContain("Review the updated plan →");
+    expect(lensFragments["live"]).not.toContain('type="password"');
+    expect(lensFragments["live"]).not.toContain('name="nonce"');
+    expect(lensFragments["thread"]).toContain('data-key="m1"');
+    expect(focusedVersion).not.toBe(String(answered["version"]));
+    // Another lens answers with ITS task; an unavailable one says so.
+    expect(await status(cookie, "?task=b&version=x")).toMatchObject({ task: "b" });
+    expect(await status(cookie, "?task=not-here&version=x")).toEqual({ session: 1, task: "not-here", unavailable: true, received: false });
+    const raw = await fetch(url("/chat/mate/status?version=x"), { headers: { cookie } });
+    expect(raw.headers.get("cache-control")).toBe("no-store");
+  });
+
+  test("package 2: the enhanced send answers JSON on the same endpoint, stays one turn across a lost response and a reload, and refuses a changed session, an empty message, and an unavailable task in JSON", async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    const request = /name="request" value="([a-f0-9]{32})"/.exec(await page(cookie))![1]!;
+    const fields = { csrf, message: "What needs me?", request, "request-session": "1" };
+    script.push(() => answer([{ type: "text", text: "Nothing needs you." }]));
+    const first = await sendJson(cookie, fields);
+    expect(first.status).toBe(202);
+    expect(first.headers.get("content-type")).toContain("application/json");
+    expect(await first.json()).toEqual({ ok: true, session: 1, task: "", request });
+    await settle();
+    // The response was lost and the page reloaded: the same send, resent
+    // by the person, is the same turn — no second dispatch, one message.
+    const again = await sendJson(cookie, fields);
+    expect(again.status).toBe(202); await settle();
+    expect(store.recentMateTurns("alex", 10)).toHaveLength(1);
+    expect(script).toHaveLength(0);
+    expect(await status(cookie, `?request=${request}`)).toMatchObject({ received: true, pending: false });
+    // The native form still redirects.
+    const native = await post(cookie, "/chat", fields);
+    expect(native.status).toBe(303); await settle();
+    expect(store.recentMateTurns("alex", 10)).toHaveLength(1);
+    // Refusals carry the server's words, and nothing is dispatched.
+    const changed = await sendJson(cookie, { ...fields, "request-session": "2" });
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toEqual({ ok: false, said: "This conversation changed. Reload it before sending your message.", session: null });
+    const empty = await sendJson(cookie, { ...fields, message: "   " });
+    expect(empty.status).toBe(400);
+    expect(await empty.json()).toMatchObject({ ok: false, said: expect.stringContaining("1 to"), session: 1 });
+    const gone = await sendJson(cookie, { ...fields, task: "not-here" });
+    expect(gone.status).toBe(404);
+    expect(await gone.json()).toMatchObject({ ok: false, said: "That task is not available in this workspace." });
+    expect((await sendJson(cookie, { ...fields, csrf: "bad" })).status).toBe(403);
+    expect(store.recentMateTurns("alex", 10)).toHaveLength(1);
+    // After the conversation ends, a JSON send says so instead of minting.
+    await post(cookie, "/chat/mate/end", { csrf });
+    const ended = await sendJson(cookie, fields);
+    expect(ended.status).toBe(409);
+    expect(await ended.json()).toEqual({ ok: false, said: "This conversation ended. Reload to continue.", session: null });
+    expect((await status(cookie))["session"]).toBeNull();
+  });
+
+  test("package 2: two task lenses keep their own drafts' context — each send carries its task to the provider, and one lens's receipt cannot settle or submit the other's", async () => {
+    const cookie = await login();
+    let html = await page(cookie);
+    let csrf = csrfFrom(html);
+    await post(cookie, "/chat/config", { csrf, provider: "codex-subscription", model: "default", "weekly-usd": "100", "daily-turns": "25", token: approverToken });
+    expect((await post(cookie, "/chat/mate/mint", { csrf, token: approverToken })).status).toBe(303);
+    html = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    csrf = csrfFrom(html);
+    expect(html).toContain('data-chat-task="a"');
+    const requestA = /name="request" value="([a-f0-9]{32})"/.exec(html)![1]!;
+    const requestB = /name="request" value="([a-f0-9]{32})"/.exec(await (await fetch(url("/chat?task=b"), { headers: { cookie } })).text())![1]!;
+    expect(requestA).not.toBe(requestB);
+    subscriptionAnswers.push({ text: "About a.", calls: [], tokensIn: 10, tokensOut: 5, reportedCostMicrousd: null });
+    expect((await sendJson(cookie, { csrf, task: "a", message: "Where is this?", request: requestA, "request-session": "1" })).status).toBe(202);
+    await settle();
+    subscriptionAnswers.push({ text: "About b.", calls: [], tokensIn: 10, tokensOut: 5, reportedCostMicrousd: null });
+    expect((await sendJson(cookie, { csrf, task: "b", message: "Where is this?", request: requestB, "request-session": "1" })).status).toBe(202);
+    await settle();
+    expect(subscriptionRequests).toHaveLength(2);
+    const contextOf = (index: number): string => [...subscriptionRequests[index]!.history].reverse().find(one => one.role === "operator")?.text ?? "";
+    expect(contextOf(0)).toContain("Current task: a.");
+    expect(contextOf(0)).toContain("Where is this?");
+    expect(contextOf(1)).toContain("Current task: b.");
+    // Each lens's status answers with its task; the receipt is per request.
+    expect(await status(cookie, `?task=a&request=${requestA}`)).toMatchObject({ task: "a", received: true });
+    expect(await status(cookie, `?task=b&request=${requestB}`)).toMatchObject({ task: "b", received: true });
+    expect(await status(cookie, `?task=a&request=${requestB}`)).toMatchObject({ task: "a", received: true });
+    // The same request key under the OTHER task's context is a different
+    // message: the engine refuses it rather than replaying a's turn as b's.
+    expect((await sendJson(cookie, { csrf, task: "b", message: "Where is this?", request: requestA, "request-session": "1" })).status).toBe(202);
+    await settle();
+    expect(store.recentMateTurns("alex", 10)).toHaveLength(2);
+    expect(subscriptionRequests).toHaveLength(2);
+    expect(await (await fetch(url("/chat?task=b"), { headers: { cookie } })).text()).toContain("different text or task context");
+    // The unified page shows both messages once, in order; each lens's page
+    // is the same thread with its own binding.
+    const unified = await page(cookie);
+    expect(unified.match(/data-message-role="operator"/g)).toHaveLength(2);
+    expect(unified).toContain('data-chat-task=""');
+  });
+
+  test("package 2: changed terms during password entry — the stale form is refused by the server, the status names the new digest, and the fresh page's form approves", async () => {
+    const cookie = await login();
+    const opening = csrfFrom(await page(cookie));
+    expect((await post(cookie, "/chat/mate/mint", { csrf: opening, "ceiling-usd": "5", token: approverToken, return: "/chat?task=a" })).status).toBe(303);
+    const before = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    const csrf = csrfFrom(before);
+    const oldNonce = /name="nonce" value="([0-9a-f]+)"/.exec(before)?.[1] ?? "";
+    const oldDigest = /name="digest" value="([0-9a-f]+)"/.exec(before)?.[1] ?? "";
+    expect(oldNonce).not.toBe(""); expect(oldDigest).not.toBe("");
+    expect(await status(cookie, "?task=a")).toMatchObject({ approval: oldDigest });
+    // The scope changes while the form is open (the console's own edit).
+    const edited = await post(cookie, "/t/a/scope", { csrf, acceptance: "c1: a is done. | manual-review", sawDigest: store.getScope("a")!.digest, goal: "do a, but narrower", not: "", touches: "" });
+    expect(edited.status).toBe(303);
+    const after = await status(cookie, "?task=a");
+    expect(after["approval"]).not.toBe(oldDigest);
+    expect(after["approval"]).toBe(store.getScope("a")!.digest);
+    // The old form, submitted anyway: refused, nothing approved.
+    const stale = await post(cookie, "/t/a/approve", { csrf, nonce: oldNonce, digest: oldDigest, token: approverToken, return: "/chat?task=a" });
+    expect(stale.status).toBe(303);
+    expect(decodeURIComponent(stale.headers.get("location") ?? "")).toContain("changed while this form was open");
+    expect(approvalOf(store.getScope("a"))).toMatchObject({ approved: false });
+    // Explicit review: the fresh page restates the current terms and its
+    // form — new nonce, new digest — approves.
+    const fresh = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    expect(fresh).toContain("do a, but narrower");
+    const newNonce = /name="nonce" value="([0-9a-f]+)"/.exec(fresh)?.[1] ?? "";
+    const newDigest = /name="digest" value="([0-9a-f]+)"/.exec(fresh)?.[1] ?? "";
+    expect(newDigest).toBe(after["approval"]); expect(newNonce).not.toBe(oldNonce);
+    const approved = await post(cookie, "/t/a/approve", { csrf, nonce: newNonce, digest: newDigest, token: approverToken, return: "/chat?task=a" });
+    expect(approved.headers.get("location")).toBe("/chat?task=a");
+    expect(approvalOf(store.getScope("a"))).toMatchObject({ approved: true, by: "alex" });
+    expect(await status(cookie, "?task=a")).toMatchObject({ approval: "" });
+  });
+
+  test("package 2: revoked standing, a changed ceiling, and an anonymous or bearer caller fail the poll and the send safely", async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    const request = "b".repeat(32);
+    expect((await status(cookie))["session"]).toBe(1);
+    // A viewer-only login (approver standing lost) is refused, never
+    // answered with somebody else's thread.
+    expect((await fetch(url("/chat/mate/status"), { redirect: "manual" })).status).toBe(303);
+    expect((await fetch(url("/chat/mate/status"), { headers: { authorization: `Bearer alex:${approverToken}` } })).status).toBe(403);
+    // Revocation bumps the approver generation and ends the session's
+    // authority: the poll reports no session (or refuses outright) and the
+    // send refuses — no turn is dispatched under the old standing.
+    const other = addApprover(store, "sam", clockNow, { name: "alex", token: approverToken });
+    if (!other.ok) throw new Error(`second approver failed: ${other.reason}`);
+    const revoked = store.revokeAccount("alex", "sam", clockNow);
+    if (!revoked.ok) throw new Error(`revoke failed: ${revoked.reason}`);
+    const gone = await fetch(url("/chat/mate/status"), { headers: { cookie }, redirect: "manual" });
+    expect([200, 303, 403]).toContain(gone.status);
+    if (gone.status === 200) expect(await gone.json()).toEqual({ session: null });
+    const refused = await sendJson(cookie, { csrf, message: "Still me?", request, "request-session": "1" });
+    expect([303, 401, 403, 409]).toContain(refused.status);
+    expect(store.recentMateTurns("alex", 10)).toHaveLength(0);
   });
 });
 
@@ -11134,7 +11363,9 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(chat).toContain(".task-chat-workspace .task-chat-context { display: none; }");
     expect(chat).toContain(".task-chat-agents {");
     expect(strip.replace(/<[^>]+>/g, " ")).not.toMatch(JARGON);
-    const approvalCard = /<details class="card chat-action-card chat-approval" id="task-chat-action">(.*?)<\/details>\s*<\/section>|<details class="card chat-action-card chat-approval" id="task-chat-action">(.*)/s.exec(chat)?.[0] ?? "";
+    // Package 2: the approval card is a section — the concise plan, then
+    // the Review plan disclosure over the exact terms.
+    const approvalCard = /<section class="card chat-action-card chat-plan" id="task-chat-action"[^>]*>(.*?)<\/details><\/section>/s.exec(chat)?.[0] ?? "";
     expect(approvalCard).toContain("High risk · stronger configured agents");
     expect(approvalCard).toContain('<p class="approval-label">agents</p>');
     expect(approvalCard).toContain("codex · gpt-5-codex");

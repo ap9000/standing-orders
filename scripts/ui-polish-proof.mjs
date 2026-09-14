@@ -59,6 +59,16 @@ const shot = async (page, name, caption) => {
   report.screenshots.push({ path, caption });
   return path;
 };
+/** Send the composer's message. Package 2 (2026-09-13): the enhanced
+ * send stays on the same document and the reply arrives through the live
+ * refresh, so this clicks and waits for the thread to move — a reply, a
+ * card, or the reply-in-progress card — instead of a new document. */
+async function sendMessage(page, text) {
+  await page.fill('.composer textarea', text);
+  const before = await page.evaluate(() => document.querySelectorAll('.msg').length);
+  await page.click('.composer button[type="submit"]');
+  await page.waitForFunction(n => document.querySelectorAll('.msg').length > n || document.querySelector('.chat-thinking') !== null, before, { timeout: 15000 });
+}
 /** Click a submit and wait for a NEW document — robust to the chat page's
  * own reload racing the POST redirect (a bare waitForNavigation aborts). */
 async function submit(page, selector) {
@@ -129,8 +139,7 @@ try {
   check('c1 the ready thread keeps one contextual sentence and three starters, with no heading intro or second composer hint', !concise.headMeta && concise.emptyLines === 1 && concise.starters.length === 3 && !concise.secondHint && concise.composer, JSON.stringify(concise));
 
   // A proposal card (hold) — the action-card state, then confirm it.
-  await page.fill('.composer textarea', 'Please pause the ledger export until I have read it.');
-  await submit(page, '.composer button[type="submit"]');
+  await sendMessage(page, 'Please pause the ledger export until I have read it.');
   await waitForReply(page);
   await scrollTo(page, '.proposal-hold');
   await shot(page, 'chat-action-card-390', 'A hold proposal card in chat after a scripted reply (fixture)');
@@ -140,17 +149,15 @@ try {
 
   // Reply in progress: the scripted runner delays on "slowly".
   await page.goto(`${fixture.url}/chat`);
-  await page.fill('.composer textarea', 'Brief me slowly.');
-  await submit(page, '.composer button[type="submit"]');
-  await page.waitForTimeout(600);
+  await sendMessage(page, 'Brief me slowly.');
+  await page.waitForSelector('.chat-thinking', { timeout: 15000 });
   await scrollTo(page, '.chat-thinking');
   await shot(page, 'chat-pending-390', 'Reply in progress with the draft composer still available (fixture)');
   check('c1 pending state keeps the composer visible and disabled send', (await page.$('.composer button[disabled]')) !== null);
   await waitForReply(page);
 
   // Ordinary revision path: a scope-revision card from chat, confirmed.
-  await page.fill('.composer textarea', 'Propose a tighter scope for the ledger export.');
-  await submit(page, '.composer button[type="submit"]');
+  await sendMessage(page, 'Propose a tighter scope for the ledger export.');
   await waitForReply(page);
   await scrollTo(page, '.proposal-scope');
   await shot(page, 'chat-scope-revision-390', 'Ordinary revision: a scope-rewrite proposal card in chat (fixture)');
@@ -284,8 +291,8 @@ try {
   // ---- reduced motion -----------------------------------------------------
   const reduced = await context(VIEWPORTS.phone, { reducedMotion: 'reduce' });
   await reduced.page.goto(`${fixture.url}/chat`);
-  await reduced.page.fill('.composer textarea', 'Brief me slowly.');
-  await submit(reduced.page, '.composer button[type="submit"]');
+  await sendMessage(reduced.page, 'Brief me slowly.');
+  await reduced.page.waitForSelector('.chat-thinking', { timeout: 15000 });
   const motion = await reduced.page.evaluate(() => {
     const read = (sel, pseudo) => { const el = document.querySelector(sel); return el ? getComputedStyle(el, pseudo) : null; };
     const orb = read('.thinking-orb', '::after');

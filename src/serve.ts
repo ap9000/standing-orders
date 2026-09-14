@@ -2308,6 +2308,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/chat/mate/status") {
+      // The read-only refresh (package 2): the same JSON status as before —
+      // session binding, the send receipt, the live turn — plus a version
+      // of the DISPLAYED facts and, only when the caller's version differs,
+      // the server-rendered thread / task fragments the page swaps into
+      // its safe regions. No-store, cookie-and-approver only, the same
+      // admission and ceiling checks as the page; nothing here writes.
       if (who.via !== "cookie" || who.role !== "approver") return respond(response, 403, "application/json", JSON.stringify({ error: "session" }));
       const session = store.activeMateSession(who.name);
       const principal = matePrincipal(who);
@@ -2317,8 +2323,33 @@ export function createDecisionServer(options: ServeOptions): Server {
       store.sweepStaleMateTurns(now);
       const request = url.searchParams.get("request") ?? "";
       const receipt = /^[a-f0-9]{32}$/.test(request) ? store.mateRequestReceipt(session.id, request) : null;
-      const latest = store.recentMateTurns(who.name, 1)[0];
-      return respond(response, 200, "application/json", JSON.stringify({ session: session.id, version: latest === undefined ? "" : `${latest.id}:${latest.state}`, pending: store.liveMateTurnFor(who.name) !== null, received: receipt !== null }));
+      const requestedTask = url.searchParams.get("task");
+      const focusTask = requestedTask === null || requestedTask === "" ? null : taskChatFocus(requestedTask, now, who, { mintNonce: false });
+      if (requestedTask !== null && requestedTask !== "" && focusTask === null) {
+        // The lens's task is gone or no longer admitted: the page keeps its
+        // draft and says so; it never falls back to the unified thread.
+        return respond(response, 200, "application/json", JSON.stringify({ session: session.id, task: requestedTask, unavailable: true, received: receipt !== null }));
+      }
+      const rows = mateConversationRows(who, principal, focusTask, now);
+      const version = mateChatVersion({ ...rows, focusTask });
+      const known = url.searchParams.get("version") ?? "";
+      const csrf = who.session.csrf;
+      const fragments = known === version
+        ? null
+        : {
+            thread: mateThreadHtml({ ...rows, focusTask, csrf, now, problem: takeMateNote(csrf, session.id) }),
+            after: mateAfterComposerHtml({ messages: rows.messages, pending: rows.pending, focusTask, csrf }),
+            live: focusTask === null ? null : taskChatLiveRegion(focusTask, csrf, true, rows.pending !== null),
+          };
+      return respond(response, 200, "application/json", JSON.stringify({
+        session: session.id,
+        task: focusTask?.id ?? "",
+        version,
+        pending: rows.pending !== null,
+        received: receipt !== null,
+        approval: focusTask?.approval?.digest ?? "",
+        ...(fragments === null ? {} : { fragments }),
+      }));
     }
 
     if (url.pathname === "/chat") {
@@ -2373,20 +2404,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       if (enabled.ok && mateSession !== null && principal !== null && !ceilingStale) {
         {
-          const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
           const said = takeMateNote(who.session.csrf, mateSession.id);
           return sendScreen(
             response,
             200,
             matePage(chromeFor(null, "chat", undefined, "all"), {
               session: mateSession,
-              messages: store.listMateMessages(opened.thread.id, 40),
-              proposals: store.listMateProposals(opened.thread.id),
-              decisions: decisionsFor(store, [...store.listMateProposals(opened.thread.id), ...coordinatorRows]),
-              coordinatorProposals: coordinatorRows,
-              pending: store.liveMateTurnFor(who.name),
+              ...mateConversationRows(who, principal, focusTask, now),
               latched,
-              recent: store.recentMateTurns(who.name, 5),
               config: enabled.config,
               turnsToday: store.chatTurnsToday(who.name, now),
               weeklySpent: store.chatWeeklySpendMicrousd(enabled.credentialKey, now),
@@ -2553,7 +2578,7 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     if (url.pathname === "/chat/task-status") {
       if (who.via !== "cookie") return respond(response, 403, "text/plain; charset=utf-8", "sign in to see this task");
-      const focus = taskChatFocus(url.searchParams.get("task"), now, who);
+      const focus = taskChatFocus(url.searchParams.get("task"), now, who, { mintNonce: false });
       if (focus === null) return respond(response, 404, "text/plain; charset=utf-8", "this task is not available in this workspace");
       response.setHeader("cache-control", "no-store");
       return respond(response, 200, "text/html; charset=utf-8", taskChatLiveRegion(focus, who.session.csrf, true));
@@ -2640,6 +2665,27 @@ export function createDecisionServer(options: ServeOptions): Server {
    * notes), bound to the mate turn it came from so a note from a session
    * that has since ended never shows; bounded; read once. */
   const mateSaid = new Map<string, { turn: number | null; message: string }>();
+  /** The unified conversation's rows for one reader (package 2): the SAME
+   * rows the page renders and the status poll's fragments re-render, so a
+   * live update can never show a card the page would not. A task lens
+   * keeps only that task's coordinator cards; the mate's own thread is one
+   * thread regardless of lens. */
+  function mateConversationRows(who: Who & { via: "cookie" }, principal: VerifiedApprover, focusTask: TaskChatFocus | null, now: Date): {
+    messages: MateMessage[]; proposals: MateProposal[]; decisions: Map<number, Decision>; coordinatorProposals: CoordinatorProposal[]; pending: MateTurn | null; recent: MateTurn[];
+  } {
+    const allCoordinatorRows = store.listCoordinatorProposals({ repos: managedRepos(), states: ["pending", "confirmed", "refused"], limit: 30 });
+    const coordinatorProposals = focusTask === null ? allCoordinatorRows : allCoordinatorRows.filter(one => one.payload["task"] === focusTask.id);
+    const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
+    const proposals = store.listMateProposals(opened.thread.id);
+    return {
+      messages: store.listMateMessages(opened.thread.id, 40),
+      proposals,
+      decisions: decisionsFor(store, [...proposals, ...coordinatorProposals]),
+      coordinatorProposals,
+      pending: store.liveMateTurnFor(who.name),
+      recent: store.recentMateTurns(who.name, 5),
+    };
+  }
   function noteMate(csrf: string, turn: number | null, message: string): void {
     if (mateSaid.size >= 500) {
       const oldest = mateSaid.keys().next().value;
@@ -3342,7 +3388,7 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   /** The task view's facts, shared by the full screen and the workbench
    * pane (attended A1): one assembly, one authorization story. */
-  function taskViewData(taskId: string, who: Who, problem: string | null): Parameters<typeof taskBody>[0] | null {
+  function taskViewData(taskId: string, who: Who, problem: string | null, render: { mintNonce?: boolean } = {}): Parameters<typeof taskBody>[0] | null {
     const found = store.getTask(taskId);
     if (found === null) return null;
     const ref = store.lookupRef(taskId);
@@ -3366,9 +3412,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     // a route that cannot run, or a pre-routing row whose approval lapsed
     // gets recovery copy, never a nonce.
     const routeView = routeViewOf(taskId, ref, scope, now, who);
+    // A read-only refresh (package 2) reads the same facts WITHOUT minting:
+    // a five-second poll must never churn the bounded nonce store, and a
+    // fragment carries no password form to bind a nonce to.
     const nonce =
       who.via === "cookie" && scope !== null && approvalDigest !== null && !approvalOf(scope).approved && !revisionBroken && ref?.plan !== "requested" && consentDoorOf(scope, routeView).open
-        ? mintApprovalNonce(who.name, taskId, approvalDigest)
+        ? render.mintNonce === false ? "unminted" : mintApprovalNonce(who.name, taskId, approvalDigest)
         : "";
     const runs = ref === null ? [] : store.runsFor(ref.id);
     const completion = (() => {
@@ -3644,7 +3693,7 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   /** Resolve a task-scoped chat lens without trusting its query string.
    * Only an admitted task becomes model context or visible page copy. */
-  function taskChatFocus(taskId: string | null, now: Date, who?: Who): TaskChatFocus | null {
+  function taskChatFocus(taskId: string | null, now: Date, who?: Who, options: { mintNonce?: boolean } = {}): TaskChatFocus | null {
     if (taskId === null || taskId.length === 0 || taskId.length > 64 || hasForbiddenControls(taskId)) return null;
     const task = store.getTask(taskId);
     const ref = store.lookupRef(taskId);
@@ -3654,7 +3703,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // Reusing that projection keeps approval nonces, joint race digests,
     // revision verification, decisions, and result evidence on one source
     // of truth instead of growing a chat-only lifecycle.
-    const view = who === undefined ? null : taskViewData(taskId, who, null);
+    const view = who === undefined ? null : taskViewData(taskId, who, null, options);
     const runs = view?.runs ?? store.runsFor(ref.id);
     const latest = runs.find(runIsTaskResult) ?? null;
     const approval = approvalOf(scope);
@@ -5341,6 +5390,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, back);
       }
       if (!outcome.ok && outcome.reason === "needs-confirm") noteMate(who.session.csrf, null, outcome.said);
+      // A confirmed task proposal leads to the task it actually created
+      // (package 2): the lens over this same conversation, whose journey
+      // and plan are the next step. The id is the door's recorded
+      // outcome, never a title or the assistant's prose; a refused,
+      // replayed, or unavailable confirmation returns as before, with
+      // the card carrying the door's words.
+      if (outcome.ok && outcome.kind === "task" && outcome.taskId !== null && taskChatFocus(outcome.taskId, now, who, { mintNonce: false }) !== null) {
+        return redirect(response, `${taskChatHref(outcome.taskId)}#task-chat-live`);
+      }
       return redirect(response, chatReturnWithLatest(back));
     }
     // Coordinator proposals (mate arc v3): confirmed by any approver whose
@@ -5368,12 +5426,22 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface");
       const requestedTask = body.get("task");
       const focusTask = taskChatFocus(requestedTask, now, who);
+      // The enhanced send (package 2): the SAME endpoint, fields, request
+      // receipt key, and session binding as the native form — only the
+      // answer differs. A fetch that asks for JSON gets the refusal's
+      // words or an acceptance instead of a redirect; nothing is retried,
+      // cleared, or authorized here that the native POST would not.
+      const wantsJson = String(request.headers["accept"] ?? "").includes("application/json");
       if (requestedTask !== null && focusTask === null) {
-        return redirect(response, chatReturnWithSaid("/chat", "That task is not available in this workspace."));
+        return wantsJson
+          ? respond(response, 404, "application/json", JSON.stringify({ ok: false, said: "That task is not available in this workspace.", session: null }))
+          : redirect(response, chatReturnWithSaid("/chat", "That task is not available in this workspace."));
       }
       const back = focusTask === null ? "/chat" : taskChatHref(focusTask.id);
+      const said = (status: number, words: string, session: number | null = null): void =>
+        wantsJson ? respond(response, status, "application/json", JSON.stringify({ ok: false, said: words, session })) : redirect(response, chatReturnWithSaid(back, words));
       const enabled = chatEnablement();
-      if (!enabled.ok) return redirect(response, chatReturnWithSaid(back, enabled.why));
+      if (!enabled.ok) return said(409, enabled.why);
       // A live mate session: the message is a mate turn — no password, the
       // session's ceremony already covered it (§1); the engine refuses on
       // its own terms and the thread shows why.
@@ -5381,13 +5449,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (mateSession !== null) {
         const requestId = body.get("request");
         if (requestId !== null && (body.getAll("request").length !== 1 || body.getAll("request-session").length !== 1 || body.get("request-session") !== String(mateSession.id))) {
-          return redirect(response, chatReturnWithSaid(back, "This conversation changed. Reload it before sending your message."));
+          return said(409, "This conversation changed. Reload it before sending your message.");
         }
         const principal = matePrincipal(who);
-        if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", back);
+        if (principal === null) return wantsJson ? said(403, "your approver standing changed — sign in again") : refuse(response, who, 403, "your approver standing changed — sign in again", back);
         const message = (body.get("message") ?? "").trim();
         if (message === "" || message.length > MATE_MESSAGE_MAX_CHARS) {
-          return redirect(response, chatReturnWithSaid(back, `a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`));
+          return said(400, `a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`, mateSession.id);
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
         void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(requestId === null ? {} : { requestId }), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Keep this turn about that task unless the operator explicitly asks to broaden it.` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
@@ -5395,8 +5463,13 @@ export function createDecisionServer(options: ServeOptions): Server {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
           })
           .catch(() => noteMate(who.session.csrf, null, "the turn failed unexpectedly"));
+        // Accepted for the engine, not received: the receipt is written by
+        // the turn's own admission, and the status poll is where the page
+        // learns of it — the same road as after a native send.
+        if (wantsJson) return respond(response, 202, "application/json", JSON.stringify({ ok: true, session: mateSession.id, task: focusTask?.id ?? "", request: requestId }));
         return redirect(response, chatReturnWithLatest(back));
       }
+      if (wantsJson) return said(409, "This conversation ended. Reload to continue.");
       if (focusTask !== null) {
         return redirect(response, chatReturnWithSaid(back, "Start the conversation first, then ask about this task without another password prompt."));
       }
@@ -10389,6 +10462,33 @@ const STYLE = `
   .composer-hint:empty { display: none; }
   .chat-prompts form { margin: 0; }
   .chat-prompts button { min-height: 2.35rem; box-shadow: none; background: var(--glass); padding-inline: .9rem; }
+  /* The New update action (package 2): sticks above the composer, takes no
+     room while hidden, and is the only thing that moves a reader who sat
+     above the latest message when a live update landed. */
+  .chat-new-update-holder { position: sticky; bottom: 1rem; z-index: 28; display: flex; justify-content: center; height: 0; margin: 0; pointer-events: none; }
+  .chat-new-update { pointer-events: auto; transform: translateY(-100%); min-height: 2.35rem; padding-inline: .9rem; border-radius: 999px; box-shadow: var(--shadow-overlay); }
+  .chat-new-update[hidden] { display: none; }
+  /* The concise plan (package 2): four signed facts, then one Review plan
+     disclosure over the unchanged exact-terms form. */
+  .chat-plan-head h2 { margin: .2rem 0 .1rem; font-size: 1rem; letter-spacing: -.025em; }
+  .chat-plan-head .meta { margin: 0; }
+  .chat-plan-brief { display: grid; gap: .55rem; margin: .85rem 0 0; }
+  .chat-plan-brief > div { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: .5rem; }
+  .chat-plan-brief dt { color: var(--muted-foreground); font-size: .66rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+  .chat-plan-brief dd { min-width: 0; margin: 0; font-size: .82rem; line-height: 1.45; }
+  .chat-plan-brief dd p { margin: 0; overflow-wrap: anywhere; }
+  .chat-plan-list { margin: 0; padding-left: 1.1rem; }
+  .chat-plan-list li { overflow-wrap: anywhere; }
+  .chat-plan > details.chat-approval { margin: .85rem 0 0; padding: .85rem 0 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
+  .chat-plan > details.chat-approval > summary { display: flex; align-items: center; gap: .75rem; cursor: pointer; list-style: none; }
+  .chat-plan > details.chat-approval > summary::-webkit-details-marker { display: none; }
+  .chat-plan > details.chat-approval > summary .button-link { flex: none; white-space: nowrap; }
+  .chat-plan > details.chat-approval > summary small { color: var(--muted-foreground); font-size: .68rem; }
+  .chat-plan > details.chat-approval > .chat-approval-form { padding: .85rem 0 0; }
+  .chat-approval-stale { margin: .75rem 0 0; }
+  .chat-approval-stale a { font-weight: 600; }
+  form.approve-form[data-stale="1"] .approval-confirm { opacity: .55; }
+  .proposal-filed { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; margin: .5rem 0 0; }
   .chat-thinking { display: flex; align-items: center; gap: .75rem; padding: .75rem .85rem; }
   .chat-thinking p { flex: 1; margin: 0; }
   .chat-thinking p strong, .chat-thinking p span { display: block; }
@@ -10465,6 +10565,10 @@ const STYLE = `
   }
   @media (max-width: 760px) {
     main:has(.chat-workspace) { padding: 1rem 1rem calc(9rem + env(safe-area-inset-bottom, 0rem)); }
+    /* Above the fixed composer and the tab bar, never beneath them. */
+    .chat-new-update-holder { bottom: calc(8.6rem + env(safe-area-inset-bottom, 0rem)); }
+    .chat-main:has(.proposal.pending) .chat-new-update-holder, .chat-main:has(.chat-empty) .chat-new-update-holder { bottom: calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
+    .chat-plan-brief > div { grid-template-columns: 1fr; gap: .15rem; }
     .chat-workspace, .chat-workspace.projects-hidden { display: block; }
     .chat-workspace.projects-hidden .chat-projects, .chat-projects { display: none; }
     .chat-project-toggle { display: inline-flex; min-height: 2.75rem; }
@@ -12533,9 +12637,37 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
         ? `<p class="meta">No dollar caps; every result and its evidence is kept for you to compare.</p>`
         : `<p class="meta">$${(approval.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} per agent plus $${(approval.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} reserve; $${(approval.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)} total.</p>`) +
       `</div>`;
+  // The concise plan (package 2): goal, intended changes and success
+  // checks, and the important limits — every line a signed fact the exact
+  // terms below restate in full — then ONE Review plan action that opens
+  // the existing focused form, where Approve & start is the only submit.
+  const plan = approval.planDocument === null ? null : parseExecutionPlanDocument(approval.planDocument);
+  const milestones = plan !== null && plan.ok ? plan.document.milestones : [];
+  const more = (shown: number, total: number, noun: string): string => total > shown ? ` <span class="meta">+${total - shown} more ${noun}</span>` : "";
+  const changes = milestones.length > 0
+    ? `<ol class="chat-plan-list">${milestones.slice(0, 3).map(one => `<li>${escape(oneLineOf(one, 140))}</li>`).join("")}</ol>${more(3, milestones.length, "milestones")}`
+    : scope.touches.length > 0
+      ? `<p>${scope.touches.slice(0, 4).map(one => `<span class="mono">${escape(one)}</span>`).join(", ")}${more(4, scope.touches.length, "paths")}</p>`
+      : `<p class="meta">no paths named</p>`;
+  const checks = scope.acceptance.length === 0
+    ? `<p class="meta">no acceptance criteria</p>`
+    : `<ul class="chat-plan-list">${scope.acceptance.slice(0, 3).map(one => `<li><code>${escape(one.id)}</code> ${escape(oneLineOf(one.statement, 140))}</li>`).join("")}</ul>${more(3, scope.acceptance.length, "criteria")}`;
+  const limits: string[] = [scope.outOfScope === null ? "no exclusions" : oneLineOf(scope.outOfScope, 160)];
+  if (approval.deliverable === "report") limits.push("report only — the repository is not changed");
+  if (scope.budgetMicrousd !== null) limits.push(`$${(scope.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap`);
+  if (permission !== null) limits.push(permission);
+  if (approval.raceTerms !== null) limits.push(`${approval.raceTerms.agents.length}-agent ${approval.raceTerms.kind}`);
   return (
-    `<details class="card chat-action-card chat-approval" id="task-chat-action">` +
-    `<summary><span><span class="eyebrow">your next step</span><strong>Review the plan & start</strong><small>Nothing builds until you approve the exact scope.</small></span><span class="button-link">Review & start</span></summary>` +
+    `<section class="card chat-action-card chat-plan" id="task-chat-action" data-approval="${escape(approval.digest)}">` +
+    `<div class="chat-plan-head"><span class="eyebrow">your next step</span><h2>${approval.revision === null ? "Plan ready — approve to start" : "Revision ready — approve to start"}</h2><p class="meta">Nothing builds until you approve the exact terms.${approval.coordinator === null ? "" : ` Filed by ${escape(approval.coordinator.label)}.`}</p></div>` +
+    `<dl class="chat-plan-brief">` +
+    `<div><dt>Goal</dt><dd><p>${escape(oneLineOf(scope.goal, 320))}</p></dd></div>` +
+    `<div><dt>${milestones.length > 0 ? "Changes" : "May touch"}</dt><dd>${changes}</dd></div>` +
+    `<div><dt>Success checks</dt><dd>${checks}</dd></div>` +
+    `<div><dt>Limits</dt><dd><p>${limits.map(escape).join(" · ")}</p></dd></div>` +
+    `</dl>` +
+    `<details class="chat-approval">` +
+    `<summary><span class="button-link">Review plan</span><small>The full exact terms, then Approve &amp; start with your password.</small></summary>` +
     `<form method="post" action="${taskHref(focus.id)}/approve" class="chat-approval-form approve-form">` +
     `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
     `<input type="hidden" name="nonce" value="${escape(approval.nonce)}">` +
@@ -12557,7 +12689,7 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
     agentsCeremonyHtml(focus.route) +
     runtimeDetailsHtml(scope) +
     `<div class="approval-confirm"><label>Your password <span class="meta">— confirms this exact scope</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>` +
-    `<button type="submit">Approve & start</button></div></form></details>`
+    `<button type="submit">Approve & start</button></div></form></details></section>`
   );
 }
 
@@ -12589,7 +12721,7 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     : taskRecoveryHref(focus.id, focus.dispatch);
   const polling = !inert && ((focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled" || focus.control.kind === "stopping" || focus.control.kind === "stop");
   return (
-    `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}">` +
+    `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}" data-approval="${escape(focus.approval?.digest ?? "")}" data-plan="${escape(focus.plan ?? "")}">` +
     `<section class="card task-journey" aria-label="task progress" data-work-status="${escape(workToken)}"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div>${resultStatus === null ? `<span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span>` : `<span class="badge" data-tone="${escape(resultStatus.tone)}">${escape(resultStatus.tone === "problem" || resultStatus.tone === "attention" ? "needs attention" : resultStatus.tone === "live" ? "in review" : resultStatus.tone === "done" || resultStatus.tone === "ready" ? "finished" : "saved")}</span>`}</div>` +
     `<ol>${steps}</ol><p class="meta">${escape(detail)}</p>` +
     (focus.liveRun === null ? "" : `<p class="task-live-build"><span class="live-dot" aria-hidden="true"></span><strong>Build #${focus.liveRun.id}</strong> · ${escape(focus.liveRun.runner)} · <time data-elapsed-since="${escape(focus.liveRun.startedAt)}"></time> <a href="/r/${focus.liveRun.id}">watch details →</a></p>`) +
@@ -12873,7 +13005,7 @@ const CHAT_UI_SCRIPT =
   `if(projectClose)projectClose.addEventListener("click",function(){apply(false);projectToggle.focus();});` +
   `document.addEventListener("click",function(ev){if(wide.matches||!workspace.classList.contains("projects-open"))return;var target=ev.target;if(target instanceof Node&&!projectPanel.contains(target)&&!projectToggle.contains(target))apply(false);});` +
   `wide.addEventListener("change",function(){apply(preferred());});document.addEventListener("keydown",function(ev){if(ev.key==="Escape"&&workspace.classList.contains("projects-open")){apply(false);projectToggle.focus();}});}` +
-  `var taskLive=document.getElementById("task-chat-live");function refreshTask(){if(!taskLive||taskLive.getAttribute("data-poll")!=="1")return;` +
+  `var taskLive=document.querySelector(".composer[data-chat-session]")?null:document.getElementById("task-chat-live");function refreshTask(){if(!taskLive||taskLive.getAttribute("data-poll")!=="1")return;` +
   `if(document.hidden){setTimeout(refreshTask,5000);return;}var source=taskLive.getAttribute("data-source");if(!source)return;` +
   `fetch(source,{cache:"no-store",signal:AbortSignal.timeout(10000)}).then(function(r){if(r.status===401||r.status===403||r.redirected){location.href="/login";return null;}if(!r.ok)throw new Error("connection");return r.text();})` +
   `.then(function(html){if(html===null||!taskLive)return;var parsed=new DOMParser().parseFromString(html,"text/html"),next=parsed.getElementById("task-chat-live");if(!next)throw new Error("response");taskLive.replaceWith(next);taskLive=next;` +
@@ -13350,10 +13482,13 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
       `<p class="done">${escape(said ?? "confirmed")}` +
       ((view.kind === "scope" || view.kind === "agents") && filed !== null
         ? ` — <a href="${taskChatHref(filed)}#task-chat-action">review & start in chat</a>`
-        : filed !== null && view.kind === "task"
-          ? ` — <a href="${taskChatHref(filed)}">continue in chat</a> · <a href="${taskHref(filed)}">overview</a>`
-          : "") +
-      `</p>`;
+        : "") +
+      `</p>` +
+      // The created task, by its recorded id (package 2): one clear road
+      // into its lens — the same conversation, focused — and the overview.
+      (filed !== null && view.kind === "task"
+        ? `<p class="proposal-filed"><a class="button-link" href="${taskChatHref(filed)}" data-filed-task="${escape(filed)}">Open task <span class="mono">${escape(filed)}</span> →</a> <a href="${taskHref(filed)}">overview</a></p>`
+        : "");
   } else if (view.state === "refused") {
     acts = `<p class="refused">${escape(said ?? "refused")}</p>`;
   } else {
@@ -13402,23 +13537,122 @@ function coordinatorProposalsSection(proposals: readonly CoordinatorProposal[], 
   );
 }
 
-function matePage(chrome: Chrome, data: {
-  session: MateSession;
+type MateThreadRows = {
   messages: MateMessage[];
   proposals: MateProposal[];
   /** The decisions the answer cards name. */
   decisions: Map<number, Decision>;
   coordinatorProposals: CoordinatorProposal[];
   pending: MateTurn | null;
-  latched: ChatTurn[];
   recent: MateTurn[];
+  /** Optional task lens into the same unified thread. */
+  focusTask: TaskChatFocus | null;
+};
+
+/** The version of the DISPLAYED conversation (package 2): every fact a
+ * thread or task fragment renders — message identities, card states and
+ * outcomes, the live turn and its step count, the last turn's state, the
+ * decisions the cards name, and the task lens's own facts — and nothing
+ * that merely ticks: no relative age, no freshly minted nonce, no csrf.
+ * Equal versions mean equal fragments; the poll fetches nothing else. */
+function mateChatVersion(rows: MateThreadRows): string {
+  const focus = rows.focusTask;
+  const facts = [
+    rows.messages.map(one => [one.id, one.role, one.turn]),
+    rows.proposals.map(one => [one.id, one.state, one.outcome === null ? null : JSON.stringify(one.outcome)]),
+    rows.coordinatorProposals.map(one => [one.id, one.state, one.outcome === null ? null : JSON.stringify(one.outcome)]),
+    [...rows.decisions.values()].map(one => [one.id, one.state, one.choice ?? null]),
+    rows.pending === null ? null : [rows.pending.id, rows.pending.steps],
+    rows.recent[0] === undefined ? null : [rows.recent[0].id, rows.recent[0].state, rows.recent[0].failureReason],
+    focus === null
+      ? null
+      : [
+          focus.id, focus.title, focus.state, focus.scope, focus.plan, focus.claimed,
+          focus.approval === null ? null : [focus.approval.digest, focus.approval.nonce === "" ? "closed" : "open", focus.approval.revision !== null && "problem" in focus.approval.revision ? focus.approval.revision.problem : null],
+          focus.liveRun === null ? null : [focus.liveRun.id, focus.liveRun.phase, focus.liveRun.runner],
+          focus.control,
+          focus.dispatch === null ? null : [focus.dispatch.code, focus.dispatch.summary, focus.dispatch.detail],
+          focus.decisions.map(one => [one.id, one.state]),
+          focus.result === null ? null : [focus.result.runId, focus.result.outcome, focus.result.verdict],
+          focus.publication === null ? null : [focus.publication.id, focus.publication.state, focus.publication.lastCheckState],
+          focus.milestoneProgress === null ? null : focus.milestoneProgress.map(one => [one.id, one.state, one.note]),
+          focus.planRevisions === null ? null : [focus.planRevisions.current?.sha256 ?? null, focus.planRevisions.current?.status ?? null, focus.planRevisions.pending?.sha256 ?? null, focus.planRevisions.pending?.status ?? null, focus.planRevisions.history.length],
+          focus.route === null ? null : [focus.route.kind, focus.route.digest, focus.route.editable, focus.route.problem],
+        ],
+  ];
+  return createHash("sha256").update(JSON.stringify(facts)).digest("hex").slice(0, 16);
+}
+
+/** The thread region — the one safe region the live refresh reconciles
+ * (package 2): coordinator cards, the operator/assistant messages with
+ * their cards, the reply-in-progress card, and the starters that follow a
+ * populated thread. Every child carries a stable `data-key` so the page
+ * keeps an unchanged node (its open disclosures, its focus) and replaces
+ * only what the server rendered differently. The composer is never here. */
+function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; problem: string | null }): string {
+  const returnTo = data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id);
+  const parts: string[] = [];
+  if (data.problem !== null) parts.push(`<div class="problem" data-key="said">${escape(data.problem)}</div>`);
+  const byTurn = new Map<number, MateProposal[]>();
+  for (const one of data.proposals) {
+    const list = byTurn.get(one.turn) ?? [];
+    list.push(one);
+    byTurn.set(one.turn, list);
+  }
+  const inert = data.pending !== null;
+  const lastMessage = data.messages.at(-1);
+  const latestReply = data.pending === null && lastMessage?.role === "assistant" ? lastMessage.id : null;
+  const coordinator = coordinatorProposalsSection(data.coordinatorProposals, data.decisions, data.csrf, data.now, true, data.focusTask === null ? null : returnTo);
+  if (coordinator !== "") parts.push(`<div data-key="coordinators" data-chat-list>${coordinator}</div>`);
+  parts.push(`<div class="thread" data-key="thread" data-chat-list>`);
+  if (data.messages.length === 0) {
+    parts.push(
+      `<div class="chat-empty" data-key="empty"><strong>${data.focusTask === null ? "What do you want to get done?" : "What do you want to understand or change?"}</strong>` +
+      `<p class="meta">${data.focusTask === null ? "Describe the outcome you want; changes come back as cards you confirm." : "I read the task first — ask anything, or start below."}</p></div>`,
+    );
+  }
+  for (const message of data.messages) {
+    if (message.role === "operator") {
+      parts.push(`<div class="msg op" data-message-role="operator" data-key="m${message.id}"><p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
+      continue;
+    }
+    const cards = message.turn === null ? [] : (byTurn.get(message.turn) ?? []);
+    parts.push(
+      `<div class="msg mate" data-message-role="assistant" data-key="m${message.id}"${message.id === latestReply ? ' id="latest"' : ""}>` +
+        renderChatText(message.text) +
+        cards.map(one => mateProposalCard(one, data.csrf, inert, data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null, data.focusTask === null ? null : returnTo)).join("") +
+        `<div class="chat-message-foot">${chatActivity(message.activity)}<time datetime="${escape(message.createdAt)}">${escape(relativeAge(message.createdAt, data.now))}</time></div>` +
+        `</div>`,
+    );
+  }
+  parts.push(`</div>`);
+  if (data.pending !== null) {
+    const subscription = data.pending.reservedMicrousd === 0;
+    parts.push(
+      `<div class="card chat-thinking" id="latest" aria-live="polite" data-key="pending"><span class="thinking-orb"></span><p><strong>${data.focusTask === null ? "Working across your projects" : `Working on ${escape(data.focusTask.title)}`}</strong>` +
+      `<span class="meta">turn #${data.pending.id} · ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"}${subscription ? " · membership-backed" : ` · up to ${chatMoney(data.pending.reservedMicrousd)} reserved`}</span></p>` +
+      `<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="turn" value="${data.pending.id}">` +
+      `<button type="submit" class="quiet">stop</button></form></div>`,
+    );
+  }
+  if (data.messages.length > 0 && data.pending === null) parts.push(`<div data-key="starters">${matePromptStarters(data.csrf, data.focusTask)}</div>`);
+  return `<div id="chat-thread" data-chat-region="thread">${parts.join("\n")}</div>`;
+}
+
+/** What follows the composer (package 2): the starters of an EMPTY thread
+ * sit under the box; once the first message lands they move above it. */
+function mateAfterComposerHtml(data: { messages: MateMessage[]; pending: MateTurn | null; focusTask: TaskChatFocus | null; csrf: string }): string {
+  return `<div id="chat-after-composer" data-chat-region="after">${data.messages.length === 0 && data.pending === null ? matePromptStarters(data.csrf, data.focusTask) : ""}</div>`;
+}
+
+function matePage(chrome: Chrome, data: MateThreadRows & {
+  session: MateSession;
+  latched: ChatTurn[];
   config: import("./store.js").ChatConfig;
   turnsToday: number;
   weeklySpent: number;
   projects: ChatProjectPulse[];
   fleetSnapshot: ChatSnapshot | null;
-  /** Optional task lens into the same unified thread. */
-  focusTask: TaskChatFocus | null;
   csrf: string;
   problem: string | null;
   now: Date;
@@ -13441,49 +13675,15 @@ function matePage(chrome: Chrome, data: {
         `<a href="/chat/ack/${turn.id}">read and acknowledge it</a> to re-enable this credential.</div>`,
     );
   }
-  const byTurn = new Map<number, MateProposal[]>();
-  for (const one of data.proposals) {
-    const list = byTurn.get(one.turn) ?? [];
-    list.push(one);
-    byTurn.set(one.turn, list);
-  }
-  const inert = data.pending !== null;
   const lastMessage = data.messages.at(-1);
   const latestReply = data.pending === null && lastMessage?.role === "assistant" ? lastMessage.id : null;
-  conversation.push(coordinatorProposalsSection(data.coordinatorProposals, data.decisions, data.csrf, data.now, true, data.focusTask === null ? null : returnTo));
-  conversation.push(`<div class="thread">`);
-  if (data.messages.length === 0) {
-    conversation.push(
-      `<div class="chat-empty"><strong>${data.focusTask === null ? "What do you want to get done?" : "What do you want to understand or change?"}</strong>` +
-      `<p class="meta">${data.focusTask === null ? "Describe the outcome you want; changes come back as cards you confirm." : "I read the task first — ask anything, or start below."}</p></div>`,
-    );
-  }
-  for (const message of data.messages) {
-    if (message.role === "operator") {
-      conversation.push(`<div class="msg op" data-message-role="operator"><p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
-      continue;
-    }
-    const cards = message.turn === null ? [] : (byTurn.get(message.turn) ?? []);
-    conversation.push(
-      `<div class="msg mate" data-message-role="assistant"${message.id === latestReply ? ' id="latest"' : ""}>` +
-        renderChatText(message.text) +
-        cards.map(one => mateProposalCard(one, data.csrf, inert, data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null, data.focusTask === null ? null : returnTo)).join("") +
-        `<div class="chat-message-foot">${chatActivity(message.activity)}<time datetime="${escape(message.createdAt)}">${escape(relativeAge(message.createdAt, data.now))}</time></div>` +
-        `</div>`,
-    );
-  }
-  conversation.push(`</div>`);
-  if (data.pending !== null) {
-    conversation.push(
-      `<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>${data.focusTask === null ? "Working across your projects" : `Working on ${escape(data.focusTask.title)}`}</strong>` +
-      `<span class="meta">turn #${data.pending.id} · ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"}${subscription ? " · membership-backed" : ` · up to ${chatMoney(data.pending.reservedMicrousd)} reserved`}</span></p>` +
-      `<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="turn" value="${data.pending.id}">` +
-      `<button type="submit" class="quiet">stop</button></form></div>`,
-    );
-  }
+  conversation.push(mateThreadHtml({ ...data, problem: null }));
   conversation.push(
-    data.messages.length === 0 || data.pending !== null ? "" : matePromptStarters(data.csrf, data.focusTask),
-    `<form method="post" action="/chat" class="card composer" id="${latestReply === null && data.pending === null ? "latest" : "chat-composer"}" aria-label="message the mate" data-chat-session="${data.session.id}" data-chat-task="${escape(data.focusTask?.id ?? "")}" data-chat-busy="${data.pending === null ? "0" : "1"}" data-chat-version="${data.recent[0] === undefined ? "" : `${data.recent[0].id}:${data.recent[0].state}`}">`,
+    // The New update action (package 2): hidden until a live update lands
+    // while the reader is above the latest message; a real button, so the
+    // keyboard reaches it. Only this act moves the reader.
+    `<div class="chat-new-update-holder"><button type="button" class="chat-new-update" id="chat-new-update" hidden>New update ↓</button></div>`,
+    `<form method="post" action="/chat" class="card composer" id="${latestReply === null && data.pending === null ? "latest" : "chat-composer"}" aria-label="message the mate" data-chat-session="${data.session.id}" data-chat-task="${escape(data.focusTask?.id ?? "")}" data-chat-busy="${data.pending === null ? "0" : "1"}" data-chat-version="${mateChatVersion(data)}" data-chat-approval="${escape(data.focusTask?.approval?.digest ?? "")}">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<input type="hidden" name="request" value="${randomBytes(16).toString("hex")}"><input type="hidden" name="request-session" value="${data.session.id}">`,
     data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,
@@ -13494,7 +13694,10 @@ function matePage(chrome: Chrome, data: {
     // a state to report — a reply in progress here, the connection from
     // the continuity script — and the composer carries no second intro.
     `<p class="meta composer-hint" id="chat-connection" role="status" aria-live="polite">${data.pending === null ? "" : "Reply in progress. You can draft your next message or come back later."}</p>`,
-    data.messages.length === 0 ? matePromptStarters(data.csrf, data.focusTask) : "",
+    // The explicit reconnection (package 2): shown only once the session
+    // or sign-in changed under this page; it reloads on the reader's act.
+    `<p class="meta composer-hint" id="chat-reconnect" hidden><button type="button" class="quiet">Reconnect</button></p>`,
+    mateAfterComposerHtml(data),
     `<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">${escape(subscription ? "membership" : data.config.provider)}</span></summary>`,
     `<div class="chat-budget"><span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span><span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span>` +
       (subscription

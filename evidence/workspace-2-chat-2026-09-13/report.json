@@ -1,0 +1,255 @@
+{
+  "generatedAt": "2026-09-14T03:32:23.591Z",
+  "out": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-workspace-2-chat-20260913-63998723/evidence/workspace-2-chat-2026-09-13",
+  "fixture": "scripts/ui-polish-fixture.mjs (synthetic, in-memory; scripted subscription runner, no model)",
+  "checks": [
+    {
+      "name": "c1 the proposal card arrived through the live refresh without a page load",
+      "ok": true
+    },
+    {
+      "name": "c1 the sent draft cleared on its receipt, the request key rotated",
+      "ok": true
+    },
+    {
+      "name": "c1 the proposal is a proposal: no task exists before confirmation",
+      "ok": true
+    },
+    {
+      "name": "c7 desktop proposal page has no horizontal overflow",
+      "ok": true
+    },
+    {
+      "name": "c1 confirming filed exactly one task",
+      "ok": true,
+      "detail": "[\"add-a-header-row-to-every-csv-export\"]"
+    },
+    {
+      "name": "c1 confirmation leads to the created task's own focus (by its recorded id)",
+      "ok": true,
+      "detail": "http://127.0.0.1:61415/chat?task=add-a-header-row-to-every-csv-export#task-chat-live"
+    },
+    {
+      "name": "c1 creation is not execution approval: the scope waits unapproved",
+      "ok": true
+    },
+    {
+      "name": "c1 the concise plan leads: goal, changes, success checks, limits, and ONE Review plan action (form folded, no competing primary button)",
+      "ok": true,
+      "detail": "{\"head\":\"Plan ready — approve to start\",\"rows\":[\"Goal\",\"May touch\",\"Success checks\",\"Limits\"],\"goal\":\"Emit one header row naming every column at the top of each exported CSV so spreadsheets open with labelled columns. Keep the existing column order and names exactly as they are.\",\"review\":\"Review plan\",\"open\":false,\"primaryButtons\":0,\"filedLink\":\"Open task add-a-header-row-to-every-csv-export →\"}"
+    },
+    {
+      "name": "c1 the confirmed card names the created task by id",
+      "ok": true,
+      "detail": "Open task add-a-header-row-to-every-csv-export →"
+    },
+    {
+      "name": "c1 Review plan reveals the full exact terms — goal, exclusions, paths, criteria, agents, permissions, digest, nonce, password — and Approve & start is the one submit",
+      "ok": true,
+      "detail": "{\"goal\":true,\"not\":true,\"paths\":true,\"criteria\":true,\"agents\":true,\"permission\":true,\"nonce\":true,\"digest\":true,\"password\":true,\"approve\":\"Approve & start\",\"approves\":1}"
+    },
+    {
+      "name": "c7 desktop expanded approval has no horizontal overflow",
+      "ok": true
+    },
+    {
+      "name": "c1 Approve & start records the approval (eligible state) and the journey says so; the form is gone",
+      "ok": true,
+      "detail": "{\"status\":\"ready\",\"headline\":\"Ready to run\",\"form\":false}"
+    },
+    {
+      "name": "c1 confirming the same proposal again files no second task",
+      "ok": true,
+      "detail": "{\"again\":{\"status\":0,\"type\":\"opaqueredirect\"},\"tasks\":1}"
+    },
+    {
+      "name": "c2 the reply-in-progress card landed live while the composer kept its node, draft, caret and focus",
+      "ok": true,
+      "detail": "{\"value\":\"Now check the proof for\",\"caret\":9,\"focused\":true,\"same\":true,\"thinking\":true}"
+    },
+    {
+      "name": "c2 the reply landed live: same composer node, draft, caret, focus and open disclosure retained; the reading position stayed and New update appeared",
+      "ok": true,
+      "detail": "{\"before\":{\"scrollY\":0,\"messages\":2,\"height\":1498},\"after\":{\"value\":\"Now check the proof for\",\"caret\":9,\"focused\":true,\"same\":true,\"detailsOpen\":true,\"messages\":4,\"scrollY\":0,\"newUpdate\":true,\"firstNewKey\":\"m5\"}}"
+    },
+    {
+      "name": "c2 New update is reached by keyboard and, on Enter, scrolls to and focuses the first new message",
+      "ok": true,
+      "detail": "{\"onButton\":true,\"moved\":{\"hidden\":true,\"focusedKey\":\"m5\",\"scrollY\":795,\"visible\":true},\"firstNewKey\":\"m5\"}"
+    },
+    {
+      "name": "c2 after several polls the composer draft is intact and the live card is still pending",
+      "ok": true,
+      "detail": "{\"same\":true,\"value\":\"Now check the proof for\",\"card\":true}"
+    },
+    {
+      "name": "c2 the live card confirmed once through its own form after multiple polls",
+      "ok": true
+    },
+    {
+      "name": "c3 a lost send response keeps the draft as submitted and says it is not confirmed — no automatic retry",
+      "ok": true,
+      "detail": "{\"value\":\"Brief me.\",\"stored\":{\"text\":\"Brief me.\",\"request\":\"9ef9946ff5162e0bf3c04417ae61465e\",\"submitted\":true,\"at\":1789356778707}}"
+    },
+    {
+      "name": "c3 the receipt poll cleared the draft once the server had the message; exactly one turn ran",
+      "ok": true,
+      "detail": "turns 4 → 5"
+    },
+    {
+      "name": "c3 after a reload the restored submitted draft settled on its durable receipt: one turn for that key, no second dispatch",
+      "ok": true,
+      "detail": "{\"restored\":\"\",\"receipt\":true,\"turns\":2}"
+    },
+    {
+      "name": "c3 a repeated send with the same request key replays instead of dispatching again",
+      "ok": true,
+      "detail": "{\"replay\":{\"status\":0,\"type\":\"opaqueredirect\"},\"turns\":2}"
+    },
+    {
+      "name": "c3 a newer unsent edit survives the older send's receipt",
+      "ok": true,
+      "detail": "{\"edited\":{\"value\":\"Brief me slowly, then the proof.\",\"status\":\"Connected.\"},\"turns\":3}"
+    },
+    {
+      "name": "c3/c6 offline disables sending and keeps the draft; online reconnects and re-enables it",
+      "ok": true,
+      "detail": "{\"off\":{\"disabled\":true,\"value\":\"Brief me slowly, then the proof.\",\"status\":\"Offline. Your draft stays here; sending resumes when the connection returns.\"},\"on\":{\"disabled\":false,\"value\":\"Brief me slowly, then the proof.\"}}"
+    },
+    {
+      "name": "c4 each task lens restores only its own draft, bound to its task",
+      "ok": true,
+      "detail": "{\"bEmpty\":\"\",\"aBack\":{\"value\":\"Draft for A: tighten the export.\",\"task\":\"ledger-export\",\"hidden\":\"ledger-export\"}}"
+    },
+    {
+      "name": "c4 the provider was handed A's context with A's message, never B's",
+      "ok": true,
+      "detail": "[\"Current task: ledger-export. Read it with get_task before answering or proposing\"]"
+    },
+    {
+      "name": "c4 A's send and receipt did not clear or submit B's draft; the unified thread is one thread under either lens",
+      "ok": true,
+      "detail": "{\"value\":\"Draft for B: when does it stream?\",\"task\":\"csv-streaming\",\"messages\":2}"
+    },
+    {
+      "name": "c5 the open form and its typed password were not swapped; the page says the plan changed, disables the stale submit, and offers explicit review",
+      "ok": true,
+      "detail": "{\"sameDocument\":true,\"sameForm\":true,\"password\":\"(kept)\",\"digest\":\"70a250b2976b30790ad78c888a927b2c\",\"disabled\":true,\"note\":\"The plan changed since this form opened. Review the current exact terms before approving. Review the current plan\",\"review\":\"Review the current plan\",\"notes\":1}"
+    },
+    {
+      "name": "c5 the stale submission is refused by the server and nothing is approved",
+      "ok": true,
+      "detail": "http://127.0.0.1:61415/chat?task=ledger-export&said=the%20scope%20or%20plan%20changed%20while%20this%20form%20was%20open%20%E2%80%94%20read%20the%20latest%20version%20and%20approve%20again"
+    },
+    {
+      "name": "c5 explicit review reveals the current exact digest and terms",
+      "ok": true,
+      "detail": "{\"digest\":\"33d1586e1d71366943fbbfafd171d6c2\",\"goal\":\"Rework the portfolio ledger export — CSV writer and range filter only.\",\"stale\":false}"
+    },
+    {
+      "name": "c5 approving the reviewed current terms succeeds",
+      "ok": true
+    },
+    {
+      "name": "c6 a failed or malformed refresh leaves the thread and draft untouched, says so, and recovers by itself",
+      "ok": true,
+      "detail": "Connection lost. Reconnecting… Your existing work is not cancelled."
+    },
+    {
+      "name": "c6 an ended session keeps the visible draft, disables sending until an explicit reconnection, and dispatches nothing",
+      "ok": true,
+      "detail": "{\"value\":\"A draft that must survive.\",\"disabled\":true,\"reconnect\":true,\"stored\":1}"
+    },
+    {
+      "name": "c6 storage denial says the draft stays on this page only, and the send still goes through exactly once",
+      "ok": true,
+      "detail": "Draft stays on this page only. Browser storage is unavailable."
+    },
+    {
+      "name": "c7 phone proposal page has no horizontal overflow",
+      "ok": true
+    },
+    {
+      "name": "c7 the phone confirmation filed one more task and landed on its focus",
+      "ok": true,
+      "detail": "http://127.0.0.1:61415/chat?task=add-a-header-row-to-every-csv-export-2#task-chat-live"
+    },
+    {
+      "name": "c7 phone: Review plan is inside the viewport and the page does not overflow",
+      "ok": true,
+      "detail": "{\"top\":519.140625,\"bottom\":555.140625,\"right\":137.203125}"
+    },
+    {
+      "name": "c7 phone: Approve & start is not hidden beneath the tab bar or composer",
+      "ok": true,
+      "detail": "{\"approveRect\":{\"top\":388.59375,\"bottom\":430.984375,\"left\":33.796875,\"right\":356.203125,\"width\":322.40625,\"height\":42.390625},\"tabbar\":{\"top\":787,\"bottom\":844,\"left\":0,\"right\":390,\"width\":390,\"height\":57}}"
+    },
+    {
+      "name": "c7/c2 phone: a live update while typing keeps the draft and focus, the reader stays put, and New update sits above the composer and tab bar inside the viewport",
+      "ok": true,
+      "detail": "{\"value\":\"And on the phone\",\"focused\":true,\"same\":true,\"button\":{\"top\":668.8125,\"bottom\":706.40625,\"left\":136.609375,\"right\":253.390625},\"clearsComposer\":true,\"composerClearsTab\":true,\"scrollY\":0}"
+    },
+    {
+      "name": "c6 without JavaScript the native send redirects and dispatches once, the reply reads after a reload, and the task focus keeps its native Review plan disclosure and password form",
+      "ok": true,
+      "detail": "{\"nativeRedirect\":true,\"nativeReply\":true,\"nativeState\":{\"thinking\":false,\"messages\":[\"msg op\",\"msg mate\"],\"problem\":null},\"turns\":1,\"noScriptPlan\":{\"plan\":true,\"review\":true,\"form\":true,\"composer\":true}}"
+    },
+    {
+      "name": "c7 no document horizontal overflow at 320px on /chat",
+      "ok": true,
+      "detail": "{\"scrollWidth\":320,\"clientWidth\":320,\"ok\":true}"
+    },
+    {
+      "name": "c7 no document horizontal overflow at 320px on /chat?task=add-a-header-row-to-every-csv-export",
+      "ok": true,
+      "detail": "{\"scrollWidth\":320,\"clientWidth\":320,\"ok\":true}"
+    },
+    {
+      "name": "c7 no document horizontal overflow at 320px on /chat?task=ledger-export",
+      "ok": true,
+      "detail": "{\"scrollWidth\":320,\"clientWidth\":320,\"ok\":true}"
+    },
+    {
+      "name": "c7 no document horizontal overflow at 320px with the approval expanded",
+      "ok": true
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-workspace-2-chat-20260913-63998723/evidence/workspace-2-chat-2026-09-13/desktop-new-task-proposal.png",
+      "caption": "Desktop 1440×900: the new-task proposal card, arrived live while the composer stayed put (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-workspace-2-chat-20260913-63998723/evidence/workspace-2-chat-2026-09-13/desktop-concise-plan.png",
+      "caption": "Desktop 1440×900: the created task's focus with the concise plan and its one Review plan action (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-workspace-2-chat-20260913-63998723/evidence/workspace-2-chat-2026-09-13/desktop-expanded-approval.png",
+      "caption": "Desktop 1440×900: Review plan opened — the exact signed terms, password, and Approve & start (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-workspace-2-chat-20260913-63998723/evidence/workspace-2-chat-2026-09-13/desktop-live-update-while-typing.png",
+      "caption": "Desktop 1440×900: a reply landed live while typing — the draft and caret stayed, the reader was not moved, New update offers the way down (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-workspace-2-chat-20260913-63998723/evidence/workspace-2-chat-2026-09-13/desktop-stale-approval.png",
+      "caption": "Desktop 1440×900: the scope changed while the password form was open — the form stays, its submit is disabled, and review is explicit (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-workspace-2-chat-20260913-63998723/evidence/workspace-2-chat-2026-09-13/phone-new-task-proposal.png",
+      "caption": "Phone 390×844: the new-task proposal card arrived live (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-workspace-2-chat-20260913-63998723/evidence/workspace-2-chat-2026-09-13/phone-concise-plan.png",
+      "caption": "Phone 390×844: the created task's concise plan with its one Review plan action (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-workspace-2-chat-20260913-63998723/evidence/workspace-2-chat-2026-09-13/phone-expanded-approval.png",
+      "caption": "Phone 390×844: Review plan opened — password and Approve & start above the tab bar (fixture)"
+    },
+    {
+      "path": "/Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-workspace-2-chat-20260913-63998723/evidence/workspace-2-chat-2026-09-13/phone-live-update-while-typing.png",
+      "caption": "Phone 390×844: a live update landed while typing — draft kept, reader not moved, New update above the composer (fixture)"
+    }
+  ]
+}
