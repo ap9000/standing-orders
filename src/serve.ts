@@ -986,6 +986,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     // project was chosen. The handler below re-proves the run's repo
     // against the ceiling and the account (`runVisible`) before a byte
     // renders, so letting the path through widens nothing.
+    // The chat's two read-only refresh routes (package 2 revision): the
+    // page itself is allowed from All projects, so its status poll and
+    // task fragment must be too — a 303 to the opener answered the poll
+    // with HTML and the page wrongly said the sign-in was lost. Each
+    // route keeps its own cookie, role, session, ceiling, and task
+    // admission checks; only the project-opener bounce is skipped, and
+    // only for these two exact paths.
     const needsProject =
       who.via === "cookie" && project === null && !unscopedMode &&
       url.pathname !== "/" && url.pathname !== "/work" &&
@@ -996,7 +1003,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/projects" &&
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
-      url.pathname !== "/chat" &&
+      url.pathname !== "/chat" && url.pathname !== "/chat/mate/status" && url.pathname !== "/chat/task-status" &&
       url.pathname !== "/settings" && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
@@ -10468,23 +10475,18 @@ const STYLE = `
   .chat-new-update-holder { position: sticky; bottom: 1rem; z-index: 28; display: flex; justify-content: center; height: 0; margin: 0; pointer-events: none; }
   .chat-new-update { pointer-events: auto; transform: translateY(-100%); min-height: 2.35rem; padding-inline: .9rem; border-radius: 999px; box-shadow: var(--shadow-overlay); }
   .chat-new-update[hidden] { display: none; }
-  /* The concise plan (package 2): four signed facts, then one Review plan
-     disclosure over the unchanged exact-terms form. */
-  .chat-plan-head h2 { margin: .2rem 0 .1rem; font-size: 1rem; letter-spacing: -.025em; }
-  .chat-plan-head .meta { margin: 0; }
-  .chat-plan-brief { display: grid; gap: .55rem; margin: .85rem 0 0; }
-  .chat-plan-brief > div { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: .5rem; }
-  .chat-plan-brief dt { color: var(--muted-foreground); font-size: .66rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
-  .chat-plan-brief dd { min-width: 0; margin: 0; font-size: .82rem; line-height: 1.45; }
-  .chat-plan-brief dd p { margin: 0; overflow-wrap: anywhere; }
-  .chat-plan-list { margin: 0; padding-left: 1.1rem; }
-  .chat-plan-list li { overflow-wrap: anywhere; }
+  /* The concise plan (package 2): a title, the outcome, one line of
+     counts and limits, then one Review plan disclosure over the unchanged
+     exact-terms form. */
+  .chat-plan-head h2 { margin: 0; font-size: 1rem; letter-spacing: -.025em; }
+  .chat-plan-outcome { margin: .65rem 0 .55rem; font-size: .88rem; line-height: 1.5; overflow-wrap: anywhere; }
+  .chat-plan-facts { margin: 0; color: var(--muted-foreground); font-size: .74rem; line-height: 1.5; overflow-wrap: anywhere; }
   .chat-plan > details.chat-approval { margin: .85rem 0 0; padding: .85rem 0 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
   .chat-plan > details.chat-approval > summary { display: flex; align-items: center; gap: .75rem; cursor: pointer; list-style: none; }
   .chat-plan > details.chat-approval > summary::-webkit-details-marker { display: none; }
-  .chat-plan > details.chat-approval > summary .button-link { flex: none; white-space: nowrap; }
-  .chat-plan > details.chat-approval > summary small { color: var(--muted-foreground); font-size: .68rem; }
+  .chat-plan > details.chat-approval > summary .button-link { flex: 0 0 auto; white-space: nowrap; min-height: 44px; }
   .chat-plan > details.chat-approval > .chat-approval-form { padding: .85rem 0 0; }
+  .chat-plan .chat-approval-lead { margin: 0 0 .85rem; }
   .chat-approval-stale { margin: .75rem 0 0; }
   .chat-approval-stale a { font-weight: 600; }
   form.approve-form[data-stale="1"] .approval-confirm { opacity: .55; }
@@ -10568,7 +10570,6 @@ const STYLE = `
     /* Above the fixed composer and the tab bar, never beneath them. */
     .chat-new-update-holder { bottom: calc(8.6rem + env(safe-area-inset-bottom, 0rem)); }
     .chat-main:has(.proposal.pending) .chat-new-update-holder, .chat-main:has(.chat-empty) .chat-new-update-holder { bottom: calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
-    .chat-plan-brief > div { grid-template-columns: 1fr; gap: .15rem; }
     .chat-workspace, .chat-workspace.projects-hidden { display: block; }
     .chat-workspace.projects-hidden .chat-projects, .chat-projects { display: none; }
     .chat-project-toggle { display: inline-flex; min-height: 2.75rem; }
@@ -12637,46 +12638,40 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
         ? `<p class="meta">No dollar caps; every result and its evidence is kept for you to compare.</p>`
         : `<p class="meta">$${(approval.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} per agent plus $${(approval.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} reserve; $${(approval.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)} total.</p>`) +
       `</div>`;
-  // The concise plan (package 2): goal, intended changes and success
-  // checks, and the important limits — every line a signed fact the exact
-  // terms below restate in full — then ONE Review plan action that opens
-  // the existing focused form, where Approve & start is the only submit.
+  // The concise plan (package 2, revised on the operator's screenshot
+  // feedback and AGENTS.md): a short title, the outcome in one bounded
+  // line, one compact line of counts and limits, and ONE Review plan
+  // action — no eyebrow, no second sentence saying the same thing, no
+  // footer. Every word is a signed fact the exact terms below restate in
+  // full; the password and approval instructions live inside the
+  // expanded review, where Approve & start is the only submit.
   const plan = approval.planDocument === null ? null : parseExecutionPlanDocument(approval.planDocument);
   const milestones = plan !== null && plan.ok ? plan.document.milestones : [];
-  const more = (shown: number, total: number, noun: string): string => total > shown ? ` <span class="meta">+${total - shown} more ${noun}</span>` : "";
-  const changes = milestones.length > 0
-    ? `<ol class="chat-plan-list">${milestones.slice(0, 3).map(one => `<li>${escape(oneLineOf(one, 140))}</li>`).join("")}</ol>${more(3, milestones.length, "milestones")}`
-    : scope.touches.length > 0
-      ? `<p>${scope.touches.slice(0, 4).map(one => `<span class="mono">${escape(one)}</span>`).join(", ")}${more(4, scope.touches.length, "paths")}</p>`
-      : `<p class="meta">no paths named</p>`;
-  const checks = scope.acceptance.length === 0
-    ? `<p class="meta">no acceptance criteria</p>`
-    : `<ul class="chat-plan-list">${scope.acceptance.slice(0, 3).map(one => `<li><code>${escape(one.id)}</code> ${escape(oneLineOf(one.statement, 140))}</li>`).join("")}</ul>${more(3, scope.acceptance.length, "criteria")}`;
-  const limits: string[] = [scope.outOfScope === null ? "no exclusions" : oneLineOf(scope.outOfScope, 160)];
-  if (approval.deliverable === "report") limits.push("report only — the repository is not changed");
-  if (scope.budgetMicrousd !== null) limits.push(`$${(scope.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap`);
-  if (permission !== null) limits.push(permission);
-  if (approval.raceTerms !== null) limits.push(`${approval.raceTerms.agents.length}-agent ${approval.raceTerms.kind}`);
+  const count = (n: number, singular: string): string => `${n} ${singular}${n === 1 ? "" : "s"}`;
+  const facts: string[] = [
+    milestones.length > 0 ? count(milestones.length, "step") : count(scope.touches.length, "path"),
+    count(scope.acceptance.length, "check"),
+  ];
+  if (approval.deliverable === "report") facts.push("Report only");
+  if (scope.budgetMicrousd !== null) facts.push(`$${(scope.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap`);
+  if (permission !== null) facts.push(permission);
+  if (approval.raceTerms !== null) facts.push(`${approval.raceTerms.agents.length}-agent ${approval.raceTerms.kind}`);
   return (
     `<section class="card chat-action-card chat-plan" id="task-chat-action" data-approval="${escape(approval.digest)}">` +
-    `<div class="chat-plan-head"><span class="eyebrow">your next step</span><h2>${approval.revision === null ? "Plan ready — approve to start" : "Revision ready — approve to start"}</h2><p class="meta">Nothing builds until you approve the exact terms.${approval.coordinator === null ? "" : ` Filed by ${escape(approval.coordinator.label)}.`}</p></div>` +
-    `<dl class="chat-plan-brief">` +
-    `<div><dt>Goal</dt><dd><p>${escape(oneLineOf(scope.goal, 320))}</p></dd></div>` +
-    `<div><dt>${milestones.length > 0 ? "Changes" : "May touch"}</dt><dd>${changes}</dd></div>` +
-    `<div><dt>Success checks</dt><dd>${checks}</dd></div>` +
-    `<div><dt>Limits</dt><dd><p>${limits.map(escape).join(" · ")}</p></dd></div>` +
-    `</dl>` +
+    `<div class="chat-plan-head"><h2>${approval.revision === null ? "Plan ready" : "Revision ready"}</h2></div>` +
+    `<p class="chat-plan-outcome">${escape(oneLineOf(scope.goal, 200))}</p>` +
+    `<p class="chat-plan-facts">${facts.map(escape).join(" · ")}</p>` +
     `<details class="chat-approval">` +
-    `<summary><span class="button-link">Review plan</span><small>The full exact terms, then Approve &amp; start with your password.</small></summary>` +
+    `<summary><span class="button-link">Review plan</span></summary>` +
     `<form method="post" action="${taskHref(focus.id)}/approve" class="chat-approval-form approve-form">` +
     `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
     `<input type="hidden" name="nonce" value="${escape(approval.nonce)}">` +
     `<input type="hidden" name="digest" value="${escape(approval.digest)}">` +
     `<input type="hidden" name="return" value="${escape(returnTo)}">` +
     `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">` +
+    `<p class="meta chat-approval-lead">These are the exact terms. Nothing builds until your password approves them.${approval.coordinator === null ? "" : ` Filed by <span class="mono">${escape(approval.coordinator.label)}</span>${approval.coordinator.filedAgo === null ? "" : ` · ${escape(approval.coordinator.filedAgo)}`}.`}</p>` +
     (approval.planDocument === null ? "" : `<div class="chat-approval-section"><span class="approval-label">proposed plan</span>${executionPlanHtml(approval.planDocument, true)}${planContractHtml(approval.planContract, "ceremony")}</div>`) +
     (approval.deliverable === "report" ? `<p class="meta"><span class="badge">report only</span> This investigates and reports back without changing the repository.</p>` : "") +
-    (approval.coordinator === null ? "" : `<p class="meta">Filed by <span class="mono">${escape(approval.coordinator.label)}</span>${approval.coordinator.filedAgo === null ? "" : ` · ${escape(approval.coordinator.filedAgo)}`}.</p>`) +
     `<div class="chat-approval-section"><span class="approval-label">goal</span><p class="approval-goal">${escape(scope.goal)}</p></div>` +
     `<div class="approval-boundaries"><div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>` +
     `<div class="approval-boundary"><p class="approval-label">may touch</p>${approvalPathsHtml(scope.touches)}</div></div>` +
@@ -13683,7 +13678,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
     // while the reader is above the latest message; a real button, so the
     // keyboard reaches it. Only this act moves the reader.
     `<div class="chat-new-update-holder"><button type="button" class="chat-new-update" id="chat-new-update" hidden>New update ↓</button></div>`,
-    `<form method="post" action="/chat" class="card composer" id="${latestReply === null && data.pending === null ? "latest" : "chat-composer"}" aria-label="message the mate" data-chat-session="${data.session.id}" data-chat-task="${escape(data.focusTask?.id ?? "")}" data-chat-busy="${data.pending === null ? "0" : "1"}" data-chat-version="${mateChatVersion(data)}" data-chat-approval="${escape(data.focusTask?.approval?.digest ?? "")}">`,
+    `<form method="post" action="/chat" class="card composer" id="${latestReply === null && data.pending === null ? "latest" : "chat-composer"}" aria-label="message the mate" data-chat-session="${data.session.id}" data-chat-task="${escape(data.focusTask?.id ?? "")}" data-chat-user="${escape(data.session.approver)}" data-chat-busy="${data.pending === null ? "0" : "1"}" data-chat-version="${mateChatVersion(data)}" data-chat-approval="${escape(data.focusTask?.approval?.digest ?? "")}">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<input type="hidden" name="request" value="${randomBytes(16).toString("hex")}"><input type="hidden" name="request-session" value="${data.session.id}">`,
     data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,

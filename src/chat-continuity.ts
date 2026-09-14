@@ -14,18 +14,28 @@
  *
  * Sending goes to the existing endpoint once, with the existing request
  * receipt key and session binding, and is never retried by itself; the
- * draft clears only on the server's receipt for THAT request, and never
- * when a newer edit replaced it. A changed or ended session, a lost
- * sign-in, an unavailable task, denied storage, and a lost connection
- * each say so in their own words; sending waits for an explicit
- * reconnection under stale authority, and drafting stays available. */
+ * draft clears only on the server's receipt for THE REQUEST THAT POLL
+ * ASKED ABOUT, never for a newer send or edit that replaced it. A changed
+ * or ended session, a lost sign-in, an unavailable task, denied storage,
+ * and a lost connection each say so in their own words; sending waits
+ * for an explicit reconnection under stale authority, and drafting stays
+ * available.
+ *
+ * Revision (build 1550 annotations): a poll acknowledges only the request
+ * it captured when it started; an answer is validated whole before any
+ * state changes, so a malformed one retries instead of latching a changed
+ * session or advancing a version nothing rendered; a task fragment held
+ * back while the reader was inside the region lands after they leave it,
+ * even when the server has nothing new; and the words carried across an
+ * explicit reconnection are bound to the server-named account, the task,
+ * and an expiry, so another account's tab never inherits them. */
 export const CHAT_CONTINUITY_SCRIPT = String.raw`
 (function(){
   var form=document.querySelector('.composer[data-chat-session]');
   if(!form)return;
   var box=form.querySelector('textarea[name="message"]'),request=form.querySelector('[name="request"]');
   var status=document.getElementById('chat-connection'),reconnect=document.getElementById('chat-reconnect'),newUpdate=document.getElementById('chat-new-update');
-  var session=form.dataset.chatSession,task=form.dataset.chatTask||'';
+  var session=form.dataset.chatSession,task=form.dataset.chatTask||'',user=form.dataset.chatUser||'';
   var key='standing-orders:chat-draft:'+session+':'+task,carryKey='standing-orders:chat-carry:'+task;
   var prefix='standing-orders:chat-draft:',draft=null,sending=false,timer=null,polling=false;
   var busy=form.dataset.chatBusy==='1',version=form.dataset.chatVersion||'',storage=true,stale=false,offline=navigator.onLine===false;
@@ -33,6 +43,10 @@ export const CHAT_CONTINUITY_SCRIPT = String.raw`
   // outlives an edit, so the older send still settles while the newer
   // draft (with its own fresh request) stays in the box.
   var sent=null,unread=null;
+  // A task fragment the server sent while the reader was inside the live
+  // region (or an approval form was open): kept until it can land safely,
+  // so leaving the field is enough — no second server change is needed.
+  var deferredLive=null;
   var sources=new WeakMap();
   function say(text){if(status)status.textContent=text;}
   function fresh(){var bytes=new Uint8Array(16);crypto.getRandomValues(bytes);return Array.from(bytes,function(b){return b.toString(16).padStart(2,'0');}).join('');}
@@ -43,9 +57,11 @@ export const CHAT_CONTINUITY_SCRIPT = String.raw`
     if(saved&&typeof saved.text==='string'&&saved.text.length<=2000&&/^[a-f0-9]{32}$/.test(saved.request)){draft=saved;box.value=saved.text;request.value=saved.request;if(saved.submitted)sent={request:saved.request,text:saved.text};}
     // Words carried across an EXPLICIT reconnection (below): a new draft
     // under this session and lens, its own fresh request key — nothing is
-    // sent, and nothing from the old session is treated as received.
+    // sent, and nothing from the old session is treated as received. The
+    // record is honoured only for the account the server names on this
+    // page, this task, and within a day; anything else is discarded here.
     var carry=JSON.parse(sessionStorage.getItem(carryKey)||'null');sessionStorage.removeItem(carryKey);
-    if(!draft&&carry&&typeof carry.text==='string'&&carry.text.length<=2000&&carry.at>Date.now()-86400000){box.value=carry.text;draft={text:carry.text,request:request.value,submitted:false,at:Date.now()};save();}
+    if(!draft&&carry&&user&&carry.owner===user&&carry.task===task&&typeof carry.text==='string'&&carry.text.length<=2000&&typeof carry.at==='number'&&carry.at>Date.now()-86400000){box.value=carry.text;draft={text:carry.text,request:request.value,submitted:false,at:Date.now()};save();}
   }catch(e){storage=false;}
   function buttons(){document.querySelectorAll('form[action="/chat"] button[type="submit"]').forEach(function(button){button.disabled=busy||sending||stale||offline;});}
   function showReconnect(on){if(reconnect)reconnect.hidden=!on;}
@@ -54,8 +70,9 @@ export const CHAT_CONTINUITY_SCRIPT = String.raw`
   function unavailable(){stale=true;buttons();showReconnect(true);say('This task is no longer available here. Your draft stays in this tab.');}
   if(reconnect)reconnect.addEventListener('click',function(){
     // The reader's own act: the unsent words ride along to the reloaded
-    // page as a NEW draft; the old session's draft is not resent.
-    try{if(box.value.trim())sessionStorage.setItem(carryKey,JSON.stringify({text:box.value,at:Date.now()}));}catch(e){}
+    // page as a NEW draft, bound to this account and task; the old
+    // session's draft is not resent.
+    try{if(box.value.trim()&&user)sessionStorage.setItem(carryKey,JSON.stringify({text:box.value,at:Date.now(),owner:user,task:task}));}catch(e){}
     location.reload();
   });
   box.addEventListener('input',function(){
@@ -123,9 +140,12 @@ export const CHAT_CONTINUITY_SCRIPT = String.raw`
       })
       .then(function(){sending=false;form.removeAttribute('aria-busy');buttons();});
   }
-  function receipt(){
-    if(draft&&draft.submitted&&sent&&draft.request===sent.request){draft=null;save();box.value='';request.value=fresh();box.dispatchEvent(new Event('input'));}
-    sent=null;
+  // A receipt settles exactly the request the poll asked about. A send
+  // submitted after that poll started (a different key) keeps its words
+  // and keeps waiting for its own receipt.
+  function receipt(asked){
+    if(draft&&draft.submitted&&draft.request===asked){draft=null;save();box.value='';request.value=fresh();box.dispatchEvent(new Event('input'));}
+    if(sent&&sent.request===asked)sent=null;
   }
   // ---- live regions --------------------------------------------------
   function normalize(html){return html.replace(/<time\b[^>]*>[^<]*<\/time>/g,'<time></time>').replace(/ id="latest"/g,'').replace(/ aria-busy="true"/g,'');}
@@ -184,23 +204,45 @@ export const CHAT_CONTINUITY_SCRIPT = String.raw`
     var action=document.getElementById('task-chat-action');
     if(action)action.insertAdjacentElement('beforebegin',note);else live.insertAdjacentElement('afterbegin',note);
   }
+  function parse(html){return new DOMParser().parseFromString('<!doctype html><body>'+html+'</body>','text/html');}
+  // The live task region lands only when it is safe: never under an open
+  // approval form (its password, its nonce, its digest stay exactly as
+  // rendered — the stale notice above speaks for the change), never while
+  // the reader is inside it. Otherwise the fragment is kept for later.
+  function liveSafe(live){return !live.querySelector('form.approve-form')&&!live.contains(document.activeElement);}
+  function swapLive(live,nextLive){
+    reconcile(live,nextLive,{first:null,focused:false});
+    Array.prototype.forEach.call(nextLive.attributes,function(attribute){live.setAttribute(attribute.name,attribute.value);});
+  }
   function apply(fragments){
-    var parsed=new DOMParser().parseFromString('<!doctype html><body>'+fragments.thread+(fragments.after||'')+(fragments.live||'')+'</body>','text/html');
+    // Everything is parsed and checked before the page changes: every
+    // region this page has must arrive whole, or the answer is malformed
+    // and nothing — not even the version — is taken from it.
+    var parsed=parse(fragments.thread+(fragments.after||'')+(fragments.live||''));
     var nextThread=parsed.getElementById('chat-thread'),thread=document.getElementById('chat-thread');
     if(!nextThread||!thread)throw new Error('response');
+    var after=document.getElementById('chat-after-composer'),nextAfter=parsed.getElementById('chat-after-composer');
+    if(after&&!nextAfter)throw new Error('response');
+    var live=document.getElementById('task-chat-live'),nextLive=parsed.getElementById('task-chat-live');
+    if(live&&!nextLive)throw new Error('response');
     var where=anchor(),report={first:null,focused:false};
     reconcile(thread,nextThread,report);
-    var after=document.getElementById('chat-after-composer'),nextAfter=parsed.getElementById('chat-after-composer');
-    if(after&&nextAfter)reconcile(after,nextAfter,{first:null,focused:false});
-    var live=document.getElementById('task-chat-live'),nextLive=parsed.getElementById('task-chat-live');
-    // The live task region: never under an open approval form (its
-    // password, its nonce, its digest stay exactly as rendered), never
-    // while the reader is inside it.
-    if(live&&nextLive&&!live.querySelector('form.approve-form')&&!live.contains(document.activeElement)){
-      reconcile(live,nextLive,{first:null,focused:false});
-      Array.prototype.forEach.call(nextLive.attributes,function(attribute){live.setAttribute(attribute.name,attribute.value);});
-    }
+    if(after)reconcile(after,nextAfter,{first:null,focused:false});
+    deferredLive=null;
+    if(live){if(liveSafe(live))swapLive(live,nextLive);else deferredLive=fragments.live;}
     restore(where,report);
+  }
+  function settleLive(){
+    if(deferredLive===null)return;
+    var live=document.getElementById('task-chat-live');
+    if(!live){deferredLive=null;return;}
+    if(!liveSafe(live))return;
+    var nextLive=parse(deferredLive).getElementById('task-chat-live');
+    deferredLive=null;
+    if(!nextLive)return;
+    var where=anchor();
+    swapLive(live,nextLive);
+    restore(where,{first:null,focused:false});
   }
   function guardApproval(digest){
     var live=document.getElementById('task-chat-live');if(!live)return;
@@ -210,29 +252,55 @@ export const CHAT_CONTINUITY_SCRIPT = String.raw`
   remember(document.getElementById('chat-thread')||form);
   var liveNow=document.getElementById('task-chat-live');if(liveNow)remember(liveNow);
   // ---- the status poll -----------------------------------------------
+  // The whole answer must have the shape the server writes before any of
+  // it is believed. Only a complete answer can end the session (an
+  // explicit session:null) or move the page; anything else is a bad
+  // refresh that changes nothing and is asked again.
+  function valid(data){
+    if(data===null||typeof data!=='object')return false;
+    if(data.session===null)return true;
+    if(typeof data.session!=='number'&&typeof data.session!=='string')return false;
+    if(typeof data.task!=='string')return false;
+    if(data.unavailable===true)return true;
+    if(typeof data.version!=='string'||typeof data.pending!=='boolean'||typeof data.received!=='boolean')return false;
+    if(data.approval!==undefined&&typeof data.approval!=='string')return false;
+    if(data.fragments!==undefined){
+      var f=data.fragments;
+      if(f===null||typeof f!=='object'||typeof f.thread!=='string')return false;
+      if(f.after!==undefined&&f.after!==null&&typeof f.after!=='string')return false;
+      if(f.live!==undefined&&f.live!==null&&typeof f.live!=='string')return false;
+    }
+    return true;
+  }
   function later(ms){if(stale)return;clearTimeout(timer);timer=setTimeout(check,ms);}
   async function check(){
     if(polling||stale)return;
     if(document.hidden){later(5000);return;}
     polling=true;
+    // The request this poll asks about is fixed here: a send submitted
+    // while the answer is in flight is a different key and is not settled
+    // by it.
+    var asked=sent?sent.request:'';
     try{
-      var query='/chat/mate/status?version='+encodeURIComponent(version)+(task?'&task='+encodeURIComponent(task):'')+(sent?'&request='+encodeURIComponent(sent.request):'');
+      var query='/chat/mate/status?version='+encodeURIComponent(version)+(task?'&task='+encodeURIComponent(task):'')+(asked?'&request='+encodeURIComponent(asked):'');
       var r=await fetch(query,{cache:'no-store',signal:AbortSignal.timeout(10000)});
       if(r.status===401||r.status===403||r.redirected){lostAuthority();return;}
       if(!r.ok)throw new Error('connection');
       var data=await r.json();
-      if(data===null||typeof data!=='object')throw new Error('response');
+      if(!valid(data))throw new Error('response');
       if(data.session===null||String(data.session)!==session){changed();return;}
       // A late answer for another lens never lands here; the poll goes on.
-      if(String(data.task||'')!==task){later(5000);return;}
+      if(data.task!==task){later(5000);return;}
       if(data.unavailable===true){unavailable();return;}
-      if(typeof data.version!=='string'||typeof data.pending!=='boolean')throw new Error('response');
-      if(sent&&data.received===true)receipt();
+      if(asked&&data.received===true)receipt(asked);
       if(typeof data.approval==='string')guardApproval(data.approval);
       if(data.version!==version){
-        if(data.fragments&&typeof data.fragments.thread==='string'){apply(data.fragments);version=data.version;}
-        else version=data.version;
+        // A changed version is rendered or it is not taken: without its
+        // fragments nothing moved, so the page keeps asking as before.
+        if(data.fragments===undefined)throw new Error('response');
+        apply(data.fragments);version=data.version;
       }
+      settleLive();
       busy=data.pending;buttons();
       say(busy?'Reply in progress. You can draft your next message or come back later.':sent?'Message not confirmed. Check the conversation before retrying.':'Connected.');
       later(busy?2500:5000);

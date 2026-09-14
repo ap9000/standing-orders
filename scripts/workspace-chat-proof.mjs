@@ -31,7 +31,14 @@
  *       approval, and a live update while typing; no document overflow;
  *       the composer clears the tab bar.
  *
- *   node scripts/workspace-chat-proof.mjs [--out evidence/workspace-2-chat-2026-09-13] [--strict]
+ * Revision (build 1550 annotations): the All-projects journey on a
+ * two-project fixture (the poll and the task fragment answer, never bounce
+ * to the opener); the FULL reconnect — end elsewhere, Reconnect, mint
+ * again, the same account's words restored unsent — and another account
+ * on the same tab inheriting nothing; the concise card's copy and its
+ * height with the long scope at 390 and 320.
+ *
+ *   node scripts/workspace-chat-proof.mjs [--out output/playwright/workspace-2-chat-2026-09-13] [--strict]
  *
  * Playwright is NOT a dependency of this package: the script imports it
  * from `playwright` when installed, else from PLAYWRIGHT_MODULE, else from
@@ -41,10 +48,11 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { startFixture } from './ui-polish-fixture.mjs';
+import { addApprover } from '../dist/scope.js';
 
 const args = process.argv.slice(2);
 const flag = name => { const at = args.indexOf(name); return at === -1 ? null : args[at + 1] ?? null; };
-const out = resolve(flag('--out') ?? 'evidence/workspace-2-chat-2026-09-13');
+const out = resolve(flag('--out') ?? 'output/playwright/workspace-2-chat-2026-09-13');
 const strict = args.includes('--strict');
 mkdirSync(out, { recursive: true });
 
@@ -152,14 +160,16 @@ try {
   check('c1 creation is not execution approval: the scope waits unapproved', scopeAfterConfirm !== null && scopeAfterConfirm.approvedAt === null && (await page.evaluate(() => document.querySelector('.task-journey')?.getAttribute('data-work-status'))) === 'needs-approval');
   const brief = await page.evaluate(() => ({
     head: document.querySelector('.chat-plan .chat-plan-head h2')?.textContent ?? null,
-    rows: [...document.querySelectorAll('.chat-plan-brief dt')].map(d => d.textContent),
-    goal: document.querySelector('.chat-plan-brief dd p')?.textContent ?? '',
+    outcome: document.querySelector('.chat-plan .chat-plan-outcome')?.textContent ?? '',
+    facts: document.querySelector('.chat-plan .chat-plan-facts')?.textContent ?? '',
     review: document.querySelector('.chat-plan details.chat-approval > summary .button-link')?.textContent ?? null,
+    summaryText: document.querySelector('.chat-plan details.chat-approval > summary')?.textContent.trim() ?? null,
     open: document.querySelector('.chat-plan details.chat-approval')?.open ?? null,
+    visibleWords: [...document.querySelectorAll('.chat-plan > *:not(details), .chat-plan > details > summary')].map(el => el.textContent).join(' '),
     primaryButtons: [...document.querySelectorAll('#task-chat-live button[type="submit"]:not(.quiet)')].filter(b => b.checkVisibility()).length,
     filedLink: document.querySelector(`a[data-filed-task="${document.querySelector('.composer').getAttribute('data-chat-task')}"]`)?.textContent ?? null,
   }));
-  check('c1 the concise plan leads: goal, changes, success checks, limits, and ONE Review plan action (form folded, no competing primary button)', brief.head === 'Plan ready — approve to start' && JSON.stringify(brief.rows) === JSON.stringify(['Goal', 'May touch', 'Success checks', 'Limits']) && brief.goal.startsWith('Emit one header row') && brief.review === 'Review plan' && brief.open === false && brief.primaryButtons === 0, JSON.stringify(brief));
+  check('c1 the concise plan leads: Plan ready, the outcome, one line of counts, and ONE unbroken Review plan action — no "your next step", "approve to start", "Nothing builds until", or footer (form folded, no competing primary button)', brief.head === 'Plan ready' && brief.outcome.startsWith('Emit one header row') && /^2 paths · 2 checks/.test(brief.facts) && brief.review === 'Review plan' && brief.summaryText === 'Review plan' && brief.open === false && brief.primaryButtons === 0 && !/your next step|approve to start|Nothing builds until|full exact terms/i.test(brief.visibleWords), JSON.stringify(brief));
   check('c1 the confirmed card names the created task by id', brief.filedLink !== null && brief.filedLink.includes(taskId), brief.filedLink);
   await scrollTo(page, '#task-chat-action');
   await shot(page, 'desktop-concise-plan', 'Desktop 1440×900: the created task\'s focus with the concise plan and its one Review plan action (fixture)');
@@ -178,11 +188,12 @@ try {
       nonce: /^[a-f0-9]{32}$/.test(form?.querySelector('[name="nonce"]')?.value ?? ''),
       digest: /^[a-f0-9]{32,64}$/.test(form?.querySelector('[name="digest"]')?.value ?? ''),
       password: form?.querySelector('input[type="password"][name="token"]') !== null,
+      lead: text.includes('These are the exact terms. Nothing builds until your password approves them.'),
       approve: form?.querySelector('button[type="submit"]')?.textContent ?? null,
       approves: [...document.querySelectorAll('#task-chat-live button[type="submit"]:not(.quiet)')].filter(b => b.checkVisibility()).length,
     };
   });
-  check('c1 Review plan reveals the full exact terms — goal, exclusions, paths, criteria, agents, permissions, digest, nonce, password — and Approve & start is the one submit', Object.entries(exact).every(([k, v]) => k === 'approve' ? v === 'Approve & start' : k === 'approves' ? v === 1 : v === true), JSON.stringify(exact));
+  check('c1 Review plan reveals the full exact terms — goal, exclusions, paths, criteria, agents, permissions, digest, nonce, the password words, password — and Approve & start is the one submit', Object.entries(exact).every(([k, v]) => k === 'approve' ? v === 'Approve & start' : k === 'approves' ? v === 1 : v === true), JSON.stringify(exact));
   await scrollTo(page, '#task-chat-action');
   await shot(page, 'desktop-expanded-approval', 'Desktop 1440×900: Review plan opened — the exact signed terms, password, and Approve & start (fixture)');
   check('c7 desktop expanded approval has no horizontal overflow', (await noOverflow(page)).ok);
@@ -371,7 +382,7 @@ try {
   await page.click('.chat-approval-stale button');
   await page.waitForFunction(() => window.__staleDocument === undefined, null, { timeout: 15000 });
   await page.waitForLoadState('load');
-  const current = await page.evaluate(() => ({ digest: document.querySelector('form.approve-form [name="digest"]')?.value, goal: document.querySelector('.chat-plan-brief dd p')?.textContent, stale: document.querySelector('.chat-approval-stale') !== null }));
+  const current = await page.evaluate(() => ({ digest: document.querySelector('form.approve-form [name="digest"]')?.value, goal: document.querySelector('.chat-plan .chat-plan-outcome')?.textContent, stale: document.querySelector('.chat-approval-stale') !== null }));
   check('c5 explicit review reveals the current exact digest and terms', current.digest === fixture.store.getScope(A).digest && current.digest !== formBefore.digest && /CSV writer and range filter only/.test(current.goal ?? '') && !current.stale, JSON.stringify(current));
   await page.click('.chat-plan details.chat-approval > summary');
   await page.fill('#task-chat-action input[name="token"]', fixture.password);
@@ -407,6 +418,50 @@ try {
   await page.click('.composer button[type="submit"]', { force: true }).catch(() => undefined);
   await page.waitForTimeout(500);
   check('c6 an ended session keeps the visible draft, disables sending until an explicit reconnection, and dispatches nothing', await sameDocument(page, token) && ended.value === 'A draft that must survive.' && ended.disabled && ended.reconnect && ended.stored >= 1 && mateTurns() === turnsAtEnd, JSON.stringify(ended));
+  // The FULL reconnection (revision): Reconnect reloads onto the mint card
+  // (no composer, nothing sent); minting again for the SAME account brings
+  // the words back as a new unsent draft under the new session and a fresh
+  // request key. The carry names the account the server rendered.
+  const endedSession = await page.evaluate(() => document.querySelector('.composer').getAttribute('data-chat-session'));
+  await page.evaluate(() => { window.__staleDocument = true; });
+  await page.click('#chat-reconnect button');
+  await page.waitForFunction(() => window.__staleDocument === undefined, null, { timeout: 15000 });
+  await page.waitForLoadState('load');
+  const atMint = await page.evaluate(() => ({ mint: document.querySelector('form[action="/chat/mate/mint"]') !== null, composer: document.querySelector('.composer') !== null, carry: JSON.parse(sessionStorage.getItem('standing-orders:chat-carry:') ?? 'null') }));
+  await page.fill('form[action="/chat/mate/mint"] input[name="token"]', fixture.password);
+  await submit(page, 'form[action="/chat/mate/mint"] button[type="submit"]');
+  await page.waitForFunction(() => document.getElementById('chat-connection')?.textContent === 'Connected.', null, { timeout: 15000 });
+  const reconnected = await page.evaluate(() => {
+    const composer = document.querySelector('.composer');
+    const session = composer.getAttribute('data-chat-session');
+    return { value: composer.querySelector('textarea').value, session, user: composer.getAttribute('data-chat-user'), request: composer.querySelector('[name="request"]').value, carry: sessionStorage.getItem('standing-orders:chat-carry:'), stored: JSON.parse(sessionStorage.getItem(`standing-orders:chat-draft:${session}:`) ?? 'null'), disabled: composer.querySelector('button[type="submit"]').disabled };
+  });
+  check('c6 the full reconnection — Reconnect, the mint card, mint again — restores the same account\'s words unsent under the new session with a fresh key, the carry consumed, nothing dispatched', atMint.mint && !atMint.composer && atMint.carry?.owner === fixture.name && atMint.carry?.text === 'A draft that must survive.' && reconnected.value === 'A draft that must survive.' && reconnected.session !== endedSession && reconnected.user === fixture.name && /^[a-f0-9]{32}$/.test(reconnected.request) && reconnected.stored?.submitted === false && reconnected.carry === null && !reconnected.disabled && mateTurns() === turnsAtEnd, JSON.stringify({ atMint, reconnected, endedSession }));
+  // Another account on the SAME tab inherits nothing: the first account's
+  // Reconnect leaves its carry behind; the second signs in, mints, and its
+  // composer is empty — the record is discarded, not shown.
+  await other.goto(`${fixture.url}/chat`);
+  await other.evaluate(() => { const d = document.querySelector('.chat-session-details'); if (d) d.open = true; });
+  await submit(other, 'form[action="/chat/mate/end"] button[type="submit"]');
+  await page.waitForFunction(() => /changed or ended/.test(document.getElementById('chat-connection')?.textContent ?? ''), null, { timeout: 15000 });
+  await page.evaluate(() => { window.__staleDocument = true; });
+  await page.click('#chat-reconnect button');
+  await page.waitForFunction(() => window.__staleDocument === undefined, null, { timeout: 15000 });
+  await page.waitForLoadState('load');
+  const leftBehind = await page.evaluate(() => JSON.parse(sessionStorage.getItem('standing-orders:chat-carry:') ?? 'null'));
+  const secondAccount = addApprover(fixture.store, 'second-account', new Date(), { name: fixture.name, token: fixture.password });
+  if (!secondAccount.ok) throw new Error(`second account: ${secondAccount.reason}`);
+  await page.evaluate(async () => { await fetch('/logout', { method: 'POST', credentials: 'same-origin', redirect: 'manual' }); });
+  await page.goto(`${fixture.url}/login`);
+  await page.fill('input[name="name"]', 'second-account');
+  await page.fill('input[name="token"]', secondAccount.token);
+  await submit(page, 'button[type="submit"]');
+  await page.goto(`${fixture.url}/chat`);
+  await page.fill('form[action="/chat/mate/mint"] input[name="token"]', secondAccount.token);
+  await submit(page, 'form[action="/chat/mate/mint"] button[type="submit"]');
+  await page.waitForFunction(() => document.getElementById('chat-connection')?.textContent === 'Connected.', null, { timeout: 15000 });
+  const otherAccount = await page.evaluate(() => ({ user: document.querySelector('.composer').getAttribute('data-chat-user'), value: document.querySelector('.composer textarea').value, carry: sessionStorage.getItem('standing-orders:chat-carry:'), drafts: Object.keys(sessionStorage).filter(k => k.startsWith('standing-orders:chat-draft:')).map(k => sessionStorage.getItem(k)) }));
+  check('c6 another account signing in on the same tab never inherits the first account\'s reconnect draft: the composer is empty and the record is gone', leftBehind?.owner === fixture.name && leftBehind?.text === 'A draft that must survive.' && otherAccount.user === 'second-account' && otherAccount.value === '' && otherAccount.carry === null && !otherAccount.drafts.some(one => /A draft that must survive/.test(one ?? '')), JSON.stringify({ leftBehind, otherAccount }));
   await other.close();
   await safety.ctx.close();
   // Storage denied: the draft stays on the page, the words say so, sending still works once.
@@ -504,6 +559,90 @@ try {
   await narrow.page.click('.chat-plan details.chat-approval > summary').catch(() => undefined);
   check('c7 no document horizontal overflow at 320px with the approval expanded', (await noOverflow(narrow.page)).ok);
   await narrow.ctx.close();
+
+  // ---- All projects (revision): a two-project fixture, no project chosen --
+  // Build 1550 annotation 100: the poll bounced to /projects and the page
+  // reported a lost sign-in under a valid session.
+  const multi = await startFixture({ secondProject: true, slowMs: 9000 });
+  try {
+    const multiLogin = async page => {
+      await page.goto(`${multi.url}/login`);
+      await page.fill('input[name="name"]', multi.name);
+      await page.fill('input[name="token"]', multi.password);
+      await submit(page, 'button[type="submit"]');
+    };
+    const multiCtx = await browser.newContext({ viewport: VIEWPORTS.desktop, deviceScaleFactor: 1 });
+    page = await multiCtx.newPage();
+    await multiLogin(page);
+    await page.goto(`${multi.url}/chat`);
+    const allProjects = await page.evaluate(() => ({ chosen: document.cookie, scope: document.querySelector('[data-project-scope]')?.getAttribute('data-project-scope') ?? null, mint: document.querySelector('form[action="/chat/mate/mint"]') !== null, opener: location.pathname }));
+    await page.fill('form[action="/chat/mate/mint"] input[name="token"]', multi.password);
+    await submit(page, 'form[action="/chat/mate/mint"] button[type="submit"]');
+    await page.waitForFunction(() => ['Connected.', 'Sign in again to reconnect. Your draft stays in this tab.'].includes(document.getElementById('chat-connection')?.textContent ?? ''), null, { timeout: 15000 });
+    const allPoll = await page.evaluate(async () => {
+      const r = await fetch('/chat/mate/status?version=x', { cache: 'no-store', credentials: 'same-origin', redirect: 'manual' });
+      return { status: r.status, type: r.type, contentType: r.headers.get('content-type'), body: r.status === 200 ? await r.json() : null, words: document.getElementById('chat-connection').textContent, reconnect: !document.getElementById('chat-reconnect').hidden, disabled: document.querySelector('.composer button[type="submit"]').disabled };
+    });
+    check('c6 All projects (two admitted projects, none chosen): the status poll answers JSON with the live session, the page says Connected, and sending is enabled — no false sign-in warning', allProjects.opener === '/chat' && allProjects.mint && allPoll.status === 200 && /json/.test(allPoll.contentType ?? '') && typeof allPoll.body?.session === 'number' && allPoll.body?.task === '' && allPoll.words === 'Connected.' && !allPoll.reconnect && !allPoll.disabled, JSON.stringify({ allProjects, allPoll }));
+    // A task lens in EACH project, still without choosing one: the poll
+    // and the fragment answer for that task; a task the ceiling does not
+    // admit, or an unknown id, is unavailable — never a redirect.
+    const lensResults = [];
+    for (const id of [multi.tasks.long, multi.statusTasks.published]) {
+      await page.goto(`${multi.url}/chat?task=${id}`);
+      await page.waitForFunction(() => document.getElementById('chat-connection')?.textContent === 'Connected.', null, { timeout: 15000 }).catch(() => undefined);
+      lensResults.push(await page.evaluate(async task => {
+        const r = await fetch(`/chat/mate/status?task=${task}&version=x`, { cache: 'no-store', credentials: 'same-origin', redirect: 'manual' });
+        const f = await fetch(`/chat/task-status?task=${task}`, { cache: 'no-store', credentials: 'same-origin', redirect: 'manual' });
+        const body = r.status === 200 ? await r.json() : null;
+        return { task, lens: document.querySelector('.composer')?.getAttribute('data-chat-task'), live: document.getElementById('task-chat-live')?.getAttribute('data-task'), words: document.getElementById('chat-connection').textContent, poll: { status: r.status, task: body?.task, hasLive: typeof body?.fragments?.live === 'string' && body.fragments.live.includes('id="task-chat-live"') }, fragment: { status: f.status, hasRegion: (await f.text()).includes(`data-task="${task}"`) } };
+      }, id));
+    }
+    const deniedLens = await page.evaluate(async () => {
+      const r = await fetch('/chat/mate/status?task=not-a-task&version=x', { cache: 'no-store', credentials: 'same-origin', redirect: 'manual' });
+      const f = await fetch('/chat/task-status?task=not-a-task', { cache: 'no-store', credentials: 'same-origin', redirect: 'manual' });
+      return { status: r.status, body: r.status === 200 ? await r.json() : null, fragmentStatus: f.status };
+    });
+    check('c6/c4 All projects: a task lens in either admitted project polls and refreshes for ITS task, and an unavailable task answers unavailable (JSON), never a redirect', lensResults.every(one => one.lens === one.task && one.live === one.task && one.words === 'Connected.' && one.poll.status === 200 && one.poll.task === one.task && one.poll.hasLive && one.fragment.status === 200 && one.fragment.hasRegion) && deniedLens.status === 200 && deniedLens.body?.unavailable === true && deniedLens.fragmentStatus === 404, JSON.stringify({ lensResults, deniedLens }));
+    await page.goto(`${multi.url}/chat?task=${multi.tasks.long}`);
+    await scrollTo(page, '#task-chat-action');
+    await shot(page, 'desktop-all-projects-task-focus', 'Desktop 1440×900: All projects (none chosen) on a two-project fixture — the task focus polls and says Connected (fixture)');
+    // Sending from All projects dispatches once and clears on the receipt.
+    const multiTurns = () => multi.store.recentMateTurns(multi.name, 50).length;
+    const turnsAll = multiTurns();
+    await page.goto(`${multi.url}/chat`);
+    await page.fill('.composer textarea', 'Brief me.');
+    await page.click('.composer button[type="submit"]');
+    await page.waitForFunction(() => document.querySelector('.composer textarea').value === '', null, { timeout: 15000 });
+    await page.waitForFunction(() => document.querySelector('.chat-thinking') === null && document.querySelectorAll('.msg').length >= 2, null, { timeout: 20000 });
+    check('c3 All projects: a send dispatches once and settles on its receipt', multiTurns() === turnsAll + 1 && (await page.evaluate(() => document.querySelectorAll('.msg').length)) >= 2, `turns ${turnsAll} → ${multiTurns()}`);
+    await multiCtx.close();
+    // The concise card with the LONG scope at 390 and 320 (revision): the
+    // outcome is bounded, the counts are one line, Review plan is one
+    // unbroken button of comfortable height, and the card stays compact.
+    for (const [name, viewport, maxCard] of [['phone', VIEWPORTS.phone, 360], ['narrow', VIEWPORTS.narrow, 400]]) {
+      const ctx = await browser.newContext({ viewport, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
+      const p = await ctx.newPage();
+      await multiLogin(p);
+      await p.goto(`${multi.url}/chat?task=${multi.tasks.long}`);
+      await scrollTo(p, '#task-chat-action', 72);
+      const card = await p.evaluate(() => {
+        const card = document.querySelector('#task-chat-action').getBoundingClientRect();
+        const button = document.querySelector('.chat-plan details.chat-approval > summary .button-link').getBoundingClientRect();
+        const head = document.querySelector('.chat-plan .chat-plan-head h2').textContent;
+        const outcome = document.querySelector('.chat-plan .chat-plan-outcome').textContent;
+        const facts = document.querySelector('.chat-plan .chat-plan-facts').textContent;
+        const summary = document.querySelector('.chat-plan details.chat-approval > summary').textContent.trim();
+        const fullGoal = document.querySelector('.chat-plan form.approve-form .approval-goal')?.textContent ?? '';
+        return { card: { top: card.top, height: card.height, right: card.right }, button: { height: button.height, width: button.width, right: button.right, top: button.top, bottom: button.bottom }, head, outcomeLength: outcome.length, facts, summary, fullGoalLength: fullGoal.length };
+      });
+      check(`c7 ${name} ${viewport.width}px with the long scope: Plan ready, a bounded outcome, one facts line, a single-line 44px Review plan, a compact card (≤ ${maxCard}px) inside the viewport, the full goal kept behind the disclosure, no overflow`, card.head === 'Plan ready' && card.outcomeLength <= 201 && /^\d+ paths · \d+ checks/.test(card.facts) && card.summary === 'Review plan' && card.button.height >= 44 && card.button.height <= 48 && card.button.width < viewport.width / 2 && card.button.right <= viewport.width && card.button.top >= 0 && card.button.bottom <= viewport.height && card.card.height <= maxCard && card.card.right <= viewport.width && card.fullGoalLength > 700 && (await noOverflow(p)).ok, JSON.stringify(card));
+      await shot(p, `${name}-concise-plan-long-scope`, `${name === 'phone' ? 'Phone 390×844' : 'Narrow 320×740'}: the revised concise plan on the long ledger-export scope — Plan ready, outcome, counts, one Review plan (fixture)`);
+      await ctx.close();
+    }
+  } finally {
+    await multi.stop();
+  }
 } finally {
   await browser.close();
   await fixture.stop();

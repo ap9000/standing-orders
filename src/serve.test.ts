@@ -8681,12 +8681,18 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain('aria-label="current task"');
     expect(html).toContain('href="/chat?task=a" class="active" aria-current="page">Ask</a>');
     expect(html).toContain('aria-label="task progress"');
-    // Package 2: a concise plan leads, ONE Review plan action opens the
-    // exact terms, and Approve & start is the only submit.
+    // Package 2 (revised on the operator's screenshot feedback): a concise
+    // plan leads — Plan ready, the outcome, one line of counts — ONE
+    // Review plan action opens the exact terms, the password words live
+    // inside that review, and Approve & start is the only submit.
     expect(html).toContain('<section class="card chat-action-card chat-plan" id="task-chat-action" data-approval="');
-    expect(html).toContain("Plan ready — approve to start");
-    expect(html).toContain('<dl class="chat-plan-brief"><div><dt>Goal</dt><dd><p>do a</p></dd></div>');
-    expect(html).toContain('<summary><span class="button-link">Review plan</span>');
+    expect(html).toContain('<div class="chat-plan-head"><h2>Plan ready</h2></div><p class="chat-plan-outcome">do a</p><p class="chat-plan-facts">0 paths · 1 check · Auto permissions</p>');
+    expect(html).toContain('<summary><span class="button-link">Review plan</span></summary>');
+    expect(html).not.toContain("your next step");
+    expect(html).not.toContain("approve to start");
+    expect(html).not.toContain("Nothing builds until you approve");
+    expect(html).not.toContain("The full exact terms, then");
+    expect(html).toContain('<p class="meta chat-approval-lead">These are the exact terms. Nothing builds until your password approves them.</p>');
     expect(html.match(/<button type="submit">Approve & start<\/button>/g)).toHaveLength(1);
     expect(html).toContain('action="/t/a/approve"');
     expect(html).toContain('name="return" value="/chat?task=a"');
@@ -9253,7 +9259,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const html = await page(cookie);
     const version = /data-chat-version="([a-f0-9]{16})"/.exec(html)?.[1];
     if (version === undefined) throw new Error("no version on the composer");
-    expect(html).toContain('data-chat-task=""');
+    // The composer names the account the server knows: the reconnect carry
+    // (package 2 revision) is honoured only for that account.
+    expect(html).toContain('data-chat-task="" data-chat-user="alex" data-chat-busy="0"');
     expect(html).toContain('<div id="chat-thread" data-chat-region="thread">');
     expect(html).toContain('<button type="button" class="chat-new-update" id="chat-new-update" hidden>New update ↓</button>');
     expect(html).toContain('<p class="meta composer-hint" id="chat-reconnect" hidden><button type="button" class="quiet">Reconnect</button></p>');
@@ -9425,6 +9433,85 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(approved.headers.get("location")).toBe("/chat?task=a");
     expect(approvalOf(store.getScope("a"))).toMatchObject({ approved: true, by: "alex" });
     expect(await status(cookie, "?task=a")).toMatchObject({ approval: "" });
+  });
+
+  test("package 2 revision: from All projects (two admitted projects, none chosen) the status poll and the task fragment answer, never bounce to the opener; a task outside the ceiling is unavailable; the page's other guards stay exact", async () => {
+    // Build 1550 annotation 100: `needsProject` exempted `/chat` but not
+    // its read-only refresh routes, so a signed-in reader in All projects
+    // got a 303 to /projects (HTML) on every poll and the page said the
+    // sign-in was lost. The exemption is these two exact paths only.
+    const repoTwo = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-mate-repo2-")));
+    const repoOutside = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-mate-repo3-")));
+    for (const [id, repo] of [["c", repoTwo], ["z", repoOutside]] as const) {
+      const made = store.createConsoleTask({ id, title: `task ${id}`, repo, goal: `do ${id}`, acceptance: [{ id: "c1", statement: `${id} is done.`, evidence: ["manual-review"] }], filedVia: "cli" }, T0);
+      if (!made.ok) throw new Error(made.reason);
+    }
+    const two = createDecisionServer({
+      store, evidenceRoot, clock: () => clockNow, repos: [repoDir, repoTwo], chatEnv: { ANTHROPIC_API_KEY: "sk-test-key" },
+      chatFetcher: (async () => { throw new Error("no provider call expected"); }) as typeof fetch,
+      subscriptionChatRunner: async () => { throw new Error("no provider call expected"); },
+    });
+    await new Promise<void>(resolve => two.listen(0, "127.0.0.1", resolve));
+    const twoAddress = two.address();
+    if (typeof twoAddress !== "object" || twoAddress === null) throw new Error("no address");
+    const twoBase = `http://127.0.0.1:${twoAddress.port}`;
+    try {
+      const signedIn = await fetch(`${twoBase}/login`, { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken }), redirect: "manual" });
+      const cookie = (signedIn.headers.get("set-cookie") ?? "").split(";")[0] as string;
+      // No project chosen: the chat page opens (as before) and mints.
+      const opener = await fetch(`${twoBase}/chat`, { headers: { cookie }, redirect: "manual" });
+      expect(opener.status).toBe(200);
+      const html = await opener.text();
+      expect(html).toContain('action="/chat/mate/mint"');
+      const csrf = csrfFrom(html);
+      const minted = await fetch(`${twoBase}/chat/mate/mint`, { method: "POST", headers: { cookie, origin: twoBase }, body: new URLSearchParams({ csrf, "ceiling-usd": "5", token: approverToken }), redirect: "manual" });
+      expect(minted.headers.get("location")).toBe("/chat");
+      const composer = await (await fetch(`${twoBase}/chat`, { headers: { cookie } })).text();
+      expect(composer).toContain('data-chat-task="" data-chat-user="alex"');
+      const poll = async (query: string) => fetch(`${twoBase}/chat/mate/status${query}`, { headers: { cookie }, redirect: "manual" });
+      // The poll from All projects: JSON, no-store, the live session.
+      const all = await poll("?version=x");
+      expect(all.status).toBe(200);
+      expect(all.headers.get("content-type")).toContain("application/json");
+      expect(all.headers.get("cache-control")).toBe("no-store");
+      const allBody = await all.json() as Record<string, unknown>;
+      expect(allBody).toMatchObject({ task: "", pending: false, received: false, approval: "" });
+      expect(typeof allBody["session"]).toBe("number");
+      expect((allBody["fragments"] as Record<string, unknown>)["thread"]).toContain('id="chat-thread"');
+      // A task lens in EITHER admitted project answers with its live region, still without choosing a project.
+      for (const id of ["a", "c"]) {
+        const lens = await (await poll(`?task=${id}&version=x`)).json() as Record<string, unknown>;
+        expect(lens).toMatchObject({ task: id, pending: false });
+        expect((lens["fragments"] as Record<string, string | null>)["live"]).toContain(`id="task-chat-live" aria-live="polite" data-task="${id}"`);
+        const fragment = await fetch(`${twoBase}/chat/task-status?task=${id}`, { headers: { cookie }, redirect: "manual" });
+        expect(fragment.status).toBe(200);
+        expect(await fragment.text()).toContain(`data-task="${id}"`);
+        expect((await fetch(`${twoBase}/chat?task=${id}`, { headers: { cookie }, redirect: "manual" })).status).toBe(200);
+      }
+      // A task outside the ceiling, like an unknown one, is unavailable — never rendered, never a redirect.
+      const denied = await poll("?task=z&version=x");
+      expect(denied.status).toBe(200);
+      expect(await denied.json()).toMatchObject({ task: "z", unavailable: true, received: false });
+      expect((await fetch(`${twoBase}/chat/task-status?task=z`, { headers: { cookie }, redirect: "manual" })).status).toBe(404);
+      expect(await (await poll("?task=nope&version=x")).json()).toMatchObject({ task: "nope", unavailable: true });
+      // The route's own guards are untouched: no cookie, a bearer, and a
+      // viewer-only standing are refused; other collections still bounce
+      // to the opener from All projects.
+      expect((await fetch(`${twoBase}/chat/mate/status`, { redirect: "manual" })).status).toBe(303);
+      expect((await fetch(`${twoBase}/chat/task-status?task=a`, { redirect: "manual" })).status).toBe(303);
+      expect((await fetch(`${twoBase}/chat/mate/status`, { headers: { authorization: `Bearer alex:${approverToken}` }, redirect: "manual" })).status).toBe(403);
+      const bounced = await fetch(`${twoBase}/board`, { headers: { cookie }, redirect: "manual" });
+      expect(bounced.status).toBe(303);
+      expect(bounced.headers.get("location")).toBe("/projects");
+      // Choosing a project afterwards keeps polling (the earlier behaviour).
+      const chosen = await fetch(`${twoBase}/projects/select`, { method: "POST", headers: { cookie, origin: twoBase }, body: new URLSearchParams({ csrf, path: repoTwo, return: "/chat" }), redirect: "manual" });
+      expect(chosen.status).toBe(303);
+      expect((await (await poll("?task=c&version=x")).json() as Record<string, unknown>)["task"]).toBe("c");
+    } finally {
+      await new Promise<void>(resolve => two.close(() => resolve()));
+      rmSync(repoTwo, { recursive: true, force: true });
+      rmSync(repoOutside, { recursive: true, force: true });
+    }
   });
 
   test("package 2: revoked standing, a changed ceiling, and an anonymous or bearer caller fail the poll and the send safely", async () => {

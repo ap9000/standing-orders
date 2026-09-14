@@ -20,7 +20,7 @@ const card = (id: number, state: string) =>
 const html = (options: { live?: string; messages?: string } = {}) =>
   `${options.live ?? ""}${thread(options.messages ?? message(1, "op", "Pause the export") + message(2, "mate", "I can pause it.", card(5, "pending")))}` +
   `<div class="chat-new-update-holder"><button type="button" id="chat-new-update" hidden>New update ↓</button></div>` +
-  `<form action="/chat" class="composer" data-chat-session="7" data-chat-task="task-a" data-chat-version="v1" data-chat-busy="0" data-chat-approval="">` +
+  `<form action="/chat" class="composer" data-chat-session="7" data-chat-task="task-a" data-chat-user="alex" data-chat-version="v1" data-chat-busy="0" data-chat-approval="">` +
   `<input name="csrf" value="c"><input name="request" value="${request}"><input name="request-session" value="7"><input type="hidden" name="task" value="task-a"><textarea name="message"></textarea><button type="submit">send</button></form>` +
   `<p id="chat-connection"></p><p id="chat-reconnect" hidden><button type="button">Reconnect</button></p>` +
   `<div id="chat-after-composer" data-chat-region="after"></div>` +
@@ -238,6 +238,17 @@ test("a changed session never discards the visible draft or sends under the new 
   expect(reload).toHaveBeenCalledOnce();
   // The explicit reconnection carries the words to the new session's page
   // as a NEW unsent draft under a fresh request key; the old key is gone.
+  // The record is bound to the account the server named, the task, and
+  // the moment it was written.
+  expect(JSON.parse(window.sessionStorage.getItem("standing-orders:chat-carry:task-a")!)).toMatchObject({ text: "Keep this draft", owner: "alex", task: "task-a", at: expect.any(Number) });
+  // The full journey: the reloaded page has NO composer (the mint card
+  // stands where the conversation was), so the script does nothing and
+  // the carry survives that page; the conversation minted next, for the
+  // same account, restores the words.
+  mount(`<form action="/chat/mate/mint"><input name="token"><button type="submit">start</button></form>`);
+  scheduled = []; calls = [];
+  window.eval(CHAT_CONTINUITY_SCRIPT);
+  expect(calls).toEqual([]);
   expect(JSON.parse(window.sessionStorage.getItem("standing-orders:chat-carry:task-a")!)).toMatchObject({ text: "Keep this draft" });
   mount(html().replace('data-chat-session="7"', 'data-chat-session="8"').replace('name="request-session" value="7"', 'name="request-session" value="8"').replace(`name="request" value="${request}"`, 'name="request" value="' + "d".repeat(32) + '"'));
   scheduled = []; calls = [];
@@ -251,6 +262,45 @@ test("a changed session never discards the visible draft or sends under the new 
   response = async () => json({ ...idle, session: 8 });
   await check();
   expect(polls()[0]!.url).not.toContain("request=");
+  expect(posts()).toHaveLength(0);
+});
+
+test("a reconnect carry is honoured only for the account the server names, the same task, and within a day; anything else is discarded, never shown", () => {
+  const carry = (fields: Record<string, unknown>) => JSON.stringify({ text: "Private draft from user A", at: Date.now(), owner: "alex", task: "task-a", ...fields });
+  // Another account signs in on the same tab: user A's words never reach user B's composer, and the record is gone.
+  window.sessionStorage.setItem("standing-orders:chat-carry:task-a", carry({ owner: "user-a" }));
+  mount(html().replace('data-chat-user="alex"', 'data-chat-user="user-b"'));
+  window.eval(CHAT_CONTINUITY_SCRIPT);
+  expect(box().value).toBe("");
+  expect(window.sessionStorage.getItem("standing-orders:chat-carry:task-a")).toBeNull();
+  expect(window.sessionStorage.getItem(key)).toBeNull();
+  // A page the server did not bind to an account restores nothing either.
+  window.sessionStorage.setItem("standing-orders:chat-carry:task-a", carry({}));
+  mount(html().replace(' data-chat-user="alex"', "")); scheduled = []; calls = [];
+  window.eval(CHAT_CONTINUITY_SCRIPT);
+  expect(box().value).toBe("");
+  // The wrong task, or a record older than a day, is discarded too.
+  window.sessionStorage.setItem("standing-orders:chat-carry:task-a", carry({ task: "task-b" }));
+  mount(html()); scheduled = []; calls = [];
+  window.eval(CHAT_CONTINUITY_SCRIPT);
+  expect(box().value).toBe("");
+  window.sessionStorage.setItem("standing-orders:chat-carry:task-a", carry({ at: Date.now() - 86_400_001 }));
+  mount(html()); scheduled = []; calls = [];
+  window.eval(CHAT_CONTINUITY_SCRIPT);
+  expect(box().value).toBe("");
+  // The same account, task, and day: restored once as a new unsent draft.
+  window.sessionStorage.setItem("standing-orders:chat-carry:task-a", carry({}));
+  mount(html()); scheduled = []; calls = [];
+  window.eval(CHAT_CONTINUITY_SCRIPT);
+  expect(box().value).toBe("Private draft from user A");
+  expect(JSON.parse(window.sessionStorage.getItem(key)!)).toMatchObject({ text: "Private draft from user A", submitted: false });
+  // A reconnection without a server-named account carries nothing.
+  const reload = vi.spyOn(window.location, "reload").mockImplementation(() => undefined);
+  mount(html().replace(' data-chat-user="alex"', "")); scheduled = []; calls = [];
+  window.eval(CHAT_CONTINUITY_SCRIPT); enter("Unbound words");
+  window.document.querySelector("#chat-reconnect button")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+  expect(reload).toHaveBeenCalledOnce();
+  expect(window.sessionStorage.getItem("standing-orders:chat-carry:task-a")).toBeNull();
 });
 
 test("an ended session ({session:null}), a lost sign-in, and an unavailable task each stop sending with their own words and keep the draft", async () => {
@@ -274,7 +324,7 @@ test("an ended session ({session:null}), a lost sign-in, and an unavailable task
 test("a late answer for another lens is ignored, and a bad refresh (503, malformed JSON, fragment without its region) changes nothing and retries", async () => {
   window.eval(CHAT_CONTINUITY_SCRIPT); enter("Draft here");
   const before = window.document.getElementById("chat-thread")!.innerHTML;
-  response = async () => json({ ...idle, task: "task-b", version: "other", fragments: { thread: thread(message(9, "op", "other task")), after: "", live: null } });
+  response = async () => json({ ...idle, task: "task-b", version: "other", fragments: { thread: thread(message(9, "op", "other task")), after: `<div id="chat-after-composer" data-chat-region="after"></div>`, live: null } });
   await check();
   expect(window.document.getElementById("chat-thread")!.innerHTML).toBe(before);
   expect(status()).toBe("");
@@ -332,7 +382,7 @@ test("a live region WITHOUT an approval form refreshes in place, and one whose t
   mount(html({ live: live("same") })); scheduled = []; calls = [];
   window.eval(CHAT_CONTINUITY_SCRIPT);
   const approveForm = window.document.querySelector("form.approve-form")!;
-  response = async () => json({ ...idle, version: "v2", approval: "same", fragments: { thread: thread(message(1, "op", "Pause the export")), after: "", live: live("same") } });
+  response = async () => json({ ...idle, version: "v2", approval: "same", fragments: { thread: thread(message(1, "op", "Pause the export")), after: `<div id="chat-after-composer" data-chat-region="after"></div>`, live: live("same") } });
   await check();
   expect(window.document.querySelector("form.approve-form")).toBe(approveForm);
   expect(approveForm.getAttribute("data-stale")).toBeNull();
@@ -380,4 +430,153 @@ test("storage denial keeps the draft on the page, says so, and still sends throu
   expect(submit()).toBe(false); await settle(); await settle();
   expect(posts()).toHaveLength(1);
   expect(box().value).toBe("Check status");
+});
+
+test("a poll acknowledges only the request it asked about: a delayed receipt for send A neither clears nor settles a send B submitted meanwhile; each request is dispatched once and B waits for its own receipt", async () => {
+  window.eval(CHAT_CONTINUITY_SCRIPT); enter("First request");
+  let finishA!: (value: Response) => void;
+  response = async (url, init) => init?.method === "POST" ? json({ ok: true, session: 7, task: "task-a" }, 202) : new Promise<Response>(resolve => { finishA = resolve; });
+  submit(); await settle(); await settle();
+  // Poll A starts, asking after A's key, and its answer is delayed.
+  scheduled.shift()!.fn(); await settle();
+  expect(polls().at(-1)!.url).toContain(`request=${request}`);
+  expect(typeof finishA).toBe("function");
+  // B is edited and SUBMITTED before A's answer lands: its own key, its own dispatch.
+  enter("Newer request must survive");
+  const keyB = (form().querySelector('[name="request"]') as HTMLInputElement).value;
+  expect(keyB).not.toBe(request);
+  submit(); await settle(); await settle();
+  expect(posts()).toHaveLength(2);
+  expect(posts().map(one => new URLSearchParams(String(one.init!.body)).get("request"))).toEqual([request, keyB]);
+  // A's receipt arrives late: B's words and submitted draft stay exactly as they were.
+  finishA(json({ ...idle, received: true })); await settle(); await settle();
+  expect(box().value).toBe("Newer request must survive");
+  expect(JSON.parse(window.sessionStorage.getItem(key)!)).toMatchObject({ text: "Newer request must survive", request: keyB, submitted: true });
+  expect(status()).toContain("Message not confirmed");
+  // The next poll asks after B's key, not A's; B clears only on B's receipt.
+  response = async () => json({ ...idle, received: false });
+  await check();
+  expect(polls().at(-1)!.url).toContain(`request=${keyB}`);
+  expect(box().value).toBe("Newer request must survive");
+  response = async () => json({ ...idle, received: true });
+  await check();
+  expect(polls().at(-1)!.url).toContain(`request=${keyB}`);
+  expect(box().value).toBe(""); expect(window.sessionStorage.getItem(key)).toBeNull();
+  await check();
+  expect(polls().at(-1)!.url).not.toContain("request=");
+  expect(posts()).toHaveLength(2);
+});
+
+test("a changed version without its fragments is not taken as rendered: the page keeps asking with the version it shows, and a later complete answer lands", async () => {
+  window.eval(CHAT_CONTINUITY_SCRIPT); enter("Draft here");
+  const before = window.document.getElementById("chat-thread")!.innerHTML;
+  response = async () => json({ ...idle, version: "v2" });
+  await check(); await check();
+  expect(polls().at(-1)!.url).toContain("version=v1");
+  expect(polls().at(-1)!.url).not.toContain("version=v2");
+  expect(status()).toContain("Reconnecting"); expect(scheduled.at(-1)!.ms).toBe(10000);
+  expect(window.document.getElementById("chat-thread")!.innerHTML).toBe(before);
+  expect(box().value).toBe("Draft here");
+  // Fragments of the wrong shape are the same malformed answer.
+  response = async () => json({ ...idle, version: "v2", fragments: { thread: 7 } });
+  await check();
+  expect(polls().at(-1)!.url).toContain("version=v1");
+  expect(window.document.getElementById("chat-thread")!.innerHTML).toBe(before);
+  response = async () => json({ ...idle, version: "v2", fragments: { thread: thread(message(1, "op", "Pause the export") + message(2, "mate", "Paused.")), after: `<div id="chat-after-composer" data-chat-region="after"></div>`, live: null } });
+  await check();
+  expect(window.document.querySelector('[data-key="m2"] p')!.textContent).toBe("Paused.");
+  await check();
+  expect(polls().at(-1)!.url).toContain("version=v2");
+  expect(status()).toBe("Connected.");
+});
+
+test("a malformed status ({}, a wrong-typed session, a missing task or version) is a bad refresh that retries without touching the draft; only a complete answer with session:null ends the conversation", async () => {
+  window.eval(CHAT_CONTINUITY_SCRIPT); enter("Keep drafting");
+  for (const bad of [{}, { session: { id: 7 } }, { session: true }, { session: 7 }, { session: 7, task: "task-a" }, { session: 7, task: "task-a", version: "v1", pending: "no", received: false }, { session: 7, task: "task-a", version: "v1", pending: false, received: false, approval: 3 }]) {
+    response = async () => json(bad); await check();
+    expect(status()).toContain("Reconnecting"); expect(scheduled.at(-1)!.ms).toBe(10000);
+    expect(box().value).toBe("Keep drafting");
+    expect(sendButton().disabled).toBe(false);
+    expect((window.document.getElementById("chat-reconnect") as HTMLElement).hidden).toBe(true);
+  }
+  response = async () => json(idle); await check();
+  expect(status()).toBe("Connected.");
+  response = async () => json({ session: null }); await check();
+  expect(status()).toContain("changed or ended");
+  expect(sendButton().disabled).toBe(true); expect(box().value).toBe("Keep drafting");
+  expect(scheduled).toEqual([]);
+});
+
+test("a task fragment held back while the reader is inside the live region lands after they leave it, with no further server change; an open approval form still holds the fragment back and keeps its stale notice", async () => {
+  mount(html({ live: `<section id="task-chat-live" data-task="task-a" data-approval="" data-plan="drafted"><p data-key="state">Old task status</p><input name="guidance" value="Keep this guidance"></section>` }));
+  window.eval(CHAT_CONTINUITY_SCRIPT);
+  const input = window.document.querySelector('#task-chat-live input') as HTMLInputElement;
+  input.focus();
+  const composer = form();
+  const fragments = (state: string) => ({
+    thread: thread(message(1, "op", "Pause the export") + message(2, "mate", "I can pause it.", card(5, "pending"))),
+    after: `<div id="chat-after-composer" data-chat-region="after"></div>`,
+    live: `<section id="task-chat-live" data-task="task-a" data-approval="" data-plan="requested"><p data-key="state">${state}</p><input name="guidance" value="Keep this guidance"></section>`,
+  });
+  response = async () => json({ ...idle, version: "v2", fragments: fragments("New task status") });
+  await check();
+  expect(window.document.activeElement).toBe(input);
+  expect(window.document.querySelector('#task-chat-live [data-key="state"]')!.textContent).toBe("Old task status");
+  expect(window.document.getElementById("task-chat-live")!.getAttribute("data-plan")).toBe("drafted");
+  expect(polls().at(-1)!.url).toContain("version=v1");
+  // The version advanced (the thread rendered); the server has nothing new.
+  response = async () => json({ ...idle, version: "v2" });
+  await check();
+  expect(polls().at(-1)!.url).toContain("version=v2");
+  expect(window.document.querySelector('#task-chat-live [data-key="state"]')!.textContent).toBe("Old task status");
+  // Leaving the field is enough: the held fragment lands on the next unchanged poll.
+  input.blur();
+  await check();
+  expect(window.document.querySelector('#task-chat-live [data-key="state"]')!.textContent).toBe("New task status");
+  expect(window.document.getElementById("task-chat-live")!.getAttribute("data-plan")).toBe("requested");
+  expect(window.document.querySelector("form.composer")).toBe(composer);
+  // It landed once: the next unchanged poll changes nothing more.
+  const state = window.document.querySelector('#task-chat-live [data-key="state"]')!;
+  await check();
+  expect(window.document.querySelector('#task-chat-live [data-key="state"]')).toBe(state);
+  // With an approval form open, changed terms are held back for the whole
+  // life of that form: the stale notice speaks, the password stays.
+  mount(html({ live: live("digest-old") })); scheduled = []; calls = [];
+  window.eval(CHAT_CONTINUITY_SCRIPT);
+  const password = window.document.querySelector('input[name="token"]') as HTMLInputElement;
+  password.value = "hunter2"; password.focus();
+  response = async () => json({ ...idle, version: "v2", approval: "digest-new", fragments: { thread: thread(message(1, "op", "Pause the export")), after: `<div id="chat-after-composer" data-chat-region="after"></div>`, live: live("digest-new") } });
+  await check();
+  password.blur();
+  response = async () => json({ ...idle, version: "v2", approval: "digest-new" });
+  await check(); await check();
+  expect(window.document.querySelector("form.approve-form")!.getAttribute("data-stale")).toBe("1");
+  expect(window.document.querySelectorAll(".chat-approval-stale")).toHaveLength(1);
+  expect(password.value).toBe("hunter2");
+  expect((window.document.querySelector('form.approve-form [name="digest"]') as HTMLInputElement).value).toBe("digest-old");
+  expect(window.document.getElementById("task-chat-live")!.getAttribute("data-approval")).toBe("digest-old");
+});
+
+test("a fragment set that lacks a region this page has — after the composer, or the focused task's live region — is malformed whole: nothing renders and the version does not advance", async () => {
+  mount(html({ live: live("", false) }));
+  window.eval(CHAT_CONTINUITY_SCRIPT); enter("Draft here");
+  const regions = () => ["chat-thread", "chat-after-composer", "task-chat-live"].map(id => window.document.getElementById(id)!.outerHTML).join("");
+  const before = regions();
+  const threadNow = thread(message(1, "op", "Pause the export") + message(2, "mate", "Paused."));
+  for (const fragments of [
+    { thread: threadNow, after: "<p>missing the after region</p>", live: `<section id="task-chat-live" data-task="task-a" data-approval="" data-plan="requested"></section>` },
+    { thread: threadNow, after: `<div id="chat-after-composer" data-chat-region="after"></div>`, live: null },
+    { thread: threadNow, after: `<div id="chat-after-composer" data-chat-region="after"></div>`, live: "<p>no live region</p>" },
+  ]) {
+    response = async () => json({ ...idle, version: "v2", fragments }); await check();
+    expect(polls().at(-1)!.url).toContain("version=v1");
+    expect(status()).toContain("Reconnecting");
+    expect(regions()).toBe(before);
+    expect(box().value).toBe("Draft here");
+  }
+  response = async () => json({ ...idle, version: "v2", fragments: { thread: threadNow, after: `<div id="chat-after-composer" data-chat-region="after"></div>`, live: `<section id="task-chat-live" data-task="task-a" data-approval="" data-plan="requested"><section class="card task-journey" data-key="journey"><h2>Building</h2></section></section>` } });
+  await check(); await check();
+  expect(polls().at(-1)!.url).toContain("version=v2");
+  expect(window.document.querySelector("#task-chat-live h2")!.textContent).toBe("Building");
+  expect(window.document.querySelector('[data-key="m2"] p')!.textContent).toBe("Paused.");
 });

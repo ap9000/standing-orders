@@ -220,3 +220,70 @@ answers "add a task" with a `propose_task` card, `planning: skip`):
 - The New update control announces new content but not a count; a reader
   who is mid-thread and receives several updates is taken to the first
   unread node.
+
+## Revision — the seven annotations on build 1550 (2026-09-14)
+
+Applied on the seeded reviewed head (`c725c82`, plus the AGENTS.md
+simplicity rule at `33ed9ac`), within the package scope. Where this
+section disagrees with the text above, this section is current. Nothing
+outside the batch was changed; no schema, scheduler, provider, billing,
+permission, publication, or global configuration was touched, and no
+dependency was added.
+
+### What the annotations found, and what changed
+
+| # | Finding (P1 unless noted) | Change |
+| --- | --- | --- |
+| 100 | From **All projects** (two or more admitted projects, none chosen) `/chat/mate/status` bounced to `/projects` and answered HTML; the page then said "Sign in again" under a valid session. | `needsProject` (`src/serve.ts`) now exempts exactly two read-only refresh paths, `/chat/mate/status` and `/chat/task-status`, beside `/chat` itself. Every other guard on those routes is untouched: cookie-only, approver role, session/ceiling/generation, `taskChatFocus` admission (a task outside the ceiling or unknown answers `unavailable: true` / 404, never a redirect). Other collections still bounce to the opener from All projects. |
+| 101 | Poll A asked for send A's receipt; B was submitted before A resolved; A's `received: true` cleared B. | `check()` captures `asked = sent.request` when the poll starts and `receipt(asked)` settles only a draft or send whose key equals `asked`. B keeps its words and its submitted state until its own receipt; each request is posted once. |
+| 102 | A changed `version` without fragments advanced the page's version as if rendered; a malformed `{}` latched "changed session" forever. | `valid(data)` checks the whole answer before any state changes: `session` null (valid, ends the conversation) or number/string; `task` string; then `unavailable`, or `version`/`pending`/`received` typed, `approval` string when present, `fragments` an object whose `thread` is a string. A changed version without fragments, and a fragment set missing any region this page has (thread, after-composer, or the focused task's live region), throws before anything is touched — a bad refresh that retries in 10 s with the draft intact. |
+| 103 | A live-region fragment skipped while an input in that region had focus was forgotten once the global version advanced. | The skipped fragment is kept as `deferredLive`; `settleLive()` runs after every poll (a `focusout` schedules one) and lands it once the reader has left the region — no new server change needed. An open approval form still holds it back for the life of that form; its stale notice, typed password, digest, and nonce stay exactly as rendered. |
+| 104 | The reconnect carry was keyed by task only, so the next account signed in on the same tab could inherit the previous account's draft. | The composer now carries `data-chat-user` (the mate session's approver, server-rendered). The carry record is `{text, at, owner, task}` and is honoured only when `owner` equals the page's account, `task` matches, and `at` is within a day; anything else is removed unread. No account on the page, no carry. Same-user reconnection still restores the words unsent under the new session and a fresh key. |
+| 105 (P2) | Screenshot feedback: the card said the same thing three times and the button wrapped. | The plan card is now **Plan ready** (or **Revision ready**), the goal in one 200-character line, one line of counts and limits (`8 paths · 6 checks · Workspace sandbox`), and one non-wrapping **Review plan** (44 px). The eyebrow, "approve to start", "Nothing builds until…", and the summary footer are gone. Inside the expanded review, one line — *These are the exact terms. Nothing builds until your password approves them.* (plus *Filed by …* when a coordinator filed it) — precedes the unchanged signed terms. Taken from the operator's plan-card-only prototype diff; nothing else from that snapshot. Measured: 390 px card 267.6 px, 320 px card 309.8 px, button 44 × 103.4 px, full 812-character goal behind the disclosure. |
+| 106 | Use the root repro harness and independent review; promote regressions; add All-projects and full-reconnect browser checks. | Root harness `output/playwright/workspace-chat-race-review.mjs` (now nine checks, run with this worktree as cwd and candidate): **9/9**. Each is promoted into `src/chat-continuity.test.ts`; the All-projects and denied-task regressions live in `src/serve.test.ts`; the browser proof gained the All-projects, full-reconnect, cross-account, and long-scope card sections. |
+
+### Simplicity pass (AGENTS.md)
+
+Before: eyebrow *your next step* · *Plan ready — approve to start* ·
+*Nothing builds until you approve the exact terms.* · four labelled rows
+· *Review plan* + *The full exact terms, then Approve & start with your
+password.* (roughly 500 px tall on the phone, two-line button). After:
+*Plan ready* · one outcome line · one facts line · *Review plan*.
+First-time reading: the plan is ready; press Review plan to see the exact
+terms and approve. Nothing signed was shortened — the full goal,
+exclusions, paths, criteria, agents, limits, digest, nonce, and password
+are unchanged inside the disclosure. Status words for the other paths
+(*Connection lost…*, *This conversation changed or ended…*, *Sign in
+again…*) were not changed.
+
+### Verification
+
+- `node output/playwright/workspace-chat-race-review.mjs .` (the main
+  checkout's root harness, run from this worktree) — 9/9.
+- `npx vitest run src/chat-continuity.test.ts` — 21 passed (15 before;
+  the six new tests and the extended reconnect test cover annotations
+  101–104 and the missing-region cases; all seven fail when run against
+  the build 1550 script, checked by swapping it in).
+- `npx vitest run src/serve.test.ts` — 280 passed (one new: All projects
+  on a two-project server, a task in each project, a task outside the
+  ceiling, the route's own guards, other collections still bouncing; the
+  test fails with a 303 when the exemption is removed).
+- `npx vitest run src/chat-continuity.test.ts src/mate-continuity.test.ts src/mate.test.ts src/mate-doors.test.ts src/serve.test.ts` — 351 passed.
+- `npm run typecheck` — clean.
+- `node scripts/workspace-chat-proof.mjs --strict` — **51/51**, 12
+  exact-viewport screenshots under `output/playwright/workspace-2-chat-2026-09-13/`
+  (the ignored output tree, per the steering note; `evidence/` was left
+  as inherited). New captures: `desktop-all-projects-task-focus.png`,
+  `phone-concise-plan-long-scope.png` (390×844),
+  `narrow-concise-plan-long-scope.png` (320×740).
+- `node scripts/ui-polish-proof.mjs --strict --out output/playwright/ui-polish-2026-09-13-revision` — 76/76.
+- `node scripts/workspace-proof.mjs --strict --out output/playwright/workspace-1-revision` — 227/227.
+- The unchanged full serial verifier is left to the machine's gate.
+
+### Still true
+
+- Headless Chromium is not physical iPhone Safari.
+- The cross-account browser check signs a second synthetic approver in on
+  the same tab of the synthetic fixture; it is a script-level proof that
+  the carry is discarded, not a claim about live data.
+- The status poll still counts as session activity, as before.
