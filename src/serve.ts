@@ -306,6 +306,9 @@ export type ServeOptions = {
 
 const SESSION_COOKIE = "standing-orders_session";
 const BODY_CAP = 16 * 1024;
+// URL encoding can triple UTF-8 bytes. Admit the existing bounded task
+// fields (including paths and rubric) before canonical text validation.
+const TASK_FORM_BODY_CAP = 256 * 1024;
 /** A cookie idles out after half a day and dies outright after a week. */
 const SESSION_IDLE_MS = 12 * 60 * 60_000;
 const SESSION_ABSOLUTE_MS = 7 * 24 * 60 * 60_000;
@@ -897,7 +900,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       returnTo: safeReturn(url.pathname + url.search),
     };
     if (method === "GET" || method === "POST") return requestContext.run(requestFacts, async () => {
-      const body = method === "POST" ? await form(request) : null;
+      const taskTextForm = url.pathname === "/tasks/add" || /^\/t\/[^/]+\/scope$/.test(url.pathname);
+      const body = method === "POST" ? await form(request, taskTextForm ? TASK_FORM_BODY_CAP : BODY_CAP) : null;
       const target = actionTarget(url, who, request, body);
       const execute = async () => {
         if (!projectRequestAllowed(url, who, request, response)) return;
@@ -3817,9 +3821,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     taskId: string,
     problem: string | null,
     status: number,
+    scopeDraft?: URLSearchParams,
   ): void {
     const data = taskViewData(taskId, who, problem);
     if (data === null) return refuse(response, who, 404, "no such task", "/tasks");
+    if (scopeDraft !== undefined) data.scopeDraft = scopeDraft;
     const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
     return sendScreen(
       response,
@@ -4600,8 +4606,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         repo = canonical;
         admitted = [canonical];
       }
-      const goal = (body.get("goal") ?? "").trim();
-      const notThis = (body.get("not") ?? "").trim();
+      const goal = body.get("goal") ?? "";
+      const notThis = body.get("not") ?? "";
       const touchesGiven = (body.get("touches") ?? "")
         .split(/[\n,]/)
         .map(one => one.trim())
@@ -4658,7 +4664,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(
           response,
           made.reason === "backlog-full" ? 429 : 400,
-          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project, null, store.permissionDefault().mode, store.qualityDefault().mode),
+          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project, { title, goal, not: notThis, touches: body.get("touches") ?? "", acceptance: body.get("acceptance") ?? "", values: body }, store.permissionDefault().mode, store.qualityDefault().mode),
         );
       }
       const actionContext = requestContext.getStore();
@@ -7031,7 +7037,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             return {
               ok: false,
               status: proposed.reason === "changed" || proposed.reason === "claimed" ? 409 : 400,
-              message: `scope not saved: ${proposed.reason}`,
+              message: proposed.message ?? `scope not saved: ${proposed.reason}`,
             };
           }
           if (coverage !== null && ref.plan === "requested") {
@@ -7085,7 +7091,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           );
           return { ok: true };
         });
-        if (!saved.ok) return taskScreen(response, who, taskId, saved.message, saved.status);
+        if (!saved.ok) return taskScreen(response, who, taskId, saved.message, saved.status, body);
         return redirect(response, taskHref(taskId));
       }
       case "approve": {
@@ -9038,6 +9044,7 @@ const STYLE = `
   .permission-choice small { margin-top: .16rem; color: var(--muted-foreground); font-size: .6875rem; font-weight: 400; line-height: 1.35; }
   .permission-note { margin: .55rem 0 0; }
   .scope-editor .permission-toggle { grid-template-columns: 1fr; }
+  .scope-editor .problem { color: var(--foreground); }
   /* New work starts like a conversation, not a configuration sheet. The
      planner turns the one intent into the detailed, signed contract; these
      controls expose the uncommon overrides without making them the door. */
@@ -9839,7 +9846,7 @@ const STYLE = `
   .approval-chip { padding: .25rem .6rem; border: 1px solid var(--glass-border); border-radius: 999px; color: var(--muted-foreground); background: var(--glass); font-size: .7rem; }
   .approval-confirm { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; align-items: end; margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--glass-border); }
   .approval-confirm label { margin: 0; }
-  .approval-confirm button { min-height: 2.5rem; }
+  .approval-card .approval-confirm button { min-height: 44px; white-space: nowrap; }
   /* The ceremony's orientation and exact-terms group (UI polish 2026-09-13). */
   /* Neutral by law: amber belongs to the count and the approve act alone. */
   .approval-orient { margin: .85rem 0 .25rem; }
@@ -14348,7 +14355,7 @@ function homePage(chrome: Chrome, data: {
   ].join("\n"), { chrome, refreshSeconds: refresh });
 }
 
-type TaskComposerPrefill = { title: string; goal: string; not: string; touches: string; acceptance: string };
+type TaskComposerPrefill = { title: string; goal: string; not: string; touches: string; acceptance: string; values?: URLSearchParams };
 
 /** The one front door for new work. The common path is one prompt and one
  * button; the detailed contract remains available in-place for templates,
@@ -14363,22 +14370,24 @@ function taskComposerHtml(data: {
   qualityDefault: QualityMode;
 }): string {
   const prefill = data.prefill ?? null;
-  const candidates = data.candidates ?? [];
+  const values = prefill?.values;
+  const after = values?.get("after") ?? "";
+  const candidates = data.candidates ?? (after === "" ? [] : [{ id: after, title: after }]);
   const projectLabel = data.project === null ? "repository required" : projectName(data.project);
   return [
     `<form method="post" action="/tasks/add" class="card task-composer">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-    data.projectRevision === undefined
+    data.projectRevision === undefined && values?.get("projectRevision") == null
       ? ""
-      : `<input type="hidden" name="projectRevision" value="${data.projectRevision}">`,
+      : `<input type="hidden" name="projectRevision" value="${escape(String(data.projectRevision ?? values?.get("projectRevision") ?? ""))}">`,
     `<input type="hidden" name="planning-policy" value="choice">`,
-    prefill === null
+    prefill === null || values !== undefined
       ? ""
       : `<p class="meta" style="margin:.35rem .75rem .15rem">pre-filled from a template. Change anything; it still waits for your approval.</p>`,
     `<label class="task-prompt"><span class="visually-hidden">What should get done?</span>` +
       `<textarea name="title" rows="4" maxlength="200" required autofocus placeholder="Describe the outcome you want. The planner will inspect the repository and work out the implementation details.">${prefill === null ? "" : escape(prefill.title)}</textarea></label>`,
     data.project === null
-      ? `<label class="task-repo">repository <span class="meta">— required because no project is open, so the task must say where it belongs</span><input type="text" name="repo" required placeholder="/path/to/repository"></label>`
+      ? `<label class="task-repo">repository <span class="meta">— required because no project is open, so the task must say where it belongs</span><input type="text" name="repo" value="${escape(values?.get("repo") ?? "")}" required placeholder="/path/to/repository"></label>`
       : "",
     `<div class="task-composer-footer">`,
     `<div class="task-context">` +
@@ -14386,8 +14395,8 @@ function taskComposerHtml(data: {
       `<span class="task-context-chip">planner inspects first</span>` +
       `</div>`,
     `<label class="task-quality"><span class="visually-hidden">quality mode</span><select name="quality-mode" aria-label="quality mode">` +
-      `<option value="default"${data.qualityDefault === "default" ? " selected" : ""}>Default quality</option>` +
-      `<option value="strict"${data.qualityDefault === "strict" ? " selected" : ""}>Strict / release</option>` +
+      `<option value="default"${(values?.get("quality-mode") ?? data.qualityDefault) === "default" ? " selected" : ""}>Default quality</option>` +
+      `<option value="strict"${(values?.get("quality-mode") ?? data.qualityDefault) === "strict" ? " selected" : ""}>Strict / release</option>` +
       `</select></label>`,
     `<button type="submit" class="task-submit">${prefill === null ? "Plan task" : "Continue"} →</button>`,
     `</div>`,
@@ -14400,15 +14409,15 @@ function taskComposerHtml(data: {
       `<textarea name="acceptance" rows="3" placeholder="Requests over the limit return 429 | check">${prefill === null ? "" : escape(prefill.acceptance)}</textarea></label>`,
     `<label>not this <span class="meta">— optional boundary</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
     `<label>likely touches <span class="meta">— paths, comma-separated</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
-    `<label class="wide task-check"><input type="checkbox" name="plan-first" value="1" checked><span><strong>Let the planner inspect first</strong><small class="meta">Recommended. It drafts the goal, acceptance criteria, and implementation approach, and asks only when a missing answer materially changes the work.</small></span></label>`,
-    `<label class="wide task-check"><input type="checkbox" name="scout" value="1"><span><strong>Research only</strong><small class="meta">Deliver a read-only report instead of changing the repository.</small></span></label>`,
-    `<label>task id <span class="meta">— optional</span><input type="text" name="id" placeholder="made from the request"></label>`,
+    `<label class="wide task-check"><input type="checkbox" name="plan-first" value="1"${values === undefined || values.get("plan-first") === "1" ? " checked" : ""}><span><strong>Let the planner inspect first</strong><small class="meta">Recommended. It drafts the goal, acceptance criteria, and implementation approach, and asks only when a missing answer materially changes the work.</small></span></label>`,
+    `<label class="wide task-check"><input type="checkbox" name="scout" value="1"${values?.get("scout") === "1" ? " checked" : ""}><span><strong>Research only</strong><small class="meta">Deliver a read-only report instead of changing the repository.</small></span></label>`,
+    `<label>task id <span class="meta">— optional</span><input type="text" name="id" value="${escape(values?.get("id") ?? "")}" placeholder="made from the request"></label>`,
     candidates.length === 0
       ? ""
       : `<label>starts after <span class="meta">— optional</span><select name="after"><option value="">right away</option>` +
-        candidates.map(one => `<option value="${escape(one.id)}">${escape(one.id)} — ${escape(one.title)}</option>`).join("") +
+        candidates.map(one => `<option value="${escape(one.id)}"${one.id === after ? " selected" : ""}>${escape(one.id)} — ${escape(one.title)}</option>`).join("") +
         `</select></label>`,
-    `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", data.permissionDefault)}` +
+    `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", values?.get("permission-mode") === "bypassPermissions" ? "bypassPermissions" : values?.get("permission-mode") === "auto" ? "auto" : data.permissionDefault)}` +
       `<p class="meta permission-note">Inherited from Settings. You can still change it on the proposed scope before approval.</p></fieldset>`,
     `</div>`,
     `</details>`,
@@ -16349,6 +16358,7 @@ function taskBody(data: {
   degraded?: "sensitive" | "pane";
   csrf: string;
   nonce: string;
+  scopeDraft?: URLSearchParams;
   problem: string | null;
   /** The attended road (Phase 2E): mint offer, or the open authorization. */
   attended?: {
@@ -16991,19 +17001,20 @@ function taskBody(data: {
           : "";
 
   const scopeForm = [
-    `<details${scope === null ? " open" : ""}><summary>${scope === null ? "write the scope" : "edit the scope"}${
+    `<details${scope === null || data.scopeDraft !== undefined ? " open" : ""}><summary>${scope === null ? "write the scope" : "edit the scope"}${
       approval.approved ? " (editing voids the approval)" : ""
     }</summary>`,
     `<form method="post" action="${taskHref(task.id)}/scope" class="scope-editor">`,
+    data.scopeDraft === undefined || data.problem === null ? "" : `<div class="problem" role="alert" id="scope-error">${escape(data.problem)}</div>`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-    `<input type="hidden" name="sawDigest" value="${escape(scope?.digest ?? "")}">`,
-    `<label>goal<textarea name="goal" rows="3">${escape(scope?.goal ?? "")}</textarea></label>`,
-    `<label>not this<textarea name="not" rows="2">${escape(scope?.outOfScope ?? "")}</textarea></label>`,
+    `<input type="hidden" name="sawDigest" value="${escape(data.scopeDraft?.get("sawDigest") ?? scope?.digest ?? "")}">`,
+    `<label>goal<textarea name="goal" rows="3"${data.scopeDraft === undefined ? "" : ' autofocus aria-describedby="scope-error"'}>${escape(data.scopeDraft?.get("goal") ?? scope?.goal ?? "")}</textarea></label>`,
+    `<label>not this<textarea name="not" rows="2">${escape(data.scopeDraft?.get("not") ?? scope?.outOfScope ?? "")}</textarea></label>`,
     `<label>touches <span class="meta">(one per line)</span><textarea name="touches" rows="2">${escape(
-      (scope?.touches ?? []).join("\n"),
+      data.scopeDraft?.get("touches") ?? (scope?.touches ?? []).join("\n"),
     )}</textarea></label>`,
     `<label>acceptance <span class="meta">(required — one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review; id is optional and auto-numbered)</span><textarea name="acceptance" rows="3" placeholder="The button opens the settings panel | screenshot">${escape(
-      acceptanceToLines(scope?.acceptance ?? []).join("\n"),
+      data.scopeDraft?.get("acceptance") ?? acceptanceToLines(scope?.acceptance ?? []).join("\n"),
     )}</textarea></label>`,
     (() => {
       const defaults = data.spendDefaults ?? null;
@@ -17014,7 +17025,7 @@ function taskBody(data: {
             ? (defaults.buildPerRunMicrousd / 1_000_000).toFixed(2)
             : "";
       return `<label>agent-reported usage cap <span class="meta">(optional — leave blank for uncapped subscription work)</span>` +
-        `<input type="number" name="budget-usd" step="0.01" min="0.01" value="${escape(budgetPrefill)}" placeholder="no cap"></label>` +
+        `<input type="number" name="budget-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("budget-usd") ?? budgetPrefill)}" placeholder="no cap"></label>` +
         `<p class="meta">Claude expresses this limiter in API-equivalent dollars even on a membership. It does not switch the run to API billing.</p>`;
     })(),
     (() => {
@@ -17026,13 +17037,13 @@ function taskBody(data: {
             : scope?.profile?.provider === "codex" || scope?.profile?.provider === "openrouter"
               ? scope.profile.sandboxMode === "danger-full-access" ? "bypassPermissions" : "auto"
               : null;
-      const selected: UnattendedPermissionMode = data.permissionMode ?? profileMode ?? data.permissionDefault ?? "auto";
+      const selected: UnattendedPermissionMode = data.scopeDraft?.get("permission-mode") === "bypassPermissions" ? "bypassPermissions" : data.scopeDraft?.get("permission-mode") === "auto" ? "auto" : data.permissionMode ?? profileMode ?? data.permissionDefault ?? "auto";
       return `<fieldset class="permission-field"><legend>agent permissions</legend>` +
         permissionModeChoices("permission-mode", selected) +
         `<p class="meta permission-note">This task’s choice is sealed into its scope. Full access prevents permission prompts or sandbox limits from pausing supported unattended agents.</p></fieldset>`;
     })(),
     (() => {
-      const selected: QualityMode = scope?.qualityMode ?? data.qualityMode ?? data.qualityDefault ?? "default";
+      const selected: QualityMode = data.scopeDraft?.get("quality-mode") === "strict" ? "strict" : data.scopeDraft?.get("quality-mode") === "default" ? "default" : scope?.qualityMode ?? data.qualityMode ?? data.qualityDefault ?? "default";
       return `<fieldset class="permission-field"><legend>quality</legend>` +
         qualityModeChoices("quality-mode", selected) +
         `<p class="meta permission-note">This choice is signed into the scope. Strict / release automatically sends a completed diff through the isolated reviewer; repair remains bounded by your operating-mode authorization.</p></fieldset>`;
@@ -17044,8 +17055,8 @@ function taskBody(data: {
       // approval above restates and covers both.
       const defaults = data.spendDefaults ?? null;
       const terms = data.raceTerms ?? null;
-      const selectedCount = terms !== null ? terms.n : defaults?.raceAgents ?? 0;
-      const selectedModel = terms?.agents[0]?.model ?? "claude-sonnet-5";
+      const selectedCount = data.scopeDraft === undefined ? terms !== null ? terms.n : defaults?.raceAgents ?? 0 : Number(data.scopeDraft.get("race-count") ?? "0");
+      const selectedModel = data.scopeDraft?.get("race-model") ?? terms?.agents[0]?.model ?? "claude-sonnet-5";
       const perPrefill =
         terms !== null
           ? (terms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)
@@ -17068,8 +17079,8 @@ function taskBody(data: {
         `<label>competing model <select name="race-model">` +
           PRICED_BUILD_MODELS.map(model => `<option value="${escape(model)}"${model === selectedModel ? " selected" : ""}>${escape(model)}</option>`).join("") +
           `</select></label>`,
-        `<label>each competing agent may spend ($)<input type="number" name="race-per-usd" step="0.01" min="0.01" value="${escape(perPrefill)}"></label>`,
-        `<label>the whole tournament may spend ($)<input type="number" name="race-total-usd" step="0.01" min="0.01" value="${escape(totalPrefill)}"></label>`,
+        `<label>each competing agent may spend ($)<input type="number" name="race-per-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("race-per-usd") ?? perPrefill)}"></label>`,
+        `<label>the whole tournament may spend ($)<input type="number" name="race-total-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("race-total-usd") ?? totalPrefill)}"></label>`,
         // The comparison lanes (Phase 3 slice B): 2-4 rows, any registered
         // provider, exact model required — no dollar fields exist. Blank
         // rows are unused; filling any row files a comparison INSTEAD of a
@@ -17078,9 +17089,9 @@ function taskBody(data: {
         ...[1, 2, 3, 4].map(lane =>
           `<div class="row"><label>agent ${lane} <select name="compare-provider-${lane}">` +
             `<option value="">—</option>` +
-            PROVIDER_IDS.map(provider => `<option value="${escape(provider)}">${escape(provider)}</option>`).join("") +
+            PROVIDER_IDS.map(provider => `<option value="${escape(provider)}"${data.scopeDraft?.get(`compare-provider-${lane}`) === provider ? " selected" : ""}>${escape(provider)}</option>`).join("") +
             `</select></label>` +
-            `<label>its exact model<input type="text" name="compare-model-${lane}" placeholder="e.g. gemini-2.5-pro"></label></div>`,
+            `<label>its exact model<input type="text" name="compare-model-${lane}" value="${escape(data.scopeDraft?.get(`compare-model-${lane}`) ?? "")}" placeholder="e.g. gemini-2.5-pro"></label></div>`,
         ),
         `</details>`,
       ].join("\n");
@@ -17467,7 +17478,7 @@ function taskBody(data: {
         `</div>`
       );
     })(),
-    data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
+    data.problem === null || data.scopeDraft !== undefined ? "" : `<div class="problem">${escape(data.problem)}</div>`,
     // The board sent them here saying "needs you" — the page must open by
     // saying WHY and pointing at the act, not read as a fact sheet
     // (operator finding: clicking a needs-you card landed with no context).
@@ -17528,7 +17539,7 @@ function taskBody(data: {
       // The recipe road rides with the scope it reuses (UI polish
       // 2026-09-13), off the title-to-action path.
       ["<h2>scope</h2>", scopeCard, data.repo !== null && data.scope !== null ? `<p class="meta"><a href="/recipes/from-task?task=${encodeURIComponent(task.id)}">Reuse this scope as a recipe →</a></p>` : "", agentsCardHtml(task.id, data.route, data.csrf, data.canEditRoute === true), revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
-      data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan),
+      data.scopeDraft !== undefined || (data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan)),
     ),
     dependencyChoiceNeeded ? "" : section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
     section("holds", holds, true, data.holds.length),
@@ -20389,12 +20400,12 @@ function taskOf(store: Store, decision: Decision): string {
 
 // ---- request plumbing ------------------------------------------------------
 
-async function form(request: IncomingMessage): Promise<URLSearchParams> {
+async function form(request: IncomingMessage, cap = BODY_CAP): Promise<URLSearchParams> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     size += (chunk as Buffer).length;
-    if (size > BODY_CAP) throw new Error("body too large");
+    if (size > cap) throw new Error("body too large");
     chunks.push(chunk as Buffer);
   }
   return new URLSearchParams(Buffer.concat(chunks).toString("utf8"));

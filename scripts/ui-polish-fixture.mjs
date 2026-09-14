@@ -48,7 +48,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { openStore } from '../dist/store.js';
-import { addApprover, approve } from '../dist/scope.js';
+import { addApprover, approve, propose } from '../dist/scope.js';
 import { fileTaskProposal } from '../dist/proposal.js';
 import { legOf, routeDigestOf } from '../dist/phase-routing.js';
 import { storeEvidence, budgetedStatJson, imageDimensions } from '../dist/evidence.js';
@@ -197,6 +197,15 @@ export function startFixture(options = {}) {
     filedVia: 'console', planning: 'skip',
   }, hoursAgo(27));
   if (!done.ok) throw new Error(`fixture done task: ${done.reason}`);
+  // Package 5 boundary fixture: reproduce signed text from the old CLI,
+  // which allowed long goals and exclusions. Never file these as new work.
+  if (options.longRequests === true) {
+    const old = store.getScope('payout-rounding');
+    propose(store, { taskId: old.taskId,
+      goal: '  Legacy request — 日本語 😀 e\u0301\n' + (LONG_GOAL + '\n').repeat(4) + 'End of inherited goal.  ',
+      outOfScope: '  Legacy exclusions — 日本語 🧭 e\u0301\n' + (LONG_NOT + '\n').repeat(10) + 'End of inherited exclusions.  ',
+      touches: old.touches, acceptance: old.acceptance, now: hoursAgo(27) });
+  }
   const doneScope = store.getScope('payout-rounding');
   approve(store, 'payout-rounding', 'polish-fixture', hoursAgo(26), doneScope.digest, login.token);
   const doneRoute = store.approvedRouteOf('payout-rounding');

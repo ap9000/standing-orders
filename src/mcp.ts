@@ -1,3 +1,4 @@
+import { TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
 /**
  * `standing-orders mcp` — the MCP stdio server (MCP gateway spec v6).
  *
@@ -300,7 +301,7 @@ const TOOLS: Tool[] = [
       properties: {
         repo: { type: "string", minLength: 1, maxLength: 800 },
         title: { type: "string", minLength: 1, maxLength: 200 },
-        intent: { type: "string", maxLength: 2000 },
+        intent: TASK_SCOPE_TEXT_SCHEMA,
         idempotency_key: { type: "string", minLength: 8, maxLength: 64 },
         deliverable: { type: "string", enum: ["branch", "report"] },
       },
@@ -355,7 +356,7 @@ function proposeTools(): Tool[] {
     make("reserve", "Propose reserving a queued task for one worker, or releasing it to the shared queue with worker null.", { ref, worker: { type: ["string", "null"], maxLength: 60 } }, ["ref", "worker"]),
     make("hold", "Propose holding a task's next attempt, with a reason. A running attempt is never interrupted.", { ref, reason: { type: "string", maxLength: 200 } }, ["ref", "reason"]),
     make("unhold", "Propose lifting the operator's own hold on a task.", { ref }, ["ref"]),
-    make("scope", "Propose rewriting a task's scope. An approver confirms the rewrite, then approves it with a password — a scope you wrote never seals under a mode.", { ref, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 } }, ["ref", "goal"]),
+    make("scope", "Propose rewriting a task's scope. An approver confirms the rewrite, then approves it with a password — a scope you wrote never seals under a mode.", { ref, goal: TASK_SCOPE_TEXT_SCHEMA, not: TASK_SCOPE_TEXT_SCHEMA, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 } }, ["ref", "goal"]),
     make("cancel", "Propose cancelling a task, with a reason. The approver arms and confirms it on the task itself.", { ref, reason: { type: "string", maxLength: 200 } }, ["ref", "reason"]),
     make("answer", "Propose an answer to an open decision you read with get_decision, with a rationale. The approver confirms where every consequence and the builder's recommendation are shown; an irreversible option needs their explicit confirmation.", { decision: { type: "integer", minimum: 1 }, option: { type: "string", minLength: 1, maxLength: 64 }, rationale: { type: "string", maxLength: 400 } }, ["decision", "option", "rationale"]),
   ];

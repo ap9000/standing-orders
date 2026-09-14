@@ -1,3 +1,4 @@
+import { validateScopeText } from "./task-text.js";
 /**
  * Proposals over the MCP gateway (mate arc v3, §9). A coordinator may
  * propose what the mate may propose — next, reserve, hold, unhold, scope,
@@ -11,7 +12,7 @@
  */
 import type { CoordinatorProposalKind, Store } from "./store.js";
 import { authenticateCoordinator, type VerifiedCoordinator } from "./coordinator.js";
-import { decisionOver, honestText, readOptionalText, readTouches, readAcceptanceArg } from "./mate-tools.js";
+import { decisionOver, honestText, readTouches, readAcceptanceArg } from "./mate-tools.js";
 
 export const PER_CID_PENDING_PROPOSALS = 20;
 
@@ -126,9 +127,11 @@ function buildPayload(store: Store, who: VerifiedCoordinator, kind: CoordinatorP
     return { ok: true, repo: task.repo, payload: { task: task.taskId, holdId: hold.id }, awaiting: confirmation };
   }
   if (kind === "scope") {
-    if (!honestText(args["goal"], 2_000)) return bad("goal is plain text ≤2000");
-    const not = readOptionalText(args["not"], 2_000);
-    if (not === undefined) return bad("not is plain text ≤2000");
+    if (typeof args["goal"] !== "string" || (args["not"] != null && typeof args["not"] !== "string")) return bad("Goal and exclusions must be text.");
+    const badText = validateScopeText({ goal: args["goal"], outOfScope: args["not"] as string | null | undefined ?? null });
+    if (badText !== null) return bad(badText.message);
+    const not = args["not"] as string | null | undefined ?? null;
+    if (!honestText(args["goal"], 2_000) || (not !== null && not.trim() !== "" && !honestText(not, 2_000))) return bad("Task text cannot contain credentials.");
     const touches = readTouches(args["touches"]);
     if (touches === null) return bad("touches is up to 50 plain paths");
     const acceptance = readAcceptanceArg(args["acceptance"]);

@@ -867,6 +867,21 @@ describe("agreeing to a scope from the command line", () => {
   };
   let approverToken = "";
 
+  test("new CLI goals and exclusions use the canonical text policy without rewriting on rejection", async () => {
+    await scopeIt();
+    for (const flag of ["--goal", "--not"]) {
+      for (const value of ["a".repeat(2001), "😀".repeat(1001), "界".repeat(3000), "bad\u0000", "bad\u202e", "ok\r"]) {
+        const args = ["task", "scope", "pay", "--goal", "valid", "--acceptance", "Works|check", "--json"];
+        if (flag === "--goal") args[4] = value; else args.push(flag, value);
+        expect(await run(args)).toBe(EXIT.usage);
+        expect(payload()).toMatchObject({ ok: false, message: expect.stringMatching(/2000|control or hidden/) });
+        const check = openStore(db);
+        try { expect(check.getScope("pay")?.goal).toBe("add a guard"); } finally { check.close(); }
+      }
+    }
+    expect(await run(["task", "scope", "pay", "--goal", "😀".repeat(1000), "--not", "界".repeat(2000), "--acceptance", "Works|check", "--json"])).toBe(EXIT.ok);
+  });
+
   test("approving without --yes shows the terms and changes nothing", async () => {
     await scopeIt();
 

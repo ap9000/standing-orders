@@ -1,3 +1,4 @@
+import { validateScopeText } from "./task-text.js";
 import { projectAuthority } from "./project-access.js";
 /**
  * What a task is allowed to become, agreed before anything builds it.
@@ -911,6 +912,7 @@ export type GuardedProposeResult =
   | {
       ok: false;
       reason: "changed" | "claimed" | "bad-goal" | "bad-out-of-scope" | "bad-touches" | "bad-acceptance" | "acceptance-required";
+      message?: string;
     };
 
 /**
@@ -936,18 +938,11 @@ export function proposeGuarded(
   store: Store,
   input: Omit<ScopeInput, "acceptance"> & { sawDigest: string | null; taskRef: number | null; acceptance?: unknown },
 ): GuardedProposeResult {
-  const goal = input.goal.trim();
-  if (goal === "" || goal.length > 2_000 || hasForbiddenControls(goal)) {
-    return { ok: false, reason: "bad-goal" };
-  }
-  const outOfScope = input.outOfScope?.trim() || null;
-  if (outOfScope !== null && (outOfScope.length > 2_000 || hasForbiddenControls(outOfScope))) {
-    return { ok: false, reason: "bad-out-of-scope" };
-  }
   const touches = [...(input.touches ?? [])].map(one => one.trim()).filter(one => one !== "");
-  if (touches.length > 50 || touches.some(one => one.length > 200 || hasForbiddenControls(one))) {
-    return { ok: false, reason: "bad-touches" };
-  }
+  const badText = validateScopeText({ goal: input.goal, outOfScope: input.outOfScope ?? null, touches });
+  if (badText !== null) return badText;
+  const goal = input.goal.trim();
+  const outOfScope = input.outOfScope?.trim() || null;
   const acceptanceParse = parseAcceptanceCriteria(input.acceptance);
   if (acceptanceParse.problems.length > 0) {
     return { ok: false, reason: "bad-acceptance" };

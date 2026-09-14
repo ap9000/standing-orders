@@ -1,3 +1,4 @@
+import { validateScopeText, validateTaskText, TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
 /**
  * The mate's tools (mate arc §2): reads over the approver's ceiling and
  * proposals that become rows — never a write. Every result passes through
@@ -496,15 +497,18 @@ export const MATE_TOOLS: MateTool[] = [
     name: "propose_task",
     description: "Propose filing a new task from a plain-language outcome. Infer routine fields instead of asking for them. It becomes a card the operator confirms; nothing is filed until then. planning chooses repository inspection before approval: required for broad/risky work, skip only when explicitly requested for a small direct change, otherwise auto. report: true proposes a SCOUT task — a read-only investigation whose only deliverable is a report, never a branch.",
     inputSchema: schema(
-      { repo: REPO_ARG, title: { type: "string", maxLength: 200 }, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, acceptance: ACCEPTANCE_ARG_SCHEMA, planning: { type: "string", enum: ["auto", "required", "skip"] }, report: { type: "boolean" } },
+      { repo: REPO_ARG, title: { type: "string", maxLength: 200 }, goal: TASK_SCOPE_TEXT_SCHEMA, not: TASK_SCOPE_TEXT_SCHEMA, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, acceptance: ACCEPTANCE_ARG_SCHEMA, planning: { type: "string", enum: ["auto", "required", "skip"] }, report: { type: "boolean" } },
       ["repo", "title", "goal", "acceptance"],
     ),
     handle: (ctx, args) => {
       const repo = repoPathOf(ctx.who, args["repo"]);
       if (repo === null) return { ok: false, message: "repo must be one of the ids from list_repos" };
-      if (!honest(args["title"], 200) || !honest(args["goal"], 2_000)) return { ok: false, message: "title (≤200) and goal (≤2000) are plain text" };
-      const not = readOptionalText(args["not"], 2_000);
-      if (not === undefined) return { ok: false, message: "not is plain text ≤2000" };
+      if (typeof args["goal"] !== "string" || (args["not"] != null && typeof args["not"] !== "string")) return { ok: false, message: "Goal and exclusions must be text." };
+      if (typeof args["title"] !== "string") return { ok: false, message: "A title is required." };
+      const badText = validateTaskText({ title: args["title"], goal: args["goal"], outOfScope: args["not"] as string | null | undefined ?? null });
+      if (badText !== null) return { ok: false, message: badText.message };
+      const not = args["not"] as string | null | undefined ?? null;
+      if ([args["title"], args["goal"], not ?? ""].some(one => scanForSecrets(one).length > 0)) return { ok: false, message: "Task text cannot contain credentials." };
       const touches = readTouches(args["touches"]);
       if (touches === null) return { ok: false, message: "touches is up to 50 plain paths" };
       const acceptance = readAcceptanceArg(args["acceptance"]);
@@ -673,16 +677,18 @@ export const MATE_TOOLS: MateTool[] = [
     description:
       "Propose rewriting a task's scope (goal, what not to do, paths it may touch). The operator confirms the rewrite, then approves it with a password — a scope you wrote never approves itself.",
     inputSchema: schema(
-      { task: TASK_ARG, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, acceptance: ACCEPTANCE_ARG_SCHEMA },
+      { task: TASK_ARG, goal: TASK_SCOPE_TEXT_SCHEMA, not: TASK_SCOPE_TEXT_SCHEMA, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, acceptance: ACCEPTANCE_ARG_SCHEMA },
       ["task", "goal", "acceptance"],
     ),
     handle: (ctx, args) => {
       const taskId = taskIdOf(args);
       const ref = taskId === null ? null : admittedRef(ctx, taskId);
       if (taskId === null || ref === null) return notFound();
-      if (!honest(args["goal"], 2_000)) return { ok: false, message: "goal is plain text ≤2000" };
-      const not = readOptionalText(args["not"], 2_000);
-      if (not === undefined) return { ok: false, message: "not is plain text ≤2000" };
+      if (typeof args["goal"] !== "string" || (args["not"] != null && typeof args["not"] !== "string")) return { ok: false, message: "Goal and exclusions must be text." };
+      const badText = validateScopeText({ goal: args["goal"], outOfScope: args["not"] as string | null | undefined ?? null });
+      if (badText !== null) return { ok: false, message: badText.message };
+      const not = args["not"] as string | null | undefined ?? null;
+      if ([args["goal"], not ?? ""].some(one => scanForSecrets(one).length > 0)) return { ok: false, message: "Task text cannot contain credentials." };
       const touches = readTouches(args["touches"]);
       if (touches === null) return { ok: false, message: "touches is up to 50 plain paths" };
       const acceptance = readAcceptanceArg(args["acceptance"]);

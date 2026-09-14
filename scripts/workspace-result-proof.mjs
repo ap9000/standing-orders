@@ -54,7 +54,7 @@
  *       closed disclosures, risks in the open, and a 44px Back at 390
  *       and 320.
  *
- *   node scripts/workspace-result-proof.mjs [--out output/playwright/workspace-3-result-2026-09-13] [--strict] [--layout-only]
+ *   node scripts/workspace-result-proof.mjs [--out output/playwright/workspace-3-result-2026-09-13] [--strict] [--layout-only] [--long-requests]
  *
  * Playwright is NOT a dependency of this package: the script imports it
  * from `playwright` when installed, else from PLAYWRIGHT_MODULE, else from
@@ -71,6 +71,7 @@ const args = process.argv.slice(2);
 const flag = name => { const at = args.indexOf(name); return at === -1 ? null : args[at + 1] ?? null; };
 const out = resolve(flag('--out') ?? 'output/playwright/workspace-3-result-2026-09-13');
 const strict = args.includes('--strict');
+const longRequests = args.includes('--long-requests');
 const layoutOnly = args.includes('--layout-only');
 mkdirSync(out, { recursive: true });
 
@@ -88,7 +89,7 @@ const report = { generatedAt: new Date().toISOString(), out, fixture: 'scripts/u
 const check = (name, ok, detail) => { report.checks.push({ name, ok: Boolean(ok), detail }); console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`); };
 
 const { chromium } = await loadPlaywright();
-const fixture = await startFixture();
+const fixture = await startFixture({ longRequests });
 const browser = await chromium.launch();
 
 async function loginAs(page, name, password) {
@@ -155,6 +156,103 @@ async function postFrom(page, path, fields) {
   }, [path, fields]);
 }
 
+/** Package 5 pilot 1: the existing fixture and real browser journey,
+ * with synthetic pre-policy signed terms. No autonomous model success. */
+async function longRequestJourney() {
+  const original = fixture.store.getScope(task);
+  check('legacy fixture exceeds the new character limit in both fields', original.goal.length > 2000 && original.outOfScope.length > 2000,
+    JSON.stringify({ goalChars: original.goal.length, goalBytes: Buffer.byteLength(original.goal), exclusionChars: original.outOfScope.length, exclusionBytes: Buffer.byteLength(original.outOfScope) }));
+  for (const [name, viewport] of [['desktop', VIEWPORTS.desktop], ['phone', VIEWPORTS.phone]]) {
+    const { ctx, page } = await context(viewport, { reducedMotion: 'reduce' });
+    await freshConversation(page, `/chat?task=${task}`);
+    const chatDraft = `Unsent ${name}: keep the Unicode terms exactly.`;
+    await page.fill('.composer textarea', chatDraft);
+    await page.click('.completion-receipt a[data-open-result]');
+    await page.waitForLoadState('load');
+    check(`${name}: open result keeps chat draft and has no overflow`, (await noOverflow(page)).ok && await page.inputValue('.composer textarea') === chatDraft);
+    await shot(page, `${name}-long-result`, `${viewport.width}×${viewport.height}: result opened from chat with an unsent draft (synthetic legacy fixture)`);
+    await page.click('[data-result-tab="changes"]');
+    check(`${name}: changes show the sealed diff`, await page.locator('.diff-lines').count() > 0 && (await noOverflow(page)).ok);
+    await page.click('[data-result-tab="checks"]');
+    check(`${name}: checks view opens`, await visibleTab(page) === 'checks');
+    // The first batch at each viewport is plain; the later one is annotated.
+    for (const mode of ['plain', 'annotated']) {
+      if (mode === 'annotated') {
+        await page.click('[data-result-tab="changes"]');
+        await page.click('button[data-diff-mode="annotate"]');
+        await page.locator('button.pick-line[data-path="src/payout.ts"][data-side="new"]').first().click();
+      }
+      const note = `${name} ${mode}: Réparer 日本語 😀 e\u0301. ` + 'Keep the footer readable. '.repeat(12).trim();
+      await page.fill('#comment-form [name="note"]', note);
+      await page.reload({ waitUntil: 'load' });
+      check(`${name} ${mode}: reload keeps the entire review draft`, await page.inputValue('#comment-form [name="note"]') === note);
+      const form = await page.evaluate(() => Object.fromEntries(new FormData(document.querySelector('#comment-form')).entries()));
+      // A lost response leaves the form and draft in place; a real retry
+      // of its exact request returns the original note, never a duplicate.
+      await postFrom(page, `/r/${runId}/comment`, form);
+      await submit(page, '#comment-form button[type="submit"]');
+      const batch = fixture.store.liveDiffComments(runId);
+      check(`${name} ${mode}: missed-response retry records exactly one note`, batch.length === (mode === 'plain' ? 1 : 2) && batch.at(-1).note === note && (mode === 'plain' ? batch.at(-1).path === null : batch.at(-1).path === 'src/payout.ts'));
+      const seal = await page.evaluate(() => Object.fromEntries(new FormData(document.querySelector('.result-request form[action$="/revise"]')).entries()));
+      await scrollTo(page, '.result-request form[action$="/revise"]', 180);
+      const button = await rect(page, '.result-request form[action$="/revise"] button');
+      const bar = await rect(page, 'nav.tabbar');
+      check(`${name} ${mode}: revision action fits above navigation`, fits(button, viewport) && button.height >= 44 && (viewport.width > 760 || button.bottom <= bar.top) && (await noOverflow(page)).ok);
+      if (mode === 'annotated') await shot(page, `${name}-long-feedback`, `${viewport.width}×${viewport.height}: Unicode line feedback ready for a separate revision (synthetic legacy fixture)`);
+      const before = fixture.store.revisionsFromRun(runId).length;
+      // Miss the seal response too; submitting the same displayed batch must land once.
+      await postFrom(page, `/r/${runId}/revise`, seal);
+      await submit(page, '.result-request form[action$="/revise"] button[type="submit"]');
+      const childId = page.url().split('/t/')[1];
+      const child = fixture.store.getScope(childId);
+      check(`${name} ${mode}: exactly one unapproved child retains every inherited byte`, fixture.store.revisionsFromRun(runId).length === before + 1 && child !== null && child.approvedAt === null && child.approvedDigest === null && child.goal === `${original.goal} — apply the annotations recorded on build #${runId}; the revision brief carries the exact batch` && child.outOfScope === original.outOfScope);
+      const terms = await page.evaluate(() => ({ goal: document.querySelector('.approval-goal')?.textContent, not: document.querySelector('.approval-boundary p + p')?.textContent, digest: document.querySelector('form[action$="/approve"] [name="digest"]')?.value }));
+      check(`${name} ${mode}: full approval terms and current digest render unchanged`, terms.goal === child.goal && terms.not === child.outOfScope && terms.digest === child.digest && (await noOverflow(page)).ok);
+      if (mode === 'annotated') {
+        await scrollTo(page, '.approval-boundaries', 80);
+        await shot(page, `${name}-long-approval`, `${viewport.width}×${viewport.height}: inherited exclusions remain fully available before fresh approval (synthetic legacy fixture)`);
+      }
+      const approval = page.locator('form[action$="/approve"]');
+      await approval.locator('[name="token"]').fill(fixture.password);
+      await approval.locator('button[type="submit"]').focus();
+      const approvalButton = await rect(page, 'form[action$="/approve"] button[type="submit"]');
+      check(`${name} ${mode}: keyboard reaches fresh approval with a single-line button`, approvalButton.height >= 44 && approvalButton.height < 70 && (await noOverflow(page)).ok, JSON.stringify(approvalButton));
+      await submit(page, 'form[action$="/approve"] button[type="submit"]');
+      check(`${name} ${mode}: only the child receives fresh approval`, fixture.store.getScope(childId).approvedDigest === child.digest && JSON.stringify(fixture.store.getScope(task)) === JSON.stringify(original));
+      await goto(page, chatResult(task, runId));
+      check(`${name} ${mode}: consumed feedback leaves an empty editable note box`, fixture.store.liveDiffComments(runId).length === 0 && await page.inputValue('#comment-form [name="note"]') === '');
+      // Old seal remains tied to its old batch when another note appears.
+      if (mode === 'plain') {
+        const laterNote = `${name}: later batch stays live`;
+        const form2 = await page.evaluate(() => Object.fromEntries(new FormData(document.querySelector('#comment-form')).entries()));
+        await postFrom(page, `/r/${runId}/comment`, { ...form2, note: laterNote });
+        await postFrom(page, `/r/${runId}/revise`, seal);
+        check(`${name}: old seal replay leaves the later batch untouched`, fixture.store.revisionsFromRun(runId).length === before + 1 && fixture.store.liveDiffComments(runId).map(one => one.note).join() === laterNote);
+        // Include this later note with the following annotated batch.
+        await goto(page, chatResult(task, runId));
+      }
+    }
+    await page.click('[data-result-back]');
+    await page.waitForLoadState('load');
+    check(`${name}: Back to chat preserves the unsent draft`, await page.inputValue('.composer textarea') === chatDraft);
+    // New authoring refusal returns an editable form, specific error and
+    // the same text, while the signed scope and approval card stay untouched.
+    await goto(page, `/t/${fixture.tasks.long}`);
+    await page.evaluate(() => { document.querySelector('#scope').open = true; document.querySelector('.scope-editor').closest('details').open = true; });
+    const bad = '新しい request 😀 '.repeat(150);
+    await page.fill('.scope-editor [name="goal"]', bad);
+    await submit(page, '.scope-editor button[type="submit"]');
+    const problem = await page.locator('.problem').first().textContent();
+    check(`${name}: rejected long scope stays editable with one concise error`, problem === 'Goal must be 2000 characters or fewer.' && await page.inputValue('.scope-editor [name="goal"]') === bad && (await noOverflow(page)).ok);
+    await scrollTo(page, '.scope-editor', 80);
+    await shot(page, `${name}-long-rejected`, `${viewport.width}×${viewport.height}: rejected new goal stays editable; signed terms remain unchanged (synthetic fixture)`);
+    await page.fill('.scope-editor [name="goal"]', 'Repair the CSV footer.');
+    await submit(page, '.scope-editor button[type="submit"]');
+    check(`${name}: correcting the rejected draft saves normally`, fixture.store.getScope(fixture.tasks.long).goal === 'Repair the CSV footer.');
+    await ctx.close();
+  }
+}
+
 let cookieHeader = '';
 const runId = fixture.runId;
 const task = fixture.tasks.done;
@@ -167,6 +265,9 @@ try {
     cookieHeader = (login.headers.get('set-cookie') ?? '').split(';')[0];
   }
 
+  if (longRequests) {
+    await longRequestJourney();
+  } else {
   let page;
   // Small presentation repairs can recheck the affected evidence and layouts
   // without repeating the already-passed result-to-revision journey.
@@ -642,6 +743,7 @@ try {
     check(`c11 ${name}: the damaged result keeps its risks open ahead of the tabs`, risks.open && risks.aboveTabs && /some evidence is unavailable/.test(risks.status ?? ''), JSON.stringify(risks));
     if (name === 'phone') await shot(page, 'phone-c11-risks-open', '390×844: a damaged result keeps its problems in the open ahead of the tabs (synthetic fixture)');
     await c11.ctx.close();
+  }
   }
 } catch (error) {
   check('proof ran to completion', false, error instanceof Error ? error.stack ?? error.message : String(error));

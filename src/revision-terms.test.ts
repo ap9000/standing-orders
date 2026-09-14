@@ -81,7 +81,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
    * with a sealed terminal diff to annotate. */
   const seedSource = (
     taskId: string,
-    terms: { risk?: "routine" | "elevated" | "high"; quality?: "default" | "strict"; budget?: number | null; permission?: "auto" | "bypassPermissions"; goal?: string; reviewOverride?: boolean } = {},
+    terms: { risk?: "routine" | "elevated" | "high"; quality?: "default" | "strict"; budget?: number | null; permission?: "auto" | "bypassPermissions"; goal?: string; outOfScope?: string; reviewOverride?: boolean } = {},
   ) => {
     store.createTask({ id: taskId, title: `${taskId} title` }, T0);
     const taskRef = store.refFor(BUILT_IN, taskId).id;
@@ -89,7 +89,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     propose(store, {
       taskId,
       goal: terms.goal ?? `do ${taskId} carefully`,
-      outOfScope: "authentication and billing",
+      outOfScope: terms.outOfScope ?? "authentication and billing",
       touches: ["src/payments/", "src/limits/"],
       acceptance: RUBRIC,
       budgetMicrousd: terms.budget === undefined ? 5_000_000 : terms.budget,
@@ -218,6 +218,53 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     expect(Number(store.raw().prepare("SELECT COUNT(*) AS n FROM attended_authorization WHERE task_ref = ?").get(childRef.id)?.["n"])).toBe(0);
     expect(Number(store.raw().prepare("SELECT COUNT(*) AS n FROM publication WHERE task_ref = ?").get(childRef.id)?.["n"])).toBe(0);
   };
+
+  test("a genuine legacy source never exempts newly authored repair text", () => {
+    const source = seedSource("t-bounds", { goal: "Legacy 日本語 ".repeat(300), outOfScope: "Exclusions 日本語 ".repeat(300) });
+    const args = {
+      source: { task: "t-bounds", run: source.run, scopeDigest: source.digest },
+      brief: writeBrief(store, source.run, { sourceTask: "t-bounds", sourceRun: source.run }),
+      child: { title: "Repair", repair: "valid" }, commentIds: null,
+    };
+    for (const repair of ["x".repeat(2001), "😀".repeat(1001), "界".repeat(3000), "bad\u0000", "bad\u202e", ""]) {
+      expect(store.sealRevision({ ...args, child: { ...args.child, repair } }, T0)).toMatchObject({ ok: false, reason: "bad-goal" });
+    }
+    expect(store.sealRevision({ ...args, child: { title: "x".repeat(201), repair: "valid" } }, T0)).toMatchObject({ ok: false, reason: "bad-title" });
+    expect(taskCount()).toBe(1);
+    expect(briefRows(source.run)).toBe(0);
+  });
+
+  test.each(["plain", "annotated"])("legacy long Unicode terms survive a %s revision byte-for-byte", (mode) => {
+    // Synthetic pre-policy CLI scope, including whitespace and >8000 UTF-8 bytes.
+    const goal = "  " + "Préserver 日本語 😀 e\u0301\n".repeat(300) + "  ";
+    const outOfScope = "  " + "Ne pas changer 日本語 🧭 e\u0301\n".repeat(300) + "  ";
+    const source = seedSource("t-long", { goal, outOfScope });
+    const original = store.getScope("t-long")!;
+    const comment = store.addDiffComment({ artifactId: source.artifactId, runId: source.run,
+      path: mode === "plain" ? null : "src/payments/pay.ts", line: mode === "plain" ? null : 12,
+      note: "Réparer 日本語 😀 sans perdre e\u0301", author: "alex" }, T0)!;
+    const sealed = sealAnnotation(store, "t-long", source.run, [comment], source.digest);
+    expect(sealed, JSON.stringify(sealed)).toMatchObject({ ok: true });
+    if (!sealed.ok) return;
+    const child = store.getScope(sealed.id)!;
+    const repair = `apply the annotations recorded on build #${source.run}; the revision brief carries the exact batch`;
+    expect(Buffer.from(child.goal)).toEqual(Buffer.from(`${goal} — ${repair}`));
+    expect(Buffer.from(child.outOfScope!)).toEqual(Buffer.from(outOfScope));
+    expect(child).toMatchObject({ approvedAt: null, approvedBy: null, approvedDigest: null, approvedRouteJson: null });
+    expect(store.revisionSourceOf(store.lookupRef(sealed.id)!.id)).toMatchObject({ sourceTask: "t-long", sourceRun: source.run });
+    expect(store.allDiffComments(source.run)).toMatchObject([{ id: comment, consumedBy: sealed.id }]);
+    expect(store.getScope("t-long")).toEqual(original);
+    expect(approve(store, sealed.id, "alex", T0, original.digest, alexToken).ok).toBe(false);
+    expect(approve(store, sealed.id, "alex", T0, child.digest, alexToken).ok).toBe(true);
+    // A no-comment repair uses the same sealed inheritance road.
+    const ci = sealCi(store, "t-long", source.run, source.digest);
+    expect(ci).toMatchObject({ ok: true });
+    if (ci.ok) {
+      expect(store.getScope(ci.id)!.goal).toBe(`${goal} — repair the failing CI on PR #7`);
+      expect(store.getScope(ci.id)!.outOfScope).toBe(outOfScope);
+      expect(approvalOf(store.getScope(ci.id)!).approved).toBe(false);
+    }
+  });
 
   test("c1: all three draft paths inherit high risk, strict quality, the budget, the boundaries and the exact rubric after the installation's defaults are downgraded and widened", () => {
     // Route choices belong to the source contract BEFORE its built run.

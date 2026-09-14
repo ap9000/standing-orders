@@ -1,3 +1,4 @@
+import { validateScopeText } from "./task-text.js";
 /**
  * The commands that actually move work: authoring tasks, and the claim loop.
  *
@@ -10441,6 +10442,9 @@ function scopeTask(
   }
 
   const touches = (text(flags, "touches") ?? "").split(",").map(one => one.trim()).filter(Boolean);
+
+  const badText = validateScopeText({ goal, outOfScope: text(flags, "not") ?? null, touches });
+  if (badText !== null) return fail(write, json, "task scope", badText.reason, badText.message, EXIT.usage);
 
   // A tournament rides the same filing (stage 3): --race names the agents,
   // the dollar terms are REQUIRED, and everything lands unapproved — the

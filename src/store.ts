@@ -1,3 +1,4 @@
+import { validateTaskText } from "./task-text.js";
 /**
  * The database: a small task store, and the operational overlay beside it.
  *
@@ -11500,7 +11501,12 @@ export class Store {
           // THE TERMS, from the source rows this transaction just proved.
           const terms = revisionTermsOf(sourceRef, sourceScope, args.coverage ?? null, this.permissionDefault().mode, this.qualityDefault().mode);
           const goal = `${terms.fromScope ? terms.goal : `revise ${args.source.task}`} — ${args.child.repair}`;
-          const made = this.createConsoleTask(
+          // Only the newly authored repair/title face new-request limits.
+          // Inherited bytes came from the source rows proved above. This
+          // runtime-private insert cannot be selected by a filing caller.
+          const badText = validateTaskText({ title: args.child.title, goal: args.child.repair });
+          if (badText !== null) return refuse(badText.reason, badText.message);
+          const made = this.#insertConsoleTask(
             {
               ...(args.child.id === undefined ? {} : { id: args.child.id }),
               title: args.child.title,
@@ -12191,14 +12197,21 @@ export class Store {
   ):
     | { ok: true; id: string }
     | { ok: false; reason: "backlog-full" | "bad-id" | "bad-title" | "bad-goal" | "bad-acceptance" | "acceptance-required" | "duplicate" } {
+    const badText = validateTaskText(spec);
+    if (badText !== null) return { ok: false, reason: badText.reason };
+    return this.#insertConsoleTask({ ...spec, ...(spec.goal === undefined ? {} : { goal: spec.goal.trim() }) }, now, cap);
+  }
+
+  /** Shared atomic insertion, callable only by this class. Public new-work
+   * filing validates all text; sealRevision validates the new repair after
+   * proving source custody, then supplies exact inherited bytes. */
+  #insertConsoleTask(
+    spec: Parameters<Store["createConsoleTask"]>[0],
+    now: Date,
+    cap = 500,
+  ): ReturnType<Store["createConsoleTask"]> {
     if (spec.id !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(spec.id)) {
       return { ok: false, reason: "bad-id" };
-    }
-    if (spec.title.trim() === "" || spec.title.length > 200 || hasForbiddenControls(spec.title)) {
-      return { ok: false, reason: "bad-title" };
-    }
-    if (spec.goal !== undefined && (spec.goal.trim() === "" || spec.goal.length > 2_000 || hasForbiddenControls(spec.goal))) {
-      return { ok: false, reason: "bad-goal" };
     }
     // v39: a goal being set here is a scope about to exist — every road that
     // funnels through this method (fileTaskProposal's ~16 callers, and
@@ -12259,7 +12272,7 @@ export class Store {
       }
       if (spec.goal !== undefined) {
         const draft = {
-          goal: spec.goal.trim(),
+          goal: spec.goal,
           outOfScope: spec.outOfScope ?? null,
           touches: spec.touches ?? ([] as string[]),
           acceptance: acceptanceParse?.criteria ?? ([] as AcceptanceCriterion[]),

@@ -1036,10 +1036,69 @@ describe("the operations console", () => {
     expect(store.liveDiffComments(run)).toHaveLength(1);
   });
 
-  test("review comments on the terminal diff seal into one revision task that must be approved (M6.8)", async () => {
+  test("valid Unicode goals and exclusions fit the web form transport and preserve new-task settings on rejection", async () => {
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    const fields = { csrf, title: "Unicode request", goal: "😀".repeat(1000), not: "界".repeat(2000), acceptance: "c1: Works | check", "planning-policy": "choice", "permission-mode": "auto", "quality-mode": "default" };
+    const refused = await post("/tasks/add", cookie, { ...fields, goal: fields.goal + "a", id: "unicode-new", scout: "1", after: "t-1" });
+    expect(refused.status).toBe(400);
+    const window = new Window();
+    window.document.body.innerHTML = await refused.text();
+    const form = window.document.querySelector(".task-composer")!;
+    expect(form.querySelector('[name="plan-first"]')?.hasAttribute("checked")).toBe(false);
+    expect(form.querySelector('[name="scout"]')?.hasAttribute("checked")).toBe(true);
+    expect(form.querySelector('[name="id"]')?.getAttribute("value")).toBe("unicode-new");
+    expect(form.querySelector('[name="after"] option[selected]')?.getAttribute("value")).toBe("t-1");
+    expect(form.textContent).not.toContain("pre-filled from a template");
+    await window.happyDOM.close();
+    const created = await post("/tasks/add", cookie, fields);
+    expect(created.status).toBe(303);
+    const id = created.headers.get("location")!.slice(3);
+    expect(store.getScope(id)).toMatchObject({ goal: fields.goal, outOfScope: fields.not, approvedAt: null });
+    const scope = store.getScope(id)!;
+    expect((await post(`/t/${id}/scope`, cookie, { ...fields, sawDigest: scope.digest })).status).toBe(303);
+    expect(store.getScope(id)).toMatchObject({ goal: fields.goal, outOfScope: fields.not, approvedAt: null });
+  });
+
+  test.each(["goal", "not"])("rejected web %s stays editable and cannot replace signed terms", async field => {
+    store.createTask({ id: "t-edit", title: "Edit safely" }, T0);
+    propose(store, { taskId: "t-edit", goal: "Original goal", outOfScope: "Original exclusion", acceptance: [{ id: "c1", statement: "Works", how: null, evidence: ["check"] }], now: T0 });
+    const original = store.getScope("t-edit")!;
+    const cookie = await login();
+    const taskHtml = await (await fetch(url("/t/t-edit"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(taskHtml)?.[1] ?? "";
+    for (const value of ["a".repeat(2001), "😀".repeat(1001), "界".repeat(3000), "bad\u202e", "bad\u0000", "ok\r"]) {
+      const fields = { csrf, goal: "valid", not: "exclusion", touches: "src/y.ts", acceptance: "c1: Works | check", [field]: value };
+      for (const path of ["/tasks/add", "/t/t-edit/scope"]) {
+        const response = await fetch(url(path), { method: "POST", headers: { cookie }, body: new URLSearchParams({ ...fields, title: "New task", sawDigest: original.digest, "planning-policy": "choice", "permission-mode": "auto", "budget-usd": "12", "quality-mode": "strict" }), redirect: "manual" });
+        expect(response.status).toBe(400);
+        const html = await response.text();
+        expect(html).toContain(value.length > 2000 ? `${field === "goal" ? "Goal" : "Exclusions"} must be 2000 characters or fewer.` : "cannot contain control or hidden characters.");
+        const window = new Window();
+        window.document.body.innerHTML = html;
+        const form = window.document.querySelector(path === "/tasks/add" ? ".task-composer" : ".scope-editor")!;
+        // HTML parsers normalize CR and replace NUL; ordinary long Unicode drafts stay exact.
+        if (!/[\r\u0000]/.test(value)) expect((form.querySelector(`[name="${field}"]`) as unknown as { value: string }).value).toBe(value);
+        expect(form.querySelector('[name="acceptance"]')?.textContent).toBe("c1: Works | check");
+        if (path !== "/tasks/add") expect(form.querySelector('[name="budget-usd"]')?.getAttribute("value")).toBe("12");
+        await window.happyDOM.close();
+        expect(store.getScope("t-edit")).toEqual(original);
+        expect(store.getTask("new-task")).toBeNull();
+      }
+    }
+  });
+
+  test.each(["plain", "annotated"])("legacy long %s feedback seals once across lost responses and later batches", async mode => {
     store.createTask({ id: "t-rev", title: "original work" }, T0);
     const ref = store.refFor("built-in", "t-rev").id;
+    // Synthetic legacy CLI terms, before the new authoring limit applied.
+    const goal = "  " + "Réparer 日本語 😀 e\u0301\n".repeat(300) + "  ";
+    const not = "  " + "No changes 日本語 🧭 e\u0301\n".repeat(300) + "  ";
+    propose(store, { taskId: "t-rev", goal, outOfScope: not, touches: ["src/y.ts"], acceptance: [{ id: "c1", statement: "Works", how: null, evidence: ["check"] }], now: T0 });
+    sealScopeFixture(store, "t-rev", approverToken);
+    const original = store.getScope("t-rev")!;
     const run = store.startRun({ taskRef: ref, leaseId: "l-r1", runner: "b-1", branch: "so/t-rev", worktree: "/w", now: T0, ...presented(store, ref, "builder") });
+    store.stampRun(run, { scopeDigest: original.digest });
     store.recordOutcomeFacts(run, { headRevision: "headsha1234", handoff: "did it" });
     store.finishRun(run, { outcome: "built", now: T0 });
     mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
@@ -1063,13 +1122,18 @@ describe("the operations console", () => {
     const taskHtml = await (await fetch(url("/t/t-rev"), { headers: { cookie } })).text();
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(taskHtml)?.[1] ?? "";
 
+    const noteBody = { csrf, path: mode === "plain" ? "" : "src/y.ts", line: mode === "plain" ? "" : "12", note: "tighten the guard here — 日本語 😀 e\u0301", request: "a".repeat(32) };
     const commented = await fetch(url(`/r/${run}/comment`), {
       method: "POST",
       headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf, path: "src/y.ts", line: "12", note: "tighten the guard here" }),
+      body: new URLSearchParams(noteBody),
       redirect: "manual",
     });
     expect(commented.status).toBe(303);
+    // The response was missed: retry exactly the same body.
+    const retried = await fetch(url(`/r/${run}/comment`), { method: "POST", headers: { cookie }, body: new URLSearchParams(noteBody), redirect: "manual" });
+    expect(retried.headers.get("location")).toBe(commented.headers.get("location"));
+    expect(store.liveDiffComments(run)).toHaveLength(1);
 
     const runView = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
     expect(runView).toContain("tighten the guard here");
@@ -1101,6 +1165,11 @@ describe("the operations console", () => {
 
     // The new task's screen restates the batch beside its own approval —
     // and the scope is unapproved by construction.
+    const child = store.getScope(target.slice(3))!;
+    expect(Buffer.from(child.goal)).toEqual(Buffer.from(`${goal} — apply the annotations recorded on build #${run}; the revision brief carries the exact batch`));
+    expect(Buffer.from(child.outOfScope!)).toEqual(Buffer.from(not));
+    expect(child).toMatchObject({ approvedAt: null, approvedDigest: null, approvedRouteJson: null });
+    expect(store.revisionSourceOf(store.lookupRef(child.taskId)!.id)).toMatchObject({ sourceTask: "t-rev", sourceRun: run });
     const taskView = await (await fetch(url(target), { headers: { cookie } })).text();
     expect(taskView).toContain("Revise t-rev from 1 annotation on build");
     expect(taskView).toContain("the review batch");
@@ -1120,6 +1189,19 @@ describe("the operations console", () => {
     expect(again.status).toBe(303);
     expect(again.headers.get("location")).toBe(target);
     expect(store.revisionsFromRun(run).map(one => one.id)).toEqual([target.replace("/t/", "")]);
+    const later = await fetch(url(`/r/${run}/comment`), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf, note: "later batch 日本語", request: "b".repeat(32) }), redirect: "manual" });
+    expect(later.status).toBe(303);
+    const replay = await fetch(url(`/r/${run}/revise`), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf, ...sealForm }), redirect: "manual" });
+    expect(replay.headers.get("location")).toBe(target);
+    expect(store.liveDiffComments(run).map(c => c.note)).toEqual(["later batch 日本語"]);
+    expect(store.revisionsFromRun(run)).toHaveLength(1);
+    const currentForm = revisionFormOf(await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text());
+    const second = await fetch(url(`/r/${run}/revise`), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf, ...currentForm }), redirect: "manual" });
+    expect(second.status).toBe(303);
+    expect(second.headers.get("location")).not.toBe(target);
+    expect(store.revisionsFromRun(run)).toHaveLength(2);
+    expect(store.liveDiffComments(run)).toHaveLength(0);
+    expect(store.getScope("t-rev")).toEqual(original);
   });
 
   test("the review cockpit ranks an observed CI failure first and the plane never merges (M8.19); a red episode earns the repair draft from the cockpit and the run page (M8.18)", async () => {

@@ -1,3 +1,5 @@
+import { validateTaskText } from "./task-text.js";
+export { validateTaskText } from "./task-text.js";
 /**
  * The one door work enters through (Codex adoption review, finding 7).
  *
@@ -181,40 +183,6 @@ function checkRepo(
     return refuse("outside-ceiling", "that repository is outside what this surface was configured to show");
   }
   return { ok: true, repo: canonical };
-}
-
-/**
- * The text rules every filed task obeys, exported so the CLI's replayed
- * `task add` path (which keeps its own idempotency machinery) validates
- * identically to the service instead of approximately.
- */
-export function validateTaskText(fields: {
-  title: string;
-  goal?: string;
-  outOfScope?: string | null;
-  touches?: string[];
-}): ProposalRefusal | null {
-  if (fields.title.trim() === "" || fields.title.length > 200 || overBytes(fields.title, BYTE_CAPS.title) || dishonest(fields.title)) {
-    return refuse("bad-title", "a title is required, at most 200 characters, with no control or disguised text");
-  }
-  if (
-    fields.goal !== undefined &&
-    (fields.goal.trim() === "" || fields.goal.length > 2_000 || overBytes(fields.goal, BYTE_CAPS.text) || dishonest(fields.goal))
-  ) {
-    return refuse("bad-goal", "a goal is at most 2000 characters, with no control or disguised text");
-  }
-  const outOfScope = fields.outOfScope ?? null;
-  if (outOfScope !== null && (outOfScope.length > 2_000 || overBytes(outOfScope, BYTE_CAPS.text) || dishonest(outOfScope))) {
-    return refuse("bad-goal", "out-of-scope text is at most 2000 characters, with no control or disguised text");
-  }
-  const touches = fields.touches ?? [];
-  if (
-    touches.length > 50 ||
-    touches.some(one => one.trim() === "" || one.length > 200 || overBytes(one, BYTE_CAPS.path) || dishonest(one))
-  ) {
-    return refuse("bad-goal", "touches: at most 50 paths, each non-empty, under 200 characters, honest text");
-  }
-  return null;
 }
 
 export function fileTaskProposal(

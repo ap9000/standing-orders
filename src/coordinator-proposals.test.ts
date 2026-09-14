@@ -42,6 +42,16 @@ describe("coordinator proposals (mate arc v3): the gateway proposes, an admitted
   });
   afterEach(() => store.close());
 
+  test("gateway scope proposals share new-text bounds and do not accept legacy flags", () => {
+    const base = { ref: "a", goal: "valid", acceptance: [{ id: "c1", statement: "Works", evidence: ["check"] }] };
+    for (const field of ["goal", "not"]) {
+      for (const value of ["a".repeat(2001), "😀".repeat(1001), "界".repeat(3000), "bad\u0000", "bad\u202e", "ok\r"]) {
+        expect(proposeAsCoordinator(store, token, "scope", { ...base, [field]: value, inheritLegacy: true }, T0)).toMatchObject({ ok: false, reason: "bad-args", message: expect.stringMatching(/2000|control or hidden/) });
+      }
+    }
+    expect(proposeAsCoordinator(store, token, "scope", { ...base, goal: "😀".repeat(1000), not: "界".repeat(2000) }, T0)).toMatchObject({ ok: true });
+  });
+
   test("a proposal is a row with the CAS material; an approver outside the repo cannot see or confirm it; an admitted one confirms through the door", () => {
     const proposed = proposeAsCoordinator(store, token, "next", { ref: "b" }, T0);
     expect(proposed).toMatchObject({ ok: true, id: 1, kind: "next" });

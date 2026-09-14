@@ -313,6 +313,22 @@ describe("the mate's turn", () => {
     expect(store.listMateProposals(thread().id, ["pending"])).toHaveLength(MATE_MAX_PROPOSALS_PER_TURN);
   });
 
+  test("chat task and scope tools share new-text limits and expose no inheritance option", () => {
+    let drafts = 0;
+    const ctx = { store, who, now: clock(), draft: () => ++drafts };
+    const base = { repo: "r1", task: "in-1", title: "Task", goal: "valid", acceptance: [{ id: "c1", statement: "Works", evidence: ["check"] }] };
+    for (const tool of ["propose_task", "propose_scope"]) {
+      for (const field of ["goal", "not"]) {
+        for (const value of ["a".repeat(2001), "😀".repeat(1001), "界".repeat(3000), "bad\u0000", "bad\u202e", "ok\r"]) {
+          expect(executeMateTool(ctx, tool, { ...base, [field]: value })).toMatchObject({ ok: false, message: expect.stringMatching(/2000|control or hidden/) });
+          expect(executeMateTool(ctx, tool, { ...base, [field]: value, inheritLegacy: true, filedVia: "revision" })).toMatchObject({ ok: false });
+        }
+      }
+      expect(drafts).toBe(tool === "propose_task" ? 0 : 1);
+      expect(executeMateTool(ctx, tool, { ...base, goal: "😀".repeat(1000), not: "界".repeat(2000) })).toMatchObject({ ok: true });
+    }
+  });
+
   test("a proposal field that looks like a credential is refused before it is drafted, and the call never goes back out", async () => {
     const ctx = { store, who, now: clock(), draft: () => 1 };
     expect(executeMateTool(ctx, "propose_hold", { task: "in-1", reason: "use AKIAABCDEFGHIJKLMNOP" })).toMatchObject({ ok: false, message: expect.stringContaining("plain text") });
