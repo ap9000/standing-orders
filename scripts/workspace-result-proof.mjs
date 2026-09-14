@@ -63,7 +63,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { startFixture } from './ui-polish-fixture.mjs';
+import { startFixture, LONG_REQUEST_PATH } from './ui-polish-fixture.mjs';
 import { addApprover, approve, propose } from '../dist/scope.js';
 import { resultFactsFromHtml } from '../dist/result-review.js';
 
@@ -162,8 +162,36 @@ async function longRequestJourney() {
   const original = fixture.store.getScope(task);
   check('legacy fixture exceeds the new character limit in both fields', original.goal.length > 2000 && original.outOfScope.length > 2000,
     JSON.stringify({ goalChars: original.goal.length, goalBytes: Buffer.byteLength(original.goal), exclusionChars: original.outOfScope.length, exclusionBytes: Buffer.byteLength(original.outOfScope) }));
+  check('synthetic signed goal and exclusions include the actual pilot assessment path', original.goal.includes(LONG_REQUEST_PATH) && original.outOfScope.includes(LONG_REQUEST_PATH));
+  const inspectScope = async (page, scope, label) => {
+    // A completed task can arrive with Scope already open.
+    if (!await page.locator('#scope').evaluate(el => el.open)) {
+      await page.locator('#scope > summary').focus();
+      await page.keyboard.press('Enter');
+    }
+    // The first two recaps are the goal and exclusions; agent fallbacks
+    // can add another recap after them.
+    const terms = await page.locator('#scope .recap').evaluateAll((elements, path) => elements.slice(0, 2).map(el => {
+      const style = getComputedStyle(el), bounds = el.getBoundingClientRect();
+      // Measure the path itself: pre-wrap intentionally hangs trailing
+      // whitespace outside line boxes without adding document overflow.
+      const start = el.textContent.indexOf(path), range = document.createRange();
+      if (start >= 0) { range.setStart(el.firstChild, start); range.setEnd(el.firstChild, start + path.length); }
+      return { text: el.textContent, width: el.clientWidth, scrollWidth: el.scrollWidth,
+        visible: el.checkVisibility(), unclipped: !['hidden', 'clip'].includes(style.overflowX) && style.textOverflow !== 'ellipsis' && ['none', '0'].includes(style.webkitLineClamp),
+        pathFits: start >= 0 && [...range.getClientRects()].every(r => r.left >= bounds.left - 1 && r.right <= bounds.right + 1) };
+    }), LONG_REQUEST_PATH);
+    const geometry = { document: await noOverflow(page), terms: terms.map(({ text, ...one }) => one) };
+    check(`${label}: expanded scope wraps the actual long path without hiding or changing signed text`, terms.length === 2 && terms[0].text === scope.goal && terms[1].text === scope.outOfScope && geometry.document.ok && terms.every(one => one.visible && one.unclipped && one.pathFits && one.scrollWidth <= one.width), JSON.stringify(geometry));
+  };
   for (const [name, viewport] of [['desktop', VIEWPORTS.desktop], ['phone', VIEWPORTS.phone]]) {
     const { ctx, page } = await context(viewport, { reducedMotion: 'reduce' });
+    await goto(page, `/t/${task}`);
+    await inspectScope(page, original, `${name} original`);
+    for (const [index, field] of ['goal', 'exclusions'].entries()) {
+      await page.locator('#scope .recap').nth(index).evaluate(el => { window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 100, behavior: 'instant' }); });
+      await shot(page, `${name}-long-scope-${field}`, `${viewport.width}×${viewport.height}: actual pilot assessment path in signed ${field} (synthetic legacy fixture)`);
+    }
     await freshConversation(page, `/chat?task=${task}`);
     const chatDraft = `Unsent ${name}: keep the Unicode terms exactly.`;
     await page.fill('.composer textarea', chatDraft);
@@ -219,6 +247,7 @@ async function longRequestJourney() {
       check(`${name} ${mode}: keyboard reaches fresh approval with a single-line button`, approvalButton.height >= 44 && approvalButton.height < 70 && (await noOverflow(page)).ok, JSON.stringify(approvalButton));
       await submit(page, 'form[action$="/approve"] button[type="submit"]');
       check(`${name} ${mode}: only the child receives fresh approval`, fixture.store.getScope(childId).approvedDigest === child.digest && JSON.stringify(fixture.store.getScope(task)) === JSON.stringify(original));
+      await inspectScope(page, fixture.store.getScope(childId), `${name} ${mode} revision`);
       await goto(page, chatResult(task, runId));
       check(`${name} ${mode}: consumed feedback leaves an empty editable note box`, fixture.store.liveDiffComments(runId).length === 0 && await page.inputValue('#comment-form [name="note"]') === '');
       // Old seal remains tied to its old batch when another note appears.

@@ -1,6 +1,39 @@
 # Package 5 pilot 1 — long requests can be revised
 
-Implemented on `standing-orders/workspace5-long-request-revisions-20260914`. All changes are uncommitted; HEAD remains the required base, `1a08e43688daeb35f8b4a1e26be2a4cf1c3b277f`. The native worker owns the commit and final repository gate. Proof criterion c5 is `pending-verification`.
+## Linked repair of build #1559
+
+The confirmed long-path overflow is fixed with one CSS rule: `#scope .recap, .approval-goal { overflow-wrap: anywhere; }`. The scope recap and revision approval goal now wrap unbroken paths without clipping, ellipsis, truncation, or text changes. Approval exclusions already had this wrapping. No validation, storage, lineage, feedback, or approval logic changed.
+
+This attempt is on `standing-orders/revise-workspace5-long-request-revisions-20260914-from-1`; HEAD remains `554d6977e2596f3f9c4066202a927b9bb85d1f6f`. The older base below belongs to the parent implementation. Changes remain uncommitted for the native worker. Review comments 112, 113 and 130 define this repair; confirmations 114–129 add no implementation work. Revision naming stays with pilot 3.
+
+### Reproduction and result
+
+The existing synthetic fixture now includes the exact real-request path `docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md` in both signed fields, alongside its existing long Unicode prose and preserved whitespace. The goal is 3,384 UTF-16 units / 3,395 UTF-8 bytes; exclusions are 2,926 units / 2,937 bytes. These are synthetic legacy terms, not a new task filed through an authoring exception.
+
+| Measurement | Before wrapping | After wrapping |
+| --- | --- | --- |
+| Operator's actual page, 390×844 (comment 112) | Document 486px; recap 277px, scrolling to 435px | Root will inspect the actual native result; no live database was opened here. |
+| Same exact path in synthetic task, 390×844 | Document 453px; goal and exclusion recaps 288px, scrolling to 402px | Document 390px; both recaps 288px, scrolling to 288px. |
+| Synthetic desktop, 1440×900 | Document 1440px; both recaps 394px, scrolling to 402px | Document 1440px; both recaps 394px, scrolling to 394px. |
+| Revision approval with the same path | Phone document-overflow assertions failed | Both modes retain full terms, fit the viewport and require fresh approval. |
+
+Before screenshots and measurements are in `output/playwright/workspace-5-overflow-before/`. The initial run failed as expected against the old CSS. The first post-fix run exposed a measurement issue: a whole-text Range counts the trailing whitespace that `pre-wrap` intentionally hangs beyond a line box. The regression now measures the exact path's line rectangles, checks element and document scroll widths, rejects hidden/clipped/ellipsized recaps, and compares full text without trimming. Its selector checks the two signed fields, excluding the separate agent-fallback recap.
+
+### Current checks and evidence
+
+- `npm run typecheck && npm run build` — passed; build supplied the fixture's current `dist/`.
+- `TMPDIR="$PWD/output/tmp" npx vitest run src/serve.test.ts -t "legacy long|rejected web|valid Unicode"` — 5 passed; other tests were outside the focused selection.
+- `TMPDIR="$PWD/output/tmp" npx vitest run src/task-text.test.ts src/proposal.test.ts src/operate.test.ts src/mate.test.ts src/coordinator-proposals.test.ts src/revision-terms.test.ts -t "new CLI goals|new-text|inheritance|character, UTF|legacy long|legacy source"` — 9 passed; other tests were outside the focused selection.
+- `TMPDIR="$PWD/output/tmp" node scripts/workspace-result-proof.mjs --long-requests --strict --out output/playwright/workspace-5-overflow-fixed` — 54 passed, zero failed. One desktop and one 390×844 journey open the result, inspect Changes/Checks, preserve drafts, submit feedback and approve linked revisions. Both feedback modes, missed responses, retries, later batches, empty feedback and rejected-input recovery remain covered. Expanded original and child scopes now cover the actual long-path case too.
+- `git diff --exit-code HEAD -- src/store.ts src/task-text.ts src/proposal.ts src/operate.ts src/scope.ts src/mate-tools.ts src/coordinator-proposals.ts src/mcp.ts && git diff --check` — passed. The parent implementation and its reviewed evidence are reused; the only production change is the CSS rule above.
+
+All twelve final screenshots in `output/playwright/workspace-5-overflow-fixed/` were inspected: each viewport's result, feedback, approval, rejection, scope goal and scope exclusions. `report.json` contains every assertion and measured geometry. The repair needs no new copy or controls. Full signed content remains readable through ordinary vertical scrolling; the rejection stays one specific sentence, and short revision/approval actions remain single-line and at least 44px high. These screenshots are of a synthetic fixture in headless Chromium, not a physical phone, Safari, an autonomous chat filing, or a native child build.
+
+c1–c3 retain the reviewed parent's custody/validation behavior and pass the focused current tests; c4 passes the expanded visual journey. c5 is `pending-verification`: the unchanged approved full verifier has not been run by this builder, and only the native final machine gate may attest to its committed candidate. Root still owns actual-result inspection and Opus review. No subagents, primary-checkout changes, commit, push, signing or deployment were performed.
+
+## Parent implementation record — build #1559
+
+The following records the original implementation on `standing-orders/workspace5-long-request-revisions-20260914`, from base `1a08e43688daeb35f8b4a1e26be2a4cf1c3b277f` to reviewed head `554d6977e2596f3f9c4066202a927b9bb85d1f6f`. Its checks and fingerprint are historical evidence, not claims of another full-suite run in this linked repair.
 
 ## Exact before and after
 

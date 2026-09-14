@@ -9139,6 +9139,7 @@ const STYLE = `
   form.option input[type=text] { font-size: 0.8125rem; margin-top: .5rem; min-height: 2.25rem; }
 
   .recap { color: var(--muted-foreground); margin: .75rem 0; white-space: pre-wrap; }
+  #scope .recap, .approval-goal { overflow-wrap: anywhere; }
   .result-card {
     margin: 1.25rem 0; border-color: color-mix(in srgb, var(--success) 32%, var(--glass-border));
     background: linear-gradient(145deg, color-mix(in srgb, var(--success-soft) 52%, var(--glass-strong)), var(--glass));

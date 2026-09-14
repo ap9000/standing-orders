@@ -57,6 +57,10 @@ import { createDecisionServer } from '../dist/serve.js';
 import { register } from '../dist/runner.js';
 import { acquire, release } from '../dist/claim.js';
 
+// The real pilot request's path: its unbroken filename overflowed the
+// expanded task scope at 390px. Keep it verbatim in synthetic signed terms.
+export const LONG_REQUEST_PATH = 'docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md';
+
 const LONG_GOAL =
   'Rework the portfolio ledger export so an operator can download one CSV per project that reconciles with the settlement ledger to the cent. ' +
   'Replace the ad-hoc string concatenation in src/export/csv.ts with a streaming writer that escapes quotes, commas and newlines per RFC 4180, ' +
@@ -202,8 +206,8 @@ export function startFixture(options = {}) {
   if (options.longRequests === true) {
     const old = store.getScope('payout-rounding');
     propose(store, { taskId: old.taskId,
-      goal: '  Legacy request — 日本語 😀 e\u0301\n' + (LONG_GOAL + '\n').repeat(4) + 'End of inherited goal.  ',
-      outOfScope: '  Legacy exclusions — 日本語 🧭 e\u0301\n' + (LONG_NOT + '\n').repeat(10) + 'End of inherited exclusions.  ',
+      goal: `  Legacy request — 日本語 😀 e\u0301\nRead AGENTS.md and ${LONG_REQUEST_PATH}.\n` + (LONG_GOAL + '\n').repeat(4) + 'End of inherited goal.  ',
+      outOfScope: `  Legacy exclusions — 日本語 🧭 e\u0301\nDo not change ${LONG_REQUEST_PATH}.\n` + (LONG_NOT + '\n').repeat(10) + 'End of inherited exclusions.  ',
       touches: old.touches, acceptance: old.acceptance, now: hoursAgo(27) });
   }
   const doneScope = store.getScope('payout-rounding');
