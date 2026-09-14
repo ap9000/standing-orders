@@ -541,6 +541,12 @@ function sameEntry(a: TreeEntry | undefined, b: TreeEntry | undefined): boolean 
   return a === undefined && b === undefined || regular(a) && regular(b) && a.object === b.object && a.mode === b.mode;
 }
 
+/** The native redactor replaces an entire diff line. Quoted marker text
+ * in code is not a redaction: unchanged/added/deleted lines have a prefix. */
+function hasRedactedLine(text: string): boolean {
+  return /^\[redacted: [^\r\n]+ detected on this line\]\r?$/m.test(text);
+}
+
 /** Select a whole plain, same-path text diff section. Quoted paths,
  * renames, binary patches and redactions WITHIN it are unsupported.
  * Other sections may be redacted; their hidden bytes are never inferred.
@@ -548,7 +554,7 @@ function sameEntry(a: TreeEntry | undefined, b: TreeEntry | undefined): boolean 
 function patchSection(content: Buffer, path: string): { offset: number; content: Buffer } | null {
   if (!/^[A-Za-z0-9_./-]+$/.test(path)) return null;
   const text = content.toString("utf8");
-  if (text.includes("\uFFFD") || text.includes("\0")) return null;
+  if (!Buffer.from(text, "utf8").equals(content) || text.includes("\0")) return null;
   const header = `diff --git a/${path} b/${path}\n`;
   const sections = [...text.matchAll(/^diff --git .*\n/gm)];
   const matches = sections.filter(one => one[0] === header);
@@ -556,7 +562,7 @@ function patchSection(content: Buffer, path: string): { offset: number; content:
   const start = matches[0]!.index;
   const end = sections.find(one => one.index > start)?.index ?? text.length;
   const section = text.slice(start, end);
-  if (/^(?:Binary files |GIT binary patch|rename |copy |similarity index )/m.test(section) || scanForSecrets(section).length > 0 || section.includes("[redacted:")) return null;
+  if (/^(?:Binary files |GIT binary patch|rename |copy |similarity index )/m.test(section) || scanForSecrets(section).length > 0 || hasRedactedLine(section)) return null;
   const offset = Buffer.byteLength(text.slice(0, start), "utf8");
   return { offset, content: content.subarray(offset, offset + Buffer.byteLength(section, "utf8")) };
 }
@@ -605,7 +611,7 @@ async function ancestorPatch(
     const section = patchSection(read.content, path);
     if (section === null) {
       const text = read.content.toString("utf8");
-      if (scanForSecrets(text).length > 0 || text.includes("[redacted:")) return fail(`run #${runId}'s terminal patch contains secret-shaped or redacted lines`, "secret-redacted");
+      if (scanForSecrets(text).length > 0 || hasRedactedLine(text)) return fail(`run #${runId}'s terminal patch contains secret-shaped or redacted lines`, "secret-redacted");
       const binary = text.includes(`Binary files a/${path} and b/${path} differ`) || text.includes(`Binary files /dev/null and b/${path} differ`);
       return fail(`run #${runId}'s path patch is ${binary ? "binary" : "missing or an unsupported shape"}`, binary ? "binary" : "source-unverified");
     }
@@ -888,7 +894,9 @@ export async function deriveReviewContext(
         if (aggregate + entry.size > REVIEW_CONTEXT_LIMITS.aggregateBytes) { gap("aggregate-limit", `${entry.size} bytes would cross the ${REVIEW_CONTEXT_LIMITS.aggregateBytes}-byte aggregate limit`); continue; }
         const read = await git("git", [...GIT_READ, "cat-file", "blob", entry.object], { cwd: args.worktree, maxBuffer: REVIEW_CONTEXT_LIMITS.itemBytes + 4096 });
         if (read.code !== 0) { gap("capture-failed", `blob ${entry.object} could not be read (git exit ${read.code})`); continue; }
-        if (read.stdout.includes("\u0000") || read.stdout.includes("\uFFFD") || Buffer.byteLength(read.stdout, "utf8") !== entry.size) { gap("binary", "not UTF-8 text"); continue; }
+        if (read.stdout.includes("\u0000") || Buffer.byteLength(read.stdout, "utf8") !== entry.size) { gap("binary", "not UTF-8 text"); continue; }
+        // Re-encoding must reproduce the named blob. A literal U+FFFD is
+        // valid text; a replacement introduced by decoding fails this hash.
         const blobHash = createHash("sha1").update(`blob ${entry.size}\0`).update(read.stdout, "utf8").digest("hex");
         if (blobHash !== entry.object) { gap("capture-failed", "the returned bytes do not match the named Git blob"); continue; }
         const hits = scanForSecrets(read.stdout);

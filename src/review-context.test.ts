@@ -375,6 +375,28 @@ describe("inherited review context (v51)", () => {
     expect(parseReviewContext(serializeReviewContext(unsupported))).toMatchObject({ ok: false, problem: expect.stringContaining("git blob identity") });
   });
 
+  test.each(["whole file", "partial patch"] as const)("valid Unicode and quoted redaction text remain usable in a %s", async variant => {
+    const padding = variant === "partial patch" ? "// existing code\n".repeat(5000) : "";
+    const marker = 'const marker = "[redacted: example detected on this line]";\n';
+    const text = padding + marker + '// A literal replacement character is valid UTF-8: \uFFFD\n' + GUARD_TS;
+    const f = await seed({ baseFiles: { "src/guard.ts": padding + "// old\n" }, guardSource: text });
+    const inventory = (await capture(f))!.inventory;
+    const item = inventory.items.find(one => one.path === "src/guard.ts");
+    expect(item?.content).toContain(marker.trim());
+    expect(item?.content).toContain("\uFFFD");
+    expect(Boolean(item?.patch)).toBe(variant === "partial patch");
+    expect(inventory.priorReview.find(one => one.criterionId === "c2")?.support).toBe("eligible");
+    expect(parseReviewContext(serializeReviewContext(inventory)).ok).toBe(true);
+    expect(reviewContextCustodyProblem(f.store, f.evidenceRoot, inventory)).toBeNull();
+  });
+
+  test("malformed UTF-8 still cannot be represented as a complete file", async () => {
+    const f = await seed({ extraSourceFiles: { "src/guard.ts": Buffer.from([0x61, 0xff, 0x62]) } });
+    const inventory = (await capture(f))!.inventory;
+    expect(inventory.items.some(one => one.path === "src/guard.ts")).toBe(false);
+    expect(inventory.gaps.some(one => one.path === "src/guard.ts" && ["binary", "capture-failed"].includes(one.reason))).toBe(true);
+  });
+
   test.each(["duplicate section", "wrong endpoints", "redacted header"] as const)("a %s in a redacted artifact cannot supply a large-file section", async variant => {
     const padding = "// existing code\n".repeat(5000);
     const f = await seed({

@@ -1,5 +1,15 @@
 # Package 5 evidence and reviewer handoffs
 
+## Operator follow-up
+
+After candidate `284bd26`, native Opus review 1580 completed on its first response but left three inherited criteria `cannot-tell`. Root replay identified two additional false classifications: quoted `[redacted: ...]` source text was treated as hidden content, and valid UTF-8 containing a literal U+FFFD was called binary.
+
+Root repaired these directly. Only complete native redaction-marker lines disqualify a patch section. UTF-8 roundtrips and the existing exact Git blob hash distinguish actual decoding damage from valid text. Two new regressions failed before the fix; typecheck and all 164 tests in the three affected context/reviewer suites now pass, including malformed-byte rejection. No evidence, review, approval or cap was waived.
+
+The read-only replay of real run 1579 now carries `src/provider.ts` (48,925 bytes), the context implementation's source/revision patches (33,753), and the reviewer patch (5,111). Its 174,098-byte packet roundtrips and passes custody checks; SHA-256 `da4a958d3e1be3af5b238cdc427e0f697b20559fb8904e016c3790f1324d3005`. Prior handoff support is eligible. Truly redacted tests and partial whole-file coverage remain explicit gaps. The original review and artifact 640 are unchanged; this replay is not a new independent review. The next approved pilot's native full gate will verify this addition.
+
+## Native builder record — candidate 284bd26
+
 Clean file sections now survive redaction elsewhere in a verified ancestor patch. Capture still proves exact Git endpoints, and custody now reselects the entire section by path and byte range before review and at ingestion. Selected redactions, ambiguous sections and incomplete coverage remain gaps. Typecheck and 341 tests across the seven existing focused suites pass.
 
 This revision applies annotation 167 only, as directed by annotation 181. The candidate is the uncommitted tree on `standing-orders/revise-workspace5-evidence-handoffs-from-15-annotations-`, based on unchanged HEAD `f440f198a3d7c291b2955ac1c277a09cbfd61dc7`. The inherited base `3725ce1c27700774c2130939597980a1af6bf4af` is historical. Changes are limited to `src/review-context.ts`, its existing test suite, and this assessment. No live database/evidence, history, approvals, provider permissions, artifact caps or verifier configuration changed.
