@@ -1,7 +1,8 @@
 import { describe, expect, test } from "vitest";
-import type { DispatchDiagnosis } from "./dispatch.js";
+import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
 import {
   compareWorkRows,
+  dispatchActionLabel,
   evidenceProblemOf,
   failedCheckExit,
   needsPerson,
@@ -189,6 +190,25 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(receiptPublicationWords(null)).toBe("Saved on the build branch. No publication, merge, or deployment is recorded here.");
     expect(receiptPublicationWords(pub({}))).toContain("No merge or deployment is recorded here.");
     expect(publicationStatusOf(pub({ remoteState: "CLOSED" }))?.detail).toBe("GitHub last reported PR #12 closed without a merge. No merge or deployment is recorded here.");
+  });
+
+  test("navigation CTAs name the available help for each diagnosis without claiming to resume work", () => {
+    const labels: Record<DispatchAction, string> = {
+      "open-result": "Review the result", "retry-task": "Review and retry",
+      "place-task": "Choose a project", "write-scope": "Define the task",
+      "select-agent": "Choose an agent", "approve-scope": "Review and approve",
+      "answer-decision": "Answer the question", unhold: "Review hold",
+      "inspect-hold": "Review hold", "repair-dependency": "Review required task",
+      "repair-capability": "Review missing requirement", "start-worker": "Check connection",
+      "retry-review": "Review retry options", "resume-run": "Review pause",
+    };
+    for (const [action, label] of Object.entries(labels)) {
+      const dispatch = diagnosis({ action: action as DispatchAction });
+      expect(dispatchActionLabel(dispatch), action).toBe(label);
+      expect(workStatusOf(facts({ dispatch })).action, action).toEqual({ label, kind: "open-task" });
+    }
+    expect(dispatchActionLabel(null)).toBe("View task details");
+    expect(dispatchActionLabel(diagnosis({ action: null }))).toBe("View task details");
   });
 
   test("Work views are shortcuts over the same rows: needs-you follows the diagnosis's action semantics, running the live claim, completed the done state", () => {

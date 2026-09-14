@@ -72,7 +72,7 @@ import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtm
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
-  WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, workCounts, compareWorkRows, primaryDestinationOf, needsPerson,
+  WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, workCounts, compareWorkRows, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
@@ -12593,7 +12593,7 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     `<section class="card task-journey" aria-label="task progress" data-work-status="${escape(workToken)}"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div>${resultStatus === null ? `<span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span>` : `<span class="badge" data-tone="${escape(resultStatus.tone)}">${escape(resultStatus.tone === "problem" || resultStatus.tone === "attention" ? "needs attention" : resultStatus.tone === "live" ? "in review" : resultStatus.tone === "done" || resultStatus.tone === "ready" ? "finished" : "saved")}</span>`}</div>` +
     `<ol>${steps}</ol><p class="meta">${escape(detail)}</p>` +
     (focus.liveRun === null ? "" : `<p class="task-live-build"><span class="live-dot" aria-hidden="true"></span><strong>Build #${focus.liveRun.id}</strong> · ${escape(focus.liveRun.runner)} · <time data-elapsed-since="${escape(focus.liveRun.startedAt)}"></time> <a href="/r/${focus.liveRun.id}">watch details →</a></p>`) +
-    (fallback === null ? "" : `<a class="button-link task-journey-action" href="${fallback}">Open the next step →</a>`) +
+    (fallback === null ? "" : `<a class="button-link task-journey-action" href="${fallback}">${escape(dispatchActionLabel(focus.dispatch))} →</a>`) +
     `</section>` +
     // The exact-run control (v52): the SAME component the task page
     // renders, refreshed with the live region — typed input in the
@@ -15994,7 +15994,7 @@ function taskBody(data: {
           case "select-agent": return ` <a href="#scope">Choose an available provider and model</a>.`;
           case "approve-scope": return ` <a href="#approve">Review and sign the exact scope</a>.`;
           case "answer-decision": return ` <a href="#decisions">Answer the waiting question</a>.`;
-          case "unhold": return ` Use <strong>unhold</strong> below when it may continue.`;
+          case "unhold": return ` Use <strong>Remove hold</strong> when it can continue.`;
           case "retry-task": return ` Review the incident, then use <strong>retry</strong> below.`;
           case "repair-capability": return ` <a href="/caps">Repair the requirement</a>.`;
           case "repair-dependency":
@@ -16029,7 +16029,7 @@ function taskBody(data: {
         if (diagnosis.action === "start-worker") {
           const firstConnection = diagnosis.code === "no-worker-registered";
           return (
-            `<details class="dispatch-recovery" open><summary>Get this task running</summary><div class="dispatch-recovery-body">` +
+            `<details class="dispatch-recovery" open><summary>${escape(dispatchActionLabel(diagnosis))}</summary><div class="dispatch-recovery-body">` +
             (firstConnection
               ? `<p>Standing Orders is open, but this project has not been connected to a builder yet.</p><p>On the machine where the project lives, open that folder and run:</p>`
               : `<p>Standing Orders is open, but this project's builder stopped checking in. Reopen Standing Orders on the machine where the project lives.</p><p>If you normally start it from a terminal, open the project folder and run:</p>`) +
@@ -16041,7 +16041,7 @@ function taskBody(data: {
           );
         }
         const href = taskRecoveryHref(task.id, diagnosis);
-        return href === null ? "" : `<a class="button-link dispatch-action-link" href="${href}">Get this task running</a>`;
+        return href === null ? "" : `<a class="button-link dispatch-action-link" href="${href}">${escape(dispatchActionLabel(diagnosis))}</a>`;
       })();
       const positive = diagnosis.code === "running" || diagnosis.code === "ready" || diagnosis.code === "planning-ready" || diagnosis.code === "scouting-ready";
       const status = diagnosis.code === "ready" ? "ready-to-run" : diagnosis.code;
@@ -16882,7 +16882,7 @@ function taskBody(data: {
     // to "plan first" adds a second, unnecessary decision at the exact
     // moment the page should have one obvious action.
     stopControlsActive || canPlan || !canHold ? "" : holdAct,
-    data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
+    data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "Remove hold") : "",
     `</div>`,
     primaryAct === null ? "" : `<p class="meta acts-why acts-why-${primaryAct.whyClass}">${primaryAct.why}</p>`,
     data.claimed && !stopControlsActive

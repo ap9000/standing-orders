@@ -17,7 +17,7 @@
  * claimed without one.
  */
 
-import type { DispatchDiagnosis } from "./dispatch.js";
+import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
 import type { ProofVerdict } from "./proof.js";
 import type { ReviewRetryState, TaskState } from "./store.js";
 
@@ -410,6 +410,29 @@ export function needsPerson(dispatch: DispatchDiagnosis | null): boolean {
   return dispatch.condition === "waiting" || dispatch.code === "failed";
 }
 
+/** Navigation labels describe the available help, not a mutation: opening
+ * a hold or pause must never promise that the task has already resumed. */
+const DISPATCH_ACTION_LABELS: Record<DispatchAction, string> = {
+  "open-result": "Review the result",
+  "retry-task": "Review and retry",
+  "place-task": "Choose a project",
+  "write-scope": "Define the task",
+  "select-agent": "Choose an agent",
+  "approve-scope": "Review and approve",
+  "answer-decision": "Answer the question",
+  unhold: "Review hold",
+  "inspect-hold": "Review hold",
+  "repair-dependency": "Review required task",
+  "repair-capability": "Review missing requirement",
+  "start-worker": "Check connection",
+  "retry-review": "Review retry options",
+  "resume-run": "Review pause",
+};
+
+export function dispatchActionLabel(dispatch: DispatchDiagnosis | null): string {
+  return dispatch?.action == null ? "View task details" : DISPATCH_ACTION_LABELS[dispatch.action];
+}
+
 export function workStatusOf(facts: WorkFacts): WorkStatus {
   const dispatch = facts.dispatch;
   const result = facts.state === "done" ? resultStatusOf(facts.result, facts.publication) : null;
@@ -451,7 +474,7 @@ export function workStatusOf(facts: WorkFacts): WorkStatus {
     return dispatchWords("problem", 0, { label: "Review and retry", kind: "open-task" });
   }
   if (needs) {
-    return dispatchWords("attention", 0, { label: dispatch?.action === "answer-decision" ? "Answer the question" : dispatch?.action === "approve-scope" ? "Review and approve" : "Open the next step", kind: "open-task" });
+    return dispatchWords("attention", 0, { label: dispatchActionLabel(dispatch), kind: "open-task" });
   }
   if (dispatch === null) return dispatchWords("neutral", 2, null);
   return dispatchWords(dispatch.condition === "retrying" ? "neutral" : "muted", 2, null);

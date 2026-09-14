@@ -7439,7 +7439,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(offline).toContain("Builder disconnected");
     expect(offline).toContain("stopped checking in");
     expect(offline).toContain("standing-orders up");
-    expect(offline).toContain("Get this task running");
+    expect(offline).toContain("Check connection");
     expect(offline).toContain('<details class="dispatch-recovery" open>');
     expect(offline).toContain('class="dispatch-recovery-command">standing-orders up</code>');
     expect(offline).toContain("Reopen Standing Orders on the machine where the project lives");
@@ -7454,7 +7454,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(ready).toContain('id="run-status" data-dispatch-status="ready-to-run"');
     expect(ready).toContain("every dispatch gate currently passes");
     expect(ready).not.toContain('id="run-status" data-dispatch-status="no-worker-online"');
-    expect(ready).not.toContain("Get this task running");
+    expect(ready).not.toContain('class="dispatch-recovery"');
   });
 
   test("a cancelled dependency is shown as repair on both the task and queue", async () => {
@@ -11377,6 +11377,34 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect([...memberMenu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1])).toEqual(["/", "/board", "/tasks", "/recipes", "/routines", "/ledger", "/people"]);
     expect(memberMenu).not.toContain("/settings");
     for (const path of ["/fleet", "/system", "/caps", "/workbench", "/chat", "/settings"]) expect((await fetch(url(path), { headers: { cookie: member } })).status, path).toBe(403);
+  });
+
+  test("held-task CTAs explain the destination across Work, chat, and task details; only Remove hold releases it", async () => {
+    const ref = seedTask("t-held", "Document the columns", alpha);
+    sealScopeFixture(store, "t-held", approverToken, "document");
+    store.hold(ref, "wait for the names to settle", null, now);
+    const cookie = await login();
+    await openProject(cookie, alpha);
+    const work = await page(cookie, "/work");
+    expect(work).toContain('<a class="work-action" href="/t/t-held">Review hold →</a>');
+    const chat = await page(cookie, "/chat?task=t-held");
+    expect(chat).toContain('<a class="button-link task-journey-action" href="/t/t-held#task-actions">Review hold →</a>');
+    const task = await page(cookie, "/t/t-held");
+    expect(task).toContain('class="button-link dispatch-action-link" href="/t/t-held#task-actions">Review hold</a>');
+    expect(task).toContain('Use <strong>Remove hold</strong> when it can continue.');
+    expect(task).toMatch(/action="\/t\/t-held\/unhold"[\s\S]*?<button type="submit">Remove hold<\/button>/);
+    for (const html of [work, chat, task]) {
+      expect(html).toContain("wait for the names to settle");
+      expect(html).not.toContain("Open the next step");
+    }
+    // Viewing all three surfaces leaves the operator's hold intact.
+    expect(rowsOf(await page(cookie, "/work"))[0]?.token).toBe("held");
+    const response = await fetch(url("/t/t-held/unhold"), {
+      method: "POST", headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf: csrfOf(task) }), redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    expect(rowsOf(await page(cookie, "/work"))[0]?.token).not.toBe("held");
   });
 
   test("Work's All, Needs you, Running, and Completed views count and list queued, waiting, held, failed, cancelled, running, and every finished-evidence state truthfully, with meaningful empty states", async () => {
