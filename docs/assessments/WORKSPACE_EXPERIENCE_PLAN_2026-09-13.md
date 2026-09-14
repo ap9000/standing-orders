@@ -1,6 +1,6 @@
 # Standing Orders: one workspace from request to result
 
-Date: September 13, 2026. Status: **packages 0–2 and the user's added concise-UI pass are implemented, verified, and merged into main; package 3 is implemented on branch `standing-orders/workspace-3-result-review-20260913` and awaits independent inspection; packages 4–5 remain planned**. The installed app is not updated by this merge. The baseline findings below describe the state when this plan was written; gates are recorded in [the packages 0/1 execution record](WORKSPACE_0_1_EXECUTION_2026-09-13.md), [the package 2 independent acceptance](WORKSPACE_2_INDEPENDENT_REVIEW_2026-09-13.md), and [the package 3 result](WORKSPACE_3_RESULT_REVIEW_2026-09-13.md).
+Date: September 13, 2026; status updated September 14. **Packages 0–3 and the final-check receipt repair are merged into main (`235eb91`). Package 4 is implemented and focused-verified locally on `codex/workspace-4-mobile-polish`; its final machine gate and physical-iPhone acceptance remain open. Package 5 remains planned.** The installed app is unchanged; signing/deployment are deferred. The baseline findings below are historical. See [packages 0/1](WORKSPACE_0_1_EXECUTION_2026-09-13.md), [package 2](WORKSPACE_2_INDEPENDENT_REVIEW_2026-09-13.md), [package 3](WORKSPACE_3_RESULT_REVIEW_2026-09-13.md), and [package 4 evidence and remaining gates](WORKSPACE_4_MOBILE_RESULT_2026-09-14.md).
 
 ## 1. The outcome
 
@@ -195,7 +195,7 @@ Unsent drafts remain same-tab storage with the existing expiry; no cloud draft s
 
 ### Package 3 — result-first review and one revision loop
 
-**Status (2026-09-13):** implemented on `standing-orders/workspace-3-result-review-20260913`; see [the package 3 result](WORKSPACE_3_RESULT_REVIEW_2026-09-13.md) for what changed, the browser proof, and the limitations. Not yet independently inspected, merged, or installed.
+**Status (2026-09-14):** independently inspected and repaired; merged into main with the final-check receipt fix through `235eb91`. The subsequent merged-candidate GitHub CI passed all eight jobs (one failed Windows migration-timeout job passed unchanged on rerun). See [the package 3 result](WORKSPACE_3_RESULT_REVIEW_2026-09-13.md) for retained historical evidence. Installed app unchanged.
 
 **Change:** the deliverable becomes the center of the experience, with regular feedback and annotations as two entrances to the same existing revision workflow.
 
@@ -215,6 +215,8 @@ Unsent drafts remain same-tab storage with the existing expiry; no cloud draft s
 **Preview limit:** no new live-preview hosting platform in this body of work. Current arbitrary HTML/text artifacts must not become executable same-origin pages. Use validated screenshots and safe text/downloads; link to an existing authorized preview if one is actually available. Rich interactive preview hosting is a later, separately scoped capability.
 
 ### Package 4 — phone, accessibility, motion, and delivery weight
+
+**Status (2026-09-14):** implementation and focused checks complete locally at `23be6e0`. [Research](WORKSPACE_4_RESEARCH_2026-09-14.md) and [measured result](WORKSPACE_4_MOBILE_RESULT_2026-09-14.md). No full native gate, physical-iPhone acceptance, merge or deployment yet.
 
 **Change:** the exemplary journey feels consistent and stable across devices, not merely attractive in one screenshot.
 
@@ -316,8 +318,9 @@ are outside this repair.
 
 The repairs and focused verification are recorded in
 [the package 3 assessment](WORKSPACE_3_RESULT_REVIEW_2026-09-13.md#repair-follow-up--2026-09-14).
-Acceptance still requires the unchanged machine verifier and independent
-inspection of this candidate. No merge, installation or deployment is
-implied. The simplicity check now explicitly includes a short outcome,
+That follow-up was subsequently inspected and merged, with the separate
+final-check receipt repair in `07e6c90` and passing merged-candidate CI.
+Historical run 1555's short verdict is retained, not retroactively rewritten.
+Installation and deployment remain deferred. The simplicity check includes a short outcome,
 the deliverable before repeated narrative, technical facts behind details,
 visible risks, and measured 44px Back targets at both signed phone widths.
