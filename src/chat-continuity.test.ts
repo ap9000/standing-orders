@@ -336,7 +336,7 @@ test("a late answer for another lens is ignored, and a bad refresh (503, malform
     expect(box().value).toBe("Draft here");
   }
   response = async () => json(idle); await check();
-  expect(status()).toBe("Connected."); expect(scheduled.at(-1)!.ms).toBe(5000);
+  expect(status()).toBe(""); expect(scheduled.at(-1)!.ms).toBe(5000);
 });
 
 test("an open approval form is never swapped: changed terms mark it stale, disable its submit, keep the typed password, and offer an explicit review", async () => {
@@ -487,7 +487,7 @@ test("a changed version without its fragments is not taken as rendered: the page
   expect(window.document.querySelector('[data-key="m2"] p')!.textContent).toBe("Paused.");
   await check();
   expect(polls().at(-1)!.url).toContain("version=v2");
-  expect(status()).toBe("Connected.");
+  expect(status()).toBe("");
 });
 
 test("a malformed status ({}, a wrong-typed session, a missing task or version) is a bad refresh that retries without touching the draft; only a complete answer with session:null ends the conversation", async () => {
@@ -500,7 +500,7 @@ test("a malformed status ({}, a wrong-typed session, a missing task or version) 
     expect((window.document.getElementById("chat-reconnect") as HTMLElement).hidden).toBe(true);
   }
   response = async () => json(idle); await check();
-  expect(status()).toBe("Connected.");
+  expect(status()).toBe("");
   response = async () => json({ session: null }); await check();
   expect(status()).toContain("changed or ended");
   expect(sendButton().disabled).toBe(true); expect(box().value).toBe("Keep drafting");

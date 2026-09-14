@@ -302,7 +302,7 @@ export const CHAT_CONTINUITY_SCRIPT = String.raw`
       }
       settleLive();
       busy=data.pending;buttons();
-      say(busy?'Reply in progress. You can draft your next message or come back later.':sent?'Message not confirmed. Check the conversation before retrying.':'Connected.');
+      say(busy?'Reply in progress. You can draft your next message or come back later.':sent?'Message not confirmed. Check the conversation before retrying.':'');
       later(busy?2500:5000);
     }catch(e){say('Connection lost. Reconnecting… Your existing work is not cancelled.');later(10000);}
     finally{polling=false;}

@@ -22,6 +22,7 @@ import { resolveRoutineAuthority, routeOfTask } from "./agentconfig.js";
 import { projectRoute, readinessWords } from "./phase-routing.js";
 import type { MateProviderAnswer } from "./converse.js";
 import { resultFactsFromHtml } from "./result-review.js";
+import { Window } from "happy-dom";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -43,6 +44,14 @@ const presented = (
 };
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
+
+async function stylesOf(html: string, base: string): Promise<string> {
+  const path = /<link rel="stylesheet" href="([^"]+)"/.exec(html)?.[1];
+  if (!path) throw new Error("missing workspace stylesheet");
+  const response = await fetch(new URL(path, base));
+  expect(response.status).toBe(200);
+  return response.text();
+}
 
 /** The revision form's own binding (repair 2026-09-14): the exact note
  * batch and source terms a rendered page displays. A seal posts these —
@@ -5267,8 +5276,9 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     // Every routed face is also declared: a served-but-undeclared weight
     // would silently synthesize.
     const html = await login.text();
+    const css = await stylesOf(html, base);
     for (const face of ["plex-sans-400", "plex-sans-500", "plex-sans-600", "plex-mono-400", "plex-mono-500", "plex-mono-600"]) {
-      expect(html).toContain(`/fonts/${face}.woff2`);
+      expect(css).toContain(`/fonts/${face}.woff2`);
     }
   });
 
@@ -5412,12 +5422,13 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     // Native <details>/<summary> — the same accessible pattern the project
     // switcher already uses — carries keyboard open/close and a focus ring
     // for free; no bespoke widget or extra ARIA wiring was added for it.
-    expect(home).toContain('button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }');
-    expect(home).toContain('.nav-group > summary .chevron { width: .875rem; height: .875rem; flex: none; transition: transform .15s; }');
+    const css = await stylesOf(home, base);
+    expect(css).toContain('button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }');
+    expect(css).toContain('.nav-group > summary .chevron { width: .875rem; height: .875rem; flex: none; transition: transform .15s; }');
     // The rotation is real motion, so it dies under prefers-reduced-motion —
     // universally, since the UI polish pass (2026-09-13): every animation
     // and transition, not a hand-kept list of selectors.
-    expect(home).toContain('@media (prefers-reduced-motion: reduce) {\n  *, *::before, *::after { animation: none !important; transition: none !important; }');
+    expect(css).toContain('@media (prefers-reduced-motion: reduce) {\n  *, *::before, *::after { animation: none !important; transition: none !important; }');
   });
 
   test("the board keeps its poller privileges: connect-src, the noscript opt-out, and swap preservation", async () => {
@@ -5438,10 +5449,11 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     expect(html).toContain('data.fold[k]=d.open');
     expect(html).toContain('if(data.fold[k])d.setAttribute("open","");else d.removeAttribute("open")');
     // The stylesheet ships the motion contracts and the phone's stacked lanes.
-    expect(html).toContain("@view-transition { navigation: auto; }");
-    expect(html).toContain("prefers-reduced-motion: reduce");
-    expect(html).toContain(".board { display: flex; flex-direction: column;");
-    expect(html).toContain("--brand:");
+    const css = await stylesOf(html, base);
+    expect(css).toContain("@view-transition { navigation: auto; }");
+    expect(css).toContain("prefers-reduced-motion: reduce");
+    expect(css).toContain(".board { display: flex; flex-direction: column;");
+    expect(css).toContain("--brand:");
   });
 
   test("a password on screen strips the chrome additions but keeps the page's own behavior", async () => {
@@ -7529,8 +7541,9 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(task).not.toContain("hold next attempt");
     expect(task).not.toContain("No approved scope yet");
     expect(task).not.toContain('<details class="section" id="waits-for"');
-    expect(task).toContain(".dependency-repair-actions form > button[type=submit] { width: 100%; }");
-    expect(task).toContain(".dependency-repair-actions .dependency-repair-replace > button[type=submit] { width: auto; }");
+    const css = await stylesOf(task, base);
+    expect(css).toContain(".dependency-repair-actions form > button[type=submit] { width: 100%; }");
+    expect(css).toContain(".dependency-repair-actions .dependency-repair-replace > button[type=submit] { width: auto; }");
 
     const queue = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
     expect(queue).toContain('data-task="t-dependent"');
@@ -8163,9 +8176,10 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
   test("the design system (v2): one token ramp in two schemes, a theme color per scheme, icons on the sidebar's primary rows", async () => {
     const cookie = await login();
     const html = await (await fetch(url("/"), { headers: { cookie } })).text();
-    expect(html).toContain("color-scheme: light dark;");
+    const css = await stylesOf(html, base);
+    expect(css).toContain("color-scheme: light dark;");
     // The light block redefines the same names — never a color that lives in one scheme only.
-    const light = /@media \(prefers-color-scheme: light\) \{\s*:root \{(.*?)\}\s*\}/s.exec(html)?.[1] ?? "";
+    const light = /@media \(prefers-color-scheme: light\) \{\s*:root \{(.*?)\}\s*\}/s.exec(css)?.[1] ?? "";
     for (const token of ["--background", "--foreground", "--card", "--muted", "--muted-foreground", "--border", "--input", "--brand", "--brand-foreground", "--running", "--success", "--destructive", "--ring"]) {
       expect(light).toContain(`${token}:`);
     }
@@ -8177,11 +8191,11 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     expect(html).toMatch(/<a href="\/workbench" aria-label="portfolio" title="portfolio">portfolio<\/a>/);
     // Section headers speak sans; status labels are quiet rounded rectangles,
     // while numeric counts retain the conventional pill silhouette.
-    expect(html).toContain("color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);");
-    expect(html).toContain("border: 1px solid var(--border); border-radius: .375rem;");
-    expect(html).toContain(".count {");
-    expect(html).toContain("border-radius: 9999px;");
-    expect(html).not.toContain(".badge-running::before");
+    expect(css).toContain("color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);");
+    expect(css).toContain("border: 1px solid var(--border); border-radius: .375rem;");
+    expect(css).toContain(".count {");
+    expect(css).toContain("border-radius: 9999px;");
+    expect(css).not.toContain(".badge-running::before");
   });
 
   test("the header pill names the scope: project with counts when one is open, 'all projects' on the portfolio", async () => {
@@ -8436,20 +8450,18 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(bar).toBeGreaterThan(ceremony);
     expect(layout).toBeGreaterThan(bar);
     expect(page).toContain('<span class="approval-kicker">ready to run · approve exactly this:</span>');
-    expect(page).toContain("Review the proposed scope");
+    expect(page).toContain("<strong>Review plan</strong>");
     expect(page).toContain('href="#scope">Edit details</a>');
-    // The orientation (UI polish 2026-09-13): the wait, the size of the
-    // terms, the "Review scope" road — then every term in full, grouped,
-    // and the confirm block reachable by its own anchor. Nothing trims.
-    const orient = page.indexOf('<div class="approval-orient" data-approval-orient>');
+    // One short status, then every exact term before confirmation.
+    const orient = page.indexOf('<p class="meta approval-orient" data-approval-orient>');
     const terms = page.indexOf('<div class="approval-terms" id="approval-terms">');
     const confirm = page.indexOf('<div class="approval-confirm" id="approval-confirm">');
     expect(orient).toBeGreaterThan(ceremony);
     expect(terms).toBeGreaterThan(orient);
     expect(confirm).toBeGreaterThan(terms);
-    expect(page).toContain("<strong>Waiting for your approval.</strong> Nothing builds until your password confirms the exact terms below.");
-    expect(page).toContain("0 acceptance criteria · 1 path limit · exclusions stated · every term is shown in full.");
-    expect(page).toContain('<a class="button-link" href="#approval-terms">Review scope ↓</a><a href="#approval-confirm">Approve after reading ↓</a>');
+    expect(page).toContain("Nothing starts until you approve.");
+    expect(page).not.toContain("every term is shown in full.");
+    expect(page).not.toContain("Approve after reading ↓");
     expect(page.slice(terms, confirm)).toContain('<p class="approval-goal">the goal</p>');
     expect(page.slice(terms, confirm)).toContain('<ul class="approval-paths"><li><span class="mono">src/a.ts</span></li></ul>');
     expect(page.slice(terms, confirm)).toContain("not that");
@@ -8641,13 +8653,14 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toContain('class="side-toggle" aria-label="collapse sidebar"');
     expect(thread).toContain('class="chat-project-toggle quiet" aria-controls="chat-project-panel"');
     expect(thread).toContain("standing-orders:chat-projects");
-    expect(thread).toContain('.chat-workspace .composer { position: static; width: 100%; box-shadow: var(--shadow); }');
-    expect(thread).toContain('position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));');
-    expect(thread).toContain('grid-template-columns: repeat(2, minmax(0, 1fr));');
-    expect(thread).toContain('.chat-prompts form:last-child:nth-child(odd) { grid-column: 1 / -1; }');
-    expect(thread).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin-bottom: .5rem; }');
-    expect(thread).toContain('width: 100%; min-width: 0; max-width: 100%; margin: 0; padding: 2rem 0 .75rem;');
-    expect(thread).toContain('.chat-main:has(.chat-empty) .composer { position: static; width: 100%; margin-top: .5rem; }');
+    const css = await stylesOf(thread, base);
+    expect(css).toContain('.chat-workspace .composer { position: static; width: 100%; box-shadow: var(--shadow); }');
+    expect(css).toContain('position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));');
+    expect(css).toContain('grid-template-columns: repeat(2, minmax(0, 1fr));');
+    expect(css).toContain('.chat-prompts form:last-child:nth-child(odd) { grid-column: 1 / -1; }');
+    expect(css).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin-bottom: .5rem; }');
+    expect(css).toContain('width: 100%; min-width: 0; max-width: 100%; margin: 0; padding: 2rem 0 .75rem;');
+    expect(css).toContain('.chat-main:has(.chat-empty) .composer { position: static; width: 100%; margin-top: .5rem; }');
     expect(thread).toContain('data-card-kind="fleet-overview"');
     expect(thread).toContain('aria-label="live portfolio overview"');
     expect(thread).toContain('aria-label="projects in this conversation"');
@@ -9125,13 +9138,37 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(before).toContain('return wide.matches&&saved==="open";');
     // Escape closes the drawer and returns focus to its toggle.
     expect(before).toContain('if(ev.key==="Escape"&&workspace.classList.contains("projects-open")){apply(false);projectToggle.focus();}');
+    // Exercise the shipped drawer script, not only its string markers.
+    // Layout/Tab wrapping is checked in Chromium; here close must restore
+    // focus and undo only the background inert state it introduced.
+    const window = new Window({ width: 390, height: 844 });
+    try {
+      window.document.body.innerHTML = before;
+      const script = window.document.querySelector('script[nonce]')?.textContent ?? "";
+      const start = script.indexOf('(function(){var workspace=');
+      expect(start).toBeGreaterThanOrEqual(0);
+      const end = script.indexOf('})();', start);
+      expect(end).toBeGreaterThan(start);
+      window.eval(script.slice(start, end + 5));
+      const toggle = window.document.querySelector<HTMLButtonElement>('.chat-project-toggle')!;
+      const panel = window.document.querySelector<HTMLElement>('#chat-project-panel')!;
+      const background = window.document.querySelector<HTMLElement>('.chat-main')!;
+      toggle.focus(); toggle.click();
+      expect(panel.getAttribute('aria-modal')).toBe('true');
+      expect(background.inert).toBe(true);
+      expect(window.document.activeElement?.getAttribute('aria-label')).toBe('close projects');
+      window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      expect(window.document.activeElement).toBe(toggle);
+      expect(background.inert).toBe(false);
+      expect(panel.hasAttribute('aria-modal')).toBe(false);
+    } finally { await window.happyDOM.close(); }
 
     // Once a conversation is live: the same disclosure carries the
     // session's own ceiling, the top of the page is heading → overview
-    // (folded) → thread, and "conversation live" is the only badge.
+    // (folded) → thread. Routine session details do not need a second badge.
     await mint(cookie);
     const live = await page(cookie);
-    expect(live).toContain('<span class="badge badge-running">conversation live</span>');
+    expect(live).not.toContain("conversation live");
     expect(live).not.toContain("answering with");
     expect(live).toContain('<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">anthropic-api</span></summary>');
     expect(live).toContain("<span>this conversation: $0.00 of $50.00</span>");
@@ -9153,17 +9190,18 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(fresh).not.toContain('<details class="chat-fleet-context" open>');
     expect(fresh).toContain('var fleet=document.querySelector(".chat-fleet-context");if(fleet&&!document.querySelector(".chat-empty")){');
     // On a desk the summary is visible (and focusable) only for the fresh thread, and the empty state gives up its slack.
-    expect(fresh).toContain('.chat-fleet-context > summary { display: none; }');
-    expect(fresh).toContain('.chat-fleet-context > summary .hot { color: var(--brand); font-weight: 600; }');
-    expect(fresh).toContain('.chat-main:has(.chat-empty) .chat-fleet-context > summary { display: flex; align-items: center; gap: .6rem; min-height: 2.5rem; padding: .5rem .9rem; color: var(--muted-foreground); font-size: .78rem; cursor: pointer; }');
-    expect(fresh).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin: .75rem 0 .75rem; }');
-    expect(fresh).toContain('.chat-main:has(.chat-empty) .chat-empty { padding: clamp(1.25rem, 4vh, 2.25rem) 1rem 1rem; }');
+    const css = await stylesOf(fresh, base);
+    expect(css).toContain('.chat-fleet-context > summary { display: none; }');
+    expect(css).toContain('.chat-fleet-context > summary .hot { color: var(--brand); font-weight: 600; }');
+    expect(css).toContain('.chat-main:has(.chat-empty) .chat-fleet-context > summary { display: flex; align-items: center; gap: .6rem; min-height: 2.5rem; padding: .5rem .9rem; color: var(--muted-foreground); font-size: .78rem; cursor: pointer; }');
+    expect(css).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin: .75rem 0 .75rem; }');
+    expect(css).toContain('.chat-main:has(.chat-empty) .chat-empty { padding: clamp(1.25rem, 4vh, 2.25rem) 1rem 1rem; }');
     // The desktop rules live behind the desk breakpoint; the phone's own empty-state rules are untouched.
-    const desk = fresh.indexOf('@media (min-width: 761px) {\n    /* A fresh conversation on a desk');
+    const desk = css.indexOf('@media (min-width: 761px) {\n    /* A fresh conversation on a desk');
     expect(desk).toBeGreaterThan(-1);
-    expect(fresh.indexOf('.chat-main:has(.chat-empty) .chat-fleet-context > summary { display: flex;')).toBeGreaterThan(desk);
-    expect(fresh).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin-bottom: .5rem; }');
-    expect(fresh).toContain('width: 100%; min-width: 0; max-width: 100%; margin: 0; padding: 2rem 0 .75rem;');
+    expect(css.indexOf('.chat-main:has(.chat-empty) .chat-fleet-context > summary { display: flex;')).toBeGreaterThan(desk);
+    expect(css).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin-bottom: .5rem; }');
+    expect(css).toContain('width: 100%; min-width: 0; max-width: 100%; margin: 0; padding: 2rem 0 .75rem;');
   });
 
   test("UI polish 2026-09-13: a membership never shows a dollar figure as a charge on the chat page", async () => {
@@ -10180,7 +10218,7 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     const primary = /<nav>(.*?)<\/nav>/s.exec(side)?.[1] ?? "";
     expect(side).toContain('class="side-toggle" aria-label="collapse sidebar" aria-expanded="true"');
     expect(home).toContain("standing-orders:sidebar-collapsed");
-    expect(home).toContain(".app.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }");
+    expect(await stylesOf(home, base)).toContain(".app.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }");
     // Workspace package 1: three primary destinations, nothing else.
     expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/work", "/projects"]);
     // The count rides the Work row (the inbox lives under it); every
@@ -10290,8 +10328,8 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     parkOne();
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
-    // The page's stylesheet is the longest style block (a noscript fallback carries a one-liner).
-    const css = [...home.matchAll(/<style>(.*?)<\/style>/gs)].map(m => m[1] as string).sort((a, b) => b.length - a.length)[0]?.replace(/\/\*.*?\*\//gs, "") ?? "";
+    // Same color assertions, now over the actual cacheable stylesheet.
+    const css = (await stylesOf(home, base)).replace(/\/\*.*?\*\//gs, "");
     const amber = new Set<string>();
     for (const rule of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
       if ((rule[2] as string).includes("var(--brand)")) amber.add((rule[1] as string).trim().replace(/\s+/g, " "));
@@ -11973,7 +12011,7 @@ describe("the phase route on the console (v47): one projection on the task page,
     // control is at least 44px tall.
     expect(card).not.toMatch(/<form[^>]*>(?:(?!<\/form>).)*<form/s);
     expect(card).toMatch(/<form method="post" action="\/t\/payouts\/route" class="agents-form-risk">/);
-    expect(html).toContain(".agents-form input, .agents-form select, .agents-form-risk select { width: 100%; min-width: 0; min-height: 2.75rem; }");
+    expect(await stylesOf(html, base)).toContain(".agents-form input, .agents-form select, .agents-form-risk select { width: 100%; min-width: 0; min-height: 2.75rem; }");
     // No jargon in the visible words (form attribute names aside).
     const visible = card.replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'");
     expect(visible).not.toMatch(JARGON);
@@ -12091,8 +12129,9 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(strip).toContain('<span class="eyebrow">agents</span>');
     expect(strip).toContain("claude · sonnet plans; claude · opus builds and repairs; codex · gpt-5-codex reviews");
     expect(strip).toContain('href="/t/payouts#agents"');
-    expect(chat).toContain(".task-chat-workspace .task-chat-context { display: none; }");
-    expect(chat).toContain(".task-chat-agents {");
+    const css = await stylesOf(chat, base);
+    expect(css).toContain(".task-chat-workspace .task-chat-context { display: none; }");
+    expect(css).toContain(".task-chat-agents {");
     expect(strip.replace(/<[^>]+>/g, " ")).not.toMatch(JARGON);
     // Package 2: the approval card is a section — the concise plan, then
     // the Review plan disclosure over the exact terms.
@@ -12860,8 +12899,9 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(work.match(/<article class="work-row"/g)).toHaveLength(3);
     expect(work.match(/<details class="work-details">/g)).toHaveLength(3);
     // The disclosure is native and unstyled as a card: no script needed, the summary is its own control.
-    expect(work).toContain(".work-details > summary::-webkit-details-marker { display: none; }");
-    expect(work).toContain(".work-row-status { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .875rem; }");
+    const css = await stylesOf(work, base);
+    expect(css).toContain(".work-details > summary::-webkit-details-marker { display: none; }");
+    expect(css).toContain(".work-row-status { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .875rem; }");
     // The receipt: an optional, unsettled review folds behind a disclosure; the machine verdict and the facts stay in the open.
     const task = await page(cookie, `/t/t-optional`);
     expect(task).toContain('<details class="receipt-coverage" data-semantic-coverage="secondary"><summary>Independent review</summary><ul><li>semantic coverage: 0/1 upheld by an independent reviewer — independent review is optional under default quality — none has settled</li></ul></details>');
@@ -12886,9 +12926,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // The menu: right-anchored on every width — the phone override that
     // re-anchored it at left: 0 (and pushed it past a 390px viewport) is gone;
     // the menu can never be wider than the viewport minus the page gutter.
-    expect(work).toContain(".work-tools-menu {\n    position: absolute; right: 0; top: calc(100% + .375rem); z-index: 20; min-width: 11rem; max-width: calc(100vw - 2rem);");
-    expect(work).not.toContain(".work-tools-menu { right: auto; left: 0; }");
-    expect(work).not.toMatch(/\.work-tools-menu\s*\{[^}]*left:/);
+    const css = await stylesOf(work, base);
+    expect(css).toContain(".work-tools-menu {\n    position: absolute; right: 0; top: calc(100% + .375rem); z-index: 20; min-width: 11rem; max-width: calc(100vw - 2rem);");
+    expect(css).not.toContain(".work-tools-menu { right: auto; left: 0; }");
+    expect(css).not.toMatch(/\.work-tools-menu\s*\{[^}]*left:/);
     expect(work).toContain('<details class="work-tools"><summary>Work tools');
     expect([...work.matchAll(/<nav class="work-tools-menu">([\s\S]*?)<\/nav>/g)][0]?.[1]?.match(/<a href="/g)).toHaveLength(8);
     // The row: the visible meta is the age (and the project label when rows
@@ -12938,7 +12979,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const tasks = await page(cookie, "/tasks");
     expect(tasks).toContain(`work you want done in <strong>alpha</strong>`);
     expect(tasks).toContain(`<p class="meta path-words"><span class="mono">${alpha}</span></p>`);
-    expect(tasks).toContain(".path-words { overflow-wrap: anywhere; word-break: break-word; }");
+    expect(await stylesOf(tasks, base)).toContain(".path-words { overflow-wrap: anywhere; word-break: break-word; }");
     expect(tasks).not.toContain(`in <span class="mono">${alpha}</span> —`);
   });
 });

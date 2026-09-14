@@ -1,5 +1,7 @@
 import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
+import { styleAsset } from "./style-asset.js";
+import { MOBILE_VIEWPORT_SCRIPT } from "./mobile-viewport.js";
 import { authorizePlanUnderMode, applyModeToNewFiling, planAutoPending } from "./plan-auto.js";
 import { LEDGER_CSV_HEADER, ledgerCsvRows } from "./ledger-csv.js";
 import { Readable } from "node:stream";
@@ -684,6 +686,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     const method = request.method ?? "GET";
+    // Exact, content-addressed application CSS only. Session-bearing
+    // pages and fragments still use no-store and are never compressed.
+    if ((method === "GET" || method === "HEAD") && url.pathname === WORKSPACE_STYLE.path) {
+      return WORKSPACE_STYLE.serve(request, response);
+    }
     // The install assets (arc 3): pre-auth by design; nothing secret rides
     // them, and each carries nosniff + its own conservative caching/CSP.
     if (method === "GET") {
@@ -7869,7 +7876,7 @@ function isOverdue(decision: Decision, now: Date): boolean {
 
 const SAFETY = {
   "Content-Security-Policy":
-    "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; manifest-src 'self'; worker-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'self' 'unsafe-inline'; font-src 'self'; manifest-src 'self'; worker-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
   "Cache-Control": "no-store",
@@ -7901,7 +7908,7 @@ function page(response: ServerResponse, status: number, html: string, nonce?: st
   response.writeHead(status, {
     ...SAFETY,
     "Content-Security-Policy":
-      `default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; manifest-src 'self'; worker-src 'self'; img-src 'self'; script-src 'nonce-${nonce}'; ` +
+      `default-src 'none'; style-src 'self' 'unsafe-inline'; font-src 'self'; manifest-src 'self'; worker-src 'self'; img-src 'self'; script-src 'nonce-${nonce}'; ` +
       // connect-src only when the page's script actually fetches (a region
       // poller, the full chrome beat, or the minimal sensitive-page beat).
       `${fetches === true ? "connect-src 'self'; " : ""}form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
@@ -8304,26 +8311,6 @@ function semanticCoverageHtml(matrix: readonly CriterionMatrixRow[], qualityMode
 function approvalPathsHtml(touches: readonly string[]): string {
   if (touches.length === 0) return `<p>anything</p>`;
   return `<ul class="approval-paths">${touches.map(one => `<li><span class="mono">${escape(one)}</span></li>`).join("")}</ul>`;
-}
-
-/** The ceremony's orientation row (UI polish 2026-09-13): the wait, the
- * size of the terms, and the "Review scope" road into them. It counts
- * what is below; it never restates or trims a term. */
-function approvalOrientHtml(scope: Pick<Scope, "goal" | "outOfScope" | "touches" | "acceptance">, race: TournamentTerms | null, revision: RevisionView | null | undefined): string {
-  const facts = [
-    `${scope.acceptance.length} acceptance criteri${scope.acceptance.length === 1 ? "on" : "a"}`,
-    scope.touches.length === 0 ? "no path limit" : `${scope.touches.length} path limit${scope.touches.length === 1 ? "" : "s"}`,
-    scope.outOfScope === null ? "no exclusions" : "exclusions stated",
-    ...(race === null ? [] : [race.kind === "comparison" ? "a comparison" : "a tournament"]),
-    ...(revision === null || revision === undefined || "problem" in revision ? [] : ["a revision brief"]),
-  ];
-  return (
-    `<div class="approval-orient" data-approval-orient>` +
-    `<p class="approval-orient-lead"><strong>Waiting for your approval.</strong> Nothing builds until your password confirms the exact terms below.</p>` +
-    `<p class="meta approval-orient-facts">${escape(facts.join(" · "))} · every term is shown in full.</p>` +
-    `<div class="approval-orient-actions"><a class="button-link" href="#approval-terms">Review scope ↓</a><a href="#approval-confirm">Approve after reading ↓</a></div>` +
-    `</div>`
-  );
 }
 
 /** The rubric, restated above the seal (v39) — the same claim the digest
@@ -9855,12 +9842,7 @@ const STYLE = `
   .approval-confirm button { min-height: 2.5rem; }
   /* The ceremony's orientation and exact-terms group (UI polish 2026-09-13). */
   /* Neutral by law: amber belongs to the count and the approve act alone. */
-  .approval-orient { margin: .85rem 0 .25rem; padding: .85rem .95rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 2px); background: color-mix(in srgb, var(--muted) 55%, transparent); }
-  .approval-orient-lead { margin: 0; font-size: .9rem; line-height: 1.5; }
-  .approval-orient-facts { margin: .3rem 0 0; }
-  .approval-orient-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; margin-top: .7rem; }
-  .approval-orient-actions .button-link { min-height: 2.5rem; }
-  .approval-orient-actions a:not(.button-link) { font-size: .8125rem; color: var(--muted-foreground); }
+  .approval-orient { margin: .85rem 0 .25rem; }
   .approval-terms { scroll-margin-top: 5rem; }
   .approval-confirm { scroll-margin-top: 5rem; }
   .approval-paths { margin: 0; padding: 0; list-style: none; display: grid; gap: .15rem; }
@@ -10214,7 +10196,7 @@ const STYLE = `
     /* One header row: the pill carries scope, counts, and the switch. */
     .scope-bar { display: none; }
     .mobile-top .brand-mini { font-weight: 600; font-size: .9375rem; text-decoration: none; color: var(--foreground); font-family: var(--font-mono); }
-    .mobile-top .project-pill { flex: 1; min-width: 0; position: static; }
+    .mobile-top .project-pill { flex: 1; min-width: 0; position: static; margin: 0; padding: 0; border: 0; background: none; box-shadow: none; }
     .mobile-top a.project-pill, .mobile-top .project-pill > summary {
       /* align-items: stretch, not the switcher's center: a centered column
          item takes its content width, and a long project name then widens
@@ -10262,18 +10244,19 @@ const STYLE = `
     .tabbar {
       display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
       background: color-mix(in srgb, var(--glass-strong) 92%, transparent); border-top: 1px solid var(--glass-border);
-      padding: .25rem .25rem calc(.25rem + env(safe-area-inset-bottom, 0rem));
+      padding: .25rem max(.25rem, env(safe-area-inset-right, 0rem)) calc(.25rem + env(safe-area-inset-bottom, 0rem)) max(.25rem, env(safe-area-inset-left, 0rem));
       -webkit-backdrop-filter: blur(22px) saturate(135%); backdrop-filter: blur(22px) saturate(135%);
     }
     .tabbar a {
       flex: 1; display: flex; flex-direction: column; align-items: center; gap: .125rem;
       padding: .375rem 0 .25rem; min-height: 3rem; text-decoration: none;
       color: var(--muted-foreground); font-size: .6875rem; font-weight: 500;
-      font-family: var(--font-mono);
+      font-family: var(--font-sans);
     }
     .tabbar a .glyph { display: flex; align-items: center; justify-content: center; height: 1.125rem; }
     .tabbar a .glyph svg { width: 1rem; height: 1rem; }
     .tabbar a.active { color: var(--foreground); }
+    .tabbar a.active .glyph { background: var(--muted); border-radius: 999px; box-shadow: 0 0 0 .35rem var(--muted); }
     .tabbar a { position: relative; }
     .tabbar a .dot-badge {
       position: absolute; top: .3125rem; left: calc(50% + .375rem);
@@ -10816,32 +10799,32 @@ const STYLE = `
     .task-chat-workspace { grid-template-columns: minmax(14rem, 16rem) minmax(0, 1fr); gap: 1.25rem; }
   }
   @media (max-width: 760px) {
-    main:has(.chat-workspace) { padding: 1rem 1rem calc(9rem + env(safe-area-inset-bottom, 0rem)); }
+    main:has(.chat-workspace) { padding: 1rem max(1rem, env(safe-area-inset-right, 0rem)) calc(var(--composer-height, 4rem) + 5rem + env(safe-area-inset-bottom, 0rem)) max(1rem, env(safe-area-inset-left, 0rem)); }
     /* Above the fixed composer and the tab bar, never beneath them. */
-    .chat-new-update-holder { bottom: calc(8.6rem + env(safe-area-inset-bottom, 0rem)); }
+    .chat-new-update-holder { bottom: calc(var(--composer-height, 4rem) + 4.5rem + env(safe-area-inset-bottom, 0rem)); }
     .chat-main:has(.proposal.pending) .chat-new-update-holder, .chat-main:has(.chat-empty) .chat-new-update-holder { bottom: calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
     .chat-workspace, .chat-workspace.projects-hidden { display: block; }
     .chat-workspace.projects-hidden .chat-projects, .chat-projects { display: none; }
     .chat-project-toggle { display: inline-flex; min-height: 2.75rem; }
     .chat-project-close { display: grid; place-items: center; min-height: 2.75rem; min-width: 2.75rem; }
     .chat-workspace.projects-open::before { content: ""; position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / .18); backdrop-filter: blur(3px); }
-    .chat-workspace.projects-open .chat-projects { display: block; position: fixed; top: 6rem; left: 1rem; right: 1rem; width: auto; max-height: calc(100dvh - 11rem); overflow-y: auto; z-index: 31; }
-    .chat-project-list { display: flex; gap: .625rem; overflow-x: auto; padding: .125rem 0 .5rem; scroll-snap-type: x proximity; }
+    .chat-workspace.projects-open .chat-projects { display: block; position: fixed; top: 5rem; left: 1rem; right: 1rem; width: auto; max-height: calc(100dvh - 10rem); overflow-y: auto; overscroll-behavior: contain; z-index: 31; background: var(--card); }
+    .chat-project-list { display: grid; gap: 0; padding: 0; }
     .chat-project-card {
-      flex: 0 0 min(16rem, 78vw); scroll-snap-align: start; padding: .6rem .65rem;
-      border: 1px solid var(--glass-border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 72%, transparent);
+      margin: 0; padding: .85rem .4rem; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent;
     }
     .chat-projects { position: static; max-height: none; overflow: hidden; padding: .65rem; margin-bottom: .85rem; }
     .chat-projects-head { margin-bottom: .35rem; }
     .chat-project-stats { display: flex; flex-wrap: wrap; gap: .15rem .7rem; margin-top: .35rem; }
     .chat-project-stats span { font-size: .625rem; }
     .chat-project-stats span:last-child { display: none; }
-    .chat-project-actions { margin-top: .35rem; }
+    .chat-project-actions { margin-top: .5rem; }
+    .chat-project-actions button { min-height: 2.75rem; padding-inline: .85rem; font-size: .8125rem; }
     .chat-head { padding-inline: 0; }
     .chat-head h1 { font-size: 1.4rem; }
     .chat-head-actions { align-items: flex-start; }
     .task-chat-workspace .task-chat-context { display: none; }
-    .result-panel { padding: .9rem .85rem .85rem; }
+    .result-panel { padding: .25rem 0 1rem; border: 0; border-radius: 0; box-shadow: none; background: transparent; }
     .result-head { display: grid; gap: .45rem; }
     .result-head .status-line { justify-self: start; }
     .result-tabs { gap: 0; }
@@ -10851,7 +10834,7 @@ const STYLE = `
     .result-action .button-link, .result-action form button { width: 100%; box-sizing: border-box; min-height: 2.75rem; }
     .result-request .revision-from-comments { display: grid; }
     .result-links { display: grid; gap: 0; }
-    .result-links a { min-height: 2.5rem; display: inline-flex; align-items: center; }
+    .result-links a { min-height: 2.75rem; display: inline-flex; align-items: center; }
     .result-links a + a::before { content: none; }
     .task-chat-head { display: block; }
     .task-chat-head > .badge { display: none; }
@@ -10899,7 +10882,7 @@ const STYLE = `
     }
     .chat-prompts form, .chat-prompts button { min-width: 0; width: 100%; }
     .chat-prompts form:last-child:nth-child(odd) { grid-column: 1 / -1; }
-    .chat-main { padding-bottom: 6rem; }
+    .chat-main { padding-bottom: 0; }
     .chat-main #latest { scroll-margin-top: 7rem; }
     .chat-workspace .composer {
       position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));
@@ -10926,6 +10909,15 @@ const STYLE = `
     .chat-main:has(.chat-empty) .chat-empty > .meta { margin-top: .45rem; }
     .chat-main:has(.chat-empty) .composer { position: static; width: 100%; margin-top: .5rem; }
     .composer textarea { min-height: 2.75rem; padding: .55rem .65rem; font-size: 1rem; }
+    /* Hide bottom navigation only when viewport shrink indicates a soft
+       keyboard; hardware-keyboard focus and pinch zoom keep it available. */
+    html[data-mobile-keyboard] .tabbar { display: none; }
+    html[data-mobile-keyboard] .chat-workspace .composer { bottom: calc(var(--keyboard-inset, 0px) + .5rem); }
+    html[data-mobile-keyboard] .chat-new-update-holder { bottom: calc(var(--keyboard-inset, 0px) + var(--composer-height, 4rem) + 1rem); }
+    html[data-mobile-keyboard] .sticky-actions { bottom: .5rem; }
+    .work-tools > summary, .work-tools-menu a, .work-views a { min-height: 2.75rem; }
+    .work-tools-menu a { display: flex; align-items: center; }
+    main :is(input, textarea, button, summary, a) { scroll-margin-block: 6rem calc(var(--composer-height, 4rem) + 5rem); }
   }
   main:has(.mate-mint) { max-width: 68rem; }
   main:has(.mate-mint) > h1 { margin-top: .5rem; font-size: 1.7rem; letter-spacing: -.04em; }
@@ -11270,6 +11262,8 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
+const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS);
+
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
   projectScoped?: boolean;
@@ -11443,6 +11437,7 @@ function beatScript(enabled = true): string {
  * from its very first screen while the palette and global keys remain absent. */
 function sidebarScript(): string {
   return (
+    MOBILE_VIEWPORT_SCRIPT +
     `(function(){var app=document.querySelector(".app"),sideToggle=document.querySelector(".side-toggle");` +
     `function setSide(collapsed){if(!app||!sideToggle)return;app.classList.toggle("sidebar-collapsed",collapsed);` +
     `sideToggle.setAttribute("aria-expanded",String(!collapsed));sideToggle.setAttribute("aria-label",collapsed?"expand sidebar":"collapse sidebar");` +
@@ -11482,8 +11477,8 @@ function chromeScript(beats = true): string {
     // the palette
     `var raw=document.getElementById("palette-index");if(!raw)return;` +
     `var index;try{index=JSON.parse(raw.textContent||"[]");}catch(e){return;}` +
-    `var open=false,box=null,list=null,input=null,items=[];` +
-    `function close(){if(!open)return;open=false;box.remove();box=null;}` +
+    `var open=false,box=null,list=null,input=null,items=[],paletteBack=null;` +
+    `function close(){if(!open)return;open=false;box.remove();box=null;if(paletteBack&&paletteBack.isConnected)paletteBack.focus();paletteBack=null;}` +
     `function go(href){location.href=href;}` +
     `function render(filter){list.textContent="";items=[];var n=0;` +
     `for(var i=0;i<index.length&&n<12;i++){var e=index[i];` +
@@ -11495,7 +11490,7 @@ function chromeScript(beats = true): string {
     `function pick(delta){var at=-1;for(var i=0;i<items.length;i++)if(items[i].getAttribute("aria-selected")==="true")at=i;` +
     `if(at>=0)items[at].removeAttribute("aria-selected");var next=Math.max(0,Math.min(items.length-1,at+delta));` +
     `if(items[next])items[next].setAttribute("aria-selected","true");}` +
-    `function show(){if(open)return;open=true;` +
+    `function show(){if(open)return;paletteBack=document.activeElement;open=true;` +
     `box=document.createElement("div");box.className="palette";box.setAttribute("role","dialog");box.setAttribute("aria-label","jump to");` +
     `input=document.createElement("input");input.type="text";input.placeholder="jump to\u2026";input.setAttribute("autocomplete","off");` +
     `list=document.createElement("ul");list.setAttribute("role","listbox");` +
@@ -11515,7 +11510,8 @@ function chromeScript(beats = true): string {
     `if(help.hidden){helpBack=document.activeElement;help.hidden=false;help.focus();}` +
     `else{help.hidden=true;if(helpBack&&helpBack.focus)helpBack.focus();helpBack=null;}}` +
     `document.addEventListener("click",function(ev){if(helpOpen()&&!help.contains(ev.target))toggleHelp();` +
-    `document.querySelectorAll("details.switcher[open]").forEach(function(d){if(!d.contains(ev.target))d.removeAttribute("open");});});` +
+    `document.querySelectorAll("details.switcher[open],details.work-tools[open]").forEach(function(d){if(!d.contains(ev.target))d.removeAttribute("open");});});` +
+    `document.addEventListener("keydown",function(ev){if(ev.key!=="Escape"||ev.isComposing)return;var d=ev.target.closest&&ev.target.closest("details.switcher[open],details.work-tools[open]");if(d){d.open=false;d.querySelector("summary").focus();ev.preventDefault();}});` +
     // j/k: a roving focus over the page's rows — only from body or from
     // inside the set, clamped at the ends, preventDefault only on a real
     // move (finding 9); held keys may repeat
@@ -11660,7 +11656,7 @@ function shell(
     ...(options.live?.fallbackRefresh !== true
       ? []
       : [`<noscript><meta http-equiv="refresh" content="30"><style>@view-transition { navigation: none; }</style></noscript>`]),
-    `<title>${escape(title)}</title><style>${STYLE}${RECIPE_CSS}</style></head><body>`,
+    `<title>${escape(title)}</title><link rel="stylesheet" href="${WORKSPACE_STYLE.path}"></head><body>`,
   ].join("\n");
   const tail =
     options.live === undefined
@@ -13198,16 +13194,14 @@ function matePromptStarters(csrf: string, focus: TaskChatFocus | null = null): s
   ).join("")}</div>`;
 }
 
-function chatHeading(copy: string, projectCount: number, live: boolean, showProjectToggle = true): string {
+function chatHeading(copy: string, projectCount: number, showProjectToggle = true): string {
   return (
     `<div class="chat-head"><div><h1>chat</h1>${copy === "" ? "" : `<p class="meta">${escape(copy)}</p>`}</div>` +
     `<div class="chat-head-actions">` +
     (showProjectToggle
       ? `<button type="button" class="chat-project-toggle quiet" aria-controls="chat-project-panel" aria-expanded="false" title="show or hide projects">` +
         `${strokeIcon(`<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>`)}<span>projects</span><span class="badge">${projectCount}</span></button>`
-      : "") +
-    // "conversation live" means something; a badge for the idle state did not.
-    (live ? `<span class="badge badge-running">conversation live</span>` : "") + `</div></div>`
+      : "") + `</div></div>`
   );
 }
 
@@ -13265,7 +13259,12 @@ const CHAT_UI_SCRIPT =
   `(function(){var workspace=document.querySelector(".chat-workspace"),projectPanel=document.getElementById("chat-project-panel"),projectToggle=document.querySelector(".chat-project-toggle"),projectClose=document.querySelector(".chat-project-close");` +
   `var fleet=document.querySelector(".chat-fleet-context");if(fleet&&!document.querySelector(".chat-empty")){var desktop=window.matchMedia("(min-width: 761px)");fleet.open=desktop.matches;desktop.addEventListener("change",function(){fleet.open=desktop.matches;});}` +
   `if(workspace&&projectPanel&&projectToggle){var wide=window.matchMedia("(min-width: 1200px)");var saved="";try{saved=localStorage.getItem("standing-orders:chat-projects")||"";}catch(e){}` +
-  `function apply(open){workspace.classList.toggle("projects-open",open);workspace.classList.toggle("projects-hidden",!open);projectToggle.setAttribute("aria-expanded",String(open));}` +
+  `var background=[];function restoreBackground(){background.forEach(function(n){n.inert=false;});background=[];}` +
+  `function apply(open){var was=workspace.classList.contains("projects-open");restoreBackground();workspace.classList.toggle("projects-open",open);workspace.classList.toggle("projects-hidden",!open);projectToggle.setAttribute("aria-expanded",String(open));` +
+  `if(open&&!wide.matches){projectPanel.setAttribute("role","dialog");projectPanel.setAttribute("aria-modal","true");projectPanel.setAttribute("aria-label","Projects");` +
+  `document.querySelectorAll(".side,.mobile-top,.tabbar,.chat-main,.task-chat-context,.task-chat-agents").forEach(function(n){if(!n.contains(projectPanel)&&!n.inert){n.inert=true;background.push(n);}});if(projectClose)projectClose.focus();}` +
+  `else{projectPanel.removeAttribute("role");projectPanel.removeAttribute("aria-modal");projectPanel.removeAttribute("aria-label");if(was&&!open)projectToggle.focus();}}` +
+  `projectPanel.addEventListener("keydown",function(ev){if(ev.key!=="Tab"||wide.matches)return;var nodes=Array.from(projectPanel.querySelectorAll("a[href],button,input,select,textarea,summary,[tabindex='0']")).filter(function(n){return !n.disabled&&n.getClientRects().length;});var first=nodes[0],last=nodes[nodes.length-1];if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first.focus();}});` +
   `function preferred(){return wide.matches&&saved==="open";}apply(preferred());` +
   `projectToggle.addEventListener("click",function(){var next=!workspace.classList.contains("projects-open");apply(next);if(wide.matches){saved=next?"open":"closed";try{localStorage.setItem("standing-orders:chat-projects",saved);}catch(e){}}});` +
   `if(projectClose)projectClose.addEventListener("click",function(){apply(false);projectToggle.focus();});` +
@@ -13375,7 +13374,7 @@ function chatPage(chrome: Chrome, data: {
   };
   const parts: string[] = [
     data.focusTask === null
-      ? chatHeading("Ask about any project. Changes come back as cards you confirm.", data.projects.length, false, data.enabled.ok)
+      ? chatHeading("", data.projects.length, data.enabled.ok)
       : taskChatHeading(data.focusTask),
     data.focusTask === null ? "" : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
   ];
@@ -13528,7 +13527,7 @@ function mateMintCard(
   const subscription = enabled.billing === "subscription";
   return [
     `<div class="card mate-mint" id="latest">`,
-    `<p><strong>Start a conversation</strong> <span class="meta">Ask about any project, get a recap, and confirm each proposed change on a card. Nothing changes without your confirmation.</span></p>`,
+    `<p><strong>Start a conversation</strong> <span class="meta">Ask about your projects and review proposed changes.</span></p>`,
     `<form method="post" action="/chat/mate/mint">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<input type="hidden" name="return" value="${escape(returnTo)}">`,
@@ -13538,9 +13537,9 @@ function mateMintCard(
       : `<label>this conversation may spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span></label>`,
     `</div>`,
     subscription
-      ? `<p class="meta">The conversation stays open until you end it. The daily turn limit and your membership's own plan limits still apply.</p>`
+      ? `<p class="meta">Stays open until you end it. Daily turn and membership limits still apply.</p>`
       : `<p class="meta">The conversation stays open until you end it. The weekly chat ceiling (${chatMoney(enabled.config.weeklyCeilingMicrousd)}) still binds above this total.</p>`,
-    `<label>Your password <span class="meta">(once, to start — messages need no password after)</span><input type="password" name="token" autocomplete="current-password"></label>`,
+    `<label>Your password <span class="meta">— once per conversation</span><input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">Start the conversation</button>`,
     `</form>`,
     `</div>`,
@@ -13931,7 +13930,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
   const returnTo = data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id);
   const conversation: string[] = [
     data.focusTask === null
-      ? chatHeading("", data.projects.length, true)
+      ? chatHeading("", data.projects.length)
       : taskChatHeading(data.focusTask),
     data.focusTask === null ? "" : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
     // The overview folds by default (UI polish 2026-09-13): the chrome
@@ -16876,12 +16875,10 @@ function taskBody(data: {
           `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? scope.digest)}">`,
           `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">`,
           `<div class="ceremony-head"><span class="approval-title"><span class="approval-kicker">ready to run · approve exactly this:</span>` +
-            `<strong>Review the proposed scope</strong></span><a href="#scope">Edit details</a></div>`,
-          // The orientation (UI polish 2026-09-13): what this page waits
-          // for, how much there is to read, and one explicit road to the
-          // exact terms — which follow IN FULL, never summarized away. The
-          // counts are facts about the terms below, not a substitute.
-          approvalOrientHtml(scope, data.raceTerms ?? null, data.revision ?? null),
+            `<strong>Review plan</strong></span><a href="#scope">Edit details</a></div>`,
+          // No duplicate summary card or skip-ahead approval action.
+          // Every signed term still follows, before password confirmation.
+          `<p class="meta approval-orient" data-approval-orient>Nothing starts until you approve.</p>`,
           `<div class="approval-terms" id="approval-terms">`,
           // The deliverable INSIDE the ceremony (mate arc §10): a yes on a
           // scout task authorizes a read-only session and a report, never
