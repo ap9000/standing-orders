@@ -52,6 +52,7 @@ const flag = name => { const at = args.indexOf(name); return at === -1 ? null : 
 const out = resolve(flag('--out') ?? 'output/playwright/workspace-1/after');
 const strict = args.includes('--strict');
 const densityOnly = args.includes('--density-only');
+const statusOnly = args.includes('--status-only');
 mkdirSync(out, { recursive: true });
 /** Another tree's fixture: `--fixture <path>` names a built checkout's
  * `scripts/ui-polish-fixture.mjs`; `--rev <git-rev>` extracts that
@@ -73,7 +74,7 @@ if (rev !== null) {
   execFileSync('node', ['scripts/postbuild.mjs'], { cwd: tree, stdio: 'inherit' });
   fixtureModule = join(tree, 'scripts', 'ui-polish-fixture.mjs');
 }
-const { startFixture } = await import(fixtureModule === null ? './ui-polish-fixture.mjs' : pathToFileURL(resolve(fixtureModule)).href);
+const { startFixture, LONG_ALLOWED_PATH } = await import(fixtureModule === null ? './ui-polish-fixture.mjs' : pathToFileURL(resolve(fixtureModule)).href);
 
 async function loadPlaywright() {
   try { return await import('playwright'); } catch { /* not installed here */ }
@@ -85,11 +86,11 @@ async function loadPlaywright() {
 }
 
 const VIEWPORTS = { desktop: { width: 1440, height: 900 }, laptop: { width: 1280, height: 800 }, phone: { width: 390, height: 844 }, narrow: { width: 320, height: 740 } };
-const report = { generatedAt: new Date().toISOString(), out, fixture: `synthetic — ${fixtureModule ?? 'scripts/ui-polish-fixture.mjs'} { secondProject: true }`, mode: densityOnly ? 'density-only' : 'full', rev: rev === null ? null : { asked: rev, resolved: execFileSync('git', ['rev-parse', rev]).toString().trim() }, checks: [], payloads: {}, screenshots: [], statuses: {} };
+const report = { generatedAt: new Date().toISOString(), out, fixture: `synthetic — ${fixtureModule ?? 'scripts/ui-polish-fixture.mjs'} { secondProject: true }`, mode: statusOnly ? 'status-only' : densityOnly ? 'density-only' : 'full', rev: rev === null ? null : { asked: rev, resolved: execFileSync('git', ['rev-parse', rev]).toString().trim() }, checks: [], payloads: {}, screenshots: [], statuses: {} };
 const check = (name, ok, detail) => { report.checks.push({ name, ok: Boolean(ok), detail }); console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`); };
 
 const { chromium } = await loadPlaywright();
-const fixture = await startFixture({ secondProject: true, slowMs: 1500 });
+const fixture = await startFixture({ secondProject: true, slowMs: 1500, statusPresentation: statusOnly });
 const browser = await chromium.launch();
 const T = fixture.statusTasks;
 const R = fixture.statusRuns;
@@ -325,8 +326,105 @@ async function densityPass() {
   }
 }
 
+/** Package 5 pilot 2: one journey per viewport, reusing this fixture and
+ * proof harness. All tasks here are synthetic, including the exact path
+ * reported on the live pilot. No model or external write is involved. */
+async function statusPass() {
+  for (const [name, viewport] of [['desktop', VIEWPORTS.desktop], ['phone', VIEWPORTS.phone]]) {
+    const { ctx, page } = await context(viewport);
+    await openProject(page, fixture.repos.main);
+    const cases = [fixture.tasks.long, T.chained, T.waitingForBuilder, T.running, T.held, T.paused, T.failed, T.failedChecks, T.missingProof, T.corruptLog, T.pendingReview, T.reviewing, T.reviewFailed];
+    const primary = () => page.evaluate(() => [...document.querySelectorAll('[data-primary-action]')].filter(el => el.checkVisibility()).map(el => ({ label: el.textContent.trim(), href: el.getAttribute('href') })));
+    for (const id of cases) {
+      await page.goto(`${fixture.url}/work`);
+      const expected = await page.locator(`.work-row[data-task="${id}"]`).evaluate(row => ({ token: row.dataset.workStatus, label: row.querySelector('.status-label').textContent, action: row.querySelector('.work-action')?.textContent.replace(/ →$/, '') ?? null }));
+      for (const surface of ['task', 'chat']) {
+        await page.goto(`${fixture.url}${surface === 'task' ? `/t/${id}` : `/chat?task=${id}`}`);
+        const seen = await statusOf(page, '[data-task-status], .completion-receipt .status-line');
+        const actions = await primary();
+        check(`agree ${name} ${id} ${surface}: status and one primary action match Work`, seen?.token === expected.token && seen?.label === expected.label && actions.length === 1 && actions[0].label === expected.action, JSON.stringify({ expected, seen, actions }));
+        const actionFit = await page.locator('[data-primary-action]').evaluateAll(els => els.filter(el => el.checkVisibility()).map(el => {
+          const target = el.querySelector('.button-link') ?? el, r = target.getBoundingClientRect(), text = document.createRange(); text.selectNodeContents(target);
+          const lines = new Set([...text.getClientRects()].filter(rect => rect.width > 0).map(rect => Math.round(rect.top)));
+          return { label: target.textContent.trim(), height: r.height, left: r.left, right: r.right, lines: lines.size };
+        }));
+        check(`fit ${name} ${id} ${surface}: primary action fits on one line with a 44px target`, actionFit.length === 1 && actionFit[0].height >= 44 && actionFit[0].left >= 0 && actionFit[0].right <= viewport.width && actionFit[0].lines === 1, JSON.stringify(actionFit));
+        const bounds = await noOverflow(page);
+        check(`fit ${name} ${id} ${surface}: document fits`, bounds.ok, JSON.stringify(bounds));
+        if (id === T.reviewing) {
+          const repeated = await page.evaluate(() => [...document.querySelectorAll('h2, strong, .status-label')].filter(el => el.checkVisibility() && el.textContent.trim() === 'Reviewing').length);
+          check(`one-action ${name} ${surface}: Reviewing appears once; Stop is reachable`, repeated === 1 && await page.locator('.task-stop-form button').isVisible(), `visible Reviewing labels=${repeated}`);
+          if (surface === 'task') {
+            await page.locator('#attempts').evaluate(el => { el.open = true; });
+            const history = await page.locator('#attempts').innerText();
+            check(`agree ${name}: the live reviewer is running in attempt history`, !history.includes('never finished') && history.includes('running'), history);
+          }
+        }
+        if (id === T.failedChecks && surface === 'task') await shot(page, `${name}-status-failure`, `${viewport.width}×${viewport.height}: long task title, failed check, one review action (synthetic fixture)`);
+        if (id === T.reviewing && surface === 'chat') await shot(page, `${name}-status-reviewing`, `${viewport.width}×${viewport.height}: one Reviewing receipt and reachable Stop (synthetic fixture)`);
+      }
+    }
+    for (const [id, target] of [[T.held, 'form[action$="/unhold"] button'], [T.paused, '.task-resume-form button'], [T.waitingForBuilder, '.dispatch-recovery-command']]) {
+      await page.goto(`${fixture.url}/t/${id}`);
+      await page.focus('[data-primary-action]');
+      await page.keyboard.press('Enter');
+      check(`one-action ${name} ${id}: keyboard primary action reveals its controls`, await page.locator(target).isVisible());
+    }
+    await page.goto(`${fixture.url}/t/${fixture.tasks.long}`);
+    await page.focus('.task-plan-review > summary');
+    await page.keyboard.press('Enter');
+    const approval = await page.locator('#approve').evaluate(el => ({ full: el.querySelector('.approval-goal').textContent, paths: el.querySelector('.approval-boundaries').textContent, password: el.querySelector('input[type="password"]') !== null }));
+    check(`one-action ${name}: Review plan opens the full exact terms before password approval`, approval.full === fixture.store.getScope(fixture.tasks.long).goal && approval.paths.includes(LONG_ALLOWED_PATH) && approval.password);
+    check(`fit ${name}: expanded approval fits`, (await noOverflow(page)).ok);
+    await scrollTo(page, '#approve');
+    await shot(page, `${name}-status-approval`, `${viewport.width}×${viewport.height}: exact signed terms remain available before consent (synthetic fixture)`);
+    await page.locator('.task-plan-review').evaluate(el => { el.open = false; });
+    await page.locator('#scope').evaluate(el => { el.open = true; });
+    await scrollTo(page, '#scope .scope-paths', 120);
+    const paths = await page.locator('#scope .scope-paths').evaluate((el, exact) => {
+      const r = el.getBoundingClientRect(), style = getComputedStyle(el);
+      return { text: el.textContent, width: el.clientWidth, scroll: el.scrollWidth, right: r.right, overflow: style.overflowX, wrap: style.overflowWrap, exact: el.textContent.includes(exact), document: document.documentElement.scrollWidth };
+    }, LONG_ALLOWED_PATH);
+    check(`fit ${name}: the exact live-pilot allowed path wraps fully`, paths.exact && paths.wrap === 'anywhere' && paths.overflow !== 'hidden' && paths.scroll <= paths.width && paths.document <= viewport.width && paths.right <= viewport.width, JSON.stringify(paths));
+    await shot(page, `${name}-status-long-path`, `${viewport.width}×${viewport.height}: full ${LONG_ALLOWED_PATH} in allowed paths (synthetic fixture)`);
+
+    // The existing native result/feedback/revision journey, once per width.
+    await page.goto(`${fixture.url}/chat?task=${fixture.tasks.done}`);
+    if (await page.locator('form[action="/chat/mate/mint"]').count()) {
+      await page.fill('form[action="/chat/mate/mint"] input[name="token"]', fixture.password);
+      await submit(page, 'form[action="/chat/mate/mint"] button[type="submit"]');
+    }
+    const draft = `Unsent ${name} feedback stays here.`;
+    await page.fill('.composer textarea', draft);
+    await page.click('.completion-receipt [data-open-result]');
+    await page.waitForSelector('[data-result-tab="changes"]');
+    await page.click('[data-result-tab="changes"]');
+    check(`one-action ${name}: Changes opens the preserved diff`, await page.locator('[data-result-view="changes"]').isVisible() && await page.locator('[data-result-view="changes"] .diff-file').count() > 0);
+    await page.click('[data-result-tab="checks"]');
+    check(`one-action ${name}: Checks is readable`, await page.locator('[data-result-view="checks"]').isVisible());
+    await page.goto(`${fixture.url}/r/${fixture.runId}?tab=changes`);
+    const note = `Keep the full allowed path visible at ${viewport.width}px. ` + 'Long feedback remains editable. '.repeat(10);
+    await page.fill('#comment-form [name="note"]', note);
+    await page.reload();
+    check(`one-action ${name}: refresh preserves the feedback draft`, await page.inputValue('#comment-form [name="note"]') === note);
+    await submit(page, '#comment-form button[type="submit"]');
+    const batch = fixture.store.liveDiffComments(fixture.runId);
+    check(`one-action ${name}: one note is saved`, batch.length === 1 && batch[0].note === note.trim(), JSON.stringify(batch.map(one => one.note)));
+    await submit(page, 'form[action$="/revise"] button[type="submit"]');
+    const child = new URL(page.url()).pathname.slice('/t/'.length);
+    check(`one-action ${name}: revision has its own unapproved scope`, fixture.store.getScope(child)?.approvedAt === null && fixture.store.revisionsFromRun(fixture.runId).some(one => one.id === child));
+    await page.goto(`${fixture.url}/chat?task=${fixture.tasks.done}`);
+    check(`one-action ${name}: result/revision navigation preserves the unsent chat draft`, await page.inputValue('.composer textarea') === draft);
+    await openProject(page, fixture.repos.empty);
+    await page.goto(`${fixture.url}/work`);
+    check(`fit ${name}: empty Work fits and offers Start in chat`, await page.locator('[data-work-empty="all"]').isVisible() && (await noOverflow(page)).ok);
+    await ctx.close();
+  }
+}
+
 try {
-  if (!densityOnly) {
+  if (statusOnly) await statusPass();
+  if (!densityOnly && !statusOnly) {
   // ---- c1: the shell, per breakpoint --------------------------------------
   for (const [name, viewport] of [['desktop', VIEWPORTS.desktop], ['phone', VIEWPORTS.phone]]) {
     const { ctx, page } = await context(viewport);
@@ -469,14 +567,14 @@ try {
       const id = key === 'done' ? fixture.tasks.done : key;
       const seen = { work: { token: work[id]?.token, label: work[id]?.label } };
       await page.goto(`${fixture.url}/t/${id}`);
-      seen.task = await statusOf(page, '#run-status');
+      seen.task = await statusOf(page, '.completion-receipt .status-line');
       seen.receipt = await statusOf(page, '.completion-receipt .status-line');
       // The title is the bare title (concise revision): the status box
       // beneath leads with the same words once; no status line rides the h1.
-      const title = await page.evaluate(() => ({ text: document.querySelector('.task-main-title')?.textContent.trim() ?? '', statusLine: document.querySelector('.task-main-title .status-line') !== null, badge: document.querySelector('.task-main-title .badge') !== null, boxLeads: document.querySelector('#run-status .dispatch-copy > strong') !== null }));
+      const title = await page.evaluate(() => ({ text: document.querySelector('.task-main-title')?.textContent.trim() ?? '', statusLine: document.querySelector('.task-main-title .status-line') !== null, badge: document.querySelector('.task-main-title .badge') !== null, boxLeads: document.querySelector('.completion-receipt .status-line')?.checkVisibility() === true }));
       check(`c3 ${id}: the task title is the bare title while the status box leads — no repeated status line or chip in the h1`, title.text.length > 0 && !title.statusLine && !title.badge && title.boxLeads, JSON.stringify(title));
       await page.goto(`${fixture.url}/chat?task=${id}`);
-      seen.chat = await statusOf(page, '.task-journey');
+      seen.chat = await statusOf(page, '.completion-receipt .status-line');
       await page.goto(`${fixture.url}/review?result=${id}`);
       seen.review = await statusOf(page, '.cockpit-head .status-line');
       // The run page (Details): the same status line beside the evidence.
@@ -492,12 +590,12 @@ try {
         // the receipt's own words — on the task page and in chat alike.
         await page.goto(`${fixture.url}/t/${id}`);
         const receiptReview = await page.evaluate(() => document.querySelector('.completion-receipt .receipt-review')?.textContent ?? null);
-        const lead = await page.evaluate(() => document.querySelector('#run-status [data-review-lead]')?.textContent ?? null);
+        const lead = await page.evaluate(() => document.querySelector('#run-status .dispatch-copy > strong')?.textContent ?? null);
         const boxClass = await page.evaluate(() => document.querySelector('#run-status')?.className ?? null);
         await page.goto(`${fixture.url}/chat?task=${id}`);
         const chatReview = await page.evaluate(() => document.querySelector('.completion-receipt .receipt-review')?.textContent ?? null);
         const history = 'Until the review settles, the earlier verdict — "Ready to review" — stays on record as history.';
-        check(`c3 ${id}: the receipt (task and chat) and the status box carry the review as primary and the earlier verdict as history`, receiptReview !== null && receiptReview.includes(history) && chatReview === receiptReview && lead !== null && lead.includes(history) && boxClass === 'answered dispatch-status', JSON.stringify({ receiptReview, chatReview, lead, boxClass }));
+        check(`c3 ${id}: one receipt leads in task and chat; its history keeps the earlier verdict and diagnostics name recorded checks`, receiptReview !== null && receiptReview.includes(history) && chatReview === receiptReview && lead === 'Recorded checks' && boxClass === 'answered dispatch-status', JSON.stringify({ receiptReview, chatReview, recordedChecks: lead, boxClass }));
         check(`c3 ${id}: the primary status is never "Ready to review" while the review is open`, token !== 'ready-to-review' && Object.values(seen).every(one => one?.label !== 'Ready to review'));
       } else if (key !== 'done') {
         check(`c3 ${id}: a weak result is never "Ready to review"`, !/Ready to review/.test(words) && token !== 'ready-to-review');
@@ -507,7 +605,7 @@ try {
     await page.goto(`${fixture.url}/t/${T.reviewFailed}`);
     await shot(page, 'desktop-task-review-failed', 'Task page for a verified result whose independent review failed with a retry left: the review leads, the earlier verdict is history (fixture)');
     await page.goto(`${fixture.url}/chat?task=${T.reviewing}`);
-    await scrollTo(page, '.task-journey');
+    await scrollTo(page, '.completion-receipt');
     await shot(page, 'desktop-chat-reviewing', 'The same projection in task chat while a live reviewer works: journey headline and receipt agree (fixture)');
     // An older result is never masked by a newer run's review: the run
     // page of the plain verified result keeps its own words while three
@@ -522,7 +620,7 @@ try {
     check('c3 failed check names the exit code and keeps the failed-check action', (await page.evaluate(() => document.querySelector('#run-status')?.textContent ?? '')).includes('The project check failed (exit 1).') && (await page.$('a.button-link[href^="/review?result="]')) !== null);
     await shot(page, 'desktop-task-failed-checks', `Task page for a saved result whose project check failed, at 1440×900 (fixture)`);
     await page.goto(`${fixture.url}/chat?task=${T.failedChecks}`);
-    await scrollTo(page, '.task-journey');
+    await scrollTo(page, '.completion-receipt');
     await shot(page, 'desktop-chat-failed-checks', 'The same run in task chat: the journey headline and receipt agree (fixture)');
     await page.goto(`${fixture.url}/review?result=${T.failedChecks}`);
     await shot(page, 'desktop-review-failed-checks', 'The same run in the review cockpit: the same status line leads (fixture)');
@@ -681,8 +779,9 @@ try {
         emptyLines: [...document.querySelectorAll('.chat-empty p')].map(p => p.textContent),
         starters: [...document.querySelectorAll('.chat-prompts form button')].map(b => b.textContent),
         journey: document.querySelector('.task-journey h2')?.textContent ?? null,
+        status: document.querySelector('.completion-receipt .status-label')?.textContent ?? null,
       }));
-      check(`c6 ${name}: a fresh focused conversation keeps the task title, one sentence, three starters, and the journey headline`, focusedFresh.titleMeta === null && focusedFresh.emptyLines.length === 1 && focusedFresh.starters.length === 3 && focusedFresh.journey === 'Changes saved, but checks failed', JSON.stringify(focusedFresh));
+      check(`c6 ${name}: a fresh focused conversation keeps the task title, one sentence, three starters, and one receipt status`, focusedFresh.titleMeta === null && focusedFresh.emptyLines.length === 1 && focusedFresh.starters.length === 3 && focusedFresh.journey === null && focusedFresh.status === 'Changes saved, but checks failed', JSON.stringify(focusedFresh));
       await page.fill('.composer textarea', 'What is the state of this task, and what should I do next?');
       await page.click('.composer button[type="submit"]'); // package 2: the enhanced send stays on this document; the reply lands live
       for (let i = 0; i < 40 && (await page.$('.msg.mate')) === null; i++) { await page.waitForTimeout(500); if (i % 4 === 3) await page.reload(); }
@@ -692,14 +791,15 @@ try {
         empty: document.querySelector('.chat-empty') !== null,
         starters: document.querySelectorAll('.chat-prompts form button').length,
         journey: document.querySelector('.task-journey h2')?.textContent ?? null,
+        status: document.querySelector('.completion-receipt .status-label')?.textContent ?? null,
         receipt: document.querySelector('.completion-receipt .status-label')?.textContent ?? null,
         summary: document.querySelector('.receipt-summary')?.textContent ?? null,
         coverageFolded: document.querySelector('details.receipt-coverage') !== null && !document.querySelector('details.receipt-coverage').open,
         coverageWords: document.querySelector('.receipt-coverage')?.textContent ?? '',
       }));
-      check(`c6 ${name}: the populated focused conversation keeps the real messages, the journey, the receipt and its narrative, and three starters; the optional review folds`, populated.operator.includes('What is the state of this task, and what should I do next?') && populated.assistant >= 1 && !populated.empty && populated.starters === 3 && populated.journey === 'Changes saved, but checks failed' && populated.receipt === 'Changes saved, but checks failed' && /Fixed the payout rounding drift/.test(populated.summary ?? '') && populated.coverageFolded && /semantic coverage/.test(populated.coverageWords), JSON.stringify(populated));
+      check(`c6 ${name}: the populated focused conversation keeps the real messages, one receipt and its narrative, and three starters; the optional review folds`, populated.operator.includes('What is the state of this task, and what should I do next?') && populated.assistant >= 1 && !populated.empty && populated.starters === 3 && populated.journey === null && populated.status === 'Changes saved, but checks failed' && populated.receipt === 'Changes saved, but checks failed' && /Fixed the payout rounding drift/.test(populated.summary ?? '') && populated.coverageFolded && /semantic coverage/.test(populated.coverageWords), JSON.stringify(populated));
       await scrollTo(page, '.msg.op', 96);
-      await shot(page, `${name}-chat-focused-populated`, `A populated focused conversation at ${viewport.width}×${viewport.height}: the operator's message, the reply, the journey and the receipt (fixture)`);
+      await shot(page, `${name}-chat-focused-populated`, `A populated focused conversation at ${viewport.width}×${viewport.height}: the operator's message, the reply and one receipt (fixture)`);
       await ctx.close();
     }
   }
@@ -719,17 +819,18 @@ try {
         action: document.querySelector('.proof-review-actions a.button-link')?.textContent ?? null,
         exception: document.querySelector('details.proof-exception > summary')?.textContent ?? null,
         exceptionShown: document.querySelector('details.proof-exception > summary')?.checkVisibility() ?? false,
+        options: document.querySelector('.task-status-details > summary')?.checkVisibility() ?? false,
         requirements: document.querySelector('details.dispatch-proof-details > summary')?.textContent ?? null,
         receipt: document.querySelector('.completion-receipt .status-label')?.textContent ?? null,
         publication: document.querySelector('.receipt-publication')?.textContent ?? null,
         history: document.querySelector('.receipt-history') !== null,
         coverageFolded: document.querySelector('details.receipt-coverage') !== null && !document.querySelector('details.receipt-coverage').open,
       }));
-      check(`c6 ${name}: the failed-check task page leads with the status box (the title is bare) and keeps the exit code, the review action, the exception control, the requirements disclosure, the receipt status and the publication fact in the open`, failedPage.title.length > 0 && !failedPage.titleStatus && failedPage.boxLabel === 'Changes saved, but checks failed' && /The project check failed \(exit 1\)\./.test(failedPage.box) && failedPage.action === 'Review the failed check' && failedPage.exception === 'Accept with exception' && failedPage.exceptionShown && /2 requirements/.test(failedPage.requirements ?? '') && failedPage.receipt === 'Changes saved, but checks failed' && failedPage.publication === 'Saved on the build branch. No publication, merge, or deployment is recorded here.' && !failedPage.history && failedPage.coverageFolded, JSON.stringify(failedPage));
+      check(`c6 ${name}: the failed-check task page leads with the status box (the title is bare) and keeps the failed-check action visible and the exit code, exception, requirements and publication available in details`, failedPage.title.length > 0 && !failedPage.titleStatus && failedPage.boxLabel === 'Changes saved, but checks failed' && /The project check failed \(exit 1\)\./.test(failedPage.box) && failedPage.action === 'Review the failed check' && failedPage.exception === 'Accept with exception' && !failedPage.exceptionShown && failedPage.options && /2 requirements/.test(failedPage.requirements ?? '') && failedPage.receipt === 'Changes saved, but checks failed' && failedPage.publication === 'Saved on the build branch. No publication, merge, or deployment is recorded here.' && !failedPage.history && failedPage.coverageFolded, JSON.stringify(failedPage));
       await page.goto(`${fixture.url}/t/${T.pendingReview}`);
       const pending = await page.evaluate(() => ({
-        lead: document.querySelector('#run-status [data-review-lead]')?.textContent ?? null,
-        leadShown: document.querySelector('#run-status [data-review-lead]')?.checkVisibility() ?? false,
+        lead: document.querySelector('.completion-receipt .status-label')?.textContent ?? null,
+        leadShown: document.querySelector('.completion-receipt .status-label')?.checkVisibility() ?? false,
         historySummary: document.querySelector('.receipt-history > summary')?.textContent ?? null,
         historyOpen: document.querySelector('.receipt-history')?.open ?? null,
         historyWords: document.querySelector('.receipt-history .receipt-review')?.textContent ?? null,
@@ -737,8 +838,9 @@ try {
         retry: document.querySelector('.review-retry-button')?.textContent ?? null,
       }));
       const history = 'Until the review settles, the earlier verdict — "Ready to review" — stays on record as history.';
-      check(`c6 ${name}: the pending-review task page leads with the review in the status box and folds the receipt's history behind "Review history" — the same words, secondary`, pending.leadShown && (pending.lead ?? '').includes(history) && pending.historySummary === 'Review history' && pending.historyOpen === false && pending.historyShown === false && (pending.historyWords ?? '').includes(history) && pending.retry === 'Retry queued', JSON.stringify(pending));
+      check(`c6 ${name}: the pending-review task page leads with one receipt status and folds the history behind "Review history" — the same words, secondary`, pending.leadShown && pending.lead === 'Waiting for review' && pending.historySummary === 'Review history' && pending.historyOpen === false && pending.historyShown === false && (pending.historyWords ?? '').includes(history) && pending.retry === 'Retry queued', JSON.stringify(pending));
       if (name === 'phone') await shot(page, 'phone-task-pending-review', 'Task page for a verified result whose independent review is queued, at 390×844: one status box leads, the receipt folds its history (fixture)');
+      await page.click('.receipt-details > summary');
       await page.click('.receipt-history > summary');
       await page.waitForTimeout(100);
       check(`c6 ${name}: the receipt's history opens on demand`, await page.evaluate(() => document.querySelector('.receipt-history .receipt-review')?.checkVisibility() === true));
@@ -811,7 +913,7 @@ try {
     await ctx.close();
   }
   }
-  await densityPass();
+  if (!statusOnly) await densityPass();
 } finally {
   await browser.close();
   await fixture.stop();

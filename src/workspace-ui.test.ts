@@ -196,7 +196,7 @@ describe("the shared status projection (workspace package 1)", () => {
     const labels: Record<DispatchAction, string> = {
       "open-result": "Review the result", "retry-task": "Review and retry",
       "place-task": "Choose a project", "write-scope": "Define the task",
-      "select-agent": "Choose an agent", "approve-scope": "Review and approve",
+      "select-agent": "Choose an agent", "approve-scope": "Review plan",
       "answer-decision": "Answer the question", unhold: "Review hold",
       "inspect-hold": "Review hold", "repair-dependency": "Review required task",
       "repair-capability": "Review missing requirement", "start-worker": "Check connection",
@@ -221,9 +221,9 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(needsPerson(diagnosis({ condition: "terminal", code: "cancelled", action: null }))).toBe(false);
 
     const approval = workStatusOf(facts({ dispatch: diagnosis({}) }));
-    expect(approval).toMatchObject({ token: "needs-approval", label: "Needs your approval", tone: "attention", views: ["all", "needs-you"], action: { label: "Review and approve", kind: "open-task" } });
+    expect(approval).toMatchObject({ token: "needs-approval", label: "Needs your approval", tone: "attention", views: ["all", "needs-you"], action: { label: "Review plan", kind: "open-task" } });
     const queued = workStatusOf(facts({ dispatch: diagnosis({ condition: "retrying", code: "ready", summary: "Ready to run", action: null }) }));
-    expect(queued).toMatchObject({ token: "ready", views: ["all"], action: null });
+    expect(queued).toMatchObject({ token: "ready", views: ["all"], action: { label: "View task details", kind: "open-task" } });
     const waiting = workStatusOf(facts({ dispatch: diagnosis({ condition: "waiting", code: "waiting-dependency", summary: "Waiting for another task", action: null }) }));
     expect(waiting.views).toEqual(["all"]);
     const paused = workStatusOf(facts({ dispatch: diagnosis({ code: "stopped", summary: "Paused", action: "resume-run" }) }));

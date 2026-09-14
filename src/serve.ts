@@ -3257,7 +3257,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * projection so this row, the task page, the focused chat, and the
    * review cockpit cannot disagree about the same run.
    */
-  function workRowOf(task: Task & { repo: string | null }, now: Date): WorkRow {
+  function workRowOf(task: Task & { repo: string | null }, now: Date, receipt?: CompletionReceiptView | null): WorkRow {
     const ref = store.lookupRef(task.id);
     const runs = ref === null ? [] : store.runsFor(ref.id);
     const latest = runs.find(runIsTaskResult) ?? null;
@@ -3289,8 +3289,13 @@ export function createDecisionServer(options: ServeOptions): Server {
               },
       publication: latest === null ? null : publicationFactsOf(store.publicationForRun(latest.id)),
       liveRunId: live === null ? null : live.id,
+      control: ref === null ? { kind: "none" } : taskControlOf(store, ref.id, now),
     };
-    return { ...facts, status: workStatusOf(facts), resultRunId: latest === null ? null : latest.id };
+    // Read the same evidence-health projection as the receipt, including
+    // damaged files discovered after a stored verdict was written.
+    const result = receipt === undefined && task.state === "done" && latest !== null && (latest.outcome === "built" || latest.outcome === "no-change")
+      ? completionReceiptView(store, latest, store.artifactsFor(latest.id), evidenceRoot, reviewFactsFor(latest.id)) : receipt;
+    return { ...facts, status: workStatusOf(facts, result == null ? undefined : receiptStatusOf(result)), resultRunId: latest === null ? null : latest.id };
   }
 
   /** The compact task list for the master pane, the current row marked. */
@@ -3301,11 +3306,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         task =>
           `<a class="item${task.id === currentId ? " current" : ""}" href="${taskHref(task.id)}">` +
           `<span class="t">${escape(task.title)}</span>` +
-          `<span class="m"><span class="mono">${escape(task.id)}</span>` +
-          // The pane names the raw state except "done", which alone is a
-          // claim: a finished build is the fact, its evidence is judged on
-          // the task page beside it (workspace package 1).
-          `<span class="badge badge-${escape(task.state)}">${escape(task.state === "done" ? "finished" : task.state)}</span></span></a>`,
+          // Navigation needs identity; the selected task owns its status.
+          `<span class="m"><span class="mono">${escape(task.id)}</span></span></a>`,
       )
       .join("\n");
     return `<h2>tasks</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
@@ -3530,6 +3532,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const milestoneProgress = ref === null ? null : progressOf(ref.id, planRevisions?.current?.document ?? null);
     return {
         task: found,
+        status: workRowOf({ ...found, repo: ref?.repo ?? null }, now, completion?.receipt).status,
         dispatch: diagnoseTaskDispatch(store, taskId, now),
         // v52: the exact-run control — the same projection the focused
         // chat and `task show` read.
@@ -3774,6 +3777,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       id: task.id,
       title: task.title,
       state: task.state,
+      status: view?.status ?? workRowOf({ ...task, repo: ref.repo }, now).status,
       project: ref.repo === null ? null : projectName(ref.repo),
       now,
       dispatch: diagnoseTaskDispatch(store, taskId, now),
@@ -9139,7 +9143,7 @@ const STYLE = `
   form.option input[type=text] { font-size: 0.8125rem; margin-top: .5rem; min-height: 2.25rem; }
 
   .recap { color: var(--muted-foreground); margin: .75rem 0; white-space: pre-wrap; }
-  #scope .recap, .approval-goal { overflow-wrap: anywhere; }
+  #scope .recap, #scope .scope-paths, .approval-goal { overflow-wrap: anywhere; }
   .result-card {
     margin: 1.25rem 0; border-color: color-mix(in srgb, var(--success) 32%, var(--glass-border));
     background: linear-gradient(145deg, color-mix(in srgb, var(--success-soft) 52%, var(--glass-strong)), var(--glass));
@@ -10499,7 +10503,15 @@ const STYLE = `
   .task-journey li.active i { color: white; border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb,var(--accent) 12%,transparent); }
   .task-journey li.active span { color: var(--foreground); font-weight: 650; }
   .task-journey > .meta { margin: 0; line-height: 1.45; }
-  .task-journey-action { margin-top: .75rem; }
+  .task-journey-action { margin-top: .75rem; min-height: 44px; }
+  .receipt-actions [data-primary-action], .task-plan-review .button-link { min-height: 44px; }
+  .task-status-reason { margin-top: .75rem; }
+  .task-status-reason summary, .task-status-details > summary { color: var(--muted-foreground); }
+  .task-plan-review > summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 650; }
+  .task-status-details, #task-control-details { margin: 1rem 0; }
+  .task-control-copy { min-width: 0; overflow-wrap: anywhere; }
+  [data-primary-action] { max-width: 100%; }
+
   .task-live-build { display: flex; align-items: center; flex-wrap: wrap; gap: .3rem; margin: .75rem 0 0; font-size: .72rem; }
   .task-live-build .live-dot { width: .45rem; height: .45rem; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px color-mix(in srgb,var(--success) 10%,transparent); }
   .chat-action-card { padding: 0; overflow: hidden; }
@@ -12642,6 +12654,7 @@ function approvalFormDigest(scopeDigest: string, raceDigest: string | null, plan
 /** A task attached by the server to one chat turn. The thread remains the
  * unified conversation; this is a focused lens, not a second chat silo. */
 type TaskChatFocus = {
+  status: DisplayStatus;
   id: string;
   title: string;
   state: TaskState;
@@ -12715,8 +12728,9 @@ function taskRecoveryHref(taskId: string, diagnosis: DispatchDiagnosis | null): 
     case "open-result":
       return task;
     case "retry-review":
-    case "resume-run":
       return `${task}#run-status`;
+    case "resume-run":
+      return `${task}#task-control`;
   }
 }
 
@@ -12739,12 +12753,26 @@ const stopWhen = (iso: string): string => iso.replace("T", " ").replace(/\.\d{3}
  * the password ceremony; a stopped review points at Review again. Forms
  * carry the CSRF token and the exact run id, nothing else.
  */
-function taskControlState(state: string, control?: TaskControlView): string {
-  if (control?.kind === "stopping") return "stopping";
-  if (control?.kind === "paused") return "paused";
-  if (control?.kind === "review-stopped") return "review-stopped";
-  if (control?.kind === "stop") return control.role === "reviewer" ? "reviewing" : "running";
-  return state;
+/** Presentation only: the same projected words and action on all task
+ * surfaces. Approval keeps its action on the exact-terms disclosure. */
+function taskStatusCard(status: DisplayStatus, taskId: string, dispatch: DispatchDiagnosis | null, runId: number | null, approvalAction = false): string {
+  const task = taskHref(taskId);
+  const recovery = status.token === "stopping" || status.token === "stopped"
+    ? `${task}#task-control`
+    : taskRecoveryHref(taskId, dispatch);
+  const href = status.action?.kind === "open-task"
+    ? recovery ?? `${task}#scope`
+    : statusActionHref(status, taskId, runId, null);
+  return `<section class="card task-journey" aria-label="task progress" data-work-status="${escape(status.token)}" data-task-status>` +
+    `<h2>${escape(status.label)}</h2>` +
+    (!approvalAction && status.action !== null && href !== null ? `<a class="button-link task-journey-action" href="${escape(href)}" data-primary-action>${escape(status.action.label)}</a>` : "") +
+    `<details class="task-status-reason"><summary>Status details</summary><p class="meta">${escape(status.detail)}</p></details></section>`;
+}
+
+function taskControlDetailsHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false): string {
+  const html = taskControlHtml(control, taskId, csrf, surface, inert);
+  return control.kind === "paused" || control.kind === "review-stopped" || control.kind === "stopping"
+    ? `<details id="task-control-details"><summary>${control.kind === "paused" ? "Preserved work and resume" : "Stop details"}</summary>${html}</details>` : html;
 }
 
 function taskControlHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false): string {
@@ -12756,7 +12784,7 @@ function taskControlHtml(control: TaskControlView, taskId: string, csrf: string,
   if (control.kind === "stop") {
     return (
       `<section class="card task-control" id="task-control" data-task-control="stop" data-control-run="${control.run}" aria-label="stop this attempt">` +
-      `<div class="task-control-copy"><span class="eyebrow">running</span><strong>${escape(role(control))} #${control.run} is running</strong><span class="meta">Stopping ends only this attempt's own processes. Its branch, uncommitted work, evidence, and decisions stay preserved; other tasks keep running.</span></div>` +
+      `<div class="task-control-copy"><details><summary>Stop details · ${escape(role(control))} #${control.run}</summary><p class="meta">Stopping ends only this attempt's own processes. Its branch, uncommitted work, evidence, and decisions stay preserved; other tasks keep running.</p></details></div>` +
       (guarded
         ? `<form method="post" action="${taskHref(taskId)}/stop" class="inline task-control-form task-stop-form"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${control.run}">${back}<button type="submit" class="danger task-control-button">Stop</button></form>`
         : `<button type="button" class="danger task-control-button" disabled>Stop</button>`) +
@@ -12927,11 +12955,10 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
   if (approval.raceTerms !== null) facts.push(`${approval.raceTerms.agents.length}-agent ${approval.raceTerms.kind}`);
   return (
     `<section class="card chat-action-card chat-plan" id="task-chat-action" data-approval="${escape(approval.digest)}">` +
-    `<div class="chat-plan-head"><h2>${approval.revision === null ? "Plan ready" : "Revision ready"}</h2></div>` +
     `<p class="chat-plan-outcome">${escape(oneLineOf(scope.goal, 200))}</p>` +
     `<p class="chat-plan-facts">${facts.map(escape).join(" · ")}</p>` +
     `<details class="chat-approval">` +
-    `<summary><span class="button-link">Review plan</span></summary>` +
+    `<summary data-primary-action><span class="button-link">Review plan</span></summary>` +
     `<form method="post" action="${taskHref(focus.id)}/approve" class="chat-approval-form approve-form">` +
     `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
     `<input type="hidden" name="nonce" value="${escape(approval.nonce)}">` +
@@ -12960,57 +12987,34 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
 /** One live, server-derived journey from request to proof. The fragment is
  * safe to refresh independently, so an in-progress message is never lost. */
 function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false, inert = false): string {
-  const hasScope = focus.scope !== "none";
-  const approved = focus.scope === "approved";
-  const hasResult = focus.result !== null;
-  const building = focus.claimed || focus.liveRun !== null || focus.dispatch?.condition === "running";
-  const active = hasResult ? 4 : building || approved ? 3 : focus.plan === "requested" ? 1 : hasScope ? 2 : 1;
-  const labels = ["Requested", "Planned", "Approved", "Building", "Result"];
-  const steps = labels.map((label, index) => {
-    const state = index < active || (index === 4 && hasResult) ? "complete" : index === active ? "active" : "upcoming";
-    return `<li class="${state}"><i aria-hidden="true">${state === "complete" ? "✓" : index + 1}</i><span>${label}</span></li>`;
-  }).join("");
-  const displayState = taskControlState(focus.state, focus.control);
-  // The journey's headline is the shared projection (package 1): for a
-  // done task the dispatch summary already carries `resultStatusOf`'s
-  // words, and the card wears the same token the task page and Work do.
-  const resultStatus = focus.state === "done" && focus.result !== null ? receiptStatusOf(focus.result) : null;
-  const workToken = resultStatus?.token ?? focus.dispatch?.code ?? "unknown";
-  // The headline is the projection's own label for a done result — a
-  // review in flight included — so it can never disagree with the token.
-  const summary = resultStatus?.label ?? focus.dispatch?.summary ?? (hasResult ? "Result ready" : "Checking task status");
-  const detail = focus.dispatch?.detail ?? "This status comes from the task scheduler.";
-  const fallback = focus.state === "done" || focus.state === "cancelled" || focus.approval !== null || ["stopping", "paused", "review-stopped"].includes(focus.control.kind)
-    ? null
-    : taskRecoveryHref(focus.id, focus.dispatch);
+  const receiptLeads = focus.state === "done" && focus.result !== null;
+  const approvalContent = (inert && focus.approval !== null && focus.plan !== "requested"
+      ? `<section class="card chat-action-card"><span class="eyebrow">approval ready</span><h2>Finish the current chat response first</h2><p class="meta">The secure approval step appears here as soon as this response lands.</p></section>`
+      : fragment && focus.approval !== null && focus.plan !== "requested"
+        ? `<section class="card chat-action-card chat-refresh-action"><a class="button-link" href="${taskChatHref(focus.id)}#task-chat-action" data-primary-action>Review plan</a></section>`
+        : taskChatApproval(focus, csrf));
+  const approvalCard = focus.approval !== null && focus.dispatch?.action !== "approve-scope"
+    ? `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approvalContent}</details>` : approvalContent;
   const polling = !inert && ((focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled" || focus.control.kind === "stopping" || focus.control.kind === "stop");
   return (
     `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}" data-approval="${escape(focus.approval?.digest ?? "")}" data-plan="${escape(focus.plan ?? "")}">` +
-    `<section class="card task-journey" aria-label="task progress" data-work-status="${escape(workToken)}"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div>${resultStatus === null ? `<span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span>` : `<span class="badge" data-tone="${escape(resultStatus.tone)}">${escape(resultStatus.tone === "problem" || resultStatus.tone === "attention" ? "needs attention" : resultStatus.tone === "live" ? "in review" : resultStatus.tone === "done" || resultStatus.tone === "ready" ? "finished" : "saved")}</span>`}</div>` +
-    `<ol>${steps}</ol><p class="meta">${escape(detail)}</p>` +
-    (focus.liveRun === null ? "" : `<p class="task-live-build"><span class="live-dot" aria-hidden="true"></span><strong>Build #${focus.liveRun.id}</strong> · ${escape(focus.liveRun.runner)} · <time data-elapsed-since="${escape(focus.liveRun.startedAt)}"></time> <a href="/r/${focus.liveRun.id}">watch details →</a></p>`) +
-    (fallback === null ? "" : `<a class="button-link task-journey-action" href="${fallback}">${escape(dispatchActionLabel(focus.dispatch))} →</a>`) +
-    `</section>` +
+    (receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status) : taskStatusCard(focus.status, focus.id, focus.dispatch, focus.liveRun?.id ?? null, focus.approval !== null && focus.dispatch?.action === "approve-scope")) +
     // The exact-run control (v52): the SAME component the task page
     // renders, refreshed with the live region — typed input in the
     // composer is untouched because only this region is replaced.
-    taskControlHtml(focus.control, focus.id, csrf, "chat", inert) +
+    taskControlDetailsHtml(focus.control, focus.id, csrf, "chat", inert) +
     // The compact agents strip (v47): always visible, phones included,
     // where the desktop context panel is hidden.
     agentsStripHtml(focus.route, focus.id) +
     milestoneProgressHtml(focus.milestoneProgress) +
     planRevisionLedgerHtml(focus.planRevisions, focus.id, csrf) +
-    (inert && focus.approval !== null && focus.plan !== "requested"
-      ? `<section class="card chat-action-card"><span class="eyebrow">approval ready</span><h2>Finish the current chat response first</h2><p class="meta">The secure approval step appears here as soon as this response lands.</p></section>`
-      : fragment && focus.approval !== null && focus.plan !== "requested"
-        ? `<section class="card chat-action-card chat-refresh-action"><span class="eyebrow">the plan changed</span><h2>Review the updated scope before work continues</h2><p class="meta">Refresh this conversation to open the secure approval step.</p><a class="button-link" href="${taskChatHref(focus.id)}#task-chat-action">Review the updated plan →</a></section>`
-        : taskChatApproval(focus, csrf)) +
+    approvalCard +
     (focus.decisions.length === 0
       ? ""
       : `<section class="chat-decisions"><div class="chat-section-head"><span class="eyebrow">needs your answer</span><h2>Keep the work moving</h2></div>${focus.decisions.map(one => focus.approval !== null || inert
         ? `<div class="decide-card"><p class="q">${escape(one.question)}</p><p class="meta">${escape(oneLineOf(one.recap, 160))}</p><a href="/d/${one.id}?return=${encodeURIComponent(taskChatHref(focus.id))}">Review and answer →</a></div>`
         : decisionAnswerCard(one, csrf, focus.now, false, taskChatHref(focus.id))).join("")}</section>`) +
-    (focus.result === null ? "" : completionReceiptCard(focus.result, focus.id, "chat")) +
+    (focus.result === null || receiptLeads ? "" : `<details class="task-previous-result"><summary>Previous result</summary>${completionReceiptCard(focus.result, focus.id, "chat")}</details>`) +
     (focus.publication === null ? "" : `<p class="chat-publication meta">Published as ${safePrUrl(focus.publication.prUrl) === null ? `<span class="mono">PR #${focus.publication.prNumber ?? "?"}</span>` : `<a href="${escape(safePrUrl(focus.publication.prUrl) as string)}">PR #${focus.publication.prNumber ?? "?"}</a>`} · ${escape(focus.publication.state)}${focus.publication.lastCheckState === null ? "" : ` · CI ${escape(focus.publication.lastCheckState)}`}</p>`) +
     `</section>`
   );
@@ -13278,10 +13282,12 @@ const CHAT_UI_SCRIPT =
   `if(projectClose)projectClose.addEventListener("click",function(){apply(false);projectToggle.focus();});` +
   `document.addEventListener("click",function(ev){if(wide.matches||!workspace.classList.contains("projects-open"))return;var target=ev.target;if(target instanceof Node&&!projectPanel.contains(target)&&!projectToggle.contains(target))apply(false);});` +
   `wide.addEventListener("change",function(){apply(preferred());});document.addEventListener("keydown",function(ev){if(ev.key==="Escape"&&workspace.classList.contains("projects-open")){apply(false);projectToggle.focus();}});}` +
-  `var taskLive=document.querySelector(".composer[data-chat-session]")?null:document.getElementById("task-chat-live");function refreshTask(){if(!taskLive||taskLive.getAttribute("data-poll")!=="1")return;` +
-  `if(document.hidden){setTimeout(refreshTask,5000);return;}var source=taskLive.getAttribute("data-source");if(!source)return;` +
+  `var taskLive=document.querySelector(".composer[data-chat-session]")?null:document.getElementById("task-chat-live");` +
+  `function taskEditing(){return taskLive.contains(document.activeElement)||taskLive.querySelector("details[open]")||Array.from(taskLive.querySelectorAll("input:not([type=hidden]),textarea,select")).some(function(el){return el.tagName==="SELECT"?Array.from(el.options).some(function(o){return o.selected!==o.defaultSelected;}):el.type==="checkbox"||el.type==="radio"?el.checked!==el.defaultChecked:el.value!==el.defaultValue;});}` +
+  `function refreshTask(){if(!taskLive||taskLive.getAttribute("data-poll")!=="1")return;` +
+  `if(document.hidden||taskEditing()){setTimeout(refreshTask,5000);return;}var source=taskLive.getAttribute("data-source");if(!source)return;` +
   `fetch(source,{cache:"no-store",signal:AbortSignal.timeout(10000)}).then(function(r){if(r.status===401||r.status===403||r.redirected){location.href="/login";return null;}if(!r.ok)throw new Error("connection");return r.text();})` +
-  `.then(function(html){if(html===null||!taskLive)return;var parsed=new DOMParser().parseFromString(html,"text/html"),next=parsed.getElementById("task-chat-live");if(!next)throw new Error("response");taskLive.replaceWith(next);taskLive=next;` +
+  `.then(function(html){if(html===null||!taskLive)return;var parsed=new DOMParser().parseFromString(html,"text/html"),next=parsed.getElementById("task-chat-live");if(!next)throw new Error("response");if(taskEditing()){setTimeout(refreshTask,5000);return;}taskLive.replaceWith(next);taskLive=next;` +
   `if(taskLive.getAttribute("data-poll")==="1")setTimeout(refreshTask,5000);}).catch(function(){setTimeout(refreshTask,10000);});}` +
   `if(taskLive&&taskLive.getAttribute("data-poll")==="1")setTimeout(refreshTask,5000);` +
   `var box=document.querySelector(".composer textarea");if(box){` +
@@ -16234,6 +16240,7 @@ function revisionLineageHtml(lineage: RevisionLineage | null): string {
 }
 
 function taskBody(data: {
+  status?: DisplayStatus;
   task: Task;
   /** Shared read-side lifecycle answer; the atomic claim still re-proves it. */
   dispatch?: DispatchDiagnosis | null;
@@ -16372,7 +16379,6 @@ function taskBody(data: {
   now: Date;
 }): string {
   const { task, scope } = data;
-  const displayState = taskControlState(task.state, data.control);
   const stopControlsActive = data.control !== undefined && ["stopping", "paused", "review-stopped"].includes(data.control.kind);
   // The result's shared status (workspace package 1): the same projection
   // the Work row, the focused chat, and the review cockpit render for this
@@ -16401,6 +16407,7 @@ function taskBody(data: {
               },
           publicationFactsOf(data.publication ?? null),
         );
+  const status = data.status ?? workStatusOf({ id: task.id, title: task.title, repo: data.repo, state: task.state, updatedAt: task.updatedAt, dispatch: data.dispatch ?? null, result: null, publication: null, liveRunId: data.liveRunId ?? null, control: data.control ?? { kind: "none" } }, resultStatus ?? undefined);
   // A review in flight leads the status box too (review fixes, finding
   // 4): the box keeps its recorded-verdict sentence as history under the
   // review's own words, and reads neutral rather than ok/problem while the
@@ -16424,6 +16431,7 @@ function taskBody(data: {
   // page carrying a password ceremony degrades to the static line.
   const liveRunId = data.liveRunId ?? null;
   const liveRun = liveRunId === null ? undefined : data.runs.find(one => one.id === liveRunId);
+  const liveHistoryRunId = data.control?.kind === "stop" && data.control.role === "reviewer" && data.completion?.review?.reviewerAlive === true ? data.control.run : liveRunId;
   const degraded = data.degraded === "sensitive";
   const attemptPanel = (() => {
     if (liveRunId === null || liveRun === undefined) return "";
@@ -16464,7 +16472,7 @@ function taskBody(data: {
     const workToken = resultStatus?.token ?? data.dispatch?.code ?? "unknown";
     const box = (kind: "ok" | "problem", title: string, detail: string, status?: string, controls = ""): string =>
       `<div class="${kind === "problem" && !inReview ? "problem" : "answered"} dispatch-status" id="run-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}" data-work-status="${escape(workToken)}">` +
-      `<div class="dispatch-copy"><strong>${escape(title)}</strong><span class="meta">${inReview && resultStatus !== null ? `<span data-review-lead="${escape(resultStatus.token)}">${escape(resultStatus.detail)}</span> ` : ""}${detail}</span></div>${controls}</div>`;
+      `<div class="dispatch-copy"><strong>${escape(inReview ? "Recorded checks" : title)}</strong><span class="meta">${detail}</span></div>${controls}</div>`;
 
     if (task.state !== "done") {
       const diagnosis = data.dispatch ?? null;
@@ -16724,7 +16732,7 @@ function taskBody(data: {
           `<div class="card">`,
           `<p><strong>goal</strong></p><p class="recap">${escape(scope.goal)}</p>`,
           scope.outOfScope === null ? "" : `<p><strong>not this</strong></p><p class="recap">${escape(scope.outOfScope)}</p>`,
-          scope.touches.length === 0 ? "" : `<p><strong>touches</strong> ${scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          scope.touches.length === 0 ? "" : `<p class="scope-paths"><strong>touches</strong> ${scope.touches.map(one => escape(one)).join(", ")}</p>`,
           `<p><strong>quality</strong> ${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</p>`,
           // The fallback chain, on the card the yes reads (Layer F): the
           // digest binds the WHOLE chain, so every entry — credential
@@ -16885,8 +16893,7 @@ function taskBody(data: {
           `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
           `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? scope.digest)}">`,
           `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">`,
-          `<div class="ceremony-head"><span class="approval-title"><span class="approval-kicker">ready to run · approve exactly this:</span>` +
-            `<strong>Review plan</strong></span><a href="#scope">Edit details</a></div>`,
+          `<div class="ceremony-head"><span class="approval-title"><strong>approve exactly this:</strong></span><a href="#scope">Edit details</a></div>`,
           // No duplicate summary card or skip-ahead approval action.
           // Every signed term still follows, before password confirmation.
           `<p class="meta approval-orient" data-approval-orient>Nothing starts until you approve.</p>`,
@@ -17136,7 +17143,7 @@ function taskBody(data: {
             ].filter((bit): bit is string => bit !== null);
             return (
               `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
-              runOutcomeBadge(run, run.id === liveRunId) +
+              runOutcomeBadge(run, run.id === liveHistoryRunId) +
               `${run.reason === null ? "" : ` <span class="meta">${escape(reasonWords(run.reason))}</span>`}` +
               ` <span class="meta mono">${escape(bits.join(" · "))}</span>` +
               `<span class="right meta mono">${escape(when(run.startedAt))}</span></p>`
@@ -17209,7 +17216,7 @@ function taskBody(data: {
     liveRun !== undefined
       ? prop("worker", `${escape(liveRun.runner)} · <a href="/r/${liveRun.id}">build #${liveRun.id}</a> running`)
       : data.runs[0] !== undefined
-        ? prop("last attempt", `<a href="/r/${data.runs[0].id}">${runNoun(data.runs[0])} #${data.runs[0].id}</a> · ${escape(data.runs[0].role === "planner" && data.runs[0].reason === "plan-drafted" ? "planned" : data.runs[0].reason === "interrupted" ? "interrupted" : data.runs[0].outcome ?? "never finished")} · ${escape(data.runs[0].runner)}`)
+        ? prop("last attempt", `<a href="/r/${data.runs[0].id}">${runNoun(data.runs[0])} #${data.runs[0].id}</a> · ${escape(data.runs[0].role === "planner" && data.runs[0].reason === "plan-drafted" ? "planned" : data.runs[0].reason === "interrupted" ? "interrupted" : data.runs[0].id === liveHistoryRunId ? "running" : data.runs[0].outcome ?? "never finished")} · ${escape(data.runs[0].runner)}`)
         : "";
   const queueRow =
     data.position !== null && data.position !== undefined && task.state === "queued"
@@ -17410,7 +17417,7 @@ function taskBody(data: {
       : `<details class="section" id="${title.replace(/\s+/g, "-")}"${open ? " open" : ""}><summary><h2>${title}${count === undefined ? "" : ` <span class="lane-count">${count}</span>`}</h2></summary>` +
         html.replace(`<h2>${title}</h2>`, "") + `</details>`;
 
-  const statusBoxLeads = (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested";
+  const receiptLeads = task.state === "done" && data.completion?.receipt != null;
   return [
     // The title leads; the machine facts — id, state, project, provenance —
     // follow as one mono meta row instead of riding the headline.
@@ -17424,26 +17431,17 @@ function taskBody(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
-    // A finished result's status is NOT repeated in the title when the
-    // status box directly beneath leads with the same words (revision of
-    // the concise pass): the box, the receipt, and every other surface
-    // still carry the shared projection. A task without a result keeps
-    // its state chip, and a result whose box is displaced by a ceremony
-    // keeps the status line so the words never leave the page.
-    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)}${resultStatus === null ? ` <span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span>` : statusBoxLeads ? "" : ` ${statusLineHtml(resultStatus)}`}</h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
-    // The planner and approval cards already answer "what now?". Avoid a
-    // second status box above the one action the operator came here for.
-    statusBoxLeads ? dispatchStatus : "",
+    // The title is bare; the receipt or shared task status leads once.
+    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)}</h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
+    // The result takes over from the task status as soon as it is ready.
+    receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope"),
     // The exact-run control (v52), directly under the scheduler's answer:
     // the one place a person stops or resumes THIS attempt.
-    taskControlHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task"),
-    data.completion === null || data.completion === undefined || data.completion.receipt === null
-      ? ""
-      : completionReceiptCard(data.completion.receipt, task.id, "task"),
+    taskControlDetailsHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task"),
+    data.completion?.receipt == null || receiptLeads ? "" : `<details class="task-previous-result"><summary>Previous result</summary>${completionReceiptCard(data.completion.receipt, task.id, "task")}</details>`,
     progressCard,
     revisionLedgerCard,
     planCard,
-    approveForm === "" && !dependencyChoiceNeeded ? actsBar : "",
     // External work wears its tracker on the page: the link, the last
     // observed state, and — when the tracker closed it and has been seen
     // open again — the authenticated reopen act. Done + closed is display
@@ -17493,8 +17491,10 @@ function taskBody(data: {
         : `<div class="card task-scope-needed"><p><strong>No approved scope yet</strong></p>` +
           `<p class="meta"><strong>Plan first</strong> drafts it from the repository, or <a href="#scope">write it yourself</a>.</p></div>`
       : "",
-    dependencyChoiceNeeded ? "" : approveForm,
-    dependencyChoiceNeeded || approveForm === "" ? "" : actsBar,
+    dependencyChoiceNeeded || approveForm === "" ? "" : data.dispatch?.action === "approve-scope"
+      ? `<details class="task-plan-review"><summary data-primary-action><span class="button-link">Review plan</span></summary>${approveForm}</details>`
+      : `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approveForm}</details>`,
+    `<details class="task-status-details" id="task-diagnostics"><summary>Task options</summary>${dispatchStatus}${dependencyChoiceNeeded ? "" : actsBar}</details>`,
     // Evidence-first (M5.5): what needs you, then what happened — decisions
     // and incidents above the attempt ledger and spend, the mechanics
     // (scope, holds, acts) after. Only trustworthy facts moved up. The rail
@@ -19013,8 +19013,8 @@ function receiptStatusOf(view: CompletionReceiptView, review: ReviewFacts | null
   );
 }
 
-function completionReceiptCard(view: CompletionReceiptView, taskId: string, place: "task" | "chat"): string {
-  const status = receiptStatusOf(view);
+function completionReceiptCard(view: CompletionReceiptView, taskId: string, place: "task" | "chat", standing: DisplayStatus = receiptStatusOf(view)): string {
+  const status = standing;
   // The verdict on record, whatever review is in flight: the criteria
   // count's source label reads from it, never from the review's tone.
   const stored = receiptStatusOf(view, null);
@@ -19072,7 +19072,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
       : view.coverageSecondary
         ? `<details class="receipt-coverage" data-semantic-coverage="secondary"><summary>Independent review</summary><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></details>`
         : `<div class="receipt-coverage" data-semantic-coverage=""><strong>Independent review</strong><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
-  const resultHref = place === "chat" ? chatResultHref(taskId, view.runId) : `/r/${view.runId}`;
+  const resultHref = status.token === "review-failed" ? reviewHref(taskId) : place === "chat" ? chatResultHref(taskId, view.runId, status.action?.kind === "open-review" ? "checks" : "summary") : statusActionHref(status, taskId, view.runId, view.publication?.prUrl ?? null) ?? `/r/${view.runId}`;
   return (
     `<section class="card completion-receipt" data-card-kind="result-receipt"${resultFactsAttributes(facts)}>` +
     `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>${escape(receiptHeadingOf(view.outcome, view.publication))}</h2></div>` +
@@ -19081,7 +19081,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     // publication line is the observed record — never "shipped".
     lead +
     `<p class="receipt-summary">${escape(conciseOutcomeOf(view.summary ?? (view.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff.")))}</p>` +
-    `<div class="receipt-actions"><a class="button-link" href="${escape(resultHref)}" data-open-result>Open result</a></div>` +
+    `<div class="receipt-actions"><a class="button-link" href="${escape(resultHref)}" data-open-result data-primary-action>${escape(status.action?.label ?? "Open result")}</a></div>` +
     (view.publication?.state === "failed" ? `<p class="problem">${escape(facts.publicationWords)}</p>` : "") +
     caveats +
     coverage +

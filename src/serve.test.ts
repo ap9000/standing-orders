@@ -1729,7 +1729,7 @@ describe("the operations console", () => {
     expect(task).toContain(`src="/r/${run}/evidence/${screenshot}"`);
     // Package 3: one primary road — Open result — to the shared panel (the
     // run page from the task, the chat's own result view from chat).
-    expect(task).toContain(`href="/r/${run}" data-open-result>Open result</a>`);
+    expect(task).toContain(`href="/r/${run}" data-open-result data-primary-action>Review the result</a>`);
     expect(task).toContain('href="/chat?task=t-receipt">Discuss in chat →</a>');
     expect(task).not.toContain("hold next attempt");
 
@@ -1737,10 +1737,10 @@ describe("the operations console", () => {
     expect(chat).toContain('data-card-kind="result-receipt"');
     expect(chat).toContain("1/1 acceptance criteria passed");
     expect(chat).toContain("2 files · +14 −3");
-    expect(chat).toContain(`href="/chat?task=t-receipt&amp;result=${run}" data-open-result>Open result</a>`);
+    expect(chat).toContain(`href="/chat?task=t-receipt&amp;result=${run}" data-open-result data-primary-action>Review the result</a>`);
     expect(chat).toContain(`href="/r/${run}">Full build record →</a>`);
-    expect(chat).toContain('aria-label="task progress"');
-    expect(chat).toContain("Complete");
+    expect(chat).not.toContain('class="card task-journey"');
+    expect(chat).toContain('data-work-status="ready-to-review"');
     expect(chat).not.toContain("Discuss in chat →");
     expect(chat).not.toContain("Get this task running");
   });
@@ -7706,7 +7706,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(bare).toContain('data-receipt-publication="none">Saved on the build branch. No publication, merge, or deployment is recorded here.</p>');
     expect(bare).toContain('data-work-status="verification-needed"');
     expect(bare).toContain("Result saved — verification needed");
-    expect(bare).toContain(`href="/r/${run}" data-open-result>Open result</a>`);
+    expect(bare).toContain(`href="/review?result=t-proof" data-open-result data-primary-action>Review the missing evidence</a>`);
     expect(bare).toContain('href="/chat?task=t-proof">Discuss in chat →</a>');
 
     const sha256 = createHash("sha256").update("").digest("hex");
@@ -7793,7 +7793,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // model-authored summary or a separate result record.
     const chat = await (await fetch(url("/chat?task=t-proof"), { headers: { cookie } })).text();
     expect(chat).toContain('class="card completion-receipt" data-card-kind="result-receipt"');
-    expect(chat).toContain(`href="/chat?task=t-proof&amp;result=${run}" data-open-result>Open result</a>`);
+    expect(chat).toContain(`href="/chat?task=t-proof&amp;result=${run}" data-open-result data-primary-action>Review the result</a>`);
     expect(chat).toContain(`href="/r/${run}">Full build record →</a>`);
     expect(chat).not.toContain("Discuss in chat →");
 
@@ -8150,7 +8150,9 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const html = await (await fetch(url("/t/t-shape"), { headers: { cookie } })).text();
     // Order: the mono eyebrow, then the title with its state chip, then the acts bar.
     const eyebrow = html.indexOf('<p class="meta task-eyebrow"><span class="mono">t-shape</span>');
-    const title = html.search(/<h1 class="task-main-title">shaped <span class="badge badge-[a-z]+">[a-z]+<\/span><\/h1>/);
+    const title = html.indexOf('<h1 class="task-main-title">shaped</h1>');
+    expect(html).toContain('data-task-status><h2>Builder disconnected</h2>');
+    expect(html).toContain('<summary>Task options</summary>');
     const bar = html.indexOf('<div class="acts-bar">');
     expect(eyebrow).toBeGreaterThan(-1);
     expect(title).toBeGreaterThan(eyebrow);
@@ -8509,7 +8511,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(board.headers.get("location")).toBe("/board");
   });
 
-  test("a scope waiting for its yes leads the page: the ceremony is the first card, above the acts, with the approve act in it", async () => {
+  test("a scope waiting for approval has one Review plan action, with exact terms and the approve act inside", async () => {
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
     await fetch(url("/projects/open"), {
@@ -8525,14 +8527,16 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     });
     const page = await (await fetch(url("/t/t-yes"), { headers: { cookie } })).text();
     const ceremony = page.indexOf('<form method="post" action="/t/t-yes/approve" class="card approve-form approval-card" id="approve">');
-    const title = page.indexOf('<h1 class="task-main-title">needs the yes ');
+    const title = page.indexOf('<h1 class="task-main-title">needs the yes</h1>');
+    expect(title).toBeGreaterThan(0);
     const bar = page.indexOf('<div class="acts-bar">');
     const layout = page.indexOf('<div class="task-layout">');
     expect(ceremony).toBeGreaterThan(title);
     expect(bar).toBeGreaterThan(ceremony);
     expect(layout).toBeGreaterThan(bar);
-    expect(page).toContain('<span class="approval-kicker">ready to run · approve exactly this:</span>');
-    expect(page).toContain("<strong>Review plan</strong>");
+    expect(page).toContain('<strong>approve exactly this:</strong>');
+    expect(page).not.toContain('ready to run · approve');
+    expect(page).toContain('<summary data-primary-action><span class="button-link">Review plan</span></summary>');
     expect(page).toContain('href="#scope">Edit details</a>');
     // One short status, then every exact term before confirmation.
     const orient = page.indexOf('<p class="meta approval-orient" data-approval-orient>');
@@ -8829,8 +8833,8 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     // Review plan action opens the exact terms, the password words live
     // inside that review, and Approve & start is the only submit.
     expect(html).toContain('<section class="card chat-action-card chat-plan" id="task-chat-action" data-approval="');
-    expect(html).toContain('<div class="chat-plan-head"><h2>Plan ready</h2></div><p class="chat-plan-outcome">do a</p><p class="chat-plan-facts">0 paths · 1 check · Auto permissions</p>');
-    expect(html).toContain('<summary><span class="button-link">Review plan</span></summary>');
+    expect(html).toContain('<p class="chat-plan-outcome">do a</p><p class="chat-plan-facts">0 paths · 1 check · Auto permissions</p>');
+    expect(html).toContain('<summary data-primary-action><span class="button-link">Review plan</span></summary>');
     expect(html).not.toContain("your next step");
     expect(html).not.toContain("approve to start");
     expect(html).not.toContain("Nothing builds until you approve");
@@ -8844,7 +8848,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).not.toContain('data-card-kind="fleet-overview"');
     const csrf = csrfFrom(html);
     const safeFragment = await (await fetch(url("/chat/task-status?task=a"), { headers: { cookie } })).text();
-    expect(safeFragment).toContain("Refresh this conversation to open the secure approval step.");
+    expect(safeFragment).toContain('data-primary-action>Review plan</a>');
     expect(safeFragment).not.toContain('type="password"');
 
     const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(html)?.[1];
@@ -9475,7 +9479,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(lens["fragments"]).toBeUndefined();
     const lensFragments = (await status(cookie, "?task=a&version=stale"))["fragments"] as Record<string, string | null>;
     expect(lensFragments["live"]).toContain('id="task-chat-live"');
-    expect(lensFragments["live"]).toContain("Review the updated plan →");
+    expect(lensFragments["live"]).toContain('data-primary-action>Review plan</a>');
     expect(lensFragments["live"]).not.toContain('type="password"');
     expect(lensFragments["live"]).not.toContain('name="nonce"');
     expect(lensFragments["thread"]).toContain('data-key="m1"');
@@ -11445,8 +11449,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     }
     // The receipt's one primary road opens the shared detail; the detail
     // itself is the same panel on every surface, and the deliverable leads.
-    expect(pages.chat).toContain(`href="/chat?task=t-shared&amp;result=${run}" data-open-result>Open result</a>`);
-    expect(pages.task).toContain(`href="/r/${run}" data-open-result>Open result</a>`);
+    expect(pages.chat).toContain(`href="/chat?task=t-shared&amp;result=${run}" data-open-result data-primary-action>Review the result</a>`);
+    expect(pages.task).toContain(`href="/r/${run}" data-open-result data-primary-action>Review the result</a>`);
     for (const html of [pages.detail, pages.run, pages.review]) {
       expect(html).toContain('data-result-panel');
       expect(html).toContain('data-result-lead="screenshots"');
@@ -11848,8 +11852,13 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       // The result panel and the receipt offer no download of the damaged
       // bytes (the run page's raw artifact ledger still lists the record;
       // the evidence road refuses it below).
-      const shared = html.slice(html.indexOf('data-result-run="'), html.lastIndexOf("</section>"));
-      expect(shared).not.toContain(`/evidence/${log.id}"`);
+      const sharedWindow = new Window();
+      try {
+        sharedWindow.document.body.innerHTML = html;
+        const shared = sharedWindow.document.querySelector('.completion-receipt, .result-panel')!;
+        expect(shared).not.toBeNull();
+        expect(shared.innerHTML).not.toContain(`/evidence/${log.id}"`);
+      } finally { await sharedWindow.happyDOM.close(); }
     }
     const panel = await read(`/r/${run}?tab=checks`);
     expect(panel).toContain('<p class="problem" data-check-log="damaged" data-cockpit-source="machine">The check log no longer verifies (');
@@ -12462,6 +12471,156 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     for (const path of ["/fleet", "/system", "/caps", "/workbench", "/chat", "/settings"]) expect((await fetch(url(path), { headers: { cookie: member } })).status, path).toBe(403);
   });
 
+  test("pilot 2: approval, queued, build/checks, stop, hold, rescope and failures share one status and primary action", async () => {
+    const id = "t-status";
+    const ref = seedTask(id, "Keep the full allowed path visible", alpha);
+    const allowed = "docs/assessments/WORKSPACE_5_LONG_REQUEST_RESULT_2026-09-14.md";
+    sealScopeFixture(store, id, approverToken, "Read the entire request.");
+    const scope = store.getScope(id)!;
+    propose(store, { taskId: id, goal: scope.goal, touches: [allowed], acceptance: scope.acceptance, now });
+    const cookie = await login();
+    await openProject(cookie, alpha);
+    const readStanding = async (html: string, rowId?: string): Promise<{ label: string; token: string; action: string }> => {
+      const window = new Window();
+      try {
+        window.document.body.innerHTML = html;
+        const region = rowId === undefined ? window.document.querySelector('#task-chat-live') ?? window.document.querySelector('main')! : window.document.querySelector(`[data-task="${rowId}"].work-row`)!;
+        const status = region.querySelector('[data-task-status], .completion-receipt .status-line, .work-row-status .status-line')!;
+        const hidden = (el: Element): boolean => {
+          let node = el;
+          while (node.parentElement !== null) {
+            if (node.parentElement.tagName === "DETAILS" && !node.parentElement.hasAttribute('open') && node.tagName !== "SUMMARY") return true;
+            node = node.parentElement;
+          }
+          return false;
+        };
+        const actions = [...region.querySelectorAll('[data-primary-action], .work-action')].filter(el => !hidden(el));
+        expect(actions).toHaveLength(1);
+        const label = status.querySelector('h2, .status-label')!.textContent!;
+        const headlines = [...region.querySelectorAll('h2, .status-label, .dispatch-copy > strong')].filter(el => !hidden(el) && el.textContent === label);
+        expect(headlines).toHaveLength(1);
+        return { token: status.getAttribute('data-work-status')!, label, action: actions[0]!.textContent!.replace(/ →$/, '') };
+      } finally { await window.happyDOM.close(); }
+    };
+    const agree = async (taskId: string, token: string, action?: string): Promise<void> => {
+      const work = await readStanding(await page(cookie, "/work"), taskId);
+      expect(work.token).toBe(token);
+      if (action !== undefined) expect(work.action).toBe(action);
+      for (const path of [`/t/${taskId}`, `/chat?task=${taskId}`, `/chat/task-status?task=${taskId}`]) {
+        expect(await readStanding(await page(cookie, path)), path).toEqual(work);
+      }
+    };
+    await agree(id, "needs-approval", "Review plan");
+    const beforeApproval = await page(cookie, `/t/${id}`);
+    expect(beforeApproval).toContain(`<p class="scope-paths"><strong>touches</strong> ${allowed}</p>`);
+    const css = await stylesOf(beforeApproval, base);
+    expect(css).toContain('#scope .recap, #scope .scope-paths, .approval-goal { overflow-wrap: anywhere; }');
+    expect(beforeApproval).toContain('<h1 class="task-main-title">Keep the full allowed path visible</h1>');
+    approve(store, id, "alex", now, store.getScope(id)!.digest, approverToken);
+    await agree(id, "no-worker-registered", "Check connection");
+    const blocker = seedTask('t-before-status', 'First task', alpha);
+    store.addEdge(id, 't-before-status');
+    await agree(id, 'waiting-dependency', 'View task details');
+    store.removeEdge(id, 't-before-status');
+    void blocker;
+    register(store, { name: "status-worker", host: "here", capacity: 1, repos: [alpha], now, newToken: () => "status-token" });
+    await agree(id, "ready", "View task details");
+    const claim = acquire(store, ref, "status-worker", { token: "status-token", now });
+    if (!claim.ok) throw new Error(claim.reason);
+    const run = store.startRun({ taskRef: ref, leaseId: claim.claim.leaseId, runner: "status-worker", provider: "claude", branch: "standing-orders/t-status", worktree: join(root, "status-worktree"), now, ...presented(store, ref) });
+    // Deliberately leave raw state queued, as in the live pilot.
+    for (const phase of ["agent-running", "verifying-proof"] as const) {
+      store.setRunPhase(run, phase);
+      await agree(id, "running", "Watch the build");
+    }
+    expect(store.requestRunStop({ runId: run, taskRef: ref, by: "alex", via: "web" }, now).ok).toBe(true);
+    await agree(id, "stopping", "View stop details");
+    store.finishRun(run, { outcome: "interrupted", reason: "stopped", now, stopSettlement: "interrupted" });
+    release(store, claim.claim.leaseId, now);
+    await agree(id, "stopped", "Review pause");
+    // A separate held scope exercises approve -> change -> unhold, with
+    // the original signature left intact and no copied approval state.
+    const heldRef = seedTask('t-scope-status', 'Changed scope', alpha);
+    sealScopeFixture(store, 't-scope-status', approverToken, 'Original request');
+    store.hold(heldRef, 'Wait for names', null, now);
+    await agree('t-scope-status', 'held', 'Review hold');
+    const signed = store.getScope('t-scope-status')!;
+    propose(store, { taskId: 't-scope-status', goal: 'Changed request', touches: signed.touches, acceptance: signed.acceptance, now });
+    store.unhold(heldRef);
+    await agree('t-scope-status', 'needs-approval', 'Review plan');
+    expect(store.getScope('t-scope-status')!.approvedDigest).toBe(signed.approvedDigest);
+    store.setTaskState('t-scope-status', 'failed', now);
+    await agree('t-scope-status', 'failed', 'Review and retry');
+    finished('t-status-check', 'Failed check', alpha, { verdict: 'refuted', reasons: ["the repository's approved verification command exited 1"] });
+    await agree('t-status-check', 'checks-failed', 'Review the failed check');
+    finished('t-status-missing', 'Missing proof', alpha, null);
+    await agree('t-status-missing', 'verification-needed', 'Review the missing evidence');
+    const oldResultScope = store.getScope('t-status-check')!;
+    propose(store, { taskId: 't-status-check', goal: 'A new scope after the failed check', touches: oldResultScope.touches, acceptance: oldResultScope.acceptance, now });
+    store.setTaskState('t-status-check', 'queued', now);
+    await agree('t-status-check', 'needs-approval', 'Review plan');
+    expect(await page(cookie, '/t/t-status-check')).toContain('<details class="task-previous-result"><summary>Previous result</summary>');
+  });
+
+  test("pilot 2: a pending status refresh preserves focused controls, open details and dirty inputs; the composer keeps its draft and selection", async () => {
+    seedTask('t-refresh-status', 'Refresh safely', alpha);
+    sealScopeFixture(store, 't-refresh-status', approverToken, 'Keep the draft');
+    const cookie = await login();
+    await openProject(cookie, alpha);
+    const html = await page(cookie, '/chat?task=t-refresh-status');
+    const fragment = await page(cookie, '/chat/task-status?task=t-refresh-status');
+    const window = new Window();
+    try {
+      window.document.body.innerHTML = html;
+      const source = window.document.querySelector('script[nonce]')!.textContent!;
+      const start = source.indexOf('var taskLive=');
+      const end = source.indexOf('var box=', start);
+      expect(start).toBeGreaterThan(0);
+      expect(end).toBeGreaterThan(start);
+      const cycles: (() => void)[] = [];
+      window.setTimeout = ((callback: () => void) => { cycles.push(callback); return 1; }) as typeof window.setTimeout;
+      let requests = 0;
+      let deliver!: (response: Response) => void;
+      window.fetch = (() => { requests++; return new Promise<Response>(resolve => { deliver = resolve; }); }) as typeof window.fetch;
+      const region = window.document.querySelector('#task-chat-live')!;
+      const composer = window.document.createElement('textarea');
+      window.document.body.append(composer);
+      composer.value = 'An unsent chat draft';
+      window.eval(source.slice(start, end));
+      cycles.shift()!();
+      expect(requests).toBe(1);
+      const control = region.querySelector<HTMLAnchorElement>('[data-primary-action]')!;
+      control.focus();
+      deliver(new Response(fragment));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(window.document.querySelector('#task-chat-live')).toBe(region);
+      expect(window.document.activeElement).toBe(control);
+      control.blur();
+      const details = region.querySelector('details')!;
+      details.open = true;
+      cycles.shift()!();
+      expect(requests).toBe(1);
+      details.open = false;
+      const note = window.document.createElement('input');
+      region.append(note); note.value = 'Unsubmitted decision note';
+      cycles.shift()!();
+      expect(requests).toBe(1);
+      expect(note.value).toBe('Unsubmitted decision note');
+      note.value = '';
+      composer.focus(); composer.setSelectionRange(3, 8);
+      cycles.shift()!();
+      expect(requests).toBe(2);
+      deliver(new Response(fragment));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(window.document.querySelector('#task-chat-live')).not.toBe(region);
+      expect(window.document.activeElement).toBe(composer);
+      expect(composer.value).toBe('An unsent chat draft');
+      expect([composer.selectionStart, composer.selectionEnd]).toEqual([3, 8]);
+      // A status refresh only GETs its fragment. No submit or model send.
+      expect(source.slice(start, end)).not.toContain('requestSubmit');
+    } finally { await window.happyDOM.close(); }
+  });
+
   test("held-task CTAs explain the destination across Work, chat, and task details; only Remove hold releases it", async () => {
     const ref = seedTask("t-held", "Document the columns", alpha);
     sealScopeFixture(store, "t-held", approverToken, "document");
@@ -12471,7 +12630,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const work = await page(cookie, "/work");
     expect(work).toContain('<a class="work-action" href="/t/t-held">Review hold →</a>');
     const chat = await page(cookie, "/chat?task=t-held");
-    expect(chat).toContain('<a class="button-link task-journey-action" href="/t/t-held#task-actions">Review hold →</a>');
+    expect(chat).toContain('<a class="button-link task-journey-action" href="/t/t-held#task-actions" data-primary-action>Review hold</a>');
     const task = await page(cookie, "/t/t-held");
     expect(task).toContain('class="button-link dispatch-action-link" href="/t/t-held#task-actions">Review hold</a>');
     expect(task).toContain('Use <strong>Remove hold</strong> when it can continue.');
@@ -12635,8 +12794,9 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       expect(task, id).not.toMatch(/<h1 class="task-main-title">[^<]*<span class="status-line"/);
       expect(task, id).not.toContain('class="badge badge-done">done');
       // The focused chat: the journey headline and the receipt.
-      expect(/<section class="card task-journey"[^>]*data-work-status="([^"]+)"/.exec(chat)?.[1], id).toBe(token);
-      expect(/<span class="eyebrow">task journey<\/span><h2>([^<]+)<\/h2>/.exec(chat)?.[1], id).toBe(label);
+      expect(statusOf(chat)[0]?.token, id).toBe(token);
+      expect(chat, id).not.toContain('class="card task-journey"');
+      expect(statusOf(chat)[0]?.label, id).toBe(label);
       expect(statusOf(chat).map(one => one.label), id).toEqual([label]);
       // The review cockpit's headline chip.
       expect(/<header class="cockpit-head"[^>]*>.*?<p class="cockpit-chips">(.*?)<\/p>/s.exec(review)?.[1], id).toContain(`data-work-status="${token}"`);
@@ -12895,9 +13055,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       expect(statusOf(task)).toHaveLength(1);
       return {
         work: { token: work?.token, label: work?.label },
-        box: { token: /id="run-status" data-dispatch-status="[^"]*" data-work-status="([^"]+)"/.exec(task)?.[1], label: /id="run-status"[^>]*>\s*<div class="dispatch-copy"><strong>([^<]+)<\/strong>/.exec(task)?.[1] },
         receipt: { token: /<section class="card completion-receipt"[\s\S]*?data-work-status="([^"]+)"/.exec(task)?.[1], label: statusOf(task)[0]?.label },
-        chat: { token: /<section class="card task-journey"[^>]*data-work-status="([^"]+)"/.exec(chat)?.[1], label: /<span class="eyebrow">task journey<\/span><h2>([^<]+)<\/h2>/.exec(chat)?.[1] },
+        chat: { token: statusOf(chat)[0]?.token, label: statusOf(chat)[0]?.label },
         chatReceipt: { token: statusOf(chat)[0]?.token, label: statusOf(chat)[0]?.label },
         cockpit: { token: /<p class="cockpit-chips">.*?data-work-status="([^"]+)"/s.exec(review)?.[1], label: statusOf(review)[0]?.label },
         run: { token: /<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(run)?.[1], label: statusOf(run)[0]?.label },
@@ -12918,7 +13077,9 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const history = "Until the review settles, the earlier verdict — &quot;Changes saved, but checks failed&quot; — stays on record as history.";
     // The receipt's history sentence sits behind a native disclosure (concise pass, 2026-09-13) — the same words, secondary.
     expect(queuedTask).toContain(`<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="review-pending">The build finished and its requested independent review is waiting for a worker. ${history}</p></details>`);
-    expect(queuedTask).toContain(`<span data-review-lead="review-pending">The build finished and its requested independent review is waiting for a worker. ${history}</span> <a href="/r/${latest}">Build #${latest}</a> finished. The project check failed (exit 1).`);
+    expect(queuedTask.split(history)).toHaveLength(2); // Said once, in Review history.
+    expect(queuedTask).toContain('<strong>Recorded checks</strong>');
+    expect(queuedTask).toContain('The project check failed (exit 1).');
     expect(queuedTask).toContain('class="answered dispatch-status" id="run-status"');
     expect(queuedTask).toContain('data-review-state="queued"');
     // The receipt's criteria label still reads from the stored verdict.
@@ -12936,7 +13097,23 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     agree(await surfaces(), "reviewing", "Reviewing");
     expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "running", "completed"]);
     expect(rowsOf(await page(cookie, "/work?view=running")).map(row => row.id)).toContain("t-rev");
-    expect(await page(cookie, "/chat?task=t-rev")).toContain('<span class="badge" data-tone="live">in review</span>');
+    const liveTask = await page(cookie, "/t/t-rev");
+    const historyWindow = new Window();
+    try {
+      historyWindow.document.body.innerHTML = liveTask;
+      const attempts = historyWindow.document.querySelector('#attempts')!;
+      expect(attempts.textContent).not.toContain("never finished");
+      expect(attempts.querySelector('.badge-running')?.textContent).toBe("running");
+      expect(liveTask).toContain(`review #${admitted.reviewerRunId}</a> · running`);
+    } finally { await historyWindow.happyDOM.close(); }
+    expect(await page(cookie, "/chat?task=t-rev")).not.toContain('class="card task-journey"');
+    // A lost reviewer stays unfinished; a null outcome alone is no proof
+    // that it is still working. Restore the heartbeat for the next case.
+    store.touchRunner('night-shift-1', new Date(now.getTime() - 3_600_000));
+    const orphan = await page(cookie, '/t/t-rev');
+    expect(orphan).toContain(`review #${admitted.reviewerRunId}</a> · never finished`);
+    expect(statusOf(orphan)[0]?.label).toBe('Review interrupted');
+    store.touchRunner('night-shift-1', now);
 
     // Failed with a retry left: one status, the retry as the next act.
     store.finishRun(admitted.reviewerRunId, { outcome: "failed", reason: "reviewer-agent", now });
@@ -13040,7 +13217,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // A task without a result keeps its state chip in the title: the box
     // beneath answers a different question ("will this run?").
     const queued = await page(cookie, "/t/t-queued");
-    expect(queued).toMatch(/<h1 class="task-main-title">Rework the ledger export <span class="badge badge-queued">queued<\/span><\/h1>/);
+    expect(queued).toContain('<h1 class="task-main-title">Rework the ledger export</h1>');
+    expect(queued).toContain('data-task-status><h2>Needs a scope</h2>');
     // The selected older result keeps its own status on its run page.
     const olderPage = await page(cookie, `/r/${older}`);
     expect(/<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("ready-to-review");

@@ -59,6 +59,7 @@ import { acquire, release } from '../dist/claim.js';
 
 // The real pilot request's path: its unbroken filename overflowed the
 // expanded task scope at 390px. Keep it verbatim in synthetic signed terms.
+export const LONG_ALLOWED_PATH = 'docs/assessments/WORKSPACE_5_LONG_REQUEST_RESULT_2026-09-14.md';
 export const LONG_REQUEST_PATH = 'docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md';
 
 const LONG_GOAL =
@@ -73,7 +74,7 @@ const LONG_NOT =
   'Do not add a background queue or a new dependency for streaming; the standard library stream is enough. Do not touch authentication or project admission.';
 const TOUCHES = [
   'src/export/csv.ts', 'src/export/csv.test.ts', 'src/export/range.ts', 'src/export/range.test.ts',
-  'src/ui/project-export.ts', 'src/ui/project-export.test.ts', 'docs/exports.md', 'fixtures/ledger-sample.csv',
+  'src/ui/project-export.ts', 'src/ui/project-export.test.ts', LONG_ALLOWED_PATH, 'fixtures/ledger-sample.csv',
 ];
 const ACCEPTANCE = [
   { id: 'c1', statement: 'Each exported CSV reconciles with the settlement ledger to the cent for the fixture projects.', how: null, evidence: ['check'] },
@@ -193,7 +194,7 @@ export function startFixture(options = {}) {
   const done = fileTaskProposal(store, {
     id: 'payout-rounding', title: 'Fix the payout rounding drift', repo,
     goal: 'Find and fix the half-cent drift in payout settlement; prove it with ledger-fixture tests.',
-    outOfScope: 'No ledger schema changes.', touches: ['src/payout.ts', 'src/payout.test.ts'],
+    outOfScope: 'No ledger schema changes.', touches: ['src/payout.ts', 'src/payout.test.ts', LONG_ALLOWED_PATH],
     acceptance: [
       { id: 'c1', statement: 'Ledger-fixture tests demonstrate the half-cent drift is gone.', how: null, evidence: ['check', 'changed-path'] },
       { id: 'c2', statement: 'The console formatter still renders payout dashboards.', how: null, evidence: ['screenshot'] },
@@ -323,7 +324,7 @@ export function startFixture(options = {}) {
     return { taskId: id, ref: store.refFor('built-in', id).id, scope: store.getScope(id) };
   };
   const results = {};
-  results.failedChecks = finished('csv-quoting', 'Escape quotes in the CSV writer', 6, { verify: { configured: true, ran: true, exitCode: 1 } });
+  results.failedChecks = finished('csv-quoting', options.statusPresentation ? 'Escape quotes in the CSV writer while preserving every long Japanese 日本語 column name and the full assessment path in the settlement export' : 'Escape quotes in the CSV writer', 6, { verify: { configured: true, ran: true, exitCode: 1 } });
   results.mismatched = finished('range-filter', 'Make the date-range filter inclusive', 7, { overclaim: true });
   results.missingProof = finished('subtotal-rows', 'Add per-currency subtotal rows', 8, { noProof: true });
   results.attested = finished('excel-bom', 'Emit a UTF-8 BOM for Excel exports', 9, { verify: { configured: false } });

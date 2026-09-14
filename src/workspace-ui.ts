@@ -20,6 +20,7 @@
 import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
 import type { ProofVerdict } from "./proof.js";
 import type { ReviewRetryState, TaskState } from "./store.js";
+import type { TaskControlView } from "./task-control.js";
 
 /** The Work destination's views — shortcuts over the same rows, never a
  * persisted state. All is the default. */
@@ -391,6 +392,7 @@ export type WorkFacts = {
   result: ResultFacts | null;
   publication: PublicationFacts;
   liveRunId: number | null;
+  control?: TaskControlView;
 };
 
 export type WorkStatus = DisplayStatus & {
@@ -418,7 +420,7 @@ const DISPATCH_ACTION_LABELS: Record<DispatchAction, string> = {
   "place-task": "Choose a project",
   "write-scope": "Define the task",
   "select-agent": "Choose an agent",
-  "approve-scope": "Review and approve",
+  "approve-scope": "Review plan",
   "answer-decision": "Answer the question",
   unhold: "Review hold",
   "inspect-hold": "Review hold",
@@ -433,9 +435,9 @@ export function dispatchActionLabel(dispatch: DispatchDiagnosis | null): string 
   return dispatch?.action == null ? "View task details" : DISPATCH_ACTION_LABELS[dispatch.action];
 }
 
-export function workStatusOf(facts: WorkFacts): WorkStatus {
+export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): WorkStatus {
   const dispatch = facts.dispatch;
-  const result = facts.state === "done" ? resultStatusOf(facts.result, facts.publication) : null;
+  const result = facts.state === "done" ? resultDisplay ?? resultStatusOf(facts.result, facts.publication) : null;
   const running = facts.liveRunId !== null || dispatch?.condition === "running" || result?.token === "reviewing";
   const needs = needsPerson(dispatch);
   const views: WorkView[] = ["all"];
@@ -452,6 +454,15 @@ export function workStatusOf(facts: WorkFacts): WorkStatus {
     views,
     rank,
   });
+
+  // The control projection knows whether a stop has actually settled.
+  // A still-live claim alone cannot distinguish Running from Stopping.
+  if (facts.control?.kind === "stopping") {
+    return { token: "stopping", label: "Stopping…", detail: facts.control.detail ?? "The attempt is ending. Its work is preserved; resume becomes available after its processes exit.", tone: "attention", action: { label: "View stop details", kind: "open-task" }, views, rank: 0 };
+  }
+  if (facts.control?.kind === "paused") {
+    return { token: "stopped", label: "Paused", detail: "The stopped attempt's work is preserved. Resuming requires confirmation and checks the current approval again.", tone: "attention", action: { label: "Review pause", kind: "open-task" }, views, rank: 0 };
+  }
 
   if (facts.state === "done" && result !== null) {
     // A review in flight or waiting outranks the stored verdict: the
@@ -476,8 +487,9 @@ export function workStatusOf(facts: WorkFacts): WorkStatus {
   if (needs) {
     return dispatchWords("attention", 0, { label: dispatchActionLabel(dispatch), kind: "open-task" });
   }
-  if (dispatch === null) return dispatchWords("neutral", 2, null);
-  return dispatchWords(dispatch.condition === "retrying" ? "neutral" : "muted", 2, null);
+  const details: NextAction = { label: "View task details", kind: "open-task" };
+  if (dispatch === null) return dispatchWords("neutral", 2, details);
+  return dispatchWords(dispatch.condition === "retrying" ? "neutral" : "muted", 2, details);
 }
 
 /** The counts each view tab wears — from the same rows the page lists. */
