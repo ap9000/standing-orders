@@ -14,3 +14,12 @@ Before finishing, ask: Can a first-time user understand the current state and ne
 Example: show **Plan ready**, a short outcome, and **Review plan**. Omit **Your next step**, **approve to start**, and a second sentence explaining the same action. Keep password and approval instructions inside the expanded review.
 
 Carry this check into Standing Orders task acceptance criteria and review feedback for UI work. Do not claim future agents followed it until their output has been inspected.
+
+## Lean verification
+
+- During implementation, run typecheck and tests for the affected behavior. Add a small regression for each reproduced bug; reuse existing tests instead of adding overlapping suites.
+- For UI work, use one end-to-end journey at desktop and one phone viewport: open the result, inspect changes, leave feedback, and create a revision. Include affected empty, long-content, and failure states. Add other viewport checks only for a concrete risk or explicit acceptance requirement.
+- After a small copy or CSS repair, rerun the affected visual checks, not every browser script. Behavioral changes also require their focused tests.
+- Let Standing Orders run the unchanged approved full verification command once at the final machine gate for the candidate. Do not duplicate that full suite in the builder or independent review. A failed gate or changed candidate still needs fresh verification; never delete tests, add skips, or waive approval or evidence checks to save time.
+- Reuse valid evidence for unchanged code and the same agent session where already supported. Do not build new orchestration just to reduce test overhead. No new agent time limits.
+- Report the checks actually run, the exact candidate they cover, and any remaining gaps. Broaden checks only for a specific uncovered risk; say why.
