@@ -3306,9 +3306,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       .map(
         task =>
           `<a class="item${task.id === currentId ? " current" : ""}" href="${taskHref(task.id)}">` +
-          `<span class="t">${escape(task.title)}</span>` +
-          // Navigation needs identity; the selected task owns its status.
-          `<span class="m"><span class="mono">${escape(task.id)}</span></span></a>`,
+          `<span class="t">${escape(task.title)}</span></a>`,
       )
       .join("\n");
     return `<h2>tasks</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
@@ -9664,9 +9662,9 @@ const STYLE = `
   .workbench-mobile-rail, .workbench-mobile-back { display: none; }
   /* The task page (slice 1c): main column beside a rail; one column narrow. */
   .task-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 19rem); gap: 0 2rem; align-items: start; }
-  /* The task page (task page pass): eyebrow, title, the acts in one row,
+  /* The task page (task page pass): title, the acts in one row,
      then folding sections; the rail is the property list. */
-  .task-eyebrow { margin: 0 0 .25rem; }
+  .task-identity { overflow-wrap: anywhere; }
   .task-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
   .task-title-row .task-main-title { min-width: 0; margin-bottom: .85rem; }
   .task-view-switch {
@@ -10526,6 +10524,7 @@ const STYLE = `
   .receipt-actions [data-primary-action], .task-plan-review .button-link { min-height: 44px; }
   .task-status-reason { margin-top: .75rem; }
   .task-status-reason summary, .task-status-details > summary { color: var(--muted-foreground); }
+  .task-status-details > summary { min-height: 44px; }
   .task-plan-review > summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 650; }
   .task-status-details, #task-control-details { margin: 1rem 0; }
   .task-control-copy { min-width: 0; overflow-wrap: anywhere; }
@@ -11110,7 +11109,6 @@ button { min-height: 44px; }
   main { padding-bottom: calc(1rem + env(safe-area-inset-bottom)); }
   /* Task actions are composed for a thumb, not allowed to wrap according
      to their intrinsic text widths. Every row owns the available width. */
-  .task-eyebrow { line-height: 1.55; overflow-wrap: anywhere; }
   .task-title-row { display: grid; gap: .6rem; margin-bottom: .8rem; }
   .task-title-row .task-main-title { margin-bottom: 0; }
   .task-title-row .task-view-switch { justify-self: start; }
@@ -17437,11 +17435,9 @@ function taskBody(data: {
         html.replace(`<h2>${title}</h2>`, "") + `</details>`;
 
   const receiptLeads = task.state === "done" && data.completion?.receipt != null;
-  return [
-    // The title leads; the machine facts — id, state, project, provenance —
-    // follow as one mono meta row instead of riding the headline.
-    `<p class="meta task-eyebrow"><span class="mono">${escape(task.id)}</span>` +
-      `${data.strikes > 0 ? ` · ${data.strikes} failed attempt(s)` : ""}` +
+  // Exact identity stays available in Task options; failures stay in the
+  // status and property rail, and approval provenance stays in the ceremony.
+  const identity = `<p class="meta task-identity">Task ID <span class="mono">${escape(task.id)}</span>` +
       `${data.repo === null ? "" : ` · ${escape(projectName(data.repo))}`}` +
       `${
         data.coordinator !== null && data.coordinator !== undefined
@@ -17449,7 +17445,8 @@ function taskBody(data: {
           : data.filedVia === null || data.filedVia === undefined
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
-      }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
+      }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`;
+  return [
     // The title is bare; the receipt or shared task status leads once.
     `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)}</h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
     // The result takes over from the task status as soon as it is ready.
@@ -17513,7 +17510,7 @@ function taskBody(data: {
     dependencyChoiceNeeded || approveForm === "" ? "" : data.dispatch?.action === "approve-scope"
       ? `<details class="task-plan-review"><summary data-primary-action><span class="button-link">Review plan</span></summary>${approveForm}</details>`
       : `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approveForm}</details>`,
-    `<details class="task-status-details" id="task-diagnostics"><summary>Task options</summary>${dispatchStatus}${dependencyChoiceNeeded ? "" : actsBar}</details>`,
+    `<details class="task-status-details" id="task-diagnostics"><summary>Task options</summary>${identity}${dispatchStatus}${dependencyChoiceNeeded ? "" : actsBar}</details>`,
     // Evidence-first (M5.5): what needs you, then what happened — decisions
     // and incidents above the attempt ledger and spend, the mechanics
     // (scope, holds, acts) after. Only trustworthy facts moved up. The rail

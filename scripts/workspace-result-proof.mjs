@@ -240,8 +240,30 @@ async function longRequestJourney() {
         const title = await page.locator('h1').textContent();
         const source = fixture.store.revisionSourceOf(fixture.store.lookupRef(childId).id);
         check(`${name} ${mode}: human title, unchanged ID generation and exact source`, title === expectedTitle && fixture.store.getTask(childId).title === expectedTitle && childId.startsWith(`revise-payout-rounding-from-${batch.length}-annotation`) && source.sourceTask === task && source.sourceRun === runId && (await noOverflow(page)).ok, JSON.stringify({ title, childId, sourceRun: source.sourceRun }));
+        const collapsed = await page.evaluate(() => {
+          const identity = document.querySelector('.task-identity');
+          const options = document.querySelector('#task-diagnostics');
+          const rows = [...document.querySelectorAll('.list-pane a.item')];
+          return { closed: options?.open === false, identityHidden: identity !== null && !identity.checkVisibility(),
+            identityInOptions: identity?.closest('details') === options,
+            titleFirst: document.querySelector('main')?.firstElementChild?.classList.contains('task-title-row'),
+            titleOnlyLinks: rows.length > 0 && rows.every(row => row.textContent === row.querySelector('.t')?.textContent),
+            selectedHref: document.querySelector('.list-pane a.item.current')?.getAttribute('href'),
+            selectedTitle: document.querySelector('.list-pane a.item.current')?.textContent };
+        });
+        check(`${name} ${mode}: title leads with identity collapsed and title-only task navigation`, collapsed.closed && collapsed.identityHidden && collapsed.identityInOptions && collapsed.titleFirst && collapsed.titleOnlyLinks && collapsed.selectedHref === `/t/${childId}` && collapsed.selectedTitle === expectedTitle, JSON.stringify(collapsed));
         await page.locator('h1').scrollIntoViewIfNeeded();
-        if (mode === 'mixed') await shot(page, `${name}-named-revision`, `${viewport.width}×${viewport.height}: parent human title on a mixed-feedback revision awaiting fresh approval (synthetic fixture)`);
+        if (mode === 'mixed') await shot(page, `${name}-named-revision`, `${viewport.width}×${viewport.height}: human title leads; Task options closed, sidebar names only, fresh approval required (synthetic fixture)`);
+        await page.locator('#task-diagnostics > summary').focus();
+        await page.keyboard.press('Enter');
+        const expanded = await page.locator('.task-identity').evaluate(el => ({ visible: el.checkVisibility(), id: el.querySelector('.mono')?.textContent, width: el.clientWidth, scrollWidth: el.scrollWidth }));
+        const summary = await rect(page, '#task-diagnostics > summary');
+        check(`${name} ${mode}: keyboard opens exact task identity without overflow`, expanded.visible && expanded.id === childId && expanded.scrollWidth <= expanded.width && summary.height >= 44 && (await noOverflow(page)).ok, JSON.stringify({ ...expanded, summary }));
+        check(`${name} ${mode}: source task and build links remain in scope details`, await page.locator(`#scope .revision-card a[href="/t/${task}"]`).count() > 0 && await page.locator(`#scope .revision-card a[href="/r/${runId}"]`).count() > 0);
+        if (mode === 'mixed') await shot(page, `${name}-named-revision-details`, `${viewport.width}×${viewport.height}: Task options opened by keyboard exposes the full unchanged task ID (synthetic fixture)`);
+        await page.locator('#task-diagnostics > summary').focus();
+        await page.keyboard.press('Enter');
+        check(`${name} ${mode}: keyboard closes task identity again`, !await page.locator('.task-identity').isVisible());
       }
       await page.locator('.task-plan-review > summary').focus();
       await page.keyboard.press('Enter');

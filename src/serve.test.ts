@@ -1180,6 +1180,9 @@ describe("the operations console", () => {
     expect(store.getTask(child.taskId)?.title).toBe("Mobile project switcher — revision");
     expect(child.taskId).toBe(`revise-t-rev-from-${count}-annotation${count === 1 ? "" : "s"}-on-build-${run}`);
     expect(taskView).toContain("Mobile project switcher — revision");
+    expect(taskView).toContain(`<a class="item current" href="${target}"><span class="t">Mobile project switcher — revision</span></a>`);
+    expect(taskView).not.toContain('task-eyebrow');
+    expect(taskView).toContain(`<details class="task-status-details" id="task-diagnostics"><summary>Task options</summary><p class="meta task-identity">Task ID <span class="mono">${child.taskId}</span>`);
     expect(taskView).toContain(`href="/r/${run}">build #${run}</a>`);
     if (mode === "mixed") expect(taskView).toContain("Keep the project name visible.");
     expect(taskView).toContain("the review batch");
@@ -8158,22 +8161,25 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(runPage).toContain(">usage</span>");
   });
 
-  test("the task page reads top-down (task page pass): eyebrow, title with state, the acts bar with the resolving act primary, the property list, then folded sections with counts", async () => {
+  test("the task page leads with its title and status, keeps identity in collapsed options, and preserves failures and actions", async () => {
     const ref = seed("t-shape", "shaped");
     const failedRun = finished("t-shape", ref, "failed", null);
     store.createIncident({ run: failedRun, kind: "attempts-exhausted" }, new Date());
     await boot();
     const cookie = await login();
     const html = await (await fetch(url("/t/t-shape"), { headers: { cookie } })).text();
-    // Order: the mono eyebrow, then the title with its state chip, then the acts bar.
-    const eyebrow = html.indexOf('<p class="meta task-eyebrow"><span class="mono">t-shape</span>');
+    // The human title leads; exact identity is available in closed options.
+    const options = html.indexOf('<details class="task-status-details" id="task-diagnostics"><summary>Task options</summary>');
+    const identity = html.indexOf('<p class="meta task-identity">Task ID <span class="mono">t-shape</span>');
     const title = html.indexOf('<h1 class="task-main-title">shaped</h1>');
     expect(html).toContain('data-task-status><h2>Builder disconnected</h2>');
-    expect(html).toContain('<summary>Task options</summary>');
+    expect(html).not.toContain('task-eyebrow');
+    expect(html).toContain('<a class="item current" href="/t/t-shape"><span class="t">shaped</span></a>');
     const bar = html.indexOf('<div class="acts-bar">');
-    expect(eyebrow).toBeGreaterThan(-1);
-    expect(title).toBeGreaterThan(eyebrow);
-    expect(bar).toBeGreaterThan(title);
+    expect(title).toBeGreaterThan(-1);
+    expect(options).toBeGreaterThan(title);
+    expect(identity).toBeGreaterThan(options);
+    expect(bar).toBeGreaterThan(identity);
     // A stalled task's primary act is the retry; hold rides beside it with its reason.
     const barHtml = html.slice(bar, html.indexOf("</div>", bar));
     expect(barHtml).toContain('<span class="primary"><form method="post" action="/t/t-shape/requeue"');
