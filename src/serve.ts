@@ -9777,7 +9777,7 @@ const STYLE = `
   .work-tools > summary .chevron { width: .875rem; height: .875rem; }
   .work-tools[open] > summary .chevron { transform: rotate(180deg); }
   .work-tools-menu {
-    position: absolute; right: 0; top: calc(100% + .375rem); z-index: 20; min-width: 11rem;
+    position: absolute; right: 0; top: calc(100% + .375rem); z-index: 20; min-width: 11rem; max-width: calc(100vw - 2rem);
     display: flex; flex-direction: column; padding: .375rem; border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
     background: var(--card); box-shadow: var(--shadow);
   }
@@ -9820,6 +9820,7 @@ const STYLE = `
   .work-meta .mono { overflow-wrap: anywhere; }
   .project-label { display: inline-block; padding: 0 .4rem; border: 1px solid var(--border); border-radius: 999px; font-size: .6875rem; line-height: 1.5; color: var(--foreground); }
   .work-detail { margin: 0 0 .25rem; font-size: .8125rem; line-height: 1.45; color: var(--muted-foreground); overflow-wrap: anywhere; }
+  .work-details .work-id { margin: 0 0 .25rem; }
   .work-action { display: inline-flex; align-items: center; min-height: 2.25rem; font-size: .8125rem; font-weight: 500; }
   .work-empty { padding: 2rem 0 1rem; max-width: 34rem; }
   .work-empty p { margin: 0 0 .75rem; color: var(--muted-foreground); line-height: 1.5; }
@@ -9843,7 +9844,11 @@ const STYLE = `
     .work-head { align-items: center; }
     .work-head h1 { margin-bottom: 0; }
     .work-details > summary, .work-action { min-height: 2.5rem; }
-    .work-tools-menu { right: auto; left: 0; }
+    /* The tools control sits at the head's right edge on every width, so
+       its menu keeps the desk's right-aligned anchor here too. A phone
+       override once re-anchored it at left: 0, which pushed the opened
+       menu past the viewport (right edge 441.5px at 390px) and widened
+       the document — found by the independent concise-UI review. */
     /* All four filters share the row (review fixes, finding 3): each tab
        takes an equal share, no tab scrolls out of view, the count sits on
        the label, and every target stays ≥ 40px tall. */
@@ -14011,20 +14016,23 @@ function workPage(
   const rowHtml = (row: WorkRow): string => {
     const actionHref = statusActionHref(row.status, row.id, row.status.action?.kind === "open-run" && row.liveRunId !== null ? row.liveRunId : row.resultRunId, row.publication?.prUrl ?? null);
     const action = row.status.action === null || actionHref === null ? "" : `<a class="work-action" href="${escape(actionHref)}">${escape(row.status.action.label)} →</a>`;
-    // The human-readable title leads; the stable id stays secondary; the
-    // project label appears when rows span projects (or the row is unplaced).
+    // The human-readable title leads; the project label appears when rows
+    // span projects (or the row is unplaced); the age stays beside it. The
+    // stable id is a machine fact — it rides inside Details (revision of
+    // the concise pass), still in the HTML and on the row's data-task.
     const project = data.multiProject || row.repo === null ? `<span class="project-label">${row.repo === null ? "unplaced" : escape(projectName(row.repo))}</span>` : "";
     return (
       `<article class="work-row" data-task="${escape(row.id)}" data-work-status="${escape(row.status.token)}" data-work-views="${row.status.views.join(" ")}">` +
       `<div class="work-row-main"><a class="work-title" href="${taskHref(row.id)}">${escape(row.title)}</a>` +
-      `<p class="work-meta">${project}<span class="mono">${escape(row.id)}</span><span>${escape(relativeAge(row.updatedAt, data.now))}</span></p></div>` +
+      `<p class="work-meta">${project}<span>${escape(relativeAge(row.updatedAt, data.now))}</span></p></div>` +
       // The status and the next act share one line (concise pass,
       // 2026-09-13); the diagnosis sentence is secondary, behind a native
       // disclosure that works without script and by keyboard — never
       // removed, never shrunk. The label itself names a failed check, a
       // needed approval, or an exception, so nothing critical folds away.
       `<div class="work-row-status">${statusLineHtml(row.status)}${action}` +
-      `<details class="work-details"><summary>Details</summary><p class="work-detail">${escape(row.status.detail)}</p></details></div>` +
+      `<details class="work-details"><summary>Details</summary><p class="work-detail">${escape(row.status.detail)}</p>` +
+      `<p class="work-meta work-id">Task <span class="mono">${escape(row.id)}</span></p></details></div>` +
       `</article>`
     );
   };
@@ -16903,6 +16911,7 @@ function taskBody(data: {
       : `<details class="section" id="${title.replace(/\s+/g, "-")}"${open ? " open" : ""}><summary><h2>${title}${count === undefined ? "" : ` <span class="lane-count">${count}</span>`}</h2></summary>` +
         html.replace(`<h2>${title}</h2>`, "") + `</details>`;
 
+  const statusBoxLeads = (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested";
   return [
     // The title leads; the machine facts — id, state, project, provenance —
     // follow as one mono meta row instead of riding the headline.
@@ -16916,10 +16925,16 @@ function taskBody(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
-    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)} ${resultStatus === null ? `<span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span>` : statusLineHtml(resultStatus)}</h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
+    // A finished result's status is NOT repeated in the title when the
+    // status box directly beneath leads with the same words (revision of
+    // the concise pass): the box, the receipt, and every other surface
+    // still carry the shared projection. A task without a result keeps
+    // its state chip, and a result whose box is displaced by a ceremony
+    // keeps the status line so the words never leave the page.
+    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)}${resultStatus === null ? ` <span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span>` : statusBoxLeads ? "" : ` ${statusLineHtml(resultStatus)}`}</h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
     // The planner and approval cards already answer "what now?". Avoid a
     // second status box above the one action the operator came here for.
-    (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested" ? dispatchStatus : "",
+    statusBoxLeads ? dispatchStatus : "",
     // The exact-run control (v52), directly under the scheduler's answer:
     // the one place a person stops or resumes THIS attempt.
     taskControlHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task"),

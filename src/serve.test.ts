@@ -11460,10 +11460,11 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       expect(rowsOf(html).map(row => row.id).sort(), view).toEqual([...expected].sort());
       expect(html, view).toMatch(new RegExp(`<a href="/work\\?view=${view}" class="active" aria-current="page"[^>]*>`));
     }
-    // The rows lead with the title; the id stays secondary; no raw "done"
-    // badge, and nothing says shipped, deployed, or verified where it is not.
+    // The rows lead with the title; the id rides inside Details (concise
+    // revision); no raw "done" badge, and nothing says shipped, deployed,
+    // or verified where it is not.
     expect(all).toContain('<a class="work-title" href="/t/t-checks">Escape quotes</a>');
-    expect(all).toMatch(/<p class="work-meta"><span class="mono">t-checks<\/span>/);
+    expect(all).toContain('<p class="work-meta work-id">Task <span class="mono">t-checks</span></p></details>');
     expect(all).not.toContain('badge-done">done');
     expect(all).not.toMatch(/\bshipped\b/i);
     expect(all).not.toContain("Deployed");
@@ -11513,10 +11514,14 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       const task = await page(cookie, `/t/${id}`);
       const chat = await page(cookie, `/chat?task=${id}`);
       const review = await page(cookie, `/review?result=${id}`);
-      // The task page: the title's status, the status box, and the receipt.
+      // The task page: the status box leads and the receipt agrees; the
+      // title carries the words ONCE — no status line rides the h1 while
+      // the box beneath says the same thing (concise revision).
       expect(task, id).toContain(`<div class="problem dispatch-status" id="run-status" data-dispatch-status="`.slice(0, 0) + `data-work-status="${token}"`);
-      expect(statusOf(task).map(one => one.label), id).toEqual([label, label]);
-      expect(/<h1 class="task-main-title">[^<]*<span class="status-line" data-work-status="([^"]+)"/.exec(task)?.[1], id).toBe(token);
+      expect(/id="run-status"[^>]*>\s*<div class="dispatch-copy"><strong>([^<]+)<\/strong>/.exec(task)?.[1], id).toBe(label);
+      expect(statusOf(task).map(one => one.label), id).toEqual([label]);
+      expect(/<h1 class="task-main-title">([^<]*)<\/h1>/.exec(task)?.[1], id).toMatch(/^\S.*\S$/);
+      expect(task, id).not.toMatch(/<h1 class="task-main-title">[^<]*<span class="status-line"/);
       expect(task, id).not.toContain('class="badge badge-done">done');
       // The focused chat: the journey headline and the receipt.
       expect(/<section class="card task-journey"[^>]*data-work-status="([^"]+)"/.exec(chat)?.[1], id).toBe(token);
@@ -11772,12 +11777,14 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       const chat = await page(cookie, "/chat?task=t-rev");
       const review = await page(cookie, "/review?result=t-rev");
       const run = await page(cookie, `/r/${latest}`);
-      const titleToken = /<h1 class="task-main-title">[^<]*<span class="status-line" data-work-status="([^"]+)"/.exec(task)?.[1];
+      // The title never repeats the box (concise revision): the h1 is the
+      // bare title, and the receipt is the page's only status line.
+      expect(task).toContain('<h1 class="task-main-title">Review me</h1>');
+      expect(statusOf(task)).toHaveLength(1);
       return {
         work: { token: work?.token, label: work?.label },
         box: { token: /id="run-status" data-dispatch-status="[^"]*" data-work-status="([^"]+)"/.exec(task)?.[1], label: /id="run-status"[^>]*>\s*<div class="dispatch-copy"><strong>([^<]+)<\/strong>/.exec(task)?.[1] },
-        title: { token: titleToken, label: statusOf(task)[0]?.label },
-        receipt: { token: /<section class="card completion-receipt"[\s\S]*?data-work-status="([^"]+)"/.exec(task)?.[1], label: statusOf(task)[1]?.label },
+        receipt: { token: /<section class="card completion-receipt"[\s\S]*?data-work-status="([^"]+)"/.exec(task)?.[1], label: statusOf(task)[0]?.label },
         chat: { token: /<section class="card task-journey"[^>]*data-work-status="([^"]+)"/.exec(chat)?.[1], label: /<span class="eyebrow">task journey<\/span><h2>([^<]+)<\/h2>/.exec(chat)?.[1] },
         chatReceipt: { token: statusOf(chat)[0]?.token, label: statusOf(chat)[0]?.label },
         cockpit: { token: /<p class="cockpit-chips">.*?data-work-status="([^"]+)"/s.exec(review)?.[1], label: statusOf(review)[0]?.label },
@@ -11853,12 +11860,12 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(work).toContain('<a href="/work" class="active" aria-current="page" title="Every task in view, most urgent first.">All<span class="count">');
     // The row: the status line, then the next act, then the diagnosis behind a native disclosure — never dropped.
     const row = /<article class="work-row" data-task="t-checks"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
-    expect(row).toMatch(/^<div class="work-row-main"><a class="work-title" href="\/t\/t-checks">Escape quotes<\/a><p class="work-meta">/);
-    expect(row).toMatch(/<div class="work-row-status"><span class="status-line" data-work-status="checks-failed"[^>]*>.*?<span class="status-label">Changes saved, but checks failed<\/span><\/span><a class="work-action" href="\/review\?result=t-checks">Review the failed check →<\/a><details class="work-details"><summary>Details<\/summary><p class="work-detail">The repository&#39;s approved check failed against this build \(exit 1\), so the result is not verified\.<\/p><\/details><\/div>$/);
+    expect(row).toMatch(/^<div class="work-row-main"><a class="work-title" href="\/t\/t-checks">Escape quotes<\/a><p class="work-meta"><span>[^<]+<\/span><\/p><\/div>/);
+    expect(row).toMatch(/<div class="work-row-status"><span class="status-line" data-work-status="checks-failed"[^>]*>.*?<span class="status-label">Changes saved, but checks failed<\/span><\/span><a class="work-action" href="\/review\?result=t-checks">Review the failed check →<\/a><details class="work-details"><summary>Details<\/summary><p class="work-detail">The repository&#39;s approved check failed against this build \(exit 1\), so the result is not verified\.<\/p><p class="work-meta work-id">Task <span class="mono">t-checks<\/span><\/p><\/details><\/div>$/);
     expect(work).not.toContain("<p class=\"work-detail\">The repository&#39;s approved check failed against this build (exit 1), so the result is not verified.</p></div>");
     // A row with no next act still discloses its reason; every row has exactly one disclosure.
     const queued = /<article class="work-row" data-task="t-queued"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
-    expect(queued).toMatch(/<details class="work-details"><summary>Details<\/summary><p class="work-detail">[^<]+<\/p><\/details><\/div>$/);
+    expect(queued).toMatch(/<details class="work-details"><summary>Details<\/summary><p class="work-detail">[^<]+<\/p><p class="work-meta work-id">Task <span class="mono">t-queued<\/span><\/p><\/details><\/div>$/);
     expect(work.match(/<article class="work-row"/g)).toHaveLength(3);
     expect(work.match(/<details class="work-details">/g)).toHaveLength(3);
     // The disclosure is native and unstyled as a card: no script needed, the summary is its own control.
@@ -11875,6 +11882,58 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(failed).toContain('href="/review?result=t-checks">Review the failed check</a>');
     expect(failed).toContain('<details class="proof-exception"><summary>Accept with exception</summary>');
     expect(failed).not.toContain('<details class="receipt-history">');
+    void checks;
+  });
+
+  test("concise revision (review of build 1548): the Work tools menu keeps its right anchor on a phone, the row's id rides inside Details beside project and age, and the task title never repeats the status box — while the receipt, an older run, the exact terms, and every action stay", async () => {
+    const cookie = await login();
+    await openProject(cookie, alpha);
+    const { run: older } = finished("t-rev", "Escape quotes", alpha, { verdict: "verified", reasons: ["the approved verification command passed"] });
+    const checks = finished("t-checks", "Round at cent precision", alpha, { verdict: "refuted", reasons: ["the repository's approved verification command exited 1"] });
+    seedTask("t-queued", "Rework the ledger export", alpha);
+    const work = await page(cookie, "/work");
+    // The menu: right-anchored on every width — the phone override that
+    // re-anchored it at left: 0 (and pushed it past a 390px viewport) is gone;
+    // the menu can never be wider than the viewport minus the page gutter.
+    expect(work).toContain(".work-tools-menu {\n    position: absolute; right: 0; top: calc(100% + .375rem); z-index: 20; min-width: 11rem; max-width: calc(100vw - 2rem);");
+    expect(work).not.toContain(".work-tools-menu { right: auto; left: 0; }");
+    expect(work).not.toMatch(/\.work-tools-menu\s*\{[^}]*left:/);
+    expect(work).toContain('<details class="work-tools"><summary>Work tools');
+    expect([...work.matchAll(/<nav class="work-tools-menu">([\s\S]*?)<\/nav>/g)][0]?.[1]?.match(/<a href="/g)).toHaveLength(8);
+    // The row: the visible meta is the age (and the project label when rows
+    // span projects); the stable id sits inside the same Details as the
+    // diagnosis, still in the HTML and still the row's data-task.
+    const row = /<article class="work-row" data-task="t-checks"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
+    const meta = /<p class="work-meta">([\s\S]*?)<\/p>/.exec(row)?.[1] ?? "";
+    expect(meta).toMatch(/^<span>[^<]+<\/span>$/);
+    expect(meta).not.toContain("t-checks");
+    expect(row).toContain('<details class="work-details"><summary>Details</summary><p class="work-detail">');
+    expect(row).toContain('<p class="work-meta work-id">Task <span class="mono">t-checks</span></p></details>');
+    expect(row).toContain('<span class="status-label">Changes saved, but checks failed</span>');
+    expect(row).toContain('<a class="work-action" href="/review?result=t-checks">Review the failed check →</a>');
+    for (const id of ["t-rev", "t-queued"]) expect(work).toContain(`<p class="work-meta work-id">Task <span class="mono">${id}</span></p></details>`);
+    // The task page: the status box leads with the result's words, the
+    // receipt agrees, and the title is the bare title — the words appear
+    // once above the fold. The failed check's exit code, its review action,
+    // and the exception control stay in the open.
+    const failed = await page(cookie, "/t/t-checks");
+    expect(failed).toContain('<h1 class="task-main-title">Round at cent precision</h1>');
+    expect(/id="run-status"[^>]*>\s*<div class="dispatch-copy"><strong>([^<]+)<\/strong>/.exec(failed)?.[1]).toBe("Changes saved, but checks failed");
+    expect(statusOf(failed).map(one => one.label)).toEqual(["Changes saved, but checks failed"]);
+    expect(failed).toContain("The project check failed (exit 1).");
+    expect(failed).toContain('href="/review?result=t-checks">Review the failed check</a>');
+    expect(failed).toContain('<details class="proof-exception"><summary>Accept with exception</summary>');
+    // A task without a result keeps its state chip in the title: the box
+    // beneath answers a different question ("will this run?").
+    const queued = await page(cookie, "/t/t-queued");
+    expect(queued).toMatch(/<h1 class="task-main-title">Rework the ledger export <span class="badge badge-queued">queued<\/span><\/h1>/);
+    // The selected older result keeps its own status on its run page.
+    const olderPage = await page(cookie, `/r/${older}`);
+    expect(/data-proof-verdict="[^"]*"><span class="status-line" data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("ready-to-review");
+    // The signed terms stay exact on the task page: the approved goal, word
+    // for word, and nothing pretends the checks passed.
+    expect(failed).toContain("do Round at cent precision");
+    expect(failed).not.toContain("Checks passed");
     void checks;
   });
 

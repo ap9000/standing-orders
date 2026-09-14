@@ -62,6 +62,28 @@ test("clears a submitted draft only on a server receipt, never on a network fail
   expect(box().value).toBe(""); expect(window.sessionStorage.getItem(key)).toBeNull();
 });
 
+test("the idle words are display-only: the same status request, the same 5s cadence, the same busy and unconfirmed sentences, and no other transport change", async () => {
+  const calls: { url: string; init: RequestInit | undefined }[] = [];
+  window.fetch = (async (url: string, init?: RequestInit) => { calls.push({ url, init }); return response(); }) as typeof window.fetch;
+  window.eval(CHAT_CONTINUITY_SCRIPT);
+  await check();
+  expect(status()).toBe("Connected.");
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.url).toBe("/chat/mate/status");
+  expect(calls[0]!.init).toMatchObject({ cache: "no-store" });
+  expect(scheduled.at(-1)!.ms).toBe(5000);
+  // An unconfirmed send and a reply in flight keep their own words.
+  enter("Check the proof"); submit();
+  await check();
+  expect(status()).toBe("Message not confirmed. Check the conversation before retrying.");
+  expect(calls.at(-1)!.url).toBe(`/chat/mate/status?request=${request}`);
+  expect(box().value).toBe("Check the proof");
+  response = async () => new Response(JSON.stringify({ session: 7, version: "", pending: true, received: false }));
+  await check();
+  expect(status()).toBe("Reply in progress. You can draft your next message or come back later.");
+  expect(scheduled.at(-1)!.ms).toBe(5000);
+});
+
 test("server errors and malformed responses retry instead of silently stopping", async () => {
   window.eval(CHAT_CONTINUITY_SCRIPT);
   for (const bad of [new Response("bad", { status: 503 }), new Response("bad json"), new Response(JSON.stringify({ session: 7 }))]) {

@@ -1,6 +1,11 @@
 /** Progressive enhancement for the existing chat, not a second transport.
  * Native POSTs and server-rendered approval forms remain the authority.
- * Only the message draft is kept in this tab, for at most 24 hours. */
+ * Only the message draft is kept in this tab, for at most 24 hours.
+ *
+ * The idle words are "Connected." (concise pass, 2026-09-13; explicitly
+ * permitted by the revision scope as display-only copy). Every other
+ * sentence, the status request, its intervals, the reload rules, the
+ * draft key, and the double-send latch are unchanged. */
 export const CHAT_CONTINUITY_SCRIPT = String.raw`
 (function(){
   var form=document.querySelector('.composer[data-chat-session]');

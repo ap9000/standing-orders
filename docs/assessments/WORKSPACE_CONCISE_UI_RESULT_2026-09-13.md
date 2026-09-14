@@ -218,3 +218,146 @@ What that means honestly:
 - Keyboard and disclosure behaviour were observed in headless Chromium
   only.
 - The full repository verifier is pending on the machine-owned gate.
+
+---
+
+## Revision — the independent review of build 1548 (2026-09-13)
+
+Branch `standing-orders/revise-workspace-concise-ui-20260913-from-4-annotations-`,
+built on the sealed head `2ebfbd659e1d9620fec2f10abbc38d8083350505` (run
+1548, the "source"). The four annotations and the review record
+(`WORKSPACE_CONCISE_UI_REVIEW_2026-09-13.md`, kept in the primary checkout)
+are applied here; the source run, its evidence, and its signed terms are
+not altered. Nothing below touches the store, the scheduler, authority,
+permissions, settings, providers, billing, installation, publication,
+deployment, dependencies, or transport.
+
+### The opened Work tools menu (annotation 96)
+
+The compact head moved the tools control to the right edge, but a phone
+rule (`.work-tools-menu { right: auto; left: 0 }` under 760 px) kept the
+menu anchored at the control's LEFT edge. Opened at 390×844 the source's
+menu measured **265.5–441.5 px** and widened the document to **442 px**
+(at 320×740: 195.5–371.5, 372 px). Reproduced by the revised proof against
+the source tree with the same fixture
+(`source/workspace/report.json` → `density["work-phone-tools-open"]`).
+
+Fix: the phone override is removed, so the menu keeps its right-aligned
+anchor on every width, and it can never exceed `100vw − 2rem`. The
+compact head, every destination, keyboard operation, and visible focus
+are unchanged. Opened now: 320 px → 128–304, 390 px → 198–374,
+1440 px → 880–1056; document width equals the viewport in every case.
+
+Explicit open-menu regression check (`scripts/workspace-proof.mjs`, section
+`c7`, at 320 / 390 / 1440): the menu is opened by keyboard (focus the
+summary, Enter); its own box has positive size and sits wholly inside the
+viewport; all eight destinations are computed visible, positive-size, and
+inside the viewport; `scrollWidth ≤ clientWidth` while open; Tab walks
+every destination in order with `:focus-visible` on each; Enter on the
+summary closes it; a tap opens it inside the viewport too. `src/serve.test.ts`
+asserts the CSS has no `left:` anchor for the menu and the eight links are
+present. Screenshots: `*-work-tools-open-keyboard.png` at each width.
+
+### The concise hierarchy (annotation 97)
+
+- **Work rows:** the stable id is no longer a visible meta line under
+  every title. It rides inside the row's existing native `Details`
+  (`<p class="work-meta work-id">Task <span class="mono">id</span></p>`
+  after the diagnosis), still in the HTML and still the row's `data-task`.
+  The meta line keeps the age (and the project label when rows span
+  projects). Keyboard-opening a row's Details shows the diagnosis and the
+  id together (browser-proved).
+- **Task page:** a finished result's status is no longer repeated in the
+  `<h1>` when the status box directly beneath leads with the same words.
+  The title is the bare title; the box and the receipt carry the shared
+  projection (`statusBoxLeads` in `taskPage`). A task with no result keeps
+  its state chip (the box beneath answers a different question), and a
+  result whose box is displaced by an approval ceremony or a planner
+  request keeps the status line, so the words never leave the page.
+  Preserved and re-asserted: the failed check's exit code, *Review the
+  failed check*, *Accept with exception*, the requirements disclosure, the
+  receipt's own status line, the review-in-flight lead and history, the
+  retry control, the older run's own verdict on its run page, the exact
+  signed goal, and both revision paths (`ui-polish-proof` 76/76).
+
+### Density, corrected (annotation 98)
+
+The source measured whole rows against `innerHeight`. At 390×844 the
+fixed tab bar covers y = 787–844 and the sticky header y = 0–91, so the
+source's "5 whole rows" was an overcount: the fifth row ended below 787.
+`visibleDensity` now measures the **unobscured band** between any
+fixed/sticky chrome pinned at the top or bottom edge (taken from the live
+boxes, recorded as `occluders`), counts whole rows inside that band, and
+labels its text figures `visibleCharsEstimate` / `visibleTextLinesEstimate`
+with a `method` sentence — characters prorated by the share of a text
+node's rects inside the band, lines bucketed at 6 px: sampling, not a glyph
+count. Whole rows, the band, and the document height are exact.
+
+All three trees were measured by the SAME function, fixture (`scripts/
+ui-polish-fixture.mjs { secondProject: true }`), flows, and exact viewports:
+*before* = `a626e87` (pre-concise base), *source* = `2ebfbd6` (build 1548),
+*after* = this tree. The historic trees are re-measured durably by
+`node scripts/workspace-proof.mjs --density-only --rev <rev> --out <dir>`,
+which extracts the revision read-only with `git archive`, builds it under
+`<dir>/tree`, and runs only the density pass against its fixture (the
+`report.json` records the resolved sha). The after numbers come from the
+strict run's own density pass. Outputs under the ignored
+`output/playwright/concise-ui-revision/{before,source,after}/workspace/`.
+This table supersedes the one above.
+
+| Surface | Band | Doc height b→s→a | Chars (est.) b→s→a | Lines (est.) b→s→a | Whole rows b→s→a | Mean row px b→s→a |
+| --- | --- | --- | --- | --- | --- | --- |
+| work-narrow (320×740) | 91–683 | 3411 → 2599 → 2574 | 466 → 370 → 332 | 21 → 19 → 18 | 1 → 3 → 3 | 178 → 135 → 133 |
+| work-phone (390×844) | 91–787 | 3060 → 2342 → 2316 | 641 → 535 → 471 | 23 → 20 → 21 | **3 → 4 → 4** | 160 → 122 → 120 |
+| work-desktop (1440×900) | 91–900 | 2261 → 1638 → 1624 | 1208 → 939 → 873 | 36 → 35 → 37 | 5 → 8 → 8 | 115 → 79 → 79 |
+| chat-fresh-phone (390×844) | 91–787 | 1016 → 849 → 849 | 523 → 233 → 233 | 16 → 11 → 11 | — | — |
+| chat-fresh-1440×900 | 91–900 | 900 → 900 → 900 | 599 → 279 → 279 | 17 → 14 → 14 | — | — |
+| chat-fresh-1280×800 | 91–800 | 800 → 800 → 800 | 599 → 279 → 279 | 17 → 14 → 14 | — | — |
+| chat-focused-populated-phone (390×844, scrolled to the message) | 91–787 | 2309 → 2178 → 2178 | 410 → 347 → 347 | 11 → 11 → 11 | — | — |
+| chat-focused-populated-desktop (1440×900, scrolled) | 91–900 | 1812 → 1738 → 1738 | 733 → 670 → 670 | 25 → 25 → 25 | — | — |
+| task-failed-checks-phone (390×844) | 91–787 | 3213 → 3129 → 3106 | 606 → 606 → 604 | 19 → 19 → 19 | — | — |
+| task-failed-checks-desktop (1440×900) | 91–900 | 2157 → 2111 → 2111 | 1794 → 1740 → 1708 | 49 → 47 → 47 | — | — |
+| task-pending-review-phone (390×844) | 91–787 | 3467 → 3335 → 3312 | 603 → 603 → 622 | 20 → 20 → 20 | — | — |
+
+Honest reading: at 390×844 the concise Work page fits **four** whole rows
+in the unobscured band where the base fit three (the last whole row ends
+at y = 664, the tab bar starts at 787; a fifth row is partly covered);
+at 320×740 three where the base fit one; on a desk eight where five. The
+first row starts 68 px higher on a phone (267 → 199). Tucking the ids
+trims the phone Work viewport by another ~64 estimated characters and 26
+px of page height. The failed-check task page's first phone viewport is
+essentially unchanged in text (606 → 604 estimated characters): the
+title lost its repeated status line, and the same amount of receipt text
+rose into view. The pending-review phone viewport's estimate rises
+(603 → 622) for the same reason — more of the receipt is now inside the
+band. No percentage claim is made beyond these numbers.
+
+### `src/chat-continuity.ts` (annotation 99)
+
+Build 1548 shortened the idle status to "Connected." without naming the
+shared file in its declared touched paths. This revision's scope permits
+that display-only copy explicitly. The file's header now says so; the
+string is retained; nothing else in the script changed. A new test
+("the idle words are display-only …") pins the transport around it: the
+same `/chat/mate/status` request with `cache: 'no-store'`, the same 5 s
+cadence, `?request=` binding on a submitted draft, and the unchanged
+"Reply in progress…" and "Message not confirmed…" sentences. Every prior
+continuity test passes unchanged.
+
+### Verification (this tree)
+
+| Command | Result |
+| --- | --- |
+| `npx vitest run src/serve.test.ts src/chat-continuity.test.ts src/workspace-ui.test.ts src/dispatch.test.ts` | 4 files, 297 passed (2 new tests), exit 0 |
+| `npm run build && node scripts/workspace-proof.mjs --out output/playwright/concise-ui-revision/after/workspace --strict` | 227/227 checks, 46 screenshots, exit 0 |
+| `node scripts/workspace-proof.mjs --density-only --rev a626e87 --out output/playwright/concise-ui-revision/before/workspace` and the same with `--rev 2ebfbd6 … /source/workspace` | 14 screenshots each, exit 0 (the before / source columns above) |
+| `node scripts/ui-polish-proof.mjs --out output/playwright/concise-ui-revision/after/ui-polish --strict` | 76/76 checks, 21 screenshots, exit 0 |
+| `node /Users/alekseypelletier/Documents/standing-orders/output/playwright/workspace-boundary-review.mjs "$PWD"` (the reviewer's five-case boundary script) | all five `ok: true`, exit 0 |
+| `npm run typecheck` | exit 0 |
+| `npm run typecheck && npm test -- --run --reporter=dot --no-file-parallelism && npm run build` (the unchanged approved verifier) | **pending** — runs once through the machine-owned sealing gate; not duplicated here |
+
+Files: `src/serve.ts`, `src/serve.test.ts`, `src/chat-continuity.ts`,
+`src/chat-continuity.test.ts`, `scripts/workspace-proof.mjs`, this record.
+`scripts/ui-polish-proof.mjs` needed no change (its 76 checks pass as
+they are). The verifier, `package.json`, the store, the scheduler, and
+every authority door are unchanged.
