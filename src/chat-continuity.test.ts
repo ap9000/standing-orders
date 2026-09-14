@@ -58,7 +58,7 @@ test("clears a submitted draft only on a server receipt, never on a network fail
   expect(scheduled.at(-1)!.ms).toBe(10000);
   response = async () => new Response(JSON.stringify({ session: 7, version: "", pending: false, received: true }));
   await check();
-  expect(status()).toBe('Connected · changes appear as cards for you to confirm.');
+  expect(status()).toBe('Connected.');
   expect(box().value).toBe(""); expect(window.sessionStorage.getItem(key)).toBeNull();
 });
 

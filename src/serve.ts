@@ -8946,6 +8946,18 @@ const STYLE = `
   .receipt-shot:hover { color: var(--foreground); }
   .receipt-caveats, .receipt-coverage { margin-top: .8rem; padding: .7rem .8rem; border-left: 2px solid var(--border); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: color-mix(in srgb, var(--muted) 62%, transparent); font-size: .78rem; }
   .receipt-caveats ul, .receipt-coverage ul { margin: .3rem 0 0; padding-left: 1.15rem; }
+  /* Secondary receipt detail (concise pass, 2026-09-13): native
+     disclosures in the receipt's own quiet tone — no card chrome. */
+  details.receipt-coverage, details.receipt-coverage[open] { padding: 0 .8rem .1rem; border-top: 0; border-right: 0; border-bottom: 0; }
+  details.receipt-coverage > summary { padding: .5rem 0; font-weight: 600; color: var(--foreground); font-size: .78rem; }
+  details.receipt-coverage[open] > summary { padding-bottom: .2rem; }
+  details.receipt-coverage ul { margin: 0 0 .5rem; }
+  .receipt-history, .receipt-history[open] { margin: .35rem 0 0; padding: 0; border: 0; background: none; border-radius: 0; }
+  .receipt-history > summary { padding: .35rem 0; min-height: 2.25rem; display: inline-flex; align-items: center; gap: .25rem; font-size: .8125rem; list-style: none; }
+  .receipt-history > summary::-webkit-details-marker { display: none; }
+  .receipt-history > summary::before { content: "▸"; }
+  .receipt-history[open] > summary::before { content: "▾"; }
+  .receipt-history .receipt-review { margin: 0 0 .35rem; }
   .semantic-coverage p { margin: .2rem 0; }
   .receipt-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem 1rem; margin-top: .9rem; }
   .receipt-actions > a:not(.button-link) { font-size: .78rem; font-weight: 550; }
@@ -9784,17 +9796,31 @@ const STYLE = `
   .work-list { display: flex; flex-direction: column; }
   .work-row {
     display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: .5rem 1.5rem; align-items: start;
-    padding: .875rem 0; border-bottom: 1px solid var(--border);
+    padding: .75rem 0; border-bottom: 1px solid var(--border);
   }
   .work-row:last-child { border-bottom: 0; }
   .work-row-main, .work-row-status { min-width: 0; }
+  /* Concise rows (2026-09-13): the status, the next act, and the Details
+     toggle share one wrapping line; an opened disclosure is wider than
+     its summary, so it wraps onto its own full-width line by itself. */
+  .work-row-status { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .875rem; }
+  .work-details, .work-details[open] { max-width: 100%; margin: 0; padding: 0; border: 0; background: none; border-radius: 0; }
+  .work-details > summary {
+    list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: .25rem;
+    min-height: 2.25rem; padding: 0 .25rem; margin: 0 -.25rem; border-radius: .375rem;
+    font-size: .8125rem; font-weight: 500; color: var(--muted-foreground);
+  }
+  .work-details > summary::-webkit-details-marker { display: none; }
+  .work-details > summary::before { content: "▸"; }
+  .work-details[open] > summary::before { content: "▾"; }
+  .work-details > summary:hover { color: var(--foreground); }
   .work-title { display: block; font-weight: 600; font-size: .9375rem; line-height: 1.35; color: var(--foreground); text-decoration: none; overflow-wrap: anywhere; }
   .work-title:hover { text-decoration: underline; }
   .work-meta { display: flex; flex-wrap: wrap; gap: .25rem .625rem; margin: .25rem 0 0; font-size: .75rem; color: var(--muted-foreground); }
   .work-meta .mono { overflow-wrap: anywhere; }
   .project-label { display: inline-block; padding: 0 .4rem; border: 1px solid var(--border); border-radius: 999px; font-size: .6875rem; line-height: 1.5; color: var(--foreground); }
-  .work-detail { margin: .2rem 0 0; font-size: .8125rem; line-height: 1.45; color: var(--muted-foreground); overflow-wrap: anywhere; }
-  .work-action { display: inline-block; margin-top: .3rem; font-size: .8125rem; font-weight: 500; }
+  .work-detail { margin: 0 0 .25rem; font-size: .8125rem; line-height: 1.45; color: var(--muted-foreground); overflow-wrap: anywhere; }
+  .work-action { display: inline-flex; align-items: center; min-height: 2.25rem; font-size: .8125rem; font-weight: 500; }
   .work-empty { padding: 2rem 0 1rem; max-width: 34rem; }
   .work-empty p { margin: 0 0 .75rem; color: var(--muted-foreground); line-height: 1.5; }
   .work-empty .row { display: flex; align-items: center; gap: 1rem; }
@@ -9813,9 +9839,10 @@ const STYLE = `
      widening the page (the phone task-list overflow, package 1). */
   .path-words { overflow-wrap: anywhere; word-break: break-word; }
   @media (max-width: 760px) {
-    .work-row { grid-template-columns: minmax(0, 1fr); gap: .375rem; padding: .75rem 0; }
-    .work-head { flex-direction: column; align-items: stretch; }
-    .work-tools { align-self: flex-start; }
+    .work-row { grid-template-columns: minmax(0, 1fr); gap: .125rem; padding: .625rem 0; }
+    .work-head { align-items: center; }
+    .work-head h1 { margin-bottom: 0; }
+    .work-details > summary, .work-action { min-height: 2.5rem; }
     .work-tools-menu { right: auto; left: 0; }
     /* All four filters share the row (review fixes, finding 3): each tab
        takes an equal share, no tab scrolls out of view, the count sits on
@@ -10353,6 +10380,8 @@ const STYLE = `
   .chat-empty > strong { display: block; font-size: 1.2rem; letter-spacing: -.025em; }
   .chat-empty > .meta { margin-top: .4rem; }
   .chat-prompts { display: flex; justify-content: center; flex-wrap: wrap; gap: .5rem; margin-top: 1.25rem; }
+  /* The composer's status line takes no room until it has a state to report. */
+  .composer-hint:empty { display: none; }
   .chat-prompts form { margin: 0; }
   .chat-prompts button { min-height: 2.35rem; box-shadow: none; background: var(--glass); padding-inline: .9rem; }
   .chat-thinking { display: flex; align-items: center; gap: .75rem; padding: .75rem .85rem; }
@@ -12590,7 +12619,7 @@ function taskChatHeading(focus: TaskChatFocus): string {
   return (
     `<div class="chat-head task-chat-head"><div>` +
     `<p class="meta chat-task-back"><a href="${taskHref(focus.id)}">← task overview</a></p>` +
-    `<div class="task-chat-title-line"><div><h1>${escape(focus.title)}</h1><p class="meta">Ask, steer, or revise this task in the same unified conversation.</p></div>${taskViewSwitch(focus.id, "ask")}</div>` +
+    `<div class="task-chat-title-line"><div><h1>${escape(focus.title)}</h1></div>${taskViewSwitch(focus.id, "ask")}</div>` +
     `</div></div>`
   );
 }
@@ -12752,15 +12781,12 @@ function matePromptStarters(csrf: string, focus: TaskChatFocus | null = null): s
     ? [
         ["brief me", "Brief me on what needs my attention, what is building, and the highest-leverage next action across every project."],
         ["decisions", "Walk me through the open decisions, their options, and what you recommend I inspect first."],
-        ["building now", "What is building right now across every project? Call out anything preventing progress or any unusual risk."],
-        ["prioritize queues", "Review every project's queue and propose the most valuable reversible reprioritization."],
         ["new task", "Help me define a new task. Ask only about choices that materially change the result; otherwise use your judgment and sensible reversible defaults."],
       ] as const
     : [
         ["what’s happening", "Read this task and explain its current status, what is blocking it, and what should happen next."],
-        ["revise scope", "Read this task and propose a tighter scope if that would improve the outcome. Explain why before I confirm anything."],
-        ["steer next attempt", "Read this task and propose concise guidance for its next attempt. Keep it inside the approved scope."],
         ["check the proof", "Review the evidence recorded for this task and tell me what is proven and what is still unverified."],
+        ["revise scope", "Read this task and propose a tighter scope if that would improve the outcome. Explain why before I confirm anything."],
       ] as const;
   return `<div class="chat-prompts" aria-label="suggested questions">${prompts.map(([label, message]) =>
     `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
@@ -12771,7 +12797,7 @@ function matePromptStarters(csrf: string, focus: TaskChatFocus | null = null): s
 
 function chatHeading(copy: string, projectCount: number, live: boolean, showProjectToggle = true): string {
   return (
-    `<div class="chat-head"><div><h1>chat</h1><p class="meta">${escape(copy)}</p></div>` +
+    `<div class="chat-head"><div><h1>chat</h1>${copy === "" ? "" : `<p class="meta">${escape(copy)}</p>`}</div>` +
     `<div class="chat-head-actions">` +
     (showProjectToggle
       ? `<button type="button" class="chat-project-toggle quiet" aria-controls="chat-project-panel" aria-expanded="false" title="show or hide projects">` +
@@ -13396,7 +13422,7 @@ function matePage(chrome: Chrome, data: {
   const returnTo = data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id);
   const conversation: string[] = [
     data.focusTask === null
-      ? chatHeading("Ask about any project. Changes come back as cards you confirm.", data.projects.length, true)
+      ? chatHeading("", data.projects.length, true)
       : taskChatHeading(data.focusTask),
     data.focusTask === null ? "" : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
     // The overview folds by default (UI polish 2026-09-13): the chrome
@@ -13424,7 +13450,7 @@ function matePage(chrome: Chrome, data: {
   if (data.messages.length === 0) {
     conversation.push(
       `<div class="chat-empty"><strong>${data.focusTask === null ? "What do you want to get done?" : "What do you want to understand or change?"}</strong>` +
-      `<p class="meta">${data.focusTask === null ? "Describe the outcome in your own words. I’ll infer the routine details and only ask when a choice materially changes the result." : "I’ll read the current task first. Ask naturally, or choose a useful starting point."}</p></div>`,
+      `<p class="meta">${data.focusTask === null ? "Describe the outcome you want; changes come back as cards you confirm." : "I read the task first — ask anything, or start below."}</p></div>`,
     );
   }
   for (const message of data.messages) {
@@ -13459,9 +13485,11 @@ function matePage(chrome: Chrome, data: {
     `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask === null ? "Describe what you want done…" : "Ask about status, revise scope, or steer the next attempt…"}"></textarea></label>`,
     `<button type="submit" aria-label="${data.pending === null ? "send message" : "wait for the current reply before sending"}"${data.pending === null ? "" : " disabled"}>send</button>`,
     `</form>`,
-    `<p class="meta composer-hint" id="chat-connection" role="status" aria-live="polite">${data.pending === null ? "Changes appear as cards for you to confirm." : "Reply in progress. You can draft your next message or come back later."}</p>`,
+    // Concise pass (2026-09-13): the status line speaks only when there is
+    // a state to report — a reply in progress here, the connection from
+    // the continuity script — and the composer carries no second intro.
+    `<p class="meta composer-hint" id="chat-connection" role="status" aria-live="polite">${data.pending === null ? "" : "Reply in progress. You can draft your next message or come back later."}</p>`,
     data.messages.length === 0 ? matePromptStarters(data.csrf, data.focusTask) : "",
-    data.focusTask === null ? `<p class="meta composer-hint">One message is enough. I’ll infer the title, scope, and proof; say “use your judgment” to accept sensible reversible defaults.</p>` : "",
     `<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">${escape(subscription ? "membership" : data.config.provider)}</span></summary>`,
     `<div class="chat-budget"><span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span><span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span>` +
       (subscription
@@ -13964,7 +13992,7 @@ function workPage(
     `<nav class="work-views" aria-label="work views"${data.truncated ? ` data-work-bound="${data.cap}"` : ""}>` +
     WORK_VIEWS.map(
       one =>
-        `<a href="${one.key === "all" ? "/work" : `/work?view=${one.key}`}"${one.key === data.view ? ' class="active" aria-current="page"' : ""}${data.truncated ? ` title="${escape(one.key === "all" ? `More than ${data.cap} tasks are in view; the newest ${data.cap} are listed.` : `Counted among the newest ${data.cap} tasks in view.`)}"` : ""}>` +
+        `<a href="${one.key === "all" ? "/work" : `/work?view=${one.key}`}"${one.key === data.view ? ' class="active" aria-current="page"' : ""} title="${escape(data.truncated ? (one.key === "all" ? `More than ${data.cap} tasks are in view; the newest ${data.cap} are listed.` : `Counted among the newest ${data.cap} tasks in view.`) : one.hint)}">` +
         `${one.label}<span class="count">${countWords(one.key)}</span></a>`,
     ).join("") +
     `</nav>`;
@@ -13990,7 +14018,13 @@ function workPage(
       `<article class="work-row" data-task="${escape(row.id)}" data-work-status="${escape(row.status.token)}" data-work-views="${row.status.views.join(" ")}">` +
       `<div class="work-row-main"><a class="work-title" href="${taskHref(row.id)}">${escape(row.title)}</a>` +
       `<p class="work-meta">${project}<span class="mono">${escape(row.id)}</span><span>${escape(relativeAge(row.updatedAt, data.now))}</span></p></div>` +
-      `<div class="work-row-status">${statusLineHtml(row.status)}<p class="work-detail">${escape(row.status.detail)}</p>${action}</div>` +
+      // The status and the next act share one line (concise pass,
+      // 2026-09-13); the diagnosis sentence is secondary, behind a native
+      // disclosure that works without script and by keyboard — never
+      // removed, never shrunk. The label itself names a failed check, a
+      // needed approval, or an exception, so nothing critical folds away.
+      `<div class="work-row-status">${statusLineHtml(row.status)}${action}` +
+      `<details class="work-details"><summary>Details</summary><p class="work-detail">${escape(row.status.detail)}</p></details></div>` +
       `</article>`
     );
   };
@@ -14013,7 +14047,9 @@ function workPage(
     ].map(([href, label]) => `<a href="${href}">${label}</a>`).join("") +
     `</nav></details>`;
   return screen("work", [
-    `<div class="work-head"><div><h1>work</h1><p class="hint">${escape(current.hint)}</p></div>${tools}</div>`,
+    // One compact line: the title and the tools control. The view's own
+    // words ride the active tab's title rather than a paragraph above it.
+    `<div class="work-head"><h1>work</h1>${tools}</div>`,
     tabs,
     list,
     bound,
@@ -18058,6 +18094,11 @@ type CompletionReceiptView = {
    * review standing under the run's policy, plus every named context gap.
    * Rendered beside the machine verdict on the task and chat receipts. */
   coverage: string[];
+  /** Concise pass (2026-09-13): the coverage lines are secondary — behind a
+   * disclosure — only while nothing is owed: review optional and not yet
+   * settled, or satisfied. A strict-quality shortfall, a strict review
+   * still pending, or a named context gap stays in the open. */
+  coverageSecondary: boolean;
   diff:
     | { fileCount: number; additions: number; deletions: number; binaryCount: number; filesTruncated: boolean }
     | { problem: string }
@@ -18126,6 +18167,7 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
   const proof = proofBundleView(store, run, artifacts, root);
   const terminal = terminalDiffView(artifacts, root);
   const stat = terminal?.stat ?? null;
+  const coverage = semanticCoverage(proof?.matrix ?? [], run.qualityMode ?? "default");
   return {
     runId: run.id,
     role: run.role,
@@ -18150,7 +18192,8 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
           },
     screenshots: proof?.screenshots ?? [],
     caveats: proof?.proof?.caveats ?? [],
-    coverage: coverageWords(semanticCoverage(proof?.matrix ?? [], run.qualityMode ?? "default")),
+    coverage: coverageWords(coverage),
+    coverageSecondary: coverage.contextGaps.length === 0 && (coverage.satisfied === true || (coverage.satisfied === null && !coverage.required)),
   };
 }
 
@@ -18579,10 +18622,14 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
       : `<div class="receipt-caveats"><strong>Before you move on</strong><ul>${view.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
   // v51: semantic coverage, distinct from the machine proof word above —
   // the same lines the CLI prints, so chat and terminal cannot disagree.
+  // Nothing owed (optional and unsettled, or satisfied) folds behind a
+  // disclosure; a strict shortfall or a context gap stays in the open.
   const coverage =
     view.coverage.length === 0
       ? ""
-      : `<div class="receipt-coverage" data-semantic-coverage=""><strong>Independent review</strong><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+      : view.coverageSecondary
+        ? `<details class="receipt-coverage" data-semantic-coverage="secondary"><summary>Independent review</summary><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></details>`
+        : `<div class="receipt-coverage" data-semantic-coverage=""><strong>Independent review</strong><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
   return (
     `<section class="card completion-receipt" data-card-kind="result-receipt">` +
     `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>${escape(receiptHeadingOf(view.outcome, view.publication))}</h2></div>` +
@@ -18591,9 +18638,11 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     // publication line is the observed record — never "shipped".
     `<p class="receipt-summary">${escape(view.summary ?? (view.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff."))}</p>` +
     `<p class="receipt-publication" data-receipt-publication="${escape(view.publication === null ? "none" : view.publication.state)}">${escape(receiptPublicationWords(view.publication))}</p>` +
-    // A review in flight is the receipt's primary status too; its detail
-    // carries the earlier verdict as history (review fixes, finding 4).
-    (inReview ? `<p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p>` : "") +
+    // A review in flight is the receipt's primary status too (its chip
+    // above); the detail — the earlier verdict as history (review fixes,
+    // finding 4) — is secondary, behind a native disclosure that reads the
+    // same words on the task page and in chat.
+    (inReview ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
     // The matrix count is the proof's own citation; it reads as verified
     // only when the machine verified the result (workspace package 1).
     `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>${stored.tone === "problem" ? "cited by the agent — not verified" : stored.token === "agent-attested" ? "cited by the agent, no independent check" : "against the approved scope"}</small></span>` +

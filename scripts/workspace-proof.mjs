@@ -13,6 +13,11 @@
  * running, and failed review reads the same on all six result surfaces;
  * and no surface makes a negative claim about checks or merges it cannot
  * see.
+ * Concise pass (2026-09-13): Work rows fold their diagnosis behind a native
+ * Details disclosure, the chat carries one contextual sentence and three
+ * starters, the receipt folds only what is not owed — and the report
+ * records VISIBLE density (rendered text inside the first viewport, whole
+ * rows inside it), never raw DOM text, for the before/after comparison.
  *
  *   node scripts/workspace-proof.mjs [--out output/playwright/workspace-1/after] [--strict]
  *
@@ -142,6 +147,44 @@ async function payload(page, path, label) {
   report.payloads[label] = { path, htmlBytes: Buffer.byteLength(html), inlineCssBytes: style, inlineJsBytes: script };
   return html;
 }
+/** Visible density (concise pass): what a reader actually sees in the
+ * first viewport. Rendered text only — every text node whose client rects
+ * intersect the viewport, from elements that are computed visible (a
+ * closed <details> body, display:none, and aria-hidden never count) —
+ * summed as characters and as distinct text lines; plus the Work rows
+ * whose whole box sits inside the viewport, and those partly inside. */
+const visibleDensity = (page, viewport) => page.evaluate(([vw, vh]) => {
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let chars = 0;
+  const lineTops = new Set();
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    const el = node.parentElement;
+    if (!el || el.closest('script,style,noscript,template,[aria-hidden="true"]')) continue;
+    if (typeof el.checkVisibility === 'function' && !el.checkVisibility({ visibilityProperty: true, opacityProperty: true })) continue;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const all = [...range.getClientRects()].filter(r => r.width > 0 && r.height > 0);
+    if (all.length === 0) continue;
+    const shown = all.filter(r => r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw);
+    if (shown.length === 0) continue;
+    chars += Math.round(text.length * shown.length / all.length);
+    for (const r of shown) lineTops.add(Math.round(r.top / 6));
+  }
+  const rows = [...document.querySelectorAll('.work-row')].map(row => row.getBoundingClientRect());
+  return {
+    viewport: `${vw}x${vh}`,
+    documentHeight: document.documentElement.scrollHeight,
+    visibleChars: chars,
+    visibleTextLines: lineTops.size,
+    rowsWhollyVisible: rows.filter(r => r.top >= 0 && r.bottom <= vh).length,
+    rowsPartlyVisible: rows.filter(r => r.bottom > 0 && r.top < vh).length,
+    rowsTotal: rows.length,
+    firstRowTop: rows[0] ? Math.round(rows[0].top) : null,
+    meanRowHeight: rows.length === 0 ? null : Math.round(rows.reduce((sum, r) => sum + r.height, 0) / rows.length),
+  };
+}, [viewport.width, viewport.height]);
 const countsOf = page => page.evaluate(() => Object.fromEntries([...document.querySelectorAll('.work-views a')].map(a => [a.childNodes[0].textContent.trim(), Number(a.querySelector('.count')?.textContent)])));
 const rowsOf = page => page.evaluate(() => [...document.querySelectorAll('.work-row')].map(row => ({ id: row.getAttribute('data-task'), token: row.getAttribute('data-work-status'), views: row.getAttribute('data-work-views').split(' '), label: row.querySelector('.status-label')?.textContent ?? null })));
 
@@ -420,6 +463,144 @@ try {
     await ctx.close();
   }
 
+  // ---- c6: the concise pass — Work rows, chat copy, receipt disclosures ----
+  report.density = {};
+  for (const [name, viewport] of [['narrow', VIEWPORTS.narrow], ['phone', VIEWPORTS.phone], ['desktop', VIEWPORTS.desktop]]) {
+    const { ctx, page } = await context(viewport);
+    await openProject(page, fixture.repos.main);
+    await page.goto(`${fixture.url}/work`);
+    report.density[`work-${name}`] = await visibleDensity(page, viewport);
+    const head = await page.evaluate(() => ({ hint: document.querySelector('.work-head .hint') !== null, h1: document.querySelector('.work-head > h1') !== null, tools: document.querySelector('.work-head > details.work-tools > summary') !== null }));
+    check(`c6 ${name}: the Work head is the title and the tools control on one line — no hint paragraph`, head.h1 && head.tools && !head.hint, JSON.stringify(head));
+    const rows = await page.evaluate(() => [...document.querySelectorAll('.work-row')].map(row => {
+      const summary = row.querySelector('.work-details > summary');
+      const detail = row.querySelector('.work-detail');
+      const action = row.querySelector('.work-action');
+      const box = el => { const r = el?.getBoundingClientRect(); return r ? Math.round(r.height) : null; };
+      return {
+        id: row.getAttribute('data-task'),
+        status: row.querySelector('.status-line .status-label')?.textContent ?? null,
+        statusShown: row.querySelector('.status-line')?.checkVisibility() ?? false,
+        action: action?.textContent ?? null, actionShown: action === null || action.checkVisibility(),
+        actionHeight: box(action), summaryHeight: box(summary),
+        summaryShown: summary?.checkVisibility() ?? false,
+        detailFolded: detail !== null && detail.textContent.trim().length > 0 && !detail.checkVisibility(),
+        order: [...row.querySelector('.work-row-status')?.children ?? []].map(el => el.className || el.tagName.toLowerCase()).join('>'),
+      };
+    }));
+    const bad = rows.filter(r => !(r.statusShown && r.actionShown && r.summaryShown && r.detailFolded && r.order.startsWith('status-line>') && r.order.endsWith('work-details')));
+    check(`c6 ${name}: every row shows its status and next act, then folds its diagnosis behind a closed native Details disclosure (${rows.length} rows)`, rows.length > 0 && bad.length === 0, bad.map(r => `${r.id}: ${JSON.stringify(r)}`).join('; ') || `rows=${rows.length}`);
+    const target = viewport.width < 760 ? 40 : 36;
+    check(`c6 ${name}: every Details toggle and next-act link is at least ${target}px tall`, rows.every(r => r.summaryHeight >= target && (r.actionHeight === null || r.actionHeight >= target)), JSON.stringify(rows.map(r => [r.id, r.summaryHeight, r.actionHeight])));
+    check(`c6 ${name}: the failed check, the exception, the needed approval, and the failed review stay in the open as the row's status`, [[T.failedChecks, 'Changes saved, but checks failed'], [T.accepted, 'Accepted with an exception'], [T.reviewFailed, 'Review failed — retry available'], [T.failed, 'Needs a retry']].every(([id, label]) => rows.find(r => r.id === id)?.status === label), JSON.stringify(rows.map(r => [r.id, r.status])));
+    check(`c6 ${name}: the row type size did not shrink (title ≥ 15px, status ≥ 14px)`, await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.work-title')).fontSize) >= 15 && parseFloat(getComputedStyle(document.querySelector('.work-row .status-line')).fontSize) >= 14));
+    // The disclosure by keyboard: Tab reaches the first summary; Enter opens it and the words appear; Enter closes it again.
+    await page.focus(`.work-row[data-task="${T.failedChecks}"] .work-details > summary`);
+    const focused = await page.evaluate(() => document.activeElement?.matches('.work-details > summary') === true);
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(100);
+    const opened = await page.evaluate(id => { const row = document.querySelector(`.work-row[data-task="${id}"]`); return { open: row.querySelector('.work-details').open, shown: row.querySelector('.work-detail').checkVisibility(), words: row.querySelector('.work-detail').textContent }; }, T.failedChecks);
+    const openOverflow = await noOverflow(page);
+    if (name === 'phone') { await scrollTo(page, `.work-row[data-task="${T.failedChecks}"]`, 120); await shot(page, 'phone-work-details-open', 'Work at 390×844 with one row’s Details opened by keyboard: the diagnosis appears under its status and next act (fixture)'); }
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(100);
+    const closed = await page.evaluate(id => !document.querySelector(`.work-row[data-task="${id}"] .work-details`).open, T.failedChecks);
+    check(`c6 ${name}: a row's Details opens and closes by keyboard, shows the exact diagnosis, and never widens the page`, focused && opened.open && opened.shown && /approved check failed against this build \(exit 1\)/.test(opened.words) && closed && openOverflow.ok, JSON.stringify({ focused, opened, closed, openOverflow }));
+    await ctx.close();
+  }
+  {
+    // A populated FOCUSED conversation on a phone and a desk: the empty-state
+    // sentence goes with the emptiness, every real message stays, the
+    // journey and receipt keep the status, and three starters remain.
+    for (const [name, viewport] of [['phone', VIEWPORTS.phone], ['desktop', VIEWPORTS.desktop]]) {
+      const { ctx, page } = await context(viewport);
+      await openProject(page, fixture.repos.main);
+      await page.goto(`${fixture.url}/chat`);
+      if (await page.$('form[action="/chat/mate/end"]')) { await page.evaluate(() => { const d = document.querySelector('.chat-session-details'); if (d) d.open = true; }); await submit(page, 'form[action="/chat/mate/end"] button[type="submit"]'); }
+      await page.fill('form[action="/chat/mate/mint"] input[name="token"]', fixture.password);
+      await submit(page, 'form[action="/chat/mate/mint"] button[type="submit"]');
+      // The fresh thread: one contextual sentence, three starters, no intro over the heading, nothing under the composer.
+      await page.waitForTimeout(400);
+      const fresh = await page.evaluate(() => ({
+        headMeta: document.querySelector('.chat-head > div > p.meta')?.textContent ?? null,
+        emptyLines: [...document.querySelectorAll('.chat-empty p')].map(p => p.textContent),
+        starters: [...document.querySelectorAll('.chat-prompts form button')].map(b => b.textContent),
+        hints: [...document.querySelectorAll('.composer-hint')].map(p => p.textContent),
+        connection: document.getElementById('chat-connection')?.textContent ?? null,
+        oneMessage: document.body.textContent.includes('One message is enough'),
+      }));
+      check(`c6 ${name}: a fresh conversation keeps one contextual sentence and three starters — no heading intro, no second hint`, fresh.headMeta === null && fresh.emptyLines.length === 1 && fresh.starters.length === 3 && fresh.hints.every(h => h === '' || h === 'Connected.') && !fresh.oneMessage, JSON.stringify(fresh));
+      report.density[`chat-fresh-${name}`] = await visibleDensity(page, viewport);
+      await page.goto(`${fixture.url}/chat?task=${T.failedChecks}`);
+      const focusedFresh = await page.evaluate(() => ({
+        titleMeta: document.querySelector('.task-chat-title-line p.meta')?.textContent ?? null,
+        emptyLines: [...document.querySelectorAll('.chat-empty p')].map(p => p.textContent),
+        starters: [...document.querySelectorAll('.chat-prompts form button')].map(b => b.textContent),
+        journey: document.querySelector('.task-journey h2')?.textContent ?? null,
+      }));
+      check(`c6 ${name}: a fresh focused conversation keeps the task title, one sentence, three starters, and the journey headline`, focusedFresh.titleMeta === null && focusedFresh.emptyLines.length === 1 && focusedFresh.starters.length === 3 && focusedFresh.journey === 'Changes saved, but checks failed', JSON.stringify(focusedFresh));
+      await page.fill('.composer textarea', 'What is the state of this task, and what should I do next?');
+      await submit(page, '.composer button[type="submit"]');
+      for (let i = 0; i < 40 && (await page.$('.msg.mate')) === null; i++) { await page.waitForTimeout(500); if (i % 4 === 3) await page.reload(); }
+      const populated = await page.evaluate(() => ({
+        operator: [...document.querySelectorAll('.msg.op')].map(m => m.textContent.trim()),
+        assistant: document.querySelectorAll('.msg.mate').length,
+        empty: document.querySelector('.chat-empty') !== null,
+        starters: document.querySelectorAll('.chat-prompts form button').length,
+        journey: document.querySelector('.task-journey h2')?.textContent ?? null,
+        receipt: document.querySelector('.completion-receipt .status-label')?.textContent ?? null,
+        summary: document.querySelector('.receipt-summary')?.textContent ?? null,
+        coverageFolded: document.querySelector('details.receipt-coverage') !== null && !document.querySelector('details.receipt-coverage').open,
+        coverageWords: document.querySelector('.receipt-coverage')?.textContent ?? '',
+      }));
+      check(`c6 ${name}: the populated focused conversation keeps the real messages, the journey, the receipt and its narrative, and three starters; the optional review folds`, populated.operator.includes('What is the state of this task, and what should I do next?') && populated.assistant >= 1 && !populated.empty && populated.starters === 3 && populated.journey === 'Changes saved, but checks failed' && populated.receipt === 'Changes saved, but checks failed' && /Fixed the payout rounding drift/.test(populated.summary ?? '') && populated.coverageFolded && /semantic coverage/.test(populated.coverageWords), JSON.stringify(populated));
+      await scrollTo(page, '.msg.op', 96);
+      await shot(page, `${name}-chat-focused-populated`, `A populated focused conversation at ${viewport.width}×${viewport.height}: the operator's message, the reply, the journey and the receipt (fixture)`);
+      report.density[`chat-focused-populated-${name}`] = await visibleDensity(page, viewport);
+      await ctx.close();
+    }
+  }
+  {
+    // The task page: the failed check and the pending review — one dominant
+    // status box, the receipt's history behind a disclosure, the exact
+    // exception control and next act in the open.
+    for (const [name, viewport] of [['phone', VIEWPORTS.phone], ['desktop', VIEWPORTS.desktop]]) {
+      const { ctx, page } = await context(viewport);
+      await openProject(page, fixture.repos.main);
+      await page.goto(`${fixture.url}/t/${T.failedChecks}`);
+      report.density[`task-failed-checks-${name}`] = await visibleDensity(page, viewport);
+      const failedPage = await page.evaluate(() => ({
+        box: document.querySelector('#run-status .dispatch-copy')?.textContent ?? '',
+        action: document.querySelector('.proof-review-actions a.button-link')?.textContent ?? null,
+        exception: document.querySelector('details.proof-exception > summary')?.textContent ?? null,
+        exceptionShown: document.querySelector('details.proof-exception > summary')?.checkVisibility() ?? false,
+        requirements: document.querySelector('details.dispatch-proof-details > summary')?.textContent ?? null,
+        receipt: document.querySelector('.completion-receipt .status-label')?.textContent ?? null,
+        publication: document.querySelector('.receipt-publication')?.textContent ?? null,
+        history: document.querySelector('.receipt-history') !== null,
+        coverageFolded: document.querySelector('details.receipt-coverage') !== null && !document.querySelector('details.receipt-coverage').open,
+      }));
+      check(`c6 ${name}: the failed-check task page keeps the exit code, the review action, the exception control, the requirements disclosure, the receipt status and the publication fact in the open`, /The project check failed \(exit 1\)\./.test(failedPage.box) && failedPage.action === 'Review the failed check' && failedPage.exception === 'Accept with exception' && failedPage.exceptionShown && /2 requirements/.test(failedPage.requirements ?? '') && failedPage.receipt === 'Changes saved, but checks failed' && failedPage.publication === 'Saved on the build branch. No publication, merge, or deployment is recorded here.' && !failedPage.history && failedPage.coverageFolded, JSON.stringify(failedPage));
+      await page.goto(`${fixture.url}/t/${T.pendingReview}`);
+      const pending = await page.evaluate(() => ({
+        lead: document.querySelector('#run-status [data-review-lead]')?.textContent ?? null,
+        leadShown: document.querySelector('#run-status [data-review-lead]')?.checkVisibility() ?? false,
+        historySummary: document.querySelector('.receipt-history > summary')?.textContent ?? null,
+        historyOpen: document.querySelector('.receipt-history')?.open ?? null,
+        historyWords: document.querySelector('.receipt-history .receipt-review')?.textContent ?? null,
+        historyShown: document.querySelector('.receipt-history .receipt-review')?.checkVisibility() ?? null,
+        retry: document.querySelector('.review-retry-button')?.textContent ?? null,
+      }));
+      const history = 'Until the review settles, the earlier verdict — "Ready to review" — stays on record as history.';
+      check(`c6 ${name}: the pending-review task page leads with the review in the status box and folds the receipt's history behind "Review history" — the same words, secondary`, pending.leadShown && (pending.lead ?? '').includes(history) && pending.historySummary === 'Review history' && pending.historyOpen === false && pending.historyShown === false && (pending.historyWords ?? '').includes(history) && pending.retry === 'Retry queued', JSON.stringify(pending));
+      if (name === 'phone') await shot(page, 'phone-task-pending-review', 'Task page for a verified result whose independent review is queued, at 390×844: one status box leads, the receipt folds its history (fixture)');
+      await page.click('.receipt-history > summary');
+      await page.waitForTimeout(100);
+      check(`c6 ${name}: the receipt's history opens on demand`, await page.evaluate(() => document.querySelector('.receipt-history .receipt-review')?.checkVisibility() === true));
+      await ctx.close();
+    }
+  }
+
   // ---- c4/c5: a NEW empty conversation per desktop viewport ------------
   for (const [name, viewport] of Object.entries({ '1440x900': VIEWPORTS.desktop, '1280x800': VIEWPORTS.laptop })) {
     const fresh = await context(viewport);
@@ -436,6 +617,7 @@ try {
     const state = await p.evaluate(() => ({ messages: document.querySelectorAll('.msg').length, empty: document.querySelector('.chat-empty') !== null, scrollY: window.scrollY }));
     check(`c5 ${name} conversation is new and empty`, state.messages === 0 && state.empty && state.scrollY === 0, JSON.stringify(state));
     await shot(p, `chat-fresh-${name}`, `A NEW empty conversation at ${viewport.width}×${viewport.height}: composer and send inside the first viewport, chat · work · projects in the rail (fixture)`);
+    report.density[`chat-fresh-${name}`] = await visibleDensity(p, viewport);
     const box = await rect(p, '.composer textarea');
     const sendButton = await rect(p, '.composer button[type="submit"]');
     const fits = one => one !== null && one.top >= 0 && one.bottom <= viewport.height && one.left >= 0 && one.right <= viewport.width;

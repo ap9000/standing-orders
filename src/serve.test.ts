@@ -7793,6 +7793,10 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(chat).toContain('data-card-kind="result-receipt"');
     expect(chat).toContain("Independent review");
     expect(chat).toContain("semantic coverage: 1/2 upheld by an independent reviewer — required under strict quality — NOT satisfied (cannot-tell never counts: c2)");
+    // A strict shortfall with a named gap is never folded away (concise
+    // pass, 2026-09-13): the receipt keeps it in the open, not a disclosure.
+    expect(chat).toContain('<div class="receipt-coverage" data-semantic-coverage=""><strong>Independent review</strong>');
+    expect(chat).not.toContain('<details class="receipt-coverage"');
     expect(chat).toContain("context gap c2: src/guard.ts: 70000 bytes exceeds the 49152-byte item limit");
 
     // Under default quality the SAME judgements read as optional coverage —
@@ -8594,7 +8598,18 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).not.toContain('name="token"');
     expect(thread).toContain("What do you want to get done?");
     expect(thread).toContain("Describe what you want done…");
-    expect(thread).toContain("One message is enough.");
+    // Concise pass (2026-09-13): one contextual sentence over the empty
+    // thread, no intro over the heading, no second hint under the
+    // composer, an idle status line with nothing to say, three starters.
+    expect(thread).toContain('<p class="meta">Describe the outcome you want; changes come back as cards you confirm.</p></div>');
+    expect(thread).not.toContain("One message is enough.");
+    expect(thread).not.toContain("Ask about any project. Changes come back as cards you confirm.");
+    expect(thread).not.toContain("Changes appear as cards for you to confirm.");
+    expect(thread).toContain('<p class="meta composer-hint" id="chat-connection" role="status" aria-live="polite"></p>');
+    expect(thread.match(/<div class="chat-prompts" aria-label="suggested questions">/g)).toHaveLength(1);
+    expect([...(/<div class="chat-prompts" aria-label="suggested questions">(.*?)<\/div>/s.exec(thread)?.[1] ?? "").matchAll(/class="quiet">([^<]+)<\/button>/g)].map(m => m[1])).toEqual(["brief me", "decisions", "new task"]);
+    expect(thread).not.toContain('>building now</button>');
+    expect(thread).not.toContain('>prioritize queues</button>');
     expect(thread).toContain("use your judgment");
     expect(thread).toContain('>new task</button>');
     expect(thread).toContain("this conversation: $0.00 of $5.00");
@@ -8683,6 +8698,18 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const minted = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "5", token: approverToken, return: "/chat?task=a" });
     expect(minted.status).toBe(303);
     expect(minted.headers.get("location")).toBe("/chat?task=a");
+    // Concise pass (2026-09-13): the focused empty thread carries the
+    // title, the Overview/Ask switch, ONE contextual sentence, three
+    // starters, and an idle status line with nothing to say — no intro
+    // sentence under the title and no second hint under the composer.
+    const focusedFresh = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    expect(focusedFresh).toContain('<div class="chat-empty"><strong>What do you want to understand or change?</strong><p class="meta">I read the task first — ask anything, or start below.</p></div>');
+    expect(focusedFresh).not.toContain("Ask, steer, or revise this task in the same unified conversation.");
+    expect(focusedFresh).not.toContain("choose a useful starting point");
+    expect(focusedFresh).not.toContain("Changes appear as cards for you to confirm.");
+    expect(focusedFresh).toContain('<p class="meta composer-hint" id="chat-connection" role="status" aria-live="polite"></p>');
+    expect([...focusedFresh.matchAll(/class="quiet">([^<]+)<\/button><\/form>/g)].map(m => m[1]).filter(one => one !== "end the conversation and forget the thread")).toEqual(["what’s happening", "check the proof", "revise scope"]);
+    expect(focusedFresh).toContain('href="/chat?task=a" class="active" aria-current="page">Ask</a>');
 
     const unknown = await post(cookie, "/chat", { csrf, task: "not-in-this-workspace", message: "do something" });
     expect(decodeURIComponent(unknown.headers.get("location") ?? "")).toContain("not available in this workspace");
@@ -8708,6 +8735,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain('name="return" value="/chat?task=a"');
     expect(html).toContain('data-message-role="operator"><p style="white-space:pre-wrap">Make the next pass focus on the mobile navigation.</p>');
     expect(html).not.toContain("Current task: a.");
+    // The populated thread keeps every real message and card; the empty-state sentence is gone with the emptiness.
+    expect(html).not.toContain('<div class="chat-empty">');
+    expect(html).toContain("I drafted focused guidance for the next attempt.");
     expect(store.listSteerNotes(store.refFor("built-in", "a").id)).toEqual([]);
 
     const confirmed = await post(cookie, "/chat/proposal/1/confirm", { csrf, return: "/chat?task=a" });
@@ -11357,7 +11387,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(empty).toContain('data-work-empty="all"');
     expect(empty).toContain("Nothing is in progress.");
     expect(countsOf(empty)).toEqual({ All: 0, "Needs you": 0, Running: 0, Completed: 0 });
-    expect(empty).toContain('<a href="/work" class="active" aria-current="page">All<span class="count">0</span></a>');
+    expect(empty).toContain('<a href="/work" class="active" aria-current="page" title="Every task in view, most urgent first.">All<span class="count">0</span></a>');
 
     // Approved and waiting for a builder; chained behind it; on hold;
     // failed; cancelled; running under a live claim; and finished builds.
@@ -11428,7 +11458,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     ] as const) {
       const html = await page(cookie, `/work?view=${view}`);
       expect(rowsOf(html).map(row => row.id).sort(), view).toEqual([...expected].sort());
-      expect(html, view).toContain(`<a href="/work?view=${view}" class="active" aria-current="page">`);
+      expect(html, view).toMatch(new RegExp(`<a href="/work\\?view=${view}" class="active" aria-current="page"[^>]*>`));
     }
     // The rows lead with the title; the id stays secondary; no raw "done"
     // badge, and nothing says shipped, deployed, or verified where it is not.
@@ -11443,7 +11473,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(all).toContain('href="/review?result=t-accepted">Review the recorded exception →</a>');
     expect(all).toContain('href="https://github.com/owner/repo/pull/482">Open the pull request →</a>');
     // Bad view values fall back to All; an unknown view is never an error.
-    expect(await page(cookie, "/work?view=bogus")).toContain('<a href="/work" class="active" aria-current="page">All');
+    expect(await page(cookie, "/work?view=bogus")).toMatch(/<a href="\/work" class="active" aria-current="page"[^>]*>All/);
     // Every shortcut view has its own honest empty state.
     store.cancelTask("t-live", now); // a live claim refuses; the row stays — so check the empty copy on a fresh project instead
     await openProject(cookie, beta);
@@ -11767,7 +11797,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     agree(await surfaces(), "review-pending", "Waiting for review");
     const queuedTask = await page(cookie, "/t/t-rev");
     const history = "Until the review settles, the earlier verdict — &quot;Changes saved, but checks failed&quot; — stays on record as history.";
-    expect(queuedTask).toContain(`<p class="receipt-review meta" data-receipt-review="review-pending">The build finished and its requested independent review is waiting for a worker. ${history}</p>`);
+    // The receipt's history sentence sits behind a native disclosure (concise pass, 2026-09-13) — the same words, secondary.
+    expect(queuedTask).toContain(`<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="review-pending">The build finished and its requested independent review is waiting for a worker. ${history}</p></details>`);
     expect(queuedTask).toContain(`<span data-review-lead="review-pending">The build finished and its requested independent review is waiting for a worker. ${history}</span> <a href="/r/${latest}">Build #${latest}</a> finished. The project check failed (exit 1).`);
     expect(queuedTask).toContain('class="answered dispatch-status" id="run-status"');
     expect(queuedTask).toContain('data-review-state="queued"');
@@ -11803,6 +11834,48 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     agree(await surfaces(), "accepted-exception", "Accepted with an exception");
     expect(await page(cookie, "/t/t-rev")).toContain('data-review-state="retryable"');
     expect(await page(cookie, "/t/t-rev")).not.toContain("data-receipt-review=");
+  });
+
+  test("concise pass: a Work row is title, status, next act, and a native Details disclosure over the diagnosis; the head is one line; the receipt folds only what is not owed", async () => {
+    const cookie = await login();
+    await openProject(cookie, alpha);
+    const checks = finished("t-checks", "Escape quotes", alpha, { verdict: "refuted", reasons: ["the repository's approved verification command exited 1"] });
+    const optional = finished("t-optional", "Add subtotal rows", alpha, { verdict: "verified", reasons: ["the approved verification command passed"] });
+    // A default-quality matrix with no settled review: coverage is owed nothing.
+    store.saveProofVerdict(optional.run, "verified", ["the approved verification command passed"], now, [
+      { id: "c1", statement: "subtotals add up", requiredEvidence: ["check"], state: "pass", detail: [], answered: [{ kind: "check", ref: "npm test" }], review: null },
+    ]);
+    seedTask("t-queued", "Rework the ledger export", alpha);
+    const work = await page(cookie, "/work");
+    // The head is the title and the tools control — no hint paragraph; the view's words ride the tab's title.
+    expect(work).toContain('<div class="work-head"><h1>work</h1><details class="work-tools">');
+    expect(work).not.toContain('<p class="hint">Every task in view, most urgent first.</p>');
+    expect(work).toContain('<a href="/work" class="active" aria-current="page" title="Every task in view, most urgent first.">All<span class="count">');
+    // The row: the status line, then the next act, then the diagnosis behind a native disclosure — never dropped.
+    const row = /<article class="work-row" data-task="t-checks"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
+    expect(row).toMatch(/^<div class="work-row-main"><a class="work-title" href="\/t\/t-checks">Escape quotes<\/a><p class="work-meta">/);
+    expect(row).toMatch(/<div class="work-row-status"><span class="status-line" data-work-status="checks-failed"[^>]*>.*?<span class="status-label">Changes saved, but checks failed<\/span><\/span><a class="work-action" href="\/review\?result=t-checks">Review the failed check →<\/a><details class="work-details"><summary>Details<\/summary><p class="work-detail">The repository&#39;s approved check failed against this build \(exit 1\), so the result is not verified\.<\/p><\/details><\/div>$/);
+    expect(work).not.toContain("<p class=\"work-detail\">The repository&#39;s approved check failed against this build (exit 1), so the result is not verified.</p></div>");
+    // A row with no next act still discloses its reason; every row has exactly one disclosure.
+    const queued = /<article class="work-row" data-task="t-queued"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
+    expect(queued).toMatch(/<details class="work-details"><summary>Details<\/summary><p class="work-detail">[^<]+<\/p><\/details><\/div>$/);
+    expect(work.match(/<article class="work-row"/g)).toHaveLength(3);
+    expect(work.match(/<details class="work-details">/g)).toHaveLength(3);
+    // The disclosure is native and unstyled as a card: no script needed, the summary is its own control.
+    expect(work).toContain(".work-details > summary::-webkit-details-marker { display: none; }");
+    expect(work).toContain(".work-row-status { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .875rem; }");
+    // The receipt: an optional, unsettled review folds behind a disclosure; the machine verdict and the facts stay in the open.
+    const task = await page(cookie, `/t/t-optional`);
+    expect(task).toContain('<details class="receipt-coverage" data-semantic-coverage="secondary"><summary>Independent review</summary><ul><li>semantic coverage: 0/1 upheld by an independent reviewer — independent review is optional under default quality — none has settled</li></ul></details>');
+    expect(task).toContain('data-receipt-publication="none">Saved on the build branch. No publication, merge, or deployment is recorded here.</p>');
+    expect(task).toContain("<strong>1/1 acceptance criteria passed</strong><small>against the approved scope</small>");
+    // The failed check keeps its exact words, its action, and its exception control in the open on the task page.
+    const failed = await page(cookie, `/t/t-checks`);
+    expect(failed).toContain("The project check failed (exit 1).");
+    expect(failed).toContain('href="/review?result=t-checks">Review the failed check</a>');
+    expect(failed).toContain('<details class="proof-exception"><summary>Accept with exception</summary>');
+    expect(failed).not.toContain('<details class="receipt-history">');
+    void checks;
   });
 
   test("the task list leads with the project label and wraps the raw path; the receipt never says shipped", async () => {

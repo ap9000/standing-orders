@@ -5,6 +5,9 @@
  * served payload sizes of the same representative pages. The follow-up on
  * build 1540 adds a NEW empty conversation per desktop viewport (1440×900,
  * 1280×800) and the review annotation forms' advertised character limit.
+ * The concise pass (2026-09-13) asserts the ready thread's one sentence
+ * and three starters while every approval, revision, and draft check
+ * below runs unchanged.
  *
  *   node scripts/ui-polish-proof.mjs [--out evidence/ui-polish-2026-09-13/after] [--strict]
  *
@@ -113,6 +116,17 @@ try {
   check('c4 composer input is at least 16px', parseFloat(fontSize) >= 16, fontSize);
   const guidance = await page.evaluate(() => document.getElementById('chat-connection')?.textContent ?? '');
   check('c1 plain-language session guidance is present', /confirm|draft|connected/i.test(guidance), guidance);
+  // Concise pass (2026-09-13): the ready thread carries one contextual
+  // sentence and three starters — no intro over the heading, no second
+  // hint under the composer; the composer and its send control stay.
+  const concise = await page.evaluate(() => ({
+    headMeta: document.querySelector('.chat-head > div > p.meta') !== null,
+    emptyLines: document.querySelectorAll('.chat-empty p').length,
+    starters: [...document.querySelectorAll('.chat-prompts form button')].map(b => b.textContent),
+    secondHint: document.body.textContent.includes('One message is enough'),
+    composer: document.querySelector('.composer textarea') !== null && document.querySelector('.composer button[type="submit"]') !== null,
+  }));
+  check('c1 the ready thread keeps one contextual sentence and three starters, with no heading intro or second composer hint', !concise.headMeta && concise.emptyLines === 1 && concise.starters.length === 3 && !concise.secondHint && concise.composer, JSON.stringify(concise));
 
   // A proposal card (hold) — the action-card state, then confirm it.
   await page.fill('.composer textarea', 'Please pause the ledger export until I have read it.');

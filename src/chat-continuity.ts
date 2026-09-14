@@ -58,7 +58,7 @@ export const CHAT_CONTINUITY_SCRIPT = String.raw`
         location.reload();return;
       }
       busy=data.pending;buttons();
-      say(busy?'Reply in progress. You can draft your next message or come back later.':draft&&draft.submitted?'Message not confirmed. Check the conversation before retrying.':'Connected · changes appear as cards for you to confirm.');
+      say(busy?'Reply in progress. You can draft your next message or come back later.':draft&&draft.submitted?'Message not confirmed. Check the conversation before retrying.':'Connected.');
       later(5000);
     }catch(e){say('Connection lost. Reconnecting… Your existing work is not cancelled.');later(10000);}
     finally{polling=false;}
