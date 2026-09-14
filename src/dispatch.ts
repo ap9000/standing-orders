@@ -11,7 +11,7 @@ import { isAlive } from "./runner.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { approvalOf, type ExecutionProfile } from "./scope.js";
 import { plannerSourceProblemOf } from "./planner-source.js";
-import { resultStatusOf } from "./workspace-ui.js";
+import { REVIEW_TOKENS, resultStatusOf, reviewFactsOf } from "./workspace-ui.js";
 import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRequestOrigin, type ReviewRetryState, type Store, type TaskState } from "./store.js";
 
 export const DEFAULT_MAX_OPEN_DECISIONS = 5;
@@ -265,8 +265,6 @@ function reviewViewOf(sourceRun: number, retry: ReviewRetryState): ReviewDispatc
   };
 }
 
-const retriesLeft = (count: number): string => (count === 1 ? "1 explicit retry" : `${count} explicit retries`);
-
 function approvedProfile(scope: ReturnType<Store["getScope"]>): ExecutionProfile | null {
   if (scope === null || scope.approvalKind === "chain") return null;
   return scope.approvedProfile ?? scope.profile ?? null;
@@ -290,42 +288,14 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
     // answer below names the attempt count and the one explicit next act.
     const retry = result === undefined ? null : store.reviewRetryStateOf(result.id);
     const review = result === undefined || retry === null || retry.state === "unrequested" ? null : reviewViewOf(result.id, retry);
-    if (!accepted && result !== undefined && retry !== null && review !== null) {
-      const ordinal = `attempt ${review.attempt ?? retry.attempts.length} of ${retry.cap}`;
-      if (retry.state === "running") {
-        const reviewer = store.getRunner(retry.live!.runner)?.runner;
-        return reviewer !== undefined && isAlive(reviewer, now)
-          ? answer("reviewing", "running", review.attempt === 1 ? "Reviewing" : `Reviewing (retry ${review.attempt! - 1} of ${retry.cap - 1})`, `The build is preserved while an independent reviewer checks its sealed evidence (${ordinal}).`, { action: "open-result", review })
-          : answer("review-failed", "waiting", "Review interrupted", `The reviewer has no live worker; recovery must settle the interrupted attempt (${ordinal}) before it can be retried.`, { action: "open-result", review });
-      }
-      if (retry.state === "queued") {
-        return review.attempt === 1
-          ? answer("review-pending", "waiting", "Waiting for review", "The build finished and its requested independent review is waiting for a worker.", { action: "open-result", review })
-          : answer("review-pending", "waiting", `Review retry queued (${ordinal})`, `The explicit review retry${review.queued === null ? "" : `, asked by ${review.queued.requestedBy},`} is waiting for a worker; ${retriesLeft(review.retriesRemaining)} would remain after it.`, { action: "open-result", review });
-      }
-      if (retry.state === "retryable") {
-        const what = review.interrupted ? "was interrupted" : "failed";
-        return answer(
-          "review-failed",
-          "waiting",
-          review.interrupted ? "Review interrupted — retry available" : "Review failed — retry available",
-          `Review ${ordinal} ${what}${review.latestReason === null ? "" : ` (${review.latestReason})`}. The build is preserved; ask for an explicit retry — ${retriesLeft(review.retriesRemaining)} left.`,
-          { action: "retry-review", review },
-        );
-      }
-      if (retry.state === "exhausted") {
-        return answer(
-          "review-exhausted",
-          "waiting",
-          "Review retries exhausted",
-          `All ${retry.cap} review attempts ended without a review${review.latestReason === null ? "" : ` (latest: ${review.latestReason})`}. Nothing retries a fourth time; open the result to accept it with an exception or file a revision.`,
-          { action: "open-result", review },
-        );
-      }
-    }
-    // The words are the workspace's shared projection (package 1): the
-    // same label the Work rows, task page, focused chat, and review
-    // cockpit render for this exact result. The codes stay the contract.
+    // The words are the workspace's shared projection (package 1, review
+    // fixes): the same label and detail the Work rows, task page, focused
+    // chat, receipt, and review cockpit render for this exact result —
+    // a review in flight included. The codes stay the contract.
+    const reviewFacts = reviewFactsOf(retry, runner => {
+      const reviewer = store.getRunner(runner)?.runner;
+      return reviewer !== undefined && isAlive(reviewer, now);
+    });
     // A no-change conclusion owes no proof beyond its handoff and sealed
     // diff (the task page's own "attested floor"); with both on record it
     // is complete, not verification-needed.
@@ -336,9 +306,13 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
     const status = resultStatusOf(
       result === undefined
         ? null
-        : { runId: result.id, role: result.role, outcome: result.outcome, verdict: proof?.verdict ?? null, reasons: proof?.reasons ?? [], accepted, ...(noChangeRecord === undefined ? {} : { recordComplete: noChangeRecord }) },
+        : { runId: result.id, role: result.role, outcome: result.outcome, verdict: proof?.verdict ?? null, reasons: proof?.reasons ?? [], accepted, review: reviewFacts, ...(noChangeRecord === undefined ? {} : { recordComplete: noChangeRecord }) },
       result === undefined ? null : store.publicationForRun(result.id),
     );
+    if (REVIEW_TOKENS.has(status.token) && retry !== null && review !== null) {
+      const code = status.token as "reviewing" | "review-pending" | "review-failed" | "review-exhausted";
+      return answer(code, code === "reviewing" ? "running" : "waiting", status.label, status.detail, { action: retry.state === "retryable" ? "retry-review" : "open-result", review });
+    }
     if (!accepted && proof?.verdict === "refuted") return answer("proof-refuted", "waiting", status.label, `${status.detail} Review the evidence to correct it, or record an explicit acceptance.`, { action: "open-result", review });
     if (!accepted && proof?.verdict === "short") return answer("needs-verification", "waiting", status.label, `${status.detail} Open the result for the exact criteria still needing verification.`, { action: "open-result", review });
     if (!accepted && proof === null && noChangeRecord !== true) return answer("needs-verification", "waiting", status.label, status.detail, { action: "open-result", review });

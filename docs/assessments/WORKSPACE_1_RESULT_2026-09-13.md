@@ -198,10 +198,10 @@ uncompressed. Calculated sizes, not transferred sizes.
   "N needs you" now include held, paused, builder-disconnected and
   unverified-result tasks. The old count's decision/approval semantics survive
   on the inbox page itself.
-- A done task whose review is in flight or queued shows the review's words on
+- ~~A done task whose review is in flight or queued shows the review's words on
   the Work row and the chat headline (from the diagnosis) while the receipt's
   status line shows the stored verdict; no fixture exercises this, so it is
-  untested here.
+  untested here.~~ Resolved by the review fixes below (finding 4).
 - The `/tasks` state filter still wears raw state badges — it is the
   state-filter tool by definition; the task page's own master pane now says
   "finished" instead of "done".
@@ -212,3 +212,181 @@ uncompressed. Calculated sizes, not transferred sizes.
   The journey component belongs to package 2/3.
 - Reviewed in headless Chromium only; no Safari keyboard behaviour was
   observed. Fixture data is synthetic and labeled so.
+
+## Review fixes — 2026-09-13 (build 1544, independent review findings 1–4)
+
+Follow-up task `workspace-1-review-fixes-20260913`, seeded from the sealed
+head `66a81a458e8607105735aa9e478edb2f0a44dae2`, resolving
+[the independent review](WORKSPACE_1_INDEPENDENT_REVIEW_2026-09-13.md) of
+build 1544 (source annotations 92–95 remain on `/r/1544`; the auto-filer's
+`bad-goal` refusal is a filing-path limit recorded there, not touched here).
+The package 0 and package 1 design is unchanged; no store schema, migration,
+scheduler, authority, permission, global configuration, service, live task,
+installation, push, publication or deployment changed; no runtime dependency
+was added. Every change was left uncommitted for the worker to seal.
+
+### Finding 1 — Work admitted after its limit (`src/serve.ts`)
+
+Reproduced with the reviewer's `output/playwright/workspace-boundary-review.mjs`
+against this checkout before the change: a selected project with 201 tasks
+answered 200 rows and no bound notice; 501 newer tasks in a repository outside
+the ceiling left the All-projects page with zero rows and the "Nothing is in
+progress" claim. After the change the script's four checks (the two above,
+the two-project member, and the reviewer's added case of 201 newer unplaced
+tasks a project-scoped member cannot see) all pass.
+
+- One bounded read, `workTasksInView`, now feeds both the Work rows and the
+  chrome's needs-you count. It reads `WORK_PAGE + 1` rows as an explicit
+  overflow probe. With a project open the store's project-bound query is the
+  bound. In the roll-up the admission list is enumerated project by project
+  (each bounded to the probe) and merged newest first, so tasks in excluded
+  repositories can never consume an admitted task's window. The per-row
+  `visible` re-proof is unchanged; no store query changed.
+- Unplaced rows ride every project-bound store read. A viewer who may see
+  them keeps them exactly as before. For a viewer who may not (a
+  project-scoped account) the read widens — 201 → 402 → 500, the store's
+  own ceiling — until visible rows fill the probe or the read runs dry.
+- Honest bounds and counts: when the probe finds more, the strip carries
+  `data-work-bound="200"`, the All tab says `200+`, every tab carries a
+  page-only title, the notice says "there are more" and that the counts
+  cover these 200 only, and an empty shortcut view says "Nothing among the
+  newest 200 tasks in view …" instead of "Nothing is building right now".
+  When the widened read hits the 500-row ceiling without proving the page,
+  the page says so (`data-work-bound="unproven"`) rather than claiming
+  emptiness, and the badge reads as saturated.
+- Permanent regressions (`src/serve.test.ts`, "Work admits before it
+  limits"): 201 tasks in a selected project (200 rows, `200+`, bound notice,
+  bounded empty copy); exactly the cap (no bound); 501 newer excluded tasks
+  (200 admitted rows, none foreign, no empty claim, both projects merged
+  newest first); a project-scoped member of one project and of two
+  (opens Work and an admitted run with no selection, sees only its own
+  rows); 201 newer unplaced tasks neither shown to nor starving the member;
+  and 700 unplaced tasks producing the honest "unproven" notice instead of
+  "Nothing is in progress".
+
+### Finding 2 — unsupported negative claims (`src/workspace-ui.ts`, `src/serve.ts`)
+
+Every status word now names what was recorded or last observed and what
+stays unconfirmed:
+
+| Before | After |
+| --- | --- |
+| Accepted: "Its checks were not passed by the machine, and the recorded exception says why." | "An approver accepted this result by hand, and the recorded exception says why. The machine's verdict is unchanged: *it verified the result before the acceptance / the checks on record are the agent's own report / the approved check failed against it (exit n) / its evidence did not match the sealed record / its required evidence was missing*." |
+| Task page, accepted: "An approver accepted it by hand; the checks were not passed by the machine." | "…; that acceptance leaves the machine's verdict above unchanged." |
+| Mismatch: "…; no check is recorded as failed." | "The proof's claims disagree with the sealed record. Whether the approved check passed is not settled by this verdict." (a structural refutation is adjudicated before the check is weighed) |
+| Receipt, no publication: "Saved on the build branch — not published, merged, or deployed." | "Saved on the build branch. No publication, merge, or deployment is recorded here." |
+| PR opened: "PR #n is open on GitHub. Merging stays a person's act; nothing is merged or deployed yet." | "PR #n was last seen open on GitHub. No merge or deployment is recorded here." |
+| PR closed: "GitHub reports PR #n closed. Nothing was merged or deployed." | "GitHub last reported PR #n closed without a merge. No merge or deployment is recorded here." |
+| Branch pushed / failed / requested | "…no pull request is recorded yet." / "The last publication attempt failed; no pull request or merge is recorded here." / "…no pull request or merge is recorded yet." |
+| Cockpit publication card: "Merging stays a person's action on GitHub." | "The pull request was last seen open; no merge is recorded here." |
+
+"Merge observed … Deployment is not confirmed by any record here." is
+unchanged. The verified, attested, missing, refuted (failed check versus
+mismatch), accepted, PR and merge states keep their distinct tokens and
+labels. Tests: `src/workspace-ui.test.ts` (every publication and receipt
+sentence must not match "nothing is/was merged", "person's act", "not
+published, merged, or deployed", and the acceptance detail is asserted per
+verdict), `src/dispatch.test.ts`, `src/serve.test.ts` (task, work, review
+and chat surfaces of the published result).
+
+### Finding 3 — real visibility proof and narrow-phone fit (`scripts/workspace-proof.mjs`, `src/serve.ts`)
+
+- The old Add project check read `.project-add-card, form[action="/projects/open"] button[type="submit"]`,
+  whose first match was the chrome switcher's hidden form button — a
+  0 × 0 rectangle at 0,0 that satisfied `top >= 0 && top < 900`. The proof
+  now scopes to the card, measures the card and its first real control
+  (`.project-add-action`, else the exact-path summary/button) with
+  `boxOf`: positive size, computed `display`/`visibility`/`opacity`/
+  `checkVisibility`, and full bounds inside the viewport; a negative control
+  proves the probe rejects the hidden rail form. **Measured, not
+  asserted:** with three enrolled projects at 1440 × 900 the card starts at
+  y = 995, below the first viewport (recorded as
+  `addProjectFirstViewport` in `report.json`); the proof asserts full
+  bounds after scrolling it into view. The earlier "inside the first
+  viewport" pass was the zero rectangle, and the card's placement is
+  package 0's design, left as it is.
+- Filters: at ≤ 760 px the four tabs share the strip equally
+  (`flex: 1 1 0`, centred, `white-space: nowrap`, `overflow: visible`, no
+  hidden scrollbar); at ≤ 400 px type steps to 12 px; at ≤ 360 px the strip
+  becomes a two-by-two grid at 13 px so every filter is wholly visible.
+  Rows keep compact phone spacing (`.75rem` vertical padding). Desktop is
+  untouched.
+- The proof asserts each filter's own bounds at 390 and 320 px: inside the
+  viewport and its strip, unclipped (`scrollWidth ≤ clientWidth`), ≥ 40 px
+  tall, ≥ 44 px wide, ≥ 12 px type, a non-scrolling strip, and Completed
+  wholly visible with its count. Measured at 320 px: All 16–160, Needs you
+  160–304 (row 1), Running 16–160, Completed 160–304 (row 2), each 40 px
+  tall at 13 px; at 390 px: 16–106 / 106–195 / 195–285 / 285–374, each
+  40 px tall at 12 px.
+
+### Finding 4 — one status while a review is pending, running or failed (`src/workspace-ui.ts`, `src/dispatch.ts`, `src/serve.ts`)
+
+- `ReviewFacts` (from `store.reviewRetryStateOf` plus the live reviewer's
+  liveness, read **per run**) ride `ResultFacts.review`; `reviewStatusOf`
+  gives the v50 words and tokens (`review-pending`, `reviewing`,
+  `review-failed`, `review-exhausted`) and `resultStatusOf` lets them lead
+  unless the result is accepted or a scout report, appending the earlier
+  verdict as history: *"Until the review settles, the earlier verdict —
+  "Changes saved, but checks failed" — stays on record as history."*
+  `diagnoseTaskDispatch` now takes its review words from the same
+  projection; its codes, conditions, actions and `review` view are
+  unchanged (all 22 dispatch tests pass as before).
+- Every surface reads the same facts for the same run: the Work row, the
+  task page's title status and status box (which leads with the review
+  sentence in `data-review-lead`, keeps the recorded verdict sentence,
+  and reads neutral rather than green/red), the receipt on the task page
+  and in chat (status line plus a `receipt-review` line carrying the
+  history; the criteria label still reads from the stored verdict), the
+  chat journey headline and badge ("in review"), the review cockpit chip,
+  and the run page's evidence card. The run page of an older run keeps
+  that run's own verdict; an accepted result stays "Accepted with an
+  exception" with the review history beneath it; lifecycle, retry
+  allowance and reviewer lineage are untouched.
+- Fixtures: `scripts/ui-polish-fixture.mjs` seeds three verified results
+  whose review is queued, running under a live reviewer (`reviewer-1`,
+  covering only the empty project), or failed with a retry left — through
+  `requestReview` / `admitReview` / `finishRun`, the store's own doors
+  (the fixture diffs now carry `captureStatus: "ok"`, which the request door
+  requires). Tests: `src/workspace-ui.test.ts` (every review state, the
+  history sentence, acceptance/scout/older precedence, `reviewFactsOf`),
+  `src/serve.test.ts` ("a review in flight … leads with one status" across
+  eight surface readings for queued → running → failed → accepted, with an
+  older run of the same task unmasked).
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `node /Users/alekseypelletier/Documents/standing-orders/output/playwright/workspace-boundary-review.mjs <this checkout>` (the reviewer's script) | before: checks 1 and 2 failed; after: 4/4 pass (201 selected → 200 rows with the bound; 501 foreign → 200 admitted rows, no empty claim; member Work/run 200/200; 201 unplaced → member's assigned task visible, none unplaced) |
+| `npx vitest run src/workspace-ui.test.ts src/dispatch.test.ts src/telegram-status.test.ts` | 40 passed |
+| `npx vitest run src/serve.test.ts` | 271 passed (2 new tests; 6 wording assertions updated, none dropped) |
+| `npx vitest run src/reviewer.test.ts src/board.test.ts src/tick.test.ts src/builder.test.ts src/telegram-status.test.ts src/dispatch.test.ts src/workspace-ui.test.ts src/cli.test.ts src/converse.test.ts` | 386 passed |
+| `npm run build && node scripts/workspace-proof.mjs --out output/playwright/workspace-1/after --strict` | 167/167 checks, 25 screenshots (was 141) |
+| `node scripts/ui-polish-proof.mjs --out output/playwright/workspace-1/ui-polish-regression --strict` | 75/75 — the prior approval and revision flows unchanged |
+| `npm run typecheck && npm test -- --run --reporter=dot --no-file-parallelism && npm run build` (the unchanged approved verifier, ONE run on the final tree) | exit 0: typecheck clean; 162 files, 2804 passed, 23 skipped (322.9 s); build ok |
+
+New screenshots (ignored `output/playwright/workspace-1/after/`):
+`narrow-work-320.png` (four filters in two rows), `phone-work-all.png`
+(four filters in one row at 390), `desktop-task-review-failed.png`
+(review leads, earlier verdict as history), `desktop-chat-reviewing.png`.
+
+### Remaining limits
+
+- The store's task reads all include unplaced rows and cap one read at 500
+  rows. For a project-scoped account only, more than about 300 newer
+  unplaced tasks in one read window make Work say its read was cut short
+  (`data-work-bound="unproven"`) rather than list the older assigned
+  tasks; the tasks are not lost and the page never claims emptiness. A
+  store-side query that excludes unplaced rows for such viewers is outside
+  this package's no-store-change scope.
+- The reviewer-liveness fact is read at render time, so "Reviewing" becomes
+  "Review interrupted" three minutes after the reviewer's last heartbeat —
+  the same rule dispatch already applied.
+- The Add project card sits below the first 1440 × 900 viewport once three
+  projects are enrolled; this record now says so instead of passing on a
+  zero rectangle. Changing its placement is a design decision not taken here.
+- The reviewer's boundary script lives in the ignored output directory of
+  the primary checkout; its cases are re-stated as permanent tests in
+  `src/serve.test.ts` so a checkout without it still proves them.
+- Headless Chromium only, synthetic fixture data, ignored output directory —
+  as before.

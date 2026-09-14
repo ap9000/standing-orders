@@ -7,6 +7,12 @@
  * counts and empty states, same-run status agreement across four surfaces,
  * the All-projects run deep link, document overflow at 320/390/1440, the
  * task-list path wrap, and a NEW empty conversation per desktop viewport.
+ * Review fixes (2026-09-13): the Add project control is proved visible by
+ * its own positive size, computed visibility, and full viewport bounds;
+ * every Work filter's bounds are asserted at 320 and 390 px; a queued,
+ * running, and failed review reads the same on all six result surfaces;
+ * and no surface makes a negative claim about checks or merges it cannot
+ * see.
  *
  *   node scripts/workspace-proof.mjs [--out output/playwright/workspace-1/after] [--strict]
  *
@@ -93,6 +99,40 @@ const noOverflow = page => page.evaluate(() => ({ scrollWidth: document.document
 const scrollTo = (page, selector, offset = 72) => page.evaluate(([sel, off]) => { const el = document.querySelector(sel); if (!el) return false; document.documentElement.style.scrollBehavior = 'auto'; window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - off, behavior: 'instant' }); return true; }, [selector, offset]);
 const hrefs = (page, selector) => page.evaluate(sel => [...document.querySelectorAll(`${sel} a`)].map(a => a.getAttribute('href')), selector);
 const visible = (page, selector) => page.evaluate(sel => { const el = document.querySelector(sel); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; }, selector);
+/** One element's real visibility (review fixes): its rect, computed
+ * visibility/display, and whether the WHOLE box sits inside the viewport
+ * — a zero-sized rectangle at 0,0 never reads as visible again. */
+const boxOf = (page, selector, viewport) => page.evaluate(([sel, vw, vh]) => {
+  const el = document.querySelector(sel);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  const style = getComputedStyle(el);
+  const box = { selector: sel, top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height, display: style.display, visibility: style.visibility, opacity: style.opacity, text: (el.textContent ?? '').trim().slice(0, 40) };
+  box.positiveSize = r.width > 0 && r.height > 0;
+  box.computedVisible = style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0 && el.checkVisibility?.({ visibilityProperty: true }) !== false;
+  box.insideViewport = r.top >= 0 && r.left >= 0 && r.bottom <= vh && r.right <= vw;
+  box.ok = box.positiveSize && box.computedVisible && box.insideViewport;
+  return box;
+}, [selector, viewport.width, viewport.height]);
+/** Every Work filter's own bounds (review fixes): inside the viewport and
+ * its strip, a usable target, legible type, no clipped words. */
+const filterBoxes = (page, viewport) => page.evaluate(([vw]) => {
+  const strip = document.querySelector('.work-views');
+  const stripRect = strip?.getBoundingClientRect() ?? null;
+  return [...document.querySelectorAll('.work-views a')].map(a => {
+    const r = a.getBoundingClientRect();
+    const style = getComputedStyle(a);
+    const label = a.childNodes[0]?.textContent?.trim() ?? '';
+    return {
+      label, count: a.querySelector('.count')?.textContent ?? null,
+      left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height),
+      fontPx: parseFloat(style.fontSize), clipped: a.scrollWidth > a.clientWidth + 1,
+      insideViewport: r.left >= 0 && r.right <= vw,
+      insideStrip: stripRect !== null && r.left >= stripRect.left - 0.5 && r.right <= stripRect.right + 0.5,
+      stripScrolls: strip !== null && strip.scrollWidth > strip.clientWidth + 1,
+    };
+  });
+}, [viewport.width]);
 const statusOf = (page, selector) => page.evaluate(sel => { const el = document.querySelector(sel); if (!el) return null; const line = el.matches('.status-line') ? el : el.querySelector('.status-line'); return { token: (line ?? el).getAttribute('data-work-status'), label: line?.querySelector('.status-label')?.textContent ?? el.querySelector('.dispatch-copy > strong, h2')?.textContent ?? null }; }, selector);
 async function payload(page, path, label) {
   const response = await page.goto(`${fixture.url}${path}`);
@@ -134,8 +174,24 @@ try {
       // Exactly one project selector in the desktop chrome.
       const selectors = await page.evaluate(() => document.querySelectorAll('details.switcher').length);
       check('c1 desktop: one project selector in the chrome', (await page.evaluate(() => [...document.querySelectorAll('details.switcher')].filter(d => d.getBoundingClientRect().width > 0).length)) === 1, `switchers rendered=${selectors}`);
-      const addProject = await page.goto(`${fixture.url}/projects`).then(() => rect(page, '.project-add-card, form[action="/projects/open"] button[type="submit"]'));
-      check('c1 desktop: Add project stays prominent on /projects (inside the first viewport)', addProject !== null && addProject.top >= 0 && addProject.top < VIEWPORTS.desktop.height, JSON.stringify(addProject));
+      // The Add project card AND its first real control, each proved by its
+      // own positive size, computed visibility, and full viewport bounds —
+      // scoped to the card, so the chrome's hidden switcher forms (zero
+      // rectangles at 0,0) can never stand in for the CTA (review fixes).
+      await page.goto(`${fixture.url}/projects`);
+      const addSelector = '.project-add-card .project-add-action, .project-add-card details.project-add-more > summary, .project-add-card form[action="/projects/open"] button[type="submit"]';
+      const addCardUnscrolled = await boxOf(page, '.project-add-card', VIEWPORTS.desktop);
+      // The honest first-viewport fact, recorded — never asserted from a
+      // zero rectangle: with three enrolled projects the card follows them.
+      report.addProjectFirstViewport = addCardUnscrolled === null ? null : { top: Math.round(addCardUnscrolled.top), insideFirstViewport: addCardUnscrolled.insideViewport };
+      check('c1 desktop: the Add project card exists with positive size and computed visibility', addCardUnscrolled !== null && addCardUnscrolled.positiveSize && addCardUnscrolled.computedVisible && addCardUnscrolled.height >= 80, JSON.stringify(addCardUnscrolled));
+      await scrollTo(page, '.project-add-card', 24);
+      const addCard = await boxOf(page, '.project-add-card', VIEWPORTS.desktop);
+      const addControl = await boxOf(page, addSelector, VIEWPORTS.desktop);
+      check('c1 desktop: scrolled to, the Add project card sits wholly inside the 1440×900 viewport', addCard !== null && addCard.ok, JSON.stringify(addCard));
+      check('c1 desktop: the Add project control itself has positive size, is computed visible, sits wholly inside the viewport, and is a usable target', addControl !== null && addControl.ok && addControl.height >= 32 && addControl.width >= 120, JSON.stringify(addControl));
+      const bogus = await boxOf(page, 'aside.side form[action="/projects/open"] button[type="submit"]', VIEWPORTS.desktop);
+      check('c1 desktop: the visibility probe rejects a hidden zero-size control (the rail switcher form) — negative control', bogus === null || !bogus.ok, JSON.stringify(bogus));
       await page.goto(`${fixture.url}/work`);
     }
     // Secondary tools stay reachable under Work tools; settings under Settings.
@@ -173,9 +229,11 @@ try {
       [T.failed]: ['failed', 'all needs-you'], [T.cancelled]: ['cancelled', 'all'], [T.running]: ['running', 'all running'],
       [T.failedChecks]: ['checks-failed', 'all needs-you completed'], [T.mismatched]: ['evidence-mismatch', 'all needs-you completed'], [T.missingProof]: ['verification-needed', 'all needs-you completed'],
       [T.attested]: ['agent-attested', 'all completed'], [T.accepted]: ['accepted-exception', 'all completed'],
+      [T.pendingReview]: ['review-pending', 'all needs-you completed'], [T.reviewing]: ['reviewing', 'all running completed'], [T.reviewFailed]: ['review-failed', 'all needs-you completed'],
     };
     const mismatches = Object.entries(expect).filter(([id, [token, views]]) => byId[id]?.token !== token || byId[id]?.views.join(' ') !== views).map(([id, want]) => `${id}: want ${want.join('/')} got ${byId[id]?.token}/${byId[id]?.views.join(' ')}`);
-    check(`c2 ${name}: every seeded state wears its token and view membership (queued, waiting, held, paused, failed, cancelled, running, failed checks, mismatched, missing, agent-attested, accepted exception)`, mismatches.length === 0, mismatches.join('; ') || `${rows.length} rows`);
+    check(`c2 ${name}: every seeded state wears its token and view membership (queued, waiting, held, paused, failed, cancelled, running, failed checks, mismatched, missing, agent-attested, accepted exception, review queued/running/failed)`, mismatches.length === 0, mismatches.join('; ') || `${rows.length} rows`);
+    check(`c2 ${name}: no row makes a negative claim it cannot see (nothing merged, manual-only merge, checks not passed)`, !(await page.evaluate(() => /nothing (is|was) merged|not published, merged, or deployed|stays a person|person's act|not passed by the machine|no check is recorded as failed/i.test(document.querySelector('.work-list')?.textContent ?? ''))));
     const tally = { All: rows.length, 'Needs you': rows.filter(r => r.views.includes('needs-you')).length, Running: rows.filter(r => r.views.includes('running')).length, Completed: rows.filter(r => r.views.includes('completed')).length };
     check(`c2 ${name}: the view counts are the rows' own memberships`, JSON.stringify(counts) === JSON.stringify(tally), `${JSON.stringify(counts)} vs rows ${JSON.stringify(tally)}`);
     check(`c2 ${name}: no row wears a bare done badge or says shipped/deployed`, !(await page.evaluate(() => { const list = document.querySelector('.work-list'); return list !== null && (/badge-done">done/.test(list.innerHTML) || /\bshipped\b/i.test(list.textContent) || /\bDeployed\b/.test(list.textContent)); })));
@@ -218,8 +276,12 @@ try {
       [T.missingProof]: ['verification-needed', 'Result saved — verification needed'],
       [T.attested]: ['agent-attested', 'Result saved — checks reported by the agent'],
       [T.accepted]: ['accepted-exception', 'Accepted with an exception'],
+      [T.pendingReview]: ['review-pending', 'Waiting for review'],
+      [T.reviewing]: ['reviewing', 'Reviewing'],
+      [T.reviewFailed]: ['review-failed', 'Review failed — retry available'],
       done: ['ready-to-review', 'Ready to review'],
     };
+    const REVIEW_TOKENS = new Set(['review-pending', 'reviewing', 'review-failed', 'review-exhausted']);
     await page.goto(`${fixture.url}/work`);
     const work = Object.fromEntries((await rowsOf(page)).map(r => [r.id, r]));
     for (const [key, [token, label]] of Object.entries(cases)) {
@@ -233,13 +295,42 @@ try {
       seen.chat = await statusOf(page, '.task-journey');
       await page.goto(`${fixture.url}/review?result=${id}`);
       seen.review = await statusOf(page, '.cockpit-head .status-line');
+      // The run page (Details): the same status line beside the evidence.
+      const runId = R[key] ?? (key === 'done' ? fixture.runId : null);
+      if (runId !== null) { await page.goto(`${fixture.url}/r/${runId}`); seen.run = await statusOf(page, '[data-proof-verdict] .status-line'); }
       report.statuses[id] = seen;
       const agree = Object.values(seen).every(one => one !== null && one.token === token && one.label === label);
-      check(`c3 ${id}: Work, task status, task title, receipt, chat, and review all say "${label}" (${token})`, agree, JSON.stringify(seen));
+      check(`c3 ${id}: Work, task status, task title, receipt, chat, review, and the run page all say "${label}" (${token})`, agree, JSON.stringify(seen));
       const words = await page.evaluate(() => document.querySelector('main')?.textContent ?? '');
       check(`c3 ${id}: nothing calls it shipped or deployed`, !/What shipped|\bshipped\b/i.test(words) && !/\bDeployed\b/.test(words));
-      if (key !== 'done') check(`c3 ${id}: a weak result is never "Ready to review"`, !/Ready to review/.test(words) && token !== 'ready-to-review');
+      if (REVIEW_TOKENS.has(token)) {
+        // A review in flight is primary; the earlier verdict is history in
+        // the receipt's own words — on the task page and in chat alike.
+        await page.goto(`${fixture.url}/t/${id}`);
+        const receiptReview = await page.evaluate(() => document.querySelector('.completion-receipt .receipt-review')?.textContent ?? null);
+        const lead = await page.evaluate(() => document.querySelector('#run-status [data-review-lead]')?.textContent ?? null);
+        const boxClass = await page.evaluate(() => document.querySelector('#run-status')?.className ?? null);
+        await page.goto(`${fixture.url}/chat?task=${id}`);
+        const chatReview = await page.evaluate(() => document.querySelector('.completion-receipt .receipt-review')?.textContent ?? null);
+        const history = 'Until the review settles, the earlier verdict — "Ready to review" — stays on record as history.';
+        check(`c3 ${id}: the receipt (task and chat) and the status box carry the review as primary and the earlier verdict as history`, receiptReview !== null && receiptReview.includes(history) && chatReview === receiptReview && lead !== null && lead.includes(history) && boxClass === 'answered dispatch-status', JSON.stringify({ receiptReview, chatReview, lead, boxClass }));
+        check(`c3 ${id}: the primary status is never "Ready to review" while the review is open`, token !== 'ready-to-review' && Object.values(seen).every(one => one?.label !== 'Ready to review'));
+      } else if (key !== 'done') {
+        check(`c3 ${id}: a weak result is never "Ready to review"`, !/Ready to review/.test(words) && token !== 'ready-to-review');
+      }
     }
+    // The review-in-flight surfaces, captured: task page, then chat.
+    await page.goto(`${fixture.url}/t/${T.reviewFailed}`);
+    await shot(page, 'desktop-task-review-failed', 'Task page for a verified result whose independent review failed with a retry left: the review leads, the earlier verdict is history (fixture)');
+    await page.goto(`${fixture.url}/chat?task=${T.reviewing}`);
+    await scrollTo(page, '.task-journey');
+    await shot(page, 'desktop-chat-reviewing', 'The same projection in task chat while a live reviewer works: journey headline and receipt agree (fixture)');
+    // An older result is never masked by a newer run's review: the run
+    // page of the plain verified result keeps its own words while three
+    // other results are under review.
+    await page.goto(`${fixture.url}/r/${fixture.runId}`);
+    const olderRun = await statusOf(page, '[data-proof-verdict] .status-line');
+    check('c3 an older selected result keeps its own verdict (no review masks it)', olderRun !== null && olderRun.token === 'ready-to-review', JSON.stringify(olderRun));
     // The failed-check result: the task page names the exit code; the
     // mismatch never claims a check failed; the accepted exception never
     // becomes "Checks passed"; the published result names the PR only.
@@ -255,16 +346,24 @@ try {
     check('c3 mismatched evidence never says checks failed', !/checks failed/i.test(await page.evaluate(() => document.querySelector('#run-status')?.textContent ?? '')));
     await page.goto(`${fixture.url}/t/${T.accepted}`);
     const acceptedWords = await page.evaluate(() => document.querySelector('main')?.textContent ?? '');
-    check('c3 accepted exception is never "Checks passed" and keeps the original missing-evidence fact', /Accepted with an exception/.test(acceptedWords) && !/Checks passed/.test(acceptedWords) && /not passed by the machine/.test(acceptedWords));
+    check('c3 accepted exception is never "Checks passed", never claims the checks failed on its own, and keeps the machine verdict on record', /Accepted with an exception/.test(acceptedWords) && !/Checks passed/.test(acceptedWords) && !/not passed by the machine/.test(acceptedWords) && /leaves the machine's verdict above unchanged/.test(acceptedWords));
     await allProjects(page);
     await page.goto(`${fixture.url}/t/${T.published}`);
     const publishedWords = await page.evaluate(() => document.querySelector('.completion-receipt')?.textContent ?? '');
-    check('c3 an opened PR reads "PR opened" — not merged, not deployed', /PR opened/.test(publishedWords) && /Merging stays a person/.test(publishedWords) && !/Merge observed|Deployed/.test(publishedWords));
+    check('c3 an opened PR reads "PR opened" as last observed — no merge or deployment recorded, no manual-only merge claim', /PR opened/.test(publishedWords) && /was last seen open on GitHub\. No merge or deployment is recorded here\./.test(publishedWords) && !/Merge observed|Deployed|Merging stays a person|nothing is merged/.test(publishedWords));
+    for (const [where, path] of [['review', `/review?result=${T.published}`], ['chat', `/chat?task=${T.published}`], ['run', `/r/${R.published}`]]) {
+      await page.goto(`${fixture.url}${path}`);
+      const text = await page.evaluate(() => document.querySelector('main')?.textContent ?? '');
+      check(`c3 the ${where} surface of the published result claims only recorded or last-observed publication facts`, !/nothing (is|was) merged|not published, merged, or deployed|stays a person|person's act/i.test(text), where);
+    }
     await page.goto(`${fixture.url}/t/${T.merged}`);
     const mergedWords = await page.evaluate(() => document.querySelector('.completion-receipt')?.textContent ?? '');
     check('c3 an observed merge reads "Merge observed" with deployment unconfirmed', /Merge observed/.test(mergedWords) && /Deployment is not confirmed/.test(mergedWords));
     await page.goto(`${fixture.url}/t/${fixture.tasks.done}`);
-    check('c3 a verified local result reads "Changes saved" and "Ready to review", never shipped', /Changes saved/.test(await page.evaluate(() => document.querySelector('.completion-receipt h2')?.textContent ?? '')) && /Saved on the build branch/.test(await page.evaluate(() => document.querySelector('.receipt-publication')?.textContent ?? '')));
+    check('c3 a verified local result reads "Changes saved" and "Ready to review", never shipped, and never denies a publication it cannot see', /Changes saved/.test(await page.evaluate(() => document.querySelector('.completion-receipt h2')?.textContent ?? '')) && (await page.evaluate(() => document.querySelector('.receipt-publication')?.textContent ?? '')) === 'Saved on the build branch. No publication, merge, or deployment is recorded here.');
+    await page.goto(`${fixture.url}/t/${T.mismatched}`);
+    const mismatchWords = await page.evaluate(() => document.querySelector('main')?.textContent ?? '');
+    check('c3 a mismatched result never claims that no check failed', !/no check is recorded as failed/i.test(mismatchWords));
     await ctx.close();
   }
 
@@ -281,6 +380,9 @@ try {
     check('c5 phone: Work view tabs and the first row sit inside the first 390×844 viewport', tabsRect !== null && tabsRect.bottom <= 844 && firstRow !== null && firstRow.top < 844 && firstRow.right <= 390, JSON.stringify({ tabsRect, firstRow }));
     const tabHeights = await page.evaluate(() => [...document.querySelectorAll('.work-views a, .tabbar a, .mobile-top .mobile-new, .mobile-top .mobile-more, .mobile-top .project-pill > summary')].map(el => el.getBoundingClientRect().height));
     check('c5 phone: view tabs, header controls, and tab-bar targets are at least 40px tall', tabHeights.length > 0 && tabHeights.every(h => h >= 40), JSON.stringify(tabHeights.map(Math.round)));
+    const filters390 = await filterBoxes(page, VIEWPORTS.phone);
+    report.filters390 = filters390;
+    check('c5 390px: all four Work filters (All, Needs you, Running, Completed) sit inside the viewport and their strip, unclipped, at least 40px tall and 12px type, with no scrolling strip', filters390.map(f => f.label).join('|') === 'All|Needs you|Running|Completed' && filters390.every(f => f.insideViewport && f.insideStrip && !f.clipped && !f.stripScrolls && f.height >= 40 && f.fontPx >= 12 && f.width >= 44), JSON.stringify(filters390));
     // The second project's long path: the task-list intro wraps, the page never widens.
     await openProject(page, fixture.repos.second);
     await page.goto(`${fixture.url}/tasks`);
@@ -299,8 +401,17 @@ try {
       check(`c5 no document horizontal overflow at ${viewport.width}px on ${path}`, flow.ok, JSON.stringify(flow));
     }
     if (name === 'narrow') {
+      await openProject(page, fixture.repos.main);
       await page.goto(`${fixture.url}/work`);
-      await shot(page, 'narrow-work-320', 'Work · All at 320×740 (fixture)');
+      await shot(page, 'narrow-work-320', 'Work · All at 320×740 with all four filters in one row (fixture)');
+      const filters320 = await filterBoxes(page, VIEWPORTS.narrow);
+      report.filters320 = filters320;
+      check('c5 320px: all four Work filters sit inside the viewport and their strip, unclipped, at least 40px tall and 12px type, with no scrolling strip', filters320.map(f => f.label).join('|') === 'All|Needs you|Running|Completed' && filters320.every(f => f.insideViewport && f.insideStrip && !f.clipped && !f.stripScrolls && f.height >= 40 && f.fontPx >= 12 && f.width >= 44), JSON.stringify(filters320));
+      const completed320 = filters320.find(f => f.label === 'Completed');
+      check('c5 320px: the Completed filter is wholly visible with its count', completed320 !== undefined && completed320.right <= 320 && completed320.count !== null && /^\d+\+?$/.test(completed320.count), JSON.stringify(completed320));
+      const rowPad = await page.evaluate(() => { const row = document.querySelector('.work-row'); return row ? parseFloat(getComputedStyle(row).paddingTop) : null; });
+      check('c5 320px: rows keep compact phone spacing (≤ 12px vertical padding)', rowPad !== null && rowPad <= 12, `paddingTop=${rowPad}`);
+      await openProject(page, fixture.repos.second);
       await page.goto(`${fixture.url}/tasks`);
       await shot(page, 'narrow-tasks-320', 'The long-path task list at 320×740 (fixture)');
       const header = await page.evaluate(() => [...document.querySelectorAll('.mobile-top > *')].map(el => { const r = el.getBoundingClientRect(); return { left: Math.round(r.left), right: Math.round(r.right) }; }));

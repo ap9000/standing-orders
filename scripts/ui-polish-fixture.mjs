@@ -20,6 +20,10 @@
  *     `{ secondProject: true }` the last two live in a second repository
  *     under a long path, so All-projects rows carry project labels and
  *     the phone task list has a raw path to wrap.
+ *   - review fixes (2026-09-13): three verified results whose independent
+ *     review is queued, running under a live reviewer, or failed with a
+ *     retry left — through the store's own request/admit doors, so every
+ *     surface projects the same review facts.
  *
  * Build first (`npm run build`), then `node scripts/ui-polish-fixture.mjs`
  * prints one JSON line with the URL and login. `scripts/ui-polish-proof.mjs`
@@ -195,7 +199,7 @@ export function startFixture(options = {}) {
     files: [{ path: 'src/payout.ts', additions: 4, deletions: 1 }, { path: 'src/payout.test.ts', additions: 9, deletions: 0 }], filesTruncated: false,
   };
   const png = encodePng(640, 400, [16, 24, 32]);
-  storeEvidence(store, evidenceRoot, run, 'terminal-diff', 'terminal-diff.patch', Buffer.from(PATCH, 'utf8'), 'git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [fixture: synthetic]', hoursAgo(8.5));
+  storeEvidence(store, evidenceRoot, run, 'terminal-diff', 'terminal-diff.patch', Buffer.from(PATCH, 'utf8'), 'git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [fixture: synthetic]', hoursAgo(8.5), { captureStatus: 'ok' });
   storeEvidence(store, evidenceRoot, run, 'diff-stat', 'diff-stat.json', budgetedStatJson(stat), 'parsed from git diff --numstat -z [fixture: synthetic]', hoursAgo(8.5));
   storeEvidence(store, evidenceRoot, run, 'handoff', 'handoff.json', Buffer.from(JSON.stringify(HANDOFF, null, 2), 'utf8'), 'composed at completion [fixture: synthetic]', hoursAgo(8.4));
   storeEvidence(store, evidenceRoot, run, 'proof', 'proof.json', Buffer.from(JSON.stringify(PROOF, null, 2), 'utf8'), 'agent-authored proof (validated) [fixture: synthetic]', hoursAgo(8.4));
@@ -240,7 +244,9 @@ export function startFixture(options = {}) {
     });
     store.stampRun(runId, { baseRevision: '4b825dc642cb6eb9a060e54bf8d69288fbee4904', scopeDigest: scope.digest });
     const proof = facts.overclaim === true ? { ...PROOF, changed: [...PROOF.changed, 'src/ledger.ts'] } : PROOF;
-    storeEvidence(store, evidenceRoot, runId, 'terminal-diff', 'terminal-diff.patch', Buffer.from(PATCH, 'utf8'), 'git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [fixture: synthetic]', hoursAgo(at + 0.2));
+    // The capture status is the plane's own (exit 0): a review request
+    // reads it before it spends the run's bounded review allowance.
+    storeEvidence(store, evidenceRoot, runId, 'terminal-diff', 'terminal-diff.patch', Buffer.from(PATCH, 'utf8'), 'git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [fixture: synthetic]', hoursAgo(at + 0.2), { captureStatus: 'ok' });
     storeEvidence(store, evidenceRoot, runId, 'diff-stat', 'diff-stat.json', budgetedStatJson(stat), 'parsed from git diff --numstat -z [fixture: synthetic]', hoursAgo(at + 0.2));
     storeEvidence(store, evidenceRoot, runId, 'handoff', 'handoff.json', Buffer.from(JSON.stringify(HANDOFF, null, 2), 'utf8'), 'composed at completion [fixture: synthetic]', hoursAgo(at + 0.1));
     if (facts.noProof !== true) {
@@ -339,13 +345,38 @@ export function startFixture(options = {}) {
   store.finishRun(pausedRun, { outcome: 'interrupted', reason: 'stopped', now: hoursAgo(0.29), stopSettlement: 'interrupted' });
   release(store, pausedClaim.claim.leaseId, hoursAgo(0.28));
   store.setTaskState(paused.taskId, 'queued', hoursAgo(0.28));
+  // --- review fixes: a review queued, running, and failed ------------------
+  // A reviewer worker that answers, covering only the empty project so no
+  // builder-coverage status above changes; its heartbeat sits an hour
+  // ahead so it stays alive for the whole proof run (fixture only).
+  register(store, { name: 'reviewer-1', host: 'fixture-host', capacity: 1, repos: [repo3 ?? repo], now: new Date(now.getTime() + 3_600_000), newToken: () => 'fixture-reviewer-token' });
+  const reviewed = (id, title, at, settle) => {
+    const built = finished(id, title, at, {});
+    const asked = store.requestReview(built.runId, 'polish-fixture', hoursAgo(at - 0.1));
+    if (!asked.ok) throw new Error(`fixture review request ${id}: ${asked.reason}`);
+    const reviewer = settle === 'queued' ? null : store.admitReview(asked.id, { runner: 'reviewer-1', token: 'fixture-reviewer-token', provider: 'codex', model: 'default' }, hoursAgo(at - 0.2));
+    if (reviewer !== null && !reviewer.ok) throw new Error(`fixture review admission ${id}: ${reviewer.reason}`);
+    if (settle === 'failed' && reviewer !== null) {
+      store.finishRun(reviewer.reviewerRunId, { outcome: 'failed', reason: 'reviewer-agent', now: hoursAgo(at - 0.3) });
+      store.stampReviewRequestOutcome(asked.id, 'reviewer-agent');
+    }
+    return { ...built, reviewerRunId: reviewer?.reviewerRunId ?? null };
+  };
+  results.pendingReview = reviewed('csv-header-row', 'Add a header row to the CSV export', 13, 'queued');
+  results.reviewing = reviewed('csv-null-cells', 'Render empty cells as empty strings', 14, 'running');
+  results.reviewFailed = reviewed('csv-large-file', 'Stream files over ten thousand rows', 15, 'failed');
+
   const statusTasks = {
     failedChecks: results.failedChecks.taskId, mismatched: results.mismatched.taskId, missingProof: results.missingProof.taskId,
     attested: results.attested.taskId, accepted: results.accepted.taskId, published: results.published.taskId, merged: results.merged.taskId,
     waitingForBuilder: waitingForBuilder.taskId, chained: chained.taskId, held: held.taskId, failed: failed.taskId, cancelled: cancelled.taskId,
     running: running.taskId, paused: paused.taskId,
+    pendingReview: results.pendingReview.taskId, reviewing: results.reviewing.taskId, reviewFailed: results.reviewFailed.taskId,
   };
-  const statusRuns = { failedChecks: results.failedChecks.runId, mismatched: results.mismatched.runId, missingProof: results.missingProof.runId, attested: results.attested.runId, accepted: results.accepted.runId, published: results.published.runId, merged: results.merged.runId, running: liveRun, paused: pausedRun };
+  const statusRuns = {
+    failedChecks: results.failedChecks.runId, mismatched: results.mismatched.runId, missingProof: results.missingProof.runId, attested: results.attested.runId, accepted: results.accepted.runId, published: results.published.runId, merged: results.merged.runId, running: liveRun, paused: pausedRun,
+    pendingReview: results.pendingReview.runId, reviewing: results.reviewing.runId, reviewFailed: results.reviewFailed.runId,
+  };
 
   // --- the scripted conversation ------------------------------------------
   const runner = async request => {

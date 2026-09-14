@@ -19,7 +19,7 @@
 
 import type { DispatchDiagnosis } from "./dispatch.js";
 import type { ProofVerdict } from "./proof.js";
-import type { TaskState } from "./store.js";
+import type { ReviewRetryState, TaskState } from "./store.js";
 
 /** The Work destination's views — shortcuts over the same rows, never a
  * persisted state. All is the default. */
@@ -49,7 +49,94 @@ export type ResultFacts = {
   /** A no-change conclusion's two presence facts (handoff + sealed diff);
    * undefined when the caller did not read them. */
   recordComplete?: boolean;
+  /** This exact run's independent review (v50 retry projection), read
+   * per run so an older selected result keeps its own words; undefined
+   * when the caller did not read it, null when never requested. */
+  review?: ReviewFacts | null;
 };
+
+/** The result's review facts as `reviewRetryStateOf` records them, plus
+ * the one liveness fact the words depend on. */
+export type ReviewFacts = {
+  state: ReviewRetryState["state"];
+  /** The attempt in play: the next ordinal while queued, else the live or
+   * latest attempt's. */
+  attempt: number | null;
+  cap: number;
+  attempts: number;
+  retriesRemaining: number;
+  latestReason: string | null;
+  interrupted: boolean;
+  /** Who asked for the open (queued) request, when one is open. */
+  queuedBy: string | null;
+  /** Whether the live attempt's reviewer worker is answering. */
+  reviewerAlive: boolean;
+};
+
+/** The review facts from the store's bounded retry projection — the same
+ * reading `diagnoseTaskDispatch` makes, so every surface starts from one
+ * record. `reviewerAlive` answers for the live attempt's runner. */
+export function reviewFactsOf(retry: ReviewRetryState | null, reviewerAlive: (runner: string) => boolean): ReviewFacts | null {
+  if (retry === null || retry.state === "unrequested") return null;
+  const current = retry.live ?? (retry.state === "queued" ? null : retry.latest);
+  return {
+    state: retry.state,
+    attempt: retry.state === "queued" ? retry.nextAttempt : current?.attempt ?? null,
+    cap: retry.cap,
+    attempts: retry.attempts.length,
+    retriesRemaining: retry.retriesRemaining,
+    latestReason: retry.latest?.reason ?? null,
+    interrupted: retry.latest !== null && (retry.latest.outcome === "interrupted" || retry.latest.reason === "interrupted"),
+    queuedBy: retry.openRequest?.requestedBy ?? null,
+    reviewerAlive: retry.live !== null && reviewerAlive(retry.live.runner),
+  };
+}
+
+/** The tokens a review in flight wears — the dispatch codes, unchanged. */
+export const REVIEW_TOKENS: ReadonlySet<string> = new Set(["reviewing", "review-pending", "review-failed", "review-exhausted"]);
+
+const retriesLeft = (count: number): string => (count === 1 ? "1 explicit retry" : `${count} explicit retries`);
+
+/**
+ * A review that is queued, running, failed with a retry left, or
+ * exhausted is the result's PRIMARY status — the machine is still
+ * deciding, and every surface must say so with the same words. A review
+ * never requested, or one that succeeded, adds nothing: the stored verdict
+ * (folded by the review where one landed) speaks. Words and tokens are
+ * the v50 dispatch contract; nothing here changes the lifecycle.
+ */
+export function reviewStatusOf(review: ReviewFacts | null): DisplayStatus | null {
+  if (review === null || review.state === "unrequested" || review.state === "succeeded") return null;
+  const ordinal = `attempt ${review.attempt ?? review.attempts} of ${review.cap}`;
+  const open: NextAction = { label: "Open the result", kind: "open-result" };
+  if (review.state === "running") {
+    return review.reviewerAlive
+      ? { token: "reviewing", label: review.attempt === 1 ? "Reviewing" : `Reviewing (retry ${(review.attempt ?? 1) - 1} of ${review.cap - 1})`, detail: `The build is preserved while an independent reviewer checks its sealed evidence (${ordinal}).`, tone: "live", action: open }
+      : { token: "review-failed", label: "Review interrupted", detail: `The reviewer has no live worker; recovery must settle the interrupted attempt (${ordinal}) before it can be retried.`, tone: "attention", action: open };
+  }
+  if (review.state === "queued") {
+    return review.attempt === 1
+      ? { token: "review-pending", label: "Waiting for review", detail: "The build finished and its requested independent review is waiting for a worker.", tone: "attention", action: open }
+      : { token: "review-pending", label: `Review retry queued (${ordinal})`, detail: `The explicit review retry${review.queuedBy === null ? "" : `, asked by ${review.queuedBy},`} is waiting for a worker; ${retriesLeft(review.retriesRemaining)} would remain after it.`, tone: "attention", action: open };
+  }
+  if (review.state === "retryable") {
+    const what = review.interrupted ? "was interrupted" : "failed";
+    return {
+      token: "review-failed",
+      label: review.interrupted ? "Review interrupted — retry available" : "Review failed — retry available",
+      detail: `Review ${ordinal} ${what}${review.latestReason === null ? "" : ` (${review.latestReason})`}. The build is preserved; ask for an explicit retry — ${retriesLeft(review.retriesRemaining)} left.`,
+      tone: "attention",
+      action: { label: "Retry the review", kind: "open-review" },
+    };
+  }
+  return {
+    token: "review-exhausted",
+    label: "Review retries exhausted",
+    detail: `All ${review.cap} review attempts ended without a review${review.latestReason === null ? "" : ` (latest: ${review.latestReason})`}. Nothing retries a fourth time; open the result to accept it with an exception or file a revision.`,
+    tone: "attention",
+    action: open,
+  };
+}
 
 export type PublicationFacts = {
   state: string;
@@ -107,7 +194,11 @@ export function failedCheckExit(reasons: readonly string[]): number | null {
 
 /** The observed publication record in words. Each state is a distinct
  * fact: a pushed branch is not a PR, an open PR is not a merge, and a
- * merge is not a deployment — no record here ever says "deployed". */
+ * merge is not a deployment — no record here ever says "deployed". The
+ * words name what was recorded or last observed and what stays
+ * unconfirmed; a missing or stale observation never proves that nothing
+ * merged or deployed, and merging is never called manual-only — an
+ * authorized mode may merge on green. */
 export function publicationStatusOf(publication: PublicationFacts): { token: string; label: string; detail: string } | null {
   if (publication === null) return null;
   const pr = publication.prNumber === null ? "the pull request" : `PR #${publication.prNumber}`;
@@ -116,18 +207,18 @@ export function publicationStatusOf(publication: PublicationFacts): { token: str
     return { token: "merge-observed", label: "Merge observed", detail: `GitHub reports ${pr} merged. Deployment is not confirmed by any record here.` };
   }
   if (publication.remoteState === "CLOSED") {
-    return { token: "pr-closed", label: "PR closed without merging", detail: `GitHub reports ${pr} closed. Nothing was merged or deployed.` };
+    return { token: "pr-closed", label: "PR closed without merging", detail: `GitHub last reported ${pr} closed without a merge. No merge or deployment is recorded here.` };
   }
   if (publication.state === "opened") {
-    return { token: "pr-opened", label: "PR opened", detail: `${pr} is open on GitHub. Merging stays a person's act; nothing is merged or deployed yet.${ci}` };
+    return { token: "pr-opened", label: "PR opened", detail: `${pr} was last seen open on GitHub. No merge or deployment is recorded here.${ci}` };
   }
   if (publication.state === "pushed") {
-    return { token: "branch-pushed", label: "Branch pushed", detail: "The branch reached the remote; no pull request is open yet." };
+    return { token: "branch-pushed", label: "Branch pushed", detail: "The branch reached the remote; no pull request is recorded yet." };
   }
   if (publication.state === "failed") {
-    return { token: "publication-failed", label: "Publication failed", detail: "Standing Orders could not publish this result; the changes stay on the build branch." };
+    return { token: "publication-failed", label: "Publication failed", detail: "The last publication attempt failed; no pull request or merge is recorded here." };
   }
-  return { token: "publication-pending", label: "Publication requested", detail: "Publishing was authorized and has not completed; the changes stay on the build branch until it does." };
+  return { token: "publication-pending", label: "Publication requested", detail: "Publishing was authorized and has not completed; no pull request or merge is recorded yet." };
 }
 
 /**
@@ -141,6 +232,36 @@ export function publicationStatusOf(publication: PublicationFacts): { token: str
  * the detail).
  */
 export function resultStatusOf(result: ResultFacts | null, publication: PublicationFacts = null): DisplayStatus {
+  const stored = storedResultStatusOf(result, publication);
+  // A review in flight (queued, running, failed with a retry, exhausted)
+  // leads on every surface; an operator's acceptance closes the matter,
+  // and a scout's report is never reviewed. The earlier verdict stays in
+  // the detail as history, never as the main wording.
+  if (result === null || result.runId === null || result.role === "scout" || result.accepted) return stored;
+  const review = reviewStatusOf(result.review ?? null);
+  if (review === null) return stored;
+  return { ...review, detail: `${review.detail} ${priorVerdictWords(stored)}` };
+}
+
+/** The earlier verdict as history under a review in flight. */
+function priorVerdictWords(stored: DisplayStatus): string {
+  return `Until the review settles, the earlier verdict — "${stored.label}" — stays on record as history.`;
+}
+
+/** What the machine itself recorded about a result, in a clause. */
+function machineVerdictWords(result: ResultFacts): string {
+  if (result.verdict === "verified") return "it verified the result before the acceptance";
+  if (result.verdict === "attested") return "the checks on record are the agent's own report";
+  const problem = evidenceProblemOf(result.verdict, result.reasons);
+  if (problem === "checks-failed") {
+    const exit = failedCheckExit(result.reasons);
+    return `the approved check failed against it${exit === null ? "" : ` (exit ${exit})`}`;
+  }
+  if (problem === "mismatched") return "its evidence did not match the sealed record";
+  return "its required evidence was missing";
+}
+
+function storedResultStatusOf(result: ResultFacts | null, publication: PublicationFacts): DisplayStatus {
   if (result === null || result.runId === null) {
     return {
       token: "no-build-record",
@@ -159,7 +280,10 @@ export function resultStatusOf(result: ResultFacts | null, publication: Publicat
     return {
       token: "accepted-exception",
       label: "Accepted with an exception",
-      detail: withPublication("An approver accepted this result by hand. Its checks were not passed by the machine, and the recorded exception says why."),
+      // Acceptance records a person's decision; it neither proves nor
+      // disproves anything about the checks. The machine's own verdict is
+      // restated as recorded.
+      detail: withPublication(`An approver accepted this result by hand, and the recorded exception says why. The machine's verdict is unchanged: ${machineVerdictWords(result)}.`),
       tone: "done",
       action: { label: "Review the recorded exception", kind: "open-review" },
     };
@@ -179,7 +303,9 @@ export function resultStatusOf(result: ResultFacts | null, publication: Publicat
     return {
       token: "evidence-mismatch",
       label: "Result saved, but its evidence does not match",
-      detail: withPublication("The proof's claims disagree with the sealed record; no check is recorded as failed."),
+      // A structural refutation is settled before the approved check is
+      // weighed, so it says nothing about whether that check passed.
+      detail: withPublication("The proof's claims disagree with the sealed record. Whether the approved check passed is not settled by this verdict."),
       tone: "problem",
       action: { label: "Review the evidence", kind: "open-review" },
     };
@@ -250,7 +376,7 @@ export function receiptHeadingOf(outcome: string | null, publication: Publicatio
 /** The receipt's one-line publication fact under the heading. */
 export function receiptPublicationWords(publication: PublicationFacts): string {
   const published = publicationStatusOf(publication);
-  return published === null ? "Saved on the build branch — not published, merged, or deployed." : published.detail;
+  return published === null ? "Saved on the build branch. No publication, merge, or deployment is recorded here." : published.detail;
 }
 
 /** Everything one Work row needs, gathered by the server from records it
@@ -275,8 +401,6 @@ export type WorkStatus = DisplayStatus & {
   rank: number;
 };
 
-const REVIEW_CODES = new Set(["reviewing", "review-pending", "review-failed", "review-exhausted"]);
-
 /** Needs you: the existing diagnosis semantics — waiting on a person with a
  * concrete act — never every queued task indiscriminately. */
 export function needsPerson(dispatch: DispatchDiagnosis | null): boolean {
@@ -288,7 +412,8 @@ export function needsPerson(dispatch: DispatchDiagnosis | null): boolean {
 
 export function workStatusOf(facts: WorkFacts): WorkStatus {
   const dispatch = facts.dispatch;
-  const running = facts.liveRunId !== null || dispatch?.condition === "running";
+  const result = facts.state === "done" ? resultStatusOf(facts.result, facts.publication) : null;
+  const running = facts.liveRunId !== null || dispatch?.condition === "running" || result?.token === "reviewing";
   const needs = needsPerson(dispatch);
   const views: WorkView[] = ["all"];
   if (needs) views.push("needs-you");
@@ -305,14 +430,16 @@ export function workStatusOf(facts: WorkFacts): WorkStatus {
     rank,
   });
 
-  if (facts.state === "done") {
+  if (facts.state === "done" && result !== null) {
     // A review in flight or waiting outranks the stored verdict: the
-    // machine is still deciding, and the row must say so.
-    if (dispatch !== null && REVIEW_CODES.has(dispatch.code)) {
+    // machine is still deciding, and the row says so in the projection's
+    // own words. A caller that never read the review facts still gets
+    // the dispatch diagnosis's words for the same codes.
+    if (REVIEW_TOKENS.has(result.token)) return { ...result, views, rank: needs ? 0 : running ? 1 : 3 };
+    if (facts.result?.review === undefined && dispatch !== null && REVIEW_TOKENS.has(dispatch.code)) {
       return dispatchWords(dispatch.condition === "running" ? "live" : "attention", needs ? 0 : running ? 1 : 3, { label: "Open the result", kind: "open-result" });
     }
-    const status = resultStatusOf(facts.result, facts.publication);
-    return { ...status, views, rank: needs ? 0 : 3 };
+    return { ...result, views, rank: needs ? 0 : 3 };
   }
   if (facts.state === "cancelled") {
     return { token: "cancelled", label: "Cancelled", detail: dispatch?.detail ?? "Nothing else will run for this task.", tone: "muted", action: null, views, rank: 4 };

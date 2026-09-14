@@ -7565,7 +7565,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // changes saved locally — never an unconditional "shipped".
     expect(bare).not.toContain("What shipped");
     expect(bare).toContain("<h2>Changes saved</h2>");
-    expect(bare).toContain('data-receipt-publication="none">Saved on the build branch — not published, merged, or deployed.</p>');
+    expect(bare).toContain('data-receipt-publication="none">Saved on the build branch. No publication, merge, or deployment is recorded here.</p>');
     expect(bare).toContain('data-work-status="verification-needed"');
     expect(bare).toContain("Result saved — verification needed");
     expect(bare).toContain(`href="/r/${run}">Review full evidence</a>`);
@@ -7672,7 +7672,10 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(accepted).toContain('data-dispatch-status="proof-refuted"');
     expect(accepted).toContain('data-work-status="accepted-exception"');
     expect(accepted).toContain("Accepted with an exception");
-    expect(accepted).toContain("the checks were not passed by the machine");
+    // Acceptance leaves the machine's verdict on record, unchanged; it
+    // never asserts on its own that the checks failed or passed.
+    expect(accepted).toContain("that acceptance leaves the machine's verdict above unchanged");
+    expect(accepted).not.toContain("not passed by the machine");
     expect(accepted).not.toContain("Checks passed");
     expect(accepted).not.toContain("Accept with exception</button>");
   });
@@ -11230,6 +11233,13 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const response = await fetch(url("/projects/open"), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, path, return: "/work" }), redirect: "manual" });
     expect(response.status).toBe(303);
   };
+  /** The switcher's session-only pick — the one project verb a
+   * project-scoped account may use. */
+  const selectProject = async (cookie: string, path: string): Promise<void> => {
+    const csrf = csrfOf(await page(cookie, "/projects"));
+    const response = await fetch(url("/projects/select"), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, path, return: "/work" }), redirect: "manual" });
+    expect(response.status).toBe(303);
+  };
   const seedTask = (id: string, title: string, repo: string): number => {
     store.createTask({ id, title }, new Date(now.getTime() - 3_600_000));
     const ref = store.refFor("built-in", id).id;
@@ -11510,15 +11520,24 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // a PR is "PR opened", and neither claims a merge or a deployment.
     const local = await page(cookie, "/t/t-verified");
     expect(local).toContain("<h2>Changes saved</h2>");
-    expect(local).toContain("Saved on the build branch — not published, merged, or deployed.");
+    expect(local).toContain("Saved on the build branch. No publication, merge, or deployment is recorded here.");
     const pr = await page(cookie, "/t/t-pr");
     expect(pr).toContain("<h2>PR opened</h2>");
-    expect(pr).toContain('data-receipt-publication="opened">PR #482 is open on GitHub. Merging stays a person');
+    expect(pr).toContain('data-receipt-publication="opened">PR #482 was last seen open on GitHub. No merge or deployment is recorded here.');
     expect(pr).not.toContain("Merge observed");
-    // The accepted exception keeps its original failed check visible.
+    // No surface denies a merge or deployment it cannot see, and none calls
+    // merging a person's act alone (an authorized mode may merge on green).
+    for (const html of [local, pr, await page(cookie, "/review?result=t-pr"), await page(cookie, "/chat?task=t-pr")]) {
+      expect(html).not.toMatch(/nothing (is|was) merged|not published, merged, or deployed|stays a person|person's act/i);
+    }
+    // The accepted exception keeps its original failed check visible and
+    // never turns the acceptance into a claim about the checks.
     const accepted = await page(cookie, "/t/t-accepted");
     expect(accepted).toContain("The project check failed (exit 2).");
-    expect(accepted).toContain("the checks were not passed by the machine");
+    expect(accepted).toContain("that acceptance leaves the machine's verdict above unchanged");
+    expect(work).toContain("The machine&#39;s verdict is unchanged: the approved check failed against it (exit 2).");
+    expect(accepted).not.toContain("not passed by the machine");
+    expect(work).not.toContain("not passed by the machine");
   });
 
   test("an admitted run's deep link opens from All projects without weakening visibility: a run outside the ceiling or the account still 404s, and the project gate stays for project-bound pages", async () => {
@@ -11557,6 +11576,213 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect((await fetch(url(`/r/${alphaRun}`), { headers: { cookie: member } })).status).toBe(200);
     expect((await fetch(url(`/r/${betaRun}`), { headers: { cookie: member } })).status).toBe(404);
     expect(rowsOf(await page(member, "/work")).map(row => row.id)).toEqual(["t-alpha"]);
+  });
+
+  test("Work admits before it limits (review fixes, finding 1): a selected project past the cap says 200+ with a bound, newer excluded tasks never starve the roll-up, empty shortcut views over a bounded page say so, and a restricted account keeps its own view", async () => {
+    // 201 tasks in alpha, oldest first, so the two oldest are the ones a
+    // bounded page must drop — and one newer task in beta, so the roll-up's
+    // merge across admitted projects is exercised too.
+    const at = (minutes: number): Date => new Date(now.getTime() - 24 * 3_600_000 + minutes * 60_000);
+    for (let i = 0; i < 201; i++) {
+      const id = `alpha-${String(i).padStart(3, "0")}`;
+      store.createTask({ id, title: `alpha task ${i}` }, at(i));
+      store.placeTask(store.refFor("built-in", id).id, alpha);
+    }
+    store.createTask({ id: "beta-newest", title: "beta newest" }, at(300));
+    store.placeTask(store.refFor("built-in", "beta-newest").id, beta);
+    const cookie = await login();
+    await openProject(cookie, alpha);
+    const scoped = await page(cookie, "/work");
+    const scopedRows = rowsOf(scoped).map(row => row.id);
+    expect(scopedRows).toHaveLength(200);
+    expect(scopedRows).not.toContain("alpha-000");
+    expect(scopedRows).toContain("alpha-200");
+    expect(scopedRows).not.toContain("beta-newest");
+    // The bound is said, the All count is honest, and the tab counts wear
+    // their page-only meaning.
+    expect(scoped).toContain('<nav class="work-views" aria-label="work views" data-work-bound="200">');
+    expect(countsOf(scoped)).toMatchObject({ "Needs you": expect.any(Number), Running: 0, Completed: 0 });
+    expect(scoped).toContain('<span class="count">200+</span>');
+    expect(scoped).toContain('<p class="meta work-bound" data-work-bound="200">Showing the newest 200 tasks in view — there are more. The view counts cover these 200 only.');
+    expect(scoped).not.toContain('data-work-empty="all"');
+    // An empty shortcut view over the bounded page claims nothing about
+    // the tasks it did not read.
+    const running = await page(cookie, "/work?view=running");
+    expect(running).toContain('<div class="work-empty" data-work-empty="running" data-work-bound="200"><p>Nothing among the newest 200 tasks in view is building or in review. Older tasks stay in the task list, filtered by state.</p>');
+    expect(running).not.toContain("Nothing is building right now.");
+    const completed = await page(cookie, "/work?view=completed");
+    expect(completed).toContain("Nothing among the newest 200 tasks in view has finished.");
+    expect(completed).not.toContain("No finished work yet.");
+    // Exactly at the cap: no bound, no "+", the ordinary empty copy.
+    store.cancelTask("alpha-000", now);
+    await openProject(cookie, beta);
+    const small = await page(cookie, "/work");
+    expect(rowsOf(small).map(row => row.id)).toEqual(["beta-newest"]);
+    expect(small).not.toContain("data-work-bound");
+    expect(small).toContain('<span class="count">1</span>');
+    expect(await page(cookie, "/work?view=completed")).toContain("No finished work yet.");
+
+    // 501 newer tasks in a repository outside the ceiling: the roll-up's
+    // window belongs to admitted tasks, so the page is full and honest —
+    // never the false empty claim the old post-filter produced.
+    const forbidden = join(root, "forbidden");
+    for (let i = 0; i < 501; i++) {
+      const id = `foreign-${String(i).padStart(3, "0")}`;
+      store.createTask({ id, title: `foreign task ${i}` }, at(1_000 + i));
+      store.placeTask(store.refFor("built-in", id).id, forbidden);
+    }
+    const all = await login();
+    expect(/<span class="name">all projects/.test(await page(all, "/work"))).toBe(true);
+    const rollup = await page(all, "/work");
+    const rollupRows = rowsOf(rollup).map(row => row.id);
+    expect(rollupRows).toHaveLength(200);
+    expect(rollupRows.filter(id => id.startsWith("foreign-"))).toEqual([]);
+    expect(rollupRows).toContain("beta-newest");
+    expect(rollupRows).toContain("alpha-200");
+    expect(rollupRows).not.toContain("alpha-001");
+    expect(rollup).not.toContain('data-work-empty="all"');
+    expect(rollup).toContain('data-work-bound="200"');
+    expect(rollup).toContain('<span class="project-label">beta</span>');
+    // The chrome's needs-you badge reads the same bounded, admitted page.
+    expect(rollup).toMatch(/<a class="scope-count" href="\/work\?view=needs-you">\d+ needs you<\/a>|needs you/);
+
+    // A project-scoped account admitted to alpha alone sees alpha's newest
+    // 200, nothing foreign, nothing from beta — with no project selected.
+    const minted = store.mintInvite("approver", "alex", now, undefined, [alpha]);
+    expect(store.consumeInviteAndCreateAccount({ tokenValue: minted.token, name: "member", credentialHash: hashPassword(memberPassword) }, now).ok).toBe(true);
+    const member = await login("member", memberPassword);
+    const memberRows = rowsOf(await page(member, "/work")).map(row => row.id);
+    expect(memberRows).toHaveLength(200);
+    expect(memberRows.every(id => id.startsWith("alpha-"))).toBe(true);
+    expect(memberRows).not.toContain("beta-newest");
+    // A member of two projects opens Work and an admitted run without
+    // selecting a project (the review's third check, kept permanent): the
+    // session lands on its first admitted project, bounded and honest.
+    const { run } = finished("t-visible", "visible result", beta, { verdict: "verified", reasons: ["the approved verification command passed"] });
+    const minted2 = store.mintInvite("approver", "alex", now, undefined, [alpha, beta]);
+    expect(store.consumeInviteAndCreateAccount({ tokenValue: minted2.token, name: "member2", credentialHash: hashPassword(memberPassword) }, now).ok).toBe(true);
+    const member2 = await login("member2", memberPassword);
+    const memberWork = await fetch(url("/work"), { headers: { cookie: member2 }, redirect: "manual" });
+    expect(memberWork.status).toBe(200);
+    const memberHtml = await memberWork.text();
+    const memberWorkRows = rowsOf(memberHtml).map(row => row.id);
+    expect(memberWorkRows).toHaveLength(200);
+    expect(memberWorkRows.every(id => id.startsWith("alpha-"))).toBe(true);
+    expect(memberHtml).toContain('data-work-bound="200"');
+    expect((await fetch(url(`/r/${run}`), { headers: { cookie: member2 }, redirect: "manual" })).status).toBe(200);
+    await selectProject(member2, beta);
+    expect(rowsOf(await page(member2, "/work")).map(row => row.id).sort()).toEqual(["beta-newest", "t-visible"]);
+
+    // Unplaced rows ride every project-bound read the store makes, and a
+    // project-scoped account may not see them: 201 newer unplaced tasks
+    // must neither appear for the member nor spend its page.
+    for (let i = 0; i < 201; i++) store.createTask({ id: `unplaced-${String(i).padStart(3, "0")}`, title: `unplaced task ${i}` }, at(2_000 + i));
+    const memberAfter = await page(member2, "/work");
+    expect(rowsOf(memberAfter).map(row => row.id).sort()).toEqual(["beta-newest", "t-visible"]);
+    expect(memberAfter).not.toContain("data-work-bound");
+    await selectProject(member2, alpha);
+    const memberAlpha = await page(member2, "/work");
+    expect(rowsOf(memberAlpha).map(row => row.id)).toHaveLength(200);
+    expect(rowsOf(memberAlpha).some(row => row.id.startsWith("unplaced-"))).toBe(false);
+    expect(memberAlpha).toContain('data-work-bound="200"');
+    // The unrestricted viewer still sees unplaced rows, newest first among
+    // the admitted projects, with the honest bound.
+    const withUnplaced = rowsOf(await page(all, "/work")).map(row => row.id);
+    expect(withUnplaced).toHaveLength(200);
+    expect(withUnplaced.filter(id => id.startsWith("unplaced-"))).toHaveLength(200);
+    // Past the store's 500-row read ceiling on rows the member cannot see,
+    // Work says its read was cut short instead of claiming emptiness.
+    for (let i = 201; i < 700; i++) store.createTask({ id: `unplaced-${String(i).padStart(3, "0")}`, title: `unplaced task ${i}` }, at(2_000 + i));
+    await selectProject(member2, beta);
+    const cut = await page(member2, "/work");
+    expect(rowsOf(cut).map(row => row.id)).toEqual([]);
+    expect(cut).toContain('data-work-empty="all" data-work-bound="unproven"');
+    expect(cut).toContain("Nothing Work could read within its 500-record bound belongs here.");
+    expect(cut).toContain('<p class="meta work-bound" data-work-bound="unproven">Work read its 500-record bound without finding every task in view');
+    expect(cut).not.toContain("Nothing is in progress.");
+  });
+
+  test("a review in flight (review fixes, finding 4) leads with one status on Work, the task page, the focused chat, the receipt, the cockpit, and the run page; the earlier verdict stays as history; an older run and an accepted result keep their own words", async () => {
+    // Two finished builds on one task: the older one (A) verified, and the
+    // newer result (B) verified too — B is what every surface projects,
+    // and A's own run page must keep A's verdict whatever B's review does.
+    const { ref, run: older } = finished("t-rev", "Review me", alpha, { verdict: "verified", reasons: ["the approved verification command passed"] });
+    const latest = store.startRun({ taskRef: ref, leaseId: "lease-t-rev-2", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-rev", worktree: "/pool/t-rev-2", now: new Date(now.getTime() - 900_000), ...presented(store, ref, "builder") });
+    storeEvidence(store, root, latest, "terminal-diff", "terminal-diff.patch", Buffer.from("diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-a\n+b\n", "utf8"), "git diff --no-ext-diff 0000..HEAD (exit 0)", now, { captureStatus: "ok" });
+    storeEvidence(store, root, latest, "handoff", "handoff.json", Buffer.from(JSON.stringify({ schema: 1, outcome: "built", committed: true, conclusion: "Finished again.", changes: [], verification: [], followUps: [], decisionsIncorporated: [] }), "utf8"), "composed at completion", now);
+    store.finishRun(latest, { outcome: "built", committed: true, now: new Date(now.getTime() - 600_000) });
+    store.saveProofVerdict(latest, "refuted", ["the repository's approved verification command exited 1"], now);
+    store.setTaskState("t-rev", "done", new Date(now.getTime() - 600_000));
+    register(store, { name: "night-shift-1", host: "here", capacity: 2, repos: [alpha], now, newToken: () => "tok-night-1" });
+    const cookie = await login();
+    await openProject(cookie, alpha);
+    const surfaces = async (): Promise<Record<string, { token: string | undefined; label: string | undefined }>> => {
+      const work = rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev");
+      const task = await page(cookie, "/t/t-rev");
+      const chat = await page(cookie, "/chat?task=t-rev");
+      const review = await page(cookie, "/review?result=t-rev");
+      const run = await page(cookie, `/r/${latest}`);
+      const titleToken = /<h1 class="task-main-title">[^<]*<span class="status-line" data-work-status="([^"]+)"/.exec(task)?.[1];
+      return {
+        work: { token: work?.token, label: work?.label },
+        box: { token: /id="run-status" data-dispatch-status="[^"]*" data-work-status="([^"]+)"/.exec(task)?.[1], label: /id="run-status"[^>]*>\s*<div class="dispatch-copy"><strong>([^<]+)<\/strong>/.exec(task)?.[1] },
+        title: { token: titleToken, label: statusOf(task)[0]?.label },
+        receipt: { token: /<section class="card completion-receipt"[\s\S]*?data-work-status="([^"]+)"/.exec(task)?.[1], label: statusOf(task)[1]?.label },
+        chat: { token: /<section class="card task-journey"[^>]*data-work-status="([^"]+)"/.exec(chat)?.[1], label: /<span class="eyebrow">task journey<\/span><h2>([^<]+)<\/h2>/.exec(chat)?.[1] },
+        chatReceipt: { token: statusOf(chat)[0]?.token, label: statusOf(chat)[0]?.label },
+        cockpit: { token: /<p class="cockpit-chips">.*?data-work-status="([^"]+)"/s.exec(review)?.[1], label: statusOf(review)[0]?.label },
+        run: { token: /data-proof-verdict="[^"]*"><span class="status-line" data-work-status="([^"]+)"/.exec(run)?.[1], label: statusOf(run)[0]?.label },
+      };
+    };
+    const agree = (seen: Record<string, { token: string | undefined; label: string | undefined }>, token: string, label: string): void => {
+      for (const [name, one] of Object.entries(seen)) expect(one, name).toEqual({ token, label });
+    };
+    // Before any review: the stored verdict everywhere.
+    agree(await surfaces(), "checks-failed", "Changes saved, but checks failed");
+
+    // Queued: one primary status on every surface; the receipt and the
+    // status box carry the earlier verdict as history, in the same words.
+    const first = store.requestReview(latest, "alex", now);
+    if (!first.ok) throw new Error(first.reason);
+    agree(await surfaces(), "review-pending", "Waiting for review");
+    const queuedTask = await page(cookie, "/t/t-rev");
+    const history = "Until the review settles, the earlier verdict — &quot;Changes saved, but checks failed&quot; — stays on record as history.";
+    expect(queuedTask).toContain(`<p class="receipt-review meta" data-receipt-review="review-pending">The build finished and its requested independent review is waiting for a worker. ${history}</p>`);
+    expect(queuedTask).toContain(`<span data-review-lead="review-pending">The build finished and its requested independent review is waiting for a worker. ${history}</span> <a href="/r/${latest}">Build #${latest}</a> finished. The project check failed (exit 1).`);
+    expect(queuedTask).toContain('class="answered dispatch-status" id="run-status"');
+    expect(queuedTask).toContain('data-review-state="queued"');
+    // The receipt's criteria label still reads from the stored verdict.
+    expect(queuedTask).toContain("cited by the agent — not verified");
+    expect(await page(cookie, "/chat?task=t-rev")).toContain(`data-receipt-review="review-pending">The build finished and its requested independent review is waiting for a worker. ${history}`);
+    expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "needs-you", "completed"]);
+    // The older run keeps its own verdict: nothing masks a selected result.
+    const olderPage = await page(cookie, `/r/${older}`);
+    expect(/data-proof-verdict="[^"]*"><span class="status-line" data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("ready-to-review");
+    expect(olderPage).not.toContain("Waiting for review");
+
+    // Running with a live reviewer: Reviewing, and the row is Running.
+    const admitted = store.admitReview(first.id, { runner: "night-shift-1", token: "tok-night-1", provider: "claude", model: "sonnet" }, now);
+    if (!admitted.ok) throw new Error(admitted.reason);
+    agree(await surfaces(), "reviewing", "Reviewing");
+    expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "running", "completed"]);
+    expect(rowsOf(await page(cookie, "/work?view=running")).map(row => row.id)).toContain("t-rev");
+    expect(await page(cookie, "/chat?task=t-rev")).toContain('<span class="badge" data-tone="live">in review</span>');
+
+    // Failed with a retry left: one status, the retry as the next act.
+    store.finishRun(admitted.reviewerRunId, { outcome: "failed", reason: "reviewer-agent", now });
+    store.stampReviewRequestOutcome(first.id, "reviewer-agent");
+    agree(await surfaces(), "review-failed", "Review failed — retry available");
+    const failedTask = await page(cookie, "/t/t-rev");
+    expect(failedTask).toContain(`data-receipt-review="review-failed">Review attempt 1 of 3 failed (reviewer-agent). The build is preserved; ask for an explicit retry — 2 explicit retries left. ${history}`);
+    expect(failedTask).toContain(">Retry review · attempt 2 of 3</button>");
+    expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "needs-you", "completed"]);
+
+    // An operator's acceptance closes the matter on every surface, the
+    // review history staying visible beneath it.
+    store.acceptProof(latest, "alex", "checked by hand", now);
+    agree(await surfaces(), "accepted-exception", "Accepted with an exception");
+    expect(await page(cookie, "/t/t-rev")).toContain('data-review-state="retryable"');
+    expect(await page(cookie, "/t/t-rev")).not.toContain("data-receipt-review=");
   });
 
   test("the task list leads with the project label and wraps the raw path; the receipt never says shipped", async () => {

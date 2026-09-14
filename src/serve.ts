@@ -72,8 +72,8 @@ import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtm
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
-  WORK_VIEWS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, workStatusOf, workCounts, compareWorkRows, primaryDestinationOf, needsPerson,
-  type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts,
+  WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, workCounts, compareWorkRows, primaryDestinationOf, needsPerson,
+  type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
@@ -1204,11 +1204,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // is re-proved here.
       const view = parseWorkView(url.searchParams.get("view"));
       const rollup = project === null && !unscopedMode;
-      const admission = rollup ? admissionList() : null;
-      const admitted = new Set(admission ?? []);
-      const fetched = store.listTasksScoped(project, undefined, rollup ? 500 : WORK_PAGE, null)
-        .filter(task => visible(task.repo) && (admission === null || task.repo === null || admitted.has(task.repo)));
-      const bounded = fetched.slice(0, WORK_PAGE);
+      const { tasks: bounded, truncated, unproven } = workTasksInView(project);
       const rows = bounded.map(task => workRowOf(task, now));
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       return sendScreen(
@@ -1217,7 +1213,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         workPage(chromeFor(project, "work", undefined, rollup ? "all" : undefined), {
           view,
           rows,
-          truncated: fetched.length > bounded.length,
+          truncated,
+          unproven,
           cap: WORK_PAGE,
           multiProject: new Set(bounded.map(task => task.repo ?? "")).size > 1,
           csrf,
@@ -2187,6 +2184,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           proofBundleView(store, found, artifacts, evidenceRoot),
           store.runRoute(found.id),
           store.publicationForRun(found.id),
+          reviewFactsFor(found.id),
         ),
       );
     }
@@ -3109,16 +3107,77 @@ export function createDecisionServer(options: ServeOptions): Server {
    * lists. Saturated when the page is full — never a sum of unbounded reads. */
   function needsYouCount(project: string | null): { count: number; saturated: boolean } {
     const now = clock();
-    const rollup = project === null && !unscopedMode;
-    const admission = rollup ? admissionList() : null;
-    const admitted = new Set(admission ?? []);
-    const rows = store.listTasksScoped(project, undefined, rollup ? 500 : WORK_PAGE, null)
-      .filter(task => visible(task.repo) && (admission === null || task.repo === null || admitted.has(task.repo)))
-      .slice(0, WORK_PAGE);
+    const { tasks, truncated, unproven } = workTasksInView(project);
     let count = 0;
-    for (const task of rows) if (task.state !== "cancelled" && needsPerson(diagnoseTaskDispatch(store, task.id, now))) count += 1;
-    return { count, saturated: rows.length >= WORK_PAGE };
+    for (const task of tasks) if (task.state !== "cancelled" && needsPerson(diagnoseTaskDispatch(store, task.id, now))) count += 1;
+    return { count, saturated: truncated || unproven };
   }
+
+  /** Newest first, exactly as the store's own task page orders. */
+  const newestTaskFirst = (a: Task, b: Task): number =>
+    a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+
+  /**
+   * The one bounded page Work and its counts read (independent review,
+   * 2026-09-13, finding 1): admission binds BEFORE the limit, and one
+   * extra row probes for overflow so the page can say "there are more"
+   * instead of silently stopping at the cap. With a project open the
+   * store's project-bound query is the bound. In the roll-up the admission
+   * list is enumerated project by project, each bounded to the page plus
+   * its probe, then merged newest first — so newer tasks in a repository
+   * the ceiling excludes can never consume the window an admitted task
+   * belongs in. Unplaced rows ride every project-bound query the store
+   * makes; a viewer who may see them keeps them in view exactly as before,
+   * and for a viewer who may not (a project-scoped account) the read
+   * widens — up to the store's own 500-row ceiling — until the visible
+   * rows fill the probe or the read runs dry. Past that ceiling the page
+   * says its read was cut short rather than claiming nothing is there.
+   * Every row's repo is still re-proved through `visible` — the query is
+   * the bound, that check is the law.
+   */
+  function workTasksInView(project: string | null): { tasks: (Task & { repo: string | null })[]; truncated: boolean; unproven: boolean } {
+    const admission = project === null ? admissionList() : null;
+    const probe = WORK_PAGE + 1;
+    let exhausted = false;
+    const read = (repo: string | null): (Task & { repo: string | null })[] => {
+      let limit = probe;
+      for (;;) {
+        const rows = store.listTasksScoped(repo, undefined, limit, null);
+        const kept = rows.filter(task => visible(task.repo));
+        if (kept.length >= probe || rows.length < limit) return kept;
+        if (limit >= WORK_READ_CEILING) {
+          exhausted = true;
+          return kept;
+        }
+        limit = Math.min(WORK_READ_CEILING, limit * 2);
+      }
+    };
+    const repos: (string | null)[] = admission === null ? [project] : admission.length === 0 ? [null] : admission;
+    const seen = new Set<string>();
+    const candidates: (Task & { repo: string | null })[] = [];
+    for (const repo of repos) {
+      for (const task of read(repo)) {
+        if (seen.has(task.id)) continue;
+        seen.add(task.id);
+        candidates.push(task);
+      }
+    }
+    if (repos.length > 1) candidates.sort(newestTaskFirst);
+    const admitted = new Set(admission ?? []);
+    const inView = candidates.filter(task => admission === null || task.repo === null || admitted.has(task.repo));
+    const truncated = inView.length > WORK_PAGE;
+    return { tasks: inView.slice(0, WORK_PAGE), truncated, unproven: exhausted && !truncated };
+  }
+
+  /** This exact run's review facts for the shared projection (review
+   * fixes, finding 4): the store's bounded retry projection plus the live
+   * reviewer's own liveness — read per run, so an older selected result
+   * never wears a newer run's review. */
+  const reviewFactsFor = (runId: number): ReviewFacts | null =>
+    reviewFactsOf(store.reviewRetryStateOf(runId), runner => {
+      const one = store.getRunner(runner)?.runner;
+      return one !== undefined && runnerAlive(one, clock());
+    });
 
   /**
    * One Work row's facts (workspace package 1), from the records the task
@@ -3153,6 +3212,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                 verdict: verdict?.verdict ?? null,
                 reasons: verdict?.reasons ?? [],
                 accepted: store.proofAcceptance(latest.id) !== null,
+                review: reviewFactsFor(latest.id),
                 ...(latest.outcome !== "no-change"
                   ? {}
                   : { recordComplete: (() => { const kinds = new Set(store.artifactsFor(latest.id).map(one => one.kind)); return kinds.has("handoff") && kinds.has("terminal-diff"); })() }),
@@ -3358,6 +3418,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (latest === undefined) return null;
       const artifacts = store.artifactsFor(latest.id);
       const verdict = store.proofVerdictFor(latest.id);
+      const review = reviewFactsFor(latest.id);
       return {
         runId: latest.id,
         outcome: latest.outcome,
@@ -3380,9 +3441,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         // v50: the bounded review-retry history of this exact result —
         // the same projection the CLI and dispatch diagnosis read.
         reviewRetry: store.reviewRetryStateOf(latest.id),
+        // The same review facts every other surface projects for this run.
+        review,
         receipt:
           latest.outcome === "built" || latest.outcome === "no-change"
-            ? completionReceiptView(store, latest, artifacts, evidenceRoot)
+            ? completionReceiptView(store, latest, artifacts, evidenceRoot, review)
             : null,
       };
     })();
@@ -3675,7 +3738,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           ? view.completion.receipt
           : latest === null || (latest.outcome !== "built" && latest.outcome !== "no-change")
           ? null
-          : completionReceiptView(store, latest, store.artifactsFor(latest.id), evidenceRoot),
+          : completionReceiptView(store, latest, store.artifactsFor(latest.id), evidenceRoot, reviewFactsFor(latest.id)),
     };
   }
 
@@ -7407,7 +7470,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       contest: contestOf(),
     };
     if (run === null) {
-      return { ...base, run: null, handoff: null, proof: null, terminal: null, files: [], outsideTouches: [], fileAnchors: new Map(), comments: [], reviewerFindings: [], reviewRetry: null, publication: null, notes: [] };
+      return { ...base, run: null, handoff: null, proof: null, terminal: null, files: [], outsideTouches: [], fileAnchors: new Map(), comments: [], reviewerFindings: [], reviewRetry: null, review: null, publication: null, notes: [] };
     }
     const artifacts = store.artifactsFor(run.id);
     const terminal = terminalDiffView(artifacts, evidenceRoot);
@@ -7465,6 +7528,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       comments: store.liveDiffComments(run.id),
       reviewerFindings: store.allDiffComments(run.id).filter(one => one.reviewerRun !== null),
       reviewRetry: store.reviewRetryStateOf(run.id),
+      review: reviewFactsFor(run.id),
       publication:
         publication === null
           ? null
@@ -9410,6 +9474,18 @@ const STYLE = `
     background: var(--destructive);
   }
   .dispatch-status[data-dispatch-status="needs-verification"] .dispatch-copy > strong::before { background: var(--muted-foreground); }
+  /* A review in flight (review fixes): the box reads neutral — neither the
+     green of a settled verdict nor the red of a problem — with the dot in
+     the review's own tone. */
+  .dispatch-status[data-work-status="reviewing"], .dispatch-status[data-work-status="review-pending"],
+  .dispatch-status[data-work-status="review-failed"], .dispatch-status[data-work-status="review-exhausted"] {
+    color: var(--foreground); border-color: var(--glass-border); background: var(--glass);
+  }
+  .dispatch-status[data-work-status="reviewing"] .dispatch-copy > strong::before, .dispatch-status[data-work-status="review-pending"] .dispatch-copy > strong::before,
+  .dispatch-status[data-work-status="review-failed"] .dispatch-copy > strong::before, .dispatch-status[data-work-status="review-exhausted"] .dispatch-copy > strong::before {
+    content: ""; display: inline-block; width: .45rem; height: .45rem; margin-right: .45rem; border-radius: 50%; vertical-align: .08rem; background: var(--warning);
+  }
+  .dispatch-status[data-work-status="reviewing"] .dispatch-copy > strong::before { background: var(--running); }
   .review-retry { margin-bottom: .65rem; }
   .task-control { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .6rem .9rem; margin: .65rem 0; padding: .8rem .9rem; }
   .task-control-copy { display: flex; flex-direction: column; gap: .15rem; min-width: 0; flex: 1 1 16rem; }
@@ -9774,12 +9850,27 @@ const STYLE = `
      widening the page (the phone task-list overflow, package 1). */
   .path-words { overflow-wrap: anywhere; word-break: break-word; }
   @media (max-width: 760px) {
-    .work-row { grid-template-columns: minmax(0, 1fr); gap: .375rem; }
-    .work-views { gap: 0; }
-    .work-views a { padding: 0 .5rem; font-size: .8125rem; gap: .3rem; }
+    .work-row { grid-template-columns: minmax(0, 1fr); gap: .375rem; padding: .75rem 0; }
     .work-head { flex-direction: column; align-items: stretch; }
     .work-tools { align-self: flex-start; }
     .work-tools-menu { right: auto; left: 0; }
+    /* All four filters share the row (review fixes, finding 3): each tab
+       takes an equal share, no tab scrolls out of view, the count sits on
+       the label, and every target stays ≥ 40px tall. */
+    .work-views { gap: 0; margin: .5rem 0 .25rem; overflow: visible; }
+    .work-views a { flex: 1 1 0; min-width: 0; justify-content: center; padding: 0 .25rem; font-size: .8125rem; gap: .3rem; white-space: nowrap; }
+  }
+  @media (max-width: 400px) {
+    .work-views a { font-size: .75rem; gap: .2rem; padding: 0 .125rem; }
+    .work-views a .count { font-size: .625rem; }
+  }
+  /* The narrowest phones (≤ 360px): four labels with counts cannot share
+     288px at legible type, so the strip becomes two rows of two — every
+     filter wholly visible, unclipped, 40px tall, never scrolled away. */
+  @media (max-width: 360px) {
+    .work-views { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .work-views a { font-size: .8125rem; gap: .3rem; padding: 0 .25rem; }
+    .work-views a .count { font-size: .6875rem; }
   }
 
   /* The phone shell: the sidebar disappears; a top bar carries the project
@@ -12492,7 +12583,9 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
   // words, and the card wears the same token the task page and Work do.
   const resultStatus = focus.state === "done" && focus.result !== null ? receiptStatusOf(focus.result) : null;
   const workToken = resultStatus?.token ?? focus.dispatch?.code ?? "unknown";
-  const summary = focus.dispatch?.summary ?? resultStatus?.label ?? (hasResult ? "Result ready" : "Checking task status");
+  // The headline is the projection's own label for a done result — a
+  // review in flight included — so it can never disagree with the token.
+  const summary = resultStatus?.label ?? focus.dispatch?.summary ?? (hasResult ? "Result ready" : "Checking task status");
   const detail = focus.dispatch?.detail ?? "This status comes from the task scheduler.";
   const fallback = focus.state === "done" || focus.state === "cancelled" || focus.approval !== null || ["stopping", "paused", "review-stopped"].includes(focus.control.kind)
     ? null
@@ -12500,7 +12593,7 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
   const polling = !inert && ((focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled" || focus.control.kind === "stopping" || focus.control.kind === "stop");
   return (
     `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}">` +
-    `<section class="card task-journey" aria-label="task progress" data-work-status="${escape(workToken)}"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div>${resultStatus === null ? `<span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span>` : `<span class="badge" data-tone="${escape(resultStatus.tone)}">${escape(resultStatus.tone === "problem" ? "needs attention" : resultStatus.tone === "done" || resultStatus.tone === "ready" ? "finished" : "saved")}</span>`}</div>` +
+    `<section class="card task-journey" aria-label="task progress" data-work-status="${escape(workToken)}"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div>${resultStatus === null ? `<span class="badge badge-${escape(displayState)}">${escape(displayState.replaceAll("-", " "))}</span>` : `<span class="badge" data-tone="${escape(resultStatus.tone)}">${escape(resultStatus.tone === "problem" || resultStatus.tone === "attention" ? "needs attention" : resultStatus.tone === "live" ? "in review" : resultStatus.tone === "done" || resultStatus.tone === "ready" ? "finished" : "saved")}</span>`}</div>` +
     `<ol>${steps}</ol><p class="meta">${escape(detail)}</p>` +
     (focus.liveRun === null ? "" : `<p class="task-live-build"><span class="live-dot" aria-hidden="true"></span><strong>Build #${focus.liveRun.id}</strong> · ${escape(focus.liveRun.runner)} · <time data-elapsed-since="${escape(focus.liveRun.startedAt)}"></time> <a href="/r/${focus.liveRun.id}">watch details →</a></p>`) +
     (fallback === null ? "" : `<a class="button-link task-journey-action" href="${fallback}">Open the next step →</a>`) +
@@ -13857,6 +13950,9 @@ function taskComposerHtml(data: {
 
 /** A task list page's ceiling: the newest rows, the bound printed. */
 const WORK_PAGE = 200;
+/** The store's own page ceiling for one task read — the most Work will
+ * widen a project's read to before saying it could not prove the page. */
+const WORK_READ_CEILING = 500;
 
 type WorkRow = WorkFacts & { status: WorkStatus; resultRunId: number | null };
 
@@ -13890,7 +13986,11 @@ function workPage(
   data: {
     view: WorkView;
     rows: readonly WorkRow[];
+    /** The probe found more tasks in view than the page holds. */
     truncated: boolean;
+    /** The read hit the store's ceiling on rows the viewer cannot see
+     * before proving the page complete: older tasks may be missing. */
+    unproven: boolean;
     cap: number;
     /** Rows span more than one project — every row wears its label. */
     multiProject: boolean;
@@ -13900,15 +14000,30 @@ function workPage(
 ): Screen {
   const counts = workCounts(data.rows.map(row => row.status));
   const shown = data.rows.filter(row => row.status.views.includes(data.view)).sort((a, b) => compareWorkRows({ rank: a.status.rank, updatedAt: a.updatedAt }, { rank: b.status.rank, updatedAt: b.updatedAt }));
+  // Honest counts (review fixes, finding 1): a count speaks for the
+  // bounded page only, and All says "200+" when the probe found more.
+  const countWords = (key: WorkView): string => (data.truncated && key === "all" ? `${data.cap}+` : String(counts[key]));
   const tabs =
-    `<nav class="work-views" aria-label="work views">` +
+    `<nav class="work-views" aria-label="work views"${data.truncated ? ` data-work-bound="${data.cap}"` : ""}>` +
     WORK_VIEWS.map(
       one =>
-        `<a href="${one.key === "all" ? "/work" : `/work?view=${one.key}`}"${one.key === data.view ? ' class="active" aria-current="page"' : ""}>` +
-        `${one.label}<span class="count">${counts[one.key]}</span></a>`,
+        `<a href="${one.key === "all" ? "/work" : `/work?view=${one.key}`}"${one.key === data.view ? ' class="active" aria-current="page"' : ""}${data.truncated ? ` title="${escape(one.key === "all" ? `More than ${data.cap} tasks are in view; the newest ${data.cap} are listed.` : `Counted among the newest ${data.cap} tasks in view.`)}"` : ""}>` +
+        `${one.label}<span class="count">${countWords(one.key)}</span></a>`,
     ).join("") +
     `</nav>`;
   const current = WORK_VIEWS.find(one => one.key === data.view) ?? WORK_VIEWS[0]!;
+  // An empty shortcut view over a truncated page never claims "nothing"
+  // about tasks it did not read.
+  const emptyWords = (() => {
+    if (data.unproven) return `Nothing Work could read within its ${WORK_READ_CEILING}-record bound belongs here. Older tasks may be missing; they stay in the task list, filtered by state.`;
+    if (!data.truncated) return current.empty;
+    switch (data.view) {
+      case "needs-you": return `Nothing among the newest ${data.cap} tasks in view needs you. Older tasks stay in the task list, filtered by state.`;
+      case "running": return `Nothing among the newest ${data.cap} tasks in view is building or in review. Older tasks stay in the task list, filtered by state.`;
+      case "completed": return `Nothing among the newest ${data.cap} tasks in view has finished. Older tasks stay in the task list, filtered by state.`;
+      default: return current.empty;
+    }
+  })();
   const rowHtml = (row: WorkRow): string => {
     const actionHref = statusActionHref(row.status, row.id, row.status.action?.kind === "open-run" && row.liveRunId !== null ? row.liveRunId : row.resultRunId, row.publication?.prUrl ?? null);
     const action = row.status.action === null || actionHref === null ? "" : `<a class="work-action" href="${escape(actionHref)}">${escape(row.status.action.label)} →</a>`;
@@ -13925,15 +14040,17 @@ function workPage(
   };
   const list =
     shown.length === 0
-      ? `<div class="work-empty" data-work-empty="${data.view}"><p>${escape(current.empty)}</p>` +
+      ? `<div class="work-empty" data-work-empty="${data.view}"${data.truncated ? ` data-work-bound="${data.cap}"` : data.unproven ? ` data-work-bound="unproven"` : ""}><p>${escape(emptyWords)}</p>` +
         (data.view === "all"
           ? `<p class="row"><a class="button-link" href="${chrome.chat === true ? "/chat" : "/tasks/new"}">${chrome.chat === true ? "Start in chat" : "Add a task"}</a> <a href="/tasks/new">Use a form →</a></p>`
           : `<p class="row"><a href="/work">See all work →</a></p>`) +
         `</div>`
       : `<div class="work-list">${shown.map(rowHtml).join("\n")}</div>`;
   const bound = data.truncated
-    ? `<p class="meta work-bound">Showing the newest ${data.cap} tasks in view. Older tasks stay in the <a href="/tasks">task list</a>, filtered by state.</p>`
-    : "";
+    ? `<p class="meta work-bound" data-work-bound="${data.cap}">Showing the newest ${data.cap} tasks in view — there are more. The view counts cover these ${data.cap} only. Older tasks stay in the <a href="/tasks">task list</a>, filtered by state.</p>`
+    : data.unproven
+      ? `<p class="meta work-bound" data-work-bound="unproven">Work read its ${WORK_READ_CEILING}-record bound without finding every task in view, so tasks older than these may be missing here and the view counts cover only what was read. Older tasks stay in the <a href="/tasks">task list</a>, filtered by state.</p>`
+      : "";
   const tools =
     `<details class="work-tools"><summary>Work tools${CHEVRON_ICON}</summary><nav class="work-tools-menu">` +
     [
@@ -15736,6 +15853,8 @@ function taskBody(data: {
     /** v50: every root review attempt of this result and what the
      * allowance still admits; null when no review was ever asked for. */
     reviewRetry?: ReviewRetryState | null;
+    /** The same review, as the shared projection reads it (review fixes). */
+    review?: ReviewFacts | null;
     /** Priority 2's concise, shared result package. */
     receipt: CompletionReceiptView | null;
   } | null;
@@ -15792,9 +15911,15 @@ function taskBody(data: {
                 reasons: data.completion.proofReasons,
                 accepted: data.completion.proofAccepted,
                 recordComplete: data.completion.hasHandoff && data.completion.hasTerminalDiff,
+                review: data.completion.review ?? null,
               },
           publicationFactsOf(data.publication ?? null),
         );
+  // A review in flight leads the status box too (review fixes, finding
+  // 4): the box keeps its recorded-verdict sentence as history under the
+  // review's own words, and reads neutral rather than ok/problem while the
+  // machine is still deciding.
+  const inReview = resultStatus !== null && REVIEW_TOKENS.has(resultStatus.token);
   const act = (verb: string, label: string, extra = ""): string =>
     [
       `<form method="post" action="${taskHref(task.id)}/${verb}" class="inline">`,
@@ -15852,8 +15977,8 @@ function taskBody(data: {
     // the same one the Work row, chat, and cockpit carry for this task.
     const workToken = resultStatus?.token ?? data.dispatch?.code ?? "unknown";
     const box = (kind: "ok" | "problem", title: string, detail: string, status?: string, controls = ""): string =>
-      `<div class="${kind === "problem" ? "problem" : "answered"} dispatch-status" id="run-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}" data-work-status="${escape(workToken)}">` +
-      `<div class="dispatch-copy"><strong>${escape(title)}</strong><span class="meta">${detail}</span></div>${controls}</div>`;
+      `<div class="${kind === "problem" && !inReview ? "problem" : "answered"} dispatch-status" id="run-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}" data-work-status="${escape(workToken)}">` +
+      `<div class="dispatch-copy"><strong>${escape(title)}</strong><span class="meta">${inReview && resultStatus !== null ? `<span data-review-lead="${escape(resultStatus.token)}">${escape(resultStatus.detail)}</span> ` : ""}${detail}</span></div>${controls}</div>`;
 
     if (task.state !== "done") {
       const diagnosis = data.dispatch ?? null;
@@ -16027,7 +16152,7 @@ function taskBody(data: {
         box(
           accepted ? "ok" : "problem",
           resultStatus.label,
-          `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. ${escape(verificationExplanation(proof.proofVerdict, proof.proofReasons))}${accepted ? " An approver accepted it by hand; the checks were not passed by the machine." : ""}${publicationWords}`,
+          `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. ${escape(verificationExplanation(proof.proofVerdict, proof.proofReasons))}${accepted ? " An approver accepted it by hand; that acceptance leaves the machine's verdict above unchanged." : ""}${publicationWords}`,
           machineToken,
         ) + `<div class="proof-review-actions"><a class="button-link" href="${reviewHref(task.id)}">${accepted ? "Review the recorded exception" : resultStatus.action?.label ?? "Review evidence"}</a>${acceptForm}</div>` + proofDetails,
       );
@@ -17187,6 +17312,8 @@ type ReviewCockpitView = {
   reviewerFindings: DiffComment[];
   /** v50: the result's bounded review-retry history, null when never asked. */
   reviewRetry: ReviewRetryState | null;
+  /** The same history as the shared projection's facts (review fixes). */
+  review: ReviewFacts | null;
   publication: {
     state: Publication["state"];
     prNumber: number | null;
@@ -17221,7 +17348,7 @@ function cockpitStatusOf(view: ReviewCockpitView): DisplayStatus {
   return resultStatusOf(
     view.run === null
       ? null
-      : { runId: view.run.id, role: view.run.role, outcome: view.run.outcome, verdict: view.proof?.verdict ?? null, reasons: view.proof?.reasons ?? [], accepted: view.proof?.accepted !== null && view.proof?.accepted !== undefined, recordComplete: view.handoff !== null && view.terminal !== null },
+      : { runId: view.run.id, role: view.run.role, outcome: view.run.outcome, verdict: view.proof?.verdict ?? null, reasons: view.proof?.reasons ?? [], accepted: view.proof?.accepted !== null && view.proof?.accepted !== undefined, recordComplete: view.handoff !== null && view.terminal !== null, review: view.review },
     view.publication === null
       ? null
       : { state: view.publication.state, prNumber: view.publication.prNumber, prUrl: view.publication.prUrl, remoteState: view.publication.remoteState, lastCheckState: view.publication.lastCheckState },
@@ -17720,7 +17847,7 @@ function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boole
     return card("revise", `${view.comments.length} comment${view.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these comments. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">Create revision</button></form>`);
   }
   if (view.publication !== null && view.publication.prNumber !== null && view.publication.prUrl !== null) {
-    return card("publication", `Review PR #${view.publication.prNumber} on GitHub`, "The evidence below matches the recorded result. Merging stays a person's action on GitHub.", `<a class="button-link" href="${escape(view.publication.prUrl)}">Open the pull request</a>`);
+    return card("publication", `Review PR #${view.publication.prNumber} on GitHub`, "The evidence below matches the recorded result. The pull request was last seen open; no merge is recorded here.", `<a class="button-link" href="${escape(view.publication.prUrl)}">Open the pull request</a>`);
   }
   if (canAnnotate) {
     return card("annotate", "Review the changes", "Nothing needs your attention. Comment on any line to request a revision.", `<a class="button-link" href="#annotate">Review changes</a>`);
@@ -17970,6 +18097,8 @@ type CompletionReceiptView = {
   /** The run's own publication record, when one exists: the heading names
    * a PR or a merge only from this, never from the outcome. */
   publication: PublicationFacts;
+  /** This run's independent review, when one was asked (review fixes). */
+  review: ReviewFacts | null;
   matrix: CriterionMatrixRow[];
   /** v51: the semantic-coverage lines (`coverageWords`) — independent
    * review standing under the run's policy, plus every named context gap.
@@ -18038,7 +18167,7 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
   };
 }
 
-function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], root: string): CompletionReceiptView {
+function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], root: string, review: ReviewFacts | null = null): CompletionReceiptView {
   const handoff = structuredHandoffView(artifacts, root);
   const proof = proofBundleView(store, run, artifacts, root);
   const terminal = terminalDiffView(artifacts, root);
@@ -18053,6 +18182,7 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
     accepted: proof?.accepted !== null && proof?.accepted !== undefined,
     recordComplete: handoff !== null && terminal !== null,
     publication: publicationFactsOf(store.publicationForRun(run.id)),
+    review,
     matrix: proof?.matrix ?? [],
     diff:
       stat === null || "problem" in stat
@@ -18368,7 +18498,7 @@ function terminalDiffCard(
  * screenshot as a thumbnail linking to the full image. Renders nothing
  * when the run predates the proof system.
  */
-function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | "role" | "outcome">, publication: PublicationFacts = null): string {
+function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | "role" | "outcome">, publication: PublicationFacts = null, review: ReviewFacts | null = null): string {
   if (view === null) return "";
   const runId = run.id;
   const parts: string[] = ["<h2>verification and evidence</h2>"];
@@ -18376,7 +18506,7 @@ function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | 
   if (view.verdict !== null) {
     // The same status line every other surface renders for this run
     // (workspace package 1), beside the verdict's own explanation.
-    const status = resultStatusOf({ runId, role: run.role, outcome: run.outcome, verdict: view.verdict, reasons: view.reasons, accepted: view.accepted !== null }, publication);
+    const status = resultStatusOf({ runId, role: run.role, outcome: run.outcome, verdict: view.verdict, reasons: view.reasons, accepted: view.accepted !== null, review }, publication);
     parts.push(`<p class="row" data-proof-verdict="${escape(dispatchStatusToken(view.verdict))}">${statusLineHtml(status)} <span class="meta">${escape(verificationExplanation(view.verdict, view.reasons))}</span></p>`);
   }
   if (view.accepted !== null) {
@@ -18449,15 +18579,19 @@ function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | 
  * the operator's acceptance alone — shared with the review cockpit's
  * header chip so the two surfaces never name one state differently. */
 /** The receipt's facts as the shared projection reads them. */
-function receiptStatusOf(view: CompletionReceiptView): DisplayStatus {
+function receiptStatusOf(view: CompletionReceiptView, review: ReviewFacts | null = view.review): DisplayStatus {
   return resultStatusOf(
-    { runId: view.runId, role: view.role, outcome: view.outcome, verdict: view.verdict, reasons: view.reasons, accepted: view.accepted, recordComplete: view.recordComplete },
+    { runId: view.runId, role: view.role, outcome: view.outcome, verdict: view.verdict, reasons: view.reasons, accepted: view.accepted, recordComplete: view.recordComplete, review },
     view.publication,
   );
 }
 
 function completionReceiptCard(view: CompletionReceiptView, taskId: string, place: "task" | "chat"): string {
   const status = receiptStatusOf(view);
+  // The verdict on record, whatever review is in flight: the criteria
+  // count's source label reads from it, never from the review's tone.
+  const stored = receiptStatusOf(view, null);
+  const inReview = REVIEW_TOKENS.has(status.token);
   const passed = view.matrix.length === 0 ? null : passFraction(view.matrix);
   const diff =
     view.diff === null
@@ -18503,9 +18637,12 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     // publication line is the observed record — never "shipped".
     `<p class="receipt-summary">${escape(view.summary ?? (view.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff."))}</p>` +
     `<p class="receipt-publication" data-receipt-publication="${escape(view.publication === null ? "none" : view.publication.state)}">${escape(receiptPublicationWords(view.publication))}</p>` +
+    // A review in flight is the receipt's primary status too; its detail
+    // carries the earlier verdict as history (review fixes, finding 4).
+    (inReview ? `<p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p>` : "") +
     // The matrix count is the proof's own citation; it reads as verified
     // only when the machine verified the result (workspace package 1).
-    `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>${status.tone === "problem" ? "cited by the agent — not verified" : status.token === "agent-attested" ? "cited by the agent, no independent check" : "against the approved scope"}</small></span>` +
+    `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>${stored.tone === "problem" ? "cited by the agent — not verified" : stored.token === "agent-attested" ? "cited by the agent, no independent check" : "against the approved scope"}</small></span>` +
     `<span><strong>${escape(diff)}</strong><small>from the sealed final diff</small></span>` +
     `<span><strong>${view.screenshots.length} screenshot${view.screenshots.length === 1 ? "" : "s"}</strong><small>${view.screenshots.length === 0 ? "none required or captured" : "validated visual proof"}</small></span></div>` +
     shots + coverage + caveats +
@@ -18604,6 +18741,7 @@ function runPage(
   proofBundle: ProofBundleView | null = null,
   route: RouteStamp | null = null,
   publicationRow: Publication | null = null,
+  review: ReviewFacts | null = null,
 ): Screen {
   const rows = runFactsRows(run, taskId, running, route);
   // The conversation (Phase 2E, v2 S1g): every stdin injection as the
@@ -18816,7 +18954,7 @@ function runPage(
     transcript,
     peek,
     handoff,
-    evidenceBundleCard(proofBundle, run, publicationFactsOf(publicationRow)),
+    evidenceBundleCard(proofBundle, run, publicationFactsOf(publicationRow), review),
     terminal === null ? "" : terminalDiffCard(terminal, run.id, editor, commentForm !== ""),
     reviewCard,
     continueCard,

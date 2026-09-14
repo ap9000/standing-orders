@@ -121,7 +121,10 @@ describe("Never Stuck dispatch diagnosis", () => {
     // Acceptance stays an exception: it never becomes "checks passed".
     const accepted = diagnoseTaskDispatch(store, "t-proof", T0);
     expect(accepted).toMatchObject({ condition: "terminal", code: "complete", summary: "Accepted with an exception" });
-    expect(accepted?.detail).toContain("were not passed by the machine");
+    // …and it never claims the checks failed or passed on its own: the
+    // machine's recorded verdict is restated as it stands.
+    expect(accepted?.detail).toContain("The machine's verdict is unchanged: the approved check failed against it (exit 1).");
+    expect(accepted?.detail).not.toMatch(/not passed by the machine|checks passed/i);
   });
 
   test("a finished build shows pending, live, failed, queued-retry, exhausted, and succeeded review states with attempt counts (v50)", () => {
