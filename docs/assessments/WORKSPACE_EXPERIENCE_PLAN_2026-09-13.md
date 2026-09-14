@@ -1,6 +1,6 @@
 # Standing Orders: one workspace from request to result
 
-Date: September 13, 2026. Status: **packages 0 and 1 and the user's added concise-UI pass are implemented and verified locally; packages 2–5 otherwise remain planned**. Nothing is merged or deployed. The baseline findings below describe the state when this plan was written; final execution and gates are recorded in [the execution record](WORKSPACE_0_1_EXECUTION_2026-09-13.md).
+Date: September 13, 2026. Status: **packages 0–2 and the user's added concise-UI pass are implemented and verified locally; packages 3–5 remain planned**. Integrated on the workspace branch, not main; nothing is pushed or deployed. The baseline findings below describe the state when this plan was written; gates are recorded in [the packages 0/1 execution record](WORKSPACE_0_1_EXECUTION_2026-09-13.md) and [the package 2 independent acceptance](WORKSPACE_2_INDEPENDENT_REVIEW_2026-09-13.md).
 
 ## 1. The outcome
 
