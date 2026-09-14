@@ -4,7 +4,7 @@ Accepted September 13, 2026 (verification finished September 14, 04:20 UTC).
 
 Standing Orders build **1551**, Claude Opus subscription, repaired the seven annotations on build 1550. The accepted source is `3ab5505b962b477a37edb11a7e545d8f245ac6cf`. Integration commit `9fe984f8e908e9fd23b93fedf0c9a8bd840eef01` on `codex/workspace-01-20260913` has the **identical Git tree**: `16bda702548c3ce83b56f6b1d077d91e6d530297`. Subsequent handoff changes are documentation only.
 
-Main's existing uncommitted work is preserved. This is not a main merge, push, release, or installed-app update.
+At acceptance, main's existing uncommitted work was preserved and no publication or installation update was performed. After the user's subsequent merge-and-push approval, main was fast-forwarded to `f9d954b63bf46dd8c3f4eb2b35a5fecfaceccd58`. All local changed files were already represented in that branch or its baseline history; a recovery stash retains the original checkout. The source still matches the verified build. This does not publish an npm release or update the installed app.
 
 ## What is finished
 
