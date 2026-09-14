@@ -260,7 +260,11 @@ export function reviewContextCustodyProblem(store: Store, root: string, inventor
       try {
         const read = readVerifiedArtifact(root, artifact);
         const content = Buffer.from(item.content, "utf8");
-        if (!usableReviewInput(root, artifact) || artifact.redacted || !read.ok || segment.offset + segment.bytes > read.content.length || !read.content.subarray(segment.offset, segment.offset + segment.bytes).equals(content.subarray(offset, offset + segment.bytes))) return "an ancestor patch's exact source bytes no longer verify";
+        // Redaction elsewhere does not invalidate this exact clean section.
+        // Reselect by path: matching arbitrary bytes alone could admit a
+        // fragment that hides a redaction, or another file's section.
+        const section = read.ok ? patchSection(read.content, item.path) : null;
+        if (!usableReviewInput(root, artifact) || section === null || section.offset !== segment.offset || section.content.length !== segment.bytes || !section.content.equals(content.subarray(offset, offset + segment.bytes))) return "an ancestor patch's exact source bytes no longer verify";
       } catch { return "an ancestor patch cannot be read"; }
       offset += segment.bytes;
     }
@@ -538,7 +542,8 @@ function sameEntry(a: TreeEntry | undefined, b: TreeEntry | undefined): boolean 
 }
 
 /** Select a whole plain, same-path text diff section. Quoted paths,
- * renames, binary patches and redactions are deliberately unsupported.
+ * renames, binary patches and redactions WITHIN it are unsupported.
+ * Other sections may be redacted; their hidden bytes are never inferred.
  * Offsets refer to the original verified bytes, not regenerated output. */
 function patchSection(content: Buffer, path: string): { offset: number; content: Buffer } | null {
   if (!/^[A-Za-z0-9_./-]+$/.test(path)) return null;
@@ -592,7 +597,6 @@ async function ancestorPatch(
     const artifacts = store.artifactsFor(runId).filter(one => one.kind === "terminal-diff");
     const artifact = artifacts[0];
     if (artifacts.length !== 1 || artifact === undefined) return fail(`run #${runId}'s terminal patch is missing or ambiguous`);
-    if (artifact.redacted) return fail(`run #${runId}'s terminal patch is redacted`, "secret-redacted");
     if (artifact.truncated) return fail(`run #${runId}'s terminal patch exceeds its capture budget`, "over-limit");
     if (artifact.captureStatus === "failed") return fail(`run #${runId}'s terminal patch capture failed`, "capture-failed");
     let read: ReturnType<typeof readVerifiedArtifact>;
