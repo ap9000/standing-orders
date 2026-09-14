@@ -302,3 +302,22 @@ No product code, task state, settings, deployment, or Git history was changed wh
 - Design reference: [Stripe Dashboard basics](https://docs.stripe.com/dashboard/basics) documents resource-oriented primary navigation, search, detail views, and separate settings/diagnostics. This informs the navigation simplification, not a claim of visual parity.
 - Design reference: [Ploy Site Builder](https://docs.ploy.ai/site-builder) documents the preview/edit/iterate loop. This informs result-first review; Standing Orders will initially use its existing verified artifacts, not claim equivalent live-preview hosting.
 - The visualization skill influenced the compact static journey map; it did not cause a new prototype app or product implementation.
+
+### Package 3 repair follow-up — September 14
+
+Independent inspection of reviewed commit
+`5d502abf6f372b6b4aaa5e34b91b9c228f705924` found five bounded issues:
+edited feedback retry identity, old-batch replay, damaged evidence status,
+stale approval/activity wording, and result density/Back target size.
+The explicit follow-up preserves the original six criteria and adds c7–c11
+for those findings; it is not an inherited native revision of run 1552.
+The unrelated overlong-goal filing limit and the original task/evidence
+are outside this repair.
+
+The repairs and focused verification are recorded in
+[the package 3 assessment](WORKSPACE_3_RESULT_REVIEW_2026-09-13.md#repair-follow-up--2026-09-14).
+Acceptance still requires the unchanged machine verifier and independent
+inspection of this candidate. No merge, installation or deployment is
+implied. The simplicity check now explicitly includes a short outcome,
+the deliverable before repeated narrative, technical facts behind details,
+visible risks, and measured 44px Back targets at both signed phone widths.

@@ -239,3 +239,80 @@ re-runs it at sealed completion.
   and the cockpit's "no merge" assertion now forbids a merge button or link
   rather than the word "merge", which the shared publication words use
   ("no merge or deployment is recorded").
+
+## Repair follow-up — 2026-09-14
+
+This section records the follow-up on branch
+`standing-orders/workspace-3-result-repair-20260914`, based on reviewed
+commit `5d502abf6f372b6b4aaa5e34b91b9c228f705924`. The earlier sections are
+historical package-3 evidence, not verification of this candidate. The
+interrupted draft was inspected and retained. Its `workspace-ui.ts` change
+was moved into the allowed `result-review.ts` presentation helper; the
+former file is byte-for-byte unchanged from the reviewed commit. No new
+schema, engine, permission, scope, or publication authority was added.
+
+The five repaired findings:
+
+- A feedback token follows the exact note, path and line displayed in the
+  form, including FormData sent directly without a submit event. Unchanged
+  retries record once; any edit receives a new token. Conflicting reuse
+  on the same or another run returns 409 and keeps the recoverable draft.
+- Revision forms name the displayed note IDs and source digest. The
+  existing transactional seal consumes only that batch. Replay checks the
+  child's verified immutable brief against the entire batch and source;
+  subsets, reordered batches, overlap and foreign notes cannot masquerade
+  as an earlier request. An exact old request returns its original child,
+  even after source rescoping, without consuming later notes. Fresh stale
+  submissions remain refused by the original exact source checks.
+- Stored check-log damage joins the shared evidence problems. Missing log
+  and diff files, missing/corrupt reports, shortened reports and diffs, and
+  unparseable shortened reports have focused HTTP coverage. Evidence that
+  cannot be read is withheld; shortened downloads say they contain only
+  the stored portion. Existing failed-check and mismatch states, review
+  history, recorded verdicts and acceptance decisions remain intact.
+- Revision approval reads `approvalOf` for the current scope and rejects
+  damaged terms. The revision line uses the child's existing Work status,
+  so approve/rescope, on hold, live activity and pause remain distinct.
+- Summary keeps one bounded outcome and one primary action. The screenshot,
+  escaped report or changed files leads its content. Full agent narrative
+  and technical facts are disclosed on demand; caveats, evidence problems,
+  required review gaps and publication failures stay visible. Receipts now
+  put their deliverable before the shortened narrative and disclose the
+  repeated counts and secondary destinations.
+
+Simplicity evidence: the reviewed six-line narrative and five technical
+boxes became a short outcome plus two closed disclosures. Back measures
+44px at 390px and 320px. The initial phone inspection found a wrapping
+Build details label; its redundant timestamp was removed from the label
+and remains inside the disclosure. Annotation scrolling respects reduced
+motion. The final viewport evidence is under
+`output/playwright/workspace3-repair-final/`; it uses real Chromium renders
+of a synthetic in-memory fixture, not live task data or physical Safari.
+
+Current verification uses `npm run typecheck` and the focused result,
+chat-continuity, HTTP, revision-terms and stale-approval tests: 343 passed,
+zero skips. The browser journey is `node scripts/workspace-result-proof.mjs
+--strict --out output/playwright/workspace3-repair-final`. It exercises one
+desktop and one 390px result-to-revision journey, the required 320px layout,
+long feedback/path input, empty drafts, damaged evidence, rejected requests,
+keyboard tabs, Back/refresh positions, and account/task isolation.
+
+The approved serial verifier remains unchanged. The attempt rules state
+that the repository verifier is rerun by the machine, never by the builder;
+therefore its success for this uncommitted candidate is pending that gate.
+No full suite was run here, and no success, skip, timeout increase or proof
+exception substitutes for the machine's result. Original task, scope and
+sealed evidence remain untouched. No commit, merge, push or deployment was
+performed.
+
+Final inspection: the full journey passed 100/100 checks. The last
+presentation-only cleanup moved duplicate screenshot failures into Build
+details and removed the second status label from Checks, retaining the
+recorded verdict as history. All 289 HTTP tests passed again. The affected
+visual/evidence recheck (`node scripts/workspace-result-proof.mjs --strict
+--layout-only --out output/playwright/workspace3-repair-layout`) passed
+18/18 checks; its six fresh viewport images were opened and inspected.
+`--layout-only` is an explicit affected-view check; the default command
+still runs every journey check. No test was skipped or weakened. The
+unchanged revision-created and two-tab-refusal screenshots remain in the
+full-journey output. The proof names the exact eight images inspected.

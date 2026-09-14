@@ -39,7 +39,7 @@ import { containerEmptiness } from "./container-state.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
 import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
-import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, scopeAuthorityOf, routeParityProblem, parseAcceptanceCriteria, exactAcceptance, exactStringList, exactSafeIntegerOrNull, exactKeys, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
+import { approvalOf, digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, scopeAuthorityOf, routeParityProblem, parseAcceptanceCriteria, exactAcceptance, exactStringList, exactSafeIntegerOrNull, exactKeys, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, exactPinOf, routeOfTask, agentChoicesFor } from "./agentconfig.js";
 import {
   canonicalOverridesJson,
@@ -9770,6 +9770,15 @@ export class Store {
       .map(readDiffComment);
   }
 
+  /** The comment a source key already names, on ANY run (repair
+   * 2026-09-14): the read behind a request-token retry, so a replay can be
+   * told from a conflicting reuse — same run and same words land on the
+   * same receipt; different words, or another run, are refused. */
+  diffCommentBySourceKey(sourceKey: string): DiffComment | null {
+    const row = this.db.prepare("SELECT * FROM diff_comment WHERE source_key = ?").get(sourceKey);
+    return row === undefined ? null : readDiffComment(row);
+  }
+
   /** Every comment on a run, consumed included — the audit view. */
   allDiffComments(runId: number): DiffComment[] {
     return this.db.prepare("SELECT * FROM diff_comment WHERE run = ? ORDER BY id").all(runId).map(readDiffComment);
@@ -11593,8 +11602,12 @@ export class Store {
     return rows.flatMap(row => {
       const task = this.getTask(row.id);
       if (task === null) return [];
+      // CURRENT exact approval (repair 2026-09-14): the same predicate every
+      // consent surface reads — a stamp on terms that were since rewritten is
+      // no approval of the current ones.
       const scope = this.getScope(row.id);
-      return [{ id: task.id, title: task.title, state: task.state, approved: scope !== null && scope.approvedAt !== null, createdAt: task.createdAt }];
+      const approved = scope !== null && scope.termsProblem == null && approvalOf(scope).approved;
+      return [{ id: task.id, title: task.title, state: task.state, approved, createdAt: task.createdAt }];
     });
   }
 

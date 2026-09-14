@@ -44,6 +44,17 @@ const presented = (
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
+/** The revision form's own binding (repair 2026-09-14): the exact note
+ * batch and source terms a rendered page displays. A seal posts these —
+ * a bare `{ csrf }` is an out-of-date form and is refused. */
+function revisionFormOf(html: string): { batch: string; source: string } {
+  const form = /<form method="post" action="\/r\/[0-9]+\/revise"[\s\S]*?<\/form>/.exec(html)?.[0] ?? "";
+  return {
+    batch: /name="batch" value="([^"]*)"/.exec(form)?.[1] ?? "",
+    source: /name="source" value="([^"]*)"/.exec(form)?.[1] ?? "",
+  };
+}
+
 /**
  * v48: a routed task opens no run without a sealed route. Fixtures that
  * need a run on a task seal its scope through the real ceremony first:
@@ -863,7 +874,7 @@ describe("the operations console", () => {
     const revised = await fetch(url(`/r/${run}/revise`), {
       method: "POST",
       headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf }),
+      body: new URLSearchParams({ csrf, ...revisionFormOf(await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text()) }),
       redirect: "manual",
     });
     const target = revised.headers.get("location") ?? "";
@@ -930,7 +941,7 @@ describe("the operations console", () => {
     const revised = await fetch(url(`/r/${run}/revise`), {
       method: "POST",
       headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf }),
+      body: new URLSearchParams({ csrf, ...revisionFormOf(await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text()) }),
       redirect: "manual",
     });
     expect(revised.status).toBe(303);
@@ -1055,11 +1066,25 @@ describe("the operations console", () => {
     expect(runView).toContain("tighten the guard here");
     expect(runView).toContain("1 note ready");
     expect(runView).toContain(">Create revision</button>");
+    // The form names the exact batch and source it displays (repair
+    // 2026-09-14); a bare seal is an out-of-date form and is refused.
+    const sealForm = revisionFormOf(runView);
+    expect(sealForm.batch).toMatch(/^[0-9]+$/);
+    expect(sealForm.source).toBe(store.getScope("t-rev")?.digest ?? "none");
+    const bare = await fetch(url(`/r/${run}/revise`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf }),
+      redirect: "manual",
+    });
+    expect(bare.status).toBe(400);
+    expect(await bare.text()).toContain("this form is out of date");
+    expect(store.revisionsFromRun(run)).toHaveLength(0);
 
     const revised = await fetch(url(`/r/${run}/revise`), {
       method: "POST",
       headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf }),
+      body: new URLSearchParams({ csrf, ...sealForm }),
       redirect: "manual",
     });
     expect(revised.status).toBe(303);
@@ -1080,7 +1105,7 @@ describe("the operations console", () => {
     const again = await fetch(url(`/r/${run}/revise`), {
       method: "POST",
       headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf }),
+      body: new URLSearchParams({ csrf, ...sealForm }),
       redirect: "manual",
     });
     expect(again.status).toBe(303);
@@ -5815,7 +5840,7 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       expect(html).toContain('data-diff-mode="view" aria-pressed="true"');
       expect(html).toContain('data-diff-mode="annotate" aria-pressed="false"');
       expect(html).toContain("closest('button.pick-file,button.pick-line')");
-      expect(html).toContain("form.scrollIntoView({behavior:'smooth',block:'center'})");
+      expect(html).toContain("form.scrollIntoView({behavior:window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'center'})");
       // prefill alone earns no network: script-src yes, connect-src no
       const csp = (await fetch(url(`/r/${runId}`), { headers: { cookie } })).headers.get("content-security-policy") ?? "";
       expect(csp).toMatch(/script-src 'nonce-/);
@@ -7590,7 +7615,12 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(bare).toContain('href="/chat?task=t-proof">Discuss in chat →</a>');
 
     const sha256 = createHash("sha256").update("").digest("hex");
+    // The records exist on disk and verify (repair 2026-09-14): a record
+    // whose bytes are missing is damaged evidence, and the status would
+    // truthfully say so instead of speaking the verdict this test reads.
+    mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
     for (const kind of ["handoff", "terminal-diff"] as const) {
+      writeFileSync(join(evidenceRoot, String(run), kind), "");
       store.saveArtifact({
         run,
         kind,
@@ -10685,11 +10715,15 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const broken = await (await fetch(url("/review?result=t-broken"), { headers: { cookie } })).text();
     expect(broken).toContain("Diff unavailable: stored but unverifiable");
     expect(broken).toContain("Change summary unavailable: capture failed");
-    expect(broken).toContain("Check output (shortened)");
+    expect(broken).toMatch(/Check output \(shortened — [0-9]+ of [0-9]+ bytes stored\)/);
     // Package 3: every evidence problem is also named in the open, ahead
     // of the tabs, and the shared facts count them.
     expect(broken).toContain("The sealed diff is unavailable: stored but unverifiable");
-    expect(broken).toContain("The check output was shortened when it was stored.");
+    expect(broken).toContain("The check output was shortened when it was stored; its download holds only the stored part.");
+    // Repair 2026-09-14: a shortened record's download is never called the full bytes.
+    expect(broken).toContain("Download the stored part of the check log (shortened at storage — not the full check log)");
+    expect(broken).not.toContain("Open the full check log");
+    expect(broken).not.toContain("Download the full diff");
     expect(broken).toMatch(/data-result-evidence="problems:[0-9]+"/);
     expect(broken).not.toContain("tampered</code>");
     expect(broken).not.toContain('id="comment-form"');
@@ -10871,7 +10905,10 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(plain).toContain("No screenshots were needed");
     expect(plain).toContain("No caveats were reported");
     expect(plain).toContain('data-matrix-state="missing"');
-    expect(plain).toContain('data-receipt-publication="failed">The last publication attempt failed; no pull request or merge is recorded here. <span class="meta">After 1 attempt — remote: permission denied.</span>');
+    expect(plain).toContain('data-receipt-publication="failed">The last publication attempt failed; no pull request or merge is recorded here.</p>');
+    // The failed publication is a risk, so it stays in the open, ahead of the tabs (repair 2026-09-14).
+    expect(plain).toContain("<li>Publication failed after 1 attempt — remote: permission denied. No pull request or merge is recorded.</li>");
+    expect(plain.indexOf("Publication failed after 1 attempt")).toBeLessThan(plain.indexOf('class="result-tabs"'));
   });
 
   test("actions: only applicable roads appear, each through its existing endpoint with the session's CSRF; a bearer session sees no forms", async () => {
@@ -11353,14 +11390,14 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       expect(attention).not.toBeNull();
       expect(attention?.[2]).toContain("Screenshot evidence/x.png no longer verifies (the file&#39;s size no longer matches its record) and is not shown.");
       expect(attention?.[2]).toContain("The change summary is unavailable: capture failed");
-      expect(attention?.[2]).toContain("The check output was shortened when it was stored.");
+      expect(attention?.[2]).toContain("The check output was shortened when it was stored; its download holds only the stored part.");
       expect(attention?.[2]).toContain("Only the USD path was exercised.");
       // Nothing renders the tampered bytes or calls them validated.
       expect(html).not.toContain(`<img src="/r/${run}/evidence/${shot.id}"`);
       expect(html).not.toContain("validated visual proof");
       expect(html).toContain("0 validated screenshots, 1 unavailable");
       expect(html).toContain('data-result-lead="changes"');
-      expect(html).toContain("Check output (shortened)");
+      expect(html).toMatch(/Check output \(shortened — [0-9]+ of [0-9]+ bytes stored\)/);
       expect(html).toContain('<p class="problem">Change summary unavailable: capture failed');
     }
     // The receipt counts it honestly too, on the task page and in chat.
@@ -11436,8 +11473,12 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(ready).toContain("<strong>3 notes ready</strong>");
     expect(ready).toMatch(/name="note"[^>]* autofocus/);
     expect((ready.match(new RegExp(`action="/r/${run}/revise"`, "g")) ?? []).length).toBe(1);
+    // The seal names the displayed batch and source (repair 2026-09-14).
+    const seal = revisionFormOf(ready);
+    expect(seal.batch).toBe(batch.map(one => one.id).join(","));
+    expect(seal.source).toBe(store.getScope("t-loop")?.digest);
     // The seal: one revision, unapproved, exact lineage, the original evidence untouched.
-    const sealed = await post(cookie, `/r/${run}/revise`, { csrf, return: `/chat?task=t-loop&result=${run}` });
+    const sealed = await post(cookie, `/r/${run}/revise`, { csrf, return: `/chat?task=t-loop&result=${run}`, ...seal });
     expect(sealed.status, await sealed.text()).toBe(303);
     const revisionId = (sealed.headers.get("location") ?? "").replace("/t/", "");
     expect(store.revisionsFromRun(run).map(one => one.id)).toEqual([revisionId]);
@@ -11446,14 +11487,14 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(store.liveDiffComments(run)).toHaveLength(0);
     expect(store.allDiffComments(run).every(one => one.consumedBy === revisionId)).toBe(true);
     // Replays of the seal: the SAME revision, never a twin.
-    const again = await post(cookie, `/r/${run}/revise`, { csrf, return: `/chat?task=t-loop&result=${run}` });
+    const again = await post(cookie, `/r/${run}/revise`, { csrf, return: `/chat?task=t-loop&result=${run}`, ...seal });
     expect(again.status).toBe(303);
     expect(again.headers.get("location")).toBe(`/t/${revisionId}`);
     expect(store.revisionsFromRun(run)).toHaveLength(1);
     // Both directions: the result names the revision; the revision names the result (task page and chat card).
     const after = await read(`/r/${run}`);
-    expect(after).toContain(`<p class="result-revision" data-result-revision="${revisionId}"><strong>Proposed revision</strong> <a href="/t/${revisionId}">`);
-    expect(after).toContain("waiting for your approval · this result stays on record");
+    expect(after).toContain(`<p class="result-revision" data-result-revision="${revisionId}" data-result-revision-approved="0"`);
+    expect(after).toContain(`<strong>Revision</strong> <a href="/t/${revisionId}">`);
     expect(after).toContain('<div class="diff-review" data-review-diff>');
     expect(after).toContain(`<img src="/r/${run}/evidence/`);
     expect(after).not.toContain(`action="/r/${run}/revise"`);
@@ -11504,6 +11545,337 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(bearer).toContain("data-result-panel");
     expect(bearer).not.toContain('id="comment-form"');
     expect(bearer).toContain("Sign in with a browser session to request changes.");
+  });
+
+  // ---- repair 2026-09-14: the five independent findings ------------------
+  test("repair c7: after a missed response an unchanged retry records once; the same request identity with different words, a different file, or another result is refused with the draft's way back carrying the conflict; a fresh identity records the edited note", async () => {
+    const ref = seed("t-retry", "a lost response", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const run = build("t-retry", ref, RICH);
+    const otherRef = seed("t-retry-other", "another result", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const otherRun = build("t-retry-other", otherRef, RICH);
+    await boot();
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+    const page = await read(`/r/${run}`);
+    const csrf = csrfOf(page);
+    const token = /name="request" value="([a-f0-9]{32})"/.exec(page.slice(page.indexOf('id="comment-form"')))?.[1] ?? "";
+    expect(token).toMatch(/^[a-f0-9]{32}$/);
+    const back = `/chat?task=t-retry&result=${run}`;
+    // Note A lands; the document never sees the receipt (the reviewer's fetch scenario).
+    const first = await post(cookie, `/r/${run}/comment`, { csrf, note: "Note A", request: token, return: back });
+    expect(first.status).toBe(303);
+    expect(first.headers.get("location")).toBe(`${back}&noted=${token}#request-changes`);
+    expect(store.liveDiffComments(run).map(one => one.note)).toEqual(["Note A"]);
+    // The same identity with EDITED words: refused, nothing recorded, and
+    // the way back names the conflicting token so the browser rotates it.
+    const edited = await post(cookie, `/r/${run}/comment`, { csrf, note: "Note B", request: token, return: back });
+    expect(edited.status).toBe(409);
+    const refusal = await edited.text();
+    expect(refusal).toContain("this request identity already recorded a different note on this result");
+    expect(refusal).toContain("&quot;Note A&quot;");
+    expect(refusal).toContain(`<a href="${back.replace(/&/g, "&amp;")}&amp;conflict=${token}#request-changes">`);
+    expect(store.liveDiffComments(run).map(one => one.note)).toEqual(["Note A"]);
+    // The same identity pinned to a file: a different note too.
+    const repinned = await post(cookie, `/r/${run}/comment`, { csrf, note: "Note A", path: "src/a.ts", line: "2", request: token, return: back });
+    expect(repinned.status).toBe(409);
+    expect(store.liveDiffComments(run)).toHaveLength(1);
+    // The UNCHANGED retry: the same receipt, still one note.
+    const retried = await post(cookie, `/r/${run}/comment`, { csrf, note: "Note A", request: token, return: back });
+    expect(retried.status).toBe(303);
+    expect(retried.headers.get("location")).toBe(first.headers.get("location"));
+    expect(store.liveDiffComments(run)).toHaveLength(1);
+    // Cross-run reuse of the identity: refused on the other result, nothing recorded there.
+    const otherCsrf = csrfOf(await read(`/r/${otherRun}`));
+    const crossed = await post(cookie, `/r/${otherRun}/comment`, { csrf: otherCsrf, note: "Note A", request: token, return: `/r/${otherRun}` });
+    expect(crossed.status).toBe(409);
+    const crossedWords = await crossed.text();
+    expect(crossedWords).toContain(`already used on another result (build #${run})`);
+    expect(crossedWords).toContain(`<a href="/r/${otherRun}?conflict=${token}#request-changes">`);
+    expect(store.liveDiffComments(otherRun)).toHaveLength(0);
+    expect(store.liveDiffComments(run)).toHaveLength(1);
+    // A fresh identity for the edited words: a second note, and the two receipts differ.
+    const fresh = "c".repeat(32);
+    const second = await post(cookie, `/r/${run}/comment`, { csrf, note: "Note B", request: fresh, return: back });
+    expect(second.status).toBe(303);
+    expect(second.headers.get("location")).toBe(`${back}&noted=${fresh}#request-changes`);
+    expect(store.liveDiffComments(run).map(one => one.note)).toEqual(["Note A", "Note B"]);
+    // The browser half is the same script on every result surface: the
+    // identity is bound at submit and rotated on edit or on ?conflict=.
+    for (const html of [await read(`/r/${run}`), await read(back), await read("/review?result=t-retry")]) {
+      expect(html).toContain("if((bound!==null&&current!==bound)||(sent!==null&&current!==sent)){sent=null;if(requestBox)requestBox.value=mint();}");
+      expect(html).toContain("saved.request===conflict");
+    }
+  });
+
+  test("repair c8: the revision form seals exactly the displayed batch; replaying an old request returns its original child and never consumes later notes; a two-tab batch partly sealed elsewhere is refused whole; concurrent identical seals land on one child; stale source and malformed batches are refused", async () => {
+    const ref = seed("t-batch", "exact batches", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const run = build("t-batch", ref, RICH);
+    store.stampRun(run, { scopeDigest: store.getScope("t-batch")!.digest });
+    const strayRef = seed("t-batch-stray", "another result", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const strayRun = build("t-batch-stray", strayRef, RICH);
+    await boot();
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+    const csrf = csrfOf(await read(`/r/${run}`));
+    const note = async (words: string, where = run) => {
+      const posted = await post(cookie, `/r/${where}/comment`, { csrf, note: words, return: `/r/${where}` });
+      expect(posted.status).toBe(303);
+      return store.liveDiffComments(where).find(one => one.note === words)!.id;
+    };
+    const a = await note("Note A");
+    const b = await note("Note B");
+    const shown = revisionFormOf(await read(`/r/${run}`));
+    expect(shown).toEqual({ batch: `${a},${b}`, source: store.getScope("t-batch")!.digest });
+    const oldBody = { csrf, return: `/r/${run}`, ...shown };
+    // Seal A+B → child X.
+    const sealed = await post(cookie, `/r/${run}/revise`, oldBody);
+    expect(sealed.status, await sealed.text()).toBe(303);
+    const x = (sealed.headers.get("location") ?? "").replace("/t/", "");
+    expect(store.revisionsFromRun(run).map(one => one.id)).toEqual([x]);
+    // A later note C, then the OLD request replayed byte for byte: X again, C untouched.
+    const c = await note("Note C");
+    const replayed = await post(cookie, `/r/${run}/revise`, oldBody);
+    expect(replayed.status).toBe(303);
+    expect(replayed.headers.get("location")).toBe(`/t/${x}`);
+    expect(store.revisionsFromRun(run).map(one => one.id)).toEqual([x]);
+    expect(store.liveDiffComments(run).map(one => one.id)).toEqual([c]);
+    expect(store.allDiffComments(run).find(one => one.id === c)?.consumedBy).toBeNull();
+    // A consumed subset, reordered batch, or changed source is not the old request.
+    for (const changed of [{ batch: String(a) }, { batch: `${b},${a}` }, { source: "wrong-source" }]) {
+      expect((await post(cookie, `/r/${run}/revise`, { ...oldBody, ...changed })).status).toBe(409);
+    }
+    // Two tabs: tab 1 displayed [C]; tab 2 displayed [C, D]. Tab 1 seals →
+    // Y. Tab 2's batch is partly sealed elsewhere: refused whole, D still live.
+    const tabOne = revisionFormOf(await read(`/r/${run}`));
+    const d = await note("Note D");
+    const tabTwo = revisionFormOf(await read(`/r/${run}`));
+    expect(tabOne.batch).toBe(String(c));
+    expect(tabTwo.batch).toBe(`${c},${d}`);
+    const one = await post(cookie, `/r/${run}/revise`, { csrf, return: `/r/${run}`, ...tabOne });
+    expect(one.status).toBe(303);
+    const y = (one.headers.get("location") ?? "").replace("/t/", "");
+    const two = await post(cookie, `/r/${run}/revise`, { csrf, return: `/r/${run}`, ...tabTwo });
+    expect(two.status).toBe(409);
+    expect(await two.text()).toContain(`some of these notes were already sealed into revision ${y}; the others are still waiting`);
+    expect(store.revisionsFromRun(run).map(one => one.id)).toEqual([x, y]);
+    expect(store.liveDiffComments(run).map(one => one.id)).toEqual([d]);
+    // Tab 2 reloads and sees [D]; two identical submissions race: one child, both land on it.
+    const reloaded = revisionFormOf(await read(`/r/${run}`));
+    expect(reloaded.batch).toBe(String(d));
+    const [left, right] = await Promise.all([
+      post(cookie, `/r/${run}/revise`, { csrf, return: `/r/${run}`, ...reloaded }),
+      post(cookie, `/r/${run}/revise`, { csrf, return: `/r/${run}`, ...reloaded }),
+    ]);
+    expect([left.status, right.status]).toEqual([303, 303]);
+    expect(left.headers.get("location")).toBe(right.headers.get("location"));
+    const z = (left.headers.get("location") ?? "").replace("/t/", "");
+    expect(store.revisionsFromRun(run).map(one => one.id)).toEqual([x, y, z]);
+    expect(store.liveDiffComments(run)).toHaveLength(0);
+    // The brief of each child carries exactly its batch.
+    expect(store.allDiffComments(run).map(one => [one.id, one.consumedBy])).toEqual([[a, x], [b, x], [c, y], [d, z]]);
+    // Malformed, foreign, and absent batches are refused before anything is read.
+    const e = await note("Note E");
+    for (const body of [{ csrf, return: `/r/${run}` }, { csrf, return: `/r/${run}`, batch: "abc", source: shown.source }, { csrf, return: `/r/${run}`, batch: String(e), source: "" }]) {
+      const refused = await post(cookie, `/r/${run}/revise`, body);
+      expect(refused.status).toBe(400);
+      expect(await refused.text()).toContain("this form is out of date");
+    }
+    const strayId = await note("Stray", strayRun);
+    const foreign = await post(cookie, `/r/${run}/revise`, { csrf, return: `/r/${run}`, batch: `${e},${strayId}`, source: shown.source });
+    expect(foreign.status).toBe(400);
+    expect(await foreign.text()).toContain("names notes that are not on this result");
+    expect(store.liveDiffComments(run).map(one => one.id)).toEqual([e]);
+    expect(store.liveDiffComments(strayRun).map(one => one.id)).toEqual([strayId]);
+    // The source terms changed after the page was shown: refused; the note waits.
+    propose(store, { taskId: "t-batch", goal: "goal of t-batch, rewritten", outOfScope: null, touches: [], acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"], how: null }], now: T0 });
+    const stale = await post(cookie, `/r/${run}/revise`, { csrf, return: `/r/${run}`, batch: String(e), source: shown.source });
+    const staleWords = await stale.text();
+    expect(stale.status, staleWords.slice(staleWords.indexOf("<main>"))).toBe(409);
+    expect(staleWords).toContain("the task&#39;s terms changed since this page was shown");
+    const oldAfterRescope = await post(cookie, `/r/${run}/revise`, oldBody);
+    expect(oldAfterRescope.status).toBe(303);
+    expect(oldAfterRescope.headers.get("location")).toBe(`/t/${x}`);
+    expect(store.revisionsFromRun(run).map(one => one.id)).toEqual([x, y, z]);
+    expect(store.liveDiffComments(run).map(one => one.id)).toEqual([e]);
+  });
+
+  test("repair c9: a check log whose bytes no longer verify is damaged evidence — the shared facts count it, every surface names it and drops the readiness word, its output and download are withheld; shortened logs and diffs say their download is the stored part only", async () => {
+    const ref = seed("t-log", "a corrupted log", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const run = build("t-log", ref, RICH);
+    const shortRef = seed("t-short", "shortened records", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const longPatch = `${PATCH}${"+// padding line that pushes the sealed diff past its storage cap\n".repeat(5_000)}`;
+    const shortRun = build("t-short", shortRef, { ...RICH, patch: longPatch, checkLog: "x".repeat(70 * 1024) });
+    await boot();
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+    const surfaces = () => Promise.all([read(`/r/${run}`), read("/review?result=t-log"), read(`/chat?task=t-log&result=${run}`), read("/t/t-log"), read("/chat?task=t-log")]);
+    for (const html of await surfaces()) {
+      expect(factsOf(html)[0]?.evidence).toBe("ok");
+      expect(html).toContain('data-work-status="ready-to-review"');
+    }
+    // The damage, after sealing.
+    const log = store.artifactsFor(run).find(one => one.kind === "check-log");
+    if (log === undefined) throw new Error("no check log");
+    writeFileSync(join(evidenceRoot, log.key), "$ npm test\n0 passed, 12 failed\n");
+    for (const html of await surfaces()) {
+      expect(factsOf(html)[0]?.evidence).toBe("problems:1");
+      expect(html).toContain("The check log no longer verifies (");
+      expect(html).toContain('data-work-status="evidence-damaged"');
+      expect(html).toContain("Result saved, but some evidence is unavailable");
+      expect(html).not.toContain("Ready to review");
+      expect(html).not.toContain("0 passed, 12 failed");
+      expect(html).not.toContain("Open the full check log");
+      // The result panel and the receipt offer no download of the damaged
+      // bytes (the run page's raw artifact ledger still lists the record;
+      // the evidence road refuses it below).
+      const shared = html.slice(html.indexOf('data-result-run="'), html.lastIndexOf("</section>"));
+      expect(shared).not.toContain(`/evidence/${log.id}"`);
+    }
+    const panel = await read(`/r/${run}?tab=checks`);
+    expect(panel).toContain('<p class="problem" data-check-log="damaged" data-cockpit-source="machine">The check log no longer verifies (');
+    expect(panel).toContain("Its output is not shown, and there is nothing to download.");
+    expect(panel.indexOf('data-result-attention="1"')).toBeLessThan(panel.indexOf('class="result-tabs"'));
+    expect(panel).toContain("check log (unverifiable)");
+    expect((await fetch(url(`/r/${run}/evidence/${log.id}`), { headers: { cookie } })).status).toBe(410);
+    // Shortened records: the readiness word stands, the detail says what was cut, and no download claims the full bytes.
+    const shortLog = store.artifactsFor(shortRun).find(one => one.kind === "check-log")!;
+    const shortPatch = store.artifactsFor(shortRun).find(one => one.kind === "terminal-diff")!;
+    expect(shortLog.truncated && shortPatch.truncated).toBe(true);
+    const shortPage = await read(`/r/${shortRun}?tab=checks`);
+    expect(factsOf(shortPage)[0]?.evidence).toBe("problems:2");
+    expect(shortPage).toContain('data-work-status="ready-to-review"');
+    expect(shortPage).toContain("The sealed diff was shortened when it was stored; its download holds only the stored part, not the full change.");
+    expect(shortPage).toContain("The check output was shortened when it was stored; its download holds only the stored part.");
+    expect(shortPage).toContain(`<details data-check-log="shortened" data-cockpit-source="machine"><summary>Check output (shortened — ${shortLog.bytesStored} of ${shortLog.bytesOriginal} bytes stored)</summary>`);
+    expect(shortPage).toContain(`href="/r/${shortRun}/evidence/${shortLog.id}">Download the stored part of the check log (shortened at storage — not the full check log)</a>`);
+    expect(shortPage).toContain(`href="/r/${shortRun}/evidence/${shortPatch.id}">Download the stored part of the diff (shortened at storage — not the full diff)</a>`);
+    expect(shortPage).toContain("The sealed diff was shortened at storage: the rest of the change was never captured, here or in the download.");
+    expect(shortPage).not.toContain("Download the full diff");
+    expect(shortPage).not.toContain("Open the full check log");
+    const shortTask = await read("/t/t-short");
+    expect(shortTask).toContain("2 stored records were shortened at storage; their downloads hold only the stored part.");
+    expect(shortTask).toContain('data-work-status="ready-to-review"');
+    // The damaged result's task page box says the same as its receipt: a problem, never "ok".
+    const damagedTask = await read("/t/t-log");
+    expect(damagedTask).toContain('data-dispatch-status="evidence-damaged"');
+    expect(damagedTask).toContain("The machine&#39;s verdict at completion is unchanged: the approved check passed against it then.");
+    expect(damagedTask).not.toContain('data-dispatch-status="complete-verified"');
+  });
+
+  test("repair c9: missing log and diff files and missing, corrupt or shortened reports stay honest on all shared result surfaces", async () => {
+    const logRef = seed("t-missing-log", "missing log");
+    const logRun = build("t-missing-log", logRef, RICH);
+    const diffRef = seed("t-missing-diff", "missing diff");
+    const diffRun = build("t-missing-diff", diffRef, RICH);
+    for (const [run, kind] of [[logRun, "check-log"], [diffRun, "terminal-diff"]] as const) {
+      const artifact = store.artifactsFor(run).find(one => one.kind === kind)!;
+      rmSync(join(evidenceRoot, artifact.key));
+    }
+    const scouts = ["missing", "corrupt", "shortened", "cut-json"].map(kind => {
+      const id = `t-report-${kind}`;
+      const ref = seed(id, `${kind} report`);
+      const run = store.startRun({ taskRef: ref, leaseId: id, runner: "night-shift-1", provider: "claude", role: "scout", branch: id, worktree: `/pool/${id}`, now: T0, ...presented(store, ref, "builder") });
+      let artifactId: number | null = null;
+      if (kind !== "missing") {
+        const document = JSON.stringify({ title: "Captured report", summary: "Stored evidence.", report: "# Safe text", followUps: [] });
+        const content = Buffer.from(kind === "cut-json" ? document.slice(0, -10) : document);
+        const key = `${run}/report.json`;
+        mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
+        writeFileSync(join(evidenceRoot, key), content);
+        artifactId = store.saveArtifact({ run, kind: "report", key, bytesStored: content.length, bytesOriginal: content.length + (kind === "corrupt" ? 0 : 100), truncated: kind !== "corrupt", sha256: createHash("sha256").update(content).digest("hex"), capture: "stored report" }, T0);
+        if (kind === "corrupt") writeFileSync(join(evidenceRoot, key), "altered");
+      }
+      store.finishRun(run, { outcome: "no-change", committed: false, now: T0 });
+      store.setTaskState(id, "done", T0);
+      return { kind, id, run, artifactId };
+    });
+    await boot();
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+    for (const sample of [{ id: "t-missing-log", run: logRun, kind: "log", artifactId: null }, { id: "t-missing-diff", run: diffRun, kind: "diff", artifactId: null }, ...scouts]) {
+      const texts = await Promise.all([read(`/r/${sample.run}`), read(`/review?result=${sample.id}`), read(`/chat?task=${sample.id}&result=${sample.run}`), read(`/t/${sample.id}`), read(`/chat?task=${sample.id}`)]);
+      for (const html of texts) {
+        expect(factsOf(html)[0]?.evidence).toBe("problems:1");
+        expect(html).toContain("data-result-attention=");
+        if (sample.kind !== "shortened") {
+          expect(html).toContain('data-work-status="evidence-damaged"');
+          expect(html).not.toContain("Ready to review");
+          expect(html).not.toContain("Report ready");
+        }
+        if (sample.kind === "shortened") expect(html).toContain("The report was shortened when it was stored; its download holds only the stored part.");
+        if (sample.kind === "cut-json") expect(html).toContain("the report was shortened at storage and cannot be read; the missing part was never captured");
+      }
+      if (sample.kind === "shortened") {
+        expect(texts[0]).toContain(`href="/r/${sample.run}/evidence/${sample.artifactId}">Download the stored part of the report (shortened at storage — not the full report)</a>`);
+        expect(texts[0]).not.toContain(">Download the report</a>");
+      }
+    }
+  });
+
+  test("repair c10: a revision's standing is the shared projection's own words — current exact approval and actual activity: approve then rescope needs approval again, and held or paused work is never called building because it was once approved", async () => {
+    const ref = seed("t-standing", "revision standing", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const run = build("t-standing", ref, RICH);
+    store.stampRun(run, { scopeDigest: store.getScope("t-standing")!.digest });
+    await boot();
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+    const csrf = csrfOf(await read(`/r/${run}`));
+    expect((await post(cookie, `/r/${run}/comment`, { csrf, note: "Round the footer.", return: `/r/${run}` })).status).toBe(303);
+    const sealed = await post(cookie, `/r/${run}/revise`, { csrf, return: `/r/${run}`, ...revisionFormOf(await read(`/r/${run}`)) });
+    expect(sealed.status).toBe(303);
+    const child = (sealed.headers.get("location") ?? "").replace("/t/", "");
+    const childRef = store.lookupRef(child)!.id;
+    const line = async () => /<p class="result-revision" data-result-revision="[^"]+" data-result-revision-approved="([01])" data-tone="([a-z]+)"><strong>Revision<\/strong> <a href="[^"]+">[^<]*<\/a> <span class="meta">· ([^<]*)<\/span><\/p>/.exec(await read(`/r/${run}`));
+    // The child's own Work row: the same projection, the same words.
+    const rowWords = async () => /<span class="status-label">([^<]*)<\/span>/.exec((await read("/work?view=all")).split(`data-task="${child}"`)[1] ?? "")?.[1] ?? null;
+    // Unapproved: waits for a person, and the child's own Work row says the same words.
+    const unapproved = await line();
+    expect(unapproved?.[1]).toBe("0");
+    expect(unapproved?.[3]).toBe("Needs your approval");
+    expect(unapproved?.[3]).toBe(await rowWords());
+    // Approved exactly: no longer waiting for approval — and not "building"
+    // either: nothing runs, and this fixture's builder is not heartbeating.
+    const scope = store.getScope(child)!;
+    const agreed = approve(store, child, "alex", T0, scope.digest, approverToken);
+    if (!agreed.ok) throw new Error(agreed.reason);
+    const approved = await line();
+    expect(approved?.[1]).toBe("1");
+    expect(approved?.[3]).not.toMatch(/building|approval/i);
+    expect(approved?.[3]).toBe(await rowWords());
+    // Held after approval: on hold, never building.
+    store.hold(childRef, "Wait for the column names to settle.", null, T0);
+    const held = await line();
+    expect(held?.[1]).toBe("1");
+    expect(held?.[3]).toBe("On hold");
+    expect(held?.[3]).toBe(await rowWords());
+    store.unhold(childRef, T0);
+    // Rescoped after approval: the old stamp is no approval of the new terms.
+    propose(store, { taskId: child, goal: `${scope.goal} — and also the header row`, outOfScope: scope.outOfScope, touches: scope.touches, acceptance: scope.acceptance, now: T0 });
+    expect(store.getScope(child)?.approvedAt).not.toBeNull();
+    expect(store.revisionsFromRun(run)[0]?.approved).toBe(false);
+    const rescoped = await line();
+    expect(rescoped?.[1]).toBe("0");
+    expect(rescoped?.[3]).toBe("Needs your approval");
+    expect(rescoped?.[3]).toBe(await rowWords());
+    // Approved again, then running under a live claim, then paused by a stop: the row's words, then "Paused".
+    const again = approve(store, child, "alex", T0, store.getScope(child)!.digest, approverToken);
+    if (!again.ok) throw new Error(again.reason);
+    const claim = acquire(store, childRef, "night-shift-1", { token: "tok-night-shift-1", now: T0, ttlMs: 3_600_000 });
+    if (!claim.ok) throw new Error(claim.reason);
+    const live = store.startRun({ taskRef: childRef, leaseId: claim.claim.leaseId, runner: "night-shift-1", provider: "claude", branch: `standing-orders/${child}`, worktree: `/pool/${child}`, now: T0, ...presented(store, childRef, "builder") });
+    store.setTaskState(child, "running", T0);
+    const running = await line();
+    expect(running?.[1]).toBe("1");
+    expect(running?.[3]).toBe(await rowWords());
+    const stopped = store.requestRunStop({ runId: live, taskRef: childRef, by: "alex", via: "web" }, T0);
+    if (!stopped.ok) throw new Error(stopped.reason);
+    store.finishRun(live, { outcome: "interrupted", reason: "stopped", now: T0, stopSettlement: "interrupted" });
+    release(store, claim.claim.leaseId, T0);
+    store.setTaskState(child, "queued", T0);
+    const paused = await line();
+    expect(paused?.[1]).toBe("1");
+    expect(paused?.[3]).toBe("Paused");
+    expect(paused?.[3]).toBe(await rowWords());
   });
 });
 
@@ -12395,6 +12767,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       const chat = await page(cookie, "/chat?task=t-rev");
       const review = await page(cookie, "/review?result=t-rev");
       const run = await page(cookie, `/r/${latest}`);
+      expect(statusOf(run)).toHaveLength(1); // The header says it once; Checks keeps the recorded verdict.
       // The title never repeats the box (concise revision): the h1 is the
       // bare title, and the receipt is the page's only status line.
       expect(task).toContain('<h1 class="task-main-title">Review me</h1>');
@@ -12406,7 +12779,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
         chat: { token: /<section class="card task-journey"[^>]*data-work-status="([^"]+)"/.exec(chat)?.[1], label: /<span class="eyebrow">task journey<\/span><h2>([^<]+)<\/h2>/.exec(chat)?.[1] },
         chatReceipt: { token: statusOf(chat)[0]?.token, label: statusOf(chat)[0]?.label },
         cockpit: { token: /<p class="cockpit-chips">.*?data-work-status="([^"]+)"/s.exec(review)?.[1], label: statusOf(review)[0]?.label },
-        run: { token: /data-proof-verdict="[^"]*"><span class="status-line" data-work-status="([^"]+)"/.exec(run)?.[1], label: statusOf(run)[0]?.label },
+        run: { token: /<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(run)?.[1], label: statusOf(run)[0]?.label },
       };
     };
     const agree = (seen: Record<string, { token: string | undefined; label: string | undefined }>, token: string, label: string): void => {
@@ -12433,7 +12806,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "needs-you", "completed"]);
     // The older run keeps its own verdict: nothing masks a selected result.
     const olderPage = await page(cookie, `/r/${older}`);
-    expect(/data-proof-verdict="[^"]*"><span class="status-line" data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("ready-to-review");
+    expect(/<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("ready-to-review");
     expect(olderPage).not.toContain("Waiting for review");
 
     // Running with a live reviewer: Reviewing, and the row is Running.
@@ -12547,7 +12920,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(queued).toMatch(/<h1 class="task-main-title">Rework the ledger export <span class="badge badge-queued">queued<\/span><\/h1>/);
     // The selected older result keeps its own status on its run page.
     const olderPage = await page(cookie, `/r/${older}`);
-    expect(/data-proof-verdict="[^"]*"><span class="status-line" data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("ready-to-review");
+    expect(/<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("ready-to-review");
     // The signed terms stay exact on the task page: the approved goal, word
     // for word, and nothing pretends the checks passed.
     expect(failed).toContain("do Round at cent precision");

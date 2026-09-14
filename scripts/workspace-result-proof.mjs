@@ -31,8 +31,30 @@
  *       result beside chat, the dedicated phone view, the run page, and
  *       the cockpit; no document overflow; tabs, Add note, Create
  *       revision, and Back to chat reachable and inside the viewport.
+ *   Repair 2026-09-14 (the five independent findings on run 1552):
+ *   c7  a note submitted whose response never arrives keeps its request
+ *       identity for an unchanged retry (recorded once) and mints a new
+ *       one the moment the note or file is edited; the server refuses the
+ *       same identity with different words or on another result, and the
+ *       refusal's way back rotates the identity without losing the words.
+ *   c8  the revision form seals exactly the note batch it displayed; the
+ *       old seal body replayed after a new note returns the original
+ *       child and leaves the new note live; a second tab whose batch was
+ *       partly sealed elsewhere is refused whole and can reload.
+ *   c9  a verified build whose check log was altered on disk reads as
+ *       damaged evidence on the task receipt, the chat receipt, the run
+ *       page, and the cockpit — problems counted, readiness word gone,
+ *       output and download withheld, evidence road refusing — while a
+ *       shortened log's download is described as the stored part only.
+ *   c10 a sealed revision's line carries the shared projection's own
+ *       words: needs approval → (approved) → on hold → (rescoped) needs
+ *       approval again — never "building" because it was once approved.
+ *   c11 Summary is the deliverable first: one bounded outcome line, one
+ *       action, the agent's account and the technical facts behind
+ *       closed disclosures, risks in the open, and a 44px Back at 390
+ *       and 320.
  *
- *   node scripts/workspace-result-proof.mjs [--out output/playwright/workspace-3-result-2026-09-13] [--strict]
+ *   node scripts/workspace-result-proof.mjs [--out output/playwright/workspace-3-result-2026-09-13] [--strict] [--layout-only]
  *
  * Playwright is NOT a dependency of this package: the script imports it
  * from `playwright` when installed, else from PLAYWRIGHT_MODULE, else from
@@ -42,13 +64,14 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { startFixture } from './ui-polish-fixture.mjs';
-import { addApprover } from '../dist/scope.js';
+import { addApprover, approve, propose } from '../dist/scope.js';
 import { resultFactsFromHtml } from '../dist/result-review.js';
 
 const args = process.argv.slice(2);
 const flag = name => { const at = args.indexOf(name); return at === -1 ? null : args[at + 1] ?? null; };
 const out = resolve(flag('--out') ?? 'output/playwright/workspace-3-result-2026-09-13');
 const strict = args.includes('--strict');
+const layoutOnly = args.includes('--layout-only');
 mkdirSync(out, { recursive: true });
 
 async function loadPlaywright() {
@@ -144,6 +167,10 @@ try {
     cookieHeader = (login.headers.get('set-cookie') ?? '').split(';')[0];
   }
 
+  let page;
+  // Small presentation repairs can recheck the affected evidence and layouts
+  // without repeating the already-passed result-to-revision journey.
+  if (!layoutOnly) {
   // ---- c1: the shared facts agree across every surface ----------------------
   const surfaces = {
     'chat receipt': await factsOf(`/chat?task=${task}`),
@@ -172,11 +199,11 @@ try {
   const codeText = await html(`/r/${fixture.statusRuns.missingProof}`);
   check('c1 UI work leads with its validated screenshots', leadOf(uiText) === 'screenshots' && /^receipt-visuals result-visuals/.test(firstInSummary(uiText) ?? ''), `${leadOf(uiText)} · ${firstInSummary(uiText)}`);
   check('c1 an investigation leads with its report', leadOf(investigationText) === 'report' && firstInSummary(investigationText) === 'result-report', `${leadOf(investigationText)} · ${firstInSummary(investigationText)}`);
-  check('c1 code work without screenshots leads with the change summary', leadOf(codeText) === 'changes' && firstInSummary(codeText) === 'result-changes', `${leadOf(codeText)} · ${firstInSummary(codeText)}`);
+  check('c1 code work without screenshots leads with its changed files and the way to the diff', leadOf(codeText) === 'changes' && firstInSummary(codeText) === 'result-files-lead', `${leadOf(codeText)} · ${firstInSummary(codeText)}`);
 
   // ---- c2: Summary / Changes / Checks, safe evidence, honest problems ------
   const desktop = await context(VIEWPORTS.desktop);
-  let page = desktop.page;
+  page = desktop.page;
   await goto(page, `/r/${runId}`);
   check('c2 the run page opens on Summary with the other views hidden', (await visibleTab(page)) === 'summary' && (await selectedTab(page)) === 'summary');
   const docToken = await page.evaluate(() => (window.__doc = Math.random()));
@@ -241,7 +268,7 @@ try {
   const tamperedFetch = await fetch(`${fixture.url}/r/${fixture.statusRuns.damaged}/evidence/${tamperedArtifact.id}`, { headers: { cookie: cookieHeader } });
   check('c2 damaged evidence is named in the open BEFORE the views: tampered screenshot not shown or called validated, failed change-summary capture, shortened check log, and the caveat', damaged.evidence?.startsWith('problems:') && damaged.attentionAboveTabs && /Screenshot evidence\/payout-dashboard\.png no longer verifies/.test(damaged.attention) && /change summary is unavailable/.test(damaged.attention) && /check output was shortened/.test(damaged.attention) && /USD only/.test(damaged.attention) && damaged.images === 0 && !damaged.validatedWords && /0 validated screenshots, 1 unavailable/.test(damaged.evidenceFact) && damaged.caveats === '1', JSON.stringify(damaged));
   check('c2 the evidence road refuses the tampered screenshot bytes (410)', tamperedFetch.status === 410, String(tamperedFetch.status));
-  check('c2 the damaged result is not called ready: its status leads with verification needed', /verification needed/i.test(damaged.status ?? ''), damaged.status);
+  check('c2 the damaged result is not called ready: its status says some evidence is unavailable (repair 2026-09-14)', /some evidence is unavailable/i.test(damaged.status ?? ''), damaged.status);
   await shot(page, 'desktop-damaged-evidence', 'Desktop 1440×900: a result whose screenshot was altered after sealing — problems first, nothing called validated (synthetic fixture)');
   const damagedChat = await factsOf(`/chat?task=${fixture.statusTasks.damaged}`);
   check('c2 the chat receipt counts the tampered screenshot as unavailable, not validated', damagedChat.text.includes('1 unavailable — not validated') && damagedChat.first?.evidence === damaged.evidence, `${damagedChat.first?.evidence}`);
@@ -276,6 +303,9 @@ try {
   const readyWords = await page.evaluate(() => document.querySelector('.result-request .revision-from-comments strong')?.textContent);
   check('c3 Request changes shows the batch beside the result with one Create revision act', readyWords === '2 notes ready' && (await page.evaluate(() => document.querySelectorAll('.result-request form[action$="/revise"]').length)) === 1, readyWords);
   await shot(page, 'desktop-request-changes-batch', 'Desktop 1440×900: a plain note and a line annotation in one batch beside the result, ready to become one revision (synthetic fixture)');
+  // The seal body as rendered (repair 2026-09-14): the exact batch and source.
+  const sealBody = await page.evaluate(() => Object.fromEntries(new FormData(document.querySelector('.result-request form[action$="/revise"]')).entries()));
+  check('c3 the seal form names the exact displayed batch and the source terms', sealBody.batch === batch.map(one => one.id).join(',') && sealBody.source === fixture.store.getScope(task).digest, JSON.stringify(sealBody));
   await submit(page, '.result-request form[action$="/revise"] button[type="submit"]');
   const revisions = fixture.store.revisionsFromRun(runId);
   const revisionId = revisions.at(-1)?.id ?? '';
@@ -286,12 +316,12 @@ try {
   check('c3 the revision page restates both notes and links back to the original task and build', revisionPage.includes('Please also round the CSV footer') && revisionPage.includes('Name the rounding helper') && revisionPage.includes(`href="/r/${runId}">build #${runId}</a>`) && revisionPage.includes(`href="/t/${task}"`), '');
   check('c3 the revision still needs its own password approval (looks good never became an approval)', revisionPage.includes('input type="password"') || /approve/i.test(revisionPage), '');
   // Replay the seal: no twin.
-  const replayedSeal = await postFrom(page, `/r/${runId}/revise`, { csrf, return: `/r/${runId}` });
+  const replayedSeal = await postFrom(page, `/r/${runId}/revise`, sealBody);
   check('c3 replaying Create revision mints no second revision', (replayedSeal.status === 0 || replayedSeal.status === 303) && fixture.store.revisionsFromRun(runId).length === revisions.length, JSON.stringify({ replayedSeal, count: fixture.store.revisionsFromRun(runId).length }));
   // Forward link and preserved original evidence.
   await goto(page, `/r/${runId}`);
   const forward = await page.evaluate(() => ({ revision: document.querySelector('[data-result-revision]')?.getAttribute('data-result-revision'), words: document.querySelector('[data-result-revision]')?.textContent, shots: document.querySelectorAll('.result-panel .receipt-shot img').length, diff: document.querySelector('[data-review-diff]') !== null, batchGone: document.querySelector('.result-request .revision-from-comments') === null }));
-  check('c3 the original result links forward to the proposed revision and keeps its own evidence (screenshot, diff); the consumed batch no longer offers a second seal', forward.revision === revisionId && /waiting for your approval/.test(forward.words ?? '') && forward.shots === 1 && forward.diff && forward.batchGone, JSON.stringify(forward));
+  check('c3 the original result links forward to the proposed revision and keeps its own evidence (screenshot, diff); the consumed batch no longer offers a second seal', forward.revision === revisionId && /Needs your approval/.test(forward.words ?? '') && forward.shots === 1 && forward.diff && forward.batchGone, JSON.stringify(forward));
   const chatApproval = await html(`/chat?task=${revisionId}`);
   check('c3 the revision\'s chat approval card links back to the original result', chatApproval.includes(`href="/chat?task=${task}&amp;result=${runId}" data-revision-source>Original result: build #${runId} →</a>`), '');
   await desktop.ctx.close();
@@ -382,7 +412,7 @@ try {
     const backRect = await rect(page, '[data-result-back] a, a[data-result-back]');
     const tabRects = await page.evaluate(() => [...document.querySelectorAll('[data-result-tab]')].map(t => { const r = t.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, height: r.height }; }));
     const tabsFit = tabRects.length === 3 && tabRects.every((r, i) => r.left >= 0 && r.right <= viewport.width && r.height >= 40 && (i === 0 || r.left >= tabRects[i - 1].right - 1));
-    check(`c5 ${name} Back to chat and the three tabs are inside the viewport, 40px tall, and do not overlap`, fits(backRect, viewport) && tabsFit, JSON.stringify({ backRect, tabRects }));
+    check(`c5 ${name} Back to chat (44px tall) and the three tabs (40px+) are inside the viewport and do not overlap`, fits(backRect, viewport) && backRect.height >= 44 && tabsFit, JSON.stringify({ backRect, tabRects }));
     await shot(page, `${name}-result-summary`, `${viewport.width}×${viewport.height}: the dedicated result view — Summary with the validated screenshot (synthetic fixture)`);
     await page.click('[data-result-tab="changes"]');
     await page.waitForTimeout(100);
@@ -395,6 +425,16 @@ try {
     const clear = addNote !== null && (tabBar === null || addNote.bottom <= tabBar.top || addNote.top >= tabBar.bottom);
     check(`c5 ${name} Add note is reachable and not under the tab bar`, addNote !== null && addNote.left >= 0 && addNote.right <= viewport.width && addNote.height >= 40 && clear, JSON.stringify({ addNote, tabBar }));
     await shot(page, `${name}-request-changes`, `${viewport.width}×${viewport.height}: Request changes beside the result — note, optional pin, Add note (synthetic fixture)`);
+    if (name === 'phone') {
+      await page.fill('#comment-form [name="note"]', 'Phone review: keep the footer aligned with the rounded rows.');
+      await submit(page, '#comment-form button[type="submit"]');
+      const phoneBatch = fixture.store.liveDiffComments(runId).map(one => one.id);
+      await submit(page, '.result-request form[action$="/revise"] button[type="submit"]');
+      const child = fixture.store.revisionsFromRun(runId).at(-1)?.id;
+      check('c5 phone result-to-revision journey seals exactly its note and still needs approval', phoneBatch.length === 1 && page.url() === `${fixture.url}/t/${child}` && fixture.store.getScope(child)?.approvedAt === null && fixture.store.allDiffComments(runId).find(one => one.id === phoneBatch[0])?.consumedBy === child, JSON.stringify({ child, phoneBatch }));
+      await shot(page, 'phone-revision-created', '390×844: revision created from phone feedback, with its own approval still required (synthetic fixture)');
+      await goto(page, chatResult(task, runId));
+    }
     // Back to chat keeps the phone draft too.
     await page.click('[data-result-back]');
     await page.waitForLoadState('load');
@@ -418,6 +458,191 @@ try {
   await scrollTo(page, '.result-panel');
   await shot(page, 'desktop-review-cockpit', 'Desktop 1440×900: the review cockpit with the same result panel under its queue and next action (synthetic fixture)');
   await wide.ctx.close();
+
+  // ---- c7: a request identity is bound to what it sent -----------------------
+  const c7 = await context(VIEWPORTS.desktop);
+  page = c7.page;
+  await goto(page, `/r/${runId}`);
+  const csrf7 = await page.evaluate(() => document.querySelector('input[name="csrf"]')?.value ?? '');
+  const notesBefore7 = fixture.store.liveDiffComments(runId).length;
+  const requestOf = () => page.evaluate(() => document.querySelector('#comment-form [name="request"]').value);
+  await page.fill('#comment-form [name="note"]', 'Retry A: round the CSV footer too.');
+  const tokenA = await requestOf();
+  // Exact independent reproduction: send current FormData with fetch and
+  // leave the document in place. No synthetic submit event can hide the bug.
+  const lost = await page.evaluate(async () => {
+    const form = document.getElementById('comment-form');
+    const r = await fetch(form.action, { method: 'POST', body: new URLSearchParams(new FormData(form)), redirect: 'manual' });
+    return { status: r.status, type: r.type };
+  });
+  const draftAfterLost = await page.evaluate(() => JSON.parse(sessionStorage.getItem(Object.keys(sessionStorage).find(k => k.startsWith('standing-orders:review-draft:')) ?? '') ?? 'null'));
+  const retried = await postFrom(page, `/r/${runId}/comment`, { csrf: csrf7, note: 'Retry A: round the CSV footer too.', request: tokenA, return: `/r/${runId}` });
+  check('c7 direct FormData with a missed receipt and unchanged retry records exactly once', (lost.status === 0 || lost.status === 303) && (retried.status === 0 || retried.status === 303) && fixture.store.liveDiffComments(runId).length === notesBefore7 + 1 && draftAfterLost?.request === tokenA, JSON.stringify({ lost, retried, draftAfterLost }));
+  // Unchanged: the identity stays (a retry would record once). Edited: a new one, before any click.
+  await page.evaluate(() => { const box = document.querySelector('#comment-form [name="note"]'); box.dispatchEvent(new Event('input', { bubbles: true })); });
+  const unchangedToken = await requestOf();
+  await page.fill('#comment-form [name="note"]', 'Retry B: round the CSV footer AND the JSON export the same way.');
+  const tokenB = await requestOf();
+  check('c7 an unchanged retry keeps its identity; editing the note mints a new immutable one at once', unchangedToken === tokenA && /^[a-f0-9]{32}$/.test(tokenB) && tokenB !== tokenA, JSON.stringify({ tokenA, unchangedToken, tokenB }));
+  // The edited words land under their own identity; A is untouched; B's own receipt clears B's draft.
+  await page.evaluate(() => document.getElementById('comment-form').removeAttribute('aria-busy'));
+  await submit(page, '#comment-form button[type="submit"]');
+  const notes7 = fixture.store.liveDiffComments(runId).map(one => one.note);
+  const afterB = { url: page.url(), note: await page.evaluate(() => document.querySelector('#comment-form [name="note"]')?.value ?? null) };
+  check('c7 the edited note is recorded as a second note under the new identity, the first stays, and the draft clears on ITS receipt', notes7.includes('Retry A: round the CSV footer too.') && notes7.includes('Retry B: round the CSV footer AND the JSON export the same way.') && fixture.store.liveDiffComments(runId).length === notesBefore7 + 2 && afterB.url.includes(`noted=${tokenB}`) && afterB.note === '', JSON.stringify({ notes7, afterB }));
+  // The reviewer's direct replay: identity A with different words → refused, nothing recorded, way back names the conflict.
+  const conflicting = await page.evaluate(async ([p, f]) => { const r = await fetch(p, { method: 'POST', body: new URLSearchParams(f), credentials: 'same-origin' }); return { status: r.status, text: await r.text() }; }, [`/r/${runId}/comment`, { csrf: csrf7, note: 'Retry C: different words, old identity.', request: tokenA, return: `/r/${runId}` }]);
+  check('c7 the same identity with different words is refused (409) with the draft\'s way back carrying ?conflict=<token>; nothing is recorded', conflicting.status === 409 && conflicting.text.includes('already recorded a different note') && conflicting.text.includes(`href="/r/${runId}?conflict=${tokenA}#request-changes"`) && fixture.store.liveDiffComments(runId).length === notesBefore7 + 2, JSON.stringify({ status: conflicting.status, count: fixture.store.liveDiffComments(runId).length }));
+  const crossRun = fixture.statusRuns.attested;
+  const crossCsrf = csrf7;
+  const crossed = await page.evaluate(async ([p, f]) => { const r = await fetch(p, { method: 'POST', body: new URLSearchParams(f), credentials: 'same-origin' }); return { status: r.status, text: await r.text() }; }, [`/r/${crossRun}/comment`, { csrf: crossCsrf, note: 'Retry A: round the CSV footer too.', request: tokenA, return: `/r/${crossRun}` }]);
+  check('c7 the same identity on another result is refused (409); that result records nothing', crossed.status === 409 && crossed.text.includes('already used on another result') && fixture.store.liveDiffComments(crossRun).length === 0, JSON.stringify({ status: crossed.status, count: fixture.store.liveDiffComments(crossRun).length }));
+  // Coming back from that refusal: the words are kept, the identity is new.
+  await page.evaluate(([k, t]) => { sessionStorage.setItem(k, JSON.stringify({ note: 'Retry C: different words, old identity.', path: '', line: '', request: t, sent: null, at: Date.now() })); }, [`standing-orders:review-draft:${fixture.name}:${task}:${runId}`, tokenA]);
+  await goto(page, `/r/${runId}?conflict=${tokenA}#request-changes`);
+  const recovered7 = { note: await page.evaluate(() => document.querySelector('#comment-form [name="note"]')?.value), token: await requestOf() };
+  check('c7 the refusal\'s way back keeps the draft and rotates its identity', recovered7.note === 'Retry C: different words, old identity.' && /^[a-f0-9]{32}$/.test(recovered7.token) && recovered7.token !== tokenA, JSON.stringify(recovered7));
+  await shot(page, 'desktop-c7-draft-recovered', 'Desktop 1440×900: after a refused identity conflict, the draft words are kept under a fresh request identity (synthetic fixture)');
+  await page.evaluate(() => sessionStorage.clear());
+
+  // ---- c8: the seal binds the displayed batch ---------------------------------
+  await goto(page, `/r/${runId}`);
+  const revisionsBefore8 = fixture.store.revisionsFromRun(runId).length;
+  const oldSeal = await page.evaluate(() => Object.fromEntries(new FormData(document.querySelector('.result-request form[action$="/revise"]')).entries()));
+  const batchA = fixture.store.liveDiffComments(runId).map(one => one.id);
+  check('c8 the rendered seal names exactly the live notes shown and the source terms', oldSeal.batch === batchA.join(',') && oldSeal.source === fixture.store.getScope(task).digest, JSON.stringify(oldSeal));
+  await submit(page, '.result-request form[action$="/revise"] button[type="submit"]');
+  const childX = fixture.store.revisionsFromRun(runId).at(-1)?.id ?? '';
+  check('c8 the seal creates one child from that batch', fixture.store.revisionsFromRun(runId).length === revisionsBefore8 + 1 && page.url() === `${fixture.url}/t/${childX}`, JSON.stringify({ childX, url: page.url() }));
+  // A new note C, then the OLD seal body replayed byte for byte.
+  await goto(page, `/r/${runId}`);
+  await page.fill('#comment-form [name="note"]', 'Note C: added after the seal.');
+  await submit(page, '#comment-form button[type="submit"]');
+  const idC = fixture.store.liveDiffComments(runId).find(one => one.note === 'Note C: added after the seal.')?.id;
+  const replayedOld = await postFrom(page, `/r/${runId}/revise`, oldSeal);
+  const afterReplay = { revisions: fixture.store.revisionsFromRun(runId).map(one => one.id), live: fixture.store.liveDiffComments(runId).map(one => one.id), consumedC: fixture.store.allDiffComments(runId).find(one => one.id === idC)?.consumedBy ?? null };
+  check('c8 replaying the old seal after a new note returns the original child and never consumes the new note', (replayedOld.status === 0 || replayedOld.status === 303) && afterReplay.revisions.length === revisionsBefore8 + 1 && afterReplay.live.length === 1 && afterReplay.live[0] === idC && afterReplay.consumedC === null, JSON.stringify({ replayedOld, afterReplay }));
+  // Two tabs: tab 1 shows [C]; tab 2 shows [C, D]; tab 1 seals; tab 2 is refused whole and reloads to [D].
+  const tabOne = await c7.ctx.newPage();
+  await tabOne.goto(`${fixture.url}/r/${runId}`); await tabOne.waitForLoadState('load');
+  await page.reload({ waitUntil: 'load' });
+  await page.fill('#comment-form [name="note"]', 'Note D: from the second tab.');
+  await submit(page, '#comment-form button[type="submit"]');
+  const tabTwoSeal = await page.evaluate(() => Object.fromEntries(new FormData(document.querySelector('.result-request form[action$="/revise"]')).entries()));
+  const tabOneSeal = await tabOne.evaluate(() => Object.fromEntries(new FormData(document.querySelector('.result-request form[action$="/revise"]')).entries()));
+  await tabOne.evaluate(() => { window.__staleDocument = true; });
+  await tabOne.click('.result-request form[action$="/revise"] button[type="submit"]');
+  await tabOne.waitForFunction(() => window.__staleDocument === undefined, null, { timeout: 15000 });
+  await tabOne.waitForLoadState('load');
+  const childY = fixture.store.revisionsFromRun(runId).at(-1)?.id ?? '';
+  await submit(page, '.result-request form[action$="/revise"] button[type="submit"]');
+  const idD = fixture.store.allDiffComments(runId).find(one => one.note === 'Note D: from the second tab.')?.id;
+  const twoTabs = { one: tabOneSeal.batch, two: tabTwoSeal.batch, refused: await page.evaluate(() => document.querySelector('.problem')?.textContent ?? ''), url: page.url(), revisions: fixture.store.revisionsFromRun(runId).map(one => one.id), live: fixture.store.liveDiffComments(runId).map(one => one.id) };
+  check('c8 two tabs: the first seals [C]; the second\'s [C, D] is refused whole (names the child that took C) and D stays live — no twin', twoTabs.one === String(idC) && twoTabs.two === `${idC},${idD}` && twoTabs.refused.includes(`already sealed into revision ${childY}`) && twoTabs.revisions.length === revisionsBefore8 + 2 && twoTabs.live.length === 1 && twoTabs.live[0] === idD, JSON.stringify(twoTabs));
+  await shot(page, 'desktop-c8-two-tab-refusal', 'Desktop 1440×900: the second tab\'s stale batch refused whole, naming the revision that sealed part of it (synthetic fixture)');
+  await goto(page, `/r/${runId}`);
+  const reloadedSeal = await page.evaluate(() => Object.fromEntries(new FormData(document.querySelector('.result-request form[action$="/revise"]')).entries()));
+  check('c8 the refused tab reloads to exactly the remaining note', reloadedSeal.batch === String(idD), JSON.stringify(reloadedSeal));
+  await tabOne.close();
+
+  // ---- c10: a revision's standing is the shared projection's words ---------
+  const revisionLine = async () => page.evaluate(id => { const p = document.querySelector(`[data-result-revision="${id}"]`); return p === null ? null : { approved: p.getAttribute('data-result-revision-approved'), words: p.querySelector('.meta')?.textContent.replace(/^· /, '') ?? '' }; }, childX);
+  const rowWords = async () => { const text = await html('/work?view=all'); const row = text.split(`data-task="${childX}"`)[1] ?? ''; return /<span class="status-label">([^<]*)<\/span>/.exec(row)?.[1] ?? null; };
+  await goto(page, `/r/${runId}`);
+  const standing = { unapproved: await revisionLine(), unapprovedRow: await rowWords() };
+  const childScope = fixture.store.getScope(childX);
+  approve(fixture.store, childX, fixture.name, new Date(), childScope.digest, fixture.password);
+  await page.reload({ waitUntil: 'load' });
+  standing.approved = await revisionLine(); standing.approvedRow = await rowWords();
+  fixture.store.hold(fixture.store.lookupRef(childX).id, 'Wait for the footer decision.', null, new Date());
+  await page.reload({ waitUntil: 'load' });
+  standing.held = await revisionLine(); standing.heldRow = await rowWords();
+  fixture.store.unhold(fixture.store.lookupRef(childX).id);
+  propose(fixture.store, { taskId: childX, goal: `${childScope.goal} — and the header row`, outOfScope: childScope.outOfScope, touches: childScope.touches, acceptance: childScope.acceptance, now: new Date() });
+  await page.reload({ waitUntil: 'load' });
+  standing.rescoped = await revisionLine(); standing.rescopedRow = await rowWords();
+  standing.rescopedStampKept = fixture.store.getScope(childX)?.approvedAt !== null;
+  check('c10 unapproved → needs your approval, the same words as the child\'s Work row', standing.unapproved?.approved === '0' && standing.unapproved?.words === 'Needs your approval' && standing.unapproved?.words === standing.unapprovedRow, JSON.stringify(standing));
+  check('c10 approved exactly → approval no longer asked for, and not "building" (nothing runs); the Work row agrees', standing.approved?.approved === '1' && !/approval|building/i.test(standing.approved?.words ?? '') && standing.approved?.words === standing.approvedRow, JSON.stringify(standing));
+  check('c10 held after approval → On hold, never building', standing.held?.approved === '1' && standing.held?.words === 'On hold' && standing.held?.words === standing.heldRow, JSON.stringify(standing));
+  check('c10 rescoped after approval → the old stamp is no approval: needs your approval again', standing.rescopedStampKept && standing.rescoped?.approved === '0' && standing.rescoped?.words === 'Needs your approval' && standing.rescoped?.words === standing.rescopedRow, JSON.stringify(standing));
+  await scrollTo(page, '#request-changes');
+  await shot(page, 'desktop-c10-revision-standing', 'Desktop 1440×900: the sealed revision\'s line after approve-then-rescope — needs approval again (synthetic fixture)');
+  await c7.ctx.close();
+
+  }
+  // ---- c9: a corrupted check log is damaged evidence everywhere --------------
+  const logTask = fixture.statusTasks.corruptLog, logRun = fixture.statusRuns.corruptLog;
+  const logArtifact = fixture.store.artifactsFor(logRun).find(one => one.kind === 'check-log');
+  const logSurfaces = { 'task receipt': await factsOf(`/t/${logTask}`), 'chat receipt': await factsOf(`/chat?task=${logTask}`), 'run page': await factsOf(`/r/${logRun}?tab=checks`), 'review cockpit': await factsOf(`/review?result=${logTask}`) };
+  for (const [name, one] of Object.entries(logSurfaces)) {
+    const shared = one.text.slice(one.text.indexOf('data-result-run="'), one.text.lastIndexOf('</section>'));
+    check(`c9 ${name}: the corrupted check log counts as an evidence problem, the readiness word is gone, the problem is named, and no download of it is offered`, one.first?.evidence === 'problems:1' && one.text.includes('data-work-status="evidence-damaged"') && !one.text.includes('Ready to review') && one.text.includes('The check log no longer verifies (') && !shared.includes(`/evidence/${logArtifact.id}"`) && !one.text.includes('0 passed, 214 failed'), JSON.stringify({ facts: one.first, damaged: one.text.includes('data-work-status="evidence-damaged"') }));
+  }
+  const logRoad = await fetch(`${fixture.url}/r/${logRun}/evidence/${logArtifact.id}`, { headers: { cookie: cookieHeader } });
+  check('c9 the evidence road refuses the corrupted check log bytes (410)', logRoad.status === 410, String(logRoad.status));
+  const c9 = await context(VIEWPORTS.desktop);
+  page = c9.page;
+  await goto(page, `/r/${logRun}?tab=checks`);
+  const logView = await page.evaluate(() => ({ status: document.querySelector('.result-head .status-line')?.textContent.trim(), attention: document.querySelector('[data-result-attention]')?.textContent ?? '', damaged: document.querySelector('[data-check-log="damaged"]')?.textContent ?? '', fullLink: /Open the full check log|Download the full/.test(document.body.textContent) }));
+  check('c9 the run page says it in the open: status, attention, and the withheld output with nothing to download', /some evidence is unavailable/.test(logView.status ?? '') && /check log no longer verifies/.test(logView.attention) && /nothing to download/.test(logView.damaged) && !logView.fullLink, JSON.stringify(logView));
+  await shot(page, 'desktop-c9-corrupt-check-log', 'Desktop 1440×900: a verified build whose check log was altered on disk — evidence unavailable, output withheld, no download (synthetic fixture)');
+  // A SHORTENED log (the damaged fixture) is described as the stored part, never the full bytes.
+  const shortenedText = await html(`/r/${fixture.statusRuns.damaged}?tab=checks`);
+  check('c9 a shortened check log\'s download is described as the stored part only', /Download the stored part of the check log \(shortened at storage — not the full check log\)/.test(shortenedText) && /Check output \(shortened — [0-9]+ of [0-9]+ bytes stored\)/.test(shortenedText) && !/Open the full check log/.test(shortenedText), '');
+  await c9.ctx.close();
+
+  // ---- c11: deliverable first, one outcome, one action, 44px Back -----------
+  for (const [name, viewport] of [['desktop', VIEWPORTS.desktop], ['phone', VIEWPORTS.phone], ['narrow', VIEWPORTS.narrow]]) {
+    const c11 = await context(viewport);
+    page = c11.page;
+    await goto(page, chatResult(task, runId));
+    const shape = await page.evaluate(() => {
+      const panel = document.querySelector('[data-result-panel]');
+      const rectOf = el => { if (!el) return null; const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, height: r.height, width: r.width, left: r.left, right: r.right }; };
+      const before = []; for (const el of panel.children) { if (el.matches('.result-view')) break; before.push(el.className || el.tagName.toLowerCase()); }
+      return {
+        back: rectOf(document.querySelector('[data-result-back]')),
+        outcome: document.querySelector('.result-summary')?.textContent ?? '',
+        outcomeLines: (() => { const el = document.querySelector('.result-summary'); if (!el) return null; return Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)); })(),
+        actions: [...document.querySelectorAll('[data-result-action]')].map(a => a.getAttribute('data-result-action')),
+        actionText: document.querySelector('[data-result-action] .button-link, [data-result-action] button')?.textContent.trim() ?? null,
+        deliverable: rectOf(document.querySelector('[data-result-view="summary"] .result-visuals img')),
+        detailsClosed: [...document.querySelectorAll('.result-notes, .result-details')].map(d => [d.className, d.open]),
+        factsInside: document.querySelector('.result-details .result-facts') !== null,
+        linksInside: document.querySelector('.result-details .result-links') !== null,
+        changesInside: document.querySelector('.result-notes .result-changes') !== null,
+        panelOrder: before,
+        attentionOpen: document.querySelector('.result-panel [data-result-attention]') !== null,
+        overflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      };
+    });
+    check(`c11 ${name}: one bounded outcome line, one action, the deliverable inside the first viewport, the agent's account and the technical facts behind closed disclosures, no page overflow`,
+      shape.outcome.length > 0 && shape.outcome.length <= 181 && shape.actions.length === 1 && /^(Request changes|Create revision from [0-9]+ notes?)$/.test(shape.actionText ?? '') && shape.deliverable !== null && shape.deliverable.top < viewport.height && shape.detailsClosed.length === 2 && shape.detailsClosed.every(([, open]) => open === false) && shape.factsInside && shape.linksInside && shape.changesInside && !shape.attentionOpen && shape.overflow,
+      JSON.stringify(shape));
+    if (viewport.width < 760) check(`c11 ${name}: Back to chat has a 44px target inside the viewport`, shape.back !== null && shape.back.height >= 44 && fits(shape.back, viewport), JSON.stringify(shape.back));
+    await shot(page, `${name}-c11-summary`, `${viewport.width}×${viewport.height}: Summary after the repair — deliverable first, one outcome line, one action, details on demand (synthetic fixture)`);
+    // Long feedback and paths must keep their input and primary act usable.
+    await page.fill('#comment-form [name="note"]', 'Long feedback stays editable. '.repeat(18).slice(0, 500));
+    await page.locator('#comment-form .result-pin summary').click();
+    await page.fill('#comment-form [name="path"]', 'src/' + 'long-name-'.repeat(28) + '.ts');
+    await scrollTo(page, '#comment-form button[type="submit"]', 160);
+    const longForm = await page.evaluate(() => {
+      const button = document.querySelector('#comment-form button[type="submit"]');
+      const r = button.getBoundingClientRect(), bar = document.querySelector('nav.tabbar');
+      const box = document.querySelector('#comment-form textarea');
+      const lineHeight = parseFloat(getComputedStyle(button).lineHeight);
+      return { fits: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight && (!bar || !bar.checkVisibility() || r.bottom <= bar.getBoundingClientRect().top), height: r.height, noteLength: box.value.length, fontSize: parseFloat(getComputedStyle(box).fontSize), overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth };
+    });
+    check(`c5 ${name}: long feedback and path fit; Add note is reachable above fixed navigation`, longForm.fits && longForm.height >= 44 && longForm.noteLength === 500 && !longForm.overflow && (viewport.width > 760 || longForm.fontSize >= 16), JSON.stringify(longForm));
+    if (name === 'narrow') await shot(page, 'narrow-long-feedback', '320×740: a 500-character review draft and long path keep Add note above the fixed navigation (synthetic fixture)');
+    // Risks stay in the open: the damaged result's problems precede the tabs at this width too.
+    await goto(page, chatResult(fixture.statusTasks.damaged, fixture.statusRuns.damaged));
+    const risks = await page.evaluate(() => { const a = document.querySelector('.result-panel [data-result-attention]'); const t = document.querySelector('.result-tabs'); return { open: a !== null && a.checkVisibility(), aboveTabs: a !== null && t !== null && a.getBoundingClientRect().bottom <= t.getBoundingClientRect().top, status: document.querySelector('.result-head .status-line')?.textContent.trim() }; });
+    check(`c11 ${name}: the damaged result keeps its risks open ahead of the tabs`, risks.open && risks.aboveTabs && /some evidence is unavailable/.test(risks.status ?? ''), JSON.stringify(risks));
+    if (name === 'phone') await shot(page, 'phone-c11-risks-open', '390×844: a damaged result keeps its problems in the open ahead of the tabs (synthetic fixture)');
+    await c11.ctx.close();
+  }
 } catch (error) {
   check('proof ran to completion', false, error instanceof Error ? error.stack ?? error.message : String(error));
 } finally {

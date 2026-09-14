@@ -670,3 +670,94 @@ test("package 3: a tab switches in place and records ?tab= in the URL; the diff 
   expect(window.location.href).toBe("https://standing.test/chat?task=task-a&result=9&tab=changes");
   expect(window.document.querySelector("[data-review-diff]")!.getAttribute("data-mode")).toBe("view");
 });
+
+// ---- repair 2026-09-14: a request identity is bound to what it sent ------
+const requestOf = () => (noteForm().querySelector('[name="request"]') as HTMLInputElement).value;
+
+test("repair c7: after a missed response, an unchanged retry keeps its request identity; editing the note or the file mints a new immutable one, so the earlier receipt cannot swallow the edited words", async () => {
+  await window.happyDOM.close();
+  window = new Window({ url: "https://standing.test/r/9" });
+  mount(panel());
+  window.eval(RESULT_REVIEW_SCRIPT);
+  const first = requestOf();
+  expect(first).toBe("b".repeat(32));
+  type("Note A");
+  // Submitted — the server records A under this token, but suppose the
+  // response never reaches the document (the reviewer's fetch scenario).
+  expect(submit(noteForm())).toBe(true);
+  expect(JSON.parse(window.sessionStorage.getItem(reviewKey)!)).toMatchObject({ note: "Note A", request: first, sent: JSON.stringify(["Note A", "", ""]) });
+  // An unchanged retry (the page came back, same words): same identity.
+  noteBox().dispatchEvent(new window.Event("input", { bubbles: true }));
+  expect(requestOf()).toBe(first);
+  // Edited to B: a new identity, immediately, before any submit.
+  type("Note B");
+  const second = requestOf();
+  expect(second).toMatch(/^[a-f0-9]{32}$/);
+  expect(second).not.toBe(first);
+  expect(JSON.parse(window.sessionStorage.getItem(reviewKey)!)).toMatchObject({ note: "Note B", request: second, sent: null });
+  // The receipt for A's token no longer names this draft: B survives that receipt.
+  await window.happyDOM.close();
+  window = new Window({ url: `https://standing.test/r/9?noted=${first}#request-changes` });
+  window.sessionStorage.setItem(reviewKey, JSON.stringify({ note: "Note B", path: "", line: "", request: second, sent: null, at: Date.now() }));
+  mount(panel());
+  window.eval(RESULT_REVIEW_SCRIPT);
+  expect(noteBox().value).toBe("Note B");
+  expect(requestOf()).toBe(second);
+  // Changing only the pinned file after a submission rotates the identity too.
+  window.document.querySelector("form")!.removeAttribute("aria-busy");
+  expect(submit(noteForm())).toBe(true);
+  expect(requestOf()).toBe(second);
+  const pathBox = noteForm().querySelector('[name="path"]') as HTMLInputElement;
+  pathBox.value = "src/a.ts"; pathBox.dispatchEvent(new window.Event("input", { bubbles: true }));
+  const third = requestOf();
+  expect(third).not.toBe(second);
+  expect(JSON.parse(window.sessionStorage.getItem(reviewKey)!)).toMatchObject({ note: "Note B", path: "src/a.ts", request: third, sent: null });
+});
+
+test("repair c7: a refusal that names the conflicting token (?conflict=) keeps the words and mints a new identity, so the next submission is a new note rather than the same refusal", async () => {
+  await window.happyDOM.close();
+  window = new Window({ url: `https://standing.test/r/9?conflict=${"b".repeat(32)}#request-changes` });
+  window.sessionStorage.setItem(reviewKey, JSON.stringify({ note: "Edited words the server refused under an old identity", path: "src/a.ts", line: "2", request: "b".repeat(32), sent: JSON.stringify(["Original words", "", ""]), at: Date.now() }));
+  mount(panel());
+  window.eval(RESULT_REVIEW_SCRIPT);
+  expect(noteBox().value).toBe("Edited words the server refused under an old identity");
+  expect((noteForm().querySelector('[name="path"]') as HTMLInputElement).value).toBe("src/a.ts");
+  const fresh = requestOf();
+  expect(fresh).toMatch(/^[a-f0-9]{32}$/);
+  expect(fresh).not.toBe("b".repeat(32));
+  expect(JSON.parse(window.sessionStorage.getItem(reviewKey)!)).toMatchObject({ request: fresh, sent: null });
+  // A conflict for SOME OTHER token leaves this draft's identity alone.
+  await window.happyDOM.close();
+  window = new Window({ url: `https://standing.test/r/9?conflict=${"e".repeat(32)}` });
+  window.sessionStorage.setItem(reviewKey, JSON.stringify({ note: "Mine", path: "", line: "", request: "b".repeat(32), sent: null, at: Date.now() }));
+  mount(panel());
+  window.eval(RESULT_REVIEW_SCRIPT);
+  expect(requestOf()).toBe("b".repeat(32));
+});
+
+
+test("repair c7: FormData sent without a submit event still binds the payload; note, path, line and clearing the form rotate identity without losing edits", () => {
+  mount(panel());
+  window.eval(RESULT_REVIEW_SCRIPT);
+  type("Direct fetch A");
+  const original = requestOf();
+  // The independent reproduction sends FormData with fetch: no submit event.
+  const body = new window.FormData(noteForm());
+  expect(body.get("request")).toBe(original);
+  type("Direct fetch B");
+  const edited = requestOf();
+  expect(edited).not.toBe(original);
+  noteBox().dispatchEvent(new window.Event("input", { bubbles: true }));
+  expect(requestOf()).toBe(edited);
+  for (const [name, value] of [["path", "src/export.ts"], ["line", "3"]]) {
+    const before = requestOf();
+    const input = noteForm().querySelector(`[name="${name}"]`) as HTMLInputElement;
+    input.value = value!;
+    input.dispatchEvent(new window.Event("input", { bubbles: true }));
+    expect(requestOf()).not.toBe(before);
+    expect(JSON.parse(window.sessionStorage.getItem(reviewKey)!)).toMatchObject({ note: "Direct fetch B", [name!]: value });
+  }
+  const beforeClear = requestOf();
+  type("");
+  expect(requestOf()).not.toBe(beforeClear);
+});

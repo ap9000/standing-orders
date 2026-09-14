@@ -19,6 +19,36 @@
  * selected tab, and the reading position in this tab's sessionStorage,
  * keyed by the server-named account, the task, and the run. */
 
+import { resultStatusOf, reviewStatusOf, type ResultFacts, type PublicationFacts, type DisplayStatus } from "./workspace-ui.js";
+
+/** Add re-read evidence health to the existing result/review projection.
+ * This is presentation only: the recorded verdict and acceptance stay intact. */
+export function evidenceResultStatusOf(result: ResultFacts, publication: PublicationFacts, evidence: EvidenceHealth): DisplayStatus {
+  const recorded = resultStatusOf({ ...result, review: null }, publication);
+  let stored = recorded;
+  if (!result.accepted && !["checks-failed", "evidence-mismatch"].includes(recorded.token) && (evidence.damaged > 0 || (result.role === "scout" && evidence.missing > 0))) {
+    stored = {
+      token: "evidence-damaged",
+      label: "Result saved, but some evidence is unavailable",
+      detail: `Some evidence is missing, damaged, or could not be read. The machine's verdict at completion is unchanged: ${result.verdict === "verified" ? "the approved check passed against it then" : recorded.label.toLowerCase()}.`,
+      tone: "problem",
+      action: { label: "Review the evidence problems", kind: "open-result" },
+    };
+  }
+  const shortened = evidenceShortenedWords(evidence);
+  if (shortened) stored = { ...stored, detail: `${stored.detail} ${shortened}` };
+  const review = result.role === "scout" || result.accepted ? null : reviewStatusOf(result.review ?? null);
+  if (review === null) return stored;
+  const reviewing = resultStatusOf(result, publication);
+  const healthDetail = stored.token === recorded.token ? shortened : stored.detail;
+  return healthDetail === "" ? reviewing : { ...reviewing, detail: `${reviewing.detail} ${healthDetail}` };
+}
+
+export function evidenceShortenedWords(evidence: EvidenceHealth): string {
+  const n = evidence.shortened;
+  return n === 0 ? "" : `${n} stored record${n === 1 ? " was" : "s were"} shortened at storage; ${n === 1 ? "its download holds" : "their downloads hold"} only the stored part.`;
+}
+
 export type ResultTab = "summary" | "changes" | "checks";
 
 export const RESULT_TABS: readonly { key: ResultTab; label: string }[] = [
@@ -57,12 +87,15 @@ export type ResultEvidenceInput = {
   /** The sealed diff's health: absent, unverifiable, or fine. */
   diff: { problem: string } | { truncated: boolean } | null;
   stat: { problem: string } | { filesTruncated: boolean } | null;
-  checkLog: { truncated: boolean } | null;
+  /** The check log: absent, no longer verifying (`problem`), or stored
+   * whole or shortened. */
+  checkLog: { problem: string } | { truncated: boolean } | null;
   screenshots: readonly ResultScreenshot[];
   /** Screenshot paths the proof cites that no stored artifact answers. */
   uncapturedScreenshots: readonly string[];
-  /** A scout's report record: absent, unverifiable, or fine. */
-  report: { problem: string } | { ok: true } | null;
+  /** A scout's report record: absent, unverifiable, or fine (possibly
+   * shortened when it was stored). */
+  report: { problem: string } | { ok: true; truncated?: boolean } | null;
   /** Whether a report is owed (a scout's run) — absence is then a problem. */
   reportExpected: boolean;
   /** The handoff record: a no-change conclusion owes one. */
@@ -70,25 +103,54 @@ export type ResultEvidenceInput = {
   outcome: string | null;
 };
 
-/** Every evidence problem in plain words, in a stable order. Empty means
+/** What kind of evidence problem a record has (repair 2026-09-14):
+ * `damaged` — the stored bytes no longer verify, cannot be read, or the
+ * capture itself failed, so nothing can be shown for that record;
+ * `shortened` — the record was cut at its storage cap, so its download is
+ * the stored part only, never the full bytes; `missing` — a record the
+ * result owes was never stored. */
+export type EvidenceProblemKind = "damaged" | "shortened" | "missing";
+export type EvidenceProblem = { kind: EvidenceProblemKind; words: string };
+
+/** Every evidence problem, classified, in a stable order. Empty means
  * every record this result cites is present, whole, and verifies. */
-export function evidenceProblemsOf(input: ResultEvidenceInput): string[] {
-  const problems: string[] = [];
-  if (input.proofProblem !== null) problems.push(`The agent's proof cannot be shown: ${input.proofProblem}.`);
-  if (input.diff !== null && "problem" in input.diff) problems.push(`The sealed diff is unavailable: ${input.diff.problem}.`);
-  else if (input.diff !== null && input.diff.truncated) problems.push("The sealed diff was shortened when it was stored; review the full download before relying on it.");
-  else if (input.diff === null && input.outcome === "no-change" && !input.reportExpected) problems.push("No sealed diff was captured, so the no-change conclusion is not verified.");
-  if (input.stat !== null && "problem" in input.stat) problems.push(`The change summary is unavailable: ${input.stat.problem}.`);
-  else if (input.stat !== null && input.stat.filesTruncated) problems.push("The changed-file list was cut short; the counts are complete.");
-  if (input.checkLog !== null && input.checkLog.truncated) problems.push("The check output was shortened when it was stored.");
+export function evidenceProblemDetailsOf(input: ResultEvidenceInput): EvidenceProblem[] {
+  const problems: EvidenceProblem[] = [];
+  const damaged = (words: string): number => problems.push({ kind: "damaged", words });
+  const shortened = (words: string): number => problems.push({ kind: "shortened", words });
+  const missing = (words: string): number => problems.push({ kind: "missing", words });
+  if (input.proofProblem !== null) damaged(`The agent's proof cannot be shown: ${input.proofProblem}.`);
+  if (input.diff !== null && "problem" in input.diff) damaged(`The sealed diff is unavailable: ${input.diff.problem}.`);
+  else if (input.diff !== null && input.diff.truncated) shortened("The sealed diff was shortened when it was stored; its download holds only the stored part, not the full change.");
+  else if (input.diff === null && input.outcome === "no-change" && !input.reportExpected) missing("No sealed diff was captured, so the no-change conclusion is not verified.");
+  if (input.stat !== null && "problem" in input.stat) damaged(`The change summary is unavailable: ${input.stat.problem}.`);
+  else if (input.stat !== null && input.stat.filesTruncated) shortened("The changed-file list was cut short; the counts are complete.");
+  if (input.checkLog !== null && "problem" in input.checkLog) damaged(`The check log no longer verifies (${input.checkLog.problem}); its output is not shown.`);
+  else if (input.checkLog !== null && input.checkLog.truncated) shortened("The check output was shortened when it was stored; its download holds only the stored part.");
   for (const shot of input.screenshots) {
-    if (shot.problem !== null) problems.push(`Screenshot ${shot.path} no longer verifies (${shot.problem}) and is not shown.`);
+    if (shot.problem !== null) damaged(`Screenshot ${shot.path} no longer verifies (${shot.problem}) and is not shown.`);
   }
-  for (const path of input.uncapturedScreenshots) problems.push(`The proof cites screenshot ${path}, but no validated image was stored.`);
-  if (input.report !== null && "problem" in input.report) problems.push(`The report cannot be shown: ${input.report.problem}.`);
-  else if (input.report === null && input.reportExpected) problems.push("This investigation stored no report.");
-  if (!input.handoffPresent && input.outcome === "no-change" && !input.reportExpected) problems.push("The no-change conclusion has no handoff record.");
+  for (const path of input.uncapturedScreenshots) missing(`The proof cites screenshot ${path}, but no validated image was stored.`);
+  if (input.report !== null && "problem" in input.report) damaged(`The report cannot be shown: ${input.report.problem}.`);
+  else if (input.report !== null && input.report.truncated === true) shortened("The report was shortened when it was stored; its download holds only the stored part.");
+  else if (input.report === null && input.reportExpected) missing("This investigation stored no report.");
+  if (!input.handoffPresent && input.outcome === "no-change" && !input.reportExpected) missing("The no-change conclusion has no handoff record.");
   return problems;
+}
+
+/** Every evidence problem in plain words, in a stable order. */
+export function evidenceProblemsOf(input: ResultEvidenceInput): string[] {
+  return evidenceProblemDetailsOf(input).map(one => one.words);
+}
+
+/** The counts the shared status reads: how many records are damaged,
+ * shortened, or missing. A status is truthful only when it knows these. */
+export type EvidenceHealth = { damaged: number; shortened: number; missing: number };
+
+export function evidenceHealthOf(problems: readonly EvidenceProblem[]): EvidenceHealth {
+  const health: EvidenceHealth = { damaged: 0, shortened: 0, missing: 0 };
+  for (const one of problems) health[one.kind] += 1;
+  return health;
 }
 
 /** The facts every result surface must agree on. */
@@ -103,6 +165,9 @@ export type SharedResultFacts = {
   checks: { passed: number; total: number } | null;
   caveats: readonly string[];
   evidenceProblems: readonly string[];
+  /** How many of the problems above are damaged, shortened, or missing
+   * records — what the shared status reads (repair 2026-09-14). */
+  evidenceHealth: EvidenceHealth;
   /** The observed publication state, "none" when nothing was intended. */
   publicationState: string;
   publicationWords: string;
@@ -169,6 +234,35 @@ export function commentSourceKey(user: string, request: string | null | undefine
   return request !== null && request !== undefined && REQUEST_TOKEN.test(request) ? `review:${user}:${request}` : undefined;
 }
 
+/** The revision form's exact batch (repair 2026-09-14): the ids of the
+ * live notes the page DISPLAYED, oldest first, joined by commas, plus the
+ * source scope digest the page rendered against ("none" when the task has
+ * no scope). A seal binds to exactly these — never to "whatever is live
+ * when the POST arrives" — so a replayed or second-tab submission can
+ * only ever consume the notes its own reader saw. */
+export function revisionBatchOf(comments: readonly { id: number }[]): string {
+  return comments.map(one => String(one.id)).join(",");
+}
+
+export const REVISION_BATCH_CAP = 500;
+
+/** Parse a posted batch back into distinct positive ids, or null when the
+ * field is absent or malformed (an out-of-date form, a hand-built POST). */
+export function parseRevisionBatch(raw: string | null | undefined): number[] | null {
+  if (raw === null || raw === undefined) return null;
+  const text = raw.trim();
+  if (text === "" || !/^[0-9]{1,15}(,[0-9]{1,15})*$/.test(text)) return null;
+  const ids = text.split(",").map(Number);
+  if (ids.length > REVISION_BATCH_CAP || ids.some(one => !Number.isSafeInteger(one) || one < 1)) return null;
+  return new Set(ids).size === ids.length ? ids : null;
+}
+
+/** The source binding the revision form carries: the scope digest the
+ * page was rendered against, or "none". */
+export function revisionSourceOf(scopeDigest: string | null): string {
+  return scopeDigest === null ? "none" : scopeDigest;
+}
+
 export const REVIEW_DRAFT_PREFIX = "standing-orders:review-draft:";
 export const RESULT_SCROLL_PREFIX = "standing-orders:result-scroll:";
 
@@ -187,6 +281,13 @@ export const RESULT_SCROLL_PREFIX = "standing-orders:result-scroll:";
  *   receipt for THIS draft's request token (`?noted=<token>`); a refused
  *   submission leaves it in place. Other accounts' drafts on this tab are
  *   dropped, never restored.
+ * - Request identity (repair 2026-09-14): the form's request token is
+ *   bound to the exact note, file, and line last displayed, even when
+ *   FormData is sent directly. An unchanged retry keeps the token, so the server
+ *   records it once; editing any of the three after a submission mints a
+ *   fresh token, so the edited words are a new note and can never be
+ *   swallowed by the earlier one's receipt. A refusal that comes back with
+ *   `?conflict=<token>` rotates that token too, keeping the words.
  * - Reading position: the page's scroll offset is kept under the same
  *   account/task and the URL's own result and tab, and restored on load
  *   when the URL carries no hash, so Back to chat and refresh return the
@@ -252,13 +353,22 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
       if(lineBox)lineBox.value=button.getAttribute('data-line')||'';
       if(pin)pin.open=true;
       save();
-      form.scrollIntoView({behavior:'smooth',block:'center'});if(noteBox)noteBox.focus();
+      form.scrollIntoView({behavior:window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'center'});if(noteBox)noteBox.focus();
     });
     // The bounded draft: this account, this task, this run.
     var draftKey=draftPrefix+user+':'+task+':'+run;
-    var noted=null;try{noted=new URL(location.href).searchParams.get('noted');}catch(e){}
+    var noted=null,conflict=null;try{var here=new URL(location.href);noted=here.searchParams.get('noted');conflict=here.searchParams.get('conflict');}catch(e){}
     var saved=read(draftKey);
     if(saved&&noted&&saved.request===noted){write(draftKey,null);saved=null;}
+    // A fresh request identity: 16 random bytes as hex, the server's own shape.
+    function mint(){var bytes=new Uint8Array(16);try{crypto.getRandomValues(bytes);}catch(e){for(var i=0;i<16;i++)bytes[i]=Math.floor(Math.random()*256);}
+      var hex='';for(var j=0;j<16;j++)hex+=(bytes[j]<16?'0':'')+bytes[j].toString(16);return hex;}
+    function payload(){return JSON.stringify([noteBox?noteBox.value:'',pathBox?pathBox.value:'',lineBox?lineBox.value:'']);}
+    // What the current token was last submitted with; null = never sent.
+    var sent=null,bound=null;
+    // The server refused this token for a different note or another result:
+    // the words stay, the identity does not.
+    if(saved&&conflict&&saved.request===conflict){saved.request=mint();saved.sent=null;write(draftKey,saved);}
     // The receipt lands with a fragment: browsers skip autofocus on a
     // fragment URL and move focus to the fragment's target on load, so the
     // just-posted form's note box is focused after that step.
@@ -272,12 +382,19 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
       if(lineBox&&!lineBox.value&&typeof saved.line==='string')lineBox.value=saved.line;
       if(pin&&(pathBox&&pathBox.value||lineBox&&lineBox.value))pin.open=true;
       if(typeof saved.request==='string'&&/^[a-f0-9]{32}$/.test(saved.request)&&requestBox)requestBox.value=saved.request;
+      if(typeof saved.sent==='string')sent=saved.sent;
+      bound=JSON.stringify([saved.note,saved.path||'',saved.line||'']);
       if(noteBox)noteBox.dispatchEvent(new Event('input'));
     }
     function save(){
       var note=noteBox?noteBox.value:'',path=pathBox?pathBox.value:'',line=lineBox?lineBox.value:'';
+      // Bind every observed payload, including FormData sent without a
+      // submit event. A changed note, path, or line always gets a new token.
+      var current=payload();
+      if((bound!==null&&current!==bound)||(sent!==null&&current!==sent)){sent=null;if(requestBox)requestBox.value=mint();}
+      bound=current;
       if(!note&&!path&&!line){write(draftKey,null);return;}
-      write(draftKey,{note:note,path:path,line:line,request:requestBox?requestBox.value:'',at:Date.now()});
+      write(draftKey,{note:note,path:path,line:line,request:requestBox?requestBox.value:'',sent:sent,at:Date.now()});
       if(!storage&&limit)limit.textContent='Draft stays on this page only. Browser storage is unavailable.';
     }
     form.addEventListener('input',save);
@@ -288,6 +405,8 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
     var chatLatch=document.querySelector('.composer[data-chat-session]')!==null;
     form.addEventListener('submit',function(event){
       save();
+      // Bind the identity to exactly what is being sent.
+      sent=payload();var draft=read(draftKey);if(draft){draft.sent=sent;write(draftKey,draft);}
       if(chatLatch)return;
       if(form.getAttribute('aria-busy')==='true'){event.preventDefault();return;}
       form.setAttribute('aria-busy','true');

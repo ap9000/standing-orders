@@ -77,7 +77,8 @@ import {
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
-  RESULT_TABS, RESULT_REVIEW_SCRIPT, parseResultTab, resultLeadOf, evidenceProblemsOf, resultFactsAttributes, resultReturnTarget, commentSourceKey, REQUEST_TOKEN,
+  RESULT_TABS, RESULT_REVIEW_SCRIPT, evidenceResultStatusOf, evidenceShortenedWords, parseResultTab, resultLeadOf, evidenceProblemDetailsOf, evidenceHealthOf, resultFactsAttributes, resultReturnTarget, commentSourceKey, REQUEST_TOKEN,
+  revisionBatchOf, parseRevisionBatch, revisionSourceOf,
   type ResultTab, type ResultScreenshot, type SharedResultFacts,
 } from "./result-review.js";
 import { parseReport } from "./scout-report.js";
@@ -1540,7 +1541,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const chosen = inQueue ?? (beyondRow === null ? null : { ...beyondRow, priority: reviewPriorityOf(beyondRow) });
       const selectedRow = chosen ?? ranked[0] ?? null;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
-      const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who);
+      const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who, now);
       return sendScreen(
         response,
         200,
@@ -2200,8 +2201,9 @@ export function createDecisionServer(options: ServeOptions): Server {
           reviewFactsFor(found.id),
           // The shared result presentation (package 3) for a finished result.
           !running && (found.outcome === "built" || found.outcome === "no-change")
-            ? { detail: resultDetailOf(found, who), tab: parseResultTab(url.searchParams.get("tab")), user: who.name, requestToken: randomBytes(16).toString("hex") }
+            ? { detail: resultDetailOf(found, who, now), tab: parseResultTab(url.searchParams.get("tab")), user: who.name, requestToken: randomBytes(16).toString("hex") }
             : null,
+          store.getScope(taskId)?.digest ?? null,
         ),
       );
     }
@@ -2395,7 +2397,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const resultPanel =
         resultRun === null
           ? null
-          : resultPanelHtml(resultDetailOf(resultRun, who), {
+          : resultPanelHtml(resultDetailOf(resultRun, who, now), {
               place: "chat",
               tab: parseResultTab(url.searchParams.get("tab")),
               csrf: who.session.csrf,
@@ -5888,10 +5890,28 @@ export function createDecisionServer(options: ServeOptions): Server {
       // bound to the account, so nobody else's replay can consume it.
       const request = body.get("request");
       const sourceKey = commentSourceKey(who.name, request);
-      store.addDiffComment(
-        { artifactId: terminal.id, runId: id, path: rawPath === "" ? null : rawPath, line, note: note.note, author: who.name, ...(sourceKey === undefined ? {} : { sourceKey }) },
+      const path = rawPath === "" ? null : rawPath;
+      const inserted = store.addDiffComment(
+        { artifactId: terminal.id, runId: id, path, line, note: note.note, author: who.name, ...(sourceKey === undefined ? {} : { sourceKey }) },
         now,
       );
+      if (inserted === null && sourceKey !== undefined) {
+        // The token was used before (repair 2026-09-14, finding 1). A
+        // request identity is IMMUTABLE: it names exactly one note on
+        // exactly one result. The unchanged retry — same run, same file,
+        // line and words — lands on its original receipt; any other reuse
+        // is refused, and the refusal's way back carries `conflict=<token>`
+        // so the browser mints a fresh identity for the words it still
+        // holds. Nothing typed is lost either way.
+        const earlier = store.diffCommentBySourceKey(sourceKey);
+        const conflictBack = `${back}${back.includes("?") ? "&" : "?"}conflict=${request as string}#request-changes`;
+        if (earlier === null || earlier.run !== id) {
+          return refuse(response, who, 409, `this note's request identity was already used on another result (build #${earlier === null ? "?" : earlier.run}) — go back; your words are kept, and the form will carry a new identity`, conflictBack);
+        }
+        if (earlier.path !== path || earlier.line !== line || earlier.note !== note.note) {
+          return refuse(response, who, 409, `this request identity already recorded a different note on this result (${earlier.path === null ? "no file" : `${earlier.path}${earlier.line === null ? "" : `:${earlier.line}`}`}: "${oneLineOf(earlier.note, 80)}") — go back; your edited words are kept as a new note, and the form will carry a new identity`, conflictBack);
+        }
+      }
       // Land back AT the request-changes form with the note field ready —
       // writing five notes in a row must cost five keystrokes of
       // navigation, not five scrolls (arc 6, finding 5/6). The receipt
@@ -5960,18 +5980,60 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 404, "no such run");
       }
       const back = resultReturnTarget(body.get("return"), id);
-      const comments = store.liveDiffComments(id);
-      if (comments.length === 0) {
-        // A replayed or double submission (package 3): the batch it meant
-        // was already sealed — the seal consumed every note — so the
-        // reader lands on that revision, and no second one is minted.
-        const sealedAlready = store.revisionsFromRun(id).at(-1);
-        if (sealedAlready !== undefined) return redirect(response, taskHref(sealedAlready.id));
-        return refuse(response, who, 400, "add at least one note before creating a revision", back);
-      }
       const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
       const sourceScope = store.getScope(sourceTaskId);
       const repo = taskRepoOf(found.taskRef);
+      // THE DISPLAYED BATCH (repair 2026-09-14, finding 2): the form names
+      // the exact note ids its reader saw and the source terms it was
+      // rendered against. The seal binds to those ids and nothing else —
+      // "every live note at POST time" would let an old submission, a
+      // replay, or a second tab consume notes its reader never displayed.
+      const batchIds = parseRevisionBatch(body.get("batch"));
+      const postedSource = body.get("source");
+      if (batchIds === null || postedSource === null || postedSource === "") {
+        return refuse(response, who, 400, "this form is out of date — it names no note batch; reload the result and create the revision from the notes shown there", back);
+      }
+      const byId = new Map(store.allDiffComments(id).map(one => [one.id, one] as const));
+      const named = batchIds.map(one => byId.get(one));
+      if (named.some(one => one === undefined)) {
+        return refuse(response, who, 400, "this batch names notes that are not on this result — reload the result", back);
+      }
+      const batch = named as DiffComment[];
+      // A replay must match the immutable brief's entire batch and source,
+      // not just a subset whose notes happen to name the same child. Read-only
+      // replay can return its original child even after the source is rescoped.
+      const replayChild = (notes: DiffComment[]): string | null => {
+        const child = notes[0]?.consumedBy;
+        if (!child || notes.length !== batchIds.length || notes.some(one => one.consumedBy !== child)) return null;
+        const ref = store.lookupRef(child);
+        const lineage = ref === null ? null : store.revisionSourceOf(ref.id);
+        if (lineage === null || lineage.sourceRun !== id || lineage.sourceTask !== sourceTaskId) return null;
+        try {
+          const read = readVerifiedArtifact(evidenceRoot, lineage.briefArtifact);
+          if (!read.ok) return null;
+          const brief = JSON.parse(read.content.toString("utf8"));
+          if (brief.sourceRun !== id || brief.sourceTask !== sourceTaskId || revisionSourceOf(brief.sourceScopeDigest) !== postedSource || !Array.isArray(brief.comments)) return null;
+          return brief.comments.length === batchIds.length && brief.comments.every((one: { id: number }, at: number) => one.id === batchIds[at]) ? child : null;
+        } catch {
+          return null;
+        }
+      };
+      // A retry of an OLD request: every note it names is already sealed
+      // into one revision — that revision is the answer, and no note added
+      // since is touched. A batch partly sealed elsewhere is refused whole.
+      const consumers = new Set(batch.map(one => one.consumedBy).filter((one): one is string => one !== null));
+      const replay = replayChild(batch);
+      if (replay !== null) return redirect(response, taskHref(replay));
+      if (consumers.size > 0) {
+        return refuse(response, who, 409, `some of these notes were already sealed into revision ${[...consumers].join(", ")}; the others are still waiting — reload the result to see the current batch`, back);
+      }
+      if (postedSource !== revisionSourceOf(sourceScope?.digest ?? null)) {
+        return refuse(response, who, 409, "the task's terms changed since this page was shown — reload the result and read the current terms before creating a revision", back);
+      }
+      if (batch.some(one => one.supersededBy !== null)) {
+        return refuse(response, who, 409, "a note in this batch was superseded — reload the result to see the current batch", back);
+      }
+      const comments = batch;
       const terminal = store.artifactsFor(id).find(one => one.kind === "terminal-diff");
       if (terminal !== undefined) {
         const proven = readVerifiedArtifact(evidenceRoot, terminal);
@@ -6054,10 +6116,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       });
       if (!sealed.ok) {
         // Two sealers of one batch race on the consumption count; the
-        // loser is sent to the winner's revision when one exists, so a
-        // double click lands on ONE revision either way.
-        const winner = sealed.reason === "duplicate" || sealed.reason === "comments-taken" ? store.revisionsFromRun(id).at(-1) : undefined;
-        if (winner !== undefined) return redirect(response, taskHref(winner.id));
+        // loser is sent to the winner's revision — the one that consumed
+        // EXACTLY this batch, never merely the newest child of the run — so
+        // a double click or a two-tab submission lands on ONE revision.
+        if (sealed.reason === "duplicate" || sealed.reason === "comments-taken") {
+          const settled = store.allDiffComments(id).filter(one => batchIds.includes(one.id));
+          const takers = new Set(settled.map(one => one.consumedBy).filter((one): one is string => one !== null));
+          const winner = replayChild(settled);
+          if (winner !== null) return redirect(response, taskHref(winner));
+          if (takers.size > 0) {
+            return refuse(response, who, 409, `some of these notes were just sealed into revision ${[...takers].join(", ")}; the others are still waiting — reload the result to see the current batch`, back);
+          }
+        }
         return refuse(response, who, 409, `could not seal the revision: ${sealed.detail}`, back);
       }
       return redirect(response, taskHref(sealed.id));
@@ -7536,7 +7606,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * finished run's result presentation reads, assembled once for the run
    * page, the review cockpit, and the chat's result view. Read-only.
    */
-  function resultDetailOf(run: Run, who: Who): ResultDetail {
+  function resultDetailOf(run: Run, who: Who, now: Date): ResultDetail {
     const taskId = store.externalIdFor(run.taskRef) ?? "?";
     const scope = store.getScope(taskId);
     const artifacts = store.artifactsFor(run.id);
@@ -7582,7 +7652,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       fileAnchors,
       comments: store.liveDiffComments(run.id),
       reviewerFindings: store.allDiffComments(run.id).filter(one => one.reviewerRun !== null),
-      revisions: store.revisionsFromRun(run.id).map(one => ({ id: one.id, title: one.title, state: one.state, approved: one.approved })),
+      revisions: store.revisionsFromRun(run.id).flatMap(one => {
+        const child = store.getTask(one.id);
+        if (child === null) return [];
+        // The same projection the Work list and the child's own page wear.
+        const status = workRowOf({ ...child, repo: store.lookupRef(one.id)?.repo ?? null }, now).status;
+        return [{ id: one.id, title: one.title, state: one.state, approved: approvalOf(store.getScope(one.id)).approved, standing: status.label, tone: status.tone }];
+      }),
+      sourceDigest: scope?.digest ?? null,
       route: store.runRoute(run.id),
       // Editor links (arc 6): the deployment capability, THIS machine's
       // runner owning the run, the session's own device-side yes, and a
@@ -7596,7 +7673,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     };
   }
 
-  function reviewCockpitViewOf(row: RankedReviewRow, who: Who): ReviewCockpitView {
+  function reviewCockpitViewOf(row: RankedReviewRow, who: Who, now: Date): ReviewCockpitView {
     const ref = store.lookupRef(row.taskId);
     const scope = store.getScope(row.taskId);
     // The result run, read once: the contest road and the shared result
@@ -7644,7 +7721,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (run === null) {
       return { ...base, run: null, detail: null, reviewRetry: null, review: null, notes: [] };
     }
-    const detail = resultDetailOf(run, who);
+    const detail = resultDetailOf(run, who, now);
     return {
       ...base,
       run: {
@@ -9945,13 +10022,29 @@ const STYLE = `
      detail — the deliverable first, problems ahead of readiness words,
      three local views, and Request changes beside it. */
   .result-panel { position: relative; padding: 1.1rem 1.2rem 1rem; min-width: 0; }
-  .result-back { margin: 0 0 .6rem; font-size: .8125rem; }
-  .result-back a { display: inline-flex; align-items: center; min-height: 2.25rem; text-decoration: none; font-weight: 550; }
+  .result-back { margin: 0 0 .4rem; font-size: .8125rem; }
+  /* A comfortable target at every width (repair 2026-09-14): 44px tall. */
+  .result-back a { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 .35rem; margin-left: -.35rem; border-radius: .375rem; text-decoration: none; font-weight: 550; }
   .result-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
   .result-head h2 { margin: .15rem 0 0; font-size: 1.15rem; }
   .result-head .eyebrow { overflow-wrap: anywhere; }
   .result-head .status-line { flex: none; font-size: .8125rem; }
-  .result-summary { max-width: 46rem; margin: .7rem 0 .5rem; font-size: .95rem; line-height: 1.55; }
+  .result-summary { max-width: 46rem; margin: .6rem 0 0; font-size: .95rem; line-height: 1.5; }
+  .result-action { margin: .7rem 0 0; }
+  .result-action form { margin: 0; }
+  .result-action .button-link { min-height: 2.5rem; gap: .35rem; }
+  .result-action .button-link .meta { color: inherit; opacity: .78; font-weight: 500; }
+  .result-notes, .result-details, .result-notes[open], .result-details[open] { margin: .6rem 0 0; padding: 0; border: 0; background: none; box-shadow: none; }
+  .result-notes > summary, .result-details > summary {
+    list-style: none; cursor: pointer; display: flex; align-items: center; gap: .5rem; min-height: 2.5rem; padding: 0 .25rem; margin: 0 -.25rem;
+    border-radius: .375rem; font-size: .8125rem; font-weight: 550; color: var(--muted-foreground);
+  }
+  .result-notes > summary::-webkit-details-marker, .result-details > summary::-webkit-details-marker { display: none; }
+  .result-notes > summary::before, .result-details > summary::before { content: "▸"; }
+  .result-notes[open] > summary::before, .result-details[open] > summary::before { content: "▾"; }
+  .result-notes > summary:hover, .result-details > summary:hover { color: var(--foreground); }
+  .result-details > summary .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: .68rem; font-weight: 400; }
+  .result-notes .recap { margin: .25rem 0 .4rem; font-size: .875rem; }
   .result-attention { margin: .75rem 0 .25rem; padding: .7rem .85rem; border-left: 3px solid var(--warning); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: var(--warning-soft); font-size: .8125rem; }
   .result-attention strong { display: block; font-size: .78rem; }
   .result-attention ul { margin: .3rem 0 0; padding-left: 1.15rem; }
@@ -9975,7 +10068,7 @@ const STYLE = `
   .result-files-lead { margin: .25rem 0 .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
   .result-report h3 { margin: .2rem 0 .3rem; font-size: 1rem; }
   .result-report .plan-doc { max-height: 28rem; overflow: auto; }
-  .result-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .5rem; margin: .9rem 0 0; }
+  .result-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .5rem; margin: .4rem 0 0; }
   .result-facts > div { min-width: 0; padding: .6rem .7rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--glass-strong) 64%, transparent); }
   .result-facts dt { color: var(--muted-foreground); font: 500 .6rem/1.2 var(--font-mono); text-transform: uppercase; letter-spacing: .05em; }
   .result-facts dd { margin: .2rem 0 0; font-size: .78rem; line-height: 1.4; overflow-wrap: anywhere; }
@@ -9997,7 +10090,7 @@ const STYLE = `
   .result-pin > summary .meta { font-weight: 400; }
   .result-pin .diff-comment-target { margin: .25rem 0 .5rem; }
   .result-revision { margin: .6rem 0; padding: .6rem .75rem; border: 1px solid color-mix(in srgb, var(--running) 24%, var(--glass-border)); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--running) 6%, var(--glass-strong)); font-size: .8125rem; overflow-wrap: anywhere; }
-  .result-links { display: flex; flex-wrap: wrap; gap: .25rem .5rem; margin: .9rem 0 0; }
+  .result-links { display: flex; flex-wrap: wrap; gap: .25rem .5rem; margin: .6rem 0 0; }
   .result-links a { font-weight: 550; }
   .result-links a + a::before { content: "·"; margin-right: .5rem; color: var(--muted-foreground); font-weight: 400; }
   .cockpit-detail .result-panel { margin: .85rem 0; }
@@ -10755,6 +10848,7 @@ const STYLE = `
     .result-tabs a { flex: 1 1 auto; min-width: 0; justify-content: center; padding: 0 .25rem; font-size: .8125rem; gap: .3rem; white-space: nowrap; min-height: 2.75rem; overflow: hidden; }
     .result-facts { grid-template-columns: 1fr; }
     .result-request .diff-comment-form button, .result-request .revision-from-comments button { width: 100%; }
+    .result-action .button-link, .result-action form button { width: 100%; box-sizing: border-box; min-height: 2.75rem; }
     .result-request .revision-from-comments { display: grid; }
     .result-links { display: grid; gap: 0; }
     .result-links a { min-height: 2.5rem; display: inline-flex; align-items: center; }
@@ -16274,9 +16368,14 @@ function taskBody(data: {
   // the Work row, the focused chat, and the review cockpit render for this
   // run, so a done task with failed or missing proof never wears a bare
   // "done" badge here while another surface says otherwise.
+  // The receipt re-verified the stored bytes (repair 2026-09-14), so the
+  // box wears the receipt's own status whenever a receipt exists — the
+  // two never disagree on one page about damaged evidence.
   const resultStatus =
     task.state !== "done"
       ? null
+      : data.completion?.receipt !== null && data.completion?.receipt !== undefined
+      ? receiptStatusOf(data.completion.receipt)
       : resultStatusOf(
           data.completion === null || data.completion === undefined
             ? null
@@ -16507,7 +16606,19 @@ function taskBody(data: {
             `<div class="dispatch-proof-body">${criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })}${coverageHtml}${machineNote}${chainHtml}</div></details>`;
       // The publication fact is separate from the evidence fact: a PR or
       // an observed merge is named from its record; nothing is "deployed".
-      const publicationWords = data.publication === null || data.publication === undefined ? "" : ` ${escape(receiptPublicationWords(publicationFactsOf(data.publication)))}`;
+      const publicationWords =
+        (data.publication === null || data.publication === undefined ? "" : ` ${escape(receiptPublicationWords(publicationFactsOf(data.publication)))}`) +
+        // Shortened records say so here too (repair 2026-09-14).
+        (proof.receipt === null ? "" : ` ${escape(evidenceShortenedWords(proof.receipt.facts.evidenceHealth))}`).replace(/ $/, "");
+      // Damaged evidence (repair 2026-09-14): the box wears the receipt's
+      // own problem words — never "ok" with a verdict that predates the damage.
+      if (resultStatus.token === "evidence-damaged") {
+        return withReview(
+          box("problem", resultStatus.label, `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. ${escape(resultStatus.detail)}${publicationWords}`, "evidence-damaged") +
+            `<div class="proof-review-actions"><a class="button-link" href="/r/${proof.runId}">Review the evidence problems</a></div>` +
+            proofDetails,
+        );
+      }
       if (proof.proofVerdict === "verified" && !accepted) {
         const recovered = verificationRecovered(proof.proofReasons);
         return withReview(box(
@@ -17965,6 +18076,7 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
         back: null,
         extraChecks,
         headStatus: false,
+        action: false,
       }) +
       (view.contest === null ? "" : `<p class="row"><a href="/contest/${view.contest.id}">${view.contest.state === "pick-wait" ? `compare the ${contestNoun(view.contest.kind)} and pick →` : `the ${contestNoun(view.contest.kind)} (${escape(view.contest.state)}) →`}</a></p>`) +
       `</div>`,
@@ -18009,7 +18121,7 @@ function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boole
     return card("draft-repair", "CI is failing on its pull request", "Standing Orders confirmed the failure. Draft one repair task, then approve it before it runs.", `<form method="post" action="/r/${run.id}/draft-repair"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">Draft a repair task</button></form>`);
   }
   if (detail.comments.length > 0 && csrf !== "") {
-    return card("revise", `${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these notes. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}"><button type="submit">Create revision</button></form>`);
+    return card("revise", `${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these notes. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}">${revisionSealFields(detail.comments, detail.sourceDigest)}<button type="submit">Create revision</button></form>`);
   }
   const prUrl = detail.publication === null ? null : safePrUrl(detail.publication.prUrl);
   if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) {
@@ -18227,7 +18339,11 @@ type ProofBundleView = {
   accepted: { by: string; note: string | null; at: string } | null;
   proof: { criteria: { statement: string; verdict: string; how: string }[]; checks: { command: string; exitCode: number; summary: string }[]; caveats: string[] } | null;
   proofProblem: string | null;
-  checkLog: { text: string; artifactId: number; truncated: boolean } | null;
+  /** The check log as stored: its text when the bytes verify, else the
+   * `problem` (repair 2026-09-14) — a log that no longer verifies shows no
+   * text and offers no download. `bytesOriginal`/`bytesStored` let a
+   * shortened log's download be described as the stored part only. */
+  checkLog: { text: string; artifactId: number; truncated: boolean; problem: string | null; bytesOriginal: number; bytesStored: number } | null;
   /** Every stored screenshot artifact; one whose bytes no longer verify
    * carries its `problem` and is never rendered or called validated
    * (workspace package 3). */
@@ -18311,7 +18427,7 @@ function runReportView(artifacts: Artifact[], root: string): RunReportView | nul
   }
   if (!read.ok) return { ok: false, artifactId: artifact.id, problem: read.problem };
   const parsed = parseReport(read.content.toString("utf8"));
-  if (!parsed.ok) return { ok: false, artifactId: artifact.id, problem: "the stored report is not a report this console can read" };
+  if (!parsed.ok) return { ok: false, artifactId: artifact.id, problem: artifact.truncated ? "the report was shortened at storage and cannot be read; the missing part was never captured" : "the stored report is not a report this console can read" };
   return { ok: true, artifactId: artifact.id, title: parsed.report.title, summary: parsed.report.summary, document: parsed.report.report, followUps: parsed.report.followUps.length, truncated: artifact.truncated };
 }
 
@@ -18332,14 +18448,17 @@ function sharedResultFactsOf(
   const statOk = stat !== null && !("problem" in stat);
   const passed = proof === null || proof.matrix.length === 0 ? null : passFraction(proof.matrix);
   const patch = terminal?.patch ?? null;
-  const evidenceProblems = evidenceProblemsOf({
+  const evidenceProblems = evidenceProblemDetailsOf({
     proofProblem: proof?.proofProblem ?? null,
     diff: patch === null ? null : "problem" in patch ? { problem: patch.problem } : { truncated: patch.truncated },
     stat: stat === null ? null : "problem" in stat ? { problem: stat.problem } : { filesTruncated: stat.filesTruncated },
-    checkLog: proof?.checkLog === null || proof?.checkLog === undefined ? null : { truncated: proof.checkLog.truncated },
+    checkLog:
+      proof?.checkLog === null || proof?.checkLog === undefined
+        ? null
+        : proof.checkLog.problem === null ? { truncated: proof.checkLog.truncated } : { problem: proof.checkLog.problem },
     screenshots: proof?.screenshots ?? [],
     uncapturedScreenshots: proof?.uncapturedScreenshots ?? [],
-    report: report === null ? null : report.ok ? { ok: true } : { problem: report.problem },
+    report: report === null ? null : report.ok ? { ok: true, truncated: report.truncated } : { problem: report.problem },
     reportExpected: run.role === "scout",
     handoffPresent: handoff !== null,
     outcome: run.outcome,
@@ -18351,7 +18470,8 @@ function sharedResultFactsOf(
     headSource: statOk ? "sealed diff" : run.headRevision === null ? null : "run record",
     checks: passed === null ? null : { passed: passed.passed, total: passed.total },
     caveats: proof?.proof?.caveats ?? [],
-    evidenceProblems,
+    evidenceProblems: evidenceProblems.map(one => one.words),
+    evidenceHealth: evidenceHealthOf(evidenceProblems),
     publicationState: publication === null ? "none" : publication.state,
     publicationWords: receiptPublicationWords(publication),
   };
@@ -18392,10 +18512,18 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
 
   let checkLog: ProofBundleView["checkLog"] = null;
   if (checkLogArtifact !== null) {
-    const read = readVerifiedArtifact(root, checkLogArtifact);
+    // Re-verified at render: a log whose bytes no longer hash to their
+    // record is a named evidence problem, never shown as output.
+    let read: ReturnType<typeof readVerifiedArtifact>;
+    try {
+      read = readVerifiedArtifact(root, checkLogArtifact);
+    } catch {
+      read = { ok: false, problem: "the file could not be read" };
+    }
+    const sizes = { bytesOriginal: checkLogArtifact.bytesOriginal, bytesStored: checkLogArtifact.bytesStored };
     checkLog = read.ok
-      ? { text: read.content.toString("utf8"), artifactId: checkLogArtifact.id, truncated: checkLogArtifact.truncated }
-      : { text: `(the check log no longer verifies: ${read.problem})`, artifactId: checkLogArtifact.id, truncated: false };
+      ? { text: read.content.toString("utf8"), artifactId: checkLogArtifact.id, truncated: checkLogArtifact.truncated, problem: null, ...sizes }
+      : { text: "", artifactId: checkLogArtifact.id, truncated: checkLogArtifact.truncated, problem: read.problem, ...sizes };
   }
 
   return {
@@ -18415,7 +18543,13 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
     screenshots,
     uncapturedScreenshots,
     matrix: verdictRow?.matrix ?? [],
-    matrixLinks: evidenceLinksFor(artifacts),
+    // A matrix row links only to records that still verify (repair
+    // 2026-09-14): a damaged screenshot or check log is named as a
+    // problem above, never offered as a download.
+    matrixLinks: (() => {
+      const damaged = new Set([...screenshots.filter(one => one.problem !== null).map(one => one.artifactId), ...(checkLog !== null && checkLog.problem !== null ? [checkLog.artifactId] : [])]);
+      return new Map([...evidenceLinksFor(artifacts)].filter(([, id]) => !damaged.has(id)));
+    })(),
     machineVerdict: verdictRow?.machineVerdict ?? null,
     qualityMode: run.qualityMode ?? "default",
     repairChain: store.repairChainFor(run.id) ?? (() => {
@@ -18637,7 +18771,7 @@ function reviewDiffHtml(
     return (
       `<details><summary>the patch${patch.truncated ? " (TRUNCATED — the raw record says how much was cut)" : ""}</summary>` +
       `<pre class="mono" style="overflow-x:auto">${escape(patch.text)}</pre></details>` +
-      `<p class="meta"><a href="/r/${runId}/evidence/${patch.artifactId}">Download the full diff</a></p>`
+      storedDownloadLink(runId, patch.artifactId, "diff", patch.truncated)
     );
   }
   const stats = stat !== null && !("problem" in stat) ? new Map(stat.files.map(one => [one.path, one] as const)) : new Map();
@@ -18682,9 +18816,32 @@ function reviewDiffHtml(
         `<p class="diff-review-help">Select a line, then describe what should change. Nothing is revised until you create the revision below.</p>`
       : "") +
     files +
-    (patch.truncated || parsed.linesTruncated ? `<p class="diff-cut">This visual diff is shortened. Review the sealed patch before approving.</p>` : "") +
-    `</div><p class="meta"><a href="/r/${runId}/evidence/${patch.artifactId}">Download the full diff</a></p>`
+    (patch.truncated
+      ? `<p class="diff-cut">The sealed diff was shortened at storage: the rest of the change was never captured, here or in the download.</p>`
+      : parsed.linesTruncated ? `<p class="diff-cut">This visual diff is shortened. Review the sealed patch before approving.</p>` : "") +
+    `</div>` + storedDownloadLink(runId, patch.artifactId, "diff", patch.truncated)
   );
+}
+
+/** The check log as stored (repair 2026-09-14): its output behind a
+ * disclosure when the bytes verify — a shortened log says so in the
+ * summary and its download is the stored part; a log that no longer
+ * verifies is a named problem with no output and no download. */
+function checkLogHtml(log: NonNullable<ProofBundleView["checkLog"]>, runId: number, attributes: string): string {
+  if (log.problem !== null) {
+    return `<p class="problem" data-check-log="damaged"${attributes}>The check log no longer verifies (${escape(log.problem)}). Its output is not shown, and there is nothing to download.</p>`;
+  }
+  return (
+    `<details data-check-log="${log.truncated ? "shortened" : "ok"}"${attributes}><summary>Check output${log.truncated ? ` (shortened — ${log.bytesStored} of ${log.bytesOriginal} bytes stored)` : ""}</summary><pre class="mono" style="overflow-x:auto;max-height:18rem">${escape(log.text)}</pre></details>` +
+    storedDownloadLink(runId, log.artifactId, "check log", log.truncated)
+  );
+}
+
+/** The download link for a stored record (repair 2026-09-14): a shortened
+ * record's link says it holds the stored part only — never "the full"
+ * bytes that were cut at storage and exist nowhere. */
+function storedDownloadLink(runId: number, artifactId: number, what: string, truncated: boolean): string {
+  return `<p class="meta"><a href="/r/${runId}/evidence/${artifactId}">${truncated ? `Download the stored part of the ${what} (shortened at storage — not the full ${what})` : `Download the ${what}`}</a></p>`;
 }
 
 /** Render the terminal diff card: stat and capture health first, the bounded
@@ -18810,13 +18967,7 @@ function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | 
     }
   }
 
-  if (view.checkLog !== null) {
-    parts.push(
-      `<details><summary>Check output${view.checkLog.truncated ? " (shortened)" : ""}</summary>` +
-        `<pre class="mono" style="overflow-x:auto">${escape(view.checkLog.text)}</pre></details>` +
-        `<p class="meta"><a href="/r/${runId}/evidence/${view.checkLog.artifactId}">Open the full check log</a></p>`,
-    );
-  }
+  if (view.checkLog !== null) parts.push(checkLogHtml(view.checkLog, runId, ""));
 
   if (view.screenshots.length > 0) {
     parts.push(
@@ -18844,9 +18995,12 @@ function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | 
  * header chip so the two surfaces never name one state differently. */
 /** The receipt's facts as the shared projection reads them. */
 function receiptStatusOf(view: CompletionReceiptView, review: ReviewFacts | null = view.review): DisplayStatus {
-  return resultStatusOf(
+  // The evidence health rides the status (repair 2026-09-14): a result
+  // whose stored records are damaged is never called ready on the strength
+  // of a verdict recorded before the damage.
+  return evidenceResultStatusOf(
     { runId: view.runId, role: view.role, outcome: view.outcome, verdict: view.verdict, reasons: view.reasons, accepted: view.accepted, recordComplete: view.recordComplete, review },
-    view.publication,
+    view.publication, view.facts.evidenceHealth,
   );
 }
 
@@ -18916,28 +19070,32 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     `${statusLineHtml(status)}</div>` +
     // The agent's handoff is its narrative, labeled as such; the
     // publication line is the observed record — never "shipped".
-    `<p class="receipt-summary">${escape(view.summary ?? (view.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff."))}</p>` +
+    lead +
+    `<p class="receipt-summary">${escape(conciseOutcomeOf(view.summary ?? (view.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff.")))}</p>` +
+    `<div class="receipt-actions"><a class="button-link" href="${escape(resultHref)}" data-open-result>Open result</a></div>` +
+    (view.publication?.state === "failed" ? `<p class="problem">${escape(facts.publicationWords)}</p>` : "") +
+    caveats +
+    coverage +
+    `<details class="receipt-details"><summary>Result details</summary>` +
+    (view.summary !== null && view.summary !== conciseOutcomeOf(view.summary) ? `<p class="recap">${escape(view.summary)}</p>` : "") +
     `<p class="receipt-publication" data-receipt-publication="${escape(facts.publicationState)}">${escape(facts.publicationWords)}</p>` +
     // A review in flight is the receipt's primary status too (its chip
     // above); the detail — the earlier verdict as history (review fixes,
     // finding 4) — is secondary, behind a native disclosure that reads the
     // same words on the task page and in chat.
     (inReview ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
-    caveats +
-    lead +
     // The matrix count is the proof's own citation; it reads as verified
     // only when the machine verified the result (workspace package 1).
     `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>${stored.tone === "problem" ? "cited by the agent — not verified" : stored.token === "agent-attested" ? "cited by the agent, no independent check" : "against the approved scope"}</small></span>` +
     `<span><strong>${escape(diff)}</strong><small>${facts.head === null ? "no commit recorded" : `head ${escape(facts.head.slice(0, 12))} · ${escape(facts.headSource ?? "")}`}</small></span>` +
     `<span><strong>${view.screenshots.length} screenshot${view.screenshots.length === 1 ? "" : "s"}</strong><small>${view.screenshots.length === 0 ? "none required or captured" : unavailable === 0 ? "validated visual proof" : `${unavailable} unavailable — not validated`}</small></span></div>` +
-    coverage +
-    `<div class="receipt-actions"><a class="button-link" href="${escape(resultHref)}" data-open-result>Open result</a>` +
+    `<div class="receipt-actions">` +
     (place === "task"
       ? `<a href="${taskChatHref(taskId)}">Discuss in chat →</a>`
       : `<a href="/r/${view.runId}">Full build record →</a>`) +
     // The cockpit (Priority 5): the same records, arranged for a reviewer.
     `<a href="${reviewHref(taskId)}">Open in the review cockpit →</a>` +
-    `</div></section>`
+    `</div></details></section>`
   );
 }
 
@@ -18967,8 +19125,15 @@ type ResultDetail = {
   fileAnchors: ReadonlyMap<string, string>;
   comments: DiffComment[];
   reviewerFindings: DiffComment[];
-  /** Revisions already sealed from this run — the forward link. */
-  revisions: { id: string; title: string; state: TaskState; approved: boolean }[];
+  /** Revisions already sealed from this run — the forward link. Each
+   * carries the shared status projection's own words for the child
+   * (repair 2026-09-14): CURRENT exact approval and actual activity, so
+   * held or paused work is never called building because it was once
+   * approved, and a rescoped child reads as needing approval again. */
+  revisions: { id: string; title: string; state: TaskState; approved: boolean; standing: string; tone: string }[];
+  /** The source scope digest the panel was rendered against (null = no
+   * scope) — the revision form's source binding. */
+  sourceDigest: string | null;
   route: RouteStamp | null;
   editor: { worktree: string } | null;
   /** Signed criteria on the scope this run built against. */
@@ -18996,7 +19161,16 @@ type ResultPanelOptions = {
   extraChecks?: string;
   /** The cockpit's header already carries the status chip: said once. */
   headStatus?: boolean;
+  /** The cockpit renders its own next-action card: no panel action. */
+  action?: boolean;
 };
+
+/** The revision form's binding (repair 2026-09-14): the exact ids of the
+ * notes this page displays and the source terms it was rendered against.
+ * The server seals these ids and no others. */
+function revisionSealFields(comments: readonly { id: number }[], sourceDigest: string | null): string {
+  return `<input type="hidden" name="batch" value="${escape(revisionBatchOf(comments))}"><input type="hidden" name="source" value="${escape(revisionSourceOf(sourceDigest))}">`;
+}
 
 function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const { run, receipt, proof, terminal, handoff } = detail;
@@ -19014,16 +19188,31 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const tabHref = (tab: ResultTab): string => escape(o.hrefFor(tab));
 
   // ---- attention: problems and caveats, ahead of every readiness word ----
+  const publication = detail.publication;
+  const prUrl = publication === null ? null : safePrUrl(publication.prUrl);
   const attention: string[] = [];
-  if (stored.tone === "problem" || stored.tone === "attention") attention.push(verificationExplanation(receipt.verdict, receipt.reasons));
+  if (stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, receipt.reasons));
   attention.push(...facts.evidenceProblems);
   if (detail.outsideTouches.length > 0) attention.push(`${detail.outsideTouches.length} changed file${detail.outsideTouches.length === 1 ? "" : "s"} outside the approved paths: ${detail.outsideTouches.join(", ")}.`);
   attention.push(...receipt.caveats);
   attention.push(...(handoff?.followUps ?? []).map(one => `Follow-up: ${one}`));
+  // Publication risks stay in the open (repair 2026-09-14); the routine
+  // publication fact lives with the build details below.
+  if (publication !== null && publication.state === "failed") {
+    attention.push(`Publication failed after ${publication.attempts} attempt${publication.attempts === 1 ? "" : "s"}${publication.lastError === null ? "" : ` — ${oneLineOf(publication.lastError, 200)}`}. No pull request or merge is recorded.`);
+  }
+  if (detail.ciFailing && publication !== null) attention.push(`CI is failing on PR #${publication.prNumber} at the last check.`);
   const attentionHtml =
     attention.length === 0
       ? ""
       : `<div class="result-attention" data-result-attention="${attention.length}"><strong>Before you rely on this</strong><ul>${attention.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+
+  // ---- one outcome, one action (repair 2026-09-14) ------------------------
+  // The outcome is the handoff's first sentence, bounded; the agent's full
+  // account waits behind a disclosure in Summary so nothing is said twice.
+  const conclusion = receipt.summary ?? (run.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff.");
+  const outcome = conciseOutcomeOf(conclusion);
+  const action = o.action === false ? "" : resultPrimaryAction(detail, o, prUrl);
 
   // ---- summary: the deliverable first ----------------------------------
   const summaryParts: string[] = [];
@@ -19039,7 +19228,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       summaryParts.push(
         `<article class="result-report" data-result-report="ok"><h3>${escape(report.title)}</h3><p class="recap">${escape(report.summary)}</p>` +
           `<pre class="recap plan-doc">${escape(report.document)}</pre>` +
-          `<p class="meta"><a href="/r/${runId}/evidence/${report.artifactId}">Download the report</a>${report.truncated ? " · shortened when stored" : ""}${report.followUps === 0 ? "" : ` · ${report.followUps} proposed follow-up${report.followUps === 1 ? "" : "s"} on <a href="${taskHref(detail.taskId)}">the task</a>`}</p></article>`,
+          `<p class="meta"><a href="/r/${runId}/evidence/${report.artifactId}">${report.truncated ? "Download the stored part of the report (shortened at storage — not the full report)" : "Download the report"}</a>${report.followUps === 0 ? "" : ` · ${report.followUps} proposed follow-up${report.followUps === 1 ? "" : "s"} on <a href="${taskHref(detail.taskId)}">the task</a>`}</p></article>`,
       );
     }
   } else if (lead === "screenshots") {
@@ -19050,49 +19239,49 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     );
   }
   const unavailableShots = shots.filter(one => one.problem !== null);
-  if (unavailableShots.length > 0 && lead !== "report") {
+  if (lead === "changes") {
+    // Code work: the changed files ARE the deliverable; the diff is one tap away.
     summaryParts.push(
-      `<ul class="result-unavailable meta" data-result-unavailable="${unavailableShots.length}">${unavailableShots.map(one => `<li>Screenshot unavailable — <span class="mono">${escape(one.path)}</span>: ${escape(one.problem ?? "")}</li>`).join("")}</ul>`,
+      `<p class="result-files-lead">${detail.files.length === 0 ? "" : `<span class="mono">${detail.files.slice(0, 6).map(one => escape(one.path)).join("</span>, <span class=\"mono\">")}</span>${detail.files.length > 6 ? ` and ${detail.files.length - 6} more` : ""} — `}<a href="${tabHref("changes")}" data-result-goto="changes">see the diff</a></p>`,
     );
   }
-  // The agent's own list of what it changed rides every Summary, after
-  // whatever leads — it is the handoff's words, labeled by the section.
-  if (handoff !== null && handoff.changes.length > 0) summaryParts.push(`<ul class="result-changes">${handoff.changes.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`);
-  if (lead === "changes" || lead === "summary") {
-    if (lead === "changes") {
-      summaryParts.push(
-        `<p class="result-files-lead">${detail.files.length === 0 ? "" : `<span class="mono">${detail.files.slice(0, 6).map(one => escape(one.path)).join("</span>, <span class=\"mono\">")}</span>${detail.files.length > 6 ? ` and ${detail.files.length - 6} more` : ""} — `}<a href="${tabHref("changes")}" data-result-goto="changes">see the diff</a></p>`,
-      );
-    }
-    if (run.outcome === "no-change" && summaryParts.length === 0) summaryParts.push(`<p class="meta">The agent found that no repository change was needed${statOk && stat.fileCount === 0 ? "; the sealed diff is empty" : ""}.</p>`);
-  }
+  if (lead === "summary" && run.outcome === "no-change") summaryParts.push(`<p class="meta">The agent found that no repository change was needed${statOk && stat.fileCount === 0 ? "; the sealed diff is empty" : ""}.</p>`);
+  // The agent's own account — its full conclusion (when the outcome line
+  // shortened it), what it says it changed, and how it checked — on demand.
+  const agentAccount = [
+    ...(conclusion !== outcome ? [`<p class="recap">${escape(conclusion)}</p>`] : []),
+    ...(handoff !== null && handoff.changes.length > 0 ? [`<ul class="result-changes">${handoff.changes.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`] : []),
+    ...(handoff !== null && handoff.verification.length > 0 ? [`<p class="meta">Checked by the agent:</p><ul class="result-changes" data-cockpit-source="agent-words">${handoff.verification.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`] : []),
+  ];
+  if (agentAccount.length > 0) summaryParts.push(`<details class="result-notes" data-result-notes-agent><summary>What the agent reported</summary>${agentAccount.join("")}</details>`);
   const evidenceSources = [
-    ...(report !== null ? [report.ok ? "verified report" : "report (unverifiable)"] : []),
+    ...(report !== null ? [report.ok ? `verified report${report.truncated ? " (shortened)" : ""}` : "report (unverifiable)"] : []),
     ...(patch !== null ? [patchOk ? `sealed diff${patch.truncated ? " (shortened)" : ""}` : "diff (unverifiable)"] : []),
     ...(proof === null ? [] : proof.proofProblem !== null ? ["proof (unreadable)"] : proof.proof !== null ? ["agent proof"] : []),
-    ...(proof?.checkLog !== null && proof?.checkLog !== undefined ? [`check log${proof.checkLog.truncated ? " (shortened)" : ""}`] : []),
+    ...(proof?.checkLog !== null && proof?.checkLog !== undefined ? [proof.checkLog.problem !== null ? "check log (unverifiable)" : `check log${proof.checkLog.truncated ? " (shortened)" : ""}`] : []),
     ...(shots.length > 0 ? [`${shown.length} validated screenshot${shown.length === 1 ? "" : "s"}${unavailableShots.length > 0 ? `, ${unavailableShots.length} unavailable` : ""}`] : []),
   ];
-  const publication = detail.publication;
-  const prUrl = publication === null ? null : safePrUrl(publication.prUrl);
   const publicationHtml =
     `<p class="result-publication" data-receipt-publication="${escape(facts.publicationState)}">${escape(facts.publicationWords)}` +
-    (publication !== null && publication.state === "failed"
-      ? ` <span class="meta">After ${publication.attempts} attempt${publication.attempts === 1 ? "" : "s"}${publication.lastError === null ? "" : ` — ${escape(oneLineOf(publication.lastError, 200))}`}.</span>`
-      : "") +
     (publication === null || publication.prNumber === null
       ? ""
       : ` ${prUrl === null ? `<span class="mono">PR #${publication.prNumber}</span>` : `<a href="${escape(prUrl)}">PR #${publication.prNumber}</a>`}` +
         `<span class="meta" data-ci-observed="${escape(detail.ciFailing ? "failing" : (publication.lastCheckState ?? "none"))}"> · ${
           detail.ciFailing ? "CI failing at the last check" : publication.lastCheckState === "passing" ? `CI passing, observed ${escape(when(publication.lastCheckAt))}` : publication.lastCheckState === "running" ? "CI still running at the last check" : "no CI checks found — verify on GitHub"
         }</span>`) +
-    `</p>` +
-    (detail.ciFailing && o.csrf !== ""
-      ? `<form method="post" action="/r/${runId}/draft-repair" class="row"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><button type="submit">Draft a repair task</button><span class="meta"> — one unapproved task; you approve its scope before anything builds</span></form>`
-      : "");
+    `</p>`;
   const agent = runAgentWords(detail.route);
+  const links: string[] = [];
+  if (o.place !== "run") links.push(`<a href="/r/${runId}">Full build record →</a>`);
+  if (o.place !== "review") links.push(`<a href="${reviewHref(detail.taskId)}">Review cockpit →</a>`);
+  if (o.place !== "chat") links.push(`<a href="${taskChatHref(detail.taskId)}">Discuss in chat →</a>`);
+  links.push(`<a href="${taskHref(detail.taskId)}">Task overview →</a>`);
+  // Technical facts on demand: build, agent, exact commits, evidence
+  // sources, the publication record, and the other pages for this result.
   summaryParts.push(
-    `<dl class="result-facts">` +
+    `<details class="result-details" data-result-details><summary>Build details</summary>` +
+      (unavailableShots.length === 0 ? "" : `<ul class="result-unavailable meta" data-result-unavailable="${unavailableShots.length}">${unavailableShots.map(one => `<li>Screenshot unavailable — <span class="mono">${escape(one.path)}</span>: ${escape(one.problem ?? "")}</li>`).join("")}</ul>`) +
+      `<dl class="result-facts">` +
       `<div><dt>Build</dt><dd>#${runId} · ${escape(run.runner)}${agent === null ? ` · ${escape(run.provider)}` : ""}${run.finishedAt === null ? "" : ` · ${escape(when(run.finishedAt))}`}</dd></div>` +
       (agent === null ? "" : `<div><dt>Agent</dt><dd>${escape(agent)}</dd></div>`) +
       `<div><dt>Commits</dt><dd>${
@@ -19102,7 +19291,9 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       }</dd></div>` +
       `<div><dt>Evidence</dt><dd>${evidenceSources.length === 0 ? "nothing was captured" : escape(evidenceSources.join(" · "))}</dd></div>` +
       `<div><dt>Publication</dt><dd>${publicationHtml}</dd></div>` +
-      `</dl>`,
+      `</dl>` +
+      `<p class="result-links meta">${links.join("")}</p>` +
+      `</details>`,
   );
 
   // ---- changes -----------------------------------------------------------
@@ -19159,7 +19350,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     if (proof.verdict !== null) {
       // The same status line the panel leads with (one status per surface,
       // workspace package 1), beside the machine verdict's own explanation.
-      checkParts.push(`<p class="row result-verdict" data-proof-verdict="${escape(dispatchStatusToken(proof.verdict))}">${statusLineHtml(status)} <span class="meta">${escape(verificationExplanation(proof.verdict, proof.reasons))}</span></p>`);
+      checkParts.push(`<p class="row result-verdict" data-proof-verdict="${escape(dispatchStatusToken(proof.verdict))}"><span class="meta">At completion: ${escape(verificationExplanation(proof.verdict, proof.reasons))}</span></p>`);
     } else if (run.outcome !== "no-change") {
       checkParts.push(`<p class="meta" data-proof-verdict="none">No verification result is available for this build.</p>`);
     }
@@ -19182,12 +19373,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       );
     }
     if (proof.proofProblem !== null) checkParts.push(`<p class="problem">Verification details are unavailable: ${escape(proof.proofProblem)}</p>`);
-    checkParts.push(
-      proof.checkLog === null
-        ? `<p class="meta" data-cockpit-source="machine">No automated check was configured for this build.</p>`
-        : `<details data-cockpit-source="machine"><summary>Check output${proof.checkLog.truncated ? " (shortened)" : ""}</summary><pre class="mono" style="overflow-x:auto;max-height:18rem">${escape(proof.checkLog.text)}</pre></details>` +
-          `<p class="meta"><a href="/r/${runId}/evidence/${proof.checkLog.artifactId}">Open the full check log</a></p>`,
-    );
+    checkParts.push(proof.checkLog === null ? `<p class="meta" data-cockpit-source="machine">No automated check was configured for this build.</p>` : checkLogHtml(proof.checkLog, runId, ' data-cockpit-source="machine"'));
     checkParts.push(
       proof.proof === null || proof.proof.checks.length === 0
         ? `<p class="meta" data-cockpit-source="agent">The agent reported no checks.</p>`
@@ -19231,15 +19417,16 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     );
     if (o.csrf !== "") {
       requestParts.push(
-        `<form method="post" action="/r/${runId}/revise" class="card revision-from-comments"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="return" value="${escape(o.returnTo)}">` +
-          `<div><strong>${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready</strong><span class="meta">Creates one revision carrying exactly these notes. You approve its scope before anything builds.</span></div>` +
+        `<form method="post" action="/r/${runId}/revise" class="card revision-from-comments"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="return" value="${escape(o.returnTo)}">${revisionSealFields(detail.comments, detail.sourceDigest)}` +
+          `<div><strong>${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready</strong><span class="meta">One revision from exactly these notes. You approve it before it builds.</span></div>` +
           `<button type="submit">Create revision</button></form>`,
       );
     }
   }
   for (const revision of detail.revisions) {
-    const standing = revision.state === "done" ? "finished" : revision.state === "cancelled" ? "cancelled" : revision.state === "failed" ? "failed" : revision.approved ? "approved — building or queued" : "waiting for your approval";
-    requestParts.push(`<p class="result-revision" data-result-revision="${escape(revision.id)}"><strong>Proposed revision</strong> <a href="${taskHref(revision.id)}">${escape(revision.title)}</a> <span class="meta">· ${escape(standing)} · this result stays on record</span></p>`);
+    // The child's standing is the shared status projection's own words
+    // (repair 2026-09-14): current exact approval and actual activity.
+    requestParts.push(`<p class="result-revision" data-result-revision="${escape(revision.id)}" data-result-revision-approved="${revision.approved ? "1" : "0"}" data-tone="${escape(revision.tone)}"><strong>Revision</strong> <a href="${taskHref(revision.id)}">${escape(revision.title)}</a> <span class="meta">· ${escape(revision.standing)}</span></p>`);
   }
   if (o.csrf === "") {
     requestParts.push(`<p class="meta">Sign in with a browser session to request changes.</p>`);
@@ -19273,16 +19460,12 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const view = (tab: ResultTab, parts: string[]): string =>
     `<div class="result-view" role="tabpanel" data-result-view="${tab}"${tab === o.tab ? "" : " hidden"}>${parts.join("\n")}</div>`;
   const heading = receiptHeadingOf(run.outcome, receipt.publication);
-  const links: string[] = [];
-  if (o.place !== "run") links.push(`<a href="/r/${runId}">Full build record →</a>`);
-  if (o.place !== "review") links.push(`<a href="${reviewHref(detail.taskId)}">Review cockpit →</a>`);
-  if (o.place !== "chat") links.push(`<a href="${taskChatHref(detail.taskId)}">Discuss in chat →</a>`);
-  links.push(`<a href="${taskHref(detail.taskId)}">Task overview →</a>`);
   return (
     `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
       (o.back === null ? "" : `<p class="result-back"><a href="${escape(o.back.href)}" data-result-back>← ${escape(o.back.label)}</a></p>`) +
-      `<header class="result-head"><div><span class="eyebrow">result · build #${runId} · <span class="mono">${escape(detail.taskId)}</span></span><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status)}</header>` +
-      `<p class="result-summary">${escape(receipt.summary ?? (run.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff."))}</p>` +
+      `<header class="result-head"><div><span class="eyebrow">Build #${runId}</span><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status)}</header>` +
+      `<p class="result-summary">${escape(outcome)}</p>` +
+      action +
       (REVIEW_TOKENS.has(status.token) ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
       attentionHtml +
       tabs +
@@ -19290,9 +19473,34 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       view("changes", changeParts) +
       view("checks", checkParts) +
       `<section class="result-request" id="request-changes">${requestParts.join("\n")}</section>` +
-      `<p class="result-links meta">${links.join("")}</p>` +
     `</section>`
   );
+}
+
+/** The outcome in one bounded sentence (repair 2026-09-14): the handoff's
+ * first sentence, cut at a word when it runs past 180 characters. The
+ * full conclusion stays available behind the Summary's disclosure. */
+function conciseOutcomeOf(conclusion: string): string {
+  const flat = oneLineOf(conclusion, 2_000);
+  const sentence = /^[\s\S]*?[.!?](?=\s|$)/.exec(flat)?.[0] ?? flat;
+  const bounded = sentence.length <= 180 ? sentence : `${sentence.slice(0, 180).replace(/\s+\S*$/, "")}…`;
+  return bounded.trim();
+}
+
+/** Exactly one primary act for the result (repair 2026-09-14), chosen from
+ * its state: draft the CI repair, create the revision the notes are
+ * waiting for, open the pull request, or request changes. A bearer session
+ * (no token) gets no control; the cockpit renders its own next-action
+ * card instead (`action: false`). */
+function resultPrimaryAction(detail: ResultDetail, o: ResultPanelOptions, prUrl: string | null): string {
+  const wrap = (kind: string, control: string): string => `<div class="result-action" data-result-action="${kind}">${control}</div>`;
+  if (detail.ciFailing && o.csrf !== "") {
+    return wrap("draft-repair", `<form method="post" action="/r/${detail.run.id}/draft-repair"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><button type="submit">Draft a repair task</button></form>`);
+  }
+  if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="button-link" href="#request-changes">Create revision <span class="meta">from ${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"}</span></a>`);
+  if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) return wrap("open-pr", `<a class="button-link" href="${escape(prUrl)}">Open PR #${detail.publication.prNumber}</a>`);
+  if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="button-link" href="#request-changes">Request changes</a>`);
+  return "";
 }
 
 /** The run's facts as rows — one renderer for the page and its live
@@ -19382,6 +19590,7 @@ function runPage(
   publicationRow: Publication | null = null,
   review: ReviewFacts | null = null,
   result: { detail: ResultDetail; tab: ResultTab; user: string; requestToken: string } | null = null,
+  sourceDigest: string | null = null,
 ): Screen {
   const rows = runFactsRows(run, taskId, running, route);
   // The conversation (Phase 2E, v2 S1g): every stdin injection as the
@@ -19476,7 +19685,7 @@ function runPage(
           .map(
             artifact =>
               `<a href="/r/${run.id}/evidence/${artifact.id}">${escape(evidenceWords(artifact.kind))}` +
-              `${artifact.truncated ? " (truncated)" : ""} · ${artifact.bytesStored} bytes</a>`,
+              `${artifact.truncated ? ` (shortened at storage: ${artifact.bytesStored} of ${artifact.bytesOriginal} bytes)` : ` · ${artifact.bytesStored} bytes`}</a>`,
           )
           .join("\n") +
         "</div>";
@@ -19526,7 +19735,7 @@ function runPage(
     csrf === "" || comments.length === 0
       ? ""
       : `<form method="post" action="/r/${run.id}/revise" class="card revision-from-comments">` +
-        `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<input type="hidden" name="csrf" value="${escape(csrf)}">${revisionSealFields(comments, sourceDigest)}` +
         `<div><strong>${comments.length} annotation${comments.length === 1 ? "" : "s"} ready</strong>` +
         `<span class="meta">Creates one revision carrying this exact batch. You review its scope before anything builds.</span></div>` +
         `<button type="submit">Create revision from annotations</button></form>`;

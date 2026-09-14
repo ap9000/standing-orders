@@ -35,6 +35,9 @@
  *     on disk, a diff-stat capture that failed, and a check log stored
  *     shortened — so the result presentation must name what it cannot
  *     show and never call it validated.
+ *   - repair (2026-09-14): a verified build whose check log was altered
+ *     on disk after sealing, so the shared status must say its evidence
+ *     is unavailable rather than "ready to review".
  *
  * Build first (`npm run build`), then `node scripts/ui-polish-fixture.mjs`
  * prints one JSON line with the URL and login. `scripts/ui-polish-proof.mjs`
@@ -451,6 +454,12 @@ export function startFixture(options = {}) {
     return { taskId: id, runId, ref };
   })();
   results.damaged = damaged;
+  // Repair 2026-09-14: a VERIFIED build whose check log was altered on disk
+  // after sealing — the only damaged record — so the shared status must
+  // stop calling it ready on the strength of the earlier verdict.
+  results.corruptLog = finished('csv-timings', 'Log the export timings', 2.5, {});
+  const corruptLog = store.artifactsFor(results.corruptLog.runId).find(one => one.kind === 'check-log');
+  writeFileSync(join(evidenceRoot, corruptLog.key), '$ npm test\n(exit 0)\n\n--- stdout ---\n0 passed, 214 failed.\n');
 
   const statusTasks = {
     failedChecks: results.failedChecks.taskId, mismatched: results.mismatched.taskId, missingProof: results.missingProof.taskId,
@@ -458,12 +467,12 @@ export function startFixture(options = {}) {
     waitingForBuilder: waitingForBuilder.taskId, chained: chained.taskId, held: held.taskId, failed: failed.taskId, cancelled: cancelled.taskId,
     running: running.taskId, paused: paused.taskId,
     pendingReview: results.pendingReview.taskId, reviewing: results.reviewing.taskId, reviewFailed: results.reviewFailed.taskId,
-    investigation: results.investigation.taskId, damaged: results.damaged.taskId,
+    investigation: results.investigation.taskId, damaged: results.damaged.taskId, corruptLog: results.corruptLog.taskId,
   };
   const statusRuns = {
     failedChecks: results.failedChecks.runId, mismatched: results.mismatched.runId, missingProof: results.missingProof.runId, attested: results.attested.runId, accepted: results.accepted.runId, published: results.published.runId, merged: results.merged.runId, running: liveRun, paused: pausedRun,
     pendingReview: results.pendingReview.runId, reviewing: results.reviewing.runId, reviewFailed: results.reviewFailed.runId,
-    investigation: results.investigation.runId, damaged: results.damaged.runId,
+    investigation: results.investigation.runId, damaged: results.damaged.runId, corruptLog: results.corruptLog.runId,
   };
 
   // --- the scripted conversation ------------------------------------------
