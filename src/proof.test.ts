@@ -6,6 +6,7 @@ import {
   verdictWords,
   dispatchStatusToken,
   foldReview,
+  semanticCoverage,
   passFraction,
   blockingCaveats,
   caveatAttributionProblems,
@@ -658,6 +659,17 @@ describe("foldReview (v40, evidence-review-v1)", () => {
     expect(foldReview(base, [])).toEqual(base);
     const withRows: AdjudicateResult = { verdict: "short", reasons: ["r"], matrix: [row("c1", "missing")] };
     expect(foldReview(withRows, [])).toEqual(withRows);
+  });
+
+  test("eligible prior support and partial patches never supply a current judgement or waive strict coverage", () => {
+    const base: AdjudicateResult = { verdict: "short", reasons: ["gap"], matrix: [{ ...row("c1"), coverage: { state: "gap", inherited: true, items: ["ctx-1"], gaps: ["partial ancestor patch; full file exceeds capture budget"], priorSupport: "eligible" } }] };
+    const unchanged = foldReview(base, []);
+    expect(unchanged).toEqual(base);
+    expect(semanticCoverage(unchanged.matrix, "strict")).toMatchObject({ upheld: [], unreviewed: ["c1"], satisfied: null });
+    const uncertain = foldReview(base, [judgement("c1", "cannot-tell")]);
+    expect(semanticCoverage(uncertain.matrix, "strict")).toMatchObject({ uncertain: ["c1"], satisfied: false });
+    expect(uncertain.verdict).toBe("short");
+    expect(uncertain.matrix[0]!.coverage).toEqual(base.matrix[0]!.coverage);
   });
 
   test("contradicts refutes: a signed criterion a second reader says is unmet fails the whole proof", () => {

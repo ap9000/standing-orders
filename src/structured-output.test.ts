@@ -17,6 +17,13 @@ const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: str
 });
 
 describe("structured JSON normalization is syntax-only", () => {
+  test("an overlong Unicode conclusion survives normalization verbatim for strict rejection", () => {
+    const note = "😀".repeat(251) + " conclusion must remain";
+    const payload = JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "contradicts", note }] });
+    const normalized = normalizeStructuredJson(`\`\`\`json\n${payload}\n\`\`\``);
+    expect(normalized.text).toBe(payload);
+    expect(JSON.parse(normalized.text).criteria[0].note).toBe(note);
+  });
   test("removes one leading BOM and leaves the JSON values untouched", () => {
     const raw = '\uFEFF { "title": "keep \\\"quoted\\\" text", "ids": ["a", "b"], "enabled": false } ';
 

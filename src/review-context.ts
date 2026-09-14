@@ -10,7 +10,7 @@
  * although run 1514 had upheld those same criteria on the base). This
  * module closes that gap WITHOUT letting a reviewer read a checkout:
  *
- *  - Every item is a file read from the git object database BY EXACT
+ *  - Complete items are files read from the git object database BY EXACT
  *    COMMIT (the revision's sealed head) and literal path — `ls-tree` for
  *    identity and size, `cat-file blob` for bytes — with lazy fetch,
  *    replace refs, filters, textconv, and diff drivers all out of the
@@ -21,10 +21,11 @@
  *    evidence it cited per criterion) and its sealed diff-stat. Every item
  *    binds to the source run, the commit, the path, the blob id, and a
  *    SHA-256 of the stored bytes.
- *  - Bounds are explicit and honest: an oversized, binary, non-UTF-8,
- *    missing, non-file, or over-aggregate path is a NAMED GAP, never a
- *    truncated item; a secret-shaped line is redacted before the bytes
- *    become durable, and the redaction is a gap too.
+ *  - Bounds are explicit and honest: an oversized file remains a NAMED
+ *    GAP. Schema 2 may also supply bounded partial ancestor patch sections
+ *    with exact artifact ranges and all intervening sealed changes. Tree
+ *    identity is proved independently of full-file capture. Binary,
+ *    non-UTF-8, missing, redacted and over-budget context stays a gap.
  *  - An earlier reviewer's judgement on the source run is CONTEXT ONLY.
  *    It is exposed as `priorReview` with its own eligibility proof — same
  *    criterion text, verified ancestry, relevant code byte-identical
@@ -47,7 +48,7 @@ import type { Artifact, Store } from "./store.js";
 /** Explicit bounds. Content bytes are UTF-8 of the stored (possibly
  * redacted) text; the aggregate is the sum over every stored item. */
 export const REVIEW_CONTEXT_LIMITS = {
-  /** One source file's stored bytes. Larger files are a named gap. */
+  /** One complete file or partial patch chain. Larger files stay gaps. */
   itemBytes: 48 * 1024,
   /** Every item's bytes together. Whatever would cross it is a named gap. */
   aggregateBytes: 192 * 1024,
@@ -99,6 +100,31 @@ export type ReviewContextItem = {
    * when ancestry could not be verified, so nothing is claimed. */
   unchangedSinceSource: boolean | null;
   redacted: boolean;
+  /** Schema 2 only. Content is concatenated exact artifact ranges, NEVER
+   * a complete file. Segments are ordered from oldest to newest. */
+  patch?: { coverage: "partial"; segments: AncestorPatchSegment[] };
+};
+
+type AncestorPatchSegment = {
+  run: number;
+  base: string;
+  head: string;
+  artifact: number;
+  sha256: string;
+  offset: number;
+  bytes: number;
+};
+
+export type ReviewContextIdentity = {
+  path: string;
+  commit: string;
+  blob: string;
+  mode: string;
+  bytes: number;
+  sourceRun: number;
+  sourceBlob: string | null;
+  sourceMode: string | null;
+  unchangedSinceSource: boolean | null;
 };
 
 export type ReviewContextGap = {
@@ -144,7 +170,9 @@ export type CriterionContextCoverage = {
 };
 
 export type ReviewContextInventory = {
-  schema: 1;
+  schema: 1 | 2;
+  /** Tree identity is independent of whether content fits capture bounds. */
+  identities?: ReviewContextIdentity[];
   bindings?: { run: number; sha256: string }[];
   run: number;
   head: string;
@@ -167,6 +195,13 @@ export type ReviewContextInventory = {
 };
 
 const CONTEXT_INPUT_KINDS = new Set<Artifact["kind"]>(["terminal-diff", "diff-stat", "proof", "check-log", "screenshot", "review-context"]);
+
+/** A shortened check log is the exact bounded log the reviewer saw.
+ * Completeness of patches, proofs and other structured inputs is still
+ * required. Failed capture is never evidence, even if its bytes hash. */
+function usableReviewInput(root: string, artifact: Artifact): boolean {
+  return artifact.captureStatus !== "failed" && (!artifact.truncated || artifact.kind === "check-log") && readVerifiedArtifact(root, artifact).ok;
+}
 
 /** A terminal reviewer can have one correction child. Follow its recorded
  * ancestry, never another task's judgement, with a fixed traversal bound. */
@@ -216,6 +251,20 @@ export function reviewContextCustodyProblem(store: Store, root: string, inventor
       catch { return `ancestor run #${binding.run}'s ${artifact.kind} cannot be read`; }
     }
   }
+  for (const item of inventory.items) {
+    let offset = 0;
+    for (const segment of item.patch?.segments ?? []) {
+      const source = store.getRun(segment.run);
+      const artifact = store.getArtifact(segment.artifact);
+      if (source?.baseRevision !== segment.base || source.headRevision !== segment.head || artifact?.run !== segment.run || artifact.kind !== "terminal-diff" || artifact.sha256 !== segment.sha256) return "an ancestor patch's source binding changed";
+      try {
+        const read = readVerifiedArtifact(root, artifact);
+        const content = Buffer.from(item.content, "utf8");
+        if (!usableReviewInput(root, artifact) || artifact.redacted || !read.ok || segment.offset + segment.bytes > read.content.length || !read.content.subarray(segment.offset, segment.offset + segment.bytes).equals(content.subarray(offset, offset + segment.bytes))) return "an ancestor patch's exact source bytes no longer verify";
+      } catch { return "an ancestor patch cannot be read"; }
+      offset += segment.bytes;
+    }
+  }
   return null;
 }
 
@@ -252,7 +301,8 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   const str = (value: unknown, max = 2000): value is string => typeof value === "string" && value.length <= max && !hasForbiddenControls(value);
   const strList = (value: unknown, max = 64): value is string[] => Array.isArray(value) && value.length <= max && value.every(one => str(one, 300));
   const optionalStr = (value: unknown, max = 2000): value is string | null => value === null || str(value, max);
-  if (r["schema"] !== 1) return { ok: false, problem: "schema must be 1" };
+  if (r["schema"] !== 1 && r["schema"] !== 2) return { ok: false, problem: "unsupported review context schema" };
+  if (r["schema"] === 1 && r["identities"] !== undefined) return { ok: false, problem: "identities require schema 2" };
   if (!Number.isSafeInteger(r["run"]) || Number(r["run"]) <= 0) return { ok: false, problem: "run must be a positive integer" };
   if (!str(r["head"], 40) || !SHA1.test(r["head"])) return { ok: false, problem: "head must be a 40-hex commit" };
   if (!optionalStr(r["base"], 40)) return { ok: false, problem: "base must be a string or null" };
@@ -272,6 +322,18 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   if (limits === null || typeof limits !== "object" || Array.isArray(limits)) return { ok: false, problem: "limits must be an object" };
   const li = limits as Record<string, unknown>;
   if (![li["itemBytes"], li["aggregateBytes"], li["items"]].every(one => Number.isSafeInteger(one) && Number(one) > 0)) return { ok: false, problem: "limits are malformed" };
+
+  const identities: ReviewContextIdentity[] = [];
+  if (r["schema"] === 2) {
+    if (!Array.isArray(r["identities"]) || r["identities"].length > REVIEW_CONTEXT_LIMITS.candidatePaths) return { ok: false, problem: "identities must be a bounded array" };
+    for (const one of r["identities"]) {
+      if (one === null || typeof one !== "object" || Array.isArray(one)) return { ok: false, problem: "identity must be an object" };
+      const it = one as ReviewContextIdentity;
+      if (!str(it.path, 300) || !safeContextPath(it.path) || identities.some(other => other.path === it.path) || it.commit !== r["head"] || !str(it.blob, 40) || !SHA1.test(it.blob) || !["100644", "100755"].includes(it.mode) || !Number.isSafeInteger(it.bytes) || it.bytes < 0 || !Number.isSafeInteger(it.sourceRun) || it.sourceRun !== so["run"] || (it.sourceBlob !== null && (!str(it.sourceBlob, 40) || !SHA1.test(it.sourceBlob))) || (it.sourceMode !== null && !["100644", "100755"].includes(it.sourceMode)) || (it.unchangedSinceSource !== null && typeof it.unchangedSinceSource !== "boolean")) return { ok: false, problem: "identity is malformed" };
+      if ((it.sourceBlob === null) !== (it.sourceMode === null) || (it.unchangedSinceSource !== null && (!an["verified"] || it.unchangedSinceSource !== (it.blob === it.sourceBlob && it.mode === it.sourceMode)))) return { ok: false, problem: "identity claims unproved equality" };
+      identities.push({ path: it.path, commit: it.commit, blob: it.blob, mode: it.mode, bytes: it.bytes, sourceRun: it.sourceRun, sourceBlob: it.sourceBlob, sourceMode: it.sourceMode, unchangedSinceSource: it.unchangedSinceSource });
+    }
+  }
 
   const items: ReviewContextItem[] = [];
   if (!Array.isArray(r["items"]) || r["items"].length > REVIEW_CONTEXT_LIMITS.items) return { ok: false, problem: `items must be an array of at most ${REVIEW_CONTEXT_LIMITS.items}` };
@@ -299,7 +361,26 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     }
     if (it["unchangedSinceSource"] !== null && typeof it["unchangedSinceSource"] !== "boolean") return { ok: false, problem: `item ${index}: unchangedSinceSource must be boolean or null` };
     if (typeof it["redacted"] !== "boolean") return { ok: false, problem: `item ${index}: redacted must be boolean` };
-    if (it["redacted"] === false && createHash("sha1").update(`blob ${bytes}\0`).update(it["content"], "utf8").digest("hex") !== it["blob"]) return { ok: false, problem: `item ${index}: git blob identity does not match its content` };
+    let patch: ReviewContextItem["patch"];
+    if (it["patch"] !== undefined) {
+      const p = it["patch"] as ReviewContextItem["patch"];
+      if (r["schema"] !== 2 || p === null || typeof p !== "object" || p.coverage !== "partial" || !Array.isArray(p.segments) || p.segments.length === 0 || p.segments.length > REVIEW_CONTEXT_LIMITS.ancestors + 1 || it["redacted"] !== false) return { ok: false, problem: `item ${index}: unsupported partial patch` };
+      let total = 0;
+      const runs = new Set<number>();
+      const lineage = [...((bindings ?? []) as { run: number }[]).map(one => one.run), Number(r["run"])];
+      let lastPosition = -1;
+      for (const s of p.segments) {
+        if (s === null || typeof s !== "object" || !Number.isSafeInteger(s.run) || s.run <= 0 || runs.has(s.run) || (s.run !== r["run"] && !(bindings as { run: number }[] | undefined)?.some(one => one.run === s.run)) || !str(s.base, 40) || !SHA1.test(s.base) || !str(s.head, 40) || !SHA1.test(s.head) || !Number.isSafeInteger(s.artifact) || s.artifact <= 0 || !str(s.sha256, 64) || !/^[0-9a-f]{64}$/.test(s.sha256) || !Number.isSafeInteger(s.offset) || s.offset < 0 || !Number.isSafeInteger(s.bytes) || s.bytes <= 0 || s.offset + s.bytes > EVIDENCE_CAPS["terminal-diff"]) return { ok: false, problem: `item ${index}: malformed patch segment` };
+        total += s.bytes;
+        const position = lineage.indexOf(s.run);
+        if (position <= lastPosition) return { ok: false, problem: `item ${index}: patch segments are out of ancestry order` };
+        lastPosition = position;
+        runs.add(s.run);
+      }
+      if (total !== bytes) return { ok: false, problem: `item ${index}: patch ranges do not cover its content` };
+      patch = { coverage: "partial", segments: p.segments.map(s => ({ run: s.run, base: s.base, head: s.head, artifact: s.artifact, sha256: s.sha256, offset: s.offset, bytes: s.bytes })) };
+    } else if (it["redacted"] === false && createHash("sha1").update(`blob ${bytes}\0`).update(it["content"], "utf8").digest("hex") !== it["blob"]) return { ok: false, problem: `item ${index}: git blob identity does not match its content` };
+    if (r["schema"] === 2 && !identities.some(one => one.path === it["path"] && one.blob === it["blob"] && one.sourceRun === it["sourceRun"] && one.unchangedSinceSource === it["unchangedSinceSource"])) return { ok: false, problem: `item ${index}: no matching tree identity` };
     paths.add(it["path"]);
     ids.add(it["id"]);
     items.push({
@@ -315,6 +396,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
       why: [...(it["why"] as ContextItemWhy[])],
       unchangedSinceSource: it["unchangedSinceSource"] as boolean | null,
       redacted: it["redacted"],
+      ...(patch === undefined ? {} : { patch }),
     });
   }
 
@@ -350,6 +432,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     if (p["support"] === "eligible" && !(p["statementMatches"] && p["ancestryVerified"] && p["relevantUnchanged"] && p["bindingsVerified"])) {
       return { ok: false, problem: `priorReview ${index}: claims eligibility without every proof` };
     }
+    if (r["schema"] === 2 && p["relevantUnchanged"] && ((p["relevantPaths"] as string[]).length === 0 || !(p["relevantPaths"] as string[]).every(path => identities.some(one => one.path === path && one.unchangedSinceSource === true)))) return { ok: false, problem: `priorReview ${index}: unchanged paths lack tree identity` };
     priorReview.push({
       criterionId: p["criterionId"], sourceRun: Number(p["sourceRun"]), reviewerRun: Number(p["reviewerRun"]), author: p["author"],
       judgement: p["judgement"] as CriterionJudgementWord, note: p["note"], statementMatches: p["statementMatches"], ancestryVerified: p["ancestryVerified"],
@@ -372,6 +455,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
       return { ok: false, problem: `coverage ${index}: malformed` };
     }
     if ((c["items"] as string[]).some(id => !ids.has(id) || !items.find(item => item.id === id)?.criteria.includes(String(c["id"])))) return { ok: false, problem: `coverage ${index}: names an item that is not in the inventory` };
+    if (items.some(item => item.patch !== undefined && (c["items"] as string[]).includes(item.id)) && (c["state"] !== "gap" || (c["gaps"] as string[]).length === 0)) return { ok: false, problem: `coverage ${index}: partial patches require an explicit gap` };
     coverageIds.add(c["id"]);
     coverage.push({
       id: c["id"], state: c["state"] as CriterionContextCoverage["state"], inherited: c["inherited"], paths: [...(c["paths"] as string[])],
@@ -382,7 +466,8 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   return {
     ok: true,
     inventory: {
-      schema: 1,
+      schema: r["schema"],
+      ...(r["schema"] === 2 ? { identities } : {}),
       ...(bindings === undefined ? {} : { bindings: bindings as { run: number; sha256: string }[] }),
       run: Number(r["run"]),
       head: r["head"],
@@ -442,6 +527,94 @@ async function treeEntries(git: GitRunner, cwd: string, revision: string, paths:
     entries.set(path, { mode, type, object, size: sizeText === "-" ? null : Number(sizeText) });
   }
   return entries;
+}
+
+function regular(entry: TreeEntry | undefined): entry is TreeEntry & { size: number } {
+  return entry !== undefined && entry.type === "blob" && ["100644", "100755"].includes(entry.mode) && SHA1.test(entry.object) && Number.isSafeInteger(entry.size) && entry.size! >= 0;
+}
+
+function sameEntry(a: TreeEntry | undefined, b: TreeEntry | undefined): boolean {
+  return a === undefined && b === undefined || regular(a) && regular(b) && a.object === b.object && a.mode === b.mode;
+}
+
+/** Select a whole plain, same-path text diff section. Quoted paths,
+ * renames, binary patches and redactions are deliberately unsupported.
+ * Offsets refer to the original verified bytes, not regenerated output. */
+function patchSection(content: Buffer, path: string): { offset: number; content: Buffer } | null {
+  if (!/^[A-Za-z0-9_./-]+$/.test(path)) return null;
+  const text = content.toString("utf8");
+  if (text.includes("\uFFFD") || text.includes("\0")) return null;
+  const header = `diff --git a/${path} b/${path}\n`;
+  const sections = [...text.matchAll(/^diff --git .*\n/gm)];
+  const matches = sections.filter(one => one[0] === header);
+  if (matches.length !== 1) return null;
+  const start = matches[0]!.index;
+  const end = sections.find(one => one.index > start)?.index ?? text.length;
+  const section = text.slice(start, end);
+  if (/^(?:Binary files |GIT binary patch|rename |copy |similarity index )/m.test(section) || scanForSecrets(section).length > 0 || section.includes("[redacted:")) return null;
+  const offset = Buffer.byteLength(text.slice(0, start), "utf8");
+  return { offset, content: content.subarray(offset, offset + Buffer.byteLength(section, "utf8")) };
+}
+
+/** Account for EVERY sealed interval through this revision. If a run's
+ * base omits an intervening change to this path, refuse the entire chain.
+ * Equal blobs/modes bridge intervals without needing full-file capture. */
+async function ancestorPatch(
+  store: Store, git: GitRunner, args: CaptureReviewContextArgs, inventory: ReviewContextInventory, path: string,
+): Promise<{ ok: true; content: string; segments: AncestorPatchSegment[] } | { ok: false; reason: ContextGapReason; detail: string }> {
+  const fail = (detail: string, reason: ContextGapReason = "source-unverified") => ({ ok: false as const, reason, detail });
+  if (!inventory.source.verified || !inventory.ancestry.verified || inventory.gaps.some(one => one.path === null && one.reason !== "criterion-changed")) return fail("verified source ancestry is unavailable for a partial patch");
+  const runs = [...(inventory.bindings ?? []).map(one => one.run), args.runId];
+  const segments: AncestorPatchSegment[] = [];
+  const contents: Buffer[] = [];
+  let previous: TreeEntry | undefined;
+  let previousHead: string | null = null;
+  let total = 0;
+  for (const runId of runs) {
+    const run = store.getRun(runId);
+    const base = runId === args.runId ? args.base : run?.baseRevision;
+    const head = runId === args.runId ? args.head : run?.headRevision;
+    if (!base || !head || !SHA1.test(base) || !SHA1.test(head)) return fail(`run #${runId} has no exact patch endpoints`);
+    for (const from of new Set([base, previousHead ?? base])) {
+      const ancestor = await git("git", [...GIT_READ, "merge-base", "--is-ancestor", from, head], { cwd: args.worktree });
+      if (ancestor.code !== 0) return fail(`run #${runId}'s patch ancestry could not be verified`);
+    }
+    const before = await treeEntries(git, args.worktree, base, [path]);
+    const after = await treeEntries(git, args.worktree, head, [path]);
+    if (before === null || after === null) return fail(`run #${runId}'s patch trees could not be read`, "capture-failed");
+    const a = before.get(path);
+    const b = after.get(path);
+    if ((a !== undefined && !regular(a)) || (b !== undefined && !regular(b))) return fail(`run #${runId}'s patch crosses a non-file`, "not-a-file");
+    if (previousHead !== null && !sameEntry(previous, a)) return fail(`uncovered changes between ${previousHead} and run #${runId}'s base; no ancestor patch supplied`);
+    previous = b;
+    previousHead = head;
+    if (sameEntry(a, b)) continue;
+    const artifacts = store.artifactsFor(runId).filter(one => one.kind === "terminal-diff");
+    const artifact = artifacts[0];
+    if (artifacts.length !== 1 || artifact === undefined) return fail(`run #${runId}'s terminal patch is missing or ambiguous`);
+    if (artifact.redacted) return fail(`run #${runId}'s terminal patch is redacted`, "secret-redacted");
+    if (artifact.truncated) return fail(`run #${runId}'s terminal patch exceeds its capture budget`, "over-limit");
+    if (artifact.captureStatus === "failed") return fail(`run #${runId}'s terminal patch capture failed`, "capture-failed");
+    let read: ReturnType<typeof readVerifiedArtifact>;
+    try { read = readVerifiedArtifact(args.root, artifact); } catch { return fail(`run #${runId}'s terminal patch cannot be read`, "capture-failed"); }
+    if (!read.ok) return fail(`run #${runId}'s terminal patch bytes do not verify`);
+    const section = patchSection(read.content, path);
+    if (section === null) {
+      const text = read.content.toString("utf8");
+      if (scanForSecrets(text).length > 0 || text.includes("[redacted:")) return fail(`run #${runId}'s terminal patch contains secret-shaped or redacted lines`, "secret-redacted");
+      const binary = text.includes(`Binary files a/${path} and b/${path} differ`) || text.includes(`Binary files /dev/null and b/${path} differ`);
+      return fail(`run #${runId}'s path patch is ${binary ? "binary" : "missing or an unsupported shape"}`, binary ? "binary" : "source-unverified");
+    }
+    // Git's index header binds the section to both exact tree blobs.
+    const index = /^index ([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})(?: [0-7]{6})?$/m.exec(section.content.toString("utf8"));
+    if (index === null || !(a?.object ?? "0".repeat(40)).startsWith(index[1]!) || !(b?.object ?? "0".repeat(40)).startsWith(index[2]!)) return fail(`run #${runId}'s path patch does not bind both tree blobs`);
+    total += section.content.length;
+    if (total > REVIEW_CONTEXT_LIMITS.itemBytes) return fail("the ancestor patch chain exceeds the item budget; no segments were omitted", "over-limit");
+    segments.push({ run: runId, base, head, artifact: artifact.id, sha256: artifact.sha256, offset: section.offset, bytes: section.content.length });
+    contents.push(section.content);
+  }
+  if (segments.length === 0) return fail("no changed source section is available for this path");
+  return { ok: true, content: Buffer.concat(contents).toString("utf8"), segments };
 }
 
 export type CaptureReviewContextArgs = {
@@ -511,7 +684,8 @@ export async function deriveReviewContext(
   const sourceRun = store.getRun(lineage.sourceRun);
   const sourceProblems: string[] = [];
   const inventory: ReviewContextInventory = {
-    schema: 1,
+    schema: 2,
+    identities: [],
     bindings: [reviewContextBindingOf(store, lineage.sourceRun)],
     run: args.runId,
     head: args.head,
@@ -574,9 +748,10 @@ export async function deriveReviewContext(
   let sourceDiffPaths: string[] | null = null;
   if (statBytes !== null) {
     try {
-      const stat = JSON.parse(statBytes.toString("utf8")) as { filesTruncated?: unknown; files?: { path?: unknown }[] };
-      if (stat.filesTruncated === true) sourceProblems.push("the source run's diff-stat file list is truncated");
-      else sourceDiffPaths = (stat.files ?? []).map(one => String(one.path ?? "")).filter(one => one !== "");
+      const stat = JSON.parse(statBytes.toString("utf8")) as { schema?: unknown; base?: unknown; head?: unknown; fileCount?: unknown; filesTruncated?: unknown; files?: { path?: unknown }[] } | null;
+      if (stat?.filesTruncated === true) sourceProblems.push("the source run's diff-stat file list is truncated");
+      else if (stat?.schema !== 1 || stat.base !== sourceRun.baseRevision || stat.head !== sourceHead || stat.filesTruncated !== false || !Array.isArray(stat.files) || stat.files.length > 400 || stat.fileCount !== stat.files.length || !stat.files.every(one => one !== null && typeof one.path === "string" && safeContextPath(one.path)) || new Set(stat.files.map(one => one.path)).size !== stat.files.length) sourceProblems.push("the source run's diff-stat shape, endpoints or path inventory is unsupported");
+      else sourceDiffPaths = stat.files.map(one => one.path as string);
     } catch {
       sourceProblems.push("the source run's diff-stat is not JSON");
     }
@@ -690,9 +865,22 @@ export async function deriveReviewContext(
         const entry = atHead.get(path);
         const gap = (reason: ContextGapReason, detail: string): void => { gaps.push({ reason, path, criteria, detail: `${path}: ${detail}` }); };
         if (entry === undefined) { gap("missing-at-head", `no object at ${args.head}`); continue; }
-        if (entry.type !== "blob" || entry.mode === "120000" || entry.size === null) { gap("not-a-file", `a ${entry.mode === "120000" ? "symlink" : entry.type} at ${args.head}, not a regular file`); continue; }
-        if (entry.size > REVIEW_CONTEXT_LIMITS.itemBytes) { gap("over-limit", `${entry.size} bytes at ${args.head} exceeds the ${REVIEW_CONTEXT_LIMITS.itemBytes}-byte item limit`); continue; }
+        if (!regular(entry)) { gap("not-a-file", `a ${entry.mode === "120000" ? "symlink" : entry.type} at ${args.head}, not a regular file`); continue; }
+        const sourceEntry = atSource?.get(path);
+        const unchangedSinceSource = atSource === null ? null : sameEntry(sourceEntry, entry);
+        inventory.identities!.push({ path, commit: args.head, blob: entry.object, mode: entry.mode, bytes: entry.size, sourceRun: sourceRun.id, sourceBlob: regular(sourceEntry) ? sourceEntry.object : null, sourceMode: regular(sourceEntry) ? sourceEntry.mode : null, unchangedSinceSource });
+        const oversized = entry.size > REVIEW_CONTEXT_LIMITS.itemBytes;
+        if (oversized) gap("over-limit", `${entry.size} bytes at ${args.head} exceeds the ${REVIEW_CONTEXT_LIMITS.itemBytes}-byte item limit; full-file context is missing`);
         if (itemsByPath.size >= REVIEW_CONTEXT_LIMITS.items) { gap("item-cap", `beyond the ${REVIEW_CONTEXT_LIMITS.items}-item bound`); continue; }
+        if (oversized) {
+          const patch = await ancestorPatch(store, git, args, inventory, path);
+          if (!patch.ok) { gap(patch.reason, patch.detail); continue; }
+          const bytes = Buffer.byteLength(patch.content, "utf8");
+          if (aggregate + bytes > REVIEW_CONTEXT_LIMITS.aggregateBytes) { gap("aggregate-limit", `the partial ancestor patch would cross the ${REVIEW_CONTEXT_LIMITS.aggregateBytes}-byte aggregate limit`); continue; }
+          aggregate += bytes;
+          itemsByPath.set(path, { id: `ctx-${itemsByPath.size + 1}`, path, commit: args.head, blob: entry.object, sha256: createHash("sha256").update(patch.content, "utf8").digest("hex"), bytes, content: patch.content, sourceRun: sourceRun.id, criteria, why, unchangedSinceSource, redacted: false, patch: { coverage: "partial", segments: patch.segments } });
+          continue;
+        }
         if (aggregate + entry.size > REVIEW_CONTEXT_LIMITS.aggregateBytes) { gap("aggregate-limit", `${entry.size} bytes would cross the ${REVIEW_CONTEXT_LIMITS.aggregateBytes}-byte aggregate limit`); continue; }
         const read = await git("git", [...GIT_READ, "cat-file", "blob", entry.object], { cwd: args.worktree, maxBuffer: REVIEW_CONTEXT_LIMITS.itemBytes + 4096 });
         if (read.code !== 0) { gap("capture-failed", `blob ${entry.object} could not be read (git exit ${read.code})`); continue; }
@@ -705,7 +893,6 @@ export async function deriveReviewContext(
         if (bytes > REVIEW_CONTEXT_LIMITS.itemBytes || aggregate + bytes > REVIEW_CONTEXT_LIMITS.aggregateBytes) { gap("over-limit", "redaction did not fit the bounds"); continue; }
         if (hits.length > 0) gap("secret-redacted", `${hits.length} secret-shaped line(s) redacted before storage — the redacted lines cannot support any criterion`);
         aggregate += bytes;
-        const sourceEntry = atSource?.get(path);
         itemsByPath.set(path, {
           id: `ctx-${itemsByPath.size + 1}`,
           path,
@@ -717,7 +904,7 @@ export async function deriveReviewContext(
           sourceRun: sourceRun.id,
           criteria,
           why,
-          unchangedSinceSource: atSource === null ? null : sourceEntry !== undefined && sourceEntry.object === entry.object,
+          unchangedSinceSource,
           redacted: hits.length > 0,
         });
       }
@@ -736,7 +923,7 @@ export async function deriveReviewContext(
     if (!plan.inherited) reasons.push("the criterion's signed text changed since the source review");
     if (!inventory.ancestry.verified) reasons.push("the source head is not verified ancestry of this head");
     if (!inventory.source.verified) reasons.push("the source run's sealed artifacts do not all verify");
-    const relevantUnchanged = plan.paths.length > 0 && plan.paths.every(path => itemsByPath.get(path)?.unchangedSinceSource === true && !itemsByPath.get(path)?.redacted);
+    const relevantUnchanged = plan.paths.length > 0 && plan.paths.every(path => inventory.identities!.some(one => one.path === path && one.unchangedSinceSource === true) && !itemsByPath.get(path)?.redacted && !gaps.some(one => one.path === path && ["binary", "secret-redacted", "capture-failed", "source-unverified"].includes(one.reason)));
     if (!relevantUnchanged) reasons.push(plan.paths.length === 0 ? "no relevant source paths are known for this criterion" : "relevant code is not byte-identical between the source head and this head, or could not be sealed");
     const singularMatches = (kind: Artifact["kind"], bound: { artifact: number; sha256: string } | null) => {
       const entries = sourceArtifacts.filter(one => one.kind === kind);
@@ -747,7 +934,7 @@ export async function deriveReviewContext(
     const reviewerLineage = historicalReviewerLineage(store, row.reviewerRun);
     const reviewerVerified = reviewerLineage.length >= 2 && reviewerLineage.at(-1)?.id === sourceRun.id && reviewerLineage.slice(0, -1).every(one => one.role === "reviewer" && one.taskRef === sourceRun.taskRef && one.outcome === "no-change");
     const allBytesVerify = sourceArtifacts.filter(one => CONTEXT_INPUT_KINDS.has(one.kind)).every(one => {
-      try { return !one.truncated && one.captureStatus !== "failed" && readVerifiedArtifact(args.root, one).ok; } catch { return false; }
+      try { return usableReviewInput(args.root, one); } catch { return false; }
     });
     const bindingsVerified =
       allBytesVerify && reviewerVerified &&
@@ -784,7 +971,7 @@ export async function deriveReviewContext(
     // "Judged from the patch" needs KNOWN relevance: only a verified source
     // proof can say the patch touched what this criterion is about.
     const touched = sourceProof !== null && plan.paths.some(path => args.patchPaths.has(path));
-    const complete = plan.paths.length > 0 && plan.paths.every(path => itemsByPath.has(path) && !itemsByPath.get(path)!.redacted) && inventory.source.verified && inventory.ancestry.verified;
+    const complete = plan.paths.length > 0 && plan.paths.every(path => itemsByPath.has(path) && !itemsByPath.get(path)!.redacted && !itemsByPath.get(path)!.patch) && inventory.source.verified && inventory.ancestry.verified;
     const state: CriterionContextCoverage["state"] = complete && relevantGaps.length === 0 ? (touched && plan.paths.every(path => args.patchPaths.has(path)) ? "patch" : "context") : "gap";
     const gapsFor = state === "gap" && relevantGaps.length === 0 ? [plan.paths.length === 0 ? "no relevant source paths are known" : "inherited context is incomplete"] : relevantGaps;
     return { id: plan.id, state, inherited: plan.inherited, paths: plan.paths, items, gaps: gapsFor, priorSupport };

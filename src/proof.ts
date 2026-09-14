@@ -663,7 +663,9 @@ export type CriterionCoverage = {
   state: "patch" | "context" | "gap";
   /** Same id AND statement as the source run's signed rubric. */
   inherited: boolean;
-  /** Provenance tokens (`ctx-<n>`) sealed for this criterion. */
+  /** Provenance tokens (`ctx-<n>`) for complete files or explicitly partial
+   * ancestor patches. A partial patch keeps state `gap`, even with eligible
+   * prior support; neither property supplies a current judgement. */
   items: string[];
   /** Why context is missing or partial — empty for `patch` and `context`. */
   gaps: string[];

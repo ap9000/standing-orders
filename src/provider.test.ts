@@ -9,6 +9,8 @@
 import { describe, test, expect } from "vitest";
 import { adapterFor, auditOf, validateSpec, reportsCost, inspectionOf, MODEL_ID, OPENROUTER_ENV_KEY, PROVIDER_IDS, MONEY_CAPABILITIES, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { runStreamJsonl } from "./exec.js";
+import { REVIEW_OUTPUT_LIMITS, REVIEW_NOTE_CODE_POINTS } from "./structured-output.js";
+import { parseReview } from "./reviewer.js";
 
 const ASK = {
   phase: "build" as const,
@@ -121,6 +123,14 @@ describe("argv dialects", () => {
     const properties = schema["properties"] as Record<string, unknown>;
     expect(properties).toHaveProperty("comments");
     expect(properties).toHaveProperty("criteria");
+    for (const field of ["comments", "criteria"] as const) {
+      const shape = properties[field] as { maxItems: number; items: { properties: { note: { minLength: number; maxLength: number } } } };
+      expect(shape.maxItems).toBe(REVIEW_OUTPUT_LIMITS[field]);
+      expect(shape.items.properties.note).toEqual({ type: "string", minLength: 1, maxLength: REVIEW_NOTE_CODE_POINTS });
+      const note = "😀".repeat(shape.items.properties.note.maxLength);
+      expect(note.length).toBe(REVIEW_OUTPUT_LIMITS.note);
+      expect(parseReview(JSON.stringify({ version: 1, comments: [{ path: "src/file.ts", note }], criteria: [{ id: "c1", judgement: "cannot-tell", note }] }), new Set(["src/file.ts"]), new Set(["c1"])).ok).toBe(true);
+    }
 
     // No other phase, and no other provider, gets the flag — a formatting
     // floor for the one phase and the one provider run 1467 actually hit.

@@ -418,6 +418,9 @@ export function storeEvidence(
  * check and the read buys an attacker nothing. Only a buffer whose SHA-256
  * matches the row is ever returned: unverified bytes never leave this
  * function, which is what lets a caller stream with a clear conscience.
+ * Success proves stored-byte integrity only. Callers must independently
+ * decide whether a shortened representation or failed capture is usable;
+ * a verified failure log is still a failure, not successful evidence.
  */
 export function readVerifiedArtifact(
   root: string,

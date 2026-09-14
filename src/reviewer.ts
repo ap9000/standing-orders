@@ -63,6 +63,8 @@ import {
   STRUCTURED_REPAIR_ATTEMPTS,
   STRUCTURED_REPAIR_MAX_TURNS,
   STRUCTURED_REPAIR_TIMEOUT_MS,
+  REVIEW_OUTPUT_LIMITS,
+  REVIEW_NOTE_GUIDANCE,
 } from "./structured-output.js";
 
 const DEFAULT_REVIEW_TIMEOUT_MS = 20 * 60_000;
@@ -95,13 +97,7 @@ export function reviewScreenshotName(artifactId: number, kind: "png" | "jpeg"): 
 }
 
 export const REVIEW_LIMITS = {
-  comments: 40,
-  note: 500,
-  path: 300,
-  /** v40: at most one judgement per signed criterion. The rubric itself
-   * caps at 12 (scope.ts's ACCEPTANCE_LIMITS), so this is never a live
-   * additional constraint — just an explicit one. */
-  criteria: 12,
+  ...REVIEW_OUTPUT_LIMITS,
   /** The mailbox read cap: 40 maximal comments plus 12 judgements fit with headroom. */
   payload: 64 * 1024,
   /** Complete encoded text bundle for providers without file-reading tools. Never truncate it. */
@@ -227,7 +223,7 @@ export function parseReview(
       return;
     }
     if (typeof note !== "string" || note.trim().length === 0 || note.length > REVIEW_LIMITS.note) {
-      problems.push({ reason: `comment ${index}: note must be a string of 1..${REVIEW_LIMITS.note} chars` });
+      problems.push({ reason: `comment ${index}: note must be a string of 1..${REVIEW_LIMITS.note} UTF-16 units` });
       return;
     }
     if (severity !== undefined && severity !== "note" && severity !== "question" && severity !== "problem") {
@@ -277,7 +273,7 @@ export function parseReview(
           return;
         }
         if (typeof note !== "string" || note.trim().length === 0 || note.length > REVIEW_LIMITS.note) {
-          problems.push({ reason: `criterion ${index}: note must be a string of 1..${REVIEW_LIMITS.note} chars` });
+          problems.push({ reason: `criterion ${index}: note must be a string of 1..${REVIEW_LIMITS.note} UTF-16 units` });
           return;
         }
         // v51: a criterion outside this run's own patch is settled only by
@@ -407,8 +403,9 @@ function reviewerBrief(
           "  ]",
         ]),
     "}",
-    `At most ${REVIEW_LIMITS.comments} comments; each note at most ${REVIEW_LIMITS.note}`,
-    "characters; every path must appear in the patch; line is the NEW file's",
+    `At most ${REVIEW_LIMITS.comments} comments and ${REVIEW_LIMITS.criteria} criterion judgements.`,
+    REVIEW_NOTE_GUIDANCE,
+    "Every path must appear in the patch; line is the NEW file's",
     "line number, or null for a file-level comment. An empty comments array",
     "is a valid review.",
     ...(criteria.length === 0
@@ -432,9 +429,14 @@ function reviewContextBriefLines(context: ReviewContextInventory): string[] {
     `${inert(context.source.task)}). Its patch shows only what the revision touched; the`,
     `signed rubric also carries criteria that earlier build implemented.`,
     `\`${REVIEW_CONTEXT_NAME}\` is the machine-sealed context for those: each \`items[]\``,
-    "entry is one source file read from git at the exact commit named in",
-    "`commit` (this run's sealed head), with its blob id, SHA-256, the source",
-    "run it derives from, and the criterion ids it is relevant to. It is the",
+    "entry without `patch` is a source file at `commit` (this run's sealed head);",
+    "`redacted: true` marks missing lines. An entry with `patch.coverage: partial` contains exact",
+    "ancestor diff sections, ordered by `patch.segments`; it is NOT a full file.",
+    "Each segment identifies its source run, endpoints and verified artifact",
+    "byte range. Read all segments together, including intervening revisions.",
+    "`identities` proves whole-blob equality separately from content coverage;",
+    "an unchanged blob does not fill a missing-file, redacted or budget gap.",
+    "Entries carry blob identity, stored-content SHA-256 and criterion ids. This is the",
     "ONLY source beyond the patch you may reason from; there is no repository.",
     "Per criterion, where your evidence comes from:",
     ...coverage,
@@ -480,8 +482,10 @@ function reviewerRepairBrief(problems: readonly ReviewProblem[], signedCriterion
     "REPLY with the corrected review JSON only: no code fence and no prose.",
     "It must keep version 1, a comments array, and—when signed ids are listed",
     "above—exactly one criteria judgement for every listed id. Every comment",
-    "path must occur in REVIEW-DIFF.patch; notes remain non-empty and within",
-    `${REVIEW_LIMITS.note} characters; a judgement on a criterion outside the`,
+    "path must occur in REVIEW-DIFF.patch; notes remain non-empty.",
+    `At most ${REVIEW_LIMITS.comments} comments and ${REVIEW_LIMITS.criteria} criterion judgements.`,
+    REVIEW_NOTE_GUIDANCE,
+    "A judgement on a criterion outside the",
     "patch cites supplied provenance (a ctx-<n> item id, a patch path, or a",
     "sealed file name) or is cannot-tell. Create, write, or edit NOTHING in the",
     "scratch directory; use the same sealed inputs from the original review.",

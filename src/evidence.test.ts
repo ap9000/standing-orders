@@ -51,6 +51,16 @@ describe("reading evidence back, believing nothing", () => {
     if (read.ok) expect(read.content.equals(content)).toBe(true);
   });
 
+  test("stored-byte integrity is independent of shortened or failed capture status", () => {
+    const content = Buffer.from("exit 0\n[output shortened]\n");
+    const key = writeEvidenceFile(root, 1, "check-log.txt", content);
+    const log = record(key, content, { kind: "check-log", bytesOriginal: 100000, truncated: true, captureStatus: "ok" });
+    expect(readVerifiedArtifact(root, log)).toEqual({ ok: true, content });
+    expect(readVerifiedArtifact(root, { ...log, captureStatus: "failed" })).toEqual({ ok: true, content });
+    writeFileSync(join(root, key), Buffer.from(content.toString().replace("exit 0", "exit 1")));
+    expect(readVerifiedArtifact(root, log)).toMatchObject({ ok: false, problem: expect.stringMatching(/hash/) });
+  });
+
   test("a traversal key never reaches the filesystem", () => {
     // The interesting failure is a *record* gone wrong — a row whose key
     // points outside the root must die on shape alone.

@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
 import { run as exec } from "./exec.js";
-import { budgetedStatJson, parseNumstat, readVerifiedArtifact, storeEvidence, writeEvidenceFile } from "./evidence.js";
+import { budgetedStatJson, captureTerminalDiff, parseNumstat, readVerifiedArtifact, storeEvidence, writeEvidenceFile } from "./evidence.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { register } from "./runner.js";
 import { adjudicate, coverageWords, foldReview, matrixWords, semanticCoverage, type CriterionMatrixRow } from "./proof.js";
@@ -30,6 +30,7 @@ import {
   parseReviewContext,
   REVIEW_CONTEXT_LIMITS,
   reviewContextRules,
+  reviewContextCustodyProblem,
   serializeReviewContext,
   type ReviewContextInventory,
 } from "./review-context.js";
@@ -126,8 +127,11 @@ describe("inherited review context (v51)", () => {
   const seed = async (options: {
     provider?: "claude" | "codex";
     extraSourceFiles?: Record<string, string | Buffer>;
+    baseFiles?: Record<string, string | Buffer>;
+    shortenedLog?: boolean;
     guardSource?: string;
     revisionFiles?: Record<string, string>;
+    intermediateFiles?: Record<string, string>;
     revisionRubric?: typeof RUBRIC;
     revisionBaseSha?: "base";
     priorJudgements?: { id: string; judgement: "upholds" | "contradicts" | "cannot-tell"; note: string }[];
@@ -137,13 +141,14 @@ describe("inherited review context (v51)", () => {
     // path, and macOS's tmpdir is a symlink into /private.
     const repo = realpathSync(temp("so-ctx-repo-"));
     git(repo, "init", "-q", "-b", "main");
-    const base = commitFiles(repo, { "README.md": "# fixture\n" }, "base");
+    const base = commitFiles(repo, { "README.md": "# fixture\n", ...options.baseFiles }, "base");
     const source = commitFiles(
       repo,
       { "src/limit.ts": LIMIT_TS, "src/guard.ts": options.guardSource ?? GUARD_TS, "src/report.ts": REPORT_TS, ...(options.extraSourceFiles ?? {}) },
       "feature",
     );
     if (options.revisionBaseSha === "base") git(repo, "checkout", "-q", base);
+    const intermediate = options.intermediateFiles ? commitFiles(repo, options.intermediateFiles, "uncovered change") : null;
     const revision = commitFiles(repo, options.revisionFiles ?? { "src/report.ts": REPORT_TS_V2 }, "revision");
 
     const store = openStore(":memory:");
@@ -187,6 +192,7 @@ describe("inherited review context (v51)", () => {
       screenshots: [],
     };
     const sourceProofArtifact = storeEvidence(store, evidenceRoot, sourceRun, "proof", "proof.json", Buffer.from(JSON.stringify(sourceProof), "utf8"), "agent-authored proof (validated, re-serialized)", T0);
+    const checkLog = options.shortenedLog ? store.getArtifact(storeEvidence(store, evidenceRoot, sourceRun, "check-log", "check-log.txt", Buffer.from("npm test: exit 0\n[output shortened]\nall green\n"), "bounded verification log", T0, { captureStatus: "ok", sourceBytesOriginal: 100000 })) : null;
     store.recordOutcomeFacts(sourceRun, { headRevision: source, handoff: "capped retries" });
     store.finishRun(sourceRun, { outcome: "built", committed: true, now: T0 });
 
@@ -206,8 +212,8 @@ describe("inherited review context (v51)", () => {
         store.raw().prepare(
           `INSERT INTO criterion_review (reviewer_run, source_run, criterion_id, judgement, note, artifact, artifact_sha, author, created_at,
              scope_digest, head_sha, proof_artifact, proof_sha, check_log_artifact, check_log_sha, screenshots_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'reviewer:claude·sonnet', ?, ?, ?, ?, ?, NULL, NULL, '[]')`,
-        ).run(priorReviewer, sourceRun, one.id, one.judgement, one.note, diffRow.id, diffRow.sha256, T0.toISOString(), sourceSealed.scope.digest, source, proofRow.id, proofRow.sha256);
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'reviewer:claude·sonnet', ?, ?, ?, ?, ?, ?, ?, '[]')`,
+        ).run(priorReviewer, sourceRun, one.id, one.judgement, one.note, diffRow.id, diffRow.sha256, T0.toISOString(), sourceSealed.scope.digest, source, proofRow.id, proofRow.sha256, checkLog?.id ?? null, checkLog?.sha256 ?? null);
       }
       store.finishRun(priorReviewer, { outcome: "no-change", reason: "reviewed — 0 comment(s), 2 judgement(s)", now: T0 });
     }
@@ -238,7 +244,7 @@ describe("inherited review context (v51)", () => {
     const revisionSealed = approve(store, revisionTaskId, "alex", T0, revisionScope.digest, alex.token);
     if (!revisionSealed.ok) throw new Error(`approve revision: ${revisionSealed.reason}`);
     const revisionRun = store.startRun({ taskRef: revisionTaskRef, leaseId: "lease-rev", runner: "builder-1", branch: `standing-orders/${revisionTaskId}`, worktree: repo, provider: "claude", model: "sonnet", now: T0, ...presented(store, revisionTaskRef) });
-    const revisionBase = options.revisionBaseSha === "base" ? base : source;
+    const revisionBase = options.revisionBaseSha === "base" ? base : intermediate ?? source;
     store.stampRun(revisionRun, { scopeDigest: revisionSealed.scope.digest, baseRevision: revisionBase });
     const revisionPatch = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--no-color", revisionBase, revision);
     storeEvidence(store, evidenceRoot, revisionRun, "terminal-diff", "terminal-diff.patch", Buffer.from(`${revisionPatch}\n`, "utf8"), `git diff ${revisionBase} ${revision} (exit 0)`, T0, { captureStatus: "ok" });
@@ -264,6 +270,121 @@ describe("inherited review context (v51)", () => {
       root: f.evidenceRoot,
       now: () => T0,
     });
+
+  test.each(["intact", "tampered", "missing", "failed", "changed-scope"] as const)("shortened check log: %s keeps integrity separate from completeness", async variant => {
+    const f = await seed({ shortenedLog: true });
+    const log = f.store.artifactsFor(f.sourceRun).find(one => one.kind === "check-log")!;
+    expect(log.truncated).toBe(true);
+    expect(readVerifiedArtifact(f.evidenceRoot, log).ok).toBe(true);
+    if (variant === "tampered") writeFileSync(join(f.evidenceRoot, log.key), "tampered".padEnd(log.bytesStored));
+    if (variant === "missing") rmSync(join(f.evidenceRoot, log.key));
+    if (variant === "failed") f.store.raw().prepare("UPDATE artifact SET capture_status = 'failed' WHERE id = ?").run(log.id);
+    if (variant === "changed-scope") f.store.raw().prepare("UPDATE run SET scope_digest = 'changed' WHERE id = ?").run(f.sourceRun);
+    const inventory = (await capture(f))!.inventory;
+    if (variant === "changed-scope") {
+      expect(inventory.priorReview).toEqual([]);
+      expect(inventory.gaps.some(one => one.reason === "source-scope-changed")).toBe(true);
+    } else expect(inventory.priorReview.map(one => one.support)).toEqual([variant === "intact" ? "eligible" : "invalid", variant === "intact" ? "eligible" : "invalid"]);
+    if (variant === "intact") {
+      expect(inventory.priorReview.every(one => one.bindingsVerified)).toBe(true);
+      expect(reviewContextCustodyProblem(f.store, f.evidenceRoot, inventory)).toBeNull();
+      writeFileSync(join(f.evidenceRoot, log.key), "tampered".padEnd(log.bytesStored));
+      expect(reviewContextCustodyProblem(f.store, f.evidenceRoot, inventory)).toMatch(/check-log/);
+    }
+  });
+
+  test("large unchanged files preserve identity and exact bounded patches; a small CSS revision stays partial", async () => {
+    const padding = "// existing code\n".repeat(5000);
+    const f = await seed({
+      baseFiles: { "src/guard.ts": padding + GUARD_TS.replace("n < 3", "n < 9"), "src/serve.ts": padding + ".button { color: red; }\n", "src/store.ts": padding + "const retries = 9;\n" },
+      guardSource: padding + GUARD_TS,
+      extraSourceFiles: { "src/serve.ts": padding + ".button { color: blue; }\n", "src/store.ts": padding + "const retries = 3;\n" },
+      revisionFiles: { "src/report.ts": REPORT_TS_V2, "src/serve.ts": padding + ".button { color: green; }\n" },
+      shortenedLog: true,
+    });
+    const inventory = (await capture(f))!.inventory;
+    expect(inventory.schema).toBe(2);
+    for (const path of ["src/guard.ts", "src/serve.ts", "src/store.ts"]) {
+      const item = inventory.items.find(one => one.path === path)!;
+      expect(item.patch?.coverage).toBe("partial");
+      expect(item.bytes).toBeLessThan(REVIEW_CONTEXT_LIMITS.itemBytes);
+      expect(item.sha256).toBe(sha256(item.content));
+      expect(item.content).not.toBe(padding + GUARD_TS);
+      for (const segment of item.patch!.segments) {
+        const artifact = f.store.getArtifact(segment.artifact)!;
+        const read = readVerifiedArtifact(f.evidenceRoot, artifact);
+        expect(read.ok).toBe(true);
+        if (read.ok) expect(item.content).toContain(read.content.subarray(segment.offset, segment.offset + segment.bytes).toString("utf8"));
+      }
+      expect(inventory.identities!.find(one => one.path === path)).toMatchObject({ blob: git(f.repo, "rev-parse", `${f.shas.revision}:${path}`), unchangedSinceSource: path !== "src/serve.ts" });
+    }
+    const css = inventory.items.find(one => one.path === "src/serve.ts")!;
+    expect(css.patch!.segments.map(one => one.run)).toEqual([f.sourceRun, f.revisionRun]);
+    expect(css.content).toContain("-.button { color: red; }");
+    expect(css.content).toContain("+.button { color: green; }");
+    expect(inventory.priorReview.find(one => one.criterionId === "c2")).toMatchObject({ relevantUnchanged: true, bindingsVerified: true, support: "eligible" });
+    expect(inventory.coverage.find(one => one.id === "c2")).toMatchObject({ state: "gap", priorSupport: "eligible", gaps: [expect.stringContaining("full-file context is missing")] });
+    expect(parseReviewContext(serializeReviewContext(inventory))).toEqual({ ok: true, inventory });
+    const matrix = adjudicateRevision(f, inventory);
+    expect(matrix.every(one => one.review === null)).toBe(true);
+    expect(semanticCoverage(matrix, "strict")).toMatchObject({ upheld: [], satisfied: null });
+    expect(reviewContextCustodyProblem(f.store, f.evidenceRoot, inventory)).toBeNull();
+    const forged = structuredClone(inventory);
+    forged.items.find(one => one.path === "src/guard.ts")!.patch!.segments[0]!.offset++;
+    expect(reviewContextCustodyProblem(f.store, f.evidenceRoot, forged)).toMatch(/exact source bytes/);
+    expect(parseReviewContext(JSON.stringify({ ...inventory, schema: 1 })).ok).toBe(false);
+    expect(parseReviewContext(JSON.stringify({ ...inventory, schema: 99 })).ok).toBe(false);
+    const hiddenGap = structuredClone(inventory);
+    hiddenGap.coverage.find(one => one.id === "c2")!.state = "context";
+    expect(parseReviewContext(serializeReviewContext(hiddenGap))).toMatchObject({ ok: false, problem: expect.stringContaining("partial patches require") });
+    const unsupported = structuredClone(inventory);
+    const partial = unsupported.items.find(one => one.patch)!;
+    delete partial.patch;
+    expect(parseReviewContext(serializeReviewContext(unsupported))).toMatchObject({ ok: false, problem: expect.stringContaining("git blob identity") });
+  });
+
+  test("a large file changed outside the sealed revision intervals is an explicit gap even if the final blob reverts", async () => {
+    const padding = "// existing code\n".repeat(5000);
+    const f = await seed({ baseFiles: { "src/guard.ts": padding + "old\n" }, guardSource: padding + GUARD_TS, intermediateFiles: { "src/guard.ts": padding + "uncovered\n" }, revisionFiles: { "src/guard.ts": padding + GUARD_TS, "src/report.ts": REPORT_TS_V2 } });
+    const inventory = (await capture(f))!.inventory;
+    expect(inventory.identities!.find(one => one.path === "src/guard.ts")?.unchangedSinceSource).toBe(true);
+    expect(inventory.items.some(one => one.path === "src/guard.ts")).toBe(false);
+    expect(inventory.coverage.find(one => one.id === "c2")).toMatchObject({ state: "gap", priorSupport: "invalid", gaps: expect.arrayContaining([expect.stringContaining("uncovered changes")]) });
+  });
+
+  test("an unrelated criterion change does not discard useful partial evidence for an unchanged criterion", async () => {
+    const padding = "// existing code\n".repeat(5000);
+    const rubric = RUBRIC.map(one => one.id === "c1" ? { ...one, statement: "The limiter caps retries at two." } : one);
+    const f = await seed({ revisionRubric: rubric, baseFiles: { "src/guard.ts": padding + "old\n" }, guardSource: padding + GUARD_TS });
+    const inventory = (await capture(f, rubric))!.inventory;
+    expect(inventory.items.find(one => one.path === "src/guard.ts")?.patch?.coverage).toBe("partial");
+    expect(inventory.priorReview.find(one => one.criterionId === "c2")?.support).toBe("eligible");
+    expect(inventory.priorReview.find(one => one.criterionId === "c1")?.support).toBe("invalid");
+  });
+
+  test.each(["binary", "redacted", "over-budget"] as const)("large %s source context remains an honest gap", async variant => {
+    const padding = "// existing code\n".repeat(5000);
+    const before = variant === "binary" ? Buffer.alloc(80000) : padding + "old\n";
+    const after = variant === "binary" ? Buffer.concat([Buffer.alloc(80000), Buffer.from([1])]) : variant === "redacted" ? padding + "// AKIAABCDEFGHIJKLMNOP\n" : padding + "x".repeat(REVIEW_CONTEXT_LIMITS.itemBytes + 1) + "\n";
+    const f = await seed({ baseFiles: { "src/guard.ts": before }, extraSourceFiles: { "src/guard.ts": after } });
+    const inventory = (await capture(f))!.inventory;
+    expect(inventory.items.some(one => one.path === "src/guard.ts")).toBe(false);
+    expect(inventory.gaps.some(one => one.path === "src/guard.ts" && one.reason === (variant === "binary" ? "binary" : variant === "redacted" ? "secret-redacted" : "over-limit"))).toBe(true);
+    expect(inventory.coverage.find(one => one.id === "c2")?.state).toBe("gap");
+    if (variant !== "over-budget") expect(inventory.priorReview.find(one => one.criterionId === "c2")?.support).toBe("invalid");
+  });
+
+  test("partial ancestor patches share the existing aggregate budget and never shed middle segments", async () => {
+    const padding = "// existing code\n".repeat(5000);
+    const paths = Array.from({ length: 6 }, (_, i) => `src/large-${i}.ts`);
+    const f = await seed({ baseFiles: Object.fromEntries(paths.map(path => [path, padding])), extraSourceFiles: Object.fromEntries(paths.map(path => [path, padding + "x".repeat(34000) + "\n"])) });
+    const inventory = (await capture(f))!.inventory;
+    expect(inventory.items.filter(one => one.patch)).toHaveLength(5);
+    expect(inventory.items.reduce((sum, one) => sum + one.bytes, 0)).toBeLessThanOrEqual(REVIEW_CONTEXT_LIMITS.aggregateBytes);
+    expect(inventory.gaps.some(one => one.reason === "aggregate-limit" && one.path === paths[5])).toBe(true);
+    expect(inventory.items.some(one => one.path === paths[5])).toBe(false);
+    expect(inventory.identities!.find(one => one.path === paths[5])?.unchangedSinceSource).toBe(true);
+  });
 
   /** Store the matrix a builder would save for the revision run, coverage attached. */
   const adjudicateRevision = (f: Fixture, inventory: ReviewContextInventory, rubric = RUBRIC): CriterionMatrixRow[] => {
@@ -445,7 +566,7 @@ describe("inherited review context (v51)", () => {
       });
       const inventory = (await capture(f))!.inventory;
       const reasons = new Map(inventory.gaps.map(one => [`${one.reason}:${one.path}`, one]));
-      expect(reasons.get("over-limit:src/big.ts")?.detail).toMatch(/exceeds the .*item limit/);
+      expect(inventory.gaps.some(one => one.path === "src/big.ts" && one.reason === "over-limit" && /exceeds the .*item limit/.test(one.detail))).toBe(true);
       expect(reasons.get("binary:assets/dot.png")?.detail).toMatch(/not UTF-8 text/);
       expect(reasons.get("secret-redacted:src/guard.ts")?.criteria).toEqual(["c2", "c4"]);
       expect(inventory.items.some(one => one.path === "src/big.ts" || one.path === "assets/dot.png")).toBe(false);
@@ -477,14 +598,18 @@ describe("inherited review context (v51)", () => {
       liar.priorReview[0]!["ancestryVerified"] = false;
       expect(parseReviewContext(JSON.stringify(liar))).toMatchObject({ ok: false, problem: expect.stringMatching(/claims eligibility/) });
       expect(parseReviewContext("nope")).toMatchObject({ ok: false });
+      const legacy = { ...inventory, schema: 1, identities: undefined };
+      expect(parseReviewContext(JSON.stringify(legacy))).toMatchObject({ ok: true, inventory: { schema: 1 } });
     });
   });
 
-  test("a second revision retains grandparent paths and re-captures them at its own head", async () => {
-    const f = await seed();
+  test.each(["complete files", "partial CSS patches"])("a second revision retains grandparent %s and every intervening change", async variant => {
+    const padding = "// existing code\n".repeat(5000);
+    const large = variant === "partial CSS patches";
+    const f = await seed(large ? { baseFiles: { "src/guard.ts": padding + ".button { color: red; }\n" }, guardSource: padding + ".button { color: blue; }\n", revisionFiles: { "src/guard.ts": padding + ".button { color: green; }\n", "src/report.ts": REPORT_TS_V2 } } : {});
     await capture(f);
     const proof = JSON.parse(readFileSync(join(f.evidenceRoot, f.store.getArtifact(f.sourceProofArtifact)!.key), "utf8"));
-    proof.changed = ["src/report.ts"];
+    proof.changed = [...patchPathsOf(f.repo, f.shas.source, f.shas.revision)];
     for (const criterion of proof.criteria) criterion.evidence = [{ kind: "check", ref: "npm test" }];
     storeEvidence(f.store, f.evidenceRoot, f.revisionRun, "proof", "proof.json", Buffer.from(JSON.stringify(proof)), "proof", T0);
     const brief = Buffer.from(JSON.stringify({ schema: 1, sourceTask: f.revisionTaskId, sourceRun: f.revisionRun, sourceScopeDigest: f.store.getScope(f.revisionTaskId)!.digest, head: f.shas.revision, comments: [] }));
@@ -494,15 +619,24 @@ describe("inherited review context (v51)", () => {
     const ref = f.store.refFor("built-in", child.id).id;
     const scope = approve(f.store, child.id, "alex", T0, f.store.getScope(child.id)!.digest, f.approverToken);
     if (!scope.ok) throw new Error(scope.reason);
-    const head = commitFiles(f.repo, { "src/report.ts": REPORT_TS_V2 + "// next revision\n" }, "next revision");
+    const head = commitFiles(f.repo, { "src/report.ts": REPORT_TS_V2 + "// next revision\n", ...(large ? { "src/guard.ts": padding + ".button { color: purple; }\n" } : {}) }, "next revision");
     const run = f.store.startRun({ taskRef: ref, leaseId: "next", runner: "builder-1", branch: "next", worktree: f.repo, provider: "claude", model: "sonnet", now: T0, ...presented(f.store, ref) });
     f.store.stampRun(run, { scopeDigest: scope.scope.digest, baseRevision: f.shas.revision });
     f.store.recordOutcomeFacts(run, { headRevision: head });
     f.store.finishRun(run, { outcome: "built", committed: true, now: T0 });
-    const captured = await captureReviewContext(f.store, exec, { runId: run, taskRef: ref, head, base: f.shas.revision, rubric: RUBRIC, patchPaths: new Set(["src/report.ts"]), worktree: f.repo, root: f.evidenceRoot, now: () => T0 });
+    await captureTerminalDiff(f.store, exec, f.repo, f.shas.revision, head, f.evidenceRoot, run, T0);
+    const captured = await captureReviewContext(f.store, exec, { runId: run, taskRef: ref, head, base: f.shas.revision, rubric: RUBRIC, patchPaths: patchPathsOf(f.repo, f.shas.revision, head), worktree: f.repo, root: f.evidenceRoot, now: () => T0 });
     expect(captured?.inventory.bindings?.map(one => one.run)).toEqual([f.sourceRun, f.revisionRun]);
     expect(captured?.inventory.items.find(one => one.path === "src/limit.ts")).toMatchObject({ commit: head, content: LIMIT_TS, criteria: expect.arrayContaining(["c1"]) });
     expect(captured?.inventory.coverage.find(one => one.id === "c1")).toMatchObject({ state: "context", paths: ["src/limit.ts"], gaps: [] });
+    if (large) {
+      const item = captured!.inventory.items.find(one => one.path === "src/guard.ts")!;
+      expect(item.patch!.segments.map(one => one.run)).toEqual([f.sourceRun, f.revisionRun, run]);
+      for (const color of ["red", "blue", "green", "purple"]) expect(item.content).toContain(`color: ${color}`);
+      expect(captured!.inventory.coverage.find(one => one.id === "c2")?.state).toBe("gap");
+      expect(parseReviewContext(serializeReviewContext(captured!.inventory)).ok).toBe(true);
+      expect(reviewContextCustodyProblem(f.store, f.evidenceRoot, captured!.inventory)).toBeNull();
+    }
   });
 
   test("a changed evidence requirement invalidates a previous judgement even with identical criterion text", async () => {
@@ -603,6 +737,34 @@ describe("inherited review context (v51)", () => {
       expect(parseReviewContext(inlineContext!.content)).toMatchObject({ ok: true, inventory: f.inventory });
       expect(f.store.criterionReviewsFor(f.revisionRun).every(row => row.context?.sha256 === artifact.sha256)).toBe(true);
       expect(f.store.criterionReviewsFor(f.revisionRun)[0]?.author).toBe("reviewer:codex·gpt-5.6-sol");
+    });
+
+    test.each(["claude", "codex"] as const)("%s receives partial large-file context with truthful gaps and current judgements only", async provider => {
+      const padding = "// existing code\n".repeat(5000);
+      const f = await readyForReview({ provider, shortenedLog: true, baseFiles: { "src/guard.ts": padding + GUARD_TS.replace("n < 3", "n < 9") }, guardSource: padding + GUARD_TS });
+      const item = f.inventory.items.find(one => one.path === "src/guard.ts")!;
+      expect(item.patch?.coverage).toBe("partial");
+      expect(f.inventory.coverage.find(one => one.id === "c2")?.priorSupport).toBe("eligible");
+      const reports = await passOnce(f, async (_file, argv, options) => {
+        const prompt = provider === "claude" ? String(argv[argv.indexOf("-p") + 1]) : options?.stdin ?? "";
+        expect(prompt).toContain("it is NOT a full file");
+        expect(prompt).toContain("c2: inherited — CONTEXT GAP");
+        const raw = readFileSync(join(options!.cwd!, REVIEW_CONTEXT_NAME), "utf8");
+        expect(parseReviewContext(raw)).toEqual({ ok: true, inventory: f.inventory });
+        if (provider === "codex") {
+          const bundle = JSON.parse(prompt.split("\n").find(line => line.startsWith('[{"name":"REVIEW-DIFF.patch"'))!);
+          expect(bundle.find((one: { name: string }) => one.name === REVIEW_CONTEXT_NAME).content).toBe(raw);
+        }
+        const answer = { version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: `${f.inventory.items.find(one => one.path === "src/limit.ts")!.id} returns 3` }, { judgement: "cannot-tell", note: "Only partial context is available." }) };
+        return { ...OK, stdout: provider === "claude" ? spoken(answer) : [
+          { type: "thread.started", thread_id: "partial-context" },
+          { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(answer) } },
+          { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 10 } },
+        ].map(one => JSON.stringify(one)).join("\n") };
+      });
+      expect(reports[0]?.outcome).toBe("reviewed");
+      expect(f.store.criterionReviewsFor(f.revisionRun).find(one => one.criterionId === "c2")?.judgement).toBe("cannot-tell");
+      expect(f.store.proofVerdictFor(f.revisionRun)!.matrix.find(one => one.id === "c2")?.coverage?.state).toBe("gap");
     });
 
     test("an upholds on an inherited criterion that cites no supplied provenance is refused, the attempt is preserved as failed, and explicit retries remain", async () => {

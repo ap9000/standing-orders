@@ -15,6 +15,13 @@ export const STRUCTURED_REPAIR_ATTEMPTS = 2;
 export const STRUCTURED_REPAIR_MAX_TURNS = 4;
 export const STRUCTURED_REPAIR_TIMEOUT_MS = 5 * 60_000;
 
+/** Native parsing counts UTF-16 code units. JSON Schema counts Unicode
+ * code points, each of which may require two units. Generation uses half
+ * the native note limit so even an all-astral note fits without clipping. */
+export const REVIEW_OUTPUT_LIMITS = { comments: 40, criteria: 12, note: 500, path: 300 } as const;
+export const REVIEW_NOTE_CODE_POINTS = Math.floor(REVIEW_OUTPUT_LIMITS.note / 2);
+export const REVIEW_NOTE_GUIDANCE = `Keep each comment and criterion note to one concise finding and its evidence, at most ${REVIEW_NOTE_CODE_POINTS} Unicode code points (${REVIEW_OUTPUT_LIMITS.note} UTF-16 units). Preserve the conclusion and any needed provenance; omit repeated rubric text.`;
+
 export type StructuredNormalization = {
   text: string;
   changed: boolean;

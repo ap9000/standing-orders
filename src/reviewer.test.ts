@@ -40,6 +40,7 @@ import {
 } from "./reviewer.js";
 import type { Runner } from "./builder.js";
 import type { CriterionMatrixRow } from "./proof.js";
+import { REVIEW_NOTE_GUIDANCE } from "./structured-output.js";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -232,6 +233,18 @@ describe("diff paths and the strict parser", () => {
       );
       if (parsed.ok) throw new Error("expected refusal");
       expect(parsed.problems.map(one => one.reason).join(", ")).toMatch(/note/);
+    });
+
+    test.each(["x".repeat(500), "😀".repeat(250), "e\u0301".repeat(250), "👩‍💻".repeat(100)])("Unicode note bounds use UTF-16 units without trimming conclusions (%#)", note => {
+      expect(note.length).toBe(500);
+      const payload = (commentNote: string, criterionNote: string) => JSON.stringify({ version: 1, comments: [{ path: "src/payouts.ts", note: commentNote }], criteria: [{ id: "c1", judgement: "cannot-tell", note: criterionNote }] });
+      const accepted = parseReview(payload(note, note), paths, new Set(["c1"]));
+      expect(accepted).toMatchObject({ ok: true, comments: [{ note }], criteria: [{ note }] });
+      for (const [comment, criterion] of [[note + "!", note], [note, note + "!"]]) expect(parseReview(payload(comment!, criterion!), paths, new Set(["c1"])).ok).toBe(false);
+    });
+
+    test.each([527, 560, 530, 647, 588, 517, 510])("real-run note length %i remains a strict refusal", length => {
+      expect(parseReview(JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "x".repeat(length) }] }), paths, new Set(["c1"])).ok).toBe(false);
     });
 
     test("more than REVIEW_LIMITS.criteria judgements refuses the whole payload", () => {
@@ -1646,7 +1659,7 @@ describe("the reviewer role in the store", () => {
       expect(store.liveDiffComments(builtRun)[0]?.reviewerRun).toBe(reviews[1]?.id);
     });
 
-    test("a malformed reply is corrected in the same session and the child reviewer authors the one ingest", async () => {
+    test.each(["shape", "Unicode note"])("a malformed %s reply is corrected in the same session and the child reviewer authors the one ingest", async variant => {
       const asked = store.requestReview(builtRun, "alex", T0);
       if (!asked.ok) throw new Error("ask failed");
       let calls = 0;
@@ -1656,11 +1669,12 @@ describe("the reviewer role in the store", () => {
         calls += 1;
         argvSeen.push([...args]);
         timeouts.push(options?.timeoutMs);
-        if (calls === 1) {
-          return { ...OK, stdout: spokenInSession({ version: 1, comments: "not-an-array" }) };
-        }
         const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-        expect(prompt).toContain("comments must be an array");
+        expect(prompt).toContain(REVIEW_NOTE_GUIDANCE);
+        if (calls === 1) {
+          return { ...OK, stdout: spokenInSession({ version: 1, comments: variant === "shape" ? "not-an-array" : [{ path: "src/payouts.ts", note: "😀".repeat(251) }] }) };
+        }
+        expect(prompt).toContain(variant === "shape" ? "comments must be an array" : "note must be a string");
         expect(prompt).toContain("complete signed criterion-id set");
         expect(prompt).toContain("cannot-tell");
         return {
