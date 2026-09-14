@@ -107,6 +107,7 @@ import {
   type ChatDraft,
 } from "./converse.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
+import { TASK_TEXT_LIMITS, validateTaskText } from "./task-text.js";
 import {
   type Artifact,
   type DiffComment,
@@ -6051,6 +6052,18 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 409, "a note in this batch was superseded — reload the result to see the current batch", back);
       }
       const comments = batch;
+      // Keep the subject recognizable, including when revising a revision.
+      // Reserve the suffix before truncating, at whole grapheme boundaries.
+      const suffix = " — revision";
+      const subject = (store.getTask(sourceTaskId)?.title ?? "").trim().replace(/(?: — revision)+$/u, "").trim() || "Task";
+      let prefix = "";
+      for (const { segment } of new Intl.Segmenter("en", { granularity: "grapheme" }).segment(subject)) {
+        if ((prefix + segment + suffix).length > TASK_TEXT_LIMITS.title) break;
+        prefix += segment;
+      }
+      const candidateTitle = `${prefix.trimEnd() || "Task"}${suffix}`;
+      const title = validateTaskText({ title: candidateTitle }) === null ? candidateTitle : `Task${suffix}`;
+      const feedbackKind = comments.every(one => one.path !== null) ? "annotations" : "feedback";
       const terminal = store.artifactsFor(id).find(one => one.kind === "terminal-diff");
       if (terminal !== undefined) {
         const proven = readVerifiedArtifact(evidenceRoot, terminal);
@@ -6111,13 +6124,19 @@ export function createDecisionServer(options: ServeOptions): Server {
             brief: { evidenceRoot, key, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "machine-authored revision brief (exit 0)" },
             child: {
               title: `Revise ${sourceTaskId} from ${comments.length} annotation${comments.length === 1 ? "" : "s"} on build #${id}`,
-              repair: `apply the annotations recorded on build #${id}; the revision brief carries the exact batch`,
+              repair: `apply the ${feedbackKind} recorded on build #${id}; the revision brief carries the exact batch`,
             },
             commentIds: comments.map(one => one.id),
             coverage,
           },
           now,
         );
+        if (result.ok) {
+          // The unchanged legacy title above feeds the store's existing slug
+          // and collision handling. Set only this new row's display title,
+          // atomically with its seal; retries returned earlier, untouched.
+          store.raw().prepare("UPDATE task SET title = ? WHERE id = ?").run(title, result.id);
+        }
         if (result.ok && coverage !== null) {
           // A scope whose profile could not resolve is unapprovable by the
           // human road (approve() refuses) — the mode road refuses too.

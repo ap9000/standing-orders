@@ -141,7 +141,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
       {
         source: { task: taskId, run, scopeDigest },
         brief: writeBrief(s, run, { schema: 1, sourceTask: taskId, sourceRun: run, comments: briefComments(s, run, commentIds) }),
-        child: { title: `Revise ${taskId} from ${commentIds.length} annotation on build #${run}`, repair: `apply the annotations recorded on build #${run}; the revision brief carries the exact batch` },
+        child: { title: `Revise ${taskId} from ${commentIds.length} annotation on build #${run}`, repair: `apply the ${briefComments(s, run, commentIds).every(one => one.path !== null) ? "annotations" : "feedback"} recorded on build #${run}; the revision brief carries the exact batch` },
         commentIds,
         coverage,
       },
@@ -247,7 +247,7 @@ describe("the revision boundary: one policy for annotation, CI, and criterion re
     expect(sealed, JSON.stringify(sealed)).toMatchObject({ ok: true });
     if (!sealed.ok) return;
     const child = store.getScope(sealed.id)!;
-    const repair = `apply the annotations recorded on build #${source.run}; the revision brief carries the exact batch`;
+    const repair = `apply the ${mode === "annotated" ? "annotations" : "feedback"} recorded on build #${source.run}; the revision brief carries the exact batch`;
     expect(Buffer.from(child.goal)).toEqual(Buffer.from(`${goal} — ${repair}`));
     expect(Buffer.from(child.outOfScope!)).toEqual(Buffer.from(outOfScope));
     expect(child).toMatchObject({ approvedAt: null, approvedBy: null, approvedDigest: null, approvedRouteJson: null });

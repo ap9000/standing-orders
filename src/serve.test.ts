@@ -3,7 +3,7 @@
  * phone. Real HTTP against an ephemeral port; only the phone is imaginary.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +23,7 @@ import { projectRoute, readinessWords } from "./phase-routing.js";
 import type { MateProviderAnswer } from "./converse.js";
 import { resultFactsFromHtml } from "./result-review.js";
 import { Window } from "happy-dom";
+import { validateTaskText, TASK_TEXT_LIMITS } from "./task-text.js";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -1088,8 +1089,8 @@ describe("the operations console", () => {
     }
   });
 
-  test.each(["plain", "annotated"])("legacy long %s feedback seals once across lost responses and later batches", async mode => {
-    store.createTask({ id: "t-rev", title: "original work" }, T0);
+  test.each(["plain", "annotated", "mixed"])("legacy long %s feedback seals once across lost responses and later batches", async mode => {
+    store.createTask({ id: "t-rev", title: "Mobile project switcher" }, T0);
     const ref = store.refFor("built-in", "t-rev").id;
     // Synthetic legacy CLI terms, before the new authoring limit applied.
     const goal = "  " + "Réparer 日本語 😀 e\u0301\n".repeat(300) + "  ";
@@ -1135,14 +1136,19 @@ describe("the operations console", () => {
     expect(retried.headers.get("location")).toBe(commented.headers.get("location"));
     expect(store.liveDiffComments(run)).toHaveLength(1);
 
+    if (mode === "mixed") {
+      const plain = await fetch(url(`/r/${run}/comment`), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf, note: "Keep the project name visible.", request: "c".repeat(32) }), redirect: "manual" });
+      expect(plain.status).toBe(303);
+    }
+    const count = mode === "mixed" ? 2 : 1;
     const runView = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
     expect(runView).toContain("tighten the guard here");
-    expect(runView).toContain("1 note ready");
+    expect(runView).toContain(`${count} note${count === 1 ? "" : "s"} ready`);
     expect(runView).toContain(">Create revision</button>");
     // The form names the exact batch and source it displays (repair
     // 2026-09-14); a bare seal is an out-of-date form and is refused.
     const sealForm = revisionFormOf(runView);
-    expect(sealForm.batch).toMatch(/^[0-9]+$/);
+    expect(sealForm.batch).toBe(store.liveDiffComments(run).map(one => one.id).join(","));
     expect(sealForm.source).toBe(store.getScope("t-rev")?.digest ?? "none");
     const bare = await fetch(url(`/r/${run}/revise`), {
       method: "POST",
@@ -1166,12 +1172,16 @@ describe("the operations console", () => {
     // The new task's screen restates the batch beside its own approval —
     // and the scope is unapproved by construction.
     const child = store.getScope(target.slice(3))!;
-    expect(Buffer.from(child.goal)).toEqual(Buffer.from(`${goal} — apply the annotations recorded on build #${run}; the revision brief carries the exact batch`));
+    expect(Buffer.from(child.goal)).toEqual(Buffer.from(`${goal} — apply the ${mode === "annotated" ? "annotations" : "feedback"} recorded on build #${run}; the revision brief carries the exact batch`));
     expect(Buffer.from(child.outOfScope!)).toEqual(Buffer.from(not));
     expect(child).toMatchObject({ approvedAt: null, approvedDigest: null, approvedRouteJson: null });
     expect(store.revisionSourceOf(store.lookupRef(child.taskId)!.id)).toMatchObject({ sourceTask: "t-rev", sourceRun: run });
     const taskView = await (await fetch(url(target), { headers: { cookie } })).text();
-    expect(taskView).toContain("Revise t-rev from 1 annotation on build");
+    expect(store.getTask(child.taskId)?.title).toBe("Mobile project switcher — revision");
+    expect(child.taskId).toBe(`revise-t-rev-from-${count}-annotation${count === 1 ? "" : "s"}-on-build-${run}`);
+    expect(taskView).toContain("Mobile project switcher — revision");
+    expect(taskView).toContain(`href="/r/${run}">build #${run}</a>`);
+    if (mode === "mixed") expect(taskView).toContain("Keep the project name visible.");
     expect(taskView).toContain("the review batch");
     expect(taskView).toContain("tighten the guard here");
     expect(taskView).toContain("t-rev");
@@ -1200,8 +1210,15 @@ describe("the operations console", () => {
     expect(second.status).toBe(303);
     expect(second.headers.get("location")).not.toBe(target);
     expect(store.revisionsFromRun(run)).toHaveLength(2);
+    const laterId = second.headers.get("location")!.slice(3);
+    expect(laterId).toBe(`revise-t-rev-from-1-annotation-on-build-${run}${count === 1 ? "-2" : ""}`);
+    expect(store.getTask(laterId)?.title).toBe("Mobile project switcher — revision");
+    expect(store.getTask(child.taskId)?.title).toBe("Mobile project switcher — revision");
+    expect(store.revisionSourceOf(store.lookupRef(laterId)!.id)).toMatchObject({ sourceTask: "t-rev", sourceRun: run });
+    expect(store.getScope(laterId)?.approvedAt).toBeNull();
     expect(store.liveDiffComments(run)).toHaveLength(0);
     expect(store.getScope("t-rev")).toEqual(original);
+    expect(store.getTask("t-rev")?.title).toBe("Mobile project switcher");
   });
 
   test("the review cockpit ranks an observed CI failure first and the plane never merges (M8.19); a red episode earns the repair draft from the cockpit and the run page (M8.18)", async () => {
@@ -11559,6 +11576,52 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(broken).not.toContain('data-result-report="ok"');
     expect(factsOf(broken)[0]?.evidence).toBe("problems:1");
     expect(broken).toContain("The report cannot be shown:");
+  });
+
+  test.each([
+    ["ASCII limit", "A".repeat(200), "A".repeat(189) + " — revision"],
+    ["astral limit", "😀".repeat(100), "😀".repeat(94) + " — revision"],
+    ["combining limit", "e\u0301".repeat(100), "e\u0301".repeat(94) + " — revision"],
+    ["repeated suffix", "Mobile project switcher — revision — revision", "Mobile project switcher — revision"],
+    ["blank title", "  ", "Task — revision"],
+    ["unavailable parent", null, "Task — revision"],
+  ])("revision names: %s stays canonical through revisions of a revision", async (_label, title, expected) => {
+    let parent = "t-names";
+    let ref = seed(parent, title ?? "Unavailable title");
+    await boot();
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+    for (let generation = 0; generation < 3; generation++) {
+      const original = store.getScope(parent)!;
+      const run = build(parent, ref, RICH);
+      store.stampRun(run, { scopeDigest: original.digest });
+      const csrf = csrfOf(await read(`/r/${run}`));
+      expect((await post(cookie, `/r/${run}/comment`, { csrf, note: "Keep 日本語 😀 e\u0301 exact." })).status).toBe(303);
+      const seal = revisionFormOf(await read(`/r/${run}`));
+      // Simulate an unavailable human-title lookup, not a missing source or lineage.
+      const getTask = store.getTask.bind(store);
+      const unavailable = title === null && generation === 0
+        ? vi.spyOn(store, "getTask").mockImplementation(id => id === parent ? null : getTask(id)) : null;
+      let response: Response;
+      try { response = await post(cookie, `/r/${run}/revise`, { csrf, ...seal }); }
+      finally { unavailable?.mockRestore(); }
+      expect(response.status).toBe(303);
+      const child = response.headers.get("location")!.slice(3);
+      const name = store.getTask(child)!.title;
+      expect(name).toBe(expected);
+      expect(validateTaskText({ title: name })).toBeNull();
+      expect(name.length).toBeLessThanOrEqual(TASK_TEXT_LIMITS.title);
+      expect(Buffer.from(name).toString("utf8")).toBe(name);
+      expect((name.match(/ — revision/g) ?? []).length).toBe(1);
+      expect(store.revisionLineageOf(child, T0)).toMatchObject({ sourceTask: parent, sourceRun: run, root: "t-names" });
+      expect(store.getScope(child)?.approvedAt).toBeNull();
+      expect(store.getScope(parent)).toEqual(original);
+      expect((await post(cookie, `/r/${run}/revise`, { csrf, ...seal })).headers.get("location")).toBe(`/t/${child}`);
+      expect(store.revisionsFromRun(run)).toHaveLength(1);
+      expect(approve(store, child, "alex", T0, store.getScope(child)!.digest, approverToken).ok).toBe(true);
+      parent = child;
+      ref = store.lookupRef(child)!.id;
+    }
   });
 
   test("package 3 c3: a plain note and a line annotation are one batch and one sealed revision; a replayed note and a replayed seal mint nothing; the links run both ways; approval is untouched", async () => {

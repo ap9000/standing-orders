@@ -60,6 +60,8 @@ import { acquire, release } from '../dist/claim.js';
 // The real pilot request's path: its unbroken filename overflowed the
 // expanded task scope at 390px. Keep it verbatim in synthetic signed terms.
 export const LONG_ALLOWED_PATH = 'docs/assessments/WORKSPACE_5_LONG_REQUEST_RESULT_2026-09-14.md';
+// Canonical 200-unit Unicode parent for the revision-name layout boundary.
+export const LONG_REVISION_PARENT = 'Fix the payout rounding drift — ' + '日本語 😀 e\u0301 '.repeat(16) + 'cent fix';
 export const LONG_REQUEST_PATH = 'docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md';
 
 const LONG_GOAL =
@@ -327,7 +329,7 @@ export function startFixture(options = {}) {
   results.failedChecks = finished('csv-quoting', options.statusPresentation ? 'Escape quotes in the CSV writer while preserving every long Japanese 日本語 column name and the full assessment path in the settlement export' : 'Escape quotes in the CSV writer', 6, { verify: { configured: true, ran: true, exitCode: 1 } });
   results.mismatched = finished('range-filter', 'Make the date-range filter inclusive', 7, { overclaim: true });
   results.missingProof = finished('subtotal-rows', 'Add per-currency subtotal rows', 8, { noProof: true });
-  results.attested = finished('excel-bom', 'Emit a UTF-8 BOM for Excel exports', 9, { verify: { configured: false } });
+  results.attested = finished('excel-bom', options.revisionNames ? LONG_REVISION_PARENT : 'Emit a UTF-8 BOM for Excel exports', 9, { verify: { configured: false } });
   results.accepted = finished('export-button', 'Keep the export button keyboard reachable', 10, { noProof: true, accept: 'Checked the export button by hand on two browsers; the proof file was lost when the worktree was cleaned.' });
   results.published = finished('settlement-rounding', 'Round settlement totals at cent precision', 11, { repo: repo2 ?? repo, publication: { pr: 482, checks: 'passing' } });
   results.merged = finished('timezone-boundaries', 'Handle DST boundaries in the range filter', 12, { repo: repo2 ?? repo, publication: { pr: 479, checks: 'passing', remote: 'MERGED' } });
