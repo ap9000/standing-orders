@@ -24,6 +24,11 @@
  *     review is queued, running under a live reviewer, or failed with a
  *     retry left — through the store's own request/admit doors, so every
  *     surface projects the same review facts.
+ *   - workspace package 2 (2026-09-13): a scripted "add a task" reply
+ *     that proposes a NEW task (planning skipped, so confirming it files a
+ *     scope that waits for approval), used by the request → confirm →
+ *     task focus → concise plan → exact approval journey; "slowly" still
+ *     delays a plain reply so a live update can land while typing.
  *
  * Build first (`npm run build`), then `node scripts/ui-polish-fixture.mjs`
  * prints one JSON line with the URL and login. `scripts/ui-polish-proof.mjs`
@@ -379,13 +384,21 @@ export function startFixture(options = {}) {
   };
 
   // --- the scripted conversation ------------------------------------------
+  // Every provider request's latest operator text, context included
+  // (package 2): what the scripted runner — standing in for the model —
+  // was actually handed, so a proof can check the task binding.
+  const requests = [];
   const runner = async request => {
     // The operator's latest message is the last operator turn in history;
     // a tool result step (after a proposal call) answers with plain text.
     const last = [...request.history].reverse().find(one => one.role === 'operator' || one.role === 'tool');
+    requests.push({ role: last?.role ?? null, text: String(last?.text ?? '') });
     if (last?.role === 'tool') return { ok: true, answer: { text: 'Confirm the card below when you are ready; nothing changes until you do.', calls: [], tokensIn: 40, tokensOut: 20, reportedCostMicrousd: null } };
     const text = String(last?.text ?? '').toLowerCase();
     if (text.includes('slowly')) await new Promise(resolve => setTimeout(resolve, options.slowMs ?? 20_000));
+    if (text.includes('add a task') || text.includes('new task')) {
+      return { ok: true, answer: { text: 'Here is a task for the **CSV header row**. Confirm the card to file it; nothing builds until you approve its exact scope.', calls: [{ id: 'task-1', name: 'propose_task', args: { repo: 'r1', title: 'Add a header row to every CSV export', goal: 'Emit one header row naming every column at the top of each exported CSV so spreadsheets open with labelled columns. Keep the existing column order and names exactly as they are.', not: 'No changes to the settlement engine or the ledger schema; no new export formats.', touches: ['src/export/csv.ts', 'src/export/csv.test.ts'], acceptance: [{ id: 'c1', statement: 'Every exported CSV begins with one header row naming each column in the existing order.', evidence: ['check', 'changed-path'] }, { id: 'c2', statement: 'A standard CSV reader parses the header and the rows without warnings.', evidence: ['check'] }], planning: 'skip' } }], tokensIn: 120, tokensOut: 60, reportedCostMicrousd: null } };
+    }
     if (text.includes('pause')) {
       return { ok: true, answer: { text: 'I’ll pause **Rework the portfolio ledger export** so nothing starts before you review it. Confirm the card below.', calls: [{ id: 'hold-1', name: 'propose_hold', args: { task: 'ledger-export', reason: 'Review the export scope before the first attempt.' } }], tokensIn: 120, tokensOut: 30, reportedCostMicrousd: null } };
     }
@@ -399,7 +412,7 @@ export function startFixture(options = {}) {
   return new Promise(resolve => {
     server.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
-      resolve({ url: `http://127.0.0.1:${port}`, name: 'polish-fixture', password: login.token, runId: run, tasks: { long: 'ledger-export', done: 'payout-rounding' }, statusTasks, statusRuns, repos: { main: repo, second: repo2, empty: repo3 }, stop, store });
+      resolve({ url: `http://127.0.0.1:${port}`, name: 'polish-fixture', password: login.token, runId: run, tasks: { long: 'ledger-export', done: 'payout-rounding' }, statusTasks, statusRuns, repos: { main: repo, second: repo2, empty: repo3 }, stop, store, requests });
     });
   });
 }
