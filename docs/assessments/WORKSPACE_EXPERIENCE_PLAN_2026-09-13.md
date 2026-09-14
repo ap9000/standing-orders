@@ -1,6 +1,6 @@
 # Standing Orders: one workspace from request to result
 
-Date: September 13, 2026; status updated September 14. **Packages 0–3 and the final-check receipt repair are merged into main (`235eb91`). Package 4 is implemented and focused-verified locally on `codex/workspace-4-mobile-polish`; its final machine gate and physical-iPhone acceptance remain open. Package 5 remains planned.** The installed app is unchanged; signing/deployment are deferred. The baseline findings below are historical. See [packages 0/1](WORKSPACE_0_1_EXECUTION_2026-09-13.md), [package 2](WORKSPACE_2_INDEPENDENT_REVIEW_2026-09-13.md), [package 3](WORKSPACE_3_RESULT_REVIEW_2026-09-13.md), and [package 4 evidence and remaining gates](WORKSPACE_4_MOBILE_RESULT_2026-09-14.md).
+Date: September 13, 2026; status updated September 14. **Packages 0–3 and the final-check receipt repair are merged into main (`235eb91`). Package 4's source gate passed in Standing Orders run 1558 at `770aba9`, with direction to finalize and push; physical-iPhone acceptance remains open. Package 5's first three real-work pilots are planned, not started.** The installed app is unchanged; signing/deployment are deferred. The baseline findings below are historical. See [packages 0/1](WORKSPACE_0_1_EXECUTION_2026-09-13.md), [package 2](WORKSPACE_2_INDEPENDENT_REVIEW_2026-09-13.md), [package 3](WORKSPACE_3_RESULT_REVIEW_2026-09-13.md), [package 4 evidence and remaining gates](WORKSPACE_4_MOBILE_RESULT_2026-09-14.md), and [the three-task pilot plan](WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md).
 
 ## 1. The outcome
 
@@ -237,6 +237,8 @@ Measure cold and warm transfer on identical fixtures. Prefer extracting shared s
 - No new runtime UI/animation dependency. No timing-sensitive sleeps masquerading as screenshot correctness.
 
 ### Package 5 — real-work pilot, release acceptance, and scoring
+
+**Next three tasks:** [long-request revisions, consistent task status, and recognizable revision names](WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md). Each has bounded scope, concrete acceptance and a real chat-to-result journey. They are the first cohort, not a claim that the wider acceptance below is complete.
 
 **Change:** move from a polished test fixture to a demonstrated installed experience.
 

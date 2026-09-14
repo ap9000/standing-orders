@@ -1,8 +1,19 @@
-# Package 4 — mobile refinement, implemented locally
+# Package 4 — mobile refinement, source verified
 
 Source candidate: `23be6e048b324a20fd05af1c52d76acf17db1b57`, branch `codex/workspace-4-mobile-polish`, based on `235eb9188c4a7e4f5df0d3023ecf47d712ce4797`. September 14, 2026. Subsequent assessment/roadmap edits are documentation only.
 
-**Implemented and focused-verified; not release-verified, merged, or deployed.** This was direct implementation with disposable synthetic fixtures, not a new subscription-backed Standing Orders build. There is no new task/run/scope digest or model-run claim. The installed app and live database were not changed. The full repository verifier is reserved for Standing Orders' final candidate gate under the lean-verification policy; it has not run for this branch.
+**Source verified through Standing Orders; physical-phone acceptance and deployment remain open.** The UI implementation used disposable synthetic fixtures. A subsequent subscription-backed release-validation task independently reviewed the bounded source diff and passed the unchanged full verifier. It did not rebuild the UI or independently repeat the browser captures. The installed app is unchanged; the live database now includes the validation task described below.
+
+## Final native gate — September 14
+
+- Task `workspace-4-release-validation-20260914`, scope `e2939ea437c5f34c43d6196b506df360`, run **1558**. Actual route: **Codex / gpt-6-astra / subscription**. No new dollar cap, permission setting or agent time limit.
+- Base `2d54e48647fce6a373ab469197d3ea5ceaffc24a`; machine-committed head `770aba98e04992a27ee65837d6e5a6e46e0ee3f4`. The only new file is the [bounded release assessment](WORKSPACE_4_RELEASE_VALIDATION_2026-09-14.md). Runtime and tests are identical to `23be6e0`; subsequent roadmap/status edits are documentation only.
+- The unchanged approved command ran **once**, exit **0**: `npm run typecheck && npm test -- --run --reporter=dot --no-file-parallelism && npm run build`. **166 test files passed; 2,871 tests passed, 23 skipped** (existing suite/platform conditions; no new skips). Vitest reported 297.80 seconds. No duplicate full-suite run by the reviewer.
+- Native result: task **done**, proof **verified**, both signed criteria **pass**, **Ready to review**. The agent's honest pending-verification criterion was resolved by the machine check, not an approval exception.
+- Check artifact `1558/check-log.txt`, SHA-256 `f6b0a728f270f7ec8b231385798b087d37aa092fa4ac0c175d8037ab6910c2a4`; stored bytes match the recorded hash. Capture status is `ok`, but the artifact is marked truncated. It retains the command, exit status and test summary; it is not a complete raw transcript.
+- Earlier attempt **1557** refused before starting a provider: standalone CLI `build` defaulted to Claude despite the approved Astra route. The normal queue workflow started the approved route correctly. This operator workaround is recorded, not counted as autonomous recovery; the separate CLI parity fix is in the [pilot backlog](WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md). The queue considered only one actual dispatch; the pre-existing `nightly-deps` routine was refused for missing current acceptance terms and did not run.
+
+The assessment below preserves the original implementation evidence and its limitations. Source verification is not physical-device certification or proof that the installed app has updated.
 
 ## What changed
 
@@ -67,7 +78,7 @@ Initial CSS was 34,931 transferred bytes (185,672 decoded). After removing the r
 
 ## Remaining gates
 
-1. Run the unchanged approved full verifier once at Standing Orders' final gate for this candidate, inspect its result and evidence, then obtain merge/release direction. No native verified result is claimed here.
+1. **Source gate completed** in native run 1558, with user direction to finalize and push. The final GitHub commit includes documentation-only receipt/plan edits; its hosted CI is a separate check, not claimed by the earlier local runtime evidence.
 2. Physical iPhone Safari: soft keyboard/predictive area, browser chrome, safe areas, rotation, foreground/Back and native zoom. Unit visual-viewport shrink and desktop emulation do not certify these. In particular the Android resize-viewport path is unit-informed, not physical-device verified.
-3. Package 5's real subscription-backed chat → result → revision pilot and unfamiliar-user assessment. Do not infer a product-wide 9–10 score from these fixtures.
-4. Signed-Mac installation/access persistence and physical Windows acceptance remain separately deferred. No signing workaround, app replacement, service restart, GitHub push or npm publication occurred in this package.
+3. Package 5's real subscription-backed chat → result → revision pilot and unfamiliar-user assessment. The first three improvements are [planned here](WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md), not started. The release-assessment run is not a completed implementation/revision pilot or a product-wide 9–10 score.
+4. Signed-Mac installation/access persistence and physical Windows acceptance remain separately deferred. No signing workaround, app replacement, service restart or npm publication is included in this source finalization.
