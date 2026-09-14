@@ -12,6 +12,7 @@ import {
   caveatAttributionWords,
   failedMetChecks,
   failedCheckWords,
+  proofSubmissionProblems,
   PROOF_LIMITS,
   type AdjudicateInput,
   type AdjudicateResult,
@@ -83,7 +84,7 @@ describe("parseProof", () => {
       ];
       expect(problemsOf({ ...sound, criteria: dupes })).toContain("criteria[1]-duplicate-id");
     });
-    test("verdict must be one of the three words", () => {
+    test("verdict must be a supported state", () => {
       expect(problemsOf({ ...sound, criteria: [{ id: "c1", statement: "s", verdict: "sort-of", how: "h" }] })).toContain(
         "criteria[0]-bad-verdict",
       );
@@ -194,6 +195,80 @@ describe("parseProof", () => {
     expect(serialized).not.toContain("extraField");
     expect(serialized).not.toContain("\"extra\"");
     expect(JSON.parse(serialized)).toEqual(result.proof);
+  });
+});
+
+describe("machine-owned final check", () => {
+  const statement = "Focused safeguards pass and the approved final check succeeds";
+  const payload = (verdict = "pending-verification") => ({
+    version: 1, criteria: [{ id: "c6", statement, verdict, how: "Focused checks passed; only the machine check remains.", evidence: [{ kind: "check", ref: "focused" }] }],
+    checks: [{ command: "focused", exitCode: 0, summary: "passed" }], changed: ["src/x.ts"], screenshots: [], caveats: [],
+  });
+  const facts = (verdict = "pending-verification"): AdjudicateInput => ({
+    proofArtifactPresent: true, proofParse: parse(payload(verdict)), handoffPresent: true,
+    terminalDiffPresent: true, terminalDiffCaptureStatus: "ok",
+    diffStat: { captured: true, truncated: false, paths: new Set(["src/x.ts"]) }, screenshots: [],
+    approvedCriteria: [{ id: "c6", statement, evidence: ["check"] }],
+    verifyCommand: { configured: true, ran: true, exitCode: 0 },
+  });
+
+  test("resolves an explicit pending answer only after the final check, without rewriting the receipt", () => {
+    const input = facts();
+    const before = JSON.stringify(input.proofParse);
+    expect(adjudicate(input)).toMatchObject({ verdict: "verified", matrix: [{ id: "c6", state: "pass" }] });
+    expect(JSON.stringify(input.proofParse)).toBe(before);
+    const parsed = input.proofParse!;
+    if (!parsed.ok) throw Error("invalid fixture");
+    expect(proofSubmissionProblems(parsed.proof, input.approvedCriteria!)).toEqual([]);
+    expect(parseProof(serializeProof(parsed.proof))).toEqual(parsed);
+  });
+
+  test.each([
+    { configured: false } as const,
+    { configured: true, ran: false } as const,
+    { configured: true, ran: false, failure: "custody-lost" } as const,
+  ])("missing final check remains pending: %j", verifyCommand => {
+    expect(adjudicate({ ...facts(), verifyCommand })).toMatchObject({ verdict: "short", matrix: [{ state: "missing" }] });
+  });
+
+  test("failed final check is refuted, never promoted", () => {
+    expect(adjudicate({ ...facts(), verifyCommand: { configured: true, ran: true, exitCode: 1 } }).verdict).toBe("refuted");
+  });
+
+  test.each(["not-met", "not-checked"])("legacy %s is never guessed to mean pending", verdict => {
+    expect(adjudicate(facts(verdict)).verdict).toBe("short");
+  });
+
+  test("unsigned, extra, or non-check requirements cannot delegate completion", () => {
+    for (const approvedCriteria of [[], [{ id: "other", statement, evidence: ["check"] as const }], [{ id: "c6", statement, evidence: [] }]]) {
+      const input = { ...facts(), approvedCriteria };
+      expect(adjudicate(input).verdict).not.toBe("verified");
+      if (input.proofParse?.ok) expect(proofSubmissionProblems(input.proofParse.proof, approvedCriteria).join(" ")).toContain("signed requirements");
+    }
+  });
+
+  test("failed focused checks, caveats and missing evidence still block", () => {
+    const p = payload();
+    for (const invalid of [
+      { ...p, checks: [{ command: "focused", exitCode: 1, summary: "failed" }] },
+      { ...p, caveats: ["c6: approval behavior is still broken"] },
+      { ...p, checks: [] },
+      { ...p, criteria: [{ ...p.criteria[0], evidence: [...p.criteria[0]!.evidence, { kind: "check", ref: "second" }] }], checks: [...p.checks, { command: "second", exitCode: 1, summary: "failed" }] },
+      { ...p, criteria: [{ ...p.criteria[0], statement: "different terms" }] },
+    ]) expect(adjudicate({ ...facts(), proofParse: parse(invalid) }).verdict).not.toBe("verified");
+    const failed = parse({ ...p, checks: [{ command: "focused", exitCode: 1, summary: "failed" }] });
+    if (!failed.ok) throw Error("invalid fixture");
+    expect(failedMetChecks(failed.proof)).toHaveLength(1);
+    expect(blockingCaveats({ ...failed.proof, caveats: ["c6: unfinished"] })).toHaveLength(1);
+  });
+
+  test("machine success cannot replace screenshots, manual review or a valid sealed diff", () => {
+    const p = payload();
+    const manual = { ...p, criteria: [{ ...p.criteria[0], evidence: [...p.criteria[0]!.evidence, { kind: "manual-review", ref: "eyes required" }] }] };
+    expect(adjudicate({ ...facts(), proofParse: parse(manual), approvedCriteria: [{ id: "c6", statement, evidence: ["check", "manual-review"] }] }).verdict).toBe("short");
+    expect(adjudicate({ ...facts(), approvedCriteria: [{ id: "c6", statement, evidence: ["check", "screenshot"] }] }).verdict).not.toBe("verified");
+    expect(adjudicate({ ...facts(), terminalDiffPresent: false }).verdict).toBe("short");
+    expect(adjudicate({ ...facts(), diffStat: { captured: true, truncated: false, paths: new Set(["elsewhere.ts"]) } }).verdict).toBe("refuted");
   });
 });
 

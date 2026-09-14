@@ -36,7 +36,9 @@ export type CriterionEvidenceRef = { kind: EvidenceKind; ref: string };
 export type ParsedCriterion = {
   id: string;
   statement: string;
-  verdict: "met" | "not-met" | "not-checked";
+  /** pending-verification asserts all agent-owned work is met; only the
+   * machine-owned final check remains. It never upgrades a legacy failure. */
+  verdict: "met" | "not-met" | "not-checked" | "pending-verification";
   how: string;
   /** v39: typed references answering a SIGNED criterion by exact id.
    * `[]` for a criterion the agent added beyond the rubric, or for any
@@ -73,6 +75,9 @@ export function proofSubmissionProblems(proof: ParsedProof, rubric: readonly App
   const changed = new Set(proof.changed);
   const shots = new Set(proof.screenshots.map(one => one.path));
   for (const criterion of proof.criteria) {
+    if (criterion.verdict === "pending-verification" && !rubric.some(one => one.id === criterion.id && one.evidence.includes("check"))) {
+      problems.push(`criterion ${criterion.id} can wait for the final check only when its signed requirements include check evidence`);
+    }
     for (const evidence of criterion.evidence) {
       const resolves = evidence.kind === "check" ? checks.has(evidence.ref)
         : evidence.kind === "changed-path" ? changed.has(evidence.ref)
@@ -254,10 +259,10 @@ function parseCriteria(value: unknown, problems: ProofProblem[]): ParsedCriterio
     const statement = prose(one["statement"], `criteria[${index}].statement`, PROOF_LIMITS.criterionStatement, problems);
     const how = prose(one["how"], `criteria[${index}].how`, PROOF_LIMITS.criterionHow, problems);
     const verdict = one["verdict"];
-    if (verdict !== "met" && verdict !== "not-met" && verdict !== "not-checked") {
+    if (verdict !== "met" && verdict !== "not-met" && verdict !== "not-checked" && verdict !== "pending-verification") {
       problems.push({
         reason: `criteria[${index}]-bad-verdict`,
-        message: `criteria[${index}].verdict must be "met", "not-met", or "not-checked" (got ${describe(verdict)})`,
+        message: `criteria[${index}].verdict must be "met", "not-met", "not-checked", or "pending-verification" (got ${describe(verdict)})`,
       });
       continue;
     }
@@ -416,7 +421,7 @@ function caveatNames(caveat: string, id: string): boolean {
  * caveat order, then criterion order; `[]` for a proof at peace with its
  * own caveats. */
 export function blockingCaveats(proof: Pick<ParsedProof, "criteria" | "caveats">): BlockingCaveat[] {
-  const met = proof.criteria.filter(one => one.verdict === "met");
+  const met = proof.criteria.filter(one => one.verdict === "met" || one.verdict === "pending-verification");
   const out: BlockingCaveat[] = [];
   proof.caveats.forEach((caveat, index) => {
     for (const criterion of met) if (caveatNames(caveat, criterion.id)) out.push({ caveat, index, criterionId: criterion.id });
@@ -435,7 +440,8 @@ export type FailedCheckCitation = { criterionId: string; ref: string; exitCode: 
  * resting on a failing command is not evidence, it is a contradiction the
  * adjudicator fails the row for. A not-met or not-checked criterion may
  * cite a failed check honestly — it is reporting, not claiming — so only
- * `met` counts here. A ref that resolves to no check is a different
+ * `met` and `pending-verification` count here: pending asserts the agent's
+ * own checks already passed. A ref that resolves to no check is a different
  * problem (an unresolved ref), not this one. In criterion order, then
  * evidence order.
  */
@@ -443,7 +449,7 @@ export function failedMetChecks(proof: Pick<ParsedProof, "criteria" | "checks">)
   const checksByCommand = new Map(proof.checks.map(c => [c.command, c] as const));
   const out: FailedCheckCitation[] = [];
   for (const criterion of proof.criteria) {
-    if (criterion.verdict !== "met") continue;
+    if (criterion.verdict !== "met" && criterion.verdict !== "pending-verification") continue;
     for (const evidence of criterion.evidence) {
       if (evidence.kind !== "check") continue;
       const check = checksByCommand.get(evidence.ref);
@@ -733,6 +739,12 @@ function criterionMatrix(
     let anyMissing = false;
     let anyFailed = false;
     let anyManual = false;
+    // Only adjudicate's trusted successful final check resolves this state.
+    // Until then the shared row must not misleadingly read as passed.
+    if (answer.verdict === "pending-verification") {
+      anyMissing = true;
+      detail.push(`criterion "${approved.id}" is waiting for the final check`);
+    }
     // The proof's own caveats outrank its verdict word: a criterion marked
     // `met` that a caveat names is not met by the proof's own admission.
     for (const blocking of proof === null ? [] : blockingCaveats(proof)) {
@@ -848,7 +860,19 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
         : "the proof could not be read";
     return { verdict: "short", reasons: [`the proof is malformed: ${detail}`], matrix: matrixOf(null) };
   }
-  const proof = input.proofParse.proof;
+  const submitted = input.proofParse.proof;
+  const finalCheckPassed = input.verifyCommand.configured && input.verifyCommand.ran && input.verifyCommand.exitCode === 0;
+  const pendingContractValid = proofSubmissionProblems(submitted, approvedCriteria).length === 0;
+  // Resolve only an explicit conditional claim, against THIS run's machine
+  // facts. Never infer intent from prose, modify the sealed receipt, or turn
+  // a genuine not-met/not-checked answer into success. All evidence, caveat,
+  // manual-review and artifact checks below still apply to the resolved copy.
+  const proof: ParsedProof = {
+    ...submitted,
+    criteria: submitted.criteria.map(one => one.verdict === "pending-verification" && finalCheckPassed && pendingContractValid &&
+      approvedCriteria.some(approved => approved.id === one.id && approved.evidence.includes("check") && approved.statement.trim() === one.statement.trim())
+      ? { ...one, verdict: "met" } : one),
+  };
   const matrix = matrixOf(proof);
 
   if (!input.handoffPresent) {
@@ -995,7 +1019,7 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
   if (unmet.length > 0) {
     return {
       verdict: "short",
-      reasons: unmet.map(c => `criterion "${c.statement}" is ${c.verdict === "not-met" ? "not met" : "not checked"}`),
+      reasons: unmet.map(c => `criterion "${c.statement}" is ${c.verdict === "not-met" ? "not met" : c.verdict === "pending-verification" ? "waiting for the final check" : "not checked"}`),
       matrix,
     };
   }

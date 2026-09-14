@@ -13,6 +13,19 @@ const proof = {
 };
 
 describe("canonical signed proof contract", () => {
+  test("preflight accepts an explicit pending final check without inventing its result", () => {
+    const payload = structuredClone(proof);
+    payload.criteria[0]!.verdict = "pending-verification";
+    const dir = mkdtempSync(join(tmpdir(), "so-pending-proof-"));
+    try {
+      writeFileSync(join(dir, "rubric.json"), JSON.stringify(rubric));
+      writeFileSync(join(dir, "proof.json"), JSON.stringify(payload));
+      const result = spawnSync(process.execPath, [resolve("scripts/proof-preflight.mjs"), "--proof", join(dir, "proof.json"), "--rubric", join(dir, "rubric.json")], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   test.each(["suffix", "missing-id", "missing-evidence", "failed-check"])("preflight rejects %s with the same facts as adjudication", kind => {
     const payload = structuredClone(proof);
     if (kind === "suffix") payload.criteria[0]!.statement += " (requires evidence: check, changed-path)";

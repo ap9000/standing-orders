@@ -2996,6 +2996,30 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     expect(store.artifactsFor(req.runId as number).map(one => one.kind)).toContain("check-log");
   });
 
+  test.each([0, 1])("pending final check settles from the machine once (exit %i), with the original receipt retained", async exitCode => {
+    claimIt();
+    const statement = "The safeguards pass and the final repository check succeeds";
+    propose(store, { taskId: "t-1", goal: "add a guard", now: T0, acceptance: [{ id: "c6", statement, how: null, evidence: ["check"] }] });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    store.setVerifyCommand({ repo: REPO, command: "final-check", timeoutMs: 5_000, approvedBy: "alex" }, T0);
+    const proof = { ...soundProof, criteria: [{ id: "c6", statement, verdict: "pending-verification", how: "Focused checks passed; awaiting the machine check.", evidence: [{ kind: "check", ref: "npm test" }] }] };
+    let checks = 0;
+    const req = request({ agent: agentWithProof(proof), verify: async () => {
+      checks++;
+      expect(agentCalls).toHaveLength(1);
+      return { ...OK, code: exitCode, stdout: "final result" };
+    } });
+    expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+    expect(checks).toBe(1);
+    expect(agentCalls).toHaveLength(1); // no extra model turn to restate success
+    expect(agentCalls[0]!.join(" ")).toContain("use pending-verification");
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: exitCode === 0 ? "verified" : "refuted" });
+    const artifact = store.artifactsFor(req.runId as number).find(one => one.kind === "proof")!;
+    const raw = readVerifiedArtifact(join2(wt, ".evidence"), artifact);
+    expect(raw.ok).toBe(true);
+    if (raw.ok) expect(JSON.parse(raw.content.toString("utf8")).criteria[0].verdict).toBe("pending-verification");
+  });
+
   test("a sound proof, an approved verify command that fails: refuted, but the work still commits", async () => {
     claimIt();
     approveScope();

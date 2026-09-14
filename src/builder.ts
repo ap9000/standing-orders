@@ -3260,7 +3260,7 @@ function brief(
     '        above, or a new id for something you found worth recording>",',
     '        "statement": "<restate that criterion\'s statement VERBATIM — an',
     '        answer that alters the signed wording is refuted, not verified>",',
-    '        "verdict": "met" | "not-met" | "not-checked", "how": "<how you',
+    '        "verdict": "met" | "not-met" | "not-checked" | "pending-verification", "how": "<how you',
     '        checked it>", "evidence": [ { "kind": "check" | "screenshot" |',
     '        "changed-path" | "manual-review", "ref": "<for check: the exact',
     '        command string from checks below; for screenshot: the exact path',
@@ -3274,6 +3274,16 @@ function brief(
     '      "screenshots": [ { "path": "<repository-relative path to a PNG or',
     '        JPEG file in the worktree>", "caption": "<what it shows>" },',
     "        ... up to 8 ] }",
+    "  If all your work for a signed criterion is met and ONLY the machine's",
+    "  final repository check remains, use pending-verification. Its signed",
+    "  evidence must include check. Cite checks you actually ran for your part;",
+    "  never invent the final command's exit code or run it a second time.",
+    "  The machine resolves that explicit state only after its approved check",
+    "  succeeds for this candidate and all other required evidence passes.",
+    "  Use not-met for unfinished work and not-checked for untested behavior;",
+    "  those states never become success just because the final check passes.",
+    "  Record this expected wait in the verdict/how, not as a caveat or a",
+    "  follow-up. Caveats are real unresolved exceptions and still block.",
     ...(scope.acceptance.length === 0
       ? []
       : [
