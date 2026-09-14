@@ -502,6 +502,10 @@ export function startFixture(options = {}) {
     if (last?.role === 'tool') return { ok: true, answer: { text: 'Confirm the card below when you are ready; nothing changes until you do.', calls: [], tokensIn: 40, tokensOut: 20, reportedCostMicrousd: null } };
     const text = String(last?.text ?? '').toLowerCase();
     if (text.includes('slowly')) await new Promise(resolve => setTimeout(resolve, options.slowMs ?? 20_000));
+    // Synthetic reproduction of the corrected live chat overflow report.
+    if (text.includes(LONG_REQUEST_PATH.toLowerCase())) {
+      return { ok: true, answer: { text: `Read AGENTS.md and ${LONG_REQUEST_PATH}.\n\nKeep the full path visible: \`${LONG_REQUEST_PATH}\`.`, calls: [], tokensIn: 100, tokensOut: 40, reportedCostMicrousd: null } };
+    }
     if (text.includes('add a task') || text.includes('new task')) {
       return { ok: true, answer: { text: 'Here is a task for the **CSV header row**. Confirm the card to file it; nothing builds until you approve its exact scope.', calls: [{ id: 'task-1', name: 'propose_task', args: { repo: 'r1', title: 'Add a header row to every CSV export', goal: 'Emit one header row naming every column at the top of each exported CSV so spreadsheets open with labelled columns. Keep the existing column order and names exactly as they are.', not: 'No changes to the settlement engine or the ledger schema; no new export formats.', touches: ['src/export/csv.ts', 'src/export/csv.test.ts'], acceptance: [{ id: 'c1', statement: 'Every exported CSV begins with one header row naming each column in the existing order.', evidence: ['check', 'changed-path'] }, { id: 'c2', statement: 'A standard CSV reader parses the header and the rows without warnings.', evidence: ['check'] }], planning: 'skip' } }], tokensIn: 120, tokensOut: 60, reportedCostMicrousd: null } };
     }

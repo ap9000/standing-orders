@@ -1,45 +1,34 @@
-# Package 5 pilot 2 — one task status
+# Package 5 pilot 2 — chat path wrap revision
 
-Chat, Work and task details now read the same display projection. One current status and next action lead; the result receipt takes over when a result exists. All changes remain uncommitted on `standing-orders/show-one-clear-task-status`.
+The corrected chat path now wraps in sent messages and replies, including inline code. The production change is one `overflow-wrap: anywhere` declaration on `.thread .msg`. No message is shortened, hidden or truncated.
 
-## Before and after
+This applies notes 138–139 under the final triage in note 155. The inherited dispatch/control/result presentation, sidebar repair, approvals and other reviewed behavior remain unchanged. The scope/recovery links, result-link behavior and disclosure-refresh trade-off stay as triaged; this revision adds no state rules or chat transport changes.
 
 | Before | After |
 | --- | --- |
-| Task headers and navigation showed raw queued/finished badges beside a different dispatch status. | Headers use Work's dispatch/control/result projection; navigation carries identity without a competing state badge. Approval says **Needs your approval** and **Review plan**. |
-| A journey, status box, review panel and receipt repeated Reviewing. | One receipt leads. Recorded checks and retry controls live in Task options; review history is stated once. Stop remains reachable. |
-| A live review appeared as never finished in the attempt list and last-attempt row. | Both read the existing review/control liveness facts. A live reviewer reads running; an orphaned reviewer still reads unfinished. |
-| Current task controls competed with an older result after a rescope. | The current projection leads; the earlier receipt remains under Previous result, with its own evidence status. No approval is copied. |
-| Refresh could replace a focused control or a draft in the status region. | Refresh defers while a control is focused, a disclosure is open or an input is dirty, including when a response is already in flight. The composer is untouched. |
-| The operator reported a 486px document at 390px: the allowed-files paragraph was 277px wide and scrolled to 435px. | The full reported path wraps with `overflow-wrap: anywhere` on `#scope .scope-paths`. In this synthetic fixture, the paragraph is 288/288px at 390px and 394/394px at desktop; documents are exactly 390px and 1440px wide. |
+| The operator reported a 278px message paragraph scrolling to 402px and a 469px document at 390×844, containing `docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md`. | The existing fixture sends that exact path through both message roles, as plain text and inline code. At 390px, the sent paragraph is 288/288px and both reply paragraphs are 313/313px; the document is exactly 390px. |
+| The exploratory run against the inherited CSS reproduced a 472px phone document after the path reply. That run stopped at a pointer-intercepted conversation control; it was not a passing proof. | The final focused proof passes every check, including real pointer interactions, message geometry, draft recovery and revision creation at both widths. Desktop paragraphs are 606/606px and 705/705px, with a 1440px document. |
+| The allowed-files regression used the separate `WORKSPACE_5_LONG_REQUEST_RESULT_2026-09-14.md` path. | That case still passes unchanged; it is not substituted for the corrected chat-message case. |
 
-The fixture uses the exact reported allowed path, `docs/assessments/WORKSPACE_5_LONG_REQUEST_RESULT_2026-09-14.md`, in both the request and result scope. These measurements are of synthetic data, not a claim about the live task after installation. No path is hidden, truncated or shortened.
+Simplicity inspection: the repair adds no copy, controls or steps. The full path remains readable, the short actions stay on one line with 44px targets, and the chat draft clears the phone tab bar. One status/action still leads each tested view. Stop remains reachable by scrolling on the phone; it is not claimed visible on first paint. The expanded approval screenshots show the declared risk and its consequences before consent. Exact terms and the password field remain available.
 
-The simplicity pass also removed the approval form's misleading “ready to run” caption, moved the result above secondary Stop/agent details, and gave each primary action a 44px target. Failed-check and missing/damaged-evidence wording stays visible; full signed terms, risks, password confirmation, exceptions and preserved work remain accessible.
-
-## Actual checks
+## Actual checks on this candidate
 
 - `npm run typecheck` — passed.
-- `GIT_CEILING_DIRECTORIES="$PWD/output/tmp" TMPDIR="$PWD/output/tmp" npx vitest run src/serve.test.ts src/workspace-ui.test.ts src/task-control-console.test.ts` — 308 passed in three affected suites.
-- `GIT_CEILING_DIRECTORIES="$PWD/output/tmp" TMPDIR="$PWD/output/tmp" node scripts/workspace-proof.mjs --status-only --strict --out output/playwright/workspace-5-status` — 188 passed, zero failed; eight viewport screenshots. The existing proof/fixture supplies this focused mode; no second browser suite ran.
+- `GIT_CEILING_DIRECTORIES="$PWD/output/tmp" TMPDIR="$PWD/output/tmp" npx vitest run src/serve.test.ts src/workspace-ui.test.ts src/task-control-console.test.ts` — 308 tests passed in three affected suites.
+- `GIT_CEILING_DIRECTORIES="$PWD/output/tmp" TMPDIR="$PWD/output/tmp" node scripts/workspace-proof.mjs --status-only --strict --out output/playwright/workspace-5-status` — 196 checks passed, zero failed, ten screenshots.
 - `node --check scripts/workspace-proof.mjs`, `node --check scripts/ui-polish-fixture.mjs` and `git diff --check` — passed.
 
-The temporary directory is inside this worktree. The Git ceiling prevents disposable non-repository fixture directories from accidentally inheriting this worktree's Git repository. The affected test harness builds current `dist/` for its HTTP fixture; this is not the approved full verifier.
+The existing chat-rendering test now checks the corrected path in operator text, plain replies and inline code, retaining its escaping assertions. The unchanged state regressions cover approval, dependency/queue waits, live build/check phases, stopping/stopped, hold, stale approval after rescope, previous results, failures, missing evidence and live/orphaned review history. Focused browser checks compare Work with Chat and task details across thirteen synthetic status cases, plus long content, expanded approval and empty Work.
 
-The regressions cover approval, ordinary queue/dependency waits, raw queued plus a live build claim, both agent-running and verifying-proof phases, stopping/settled pause, hold, stale approval after rescope, a previous result after rescope, failed tasks, failed checks, missing proof, live/orphaned review history, and focus/draft preservation. Existing stop authorization and confirmation tests remain intact.
+Each viewport follows one result journey: receive the path reply while keeping the composer node, draft, focus and selection; reload without losing the draft; open the result; inspect Changes and Checks; reload a feedback draft; save one note; create an unapproved linked revision; return to the preserved chat draft. The existing fixture and proof were extended; no second browser suite or new timeout was added. Disposable fixtures stay under this worktree's `output/tmp`; the Git ceiling prevents fixture directories from inheriting this checkout.
 
-Each browser viewport follows one result journey: open the result, inspect Changes and Checks, preserve and reload a feedback draft, save one note, create an unapproved linked revision, and return to the preserved chat draft. Thirteen synthetic status cases, long titles, full allowed paths, expanded approval and empty Work are also checked. Keyboard actions reveal the actual hold, resume and connection controls. Initial browser inspection caught links aimed at closed disclosures; the repaired links target their controls and pass at both widths.
+All ten final PNGs in [the evidence directory](../../output/playwright/workspace-5-status/) were visually inspected, including desktop/phone `status-chat-path`, `status-failure`, `status-reviewing`, `status-approval` and `status-long-path`. [report.json](../../output/playwright/workspace-5-status/report.json) records assertions and geometry. These are real Chromium captures at 1440×900 and 390×844 of explicitly synthetic cases. The gradient inside result receipts is a labeled fixture image, not a model deliverable.
 
-## Screenshot inspection
+## Candidate and remaining native work
 
-All eight final PNGs in [the evidence directory](../../output/playwright/workspace-5-status/) were inspected: desktop and phone versions of `status-failure`, `status-reviewing`, `status-long-path` and `status-approval`. [report.json](../../output/playwright/workspace-5-status/report.json) records every assertion and measured geometry. These are real Chromium viewport captures of a synthetic fixture at 1440×900 and 390×844, not generated UI mockups or physical-phone acceptance. The gradient inside a receipt is the fixture's labeled evidence image, not a screenshot of a real model deliverable.
+HEAD remains `673a004279abe920c2da3f1141eb1ce4fbe992c4`; all changes are uncommitted on the assigned revision branch. The implementation/test/script fingerprint is `ad8840ca096acd076a7b2978a029fa8cd4b06d05451752b0aec050cec7a63f02`: SHA-256 of compact JSON containing sorted `{path, sha256}` entries for the four changed files under `src/` and `scripts/`. This assessment and evidence/protocol files are excluded to avoid self-reference.
 
-The screenshots show wrapping without document overflow, readable status/error text, one clear primary action and unbroken short button labels. Full approval text uses ordinary vertical scrolling. Native disclosures retain keyboard access and the existing motion policy is unchanged.
+The native machine owns the unchanged approved full verifier for this candidate; it was not run by this revision builder. The affected-test harness rebuilt current `dist/` for its fixtures. The prior build's captured full verification is historical evidence only and does not certify this revision. The signed proof entries await the final repository gate.
 
-## Candidate and handoff
-
-HEAD remains `cab3e6a59819649a2207c2401717e81d668d8da6`. The implementation/test/script fingerprint is `9d5a3be6ecaa82961407de1f3f55ae73cc58af84d9296011a2416e8ebbfb7f56`: SHA-256 of compact JSON containing sorted `{path, sha256}` entries for the six changed files under `src/` and `scripts/`. This assessment and protocol/evidence files are excluded to avoid self-reference. The native machine must bind its final gate to its own candidate.
-
-The lease names runner `workspace5-pilot-20260914`, group `0774c645-ad9a-4d83-9efb-eca6506656c5`. The native ledger owns task/run IDs and actual provider/model/auth stamps; no route or approval settings changed. No subagents, new timeouts, schema/state-machine changes, commits, pushes, signing, publication or deployment occurred.
-
-The signed `agree`, `one-action` and `fit` proof entries await the native final repository gate; the builder did not run the unchanged approved full verifier. Root still owns actual-result inspection and native Opus review. The steering request to inspect the real task was attempted through read-only computer discovery, which reported that the Mac was locked and exposed no browser surfaces. The live task has therefore **not** been re-inspected by this builder; root must check its full allowed path on the native candidate. Independent review, physical-phone/Safari acceptance and a real model revision result are not claimed.
+Root retains actual-result inspection and native Opus review. This builder did not inspect the installed live task or complete independent review, physical-phone/Safari acceptance, or a real model revision result. No original approval was changed or copied; the fixture revision requires fresh approval. No subagents, new timeouts, unrelated cleanup, commits to this worktree, pushes, publication or deployment occurred.

@@ -10643,7 +10643,7 @@ const STYLE = `
     display: flex; flex-direction: column; gap: 1rem; margin: 1rem 0 1.25rem;
     min-height: min(32rem, 48vh); padding: .25rem;
   }
-  .thread .msg { max-width: 48rem; line-height: 1.65; }
+  .thread .msg { max-width: 48rem; line-height: 1.65; overflow-wrap: anywhere; }
   .thread .msg p { margin: .3rem 0; }
   .thread .msg.op {
     align-self: flex-end; max-width: min(82%, 40rem); padding: .75rem 1rem;

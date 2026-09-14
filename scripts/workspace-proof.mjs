@@ -74,7 +74,7 @@ if (rev !== null) {
   execFileSync('node', ['scripts/postbuild.mjs'], { cwd: tree, stdio: 'inherit' });
   fixtureModule = join(tree, 'scripts', 'ui-polish-fixture.mjs');
 }
-const { startFixture, LONG_ALLOWED_PATH } = await import(fixtureModule === null ? './ui-polish-fixture.mjs' : pathToFileURL(resolve(fixtureModule)).href);
+const { startFixture, LONG_ALLOWED_PATH, LONG_REQUEST_PATH } = await import(fixtureModule === null ? './ui-polish-fixture.mjs' : pathToFileURL(resolve(fixtureModule)).href);
 
 async function loadPlaywright() {
   try { return await import('playwright'); } catch { /* not installed here */ }
@@ -375,9 +375,11 @@ async function statusPass() {
     await page.keyboard.press('Enter');
     const approval = await page.locator('#approve').evaluate(el => ({ full: el.querySelector('.approval-goal').textContent, paths: el.querySelector('.approval-boundaries').textContent, password: el.querySelector('input[type="password"]') !== null }));
     check(`one-action ${name}: Review plan opens the full exact terms before password approval`, approval.full === fixture.store.getScope(fixture.tasks.long).goal && approval.paths.includes(LONG_ALLOWED_PATH) && approval.password);
+    const risk = page.locator('#approve .agents-risk-line');
+    await risk.scrollIntoViewIfNeeded();
+    check(`one-action ${name}: the risk and its consequences are reachable before consent`, await risk.isVisible() && (await risk.innerText()).startsWith('Routine: every role uses the everyday configured agent'), await risk.innerText());
     check(`fit ${name}: expanded approval fits`, (await noOverflow(page)).ok);
-    await scrollTo(page, '#approve');
-    await shot(page, `${name}-status-approval`, `${viewport.width}×${viewport.height}: exact signed terms remain available before consent (synthetic fixture)`);
+    await shot(page, `${name}-status-approval`, `${viewport.width}×${viewport.height}: risk and agent terms remain available before consent (synthetic fixture)`);
     await page.locator('.task-plan-review').evaluate(el => { el.open = false; });
     await page.locator('#scope').evaluate(el => { el.open = true; });
     await scrollTo(page, '#scope .scope-paths', 120);
@@ -389,13 +391,28 @@ async function statusPass() {
     await shot(page, `${name}-status-long-path`, `${viewport.width}×${viewport.height}: full ${LONG_ALLOWED_PATH} in allowed paths (synthetic fixture)`);
 
     // The existing native result/feedback/revision journey, once per width.
+    await freshConversation(page);
     await page.goto(`${fixture.url}/chat?task=${fixture.tasks.done}`);
-    if (await page.locator('form[action="/chat/mate/mint"]').count()) {
-      await page.fill('form[action="/chat/mate/mint"] input[name="token"]', fixture.password);
-      await submit(page, 'form[action="/chat/mate/mint"] button[type="submit"]');
-    }
+    // The reported message path is different from the allowed-files case.
+    // Send through the existing scripted runner and let the reply land live.
+    await page.fill('.composer textarea', `Slowly read AGENTS.md and ${LONG_REQUEST_PATH}.`);
+    await page.click('.composer button[type="submit"]');
+    await page.waitForSelector('.chat-thinking');
     const draft = `Unsent ${name} feedback stays here.`;
     await page.fill('.composer textarea', draft);
+    await page.locator('.composer textarea').evaluate(el => { window.__statusComposer = el; el.setSelectionRange(3, 8); });
+    await page.locator('.msg.mate .chat-copy p').filter({ hasText: LONG_REQUEST_PATH }).first().waitFor();
+    const kept = await page.locator('.composer textarea').evaluate(el => ({ same: el === window.__statusComposer, focused: el === document.activeElement, value: el.value, start: el.selectionStart, end: el.selectionEnd }));
+    check(`one-action ${name}: the path reply refresh preserves the composer, draft, focus and selection`, kept.same && kept.focused && kept.value === draft && kept.start === 3 && kept.end === 8, JSON.stringify(kept));
+    const messagePaths = await page.locator('.thread .msg p').filter({ hasText: LONG_REQUEST_PATH }).evaluateAll(els => els.map(el => {
+      const r = el.getBoundingClientRect(), style = getComputedStyle(el);
+      return { role: el.closest('.msg').dataset.messageRole, text: el.textContent, width: el.clientWidth, scroll: el.scrollWidth, left: r.left, right: r.right, overflow: style.overflowX, wrap: style.overflowWrap, clamp: style.webkitLineClamp, document: document.documentElement.scrollWidth };
+    }));
+    check(`fit ${name}: the exact live-pilot chat path wraps in sent text and plain/code replies without clipping`, messagePaths.length === 3 && messagePaths.some(p => p.role === 'operator') && messagePaths.every(p => p.wrap === 'anywhere' && p.overflow === 'visible' && p.clamp === 'none' && p.scroll <= p.width && p.left >= 0 && p.right <= viewport.width && p.document <= viewport.width), JSON.stringify(messagePaths));
+    await scrollTo(page, '.msg.op', 96);
+    await shot(page, `${name}-status-chat-path`, `${viewport.width}×${viewport.height}: full REAL_WORK_PILOT path in sent text and reply, with an unsent draft (synthetic fixture)`);
+    await page.reload();
+    check(`one-action ${name}: reloading the long-message chat preserves the unsent draft`, await page.inputValue('.composer textarea') === draft);
     await page.click('.completion-receipt [data-open-result]');
     await page.waitForSelector('[data-result-tab="changes"]');
     await page.click('[data-result-tab="changes"]');

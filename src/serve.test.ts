@@ -9066,13 +9066,19 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const minted = await post(cookie, "/chat/mate/mint", { csrf, token: approverToken });
     expect(minted.status).toBe(303);
     expect(store.activeMateSession("alex")).toMatchObject({ ceilingMicrousd: 0, spentMicrousd: 0 });
-    subscriptionAnswers.push({ text: "## Fleet status\n\n- **Queue:** calm\n- Run `smoke` next.\n\n<script>bad()</script>", calls: [], tokensIn: 21, tokensOut: 5, reportedCostMicrousd: null });
-    const sent = await post(cookie, "/chat", { csrf, message: "how does it look?" });
+    // The live pilot's chat message overflowed at 390px; the allowed-files
+    // path is a separate case. Keep this exact path in both message roles.
+    const path = "docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md";
+    const message = `Read AGENTS.md and ${path}.`;
+    subscriptionAnswers.push({ text: `## Fleet status\n\n- **Queue:** calm\n- Run \`smoke\` next.\n\n<script>bad()</script>\n\n${message}\n\nKeep \`${path}\` visible.`, calls: [], tokensIn: 21, tokensOut: 5, reportedCostMicrousd: null });
+    const sent = await post(cookie, "/chat", { csrf, message });
     expect(sent.status).toBe(303);
     await settle();
 
     html = await page(cookie);
-    expect(html).toContain('<div class="chat-copy"><h3>Fleet status</h3><ul><li><strong>Queue:</strong> calm</li><li>Run <code>smoke</code> next.</li></ul><p>&lt;script&gt;bad()&lt;/script&gt;</p></div>');
+    expect(html).toContain(`<p style="white-space:pre-wrap">${message}</p>`);
+    expect(html).toContain(`<div class="chat-copy"><h3>Fleet status</h3><ul><li><strong>Queue:</strong> calm</li><li>Run <code>smoke</code> next.</li></ul><p>&lt;script&gt;bad()&lt;/script&gt;</p><p>${message}</p><p>Keep <code>${path}</code> visible.</p></div>`);
+    expect(await stylesOf(html, base)).toContain('.thread .msg { max-width: 48rem; line-height: 1.65; overflow-wrap: anywhere; }');
     expect(html).not.toContain("<script>bad()</script>");
     expect(html).toContain("membership login · no dollar ceiling");
     expect(html).not.toContain("this session: $0.00 of $0.00");
