@@ -11690,16 +11690,36 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const withUnplaced = rowsOf(await page(all, "/work")).map(row => row.id);
     expect(withUnplaced).toHaveLength(200);
     expect(withUnplaced.filter(id => id.startsWith("unplaced-"))).toHaveLength(200);
-    // Past the store's 500-row read ceiling on rows the member cannot see,
-    // Work says its read was cut short instead of claiming emptiness.
+    // 700 newer unplaced tasks the member cannot see (past the legacy
+    // read's 500-row ceiling): the store binds the member's admission and
+    // the unplaced exclusion before the limit, so its permitted work is
+    // listed in full, with no bound and no "read was cut short" notice —
+    // never an empty page (the reviewer's fifth boundary case).
     for (let i = 201; i < 700; i++) store.createTask({ id: `unplaced-${String(i).padStart(3, "0")}`, title: `unplaced task ${i}` }, at(2_000 + i));
     await selectProject(member2, beta);
-    const cut = await page(member2, "/work");
-    expect(rowsOf(cut).map(row => row.id)).toEqual([]);
-    expect(cut).toContain('data-work-empty="all" data-work-bound="unproven"');
-    expect(cut).toContain("Nothing Work could read within its 500-record bound belongs here.");
-    expect(cut).toContain('<p class="meta work-bound" data-work-bound="unproven">Work read its 500-record bound without finding every task in view');
-    expect(cut).not.toContain("Nothing is in progress.");
+    const hidden = await page(member2, "/work");
+    expect(rowsOf(hidden).map(row => row.id).sort()).toEqual(["beta-newest", "t-visible"]);
+    expect(hidden).not.toContain("data-work-bound");
+    expect(hidden).not.toContain("unproven");
+    expect(hidden).not.toContain("500-record");
+    expect(hidden).not.toContain('data-work-empty="all"');
+    expect(countsOf(hidden)).toMatchObject({ Running: 0, Completed: 1 });
+    expect(hidden).toContain('<span class="count">2</span>');
+    // Clearing the selection lands a project-scoped account on its first
+    // admitted project (never a roll-up): alpha's newest 200, still without
+    // an unplaced row, and the bound is the honest 201st-row probe.
+    await selectProject(member2, "");
+    const memberFirst = await page(member2, "/work");
+    const memberFirstRows = rowsOf(memberFirst).map(row => row.id);
+    expect(memberFirstRows).toHaveLength(200);
+    expect(memberFirstRows.every(id => id.startsWith("alpha-"))).toBe(true);
+    expect(memberFirst).toContain('data-work-bound="200"');
+    expect(memberFirst).toContain('<span class="count">200+</span>');
+    // The unrestricted viewer still sees the unplaced rows, newest first.
+    const unrestricted = rowsOf(await page(all, "/work")).map(row => row.id);
+    expect(unrestricted).toHaveLength(200);
+    expect(unrestricted[0]).toBe("unplaced-699");
+    expect(unrestricted.every(id => id.startsWith("unplaced-"))).toBe(true);
   });
 
   test("a review in flight (review fixes, finding 4) leads with one status on Work, the task page, the focused chat, the receipt, the cockpit, and the run page; the earlier verdict stays as history; an older run and an accepted result keep their own words", async () => {

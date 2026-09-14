@@ -403,7 +403,7 @@ try {
     if (name === 'narrow') {
       await openProject(page, fixture.repos.main);
       await page.goto(`${fixture.url}/work`);
-      await shot(page, 'narrow-work-320', 'Work · All at 320×740 with all four filters in one row (fixture)');
+      await shot(page, 'narrow-work-320', 'Work · All at 320×740 with all four filters wholly visible in two rows of two (fixture)');
       const filters320 = await filterBoxes(page, VIEWPORTS.narrow);
       report.filters320 = filters320;
       check('c5 320px: all four Work filters sit inside the viewport and their strip, unclipped, at least 40px tall and 12px type, with no scrolling strip', filters320.map(f => f.label).join('|') === 'All|Needs you|Running|Completed' && filters320.every(f => f.insideViewport && f.insideStrip && !f.clipped && !f.stripScrolls && f.height >= 40 && f.fontPx >= 12 && f.width >= 44), JSON.stringify(filters320));

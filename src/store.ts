@@ -16065,6 +16065,47 @@ export class Store {
     }));
   }
 
+  /**
+   * The Work destination's one bounded page (workspace package 1 query):
+   * the newest tasks the viewer may see, with the viewer's already-proved
+   * admission bound BEFORE the ordering and the limit — never a wider
+   * read post-filtered in the caller. `admitted` is the resolved
+   * permitted repo set: `null` means unrestricted (every placed row),
+   * `[]` means no placed project is permitted (no placed row at all).
+   * `includeUnplaced` says whether NULL-repo rows belong to this viewer;
+   * an account restricted to projects never sees them, so they must not
+   * spend its page. Every predicate is a bound parameter; the limit is
+   * clamped here, not trusted from the caller. Read-only; the legacy
+   * `listTasksScoped` is untouched.
+   */
+  listWorkTasksAdmitted(
+    admitted: readonly string[] | null,
+    includeUnplaced: boolean,
+    limit: number,
+  ): (Task & { repo: string | null })[] {
+    const page = Math.max(1, Math.min(Math.floor(limit), 500));
+    // SQLite accepts an empty IN list, so an empty admission binds as
+    // "no placed row" without any special SQL shape.
+    const rows = this.db
+      .prepare(
+        `SELECT task.*, task_ref.repo AS task_repo FROM task
+         JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+         WHERE ((task_ref.repo IS NULL AND ? = 1)
+             OR (task_ref.repo IS NOT NULL AND (? = 1 OR task_ref.repo IN (${(admitted ?? []).map(() => "?").join(",")}))))
+         ORDER BY task.created_at DESC, task.id DESC LIMIT ?`,
+      )
+      .all(BUILT_IN, includeUnplaced ? 1 : 0, admitted === null ? 1 : 0, ...(admitted ?? []), page);
+    return rows.map(row => ({
+      id: String(row["id"]),
+      title: String(row["title"]),
+      state: String(row["state"]) as TaskState,
+      createdAt: String(row["created_at"]),
+      updatedAt: String(row["updated_at"]),
+      priority: row["priority"] === null || row["priority"] === undefined ? 0 : Number(row["priority"]),
+      repo: row["task_repo"] === null ? null : String(row["task_repo"]),
+    }));
+  }
+
   /** Newest first, because the question is almost always "what just happened". */
   runsFor(taskRef: number): Run[] {
     return this.db

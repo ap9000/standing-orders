@@ -1204,7 +1204,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // is re-proved here.
       const view = parseWorkView(url.searchParams.get("view"));
       const rollup = project === null && !unscopedMode;
-      const { tasks: bounded, truncated, unproven } = workTasksInView(project);
+      const { tasks: bounded, truncated } = workTasksInView(project);
       const rows = bounded.map(task => workRowOf(task, now));
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       return sendScreen(
@@ -1214,7 +1214,6 @@ export function createDecisionServer(options: ServeOptions): Server {
           view,
           rows,
           truncated,
-          unproven,
           cap: WORK_PAGE,
           multiProject: new Set(bounded.map(task => task.repo ?? "")).size > 1,
           csrf,
@@ -3107,66 +3106,30 @@ export function createDecisionServer(options: ServeOptions): Server {
    * lists. Saturated when the page is full — never a sum of unbounded reads. */
   function needsYouCount(project: string | null): { count: number; saturated: boolean } {
     const now = clock();
-    const { tasks, truncated, unproven } = workTasksInView(project);
+    const { tasks, truncated } = workTasksInView(project);
     let count = 0;
     for (const task of tasks) if (task.state !== "cancelled" && needsPerson(diagnoseTaskDispatch(store, task.id, now))) count += 1;
-    return { count, saturated: truncated || unproven };
+    return { count, saturated: truncated };
   }
-
-  /** Newest first, exactly as the store's own task page orders. */
-  const newestTaskFirst = (a: Task, b: Task): number =>
-    a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
 
   /**
    * The one bounded page Work and its counts read (independent review,
-   * 2026-09-13, finding 1): admission binds BEFORE the limit, and one
-   * extra row probes for overflow so the page can say "there are more"
-   * instead of silently stopping at the cap. With a project open the
-   * store's project-bound query is the bound. In the roll-up the admission
-   * list is enumerated project by project, each bounded to the page plus
-   * its probe, then merged newest first — so newer tasks in a repository
-   * the ceiling excludes can never consume the window an admitted task
-   * belongs in. Unplaced rows ride every project-bound query the store
-   * makes; a viewer who may see them keeps them in view exactly as before,
-   * and for a viewer who may not (a project-scoped account) the read
-   * widens — up to the store's own 500-row ceiling — until the visible
-   * rows fill the probe or the read runs dry. Past that ceiling the page
-   * says its read was cut short rather than claiming nothing is there.
+   * 2026-09-13, finding 1; workspace package 1 query): the viewer's
+   * admission binds in the store's SQL BEFORE the ordering and the limit,
+   * and one extra row probes for overflow so the page can say "there are
+   * more" instead of silently stopping at the cap. The permitted repo set
+   * is the open project, else the admission list (null = unrestricted,
+   * empty = no placed project); unplaced rows join the read only when
+   * this viewer may see them (`visible(null)`), so rows a project-scoped
+   * account cannot see never spend its page — however many there are.
    * Every row's repo is still re-proved through `visible` — the query is
    * the bound, that check is the law.
    */
-  function workTasksInView(project: string | null): { tasks: (Task & { repo: string | null })[]; truncated: boolean; unproven: boolean } {
-    const admission = project === null ? admissionList() : null;
-    const probe = WORK_PAGE + 1;
-    let exhausted = false;
-    const read = (repo: string | null): (Task & { repo: string | null })[] => {
-      let limit = probe;
-      for (;;) {
-        const rows = store.listTasksScoped(repo, undefined, limit, null);
-        const kept = rows.filter(task => visible(task.repo));
-        if (kept.length >= probe || rows.length < limit) return kept;
-        if (limit >= WORK_READ_CEILING) {
-          exhausted = true;
-          return kept;
-        }
-        limit = Math.min(WORK_READ_CEILING, limit * 2);
-      }
-    };
-    const repos: (string | null)[] = admission === null ? [project] : admission.length === 0 ? [null] : admission;
-    const seen = new Set<string>();
-    const candidates: (Task & { repo: string | null })[] = [];
-    for (const repo of repos) {
-      for (const task of read(repo)) {
-        if (seen.has(task.id)) continue;
-        seen.add(task.id);
-        candidates.push(task);
-      }
-    }
-    if (repos.length > 1) candidates.sort(newestTaskFirst);
-    const admitted = new Set(admission ?? []);
-    const inView = candidates.filter(task => admission === null || task.repo === null || admitted.has(task.repo));
-    const truncated = inView.length > WORK_PAGE;
-    return { tasks: inView.slice(0, WORK_PAGE), truncated, unproven: exhausted && !truncated };
+  function workTasksInView(project: string | null): { tasks: (Task & { repo: string | null })[]; truncated: boolean } {
+    const admitted = project === null ? admissionList() : [project];
+    const rows = store.listWorkTasksAdmitted(admitted, visible(null), WORK_PAGE + 1);
+    const inView = rows.filter(task => visible(task.repo));
+    return { tasks: inView.slice(0, WORK_PAGE), truncated: inView.length > WORK_PAGE };
   }
 
   /** This exact run's review facts for the shared projection (review
@@ -13950,9 +13913,6 @@ function taskComposerHtml(data: {
 
 /** A task list page's ceiling: the newest rows, the bound printed. */
 const WORK_PAGE = 200;
-/** The store's own page ceiling for one task read — the most Work will
- * widen a project's read to before saying it could not prove the page. */
-const WORK_READ_CEILING = 500;
 
 type WorkRow = WorkFacts & { status: WorkStatus; resultRunId: number | null };
 
@@ -13988,9 +13948,6 @@ function workPage(
     rows: readonly WorkRow[];
     /** The probe found more tasks in view than the page holds. */
     truncated: boolean;
-    /** The read hit the store's ceiling on rows the viewer cannot see
-     * before proving the page complete: older tasks may be missing. */
-    unproven: boolean;
     cap: number;
     /** Rows span more than one project — every row wears its label. */
     multiProject: boolean;
@@ -14015,7 +13972,6 @@ function workPage(
   // An empty shortcut view over a truncated page never claims "nothing"
   // about tasks it did not read.
   const emptyWords = (() => {
-    if (data.unproven) return `Nothing Work could read within its ${WORK_READ_CEILING}-record bound belongs here. Older tasks may be missing; they stay in the task list, filtered by state.`;
     if (!data.truncated) return current.empty;
     switch (data.view) {
       case "needs-you": return `Nothing among the newest ${data.cap} tasks in view needs you. Older tasks stay in the task list, filtered by state.`;
@@ -14040,7 +13996,7 @@ function workPage(
   };
   const list =
     shown.length === 0
-      ? `<div class="work-empty" data-work-empty="${data.view}"${data.truncated ? ` data-work-bound="${data.cap}"` : data.unproven ? ` data-work-bound="unproven"` : ""}><p>${escape(emptyWords)}</p>` +
+      ? `<div class="work-empty" data-work-empty="${data.view}"${data.truncated ? ` data-work-bound="${data.cap}"` : ""}><p>${escape(emptyWords)}</p>` +
         (data.view === "all"
           ? `<p class="row"><a class="button-link" href="${chrome.chat === true ? "/chat" : "/tasks/new"}">${chrome.chat === true ? "Start in chat" : "Add a task"}</a> <a href="/tasks/new">Use a form →</a></p>`
           : `<p class="row"><a href="/work">See all work →</a></p>`) +
@@ -14048,9 +14004,7 @@ function workPage(
       : `<div class="work-list">${shown.map(rowHtml).join("\n")}</div>`;
   const bound = data.truncated
     ? `<p class="meta work-bound" data-work-bound="${data.cap}">Showing the newest ${data.cap} tasks in view — there are more. The view counts cover these ${data.cap} only. Older tasks stay in the <a href="/tasks">task list</a>, filtered by state.</p>`
-    : data.unproven
-      ? `<p class="meta work-bound" data-work-bound="unproven">Work read its ${WORK_READ_CEILING}-record bound without finding every task in view, so tasks older than these may be missing here and the view counts cover only what was read. Older tasks stay in the <a href="/tasks">task list</a>, filtered by state.</p>`
-      : "";
+    : "";
   const tools =
     `<details class="work-tools"><summary>Work tools${CHEVRON_ICON}</summary><nav class="work-tools-menu">` +
     [

@@ -372,13 +372,15 @@ New screenshots (ignored `output/playwright/workspace-1/after/`):
 
 ### Remaining limits
 
-- The store's task reads all include unplaced rows and cap one read at 500
+- ~~The store's task reads all include unplaced rows and cap one read at 500
   rows. For a project-scoped account only, more than about 300 newer
   unplaced tasks in one read window make Work say its read was cut short
   (`data-work-bound="unproven"`) rather than list the older assigned
   tasks; the tasks are not lost and the page never claims emptiness. A
   store-side query that excludes unplaced rows for such viewers is outside
-  this package's no-store-change scope.
+  this package's no-store-change scope.~~ Resolved by the bounded admitted
+  query below: the adaptive read, its 500-record ceiling and the
+  "unproven" notice are gone.
 - The reviewer-liveness fact is read at render time, so "Reviewing" becomes
   "Review interrupted" three minutes after the reviewer's last heartbeat —
   the same rule dispatch already applied.
@@ -388,5 +390,98 @@ New screenshots (ignored `output/playwright/workspace-1/after/`):
 - The reviewer's boundary script lives in the ignored output directory of
   the primary checkout; its cases are re-stated as permanent tests in
   `src/serve.test.ts` so a checkout without it still proves them.
+- Headless Chromium only, synthetic fixture data, ignored output directory —
+  as before.
+
+## Bounded admitted query — 2026-09-13 (build 1546 follow-up)
+
+Follow-up task `workspace-1-query-20260913`, seeded from the sealed head
+`737b6c7` (build 1546). The reviewer's independent script
+(`output/playwright/workspace-boundary-review.mjs` in the primary checkout)
+had gained a fifth case — 700 newer unplaced tasks a project-scoped member
+cannot see — and build 1546 failed it: the member's assigned-project Work
+page showed zero rows behind the "read its 500-record bound" notice
+(reproduced on this checkout before the change: `shown: 0`,
+`assignedTaskVisible: false`, `limitedScanNotice: true`). The permitted work
+was never lost, but a limitation notice is not a listing. Every change was
+left uncommitted for the worker to seal. No schema, migration, scheduling,
+approval, identity, permission grant, write path, revision filer,
+installation, service, publication, deployment or dependency changed; the
+legacy `listTasksScoped` is untouched, as is every other 1546 UI correction.
+
+### One read-only Store reader (`src/store.ts`)
+
+`Store.listWorkTasksAdmitted(admitted, includeUnplaced, limit)` returns
+`Task & { repo }` rows for Work alone. `admitted` is the already-resolved
+permitted repo set — `null` is explicitly unrestricted (every placed row),
+`[]` means no placed project is permitted (no placed row at all) — and
+`includeUnplaced` says whether NULL-repo rows belong to this viewer. Both
+predicates, the admitted repo values and the flags alike, are bound SQL
+parameters applied in the `WHERE` clause BEFORE `ORDER BY created_at DESC,
+id DESC LIMIT ?`; the limit is clamped in the store (1..500, floored). An
+empty admission binds as an empty `IN ()` list, which SQLite evaluates as
+false, so no SQL shape changes with the input.
+
+### Work reads it once (`src/serve.ts`)
+
+`workTasksInView` now computes the permitted repo set — the open project,
+else `admissionList()` (null when unscoped) — and `includeUnplaced` from
+`visible(null)` (false for a project-scoped account), asks the store for
+`WORK_PAGE + 1 = 201` rows, keeps the final per-row `visible` check, lists
+the first 200 and treats a 201st row as the overflow probe. `needsYouCount`
+reuses the same read, so the chrome badge, the tab counts and the `200+`
+bound all derive from the same page and its probe. Removed: the adaptive
+201 → 402 → 500 retries, `WORK_READ_CEILING`, the per-project enumeration
+and newest-first merge, the `unproven` state and its "read its 500-record
+bound" copy on the strip, the empty state and the notice. The truncated
+bound, its `200+` count, page-only tab titles and bounded empty copy are
+unchanged.
+
+### Tests
+
+- `src/workspace-query.test.ts` (new, 6 tests against the store directly):
+  700 newer hidden unplaced tasks leave a project-scoped read exactly its
+  permitted rows (and the legacy read still returns 500 unplaced rows, the
+  reason Work no longer uses it); an unrestricted viewer gets unplaced rows
+  newest first, bounded by the probe, with `null` admitting every placed
+  project explicitly; 501 newer excluded tasks leave the admitted page full
+  and ordered; an empty admission exposes no placed row with unplaced rows
+  following the flag alone; the 201st-row probe (200 → 200 rows, 201 → 201),
+  id tie-break, and the clamp (0, −7, 2.9, 10 000 → 1, 1, 2, 500); exact
+  repo matching and a quote-bearing repo value bound, not concatenated.
+- `src/serve.test.ts` "Work admits before it limits": the 700-unplaced tail
+  now asserts the member's two beta rows with no bound, no `unproven`, no
+  `500-record`, no empty claim, page counts (`2`, Completed 1); clearing the
+  selection lands the member on alpha's newest 200 with the honest bound
+  and no unplaced row; the unrestricted viewer sees `unplaced-699` first.
+  Every earlier assertion in the test (201 selected, exactly the cap, 501
+  foreign, member of one and two projects, 201 unplaced) is unchanged.
+- `scripts/workspace-proof.mjs`: the `narrow-work-320` caption now says the
+  four filters are wholly visible in two rows of two — the layout the
+  measured `filters320` report and the screenshot show — instead of "one
+  row".
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `node /Users/alekseypelletier/Documents/standing-orders/output/playwright/workspace-boundary-review.mjs <this checkout>` | before: 4/5 (case 5 `shown: 0`, `limitedScanNotice: true`); after: 5/5, exit 0 — case 5 `shown: 17`, `assignedTaskVisible: true`, `limitedScanNotice: false` |
+| `npx vitest run src/workspace-query.test.ts` | 6 passed |
+| `npx vitest run src/serve.test.ts src/workspace-query.test.ts src/workspace-ui.test.ts src/dispatch.test.ts src/store.test.ts` | 5 files, 400 passed |
+| `npm run typecheck` | clean |
+| `npm run build && node scripts/workspace-proof.mjs --out output/playwright/workspace-1/after --strict` | 167/167 checks, 25 screenshots, exit 0 |
+| `node scripts/ui-polish-proof.mjs --out output/playwright/workspace-1/ui-polish-regression --strict` | 75/75 checks, exit 0 |
+| `npm run typecheck && npm test -- --run --reporter=dot --no-file-parallelism && npm run build` (the unchanged approved verifier) | **not run by the builder** — the machine-owned verifier runs after sealing and must pass before acceptance; its result is pending until it finishes |
+
+### Remaining limits
+
+- The full serial suite was deliberately not duplicated here; acceptance
+  waits on the machine's own run of the unchanged verifier.
+- `admissionList()` for a root ceiling enumerates the stored repos that pass
+  it, so the `IN` list is as long as that enumeration — the same shape
+  `listCompletedWorkScoped` already binds.
+- The reviewer's script still lives in the ignored output directory of the
+  primary checkout; its five cases are re-stated as permanent tests in
+  `src/serve.test.ts` and `src/workspace-query.test.ts`.
 - Headless Chromium only, synthetic fixture data, ignored output directory —
   as before.
