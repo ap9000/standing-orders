@@ -31,6 +31,60 @@ const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: str
   route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
 });
 
+describe("same task revision identity (read projection)", () => {
+  test("groups before pages, keeps exact versions and active siblings, and admits before lineage", () => {
+    const store = openStore(":memory:");
+    try {
+      const make = (id: string, repo = "/visible") => {
+        store.createTask({ id, title: id }, T0);
+        const ref = store.refFor(BUILT_IN, id).id;
+        store.placeTask(ref, repo);
+        return ref;
+      };
+      const link = (child: string, parent: string, source = parent) => {
+        const run = store.startRun({ taskRef: store.lookupRef(source)!.id, leaseId: `fixture-${child}`, runner: "fixture", branch: "fixture", worktree: "/fixture", now: T0, ...bareLegacy("build") });
+        store.finishRun(run, { outcome: "built", now: T0 });
+        const artifact = store.saveArtifact({ run, kind: "revision-brief", key: `fixture/${child}.json`, bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: "a".repeat(64), capture: "synthetic lineage fixture" }, T0);
+        store.markRevision(store.lookupRef(child)!.id, parent, artifact);
+      };
+      make("root");
+      store.setTaskState("root", "done", T0);
+      make("unrelated");
+      // A large family must not spend the task page's allowance.
+      for (let i = 0; i < 205; i++) { make(`sibling-${i}`); link(`sibling-${i}`, "root"); }
+      make("revision-2"); link("revision-2", "sibling-204");
+      const families = store.taskFamiliesAdmitted(["/visible"], false);
+      expect(families.map(one => one.root.id)).toEqual(["root", "unrelated"]);
+      expect(families[0]!.current.id).toBe("revision-2");
+      expect(families[0]!.versions).toHaveLength(207);
+      expect(families[0]!.otherActive).toHaveLength(205);
+      expect(store.taskFamilyOf("sibling-0", ["/visible"], false)?.root.id).toBe("root");
+      expect(store.chatSnapshot(["/visible"], T0).tasks).toHaveLength(2);
+      expect(store.chatSnapshot(["/visible"], T0).tasks[0]).toMatchObject({ id: "revision-2", rootId: "root", title: "root", state: "queued" });
+      // Hidden/cross-project/missing/cyclic/borrowed-source links stay visible
+      // separately and reveal no ancestor identifiers in their explanation.
+      make("secret-root", "/hidden");
+      make("cross"); link("cross", "secret-root");
+      make("broken"); link("broken", "root", "unrelated");
+      make("missing"); link("missing", "root");
+      store.raw().prepare("UPDATE task_ref SET revision_of = 'secret-missing' WHERE external_id = 'missing'").run();
+      make("cycle"); link("cycle", "root");
+      store.raw().prepare("UPDATE task_ref SET revision_of = 'cycle' WHERE external_id = 'cycle'").run();
+      for (const id of ["cross", "broken", "missing", "cycle"]) {
+        const family = store.taskFamilyOf(id, ["/visible"], false)!;
+        expect(family.root.id).toBe(id);
+        expect(family.problem).not.toBeNull();
+        expect(family.problem).not.toContain("secret");
+        expect(family.versions.map(one => one.id)).toEqual([id]);
+      }
+      expect(store.taskFamilyOf("secret-root", ["/visible"], false)).toBeNull();
+      expect(store.taskFamiliesAdmitted([], false)).toEqual([]);
+      expect(store.paletteTasks("/hidden", 10, ["/visible"], false)).toEqual([]);
+      expect(store.paletteTasks("/visible", 1, ["/visible"], false)).toHaveLength(1);
+    } finally { store.close(); }
+  });
+});
+
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
  * store dictates nothing, so a routed row presents the leg it holds, exactly

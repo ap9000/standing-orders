@@ -63,7 +63,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { startFixture, LONG_REQUEST_PATH } from './ui-polish-fixture.mjs';
+import { startFixture, LONG_REQUEST_PATH, LONG_FEEDBACK_PATH } from './ui-polish-fixture.mjs';
 import { addApprover, approve, propose } from '../dist/scope.js';
 import { resultFactsFromHtml } from '../dist/result-review.js';
 
@@ -71,6 +71,7 @@ const args = process.argv.slice(2);
 const flag = name => { const at = args.indexOf(name); return at === -1 ? null : args[at + 1] ?? null; };
 const out = resolve(flag('--out') ?? 'output/playwright/workspace-3-result-2026-09-13');
 const strict = args.includes('--strict');
+const sameTask = args.includes('--same-task-revisions');
 const revisionNames = args.includes('--revision-names');
 const longRequests = args.includes('--long-requests') || revisionNames;
 const layoutOnly = args.includes('--layout-only');
@@ -85,13 +86,13 @@ async function loadPlaywright() {
   throw new Error('playwright not found: install it, or set PLAYWRIGHT_MODULE to its index.mjs');
 }
 
-const VIEWPORTS = { desktop: { width: revisionNames ? 1400 : 1440, height: 900 }, phone: { width: 390, height: 844 }, narrow: { width: 320, height: 740 } };
+const VIEWPORTS = { desktop: { width: revisionNames || sameTask ? 1400 : 1440, height: 900 }, phone: { width: 390, height: 844 }, narrow: { width: 320, height: 740 } };
 const report = { generatedAt: new Date().toISOString(), out, fixture: 'scripts/ui-polish-fixture.mjs (synthetic, in-memory; scripted subscription runner, no model)', checks: [], screenshots: [] };
 const check = (name, ok, detail) => { report.checks.push({ name, ok: Boolean(ok), detail }); console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`); };
 
 const { chromium } = await loadPlaywright();
-const fixture = await startFixture({ longRequests, revisionNames });
-const browser = await chromium.launch();
+let fixture = await startFixture({ longRequests, revisionNames, sameTaskRevisions: sameTask, secondProject: sameTask, ...(sameTask ? { directory: join(out, "fixture") } : {}) });
+const browser = await chromium.launch(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {});
 
 async function loginAs(page, name, password) {
   await page.goto(`${fixture.url}/login`);
@@ -100,9 +101,11 @@ async function loginAs(page, name, password) {
   await submit(page, 'button[type="submit"]');
 }
 const login = page => loginAs(page, fixture.name, fixture.password);
+let latestPage = null;
 async function context(viewport, extra = {}) {
   const ctx = await browser.newContext({ viewport, deviceScaleFactor: 1, isMobile: viewport.width < 760, hasTouch: viewport.width < 760, ...extra });
   const page = await ctx.newPage();
+  latestPage = page;
   await login(page);
   return { ctx, page };
 }
@@ -138,6 +141,8 @@ const factsOf = async (path, selectorHint) => {
   return { all, text, first: all[0] ?? null };
 };
 const visibleTab = page => page.evaluate(() => [...document.querySelectorAll('[data-result-view]')].find(v => !v.hidden)?.getAttribute('data-result-view') ?? null);
+const revisionIdAt = url => { const u = new URL(url); return u.searchParams.get('revision') ?? u.searchParams.get('version') ?? u.pathname.slice(3); };
+const revisionLocationIs = (url, root, child) => { const u = new URL(url); return (u.pathname === '/chat' && u.searchParams.get('task') === root && u.searchParams.get('revision') === child) || (u.pathname === `/t/${root}` && u.searchParams.get('version') === child); };
 const selectedTab = page => page.evaluate(() => document.querySelector('[data-result-tab][aria-selected="true"]')?.getAttribute('data-result-tab') ?? null);
 /** Mint a NEW conversation (ending any live one first) so the composer exists. */
 async function freshConversation(page, path) {
@@ -232,14 +237,16 @@ async function longRequestJourney() {
       // Miss the seal response too; submitting the same displayed batch must land once.
       await postFrom(page, `/r/${runId}/revise`, seal);
       await submit(page, '.result-request form[action$="/revise"] button[type="submit"]');
-      const childId = page.url().split('/t/')[1];
+      const childId = revisionIdAt(page.url());
+      check(`${name}: revision navigation stays rooted`, revisionLocationIs(page.url(), task, childId));
+      await goto(page, `/t/${task}?version=${childId}`);
       const child = fixture.store.getScope(childId);
       check(`${name} ${mode}: exactly one unapproved child retains every inherited byte`, fixture.store.revisionsFromRun(runId).length === before + 1 && child !== null && child.approvedAt === null && child.approvedDigest === null && child.goal === `${original.goal} — apply the ${batch.every(one => one.path !== null) ? 'annotations' : 'feedback'} recorded on build #${runId}; the revision brief carries the exact batch` && child.outOfScope === original.outOfScope);
       if (revisionNames) {
         const expectedTitle = 'Fix the payout rounding drift — revision';
         const title = await page.locator('h1').textContent();
         const source = fixture.store.revisionSourceOf(fixture.store.lookupRef(childId).id);
-        check(`${name} ${mode}: human title, unchanged ID generation and exact source`, title === expectedTitle && fixture.store.getTask(childId).title === expectedTitle && childId.startsWith(`revise-payout-rounding-from-${batch.length}-annotation`) && source.sourceTask === task && source.sourceRun === runId && (await noOverflow(page)).ok, JSON.stringify({ title, childId, sourceRun: source.sourceRun }));
+        check(`${name} ${mode}: human title, unchanged ID generation and exact source`, title === fixture.store.getTask(task).title && fixture.store.getTask(childId).title === expectedTitle && childId.startsWith(`revise-payout-rounding-from-${batch.length}-annotation`) && source.sourceTask === task && source.sourceRun === runId && (await noOverflow(page)).ok, JSON.stringify({ title, childId, sourceRun: source.sourceRun }));
         const collapsed = await page.evaluate(() => {
           const identity = document.querySelector('.task-identity');
           const options = document.querySelector('#task-diagnostics');
@@ -251,7 +258,7 @@ async function longRequestJourney() {
             selectedHref: document.querySelector('.list-pane a.item.current')?.getAttribute('href'),
             selectedTitle: document.querySelector('.list-pane a.item.current')?.textContent };
         });
-        check(`${name} ${mode}: title leads with identity collapsed and title-only task navigation`, collapsed.closed && collapsed.identityHidden && collapsed.identityInOptions && collapsed.titleFirst && collapsed.titleOnlyLinks && collapsed.selectedHref === `/t/${childId}` && collapsed.selectedTitle === expectedTitle, JSON.stringify(collapsed));
+        check(`${name} ${mode}: title leads with identity collapsed and title-only task navigation`, collapsed.closed && collapsed.identityHidden && collapsed.identityInOptions && collapsed.titleFirst && collapsed.titleOnlyLinks && collapsed.selectedHref === `/t/${task}` && collapsed.selectedTitle === fixture.store.getTask(task).title, JSON.stringify(collapsed));
         await page.locator('h1').scrollIntoViewIfNeeded();
         if (mode === 'mixed') await shot(page, `${name}-named-revision`, `${viewport.width}×${viewport.height}: human title leads; Task options closed, sidebar names only, fresh approval required (synthetic fixture)`);
         await page.locator('#task-diagnostics > summary').focus();
@@ -318,19 +325,21 @@ async function longRequestJourney() {
       await page.fill('#comment-form [name="note"]', `${name}: Keep the long Unicode subject recognizable.`);
       await submit(page, '#comment-form button[type="submit"]');
       await submit(page, '.result-request form[action$="/revise"] button[type="submit"]');
-      const childId = page.url().split('/t/')[1];
+      const childId = revisionIdAt(page.url());
+      check(`${name}: revision navigation stays rooted`, revisionLocationIs(page.url(), task, childId));
+      await goto(page, `/t/${task}?version=${childId}`);
       const longTitle = fixture.store.getTask(childId).title;
       const geometry = await page.locator('h1').evaluate(el => {
         const r = el.getBoundingClientRect(), style = getComputedStyle(el);
         return { width: el.clientWidth, scrollWidth: el.scrollWidth, height: r.height, left: r.left, right: r.right, text: el.textContent, overflow: style.overflow, ellipsis: style.textOverflow, clamp: style.webkitLineClamp };
       });
-      check(`${name}: long Unicode revision title wraps completely`, longTitle.length <= 200 && longTitle.endsWith(' — revision') && geometry.text === longTitle && geometry.scrollWidth <= geometry.width && geometry.left >= 0 && geometry.right <= viewport.width && !['hidden', 'clip'].includes(geometry.overflow) && geometry.ellipsis !== 'ellipsis' && ['none', '0'].includes(geometry.clamp) && (await noOverflow(page)).ok, JSON.stringify(geometry));
+      check(`${name}: long Unicode revision title wraps completely`, longTitle.length <= 200 && longTitle.endsWith(' — revision') && geometry.text === fixture.store.getTask(task).title && geometry.scrollWidth <= geometry.width && geometry.left >= 0 && geometry.right <= viewport.width && !['hidden', 'clip'].includes(geometry.overflow) && geometry.ellipsis !== 'ellipsis' && ['none', '0'].includes(geometry.clamp) && (await noOverflow(page)).ok, JSON.stringify(geometry));
       await shot(page, `${name}-long-named-revision`, `${viewport.width}×${viewport.height}: a bounded Unicode revision title wraps without clipping (synthetic fixture)`);
       await goto(page, `/chat?task=${childId}`);
-      check(`${name}: chat card keeps the same long revision title and source link`, await page.locator('h1').textContent() === longTitle && await page.locator('[data-revision-source]').count() === 1 && (await noOverflow(page)).ok);
+      check(`${name}: chat card keeps the same long revision title and source link`, await page.locator('h1').textContent() === fixture.store.getTask(task).title && await page.locator('[data-revision-source]').count() === 1 && (await noOverflow(page)).ok);
       await goto(page, '/work?view=needs-you');
-      const card = page.locator(`.work-row[data-task="${childId}"] .work-title`);
-      check(`${name}: Work card has the same long revision title`, await card.textContent() === longTitle && (await noOverflow(page)).ok);
+      const card = page.locator(`.work-row[data-task="${task}"] .work-title`);
+      check(`${name}: Work card has the same long revision title`, await card.textContent() === fixture.store.getTask(task).title && (await noOverflow(page)).ok);
       await card.scrollIntoViewIfNeeded();
       await shot(page, `${name}-long-revision-work`, `${viewport.width}×${viewport.height}: long revision name in Work (synthetic fixture)`);
       await goto(page, chatResult(fixture.statusTasks.damaged, fixture.statusRuns.damaged));
@@ -338,6 +347,152 @@ async function longRequestJourney() {
       check(`${name}: damaged evidence stays visible`, await risk.isVisible() && (await noOverflow(page)).ok);
       await shot(page, `${name}-names-evidence-failure`, `${viewport.width}×${viewport.height}: damaged evidence is still named openly (synthetic fixture)`);
     }
+    await ctx.close();
+  }
+}
+
+/** Same-task acceptance: two browser journeys, real HTTP/approval/seal
+ * and claim records, synthetic completed artifacts, no model or worker. */
+async function sameTaskJourney() {
+  for (const [name, viewport] of Object.entries(VIEWPORTS).filter(([name]) => name !== 'narrow' && (!args.includes('--phone-only') || name === 'phone'))) {
+    if (name === 'phone') {
+      await fixture.stop();
+      fixture = await startFixture({ sameTaskRevisions: true, secondProject: true, directory: join(out, 'fixture') });
+    }
+    const root = fixture.tasks.done, originalRun = fixture.runId;
+    const originalArtifacts = JSON.stringify(fixture.store.artifactsFor(originalRun));
+    const originalScope = JSON.stringify(fixture.store.getScope(root));
+    const { page, ctx } = await context(viewport, { reducedMotion: 'reduce' });
+    const read = async path => (await ctx.request.get(`${fixture.url}${path}`)).text();
+    const post = async (path, body) => ctx.request.post(`${fixture.url}${path}`, { form: body, maxRedirects: 0 });
+    const fields = selector => page.locator(selector).evaluate(form => Object.fromEntries(new FormData(form)));
+    const draft = `Keep this ${name} conversation draft through two revisions.`;
+    await freshConversation(page, `/chat?task=${root}`);
+    await page.fill('.composer textarea[name="message"]', `Remember the ${name} review conversation.`);
+    await page.click('.composer button[type="submit"]');
+    await page.waitForFunction(() => document.querySelector('.composer')?.getAttribute('data-chat-busy') === '0' && document.querySelectorAll('[data-message-role]').length > 0);
+    await page.fill('.composer textarea[name="message"]', draft);
+    const thread = fixture.store.activeMateSession(fixture.name);
+    let sourceRun = originalRun;
+    const versions = [root], runs = [sourceRun], seals = [];
+    for (let revision = 1; revision <= 2; revision++) {
+      await goto(page, `/chat?task=${root}&result=${sourceRun}`);
+      check(`${name} revision ${revision}: exact source result and root conversation`, await page.locator(`[data-result-panel][data-result-run="${sourceRun}"]`).count() === 1 && await page.locator('.composer').getAttribute('data-chat-task') === root);
+      if (revision === 1) {
+        check(`${name}: empty requested-change batch has no Revise form`, await page.locator('.revision-from-comments').count() === 0);
+        await shot(page, `${name}-same-task-result`, `${viewport.width}×${viewport.height}: original result with the shared root conversation (synthetic fixture).`);
+      }
+      if (revision === 1) {
+        fixture.addReviewNotes(sourceRun);
+        await page.reload();
+        await page.click('[data-result-tab="checks"]');
+        check(`${name}: informational reviewer notes stay available without Revise`, await page.locator('[data-cockpit-source="reviewer"]').innerText().then(text => text.includes('The rounding guard looks good.') && text.includes('Should the helper name be clearer?')) && await page.locator('.revision-from-comments').count() === 0);
+        await page.locator('button[data-review-note="Should the helper name be clearer?"]').click();
+        check(`${name}: deliberately selecting a reviewer question creates a feedback draft only`, await page.inputValue('#comment-form textarea[name="note"]') === 'Should the helper name be clearer?' && fixture.store.liveDiffComments(sourceRun).every(one => one.reviewerRun !== null));
+      }
+      await page.locator('[data-result-tab="changes"]').focus();
+      await page.keyboard.press('Enter');
+      await page.click('button[data-diff-mode="annotate"]');
+      await page.locator("details.diff-file").filter({ hasText: LONG_FEEDBACK_PATH }).locator("summary").click();
+      const lineButton = page.locator(`button.pick-line[data-path="${LONG_FEEDBACK_PATH}"][data-side="new"]`).first();
+      const lineSize = await lineButton.boundingBox();
+      check(`${name} revision ${revision}: keyboard opens Changes and phone annotation targets are comfortable`, await visibleTab(page) === 'changes' && (viewport.width > 760 || lineSize.width >= 44 && lineSize.height >= 44));
+      await lineButton.click();
+      const note = `Version ${revision}: keep ${LONG_FEEDBACK_PATH} and ${'a'.repeat(64)} intact. 日本語 😀`;
+      await page.fill('#comment-form textarea[name="note"]', note);
+      // Reload recovers the exact per-run annotation draft before submission.
+      await page.reload();
+      check(`${name} revision ${revision}: annotation draft survives reload`, await page.inputValue('#comment-form textarea[name="note"]') === note && await page.inputValue('#comment-form input[name="path"]') === LONG_FEEDBACK_PATH);
+      check(`${name} revision ${revision}: long changed paths and hashes fit the viewport`, (await noOverflow(page)).ok);
+      const annotation = await fields('#comment-form');
+      await submit(page, '#comment-form button[type="submit"]');
+      await post(`/r/${sourceRun}/comment`, annotation); // simulate lost response
+      check(`${name} revision ${revision}: lost note response stores one annotation`, fixture.store.liveDiffComments(sourceRun).filter(one => one.note === note).length === 1);
+      await page.fill('#comment-form textarea[name="note"]', `Also keep the ${name} root task name.`);
+
+      await submit(page, '#comment-form button[type="submit"]');
+      const batch = await fields('.revision-from-comments');
+      seals.push(batch);
+      const exactIds = batch.batch.split(',').map(Number);
+      check(`${name} revision ${revision}: ordinary feedback and annotation share one batch`, exactIds.length === 2);
+      await page.locator('.revision-from-comments button').focus();
+      const reviseButton = await rect(page, '.revision-from-comments button');
+      check(`${name} revision ${revision}: Revise is a single-line 44px target`, fits(reviseButton, viewport) && reviseButton.height >= 44 && reviseButton.height < 70);
+      await submit(page, '.revision-from-comments button');
+      const child = new URL(page.url()).searchParams.get('revision');
+      versions.push(child);
+      check(`${name} revision ${revision}: Revise stays on the root with a fresh unapproved execution`, new URL(page.url()).searchParams.get('task') === root && child && !fixture.store.getScope(child).approvedAt && await page.locator(`form[action="/t/${child}/approve"]`).count() === 1);
+      const replay = await post(`/r/${sourceRun}/revise`, batch);
+      check(`${name} revision ${revision}: lost seal response returns the same child`, replay.status() === 303 && replay.headers().location === `/chat?task=${root}&revision=${child}` && fixture.store.revisionsFromRun(sourceRun).length === 1);
+      check(`${name} revision ${revision}: root draft and session survive creation`, await page.inputValue('.composer textarea[name="message"]') === draft && fixture.store.activeMateSession(fixture.name).id === thread.id);
+      const work = await read('/work');
+      check(`${name} revision ${revision}: one root Work card with current approval state`, (work.match(new RegExp(`class="work-row" data-task="${root}"`, 'g')) ?? []).length === 1 && !work.includes(`class="work-row" data-task="${child}"`) && /Needs your approval/.test(work.split(`data-task="${root}"`)[1]?.split('</article>')[0] ?? ''));
+      await page.locator('.chat-approval > summary').focus();
+      await page.keyboard.press('Enter');
+      await scrollTo(page, '.chat-approval-section .recap', 100);
+      check(`${name} revision ${revision}: keyboard opens approval and inherited paths and hashes wrap`, await page.locator('.chat-approval').evaluate(el => el.open) && (await noOverflow(page)).ok && await page.locator('.chat-approval').innerText().then(text => text.includes(note)));
+      if (revision === 1) await shot(page, `${name}-same-task-approval`, `${viewport.width}×${viewport.height}: exact inherited feedback, wrapped path/hash, fresh approval (synthetic fixture).`);
+      await page.fill(`form[action="/t/${child}/approve"] input[name="token"]`, fixture.password);
+      await submit(page, `form[action="/t/${child}/approve"] button[type="submit"]`);
+      check(`${name} revision ${revision}: only this exact scope is approved`, fixture.store.getScope(child).approvedDigest === fixture.store.getScope(child).digest && JSON.stringify(fixture.store.getScope(root)) === originalScope);
+      if (revision === 2) {
+        fixture.store.hold(fixture.store.lookupRef(child).id, 'Synthetic hold for the acceptance journey.', null, new Date());
+        await page.reload();
+        check(`${name}: held revision replaces the old completed state`, await page.locator('#task-chat-live').innerText().then(text => text.includes('On hold')));
+        fixture.store.unhold(fixture.store.lookupRef(child).id);
+      }
+      const live = fixture.startRevision(child);
+      await page.reload();
+      check(`${name} revision ${revision}: actual live revision says Revising`, await page.locator('#task-chat-live').innerText().then(text => text.includes('Revising')));
+      if (revision === 2) {
+        fixture.finishRevision(live, 'failed');
+        await page.reload();
+        check(`${name}: failed current revision exposes recovery and History`, await page.locator('#task-chat-live').innerText().then(text => /failed|retry/i.test(text) && text.includes('History')));
+        await shot(page, `${name}-same-task-failure`, `${viewport.width}×${viewport.height}: current failed revision, preserved conversation and History (synthetic fixture).`);
+        const retried = fixture.store.requeueTask(child, fixture.name, new Date());
+        if (!retried.ok) throw new Error(`synthetic retry: ${retried.reason}`);
+        sourceRun = fixture.startRevision(child);
+      } else sourceRun = live;
+      fixture.finishRevision(sourceRun);
+      runs.push(sourceRun);
+      await page.reload();
+      check(`${name} revision ${revision}: current result, root draft and shared conversation`, (await page.locator('[data-open-result]').first().getAttribute('href')).includes(`result=${sourceRun}`) && await page.inputValue('.composer textarea[name="message"]') === draft && (await page.locator('#chat-thread').innerText()).includes(`Remember the ${name} review conversation.`));
+    }
+    await page.locator('#task-chat-live .task-history > summary').focus();
+    await page.keyboard.press('Enter');
+    check(`${name}: keyboard opens History with Original and two exact revisions`, await page.locator('#task-chat-live .task-history').evaluate(el => el.open) && await page.locator('#task-chat-live [data-history-version]').count() === 3 && await page.locator('#task-chat-live .task-history').innerText().then(text => text.includes('Original') && text.includes('Revision 1') && text.includes('Revision 2')));
+    await scrollTo(page, '#task-chat-live .task-history', 130);
+    await shot(page, `${name}-same-task-history`, `${viewport.width}×${viewport.height}: one root task, Original, Revision 1 and Revision 2 (synthetic builds).`);
+    const heads = [];
+    for (let i = 0; i < runs.length; i++) {
+      await goto(page, `/chat?task=${root}&result=${runs[i]}&tab=changes`);
+      heads.push(await page.locator('[data-result-panel]').getAttribute('data-result-head'));
+      check(`${name}: History result ${i} opens its exact diff and comment target`, await page.locator(`[data-result-panel][data-result-run="${runs[i]}"]`).count() === 1 && await page.locator('#comment-form').getAttribute('action') === `/r/${runs[i]}/comment`);
+      await page.locator("details.diff-file").filter({ hasText: LONG_FEEDBACK_PATH }).locator("summary").click();
+      if (i > 0) check(`${name}: revision ${i} diff is distinct`, (await page.locator('[data-result-view="changes"]').innerText()).includes(`version_${runs[i]}`));
+      await page.goBack();
+    }
+    check(`${name}: three exact heads and immutable original artifacts`, new Set(heads).size === 3 && JSON.stringify(fixture.store.artifactsFor(originalRun).filter(one => one.kind !== 'revision-brief')) === originalArtifacts, JSON.stringify({ heads }));
+    // A late note on the original is never stolen by retrying its earlier seal.
+    await goto(page, `/chat?task=${root}&result=${originalRun}`);
+    await page.fill('#comment-form textarea[name="note"]', 'Later feedback on the original.');
+    await submit(page, '#comment-form button[type="submit"]');
+    check(`${name}: later feedback stays on the original`, fixture.store.liveDiffComments(originalRun).filter(one => one.reviewerRun === null).length === 1);
+    const oldSeal = await post(`/r/${originalRun}/revise`, seals[0]);
+    await goto(page, oldSeal.headers().location);
+    check(`${name}: an old seal retry after two revisions opens its exact version and preserves later notes`, new URL(page.url()).pathname === `/t/${root}` && new URL(page.url()).searchParams.get('version') === versions[1] && fixture.store.liveDiffComments(originalRun).filter(one => one.reviewerRun === null).length === 1 && fixture.store.revisionsFromRun(originalRun).length === 1);
+    await goto(page, `/chat?task=${versions[1]}&result=${runs[1]}`);
+    check(`${name}: old child result link canonicalizes without changing the selected run`, new URL(page.url()).searchParams.get('task') === root && new URL(page.url()).searchParams.get('result') === String(runs[1]));
+    await goto(page, `/chat?task=${root}`);
+    await page.reload();
+    check(`${name}: draft survives Back, old links and reload`, await page.inputValue('.composer textarea[name="message"]') === draft);
+    await goto(page, `/chat?task=${fixture.statusTasks.damaged}&result=${fixture.statusRuns.damaged}`);
+    check(`${name}: damaged screenshot remains an explicit failure`, await page.locator('.result-panel [data-result-attention]').innerText().then(text => /unavailable|damaged|cannot/i.test(text)) && (await noOverflow(page)).ok);
+    const csrf = await page.locator('input[name=csrf]').first().getAttribute('value');
+    await post('/projects/select', { csrf, path: fixture.repos.empty, return: '/work' });
+    await goto(page, '/work');
+    check(`${name}: empty project has no family cards`, await page.locator('.work-row').count() === 0 && await page.locator('.work-empty').count() === 1);
+    check(`${name}: final layout has no horizontal overflow`, (await noOverflow(page)).ok);
     await ctx.close();
   }
 }
@@ -354,7 +509,9 @@ try {
     cookieHeader = (login.headers.get('set-cookie') ?? '').split(';')[0];
   }
 
-  if (longRequests) {
+  if (sameTask) {
+    await sameTaskJourney();
+  } else if (longRequests) {
     await longRequestJourney();
   } else {
   let page;
@@ -491,7 +648,7 @@ try {
   const batch = fixture.store.liveDiffComments(runId);
   check('c3 both feedback styles sit in ONE batch: a plain note and a pinned annotation', batch.length === 2 && batch.some(one => one.path === null) && batch.some(one => one.path === 'src/payout.ts' && one.line !== null), JSON.stringify(batch.map(one => [one.path, one.line])));
   const readyWords = await page.evaluate(() => document.querySelector('.result-request .revision-from-comments strong')?.textContent);
-  check('c3 Request changes shows the batch beside the result with one Create revision act', readyWords === '2 notes ready' && (await page.evaluate(() => document.querySelectorAll('.result-request form[action$="/revise"]').length)) === 1, readyWords);
+  check('c3 Request changes shows the batch beside the result with one Revise act', readyWords === '2 notes ready' && (await page.evaluate(() => document.querySelectorAll('.result-request form[action$="/revise"]').length)) === 1, readyWords);
   await shot(page, 'desktop-request-changes-batch', 'Desktop 1440×900: a plain note and a line annotation in one batch beside the result, ready to become one revision (synthetic fixture)');
   // The seal body as rendered (repair 2026-09-14): the exact batch and source.
   const sealBody = await page.evaluate(() => Object.fromEntries(new FormData(document.querySelector('.result-request form[action$="/revise"]')).entries()));
@@ -501,7 +658,8 @@ try {
   const revisionId = revisions.at(-1)?.id ?? '';
   const revisionScope = fixture.store.getScope(revisionId);
   const lineage = fixture.store.revisionLineageOf(revisionId, new Date());
-  check('c3 Create revision seals exactly one revision through the existing road, unapproved, with the exact source lineage', revisions.length === revisionsBefore + 1 && page.url() === `${fixture.url}/t/${revisionId}` && revisionScope !== null && revisionScope.approvedAt === null && lineage?.sourceTask === task && lineage?.sourceRun === runId, JSON.stringify({ revisions: revisions.map(one => one.id), url: page.url(), lineage }));
+  check('c3 Create revision seals exactly one revision through the existing road, unapproved, with the exact source lineage', revisions.length === revisionsBefore + 1 && revisionLocationIs(page.url(), task, revisionId) && revisionScope !== null && revisionScope.approvedAt === null && lineage?.sourceTask === task && lineage?.sourceRun === runId, JSON.stringify({ revisions: revisions.map(one => one.id), url: page.url(), lineage }));
+  await goto(page, `/t/${task}?version=${revisionId}`);
   const revisionPage = await page.content();
   check('c3 the revision page restates both notes and links back to the original task and build', revisionPage.includes('Please also round the CSV footer') && revisionPage.includes('Name the rounding helper') && revisionPage.includes(`href="/r/${runId}">build #${runId}</a>`) && revisionPage.includes(`href="/t/${task}"`), '');
   check('c3 the revision still needs its own password approval (looks good never became an approval)', revisionPage.includes('input type="password"') || /approve/i.test(revisionPage), '');
@@ -621,7 +779,7 @@ try {
       const phoneBatch = fixture.store.liveDiffComments(runId).map(one => one.id);
       await submit(page, '.result-request form[action$="/revise"] button[type="submit"]');
       const child = fixture.store.revisionsFromRun(runId).at(-1)?.id;
-      check('c5 phone result-to-revision journey seals exactly its note and still needs approval', phoneBatch.length === 1 && page.url() === `${fixture.url}/t/${child}` && fixture.store.getScope(child)?.approvedAt === null && fixture.store.allDiffComments(runId).find(one => one.id === phoneBatch[0])?.consumedBy === child, JSON.stringify({ child, phoneBatch }));
+      check('c5 phone result-to-revision journey seals exactly its note and still needs approval', phoneBatch.length === 1 && revisionLocationIs(page.url(), task, child) && fixture.store.getScope(child)?.approvedAt === null && fixture.store.allDiffComments(runId).find(one => one.id === phoneBatch[0])?.consumedBy === child, JSON.stringify({ child, phoneBatch }));
       await shot(page, 'phone-revision-created', '390×844: revision created from phone feedback, with its own approval still required (synthetic fixture)');
       await goto(page, chatResult(task, runId));
     }
@@ -703,7 +861,7 @@ try {
   check('c8 the rendered seal names exactly the live notes shown and the source terms', oldSeal.batch === batchA.join(',') && oldSeal.source === fixture.store.getScope(task).digest, JSON.stringify(oldSeal));
   await submit(page, '.result-request form[action$="/revise"] button[type="submit"]');
   const childX = fixture.store.revisionsFromRun(runId).at(-1)?.id ?? '';
-  check('c8 the seal creates one child from that batch', fixture.store.revisionsFromRun(runId).length === revisionsBefore8 + 1 && page.url() === `${fixture.url}/t/${childX}`, JSON.stringify({ childX, url: page.url() }));
+  check('c8 the seal creates one child from that batch', fixture.store.revisionsFromRun(runId).length === revisionsBefore8 + 1 && revisionLocationIs(page.url(), task, childX), JSON.stringify({ childX, url: page.url() }));
   // A new note C, then the OLD seal body replayed byte for byte.
   await goto(page, `/r/${runId}`);
   await page.fill('#comment-form [name="note"]', 'Note C: added after the seal.');
@@ -808,7 +966,7 @@ try {
       };
     });
     check(`c11 ${name}: one bounded outcome line, one action, the deliverable inside the first viewport, the agent's account and the technical facts behind closed disclosures, no page overflow`,
-      shape.outcome.length > 0 && shape.outcome.length <= 181 && shape.actions.length === 1 && /^(Request changes|Create revision from [0-9]+ notes?)$/.test(shape.actionText ?? '') && shape.deliverable !== null && shape.deliverable.top < viewport.height && shape.detailsClosed.length === 2 && shape.detailsClosed.every(([, open]) => open === false) && shape.factsInside && shape.linksInside && shape.changesInside && !shape.attentionOpen && shape.overflow,
+      shape.outcome.length > 0 && shape.outcome.length <= 181 && shape.actions.length === 1 && /^(Request changes|Revise from [0-9]+ notes?)$/.test(shape.actionText ?? '') && shape.deliverable !== null && shape.deliverable.top < viewport.height && shape.detailsClosed.length === 2 && shape.detailsClosed.every(([, open]) => open === false) && shape.factsInside && shape.linksInside && shape.changesInside && !shape.attentionOpen && shape.overflow,
       JSON.stringify(shape));
     if (viewport.width < 760) check(`c11 ${name}: Back to chat has a 44px target inside the viewport`, shape.back !== null && shape.back.height >= 44 && fits(shape.back, viewport), JSON.stringify(shape.back));
     await shot(page, `${name}-c11-summary`, `${viewport.width}×${viewport.height}: Summary after the repair — deliverable first, one outcome line, one action, details on demand (synthetic fixture)`);
@@ -835,6 +993,7 @@ try {
   }
   }
 } catch (error) {
+  if (latestPage && !latestPage.isClosed()) { await latestPage.screenshot({ path: join(out, 'failure.png'), fullPage: true }); console.log(await latestPage.locator('#comment-form').evaluate(form => ({ rect: form.getBoundingClientRect().toJSON(), height: document.documentElement.scrollHeight, top: scrollY, button: form.querySelector('button[type=submit]')?.getBoundingClientRect().toJSON() })).catch(() => null)); }
   check('proof ran to completion', false, error instanceof Error ? error.stack ?? error.message : String(error));
 } finally {
   await browser.close();

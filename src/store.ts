@@ -284,11 +284,23 @@ export type ChatProviderId = DirectChatProviderId | SubscriptionChatProviderId;
 
 /** What chat may know (v3 change 9): repo-indexed, path-free items. The
  * repos list itself stays server-side; only indexes leave as opaque ids. */
+export type TaskVersion = Task & { repo: string | null; refId: number };
+export type TaskFamily = {
+  root: TaskVersion;
+  current: TaskVersion;
+  versions: TaskVersion[];
+  otherActive: TaskVersion[];
+  problem: string | null;
+};
+
 export type ChatSnapshot = {
   repos: string[];
   tasks: {
     repoIndex: number;
     id: string;
+    rootId?: string;
+    historyProblem?: string | null;
+    otherActive?: string[];
     title: string;
     state: string;
     ageHours: number;
@@ -11588,6 +11600,63 @@ export class Store {
     return this.revisionAncestryStatus(taskId).chain;
   }
 
+  /** Read-only task identity. Admission precedes both lineage and pagination.
+   * Damaged links stay as separate visible cards; never expose a hidden
+   * ancestor's name. Each edge must name its source's actual run/brief.
+   * Current is the newest filed version (ref id breaks timestamp ties).
+   * Older unfinished siblings remain explicit, without changing dispatch. */
+  taskFamiliesAdmitted(admitted: readonly string[] | null, includeUnplaced: boolean): TaskFamily[] {
+    const rows = this.db.prepare(`SELECT task.*, task_ref.repo AS task_repo, task_ref.id AS ref_id
+      FROM task JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+      WHERE ((task_ref.repo IS NULL AND ? = 1) OR (task_ref.repo IS NOT NULL
+        AND (? = 1 OR task_ref.repo IN (${(admitted ?? []).map(() => "?").join(",")}))))
+      ORDER BY task_ref.id`).all(BUILT_IN, includeUnplaced ? 1 : 0, admitted === null ? 1 : 0, ...(admitted ?? []));
+    const tasks = new Map(rows.map(row => [String(row["id"]), {
+      id: String(row["id"]), title: String(row["title"]), state: String(row["state"]) as TaskState,
+      createdAt: String(row["created_at"]), updatedAt: String(row["updated_at"]),
+      priority: Number(row["priority"] ?? 0), repo: row["task_repo"] === null ? null : String(row["task_repo"]),
+      refId: Number(row["ref_id"]),
+    }]));
+    const families = new Map<string, TaskFamily>();
+    for (const task of tasks.values()) {
+      const ancestry = this.revisionAncestryStatus(task.id);
+      let problem = ancestry.problem === null ? null : "Task history is incomplete or circular. This execution is shown separately.";
+      for (const id of ancestry.chain) {
+        const ancestor = tasks.get(id);
+        if (ancestor === undefined || ancestor.repo !== task.repo) {
+          problem = "Task history is unavailable in this project. This execution is shown separately.";
+          break;
+        }
+        const ref = this.lookupRef(id)!;
+        if (ref.revisionOf === null) continue;
+        const source = this.revisionSourceOf(ref.id);
+        const run = source === null ? null : this.getRun(source.sourceRun);
+        const parent = tasks.get(ref.revisionOf);
+        if (source === null || parent === undefined || run?.taskRef !== parent.refId) {
+          problem = "A revision’s source record is unavailable. This execution is shown separately.";
+          break;
+        }
+      }
+      const root = problem === null ? tasks.get(ancestry.chain.at(-1)!)! : task;
+      let family = families.get(root.id);
+      if (family === undefined) {
+        family = { root, current: task, versions: [], otherActive: [], problem };
+        families.set(root.id, family);
+      }
+      family.versions.push(task);
+    }
+    for (const family of families.values()) {
+      family.versions.sort((a, b) => a.id === family.root.id ? -1 : b.id === family.root.id ? 1 : a.createdAt.localeCompare(b.createdAt) || a.refId - b.refId);
+      family.current = family.versions.at(-1)!;
+      family.otherActive = family.versions.filter(one => one.id !== family.current.id && (one.state === "queued" || one.state === "running"));
+    }
+    return [...families.values()].sort((a, b) => b.current.createdAt.localeCompare(a.current.createdAt) || b.current.refId - a.current.refId);
+  }
+
+  taskFamilyOf(taskId: string, admitted: readonly string[] | null, includeUnplaced: boolean): TaskFamily | null {
+    return this.taskFamiliesAdmitted(admitted, includeUnplaced).find(one => one.versions.some(version => version.id === taskId)) ?? null;
+  }
+
   /**
    * The revision tasks sealed FROM one reviewed run (workspace package 3):
    * every task whose brief artifact belongs to the run, oldest first, with
@@ -13886,25 +13955,14 @@ export class Store {
     const indexOf = (repo: unknown): number => repoIndex.get(String(repo)) ?? -1;
     const hours = (iso: unknown): number => Math.max(0, Math.round((now.getTime() - Date.parse(String(iso))) / 3_600_000));
     return this.transact(() => {
-      const taskRows = this.db
-        .prepare(
-          `SELECT task.id AS id, task.title AS title, task.state AS state, task.updated_at AS updated_at, task_ref.repo AS repo, task_ref.strikes AS strikes,
-                  proof_verdict.verdict AS proof_verdict, proof_verdict.matrix_json AS proof_matrix_json
-             FROM task JOIN task_ref ON task_ref.backend = '${BUILT_IN}' AND task_ref.external_id = task.id
-             LEFT JOIN run ON run.id = (
-               -- v40 fix: a reviewer run finishes 'no-change' too, after
-               -- the build it reviews, and carries no proof verdict of its
-               -- own — excluded so it never outranks the builder's own
-               -- attempt as "the latest".
-               SELECT MAX(final.id) FROM run AS final
-               WHERE final.task_ref = task_ref.id AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL
-                 AND final.role IN ('builder','scout')
-             )
-             LEFT JOIN proof_verdict ON proof_verdict.run = run.id
-            WHERE task_ref.repo IN (${marks})
-            ORDER BY task.updated_at DESC LIMIT 61`,
-        )
-        .all(...admittedRepos);
+      const families = this.taskFamiliesAdmitted(admittedRepos, false);
+      const taskRows = families.slice(0, 61).map(family => {
+        const current = family.current;
+        const ref = this.lookupRef(current.id)!;
+        const run = this.runsFor(ref.id).find(one => one.finishedAt !== null && (one.role === "builder" || one.role === "scout"));
+        const proof = current.state === "done" && run !== undefined ? this.proofVerdictFor(run.id) : null;
+        return { family, current, ref, proof };
+      });
       const decisionRows = this.db
         .prepare(
           `SELECT decision.id AS id, decision.question AS question, decision.options AS options, task_ref.repo AS repo,
@@ -13951,18 +14009,11 @@ export class Store {
       const optionLabelsOf = (raw: unknown): string[] => optionsOf(raw).map(one => one.label);
       return {
         repos: [...admittedRepos],
-        tasks: taskRows.slice(0, 60).map(row => ({
-          repoIndex: indexOf(row["repo"]),
-          id: String(row["id"]),
-          title: String(row["title"]),
-          state: String(row["state"]),
-          ageHours: hours(row["updated_at"]),
-          strikes: Number(row["strikes"] ?? 0),
-          proofVerdict:
-            row["proof_verdict"] === null || row["proof_verdict"] === undefined
-              ? null
-              : (String(row["proof_verdict"]) as "verified" | "attested" | "short" | "refuted"),
-          proofMatrix: readMatrixJson(row["proof_matrix_json"]),
+        tasks: taskRows.slice(0, 60).map(({ family, current, ref, proof }) => ({
+          repoIndex: indexOf(current.repo), id: current.id, rootId: family.root.id,
+          title: family.root.title, state: current.state, ageHours: hours(current.updatedAt),
+          strikes: ref.strikes, proofVerdict: proof?.verdict ?? null, proofMatrix: proof?.matrix ?? [],
+          historyProblem: family.problem, otherActive: family.otherActive.map(one => one.id),
         })),
         tasksSaturated: taskRows.length > 60,
         decisions: decisionRows.slice(0, 20).map(row => ({
@@ -14295,24 +14346,14 @@ export class Store {
     repo: string | null,
     limit: number,
     admitted: string[] | null = null,
+    includeUnplaced = true,
   ): { id: string; title: string; repo: string | null }[] {
-    const admission =
-      admitted === null ? "" : `AND (task_ref.repo IS NULL OR task_ref.repo IN (${admitted.map(() => "?").join(",")}))`;
-    return this.db
-      .prepare(
-        `SELECT task.id AS id, task.title AS title, task_ref.repo AS repo
-           FROM task JOIN task_ref ON task_ref.backend = '${BUILT_IN}' AND task_ref.external_id = task.id
-          WHERE task.state IN ('queued','running','failed')
-            AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
-            ${admission}
-          ORDER BY task.updated_at DESC LIMIT ?`,
-      )
-      .all(repo, repo, ...(admitted ?? []), Math.max(1, Math.min(limit, 500)))
-      .map(row => ({
-        id: String(row["id"]),
-        title: String(row["title"]),
-        repo: row["repo"] === null || row["repo"] === undefined ? null : String(row["repo"]),
-      }));
+    const projects = repo === null ? admitted : admitted === null || admitted.includes(repo) ? [repo] : [];
+    return this.taskFamiliesAdmitted(projects, includeUnplaced)
+      .filter(one => ["queued", "running", "failed"].includes(one.current.state))
+      .sort((a, b) => b.current.updatedAt.localeCompare(a.current.updatedAt) || b.current.refId - a.current.refId)
+      .slice(0, Math.max(1, Math.min(limit, 500)))
+      .map(one => ({ id: one.root.id, title: one.root.title, repo: one.root.repo }));
   }
 
   /** Whether any work was ever filed — task or routine. */

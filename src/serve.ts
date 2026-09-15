@@ -1,3 +1,4 @@
+import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
 import { styleAsset } from "./style-asset.js";
@@ -79,7 +80,7 @@ import {
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
-  RESULT_TABS, RESULT_REVIEW_SCRIPT, evidenceResultStatusOf, evidenceShortenedWords, parseResultTab, resultLeadOf, evidenceProblemDetailsOf, evidenceHealthOf, resultFactsAttributes, resultReturnTarget, commentSourceKey, REQUEST_TOKEN,
+  RESULT_TABS, RESULT_REVIEW_SCRIPT, isRevisionFeedback, evidenceResultStatusOf, evidenceShortenedWords, parseResultTab, resultLeadOf, evidenceProblemDetailsOf, evidenceHealthOf, resultFactsAttributes, resultReturnTarget, commentSourceKey, REQUEST_TOKEN,
   revisionBatchOf, parseRevisionBatch, revisionSourceOf,
   type ResultTab, type ResultScreenshot, type SharedResultFacts,
 } from "./result-review.js";
@@ -1534,10 +1535,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       // stored verdict, and the sealed patch downloads exactly as stored.
       // Admission binds BEFORE the SQL limit (the done page's own rule),
       // and every row is re-proved against the ceiling before ranking.
-      const rows = store
-        .listCompletedWorkScoped(project, REVIEW_QUEUE_CAP, admissionList())
-        .filter(row => visible(row.repo))
-        .map(row => ({ ...row, ciFailing: ciFailingFor(row.runId, row.prNumber) }));
+      const rows = familiesInView(project).filter(family => family.current.state === "done" && family.problem === null)
+        .slice(0, REVIEW_QUEUE_CAP).flatMap(family => {
+          const row = completedRowFor(family.current.id, project);
+          return row === null ? [] : [{ ...row, title: family.root.title, ciFailing: ciFailingFor(row.runId, row.prNumber) }];
+        });
       const ranked = rankReviewQueue(rows);
       const wanted = url.searchParams.get("result");
       const wantedId =
@@ -1551,7 +1553,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const beyond = wantedId === null || inQueue !== null ? null : completedRowFor(wantedId, project);
       const beyondRow = beyond === null ? null : { ...beyond, ciFailing: ciFailingFor(beyond.runId, beyond.prNumber) };
       const chosen = inQueue ?? (beyondRow === null ? null : { ...beyondRow, priority: reviewPriorityOf(beyondRow) });
-      const selectedRow = chosen ?? ranked[0] ?? null;
+      const selectedRow = wantedId === null ? ranked[0] ?? null : chosen;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who, now);
       return sendScreen(
@@ -1903,7 +1905,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         200,
         tasksPage(
           chromeFor(project, "tasks"),
-          store.listTasksScoped(project, wanted === null ? undefined : (wanted as TaskState), 200, null),
+          familyTasksInView(project, wanted === null ? undefined : (wanted as TaskState)).slice(0, 200),
           wanted as TaskState | null,
           csrf,
           null,
@@ -2032,7 +2034,12 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     const task = matchTaskPath(url.pathname, "");
     if (task !== null) {
-      return taskScreen(response, who, task.taskId, null, 200);
+      const family = familyOf(task.taskId);
+      if (family === null) return refuse(response, who, 404, "no such task", "/tasks");
+      const version = url.searchParams.get("version");
+      if (version !== null && !family.versions.some(one => one.id === version)) return refuse(response, who, 404, "That version is not available for this task.", taskHref(family.root.id));
+      if (task.taskId !== family.root.id) return redirect(response, `${taskHref(family.root.id)}?version=${encodeURIComponent(task.taskId)}`);
+      return taskScreen(response, who, version ?? family.current.id, null, 200);
     }
 
     if (url.pathname === "/runs") {
@@ -2152,7 +2159,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           terminalDiffView(artifacts, evidenceRoot),
           store.notesForRun(found.id),
           who.via === "cookie" ? who.session.csrf : "",
-          store.liveDiffComments(found.id),
+          store.liveDiffComments(found.id).filter(isRevisionFeedback),
           (() => {
             const publication = store.publicationForRun(found.id);
             return publication !== null && publication.prNumber !== null && store.hasOpenCiEpisode(publication.githubRepo, publication.prNumber)
@@ -2394,6 +2401,19 @@ export function createDecisionServer(options: ServeOptions): Server {
       sweepChatDrafts(Date.now());
       const requestedTask = url.searchParams.get("task");
       const focusTask = taskChatFocus(requestedTask, now, who);
+      if (focusTask !== null && requestedTask !== focusTask.id) {
+        url.searchParams.set("task", focusTask.id);
+        return redirect(response, `/chat?${url.searchParams.toString()}`);
+      }
+      // A seal receipt names the exact child it returned. Reopening an old
+      // receipt must not present a newer revision's approval as its answer.
+      const requestedRevision = url.searchParams.get("revision");
+      if (requestedRevision !== null) {
+        if (focusTask === null || !focusTask.family.versions.some(one => one.id === requestedRevision) || url.searchParams.has("result")) {
+          return refuse(response, who, 404, "That revision is not available for this task.", "/work");
+        }
+        if (requestedRevision !== focusTask.executionId) return redirect(response, `${taskHref(focusTask.id)}?version=${encodeURIComponent(requestedRevision)}`);
+      }
       // The result detail (package 3): `?result=<run>` names one finished
       // build OF THIS TASK; anything else — another task's run, a live or
       // failed attempt, a number that is no run — says so and shows the
@@ -2402,7 +2422,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const resultRun = (() => {
         if (focusTask === null || requestedResult === null || !/^[0-9]{1,15}$/.test(requestedResult)) return null;
         const found = store.getRun(Number(requestedResult));
-        if (found === null || !runVisible(found) || store.externalIdFor(found.taskRef) !== focusTask.id) return null;
+        if (found === null || !runVisible(found) || !focusTask.family.versions.some(one => one.refId === found.taskRef)) return null;
         if (runIsLive(found) || (found.outcome !== "built" && found.outcome !== "no-change")) return null;
         return found;
       })();
@@ -2430,7 +2450,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const allCoordinatorRows = who.role === "approver" ? store.listCoordinatorProposals({ repos, states: ["pending", "confirmed", "refused"], limit: 30 }) : [];
       const coordinatorRows = focusTask === null
         ? allCoordinatorRows
-        : allCoordinatorRows.filter(one => one.payload["task"] === focusTask.id);
+        : allCoordinatorRows.filter(one => focusTask.family.versions.some(version => version.id === one.payload["task"]));
       const enabled = chatEnablement();
       const pending = store.liveChatTurnFor(who.name);
       const latched = enabled.ok ? store.latchedChatTurns(enabled.credentialKey) : [];
@@ -2446,7 +2466,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const chatProjects = repos.map((repo, index) => {
         let peek: ProjectPeek | null = null;
         try {
-          peek = { ...store.projectPeek(repo, now), waiting: needsYouBadge(repo).count };
+          peek = projectFamilyPeek(repo, now);
         } catch {
           // The project rail is orientation, like chrome's project peek: a
           // failed count must not make the conversation itself disappear.
@@ -2736,7 +2756,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     messages: MateMessage[]; proposals: MateProposal[]; decisions: Map<number, Decision>; coordinatorProposals: CoordinatorProposal[]; pending: MateTurn | null; recent: MateTurn[];
   } {
     const allCoordinatorRows = store.listCoordinatorProposals({ repos: managedRepos(), states: ["pending", "confirmed", "refused"], limit: 30 });
-    const coordinatorProposals = focusTask === null ? allCoordinatorRows : allCoordinatorRows.filter(one => one.payload["task"] === focusTask.id);
+    const coordinatorProposals = focusTask === null ? allCoordinatorRows : allCoordinatorRows.filter(one => focusTask.family.versions.some(version => version.id === one.payload["task"]));
     const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
     const proposals = store.listMateProposals(opened.thread.id);
     return {
@@ -3048,7 +3068,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       { label: "projects", href: "/projects" },
       ...(options.telegramTokenFile !== undefined ? [{ label: "settings", href: "/settings" }] : []),
     ];
-    const open = store.paletteTasks(project, 201, admitted).filter(one => one.repo === null || visible(one.repo));
+    const open = store.paletteTasks(project, 201, admitted, visible(null));
     for (const one of open.slice(0, 200)) {
       entries.push({ label: `${one.id} — ${one.title}`, href: `/t/${encodeURIComponent(one.id)}` });
     }
@@ -3158,7 +3178,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     let projectPeek: ProjectPeek | null | undefined = project === null ? null : undefined;
     if (project !== null) {
       try {
-        projectPeek = { ...store.projectPeek(project, clock()), waiting: badge.count };
+        projectPeek = projectFamilyPeek(project, clock());
       } catch {
         // Chrome is orientation, never a reason to fail the actual screen.
         projectPeek = undefined;
@@ -3233,11 +3253,45 @@ export function createDecisionServer(options: ServeOptions): Server {
    * Every row's repo is still re-proved through `visible` — the query is
    * the bound, that check is the law.
    */
-  function workTasksInView(project: string | null): { tasks: (Task & { repo: string | null })[]; truncated: boolean } {
-    const admitted = project === null ? admissionList() : [project];
-    const rows = store.listWorkTasksAdmitted(admitted, visible(null), WORK_PAGE + 1);
-    const inView = rows.filter(task => visible(task.repo));
-    return { tasks: inView.slice(0, WORK_PAGE), truncated: inView.length > WORK_PAGE };
+  function projectFamilyPeek(repo: string, now: Date): ProjectPeek {
+    const families = familiesInView(repo);
+    const since = now.getTime() - 24 * 60 * 60_000;
+    return { waiting: needsYouBadge(repo).count,
+      queued: families.filter(one => one.current.state === "queued").length,
+      running: families.filter(one => one.current.state === "running").length,
+      doneRecently: families.filter(one => one.current.state === "done" && Date.parse(one.current.updatedAt) >= since).length };
+  }
+  function familiesInView(project: string | null): TaskFamily[] {
+    return store.taskFamiliesAdmitted(project === null ? admissionList() : [project], visible(null));
+  }
+  function familyOf(taskId: string): TaskFamily | null {
+    return store.taskFamilyOf(taskId, admissionList(), visible(null));
+  }
+  function workTasksInView(project: string | null): { tasks: (Task & { repo: string | null; family?: TaskFamily })[]; truncated: boolean } {
+    const families = familiesInView(project);
+    return { tasks: families.slice(0, WORK_PAGE).map(family => ({ ...family.current, family })), truncated: families.length > WORK_PAGE };
+  }
+  function familyTasksInView(project: string | null, state?: TaskState): (Task & { repo: string | null })[] {
+    return familiesInView(project).filter(family => state === undefined || family.current.state === state)
+      .map(family => ({ ...family.current, id: family.root.id, title: family.root.title }));
+  }
+  function revisionDestination(child: string, back: string): string {
+    const root = familyOf(child)?.root.id ?? child;
+    return back.startsWith("/chat?") ? `${taskChatHref(root)}&revision=${encodeURIComponent(child)}` : `${taskHref(root)}?version=${encodeURIComponent(child)}`;
+  }
+  function familyHistory(family: TaskFamily): string {
+    const warning = family.problem === null ? "" : `<p class="problem" data-history-problem>${escape(family.problem)}</p>`;
+    const active = family.otherActive.length === 0 ? "" : `<p class="problem" data-other-active>${family.otherActive.length} earlier version${family.otherActive.length === 1 ? " is" : "s are"} still waiting or running. Review History.</p>`;
+    if (family.versions.length < 2) return warning;
+    const versions = family.versions.map((version, index) => {
+      const label = index === 0 ? "Original" : `Revision ${index}`;
+      const status = workRowOf(version, clock()).status;
+      const runs = store.runsFor(version.refId).filter(runIsTaskResult);
+      const href = `${taskHref(family.root.id)}?version=${encodeURIComponent(version.id)}`;
+      return `<li data-history-version="${escape(version.id)}"><a href="${href}">${label}</a>${version.id === family.current.id ? " · Current" : ""} · ${escape(status.label)}` +
+        runs.map(run => `<a href="${escape(run.outcome === "built" || run.outcome === "no-change" ? chatResultHref(family.root.id, run.id) : `/r/${run.id}`)}">Build #${run.id}${run.outcome === "built" ? "" : ` · ${escape(run.outcome === "no-change" ? "No changes" : run.outcome === "failed" ? "Failed" : run.outcome ?? "Unfinished")}`}</a>`).join("") + `</li>`;
+    });
+    return warning + active + `<details class="task-history" data-root-task="${escape(family.root.id)}"><summary>History</summary><ol>${versions.join("")}</ol></details>`;
   }
 
   /** This exact run's review facts for the shared projection (review
@@ -3258,7 +3312,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * projection so this row, the task page, the focused chat, and the
    * review cockpit cannot disagree about the same run.
    */
-  function workRowOf(task: Task & { repo: string | null }, now: Date, receipt?: CompletionReceiptView | null): WorkRow {
+  function workRowOf(task: Task & { repo: string | null; family?: TaskFamily }, now: Date, receipt?: CompletionReceiptView | null): WorkRow {
     const ref = store.lookupRef(task.id);
     const runs = ref === null ? [] : store.runsFor(ref.id);
     const latest = runs.find(runIsTaskResult) ?? null;
@@ -3296,12 +3350,17 @@ export function createDecisionServer(options: ServeOptions): Server {
     // damaged files discovered after a stored verdict was written.
     const result = receipt === undefined && task.state === "done" && latest !== null && (latest.outcome === "built" || latest.outcome === "no-change")
       ? completionReceiptView(store, latest, store.artifactsFor(latest.id), evidenceRoot, reviewFactsFor(latest.id)) : receipt;
-    return { ...facts, status: workStatusOf(facts, result == null ? undefined : receiptStatusOf(result)), resultRunId: latest === null ? null : latest.id };
+    const status = workStatusOf(facts, result == null ? undefined : receiptStatusOf(result));
+    if (store.lookupRef(task.id)?.revisionOf !== null && live !== null && status.tone === "live") status.label = "Revising";
+    return { ...facts, executionId: task.id, id: task.family?.root.id ?? task.id, title: task.family?.root.title ?? task.title,
+      familyNotice: task.family?.problem ?? (task.family?.otherActive.length ? `${task.family.otherActive.length} earlier versions still waiting or running. Open History.` : null),
+      status, resultRunId: latest === null ? null : latest.id };
   }
 
   /** The compact task list for the master pane, the current row marked. */
   function taskListPane(project: string | null, currentId: string | null): string {
-    const rows = store.listTasksScoped(project, undefined, 100, currentId);
+    const all = familyTasksInView(project);
+    const rows = all.filter((one, index) => index < 100 || one.id === currentId);
     const items = rows
       .map(
         task =>
@@ -3396,7 +3455,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // COUNTs each, scoped to the exact repo.
     const peekOf = (path: string) => {
       try {
-        return { ...store.projectPeek(path, now), waiting: needsYouBadge(path).count };
+        return projectFamilyPeek(path, now);
       } catch {
         return null;
       }
@@ -3758,23 +3817,28 @@ export function createDecisionServer(options: ServeOptions): Server {
    * Only an admitted task becomes model context or visible page copy. */
   function taskChatFocus(taskId: string | null, now: Date, who?: Who, options: { mintNonce?: boolean } = {}): TaskChatFocus | null {
     if (taskId === null || taskId.length === 0 || taskId.length > 64 || hasForbiddenControls(taskId)) return null;
-    const task = store.getTask(taskId);
-    const ref = store.lookupRef(taskId);
-    if (task === null || ref === null || !visible(ref.repo)) return null;
+    const family = familyOf(taskId);
+    if (family === null) return null;
+    taskId = family.current.id;
+    const task = family.current;
+    const ref = store.lookupRef(taskId)!;
     const scope = store.getScope(taskId);
     // The focused chat is a lens over the task page's own assembled facts.
     // Reusing that projection keeps approval nonces, joint race digests,
     // revision verification, decisions, and result evidence on one source
     // of truth instead of growing a chat-only lifecycle.
-    const view = who === undefined ? null : taskViewData(taskId, who, null, options);
+    const view = who === undefined || family.problem !== null ? null : taskViewData(taskId, who, null, options);
     const runs = view?.runs ?? store.runsFor(ref.id);
     const latest = runs.find(runIsTaskResult) ?? null;
     const approval = approvalOf(scope);
     const live = runs.find(one => runIsLive(one)) ?? null;
     const planRevisions = view?.planRevisions ?? revisionLedgerOf(ref.id);
     return {
-      id: task.id,
-      title: task.title,
+      id: family.root.id,
+      executionId: task.id,
+      family,
+      history: familyHistory(family),
+      title: family.root.title,
       state: task.state,
       status: view?.status ?? workRowOf({ ...task, repo: ref.repo }, now).status,
       project: ref.repo === null ? null : projectName(ref.repo),
@@ -3826,9 +3890,16 @@ export function createDecisionServer(options: ServeOptions): Server {
     status: number,
     scopeDraft?: URLSearchParams,
   ): void {
+    const admittedFamily = familyOf(taskId);
+    if (admittedFamily?.problem != null) return sendScreen(response, status, screen(admittedFamily.root.title,
+      `<h1>${escape(admittedFamily.root.title)}</h1><p>${escape(admittedFamily.current.state)}</p><p class="problem" data-history-problem>${escape(admittedFamily.problem)}</p>`, { chrome: chromeFor(admittedFamily.root.repo, "tasks") }));
     const data = taskViewData(taskId, who, problem);
     if (data === null) return refuse(response, who, 404, "no such task", "/tasks");
-    if (scopeDraft !== undefined) data.scopeDraft = scopeDraft;
+    const family = familyOf(taskId);
+    const presentedData = { ...data, rootId: family?.root.id ?? taskId, rootTitle: family?.root.title ?? data.task.title,
+      history: family === null ? "" : familyHistory(family),
+      versionLabel: family !== null && family.current.id !== taskId ? `Viewing ${family.versions.findIndex(one => one.id === taskId) === 0 ? "Original" : `Revision ${family.versions.findIndex(one => one.id === taskId)}`} · ${family.current.state === "running" ? "A newer revision is running" : "A newer revision is current"}` : null };
+    if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
     const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
     return sendScreen(
       response,
@@ -3836,8 +3907,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       taskPage(
         paneProject === null && !unscopedMode
           ? chromeFor(paneProject, "tasks")
-          : chromeFor(paneProject, "tasks", taskListPane(paneProject, taskId)),
-        data,
+          : chromeFor(paneProject, "tasks", taskListPane(paneProject, family?.root.id ?? taskId)),
+        presentedData,
       ),
     );
   }
@@ -4590,7 +4661,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(
           response,
           400,
-          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project, null, store.permissionDefault().mode, store.qualityDefault().mode),
+          tasksPage(chromeFor(project, "tasks"), familyTasksInView(project).slice(0, 200), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project, null, store.permissionDefault().mode, store.qualityDefault().mode),
         );
       }
       let repo = effective;
@@ -4603,7 +4674,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return sendScreen(
             response,
             403,
-            tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, `${effective} is outside what this server was configured to show`, project, null, store.permissionDefault().mode, store.qualityDefault().mode),
+            tasksPage(chromeFor(project, "tasks"), familyTasksInView(project).slice(0, 200), null, csrf, `${effective} is outside what this server was configured to show`, project, null, store.permissionDefault().mode, store.qualityDefault().mode),
           );
         }
         repo = canonical;
@@ -4667,7 +4738,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(
           response,
           made.reason === "backlog-full" ? 429 : 400,
-          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project, { title, goal, not: notThis, touches: body.get("touches") ?? "", acceptance: body.get("acceptance") ?? "", values: body }, store.permissionDefault().mode, store.qualityDefault().mode),
+          tasksPage(chromeFor(project, "tasks"), familyTasksInView(project).slice(0, 200), null, csrf, made.message, project, { title, goal, not: notThis, touches: body.get("touches") ?? "", acceptance: body.get("acceptance") ?? "", values: body }, store.permissionDefault().mode, store.qualityDefault().mode),
         );
       }
       const actionContext = requestContext.getStore();
@@ -5524,7 +5595,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return said(400, `a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`, mateSession.id);
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(requestId === null ? {} : { requestId }), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Keep this turn about that task unless the operator explicitly asks to broaden it.` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(requestId === null ? {} : { requestId }), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
           })
@@ -5998,6 +6069,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       const back = resultReturnTarget(body.get("return"), id);
       const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
       const sourceScope = store.getScope(sourceTaskId);
+      const sourceFamily = familyOf(sourceTaskId);
+      if (sourceFamily === null || sourceFamily.problem !== null) return refuse(response, who, 409, "The revision history cannot be verified in this project.", back);
       const repo = taskRepoOf(found.taskRef);
       // THE DISPLAYED BATCH (repair 2026-09-14, finding 2): the form names
       // the exact note ids its reader saw and the source terms it was
@@ -6023,7 +6096,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!child || notes.length !== batchIds.length || notes.some(one => one.consumedBy !== child)) return null;
         const ref = store.lookupRef(child);
         const lineage = ref === null ? null : store.revisionSourceOf(ref.id);
-        if (lineage === null || lineage.sourceRun !== id || lineage.sourceTask !== sourceTaskId) return null;
+        if (ref === null || !visible(ref.repo) || lineage === null || lineage.sourceRun !== id || lineage.sourceTask !== sourceTaskId) return null;
         try {
           const read = readVerifiedArtifact(evidenceRoot, lineage.briefArtifact);
           if (!read.ok) return null;
@@ -6039,7 +6112,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // since is touched. A batch partly sealed elsewhere is refused whole.
       const consumers = new Set(batch.map(one => one.consumedBy).filter((one): one is string => one !== null));
       const replay = replayChild(batch);
-      if (replay !== null) return redirect(response, taskHref(replay));
+      if (replay !== null) return redirect(response, revisionDestination(replay, back));
       if (consumers.size > 0) {
         return refuse(response, who, 409, `some of these notes were already sealed into revision ${[...consumers].join(", ")}; the others are still waiting — reload the result to see the current batch`, back);
       }
@@ -6049,6 +6122,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (batch.some(one => one.supersededBy !== null)) {
         return refuse(response, who, 409, "a note in this batch was superseded — reload the result to see the current batch", back);
       }
+      if (batch.some(one => !isRevisionFeedback(one))) return refuse(response, who, 409, "Review observations are not requested changes. Use Request change to add your feedback first.", back);
       const comments = batch;
       // Keep the subject recognizable, including when revising a revision.
       // Reserve the suffix before truncating, at whole grapheme boundaries.
@@ -6157,14 +6231,14 @@ export function createDecisionServer(options: ServeOptions): Server {
           const settled = store.allDiffComments(id).filter(one => batchIds.includes(one.id));
           const takers = new Set(settled.map(one => one.consumedBy).filter((one): one is string => one !== null));
           const winner = replayChild(settled);
-          if (winner !== null) return redirect(response, taskHref(winner));
+          if (winner !== null) return redirect(response, revisionDestination(winner, back));
           if (takers.size > 0) {
             return refuse(response, who, 409, `some of these notes were just sealed into revision ${[...takers].join(", ")}; the others are still waiting — reload the result to see the current batch`, back);
           }
         }
         return refuse(response, who, 409, `could not seal the revision: ${sealed.detail}`, back);
       }
-      return redirect(response, taskHref(sealed.id));
+      return redirect(response, revisionDestination(sealed.id, back));
     }
 
     const draftRepair = /^\/r\/([0-9]{1,15})\/draft-repair$/.exec(url.pathname);
@@ -7588,6 +7662,8 @@ export function createDecisionServer(options: ServeOptions): Server {
    * null, and null reads exactly like a task that never existed.
    */
   function completedRowFor(taskId: string, project: string | null): CompletedWorkRow | null {
+    const family = familyOf(taskId);
+    if (family === null || family.problem !== null) return null;
     const task = store.getTask(taskId);
     const ref = store.lookupRef(taskId);
     if (task === null || ref === null || task.state !== "done") return null;
@@ -7674,6 +7750,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     const publication = store.publicationForRun(run.id);
     return {
       taskId,
+      rootId: familyOf(taskId)?.root.id ?? taskId,
+      history: (() => { const family = familyOf(taskId); return family === null ? "" : familyHistory(family); })(),
       run,
       receipt,
       handoff,
@@ -7684,11 +7762,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       files,
       outsideTouches: files.filter(one => one.outsideTouches).map(one => one.path),
       fileAnchors,
-      comments: store.liveDiffComments(run.id),
+      comments: store.liveDiffComments(run.id).filter(isRevisionFeedback),
+      pastComments: store.allDiffComments(run.id).filter(one => one.reviewerRun === null && (one.consumedBy !== null || one.supersededBy !== null)),
       reviewerFindings: store.allDiffComments(run.id).filter(one => one.reviewerRun !== null),
       revisions: store.revisionsFromRun(run.id).flatMap(one => {
         const child = store.getTask(one.id);
-        if (child === null) return [];
+        if (child === null || !visible(store.lookupRef(one.id)?.repo ?? null)) return [];
         // The same projection the Work list and the child's own page wear.
         const status = workRowOf({ ...child, repo: store.lookupRef(one.id)?.repo ?? null }, now).status;
         return [{ id: one.id, title: one.title, state: one.state, approved: approvalOf(store.getScope(one.id)).approved, standing: status.label, tone: status.tone }];
@@ -10076,6 +10155,9 @@ const STYLE = `
   .result-unavailable { margin: .5rem 0 0; padding-left: 1.15rem; font-size: .78rem; }
   .result-changes { margin: .25rem 0 .5rem; padding-left: 1.15rem; font-size: .875rem; }
   .result-changes li { margin: .2rem 0; overflow-wrap: anywhere; }
+  .result-files li, .result-files .mono { overflow-wrap: anywhere; white-space: normal; }
+  .result-files li { min-width: 0; }
+  @media (max-width: 760px) { .result-panel .pick-file, .result-panel .pick-line { min-height: 44px; min-width: 44px; white-space: nowrap; } }
   .result-files-lead { margin: .25rem 0 .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
   .result-report h3 { margin: .2rem 0 .3rem; font-size: 1rem; }
   .result-report .plan-doc { max-height: 28rem; overflow: auto; }
@@ -10100,6 +10182,11 @@ const STYLE = `
   .result-pin[open] > summary::before { content: "▾"; }
   .result-pin > summary .meta { font-weight: 400; }
   .result-pin .diff-comment-target { margin: .25rem 0 .5rem; }
+  .chat-approval-section, .revision-card, .revision-lineage, .task-history, .diff-comment p { min-width: 0; overflow-wrap: anywhere; }
+  .result-feedback-history > summary, .task-history > summary, .task-history a { display: inline-flex; align-items: center; min-height: 44px; padding: .25rem .5rem; }
+  .task-history > summary::before { content: "▸"; margin-right: .35rem; }
+  .task-history[open] > summary::before { content: "▾"; }
+  .task-history li { margin: .25rem 0; }
   .result-revision { margin: .6rem 0; padding: .6rem .75rem; border: 1px solid color-mix(in srgb, var(--running) 24%, var(--glass-border)); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--running) 6%, var(--glass-strong)); font-size: .8125rem; overflow-wrap: anywhere; }
   .result-links { display: flex; flex-wrap: wrap; gap: .25rem .5rem; margin: .6rem 0 0; }
   .result-links a { font-weight: 550; }
@@ -12671,6 +12758,9 @@ function approvalFormDigest(scopeDigest: string, raceDigest: string | null, plan
 /** A task attached by the server to one chat turn. The thread remains the
  * unified conversation; this is a focused lens, not a second chat silo. */
 type TaskChatFocus = {
+  executionId: string;
+  family: TaskFamily;
+  history: string;
   status: DisplayStatus;
   id: string;
   title: string;
@@ -12941,7 +13031,7 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
       (approval.revision.comments.length === 0 ? "" : `<ul class="recap">${approval.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul>`) +
       // The link back (package 3): the original result stays on record
       // and one tap away from the revision it produced, in both directions.
-      `<p class="meta"><a href="${escape(chatResultHref(approval.revision.sourceTask, approval.revision.sourceRun))}" data-revision-source>Original result: build #${approval.revision.sourceRun} →</a></p>` +
+      `<p class="meta"><a href="${escape(chatResultHref(focus.id, approval.revision.sourceRun))}" data-revision-source>Original result: build #${approval.revision.sourceRun} →</a></p>` +
       revisionLineageHtml(approval.revision.lineage) +
       `</div>`;
   const race = approval.raceTerms === null
@@ -12976,7 +13066,7 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
     `<p class="chat-plan-facts">${facts.map(escape).join(" · ")}</p>` +
     `<details class="chat-approval">` +
     `<summary data-primary-action><span class="button-link">Review plan</span></summary>` +
-    `<form method="post" action="${taskHref(focus.id)}/approve" class="chat-approval-form approve-form">` +
+    `<form method="post" action="${taskHref(focus.executionId)}/approve" class="chat-approval-form approve-form">` +
     `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
     `<input type="hidden" name="nonce" value="${escape(approval.nonce)}">` +
     `<input type="hidden" name="digest" value="${escape(approval.digest)}">` +
@@ -13014,18 +13104,18 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     ? `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approvalContent}</details>` : approvalContent;
   const polling = !inert && ((focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled" || focus.control.kind === "stopping" || focus.control.kind === "stop");
   return (
-    `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}" data-approval="${escape(focus.approval?.digest ?? "")}" data-plan="${escape(focus.plan ?? "")}">` +
+    `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-execution="${escape(focus.executionId)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}" data-approval="${escape(focus.approval?.digest ?? "")}" data-plan="${escape(focus.plan ?? "")}">` +
     (receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status) : taskStatusCard(focus.status, focus.id, focus.dispatch, focus.liveRun?.id ?? null, focus.approval !== null && focus.dispatch?.action === "approve-scope")) +
     // The exact-run control (v52): the SAME component the task page
     // renders, refreshed with the live region — typed input in the
     // composer is untouched because only this region is replaced.
-    taskControlDetailsHtml(focus.control, focus.id, csrf, "chat", inert) +
+    taskControlDetailsHtml(focus.control, focus.executionId, csrf, "chat", inert) +
     // The compact agents strip (v47): always visible, phones included,
     // where the desktop context panel is hidden.
-    agentsStripHtml(focus.route, focus.id) +
+    agentsStripHtml(focus.route, focus.executionId) +
     milestoneProgressHtml(focus.milestoneProgress) +
-    planRevisionLedgerHtml(focus.planRevisions, focus.id, csrf) +
-    approvalCard +
+    planRevisionLedgerHtml(focus.planRevisions, focus.executionId, csrf) +
+    approvalCard + focus.history +
     (focus.decisions.length === 0
       ? ""
       : `<section class="chat-decisions"><div class="chat-section-head"><span class="eyebrow">needs your answer</span><h2>Keep the work moving</h2></div>${focus.decisions.map(one => focus.approval !== null || inert
@@ -13099,7 +13189,7 @@ function chatFleetOverview(
     .slice(0, Math.max(0, 3 - rows.length))) {
     const dispatch = task.dispatch as DispatchDiagnosis;
     rows.push(
-      `<a class="chat-overview-item decision" href="${taskHref(task.id)}" data-dispatch-status="${escape(dispatch.code)}">` +
+      `<a class="chat-overview-item decision" href="${taskHref(task.rootId ?? task.id)}" data-dispatch-status="${escape(dispatch.code)}">` +
         `<span class="chat-overview-icon">${strokeIcon(`<path d="M12 8v4"/><path d="M12 16h.01"/><circle cx="12" cy="12" r="9"/>`)}</span>` +
         `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · ${escape(dispatch.summary.toLowerCase())}</span></span>` +
         `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
@@ -13107,7 +13197,7 @@ function chatFleetOverview(
   }
   for (const task of snapshot.tasks.filter(one => one.state === "failed").slice(0, Math.max(0, 3 - rows.length))) {
     rows.push(
-      `<a class="chat-overview-item failed" href="${taskHref(task.id)}">` +
+      `<a class="chat-overview-item failed" href="${taskHref(task.rootId ?? task.id)}">` +
         `<span class="chat-overview-icon">${strokeIcon(`<path d="M12 9v4"/><path d="M12 17h.01"/><path d="m10.3 2.9-8.6 15A2 2 0 0 0 3.4 21h17.2a2 2 0 0 0 1.7-3.1l-8.6-15a2 2 0 0 0-3.4 0z"/>`)}</span>` +
         `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · failed</span></span>` +
         `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
@@ -13120,7 +13210,7 @@ function chatFleetOverview(
     .filter(one => one.state === "done" && (one.proofVerdict === "short" || one.proofVerdict === "refuted"))
     .slice(0, Math.max(0, 3 - rows.length))) {
     rows.push(
-      `<a class="chat-overview-item failed" href="${taskHref(task.id)}">` +
+      `<a class="chat-overview-item failed" href="${taskHref(task.rootId ?? task.id)}">` +
         `<span class="chat-overview-icon">${strokeIcon(`<path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/>`)}</span>` +
         `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · ${task.proofVerdict === "refuted" ? "conflicting evidence" : "missing evidence"}${task.proofMatrix.length > 0 ? ` · ${task.proofMatrix.length} requirement${task.proofMatrix.length === 1 ? "" : "s"}` : ""}</span></span>` +
         `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
@@ -13128,7 +13218,7 @@ function chatFleetOverview(
   }
   for (const task of snapshot.tasks.filter(one => one.state === "running").slice(0, Math.max(0, 4 - rows.length))) {
     rows.push(
-      `<a class="chat-overview-item running" href="${taskHref(task.id)}">` +
+      `<a class="chat-overview-item running" href="${taskHref(task.rootId ?? task.id)}">` +
         `<span class="chat-overview-icon">${strokeIcon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`)}</span>` +
         `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · building now</span></span>` +
         `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
@@ -13865,7 +13955,7 @@ function mateChatVersion(rows: MateThreadRows): string {
     focus === null
       ? null
       : [
-          focus.id, focus.title, focus.state, focus.scope, focus.plan, focus.claimed,
+          focus.id, focus.executionId, focus.history, focus.title, focus.state, focus.scope, focus.plan, focus.claimed,
           focus.approval === null ? null : [focus.approval.digest, focus.approval.nonce === "" ? "closed" : "open", focus.approval.revision !== null && "problem" in focus.approval.revision ? focus.approval.revision.problem : null],
           focus.liveRun === null ? null : [focus.liveRun.id, focus.liveRun.phase, focus.liveRun.runner],
           focus.control,
@@ -14452,7 +14542,7 @@ function taskComposerHtml(data: {
 /** A task list page's ceiling: the newest rows, the bound printed. */
 const WORK_PAGE = 200;
 
-type WorkRow = WorkFacts & { status: WorkStatus; resultRunId: number | null };
+type WorkRow = WorkFacts & { executionId?: string; familyNotice?: string | null; status: WorkStatus; resultRunId: number | null };
 
 function publicationFactsOf(publication: Publication | null): PublicationFacts {
   return publication === null
@@ -14519,7 +14609,7 @@ function workPage(
     }
   })();
   const rowHtml = (row: WorkRow): string => {
-    const actionHref = statusActionHref(row.status, row.id, row.status.action?.kind === "open-run" && row.liveRunId !== null ? row.liveRunId : row.resultRunId, row.publication?.prUrl ?? null);
+    const actionHref = row.executionId !== row.id && row.status.action?.kind === "open-result" && row.resultRunId !== null ? chatResultHref(row.id, row.resultRunId) : statusActionHref(row.status, row.id, row.status.action?.kind === "open-run" && row.liveRunId !== null ? row.liveRunId : row.resultRunId, row.publication?.prUrl ?? null);
     const action = row.status.action === null || actionHref === null ? "" : `<a class="work-action" href="${escape(actionHref)}">${escape(row.status.action.label)} →</a>`;
     // The human-readable title leads; the project label appears when rows
     // span projects (or the row is unplaced); the age stays beside it. The
@@ -14535,7 +14625,7 @@ function workPage(
       // disclosure that works without script and by keyboard — never
       // removed, never shrunk. The label itself names a failed check, a
       // needed approval, or an exception, so nothing critical folds away.
-      `<div class="work-row-status">${statusLineHtml(row.status)}${action}` +
+      `<div class="work-row-status">${statusLineHtml(row.status)}${action}${row.familyNotice == null ? "" : `<p class="problem">${escape(row.familyNotice)}</p>`}` +
       `<details class="work-details"><summary>Details</summary><p class="work-detail">${escape(row.status.detail)}</p>` +
       `<p class="work-meta work-id">Task <span class="mono">${escape(row.id)}</span></p></details></div>` +
       `</article>`
@@ -16257,6 +16347,10 @@ function revisionLineageHtml(lineage: RevisionLineage | null): string {
 }
 
 function taskBody(data: {
+  rootId?: string;
+  rootTitle?: string;
+  history?: string;
+  versionLabel?: string | null;
   status?: DisplayStatus;
   task: Task;
   /** Shared read-side lifecycle answer; the atomic claim still re-proves it. */
@@ -17438,6 +17532,7 @@ function taskBody(data: {
   // Exact identity stays available in Task options; failures stay in the
   // status and property rail, and approval provenance stays in the ceremony.
   const identity = `<p class="meta task-identity">Task ID <span class="mono">${escape(task.id)}</span>` +
+      (data.rootTitle !== undefined && data.rootTitle !== task.title ? ` · Execution: ${escape(task.title)}` : "") +
       `${data.repo === null ? "" : ` · ${escape(projectName(data.repo))}`}` +
       `${
         data.coordinator !== null && data.coordinator !== undefined
@@ -17448,7 +17543,9 @@ function taskBody(data: {
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`;
   return [
     // The title is bare; the receipt or shared task status leads once.
-    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)}</h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
+    `<div class="task-title-row"><h1 class="task-main-title">${escape(data.rootTitle ?? task.title)}</h1>${data.csrf === "" ? "" : taskViewSwitch(data.rootId ?? task.id, "overview")}</div>`,
+    data.versionLabel == null ? "" : `<p class="meta">${escape(data.versionLabel)} · <a href="${taskHref(data.rootId ?? task.id)}">Current work</a></p>`,
+    data.history ?? "",
     // The result takes over from the task status as soon as it is ready.
     receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope"),
     // The exact-run control (v52), directly under the scheduler's answer:
@@ -18146,7 +18243,7 @@ function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boole
     return card("draft-repair", "CI is failing on its pull request", "Standing Orders confirmed the failure. Draft one repair task, then approve it before it runs.", `<form method="post" action="/r/${run.id}/draft-repair"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">Draft a repair task</button></form>`);
   }
   if (detail.comments.length > 0 && csrf !== "") {
-    return card("revise", `${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these notes. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}">${revisionSealFields(detail.comments, detail.sourceDigest)}<button type="submit">Create revision</button></form>`);
+    return card("revise", `${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these notes. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}">${revisionSealFields(detail.comments, detail.sourceDigest)}<button type="submit">Revise</button></form>`);
   }
   const prUrl = detail.publication === null ? null : safePrUrl(detail.publication.prUrl);
   if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) {
@@ -19137,6 +19234,8 @@ const chatResultHref = (taskId: string, runId: number, tab: ResultTab = "summary
  * only in where the panel sits and which links lead away from it.
  */
 type ResultDetail = {
+  rootId?: string;
+  history?: string;
   taskId: string;
   run: Run;
   receipt: CompletionReceiptView;
@@ -19149,6 +19248,7 @@ type ResultDetail = {
   outsideTouches: string[];
   fileAnchors: ReadonlyMap<string, string>;
   comments: DiffComment[];
+  pastComments?: DiffComment[];
   reviewerFindings: DiffComment[];
   /** Revisions already sealed from this run — the forward link. Each
    * carries the shared status projection's own words for the child
@@ -19253,7 +19353,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       summaryParts.push(
         `<article class="result-report" data-result-report="ok"><h3>${escape(report.title)}</h3><p class="recap">${escape(report.summary)}</p>` +
           `<pre class="recap plan-doc">${escape(report.document)}</pre>` +
-          `<p class="meta"><a href="/r/${runId}/evidence/${report.artifactId}">${report.truncated ? "Download the stored part of the report (shortened at storage — not the full report)" : "Download the report"}</a>${report.followUps === 0 ? "" : ` · ${report.followUps} proposed follow-up${report.followUps === 1 ? "" : "s"} on <a href="${taskHref(detail.taskId)}">the task</a>`}</p></article>`,
+          `<p class="meta"><a href="/r/${runId}/evidence/${report.artifactId}">${report.truncated ? "Download the stored part of the report (shortened at storage — not the full report)" : "Download the report"}</a>${report.followUps === 0 ? "" : ` · ${report.followUps} proposed follow-up${report.followUps === 1 ? "" : "s"} on <a href="${taskHref(detail.rootId ?? detail.taskId)}">the task</a>`}</p></article>`,
       );
     }
   } else if (lead === "screenshots") {
@@ -19299,8 +19399,8 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const links: string[] = [];
   if (o.place !== "run") links.push(`<a href="/r/${runId}">Full build record →</a>`);
   if (o.place !== "review") links.push(`<a href="${reviewHref(detail.taskId)}">Review cockpit →</a>`);
-  if (o.place !== "chat") links.push(`<a href="${taskChatHref(detail.taskId)}">Discuss in chat →</a>`);
-  links.push(`<a href="${taskHref(detail.taskId)}">Task overview →</a>`);
+  if (o.place !== "chat") links.push(`<a href="${taskChatHref(detail.rootId ?? detail.taskId)}">Discuss in chat →</a>`);
+  links.push(`<a href="${taskHref(detail.rootId ?? detail.taskId)}">Task overview →</a>`);
   // Technical facts on demand: build, agent, exact commits, evidence
   // sources, the publication record, and the other pages for this result.
   summaryParts.push(
@@ -19368,6 +19468,8 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
 
   // ---- checks --------------------------------------------------------------
   const checkParts: string[] = [];
+  const reviewerNotes = detail.reviewerFindings.map(one => `<li><span class="badge${one.severity === "problem" ? " badge-failed" : ""}">${escape(one.severity ?? "note")}</span> ${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span>${!isRevisionFeedback(one) && detail.canAnnotate && o.csrf !== "" ? ` <button type="button" class="pick-file" data-path="${escape(one.path ?? "")}" data-line="${one.line ?? ""}" data-review-note="${escape(one.note)}">Request change</button>` : ""}</li>`).join("");
+  if (proof === null && reviewerNotes !== "") checkParts.push(`<div class="result-section" data-cockpit-source="reviewer"><strong>Independent review</strong><ul>${reviewerNotes}</ul></div>`);
   if (run.outcome === "no-change") checkParts.push(`<p class="meta">The build concluded that no repository change was needed. A no-change conclusion owes no proof — its handoff and machine-captured diff are the record.</p>`);
   if (proof === null) {
     if (run.outcome !== "no-change") checkParts.push(`<p class="meta" data-proof-verdict="none">This build has no verification result or captured evidence. Review its recorded changes yourself.</p>`);
@@ -19393,7 +19495,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       checkParts.push(
         `<div class="result-section" data-cockpit-source="reviewer"><strong>independent review</strong><ul>` +
           judgements.map(one => `<li>${reviewJudgementBadge(one.review)} <code>${escape(one.id)}</code> <span class="meta">${escape(one.review?.author ?? "")}: ${escape(one.review?.note ?? "")}</span></li>`).join("") +
-          detail.reviewerFindings.map(one => `<li><span class="badge${one.severity === "problem" ? " badge-failed" : ""}">${escape(one.severity ?? "note")}</span> ${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("") +
+          reviewerNotes +
           `</ul></div>`,
       );
     }
@@ -19443,10 +19545,13 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     if (o.csrf !== "") {
       requestParts.push(
         `<form method="post" action="/r/${runId}/revise" class="card revision-from-comments"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="return" value="${escape(o.returnTo)}">${revisionSealFields(detail.comments, detail.sourceDigest)}` +
-          `<div><strong>${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready</strong><span class="meta">One revision from exactly these notes. You approve it before it builds.</span></div>` +
-          `<button type="submit">Create revision</button></form>`,
+          `<div><strong>${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready</strong></div>` +
+          `<button type="submit">Revise</button></form>`,
       );
     }
+  }
+  if ((detail.pastComments?.length ?? 0) > 0) {
+    requestParts.push(`<details class="result-feedback-history"><summary>Earlier feedback</summary><div class="diff-comments" data-past-feedback>${detail.pastComments!.map(one => `<div class="diff-comment"><p>${one.path === null ? "" : pathWords(one.path, one.line)}${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span></div>`).join("")}</div></details>`);
   }
   for (const revision of detail.revisions) {
     // The child's standing is the shared status projection's own words
@@ -19456,7 +19561,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   if (o.csrf === "") {
     requestParts.push(`<p class="meta">Sign in with a browser session to request changes.</p>`);
   } else if (!detail.canAnnotate) {
-    requestParts.push(`<p class="meta" data-result-feedback="unavailable">${terminal === null ? "This result has no sealed diff to attach notes to." : "The sealed diff no longer verifies, so notes cannot attach to it."} <a href="${taskChatHref(detail.taskId)}">Discuss in chat →</a></p>`);
+    requestParts.push(`<p class="meta" data-result-feedback="unavailable">${terminal === null ? "This result has no sealed diff to attach notes to." : "The sealed diff no longer verifies, so notes cannot attach to it."} <a href="${taskChatHref(detail.rootId ?? detail.taskId)}">Discuss in chat →</a></p>`);
   } else {
     requestParts.push(
       `<form method="post" action="/r/${runId}/comment" class="diff-comment-form" id="comment-form">` +
@@ -19486,8 +19591,9 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     `<div class="result-view" role="tabpanel" data-result-view="${tab}"${tab === o.tab ? "" : " hidden"}>${parts.join("\n")}</div>`;
   const heading = receiptHeadingOf(run.outcome, receipt.publication);
   return (
-    `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
+    `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.rootId ?? detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
       (o.back === null ? "" : `<p class="result-back"><a href="${escape(o.back.href)}" data-result-back>← ${escape(o.back.label)}</a></p>`) +
+      (detail.history ?? "") +
       `<header class="result-head"><div><span class="eyebrow">Build #${runId}</span><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status)}</header>` +
       `<p class="result-summary">${escape(outcome)}</p>` +
       action +
@@ -19522,7 +19628,7 @@ function resultPrimaryAction(detail: ResultDetail, o: ResultPanelOptions, prUrl:
   if (detail.ciFailing && o.csrf !== "") {
     return wrap("draft-repair", `<form method="post" action="/r/${detail.run.id}/draft-repair"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><button type="submit">Draft a repair task</button></form>`);
   }
-  if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="button-link" href="#request-changes">Create revision <span class="meta">from ${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"}</span></a>`);
+  if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="button-link" href="#request-changes">Revise <span class="meta">from ${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"}</span></a>`);
   if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) return wrap("open-pr", `<a class="button-link" href="${escape(prUrl)}">Open PR #${detail.publication.prNumber}</a>`);
   if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="button-link" href="#request-changes">Request changes</a>`);
   return "";

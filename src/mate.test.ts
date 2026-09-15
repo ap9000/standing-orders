@@ -658,6 +658,29 @@ describe("the mate's turn", () => {
     expect(script.bodies.join("\n")).not.toContain("RECAP-CANARY");
   });
 
+  test("same task conversation identifies current execution while proposals keep their exact target", () => {
+    const root = store.lookupRef("in-1")!;
+    const run = store.runsFor(root.id)[0]!;
+    const artifact = store.saveArtifact({ run: run.id, kind: "revision-brief", key: "synthetic-brief.json", bytesOriginal: 2, bytesStored: 2, sha256: "a".repeat(64), truncated: false, capture: "synthetic family fixture" }, T0);
+    store.markRevision(store.lookupRef("in-2")!.id, "in-1", artifact);
+    let payload: Record<string, unknown> | null = null;
+    const ctx = { store, who, now: clock(), draft: (_kind: string, value: Record<string, unknown>) => { payload = value; return 12; }, step: 1, readDecisions: new Map<number, number>() };
+    const listed = executeMateTool(ctx, "list_tasks", {});
+    expect(listed).toMatchObject({ ok: true, body: { tasks: expect.arrayContaining([expect.objectContaining({ task: "in-1", execution: "in-2" })]) } });
+    const tasks = (listed as { ok: true; body: { tasks: { task: string }[] } }).body.tasks;
+    expect(tasks.filter(one => one.task === "in-1")).toHaveLength(1);
+    expect(tasks.some(one => one.task === "in-2")).toBe(false);
+    expect(executeMateTool(ctx, "get_task", { task: "in-1" })).toMatchObject({ ok: true, body: { task: "in-1", root: "in-1", currentExecution: "in-2" } });
+    expect(executeMateTool(ctx, "propose_hold", { task: "in-1", reason: "Hold this exact execution." })).toMatchObject({ ok: true });
+    expect(payload).toMatchObject({ task: "in-1" });
+    expect(executeMateTool(ctx, "get_task", { task: "out-1" })).toMatchObject({ ok: false });
+    for (let i = 0; i < 65; i++) {
+      store.createTask({ id: `other-new-${i}`, title: "Other project" }, new Date(T0.getTime() + i + 1));
+      store.placeTask(store.lookupRef(`other-new-${i}`)!.id, OTHER);
+    }
+    expect(executeMateTool(ctx, "list_tasks", { repo: "r1", limit: 2 })).toMatchObject({ ok: true, body: { tasks: expect.arrayContaining([expect.objectContaining({ task: "in-1", execution: "in-2", repo: "r1" })]) } });
+  });
+
   test("get_task exposes dependency state and repair proposals capture the exact graph seen", () => {
     store.setTaskState("in-3", "failed", clock());
     store.addEdge("in-2", "in-3");

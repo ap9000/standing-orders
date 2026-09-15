@@ -398,13 +398,16 @@ export const MATE_TOOLS: MateTool[] = [
     handle: (ctx, args) => {
       const repo = args["repo"] === undefined ? null : repoPathOf(ctx.who, args["repo"]);
       if (args["repo"] !== undefined && repo === null) return { ok: false, message: "repo must be one of the ids from list_repos" };
-      const snapshot = withDispatchDiagnoses(ctx.store, ctx.store.chatSnapshot(ctx.who.repos, ctx.now), ctx.now);
       const limit = typeof args["limit"] === "number" ? Math.min(50, Math.max(1, Math.floor(args["limit"]))) : 20;
-      const rows = snapshot.tasks
-        .filter(one => (repo === null || ctx.who.repos[one.repoIndex] === repo) && (args["state"] === undefined || one.state === args["state"]))
-        .slice(0, limit)
-        .map(one => ({ repo: `r${one.repoIndex + 1}`, task: one.id, title: one.title, state: one.state, ageHours: one.ageHours, strikes: one.strikes, dispatch: one.dispatch ?? null }));
-      return { ok: true, body: { tasks: rows, truncated: snapshot.tasksSaturated } };
+      const families = ctx.store.taskFamiliesAdmitted(repo === null ? ctx.who.repos : [repo], false)
+        .filter(one => args["state"] === undefined || one.current.state === args["state"]);
+      const tasks = families.slice(0, limit).map(one => ({
+        repo: `r${ctx.who.repos.indexOf(one.current.repo!) + 1}`, task: one.root.id, execution: one.current.id,
+        title: one.root.title, state: one.current.state, historyProblem: one.problem, otherActive: one.otherActive.map(version => version.id),
+        ageHours: Math.max(0, Math.round((ctx.now.getTime() - Date.parse(one.current.updatedAt)) / 3_600_000)),
+        strikes: ctx.store.lookupRef(one.current.id)?.strikes ?? 0, dispatch: diagnoseTaskDispatch(ctx.store, one.current.id, ctx.now),
+      }));
+      return { ok: true, body: { tasks, truncated: families.length > limit } };
     },
   },
   {
@@ -418,6 +421,7 @@ export const MATE_TOOLS: MateTool[] = [
       const ref = admittedRef(ctx, taskId);
       const task = ref === null ? null : ctx.store.getTask(taskId);
       if (ref === null || task === null) return notFound();
+      const family = ctx.store.taskFamilyOf(taskId, ctx.who.repos, false);
       const runs = ctx.store.runsFor(ref.id);
       const holds = ctx.store.activeHolds(ref.id, ctx.now);
       const position = ctx.store.queuePosition(taskId);
@@ -427,6 +431,10 @@ export const MATE_TOOLS: MateTool[] = [
         body: {
           repo: ref.repoId,
           task: taskId,
+          root: family?.root.id ?? taskId,
+          currentExecution: family?.current.id ?? taskId,
+          historyProblem: family?.problem ?? null,
+          versions: family?.versions.map(one => ({ task: one.id, state: one.state })) ?? [],
           title: task.title,
           state: task.state,
           dispatch: diagnoseTaskDispatch(ctx.store, taskId, ctx.now),

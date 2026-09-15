@@ -192,7 +192,9 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
 
   const view = mateViewContextFor(store, who);
   const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(who.repos, now), now);
-  const document = redactForMate(buildDataDocument(snapshot).document, view);
+  const families = snapshot.tasks.map(one => ({ task: one.rootId ?? one.id, currentExecution: one.id,
+    otherActive: one.otherActive ?? [], historyProblem: one.historyProblem ?? null }));
+  const document = redactForMate(`${buildDataDocument(snapshot).document}\nTask identities (read exact currentExecution before proposing new actions; prior proposals retain their targets): ${JSON.stringify(families)}`, view);
   const historyMessage = input.context === undefined ? message : `${input.context}\n\n${message}`;
   const history: MateHistoryMessage[] = [...historyFor(store, thread.id), { role: "operator", text: historyMessage }];
   const composeDirect = (key: string): { url: string; headers: Record<string, string>; body: string } => {

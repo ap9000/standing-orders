@@ -43,7 +43,7 @@
  * prints one JSON line with the URL and login. `scripts/ui-polish-proof.mjs`
  * imports `startFixture` directly. */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -59,6 +59,7 @@ import { acquire, release } from '../dist/claim.js';
 
 // The real pilot request's path: its unbroken filename overflowed the
 // expanded task scope at 390px. Keep it verbatim in synthetic signed terms.
+export const LONG_FEEDBACK_PATH = 'src/inherited-feedback/' + 'exact-feedback-'.repeat(6) + '0123456789abcdef'.repeat(4) + '.ts';
 export const LONG_ALLOWED_PATH = 'docs/assessments/WORKSPACE_5_LONG_REQUEST_RESULT_2026-09-14.md';
 // Canonical 200-unit Unicode parent for the revision-name layout boundary.
 export const LONG_REVISION_PARENT = 'Fix the payout rounding drift — ' + '日本語 😀 e\u0301 '.repeat(16) + 'cent fix';
@@ -161,7 +162,9 @@ function seedRepo(path, name) {
 }
 
 export function startFixture(options = {}) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'standing-orders-ui-polish-')));
+  const parent = options.directory ?? tmpdir();
+  mkdirSync(parent, { recursive: true });
+  const root = realpathSync(mkdtempSync(join(parent, 'standing-orders-ui-polish-')));
   const repo = join(root, 'portfolio-console');
   seedRepo(repo, 'portfolio-console');
   // The second project (workspace package 1): a deliberately long path so
@@ -194,9 +197,9 @@ export function startFixture(options = {}) {
 
   // --- the finished build with a sealed result ------------------------------
   const done = fileTaskProposal(store, {
-    id: 'payout-rounding', title: 'Fix the payout rounding drift', repo,
+    id: 'payout-rounding', title: options.sameTaskRevisions ? 'Fix payout rounding (synthetic)' : 'Fix the payout rounding drift', repo,
     goal: 'Find and fix the half-cent drift in payout settlement; prove it with ledger-fixture tests.',
-    outOfScope: 'No ledger schema changes.', touches: ['src/payout.ts', 'src/payout.test.ts', LONG_ALLOWED_PATH],
+    outOfScope: 'No ledger schema changes.', touches: ['src/payout.ts', 'src/payout.test.ts', LONG_ALLOWED_PATH, ...(options.sameTaskRevisions ? [LONG_FEEDBACK_PATH] : [])],
     acceptance: [
       { id: 'c1', statement: 'Ledger-fixture tests demonstrate the half-cent drift is gone.', how: null, evidence: ['check', 'changed-path'] },
       { id: 'c2', statement: 'The console formatter still renders payout dashboards.', how: null, evidence: ['screenshot'] },
@@ -228,15 +231,18 @@ export function startFixture(options = {}) {
     fileCount: 2, additions: 13, deletions: 1, binaryCount: 0,
     files: [{ path: 'src/payout.ts', additions: 4, deletions: 1 }, { path: 'src/payout.test.ts', additions: 9, deletions: 0 }], filesTruncated: false,
   };
+  const fixturePatch = options.sameTaskRevisions ? PATCH + `diff --git a/${LONG_FEEDBACK_PATH} b/${LONG_FEEDBACK_PATH}\n--- a/${LONG_FEEDBACK_PATH}\n+++ b/${LONG_FEEDBACK_PATH}\n@@ -1 +1 @@\n-old\n+new\n` : PATCH;
+  if (options.sameTaskRevisions) { stat.files.push({ path: LONG_FEEDBACK_PATH, additions: 1, deletions: 1 }); stat.fileCount++; stat.additions++; stat.deletions++; }
+  const fixtureProof = options.sameTaskRevisions ? { ...PROOF, changed: [...PROOF.changed, LONG_FEEDBACK_PATH] } : PROOF;
   const png = encodePng(640, 400, [16, 24, 32]);
-  storeEvidence(store, evidenceRoot, run, 'terminal-diff', 'terminal-diff.patch', Buffer.from(PATCH, 'utf8'), 'git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [fixture: synthetic]', hoursAgo(8.5), { captureStatus: 'ok' });
+  storeEvidence(store, evidenceRoot, run, 'terminal-diff', 'terminal-diff.patch', Buffer.from(fixturePatch, 'utf8'), 'git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [fixture: synthetic]', hoursAgo(8.5), { captureStatus: 'ok' });
   storeEvidence(store, evidenceRoot, run, 'diff-stat', 'diff-stat.json', budgetedStatJson(stat), 'parsed from git diff --numstat -z [fixture: synthetic]', hoursAgo(8.5));
   storeEvidence(store, evidenceRoot, run, 'handoff', 'handoff.json', Buffer.from(JSON.stringify(HANDOFF, null, 2), 'utf8'), 'composed at completion [fixture: synthetic]', hoursAgo(8.4));
-  storeEvidence(store, evidenceRoot, run, 'proof', 'proof.json', Buffer.from(JSON.stringify(PROOF, null, 2), 'utf8'), 'agent-authored proof (validated) [fixture: synthetic]', hoursAgo(8.4));
+  storeEvidence(store, evidenceRoot, run, 'proof', 'proof.json', Buffer.from(JSON.stringify(fixtureProof, null, 2), 'utf8'), 'agent-authored proof (validated) [fixture: synthetic]', hoursAgo(8.4));
   storeEvidence(store, evidenceRoot, run, 'screenshot', 'screenshot-fixture.png', png, 'agent-claimed screenshot at evidence/payout-dashboard.png (validated png) [fixture: synthetic]', hoursAgo(8.4));
   storeEvidence(store, evidenceRoot, run, 'check-log', 'check-log.txt', Buffer.from('$ npm test\n(exit 0)\n\n--- stdout ---\n214 tests passed.\n\n--- stderr ---\n', 'utf8'), 'sh -c "npm test" (exit 0) [fixture: synthetic]', hoursAgo(8.4));
   const adjudicated = adjudicate({
-    proofArtifactPresent: true, proofParse: parseProof(JSON.stringify(PROOF)), handoffPresent: true, terminalDiffPresent: true, terminalDiffCaptureStatus: 'ok',
+    proofArtifactPresent: true, proofParse: parseProof(JSON.stringify(fixtureProof)), handoffPresent: true, terminalDiffPresent: true, terminalDiffCaptureStatus: 'ok',
     diffStat: { captured: true, truncated: false, paths: new Set(stat.files.map(one => one.path)) },
     verifyCommand: { configured: true, ran: true, exitCode: 0 },
     screenshots: [{ path: 'evidence/payout-dashboard.png', ok: true, bytes: png.length, dims: imageDimensions(png, 'png') }],
@@ -520,11 +526,55 @@ export function startFixture(options = {}) {
     return { ok: true, answer: { text: 'One task is waiting for your approval (**Rework the portfolio ledger export**) and one finished with verified evidence (**Fix the payout rounding drift**). Nothing is building right now.', calls: [], tokensIn: 100, tokensOut: 40, reportedCostMicrousd: null } };
   };
   const server = createDecisionServer({ store, evidenceRoot, ...(repo2 === null ? { repo } : { repos: [repo, repo2, repo3] }), chatEnv: {}, subscriptionChatRunner: runner });
+  const addReviewNotes = runId => {
+    const source = store.getRun(runId), now = new Date();
+    const taskId = store.externalIdFor(source.taskRef);
+    const asked = store.requestReview(runId, 'polish-fixture', now);
+    if (!asked.ok) throw new Error(`synthetic review: ${asked.reason}`);
+    const reviewer = store.startRun({ taskRef: source.taskRef, role: 'reviewer', parentRun: runId, request: asked.id, leaseId: 'synthetic-review', runner: 'reviewer-1', provider: 'codex', model: 'default', now, ...liveRoute(taskId, 'review') });
+    store.stampProviderStart(reviewer, now);
+    store.addReviewerComments({ reviewerRunId: reviewer, runId, artifactId: store.artifactsFor(runId).find(one => one.kind === 'terminal-diff').id, author: 'reviewer:codex', comments: [
+      { path: 'src/payout.ts', line: 43, note: 'The rounding guard looks good.', severity: 'note' },
+      { path: 'src/payout.ts', line: 43, note: 'Should the helper name be clearer?', severity: 'question' },
+    ] }, now);
+    store.finishRun(reviewer, { outcome: 'no-change', reason: 'reviewed', now });
+  };
+  const startRevision = taskId => {
+    const ref = store.lookupRef(taskId);
+    const now = new Date();
+    const claim = acquire(store, ref.id, 'night-shift-1', { token: 'fixture-runner-token', now, ttlMs: 6 * 3_600_000 });
+    if (!claim.ok) throw new Error(`synthetic revision claim: ${claim.reason}`);
+    const runId = store.startRun({ taskRef: ref.id, leaseId: claim.claim.leaseId, runner: 'night-shift-1', branch: `standing-orders/${taskId}`, worktree: join(repo, `.fixture-${taskId}`), now, provider: 'codex', model: 'default', ...liveRoute(taskId, 'build') });
+    store.stampRun(runId, { baseRevision: stat.head, scopeDigest: store.getScope(taskId).digest });
+    store.setTaskState(taskId, 'running', now);
+    return runId;
+  };
+  const finishRevision = (runId, outcome = 'built') => {
+    const current = store.getRun(runId), now = new Date();
+    const taskId = store.externalIdFor(current.taskRef);
+    if (outcome === 'built') {
+      // Synthetic artifacts, visibly distinct per version, sealed by the
+      // normal evidence writer. The original bytes/rows are never edited.
+      for (const artifact of store.artifactsFor(run).filter(one => one.kind !== 'revision-brief')) {
+        let bytes = readFileSync(join(evidenceRoot, artifact.key));
+        if (artifact.kind === 'terminal-diff') bytes = Buffer.from(fixturePatch.replace('+new', `+version_${runId}`));
+        if (artifact.kind === 'diff-stat') bytes = budgetedStatJson({ ...stat, base: stat.head, head: runId.toString(16).padEnd(40, 'a') });
+        if (artifact.kind === 'handoff') bytes = Buffer.from(JSON.stringify({ ...HANDOFF, conclusion: `Synthetic revision build #${runId}: requested feedback applied.` }));
+        if (artifact.kind === 'screenshot') bytes = encodePng(640, 400, [30 + runId % 80, 40, 80]);
+        storeEvidence(store, evidenceRoot, runId, artifact.kind, artifact.key.split('/').at(-1), bytes, `${artifact.capture} [successive revision: synthetic]`, now, { captureStatus: 'ok' });
+      }
+      const verdict = store.proofVerdictFor(run);
+      store.saveProofVerdict(runId, verdict.verdict, verdict.reasons, now, verdict.matrix);
+    }
+    store.finishRun(runId, { outcome, reason: outcome === 'failed' ? 'synthetic failure' : undefined, committed: outcome === 'built', now });
+    release(store, current.leaseId, now);
+    store.setTaskState(taskId, outcome === 'built' ? 'done' : 'failed', now);
+  };
   const stop = () => new Promise(resolve => { server.closeAllConnections(); server.close(() => { store.close(); rmSync(root, { recursive: true, force: true }); resolve(); }); });
   return new Promise(resolve => {
     server.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
-      resolve({ url: `http://127.0.0.1:${port}`, name: 'polish-fixture', password: login.token, runId: run, tasks: { long: 'ledger-export', done: 'payout-rounding' }, statusTasks, statusRuns, repos: { main: repo, second: repo2, empty: repo3 }, stop, store, requests });
+      resolve({ url: `http://127.0.0.1:${port}`, name: 'polish-fixture', password: login.token, runId: run, tasks: { long: 'ledger-export', done: 'payout-rounding' }, statusTasks, statusRuns, repos: { main: repo, second: repo2, empty: repo3 }, stop, store, requests, startRevision, finishRevision, addReviewNotes });
     });
   });
 }

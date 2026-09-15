@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { Window } from "happy-dom";
 import {
   RESULT_REVIEW_SCRIPT,
   REVIEW_DRAFT_PREFIX,
@@ -11,6 +12,7 @@ import {
   parseResultTab,
   parseRevisionBatch,
   revisionBatchOf,
+  isRevisionFeedback,
   revisionSourceOf,
   resultFactsAttributes,
   resultFactsFromHtml,
@@ -217,4 +219,31 @@ describe("result-first review (workspace package 3): the pure presentation rules
     expect(RESULT_REVIEW_SCRIPT).not.toMatch(/XMLHttpRequest|\.submit\(\)|requestSubmit/);
     expect(RESULT_REVIEW_SCRIPT).not.toContain("innerHTML");
   });
+});
+
+ test("revision batches distinguish requested changes from review information", () => {
+  expect(isRevisionFeedback({ reviewerRun: null, severity: null })).toBe(true);
+  expect(isRevisionFeedback({ reviewerRun: 9, severity: "problem" })).toBe(true);
+  for (const severity of [null, "note", "question"]) expect(isRevisionFeedback({ reviewerRun: 9, severity })).toBe(false);
+});
+
+test("selecting a reviewer observation preserves a draft unless its replacement is confirmed", async () => {
+  const window = new Window({ url: "http://fixture/chat?task=root&result=1" });
+  try {
+    window.document.body.innerHTML = `<section data-result-panel data-result-user="alex" data-result-task="root" data-result-run="1"><button class="pick-file" data-path="new.ts" data-line="2" data-review-note="Should the name change?">Request change</button><form id="comment-form"><textarea name="note" maxlength="500">Keep my draft</textarea><input name="path" value="old.ts"><input name="line" value="1"><input name="request" value="${"a".repeat(32)}"></form></section>`;
+    window.HTMLElement.prototype.scrollIntoView = () => undefined;
+    window.confirm = () => false;
+    window.eval(RESULT_REVIEW_SCRIPT);
+    const button = window.document.querySelector("button")!;
+    const note = window.document.querySelector("textarea")!;
+    const path = window.document.querySelector<HTMLInputElement>('input[name="path"]')!;
+    button.click();
+    expect(note.value).toBe("Keep my draft");
+    expect(path.value).toBe("old.ts");
+    window.confirm = () => true;
+    button.click();
+    expect(note.value).toBe("Should the name change?");
+    expect(path.value).toBe("new.ts");
+    expect(window.sessionStorage.getItem(`${REVIEW_DRAFT_PREFIX}alex:root:1`)).toContain("Should the name change?");
+  } finally { await window.happyDOM.close(); }
 });

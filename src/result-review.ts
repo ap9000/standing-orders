@@ -244,6 +244,12 @@ export function revisionBatchOf(comments: readonly { id: number }[]): string {
   return comments.map(one => String(one.id)).join(",");
 }
 
+/** User feedback requests work; a reviewer's observations only do so when
+ * they are problems. The original findings always remain on record. */
+export function isRevisionFeedback(comment: { reviewerRun: number | null; severity: string | null }): boolean {
+  return comment.reviewerRun === null || comment.severity === "problem";
+}
+
 export const REVISION_BATCH_CAP = 500;
 
 /** Parse a posted batch back into distinct positive ids, or null when the
@@ -349,11 +355,14 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
     }
     document.addEventListener('click',function(ev){
       var button=ev.target&&ev.target.closest?ev.target.closest('button.pick-file,button.pick-line'):null;if(!button)return;
+      var reviewNote=button.getAttribute('data-review-note');
+      if(reviewNote!==null&&noteBox&&noteBox.value&&!window.confirm('Replace the feedback draft with this review note?'))return;
+      if(reviewNote!==null&&noteBox)noteBox.value=reviewNote;
       if(pathBox)pathBox.value=button.getAttribute('data-path')||'';
       if(lineBox)lineBox.value=button.getAttribute('data-line')||'';
       if(pin)pin.open=true;
       save();
-      form.scrollIntoView({behavior:window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'center'});if(noteBox)noteBox.focus();
+      form.scrollIntoView({behavior:window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'center'});if(noteBox){noteBox.dispatchEvent(new Event('input',{bubbles:true}));noteBox.focus();}
     });
     // The bounded draft: this account, this task, this run.
     var draftKey=draftPrefix+user+':'+task+':'+run;
