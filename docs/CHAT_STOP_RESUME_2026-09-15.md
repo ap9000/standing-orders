@@ -124,3 +124,31 @@ The other before captures (`before/desktop-empty.png`, `before/desktop-stopping.
 Not changed, on purpose: the previous message scrolling under the top bar on arrival at `#latest` is ordinary thread behaviour, not an overlay over the newest message or a control. The desktop landing now follows the phone's receipt anchor for one consistent chat return; if the plan-first landing is preferred on desktop, that is a product choice to raise, not a defect.
 
 Repair 2 receipt: builder Claude Opus 5 (`claude-opus-5`), no subagents, zero live model calls (the browser provider is the scripted fixture), zero operator interventions. Comment recorded 2026-09-15T16:16:26Z; work ran from about 16:17Z to 16:32Z, roughly 15 minutes including one serve suite run and four browser journeys. Builder corrections along the way: an over-strict "whole message visible" check for the typing state (the receipt is taller than the space above a raised composer, so the check now requires its end and link) and a first keyboard simulation by attribute alone, which the page's own viewport script undid on the screenshot's resize; the simulation now shrinks the reported visual viewport instead. No commit, push, branch switch, installed-database migration, or provider/permission change.
+# Current evidence follow-up — 2026-09-15
+
+The task input combines deployed `8efa954` with the existing phone revision
+`ec49769` and realistic screenshot-fixture correction `88ef100`. This is an
+unverified integration input, not a new claim that the phone revision passed
+independent review. Its merge preserves both histories and all deployed
+process-identity fixes. Do not move HEAD or replace this prepared checkout with
+the older baseline named in the inherited original scope.
+
+Source run 1606's review 1607 upheld c4 but could not determine c1–c3: the old
+installed parser could not read inherited evidence, and screenshots/captured
+journey output were missing from its sealed package. The installed UI/worker
+now both use `8efa954` and schema 60; preserve the old review as history.
+
+Keep the existing phone overlap repair and concise stop consequences. Reuse
+`scripts/chat-stop-resume-journey.mjs` for one desktop and 390px journey; inspect
+long feedback, failure/draft recovery, same-task revision and simulated keyboard.
+Capture current screenshots plus readable command output, include those exact
+files in the supported handoff/proof so the independent reviewer can see them,
+and explicitly identify inherited unchanged controls. Label synthetic Chromium
+evidence honestly; no physical-device claim or live queue manipulation.
+
+Use focused tests and typecheck only while building. The native machine gate
+runs the unchanged full verifier once on the final candidate. Do not rebuild
+the installed root, rerun the full suite in review, change runtime/settings,
+rewrite sealed history or weaken any evidence, approval or execution safeguard.
+The screenshot's old repeated filler was fixture text, not actual model output;
+the prepared script already replaces it with realistic long feedback.
