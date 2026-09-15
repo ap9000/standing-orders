@@ -454,7 +454,10 @@ test("an ended run with a live process witness still drains, and cancellation ne
   } finally { f.close(); }
 });
 
-test.each(["single reused PID", "absent group", "populated group", "unknown group", "unknown birth"])("updater handles %s without rewriting the historical witness", async state => {
+test.each([
+  "single reused PID", "absent group", "populated group", "unknown group", "unknown birth",
+  "reused populated group", "EPERM PID", "EPERM group", "orphan group", "denied birth group", "same-second group",
+])("updater handles %s without rewriting the historical witness", async state => {
   const f = fixture();
   const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
   let kill: ReturnType<typeof vi.spyOn> | undefined;
@@ -471,10 +474,17 @@ test.each(["single reused PID", "absent group", "populated group", "unknown grou
     const before = db.prepare("SELECT * FROM run_process WHERE run=?").all(id); db.close();
     Object.defineProperty(process, "platform", { value: "darwin" });
     kill = vi.spyOn(process, "kill").mockImplementation(target => {
-      if (target < 0 && state !== "populated group") throw Object.assign(new Error(state), { code: state === "unknown group" ? "EPERM" : "ESRCH" });
+      if (state.startsWith("EPERM") || state === "denied birth group") throw Object.assign(new Error(state), { code: "EPERM" });
+      if (target < 0 && (state === "absent group" || state === "unknown group")) throw Object.assign(new Error(state), { code: state === "unknown group" ? "EIO" : "ESRCH" });
+      if (target > 0 && state === "orphan group") throw Object.assign(new Error(state), { code: "ESRCH" });
       return true;
     });
-    ps.mockReturnValue(state === "unknown birth" ? "" : "Mon Sep 14 14:33:43 2026\n");
+    const birth = state === "unknown birth" ? ""
+      : state === "populated group" ? "Sat Sep 12 16:00:00 2026\n"
+      : state === "same-second group" ? "Sat Sep 12 16:53:59 2026\n"
+      : "Mon Sep 14 14:33:43 2026\n";
+    ps.mockReturnValue(birth);
+    if (state === "orphan group" || state === "denied birth group") ps.mockImplementation(() => { throw Object.assign(new Error(state), { code: state === "orphan group" ? "ESRCH" : "EPERM" }); });
     clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-15T00:00:00.000Z"));
     let waiting = false;
     await runDesktopUpdate(f.state, { ...f.hooks, sleep: async () => {
@@ -482,7 +492,7 @@ test.each(["single reused PID", "absent group", "populated group", "unknown grou
       expect(readUpdateJournal(f.state)?.detail).toContain("may still be running");
       requestUpdateRestore(f.state);
     } });
-    const blocked = state === "populated group" || state.startsWith("unknown");
+    const blocked = ["populated group", "unknown group", "unknown birth", "orphan group", "denied birth group", "same-second group"].includes(state);
     expect(waiting).toBe(blocked);
     expect(readUpdateJournal(f.state)?.phase).toBe(blocked ? "cancelled" : "complete");
     expect(f.calls.filter(call => call === "swap")).toHaveLength(blocked ? 0 : 1);

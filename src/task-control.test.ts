@@ -91,7 +91,7 @@ describe("safe task stop and resume (v52)", () => {
   });
   afterEach(() => store.close());
 
-  test.each([false, true])("quiescence dismisses a proven reused PID only after an absent group, without changing retained rows (group=%s)", group => {
+  test.each([false, true])("quiescence dismisses only proven reuse across successful and EPERM probes without changing retained rows (group=%s)", group => {
     const a = runningAttempt(store, "t-reused");
     store.finishRun(a.runId, { outcome: "failed", reason: "interrupted", now: later(1_000) });
     store.raw().prepare("INSERT INTO run_process(run,pid,host,process_group,observed_at) VALUES(?,?,?,?,?)")
@@ -115,8 +115,12 @@ describe("safe task stop and resume (v52)", () => {
       ps.mockReturnValue("Mon Sep 14 14:33:43 2026\n");
       if (group) {
         kill.mockReturnValue(true);
-        expect(store.stopQuiescenceProblem(a.runId)).toContain("may still be running");
+        expect(store.stopQuiescenceProblem(a.runId)).toBeNull();
       }
+      kill.mockImplementation(() => { throw Object.assign(new Error("denied"), { code: "EPERM" }); });
+      expect(store.stopQuiescenceProblem(a.runId)).toBeNull();
+      ps.mockImplementation(() => { throw Object.assign(new Error("birth denied"), { code: "EPERM" }); });
+      expect(store.stopQuiescenceProblem(a.runId)).toContain("may still be running");
       expect(rows()).toEqual(before);
       expect(kill.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
     } finally {

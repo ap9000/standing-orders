@@ -37,14 +37,32 @@ function newerMacProcess(pid: number, witness: HistoricalWitness | undefined): b
 
 /** Read-only checks of retained process witnesses. Saved PIDs authorize no
  * signal. ESRCH or proven macOS PID reuse establishes absence; everything
- * unknown stays occupied. A reused leader never proves its group empty. */
+ * unknown stays occupied. This concerns the historical identity, not whether
+ * the numeric PID/PGID is currently populated by unrelated processes. */
 export function processMayBeAlive(pid: number, group: boolean, witness?: HistoricalWitness): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return true;
   if (group && process.platform !== "win32") {
-    try { process.kill(-pid, 0); return true; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return true; }
+    let absent = false;
+    try { process.kill(-pid, 0); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") absent = true;
+      else if (code !== "EPERM") return true;
+    }
+    // Darwin's forkproc excludes existing PIDs, PGIDs and session IDs under
+    // proc_list_lock. A proven newer PID EQUAL to the saved PGID therefore
+    // implies the old group ended before allocation, even if a new group now
+    // uses that number. A new member or an absent leader proves nothing.
+    // See docs/assessments/UPDATE_PID_REUSE_2026-09-15.md, recovery attempt 2.
+    if (!absent) return !newerMacProcess(pid, witness);
   }
   try { process.kill(pid, 0); }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code !== "EPERM") return true;
+    // Signal permission and readable birth identity are independent. EPERM
+    // alone proves nothing; a failed/ambiguous ps read still stays occupied.
+  }
   return !newerMacProcess(pid, witness);
 }
