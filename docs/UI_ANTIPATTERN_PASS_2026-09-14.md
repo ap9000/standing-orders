@@ -24,4 +24,6 @@ Follow-up to `f53b7f1`, on `codex/native-chat-flow`. These are design findings i
 
 ## Remaining
 
+Follow-up: removed the verification warning's rounded box, left accent stripe, shadow and single-item bullet. The exact warning remains visible as plain text. Build passed; inspected 1400×900 and 390×844 screenshots (`plain-warning-desktop.png`, `plain-warning-phone.png`). No behavior changed; earlier behavioral evidence was reused.
+
 The current-task status and selected historical result can legitimately differ. Both remain; deduplicating them safely needs version-aware rendering, not unconditional CSS hiding. Two History disclosures and some generated revision wording also remain opportunities for a separate information-layout pass. This is not an application-wide design sign-off.

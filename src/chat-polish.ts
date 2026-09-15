@@ -88,8 +88,9 @@ export const CHAT_POLISH_CSS = `
   .chat-overview .chat-overview-stat { box-shadow: none; border: 0; background: transparent; border-radius: 0; }
   .chat-overview .chat-overview-stat + .chat-overview-stat { border-left: 1px solid var(--border); }
   .result-panel .result-request { border-top: 1px solid var(--border); padding-top: 1rem; }
-  .result-panel .result-attention { background: transparent; border: 1px solid var(--border); border-left: 3px solid var(--muted-foreground); border-radius: .65rem; color: var(--foreground); }
-  .result-panel .result-attention ul { margin-bottom: 0; }
+  .result-panel .result-attention { background: transparent; border: 0; border-radius: 0; box-shadow: none; padding: 0; margin: .75rem 0; color: var(--foreground); }
+  .result-panel .result-attention ul { margin: 0; padding-left: 1.15rem; }
+  .result-panel .result-attention ul:has(> li:only-child) { list-style: none; padding-left: 0; }
   .result-panel .result-knowledge { border: 0; border-top: 1px solid var(--border); background: transparent; box-shadow: none; border-radius: 0; padding: .25rem 0; }
   .result-panel .revision-from-comments { border: 0; background: transparent; box-shadow: none; padding: .5rem 0; }
   .result-panel .result-pin summary { font-size: .8125rem; min-height: 44px; display: flex; align-items: center; cursor: pointer; }
