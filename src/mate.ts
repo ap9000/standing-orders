@@ -116,7 +116,7 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
   "request-changed": "That send was already received with different text or task context. Reload the conversation before sending a new message.",
 };
 
-const READ_TOOLS = new Set(["recap", "list_repos", "list_tasks", "get_task", "list_decisions", "get_decision", "queue"]);
+const READ_TOOLS = new Set(["recap", "list_repos", "list_tasks", "get_task", "get_project_knowledge", "list_decisions", "get_decision", "queue"]);
 
 /** The last messages of the thread as provider-neutral history, newest kept first until the byte cap. */
 export function historyFor(store: Store, thread: number): MateHistoryMessage[] {

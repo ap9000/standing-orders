@@ -1,4 +1,6 @@
 import { changeLearning, learningView } from "./project-learning.js";
+import { changeKnowledge, knowledgeView, knowledgeVersion, readKnowledgeSnapshot, type KnowledgeDraft } from "./project-knowledge.js";
+import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS } from "./knowledge-ui.js";
 import { learningHtml } from "./workspace-ui.js";
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -943,6 +945,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
   function actionTarget(url: URL, who: Who, request: IncomingMessage, body: URLSearchParams | null = null): { repo: string | null; taskId: string | null; runId: number | null; action: string } {
+    if (url.pathname.startsWith('/settings/knowledge')) return {repo:body?.get('repo')??url.searchParams.get('repo')??projectOf(who,request)??null,taskId:null,runId:null,action:body?'project knowledge change':'project knowledge view'};
     const task = matchTaskPath(url.pathname, "(?:/([a-z-]+))?$");
     if (task !== null) return { repo: store.lookupRef(task.taskId)?.repo ?? null, taskId: task.taskId, runId: null, action: `task ${task.verb || "view"}` };
     const resource = /^\/(r|d|i|routines)\/([0-9]{1,15})(?:\/([a-z-]+)(?:\/[0-9]+)?)?$/.exec(url.pathname);
@@ -963,8 +966,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
     if (!restricted()) return true;
     const path = url.pathname;
-    const read = new Set(["/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
-    const write = new Set(["/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
+    const read = new Set(["/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const write = new Set(["/settings/knowledge/change", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path)
@@ -980,7 +983,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     // Every collection except these three must have a concrete project;
     // NULL otherwise means all rows in legacy store APIs.
-    if (!["/settings", "/settings/learning", "/settings/learning/change", "/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
+    if (!["/settings/knowledge", "/settings/knowledge/change", "/settings", "/settings/learning", "/settings/learning/change", "/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
       refuse(response, who, 403, "No assigned project is available. Ask an instance operator for access.", "/projects"); return false;
     }
     if (request.method === "GET" && path === "/board") {
@@ -2592,6 +2595,28 @@ export function createDecisionServer(options: ServeOptions): Server {
         { chrome: chromeFor(project, "settings"), ...(catalog === null ? {} : { functional: { script: openRouterPickerScript() } }) }));
     }
 
+    if (url.pathname === "/settings/knowledge") {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
+      if (chosen && (!projects.includes(chosen) || !visible(chosen))) return refuse(response, who, 403, "That project is outside your access.", "/settings/knowledge");
+      const selector = projects.length > 1 ? `<form class="knowledge" method="get" action="/settings/knowledge"><label>Project<select name="repo">${projects.map(p=>`<option value="${escape(p)}"${p===chosen?' selected':''}>${escape(p.split('/').at(-1)??p)}</option>`).join('')}</select></label><button>Show project</button></form>` : '';
+      let content = '<p>Add a project to keep its knowledge here.</p>';
+      if (chosen) {
+        try {
+          const csrf = who.via === 'cookie' ? who.session.csrf : '';
+          const view = knowledgeView(store,chosen,who.name);
+          if (url.searchParams.has('version')) {
+            const revision=Number(url.searchParams.get('version'));
+            const previous=knowledgeVersion(store,chosen,who.name,revision);
+            const restore=csrf&&who.role==='approver'&&revision!==view.revision?`<form class="knowledge" method="post" action="/settings/knowledge/change">${hiddenFields({csrf,repo:chosen,identity:view.identity,revision:String(view.revision),action:'restore',restore:String(revision)})}<p>Replaces knowledge for future tasks. Existing runs keep their saved context.</p><button>Restore version ${revision}</button></form>`:'';
+            return sendScreen(response,200,screen('Knowledge history',`<p><a href="/settings/knowledge?repo=${encodeURIComponent(chosen)}">Current knowledge</a></p><h1>Version ${revision}</h1>${knowledgeHtml({...view,knowledge:previous,history:[]},'',false)}${restore}`,{chrome:chromeFor(chosen,'settings')}));
+          }
+          content = knowledgeHtml(view,csrf,who.role==='approver');
+          content += `<details class="knowledge"><summary>Learned lessons</summary>${learningHtml(learningView(store,evidenceRoot,chosen,who.name),csrf,who.role==='approver')}</details>`;
+        } catch { content = '<p class="problem" role="alert">Project knowledge is unavailable. Reload to retry.</p>'; }
+      }
+      return sendScreen(response,200,screen('Knowledge',`<p><a href="/settings">Settings</a></p><h1>Knowledge</h1>${url.searchParams.get('saved')==='1'?'<p role="status">Saved for future tasks.</p>':''}${selector}${content}`,{chrome:chromeFor(chosen||project,'settings')}));
+    }
     if (url.pathname === "/settings/learning") {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
       const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
@@ -2605,7 +2630,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(response, 200, screen("Learning", `<p><a href="/settings">Settings</a></p><h1>Learning</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
     if (url.pathname === "/settings" && (options.telegramTokenFile === undefined || restricted())) {
-      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/learning">Learning</a></p>', { chrome: chromeFor(project, "settings") }));
+      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/knowledge">Project knowledge</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
     }
 
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
@@ -4446,6 +4471,21 @@ export function createDecisionServer(options: ServeOptions): Server {
     // re-counts within five seconds either way, this just makes it exact.
     bustBadge();
 
+    if (url.pathname === "/settings/knowledge/change") {
+      if (who.via !== 'cookie' || who.role !== 'approver') return refuse(response,who,403,'Sign in as an approver to change project knowledge.','/settings/knowledge');
+      const repo = body.get('repo') ?? '', action = body.get('action') ?? '';
+      if (!visible(repo) || ![...(admissionList() ?? []),...managedRepos(),...store.knownRepos()].includes(repo)) return refuse(response,who,403,'That project is outside your access.','/settings/knowledge');
+      if (['repo','action','identity','revision','instructions','title','content','path','id','restore'].some(k=>body.getAll(k).length>1) || !['instructions','save','remove','restore'].includes(action) || !/^[0-9]+$/.test(body.get('revision')??'')) return refuse(response,who,400,'Invalid knowledge form.','/settings/knowledge');
+      const draft:KnowledgeDraft = Object.fromEntries(['instructions','title','content','path','id'].filter(k=>body.has(k)).map(k=>[k,body.get(k)!]));
+      try {
+        changeKnowledge(store,{repo,actor:who.name,identity:body.get('identity')??'',revision:Number(body.get('revision')),action:action as 'instructions'|'save'|'remove'|'restore',draft,restore:Number(body.get('restore'))},clock());
+      } catch (error) {
+        let content = `<p role="alert">Project knowledge is unavailable. Your unsaved draft is below.</p><pre class="knowledge">${escape(JSON.stringify(draft,null,2))}</pre>`;
+        try { content=knowledgeHtml(knowledgeView(store,repo,who.name),who.session.csrf,true,draft,error instanceof Error?error.message:'Save failed. Your draft is below.'); } catch { /* never render unverified saved context */ }
+        return sendScreen(response,409,screen('Knowledge',`<h1>Knowledge</h1>${content}`,{chrome:chromeFor(repo,'settings')}));
+      }
+      return redirect(response,`/settings/knowledge?repo=${encodeURIComponent(repo)}&saved=1`);
+    }
     if (url.pathname === "/settings/learning/change") {
       if (who.via !== "cookie") return refuse(response, who, 403, "Sign in to change learning.", "/settings/learning");
       const repo = body.get("repo") ?? "", action = body.get("action") ?? "";
@@ -7795,6 +7835,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (learningRepo && visible(learningRepo)) {
       try { learning = learningHtml(learningView(store, evidenceRoot, learningRepo, who.name), who.via === "cookie" ? who.session.csrf : "", who.role === "approver", run.id); }
       catch { /* Learning failures remain available in Settings; the result is independent. */ }
+      try { learning = knowledgeContextHtml(readKnowledgeSnapshot(store,run.id)) + learning; }
+      catch { learning = '<p class="problem" role="alert">The context saved for this run could not be verified.</p>' + learning; }
     }
     return {
       learning,
@@ -11438,7 +11480,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS + KNOWLEDGE_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -15676,6 +15718,7 @@ function projectsPage(
       `<p class="meta mono" style="overflow-wrap:anywhere;margin:.2rem 0">${escape(one.path)}</p>`,
       `<p class="row" style="gap:.35rem;flex-wrap:wrap">${peekChips(one.path, one.peek)}</p>`,
       `<p class="meta">${escape(one.note)}</p>`,
+      `<a class="button-link" href="/settings/knowledge?repo=${encodeURIComponent(one.path)}">Knowledge</a>`,
       `</div>`,
     ].join("\n");
   const cards = (items: { path: string; name: string; note: string }[]): string =>
@@ -20361,7 +20404,7 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return screen("settings", [
     "<h1>settings</h1>",
-    '<p><a href="/settings/learning">Learning</a></p>',
+    '<p><a href="/settings/knowledge">Project knowledge</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
     permissionCard,
     qualityCard,
     pushCard,

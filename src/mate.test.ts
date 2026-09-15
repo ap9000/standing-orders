@@ -124,7 +124,7 @@ describe("the mate's turn", () => {
     });
 
   test("the intake contract treats one outcome as enough and asks only material questions", () => {
-    expect(MATE_CONTRACT_VERSION).toBe(7);
+    expect(MATE_CONTRACT_VERSION).toBe(8);
     expect(MATE_CONTRACT).toContain("read get_agents and answer in its words");
     expect(MATE_CONTRACT).toContain("never an agent that is not listed");
     expect(MATE_CONTRACT).toContain("a plain-language outcome is enough to draft a task");
@@ -247,6 +247,12 @@ describe("the mate's turn", () => {
     expect(store.raw().prepare("SELECT provider FROM chat_turn WHERE mate_turn = ? ORDER BY id").all(outcome.turn).map(row => row["provider"])).toEqual(["codex-subscription", "codex-subscription"]);
     expect(store.latchedChatTurns(credential)).toEqual([]);
     expect(store.chatTurnsToday("alex", clock())).toBe(1);
+  });
+  test('project knowledge reads are counted without granting a write tool',async()=>{
+    const script=scripted([answer([call('get_project_knowledge',{repo:'r1'})]),text('Project knowledge is unavailable; no changes made.')]);
+    const outcome=await turn('Read project knowledge',script.fetcher);
+    expect(outcome).toMatchObject({ok:true,activity:expect.stringContaining('read 1'),proposals:0});
+    expect(script.bodies[0]).toContain('get_project_knowledge');expect(script.bodies[0]).not.toContain('save_project_knowledge');
   });
 
   test("canary: nothing sent to the provider names a path, an approver, a digest, or a consequence — free text included", async () => {

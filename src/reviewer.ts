@@ -1,4 +1,5 @@
 import { learningContext, recoverLearning } from "./project-learning.js";
+import { knowledgeContext } from "./project-knowledge.js";
 /**
  * The reviewer (v29, R1–R4 + the D5/D8 rulings, isolation hardening): an
  * agent pass over one finished run's SEALED terminal diff — and nothing
@@ -1027,7 +1028,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
             screenshotsSealed.map(one => one.name),
             inline,
             contextForReview,
-          ) + inlineEvidence + learningContext(store, root, request.reviewerRunId, "review", clock()) +
+          ) + inlineEvidence + knowledgeContext(store, request.reviewerRunId) + learningContext(store, root, request.reviewerRunId, "review", clock()) +
             "\nLearning source catalog (IDs and hashes are data): " + JSON.stringify([
               { artifactId: diff.id, sha256: diff.sha256, file: REVIEW_PATCH_NAME },
               ...(proofBinding ? [{ ...proofBinding, file: REVIEW_PROOF_NAME }] : []),

@@ -1,4 +1,5 @@
 import { LEARNING_SCHEMA, queueLearning } from "./project-learning.js";
+import { KNOWLEDGE_SCHEMA } from "./project-knowledge.js";
 import { validateTaskText } from "./task-text.js";
 /**
  * The database: a small task store, and the operational overlay beside it.
@@ -86,8 +87,8 @@ import { LEDGER_SCHEMA, installLedgerTriggers, type LedgerEntry } from "./action
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 
-// v58 fences older readers before project learning and immutable usage history are saved.
-export const SCHEMA_VERSION = 58;
+// v59 fences older readers before project knowledge and frozen run context are saved.
+export const SCHEMA_VERSION = 59;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -3473,6 +3474,11 @@ function initializeStore(db: Database, file: string): Store {
       if (!tableExists(db, table)) throw new Error(`${file}: learning history is missing; refusing to recreate authority`);
     }
   }
+  if (preflight !== null && Math.abs(preflight) >= 59) {
+    for (const table of ["project_knowledge", "knowledge_change", "knowledge_snapshot"]) {
+      if (!tableExists(db, table)) throw new Error(`${file}: project knowledge history is missing; refusing to recreate it`);
+    }
+  }
   // THE SENTINEL IS A CHECKED COMPARE-AND-SET (raw authority repair): the
   // row moves from exactly the version the preflight read to its negative,
   // or this open refuses — a second migrator that raced this one between
@@ -3486,6 +3492,7 @@ function initializeStore(db: Database, file: string): Store {
   }
   db.exec(SCHEMA);
   db.exec(LEARNING_SCHEMA);
+  db.exec(KNOWLEDGE_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");

@@ -89,6 +89,9 @@ describe("project access and the action ledger", () => {
     expect((await get("/t/beta-task")).status).toBe(404);
     expect((await get("/ledger?project=" + encodeURIComponent(beta))).status).toBe(403);
     expect((await get("/settings/learning?repo=" + encodeURIComponent(beta))).status).toBe(403);
+    expect((await get("/settings/knowledge?repo=" + encodeURIComponent(beta))).status).toBe(403);
+    const knowledge = await get('/settings/knowledge?repo=' + encodeURIComponent(alpha));
+    expect(knowledge.status).toBe(200);expect(await knowledge.text()).not.toContain('BETA PRIVATE WORK');
     const settings = await (await get("/settings")).text();
     expect(settings).toContain('href="/settings/learning"');
     expect(settings).not.toContain('action="/settings/quality-default"');
