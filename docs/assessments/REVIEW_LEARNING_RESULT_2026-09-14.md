@@ -1,5 +1,7 @@
 # Quiet project learning — revision 1 result
 
+Post-controller status: the native controller committed this handoff as `c9da48ddbe350fc7b14d5fa1c6045e68239b9d43`; its full gate passed and independent Opus review 1599 verified all five criteria. References below to uncommitted work or pending gates describe the builder's earlier handoff. See [the operator execution record](REVIEW_LEARNING_EXECUTION_2026-09-14.md) for final checks, live-pilot limitations, and integration status.
+
 ## Outcome and candidate
 
 Repaired recovery starvation, unscoped planner advice, the optional review output contract, and the four native-gate test expectations. Presentation, schema, approvals, routing, and the approved verification command remain unchanged. An observation, adoption, or usage record does not establish that a remedy works or that quality improved.

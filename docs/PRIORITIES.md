@@ -74,7 +74,12 @@ implementation history, not current deployment claims.
    Start with proven facts, not a general memory platform.
    The [review-learning plan](REVIEW_LEARNING_PLAN_2026-09-14.md) now specifies
    project lessons first, then separately evaluated Standing Orders improvements.
-   It is a researched proposal, not an implemented learning runtime.
+   The first slice is now implemented and independently reviewed locally:
+   optional evidence-backed review lessons, explicit adoption, bounded advisory
+   reuse, and Settings → Learning with retained change history. See the
+   [execution record](assessments/REVIEW_LEARNING_EXECUTION_2026-09-14.md).
+   Live nonempty lesson reuse, measured benefit, and the controlled installation
+   update remain open; program-wide improvements are suggestions only.
 
 Keep real exhausted-subscription fallback certification fail-closed. No new
 task-duration caps, unlimited repair loops, or mandatory extra reviewer stages
@@ -235,8 +240,10 @@ chat, inbox, and routine surfaces; Codex resumes carry their sandbox as an
 override so a structured correction is no longer an immediately doomed turn,
 and a protocol failure on a resume is retried as a fresh planner root — all
 proved on a real Codex plan-first run and a real subscription-backed chat
-rather than seeded demo turns. The learning half (project memory) is not
-started.
+rather than seeded demo turns. Project learning's first local slice is now
+implemented; the execution record above separates controlled reuse tests from
+the two real-provider reviews that produced no lesson. It is not yet deployed
+or evidence of a quality gain.
 
 ## Current focus
 
