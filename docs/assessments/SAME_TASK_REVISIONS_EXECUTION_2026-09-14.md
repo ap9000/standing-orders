@@ -1,0 +1,94 @@
+# Same-task revisions — live execution
+
+Implemented and inspected through **two real model-built revisions**. Final candidate **`af4c20479935b6c101337189e012cb310025f4e3`** passed its native gate and Opus review. Integrated locally on `codex/same-task-revisions`; not pushed or deployed. The entries below preserve the sequence, including intermediate findings and review gaps.
+
+## Admission
+
+- Fetched origin/main and confirmed it matched local main at `1a08e43`. Fast-forwarded **local main** to verified Package 5 receipt `a355fe3`; no push or deployment.
+- Created branch `codex/same-task-revisions` and committed the detailed plan as **`4755b21af6bf3fa4c76c95697c65f9bc3c283364`**.
+- Filed native task **`same-task-revisions-20260914`**, title **Keep revisions in the same task**. Exact approved scope **`40f5133b615a4726aaa0cd1d35b69b2b`**, four criteria (identity, safety, feedback, experience), 16 bounded paths. Preserved the existing access posture, no dollar cap and existing idle policy; no new time limit.
+- Native builder **1586**, Codex **gpt-6-astra**, started at 23:23:52 UTC from `4755b21`; Opus is the signed review route. Actual authentication will be reported from the finished run, not inferred from defaults.
+- Root uses the existing one-off repo-bound runner, not a second global watcher. Installed app/worker and unrelated tasks remain unchanged.
+
+## Before
+
+Actual Work page on the verified candidate shows both `/t/give-revisions-recognizable-names` and its separate `/t/revise-give-revisions-recognizable-names-from-15-annotat` card. Actual desktop baseline: `output/playwright/same-task-before-desktop.png`. This is live task data, not the synthetic proof fixture.
+
+## In-progress inspection
+
+A read-only inspection of the builder's initial implementation found `taskFamilyOf` calling an unbounded all-admitted-tasks projection. Root tested that code against an isolated in-memory database of 1,200 synthetic root tasks: selecting one root made 2,400 `lookupRef` calls (82ms in that sample). No production records were touched. Recheck the final implementation; if unchanged, require bounded point lookup and grouping/page limits rather than accepting this as a scalable query. This observation is provisional, not a finding attributed to a finished candidate.
+
+An isolated happy-dom check of the in-progress result script reproduced a draft-cancel issue: with existing feedback pinned to `src/original.ts:12`, selecting a review note for `src/reviewer.ts:30` and cancelling the replacement prompt preserved the words but changed and saved the file/line. Cancellation must leave the entire draft unchanged. Recheck the completed candidate before filing this as review feedback; no production comments were written by this check.
+
+The builder subsequently moved confirmation before all draft mutations in its own in-progress changes. Root repeated the isolated check with a previously saved draft: both all form fields and the saved draft remained byte-for-byte unchanged after Cancel. Do not file the superseded initial finding against the final candidate if this repair remains.
+
+Read-only checks of actual records with the in-progress projection grouped the names and evidence-handoff tasks with their respective linked revision, retaining the root and reporting no lineage problem. The active task `same-task-revisions-20260914` still has stored state `queued` while run 1586 is `agent-running` (normal native claim behavior). The new `projectFamilyPeek` counts `running` using only `family.current.state === "running"`, so it cannot represent this real live build correctly. Recheck the finished code and rendered Projects response; derive live counts from the same actual claim/run projection used by Work, not the task row alone.
+
+At 00:02 UTC, root restarted only the owned 4187 preview with the in-progress build (installed 4180 unchanged). Actual `/projects` showed **0 live / 1 queued** while `/chat?task=same-task-revisions-20260914` showed **Running now / Stop details · build #1586**, and the stored run remained `agent-running` with no outcome or finish timestamp. Screenshot `output/playwright/same-task-live-count-before-desktop.png` and snapshots `page-2026-09-15T00-02-23-284Z.yml` / `page-2026-09-15T00-02-45-695Z.yml` capture this real-data mismatch. This preview is not a deployed or final candidate.
+
+Actual result 1584 at the canonical names-task chat URL retains all six informational reviewer observations and exposes six optional Request change controls, but renders zero default revision forms. At 390x844, its Checks view still overflows: document client width 379px, scroll width 397px; the sole visible overflowing element is the reviewer `.mono` path `docs/assessments/WORKSPACE_5_NAMES_RESULT_2026-09-14.md:28`, ending at x396.5. Screenshot `output/playwright/same-task-real-review-notes-phone.png`. History already has a real disclosure marker; do not infer a missing affordance from the earlier scrolled fixture capture.
+
+The remaining real-work acceptance is planned as two contained revisions: bounded task reads/live counts, then wrapping this actual reviewer path on phones. Both findings are known before sign-off; the second is not being treated as fixed by the fixture's passing long-feedback case. An unsent draft (`Keep this task’s revisions and results together.`) is saved in the owned preview session for the current root task, to check continuity through the real revisions.
+
+## Independent checks at handoff
+
+- One family card/count before the page limit, with project admission before both grouping and lookup. Hidden roots/children cannot enter a visible family's history. No grouping by title.
+- Stable root URL/name; exact old-version URLs still work. Current action/approval targets remain actual execution IDs. A stale form must not mutate a newer execution because of canonical routing.
+- Current state does not reuse an earlier success while revision work is queued/live/held/failed. Legacy concurrent siblings stay discoverable with truthful status, not silently dropped.
+- Two successive revisions retain all prior result hashes, feedback and fresh authorization. Duplicate seal/retry and later-batch behavior remain exact. Informational reviewer notes do not become default requested changes; intentionally requested reviewer feedback remains possible.
+- Root chat draft survives history/results/revision navigation, while account/session/task isolation and action targeting remain intact. Old result selection must not change which execution an approval or Stop controls.
+- Inspect real desktop and phone views after fixture checks. Include inherited feedback paths/hashes, long names, empty/informational feedback and damaged evidence. No polished-phone claim if actual data still overflows.
+
+Only the native final gate runs the unchanged full verifier for each candidate. Root will record focused checks, independent review, actual screenshots, manual interventions and remaining gaps here.
+
+## Initial candidate
+
+Native run 1586 committed **`657b58bb63dc0c8557bec745e3c427a7c1331422`**. Recorded authentication is **subscription** (Codex, GPT-6 Astra). Builder reports 486 affected tests plus affected-file reruns and 98 passing synthetic desktop/phone checks; it did not run the full repository verifier. Native final verification remains in progress at this entry. This candidate is not accepted: the bounded-read, live-count and real-phone reviewer-path findings above remain.
+
+Original sealed records to preserve through both revisions: terminal diff artifact **678**, SHA-256 `bac71ab08d023f10eef3cfbb000fa45650eeced2cc0cb22d6ce6ceca06adbf86`; handoff **680**, `8f2554745501a1e3ac606c31d3ce250433e9abe524b6c15e2026a27ad65d8ff8`; proof **682**, `1a0ea09f66f92f009f35605d8904954992be088f323a0a9893a47e7a668a6706`; eight screenshot artifacts **683–690**. Final check/review records will be added after they exist.
+
+Native final gate passed once: **2,937 passed / 23 existing skips / 167 files**, 322.41s, typecheck and build passed. Check artifact **691**, SHA-256 `19660c924f84c6dc67c3e5c3576bea7097c6796ca1ebc3c796632413cb6d3424`. Native Opus reviewer **1587**, subscription, accepted its first response: four upholds and 14 comments. Response **692**, SHA-256 `18135ce3ed340804a8a2a3c40dc0593da7af418287c42d0ccc621565dd26a010`. One comment is a problem: damaged-history results disappear from the review queue without notice. Root retains its independent findings despite the overall upholds; this is not sign-off.
+
+## Live revision 1
+
+Using the actual phone result page, root submitted ordinary feedback **212** for live counts and diff annotation **213** on `src/store.ts:11657` for bounded reads. After review, the rendered batch contained exactly **212,213,216** (the reviewer problem), not its 13 informational comments. Clicking **Revise** filed **`revise-same-task-revisions-20260914-from-3-annotations-o`** and stayed at the original root chat URL. Brief **693** binds source run 1586, candidate 657b58b, exact source scope and the three IDs; SHA-256 `79e17faa08851216bbf9107231f04fce84f6ed3005bf235ad548779f09e400a8`.
+
+Root inspected the full inherited scope and expanded Review plan in the real UI, then used the normal credentialed native CLI approval (not a claimed click on Approve). Fresh digest **`c835aa8ad730e648557423f1782c5bab`** retains all four criteria, 16 paths, exclusions, Astra/Opus routes and no dollar cap. Native run **1588** is building from exact base `657b58bb63dc0c8557bec745e3c427a7c1331422` on the same owned runner. Actual chat now says **Revising**, controls run 1588, uses the root identity, and preserves the unsent root draft. Screens: `same-task-real-revision1-approval-phone.png`, `same-task-real-revision1-running-phone.png` under `output/playwright/`.
+
+Actual Work-page inspection while 1588 was active found exactly one root card, no child card, and **Revising / Watch the build**. Screen: `same-task-real-work-revising-phone.png`. The in-progress revision's direct lookup also passed root's same isolated 1,200-task probe: zero repeated `lookupRef` calls, under 1ms in that sample (the query still performs real SQL reads; this is not a zero-query claim).
+
+At 00:28 UTC root restarted only preview 4187 with the in-progress repair build. While stored run 1588 remained `agent-running`, the actual project header showed **1 live / 0 queued** and the standing-orders project card showed **1 running**. Screen: `same-task-live-count-after-desktop.png`, paired with the earlier real-data before capture. This validates the native queued-row/live-claim repair before the final candidate gate; it is not a deployment claim.
+
+Revision 1 committed as **`70e6d2fba456c1291026e34827d52fdfaebe8e2f`**, recorded subscription authentication. Native final verification is running. Builder reports 488 focused tests, refreshed store/server checks, 110 desktop/phone journey checks, and a 56-check phone-only rerun after fixing clipped header labels. Root separately inspected the refreshed phone live-count image and the desktop broken-history Review image; the latter keeps the result visible with its warning. The report's wider fixture inspection is builder-reported, distinct from root's actual-data checks above.
+
+Revision 1's native gate passed: **2,940 passed / 23 existing skips / 167 files**, 321.57s; typecheck/build passed. Check **708**, SHA-256 `49d1a8de95fa1dfb6f76d58fe056b7ffb5793a1b3590b5dc9c39a24ac1885f08`. Native Opus request 27 completed through its existing bounded format corrections (1590 → 1591 → 1592), subscription authentication. It recorded two upholds (identity/experience) and two **cannot-tell** judgments (safety/feedback): the bounded packet omits inherited server handlers. It found no new problem comments. The machine verdict `verified` is not a claim that all independent judgments upheld. The source packet remains unchanged, and this limitation is not waived or hidden.
+
+## Live revision 2
+
+Root reconfirmed the actual build-1584 reviewer-path overflow against final `70e6d2f` preview: 379px available, 397px document width, sole overflowing path ending at x396.5. Submitted ordinary note **246** on source build **1588** for that narrow wrapping repair and replacing “execution” with “task” in the history warning. The rendered revision batch contained only **246**, excluding all 18 informational reviewer observations.
+
+Clicking **Revise** created **`revise-revise-same-task-revisions-20260914-from-3-annota`**, a revision of Revision 1, at the same root chat URL. Machine brief **713**, SHA-256 `f5bbb3b46349cbc4f68f7404a22115a34189b3b3a7af597cd525b38cf7e992b0`, binds exact source 1588 / `70e6d2f` / source scope and note 246. Root read the full inherited terms and opened Review plan. Normal credentialed CLI approval signed fresh digest **`24c3e83d1d8aecf9e23d984c2e2eac7d`**; no approval was copied.
+
+Native Astra builder **1593** started from `70e6d2fba456c1291026e34827d52fdfaebe8e2f` on the owned runner. Actual phone chat keeps the root identity, current Revision 2 execution, **Revising**, and the unchanged unsent draft. History now reads Original / Revision 1 / Revision 2, with exact earlier build links 1586/1588; the page itself fits at 379px with no horizontal overflow. Final result and review still pending.
+
+Root opened build 1586 from the real History link while Revision 2 ran: the panel showed exactly 1586, original feedback under Earlier feedback, and `/r/1586/comment` (no new default Revise form). The old Revision 1 task URL redirected to the root's explicit `?version=...` page, labelled Viewing Revision 1, with no Stop form for the newer run. Work still had exactly one root card and no child cards. All **33** artifacts attached to builds 1586/1588 verified; only the exact requested feedback was consumed, leaving 31 informational observations untouched. These are actual-data checks, distinct from the synthetic negative/replay cases.
+
+Root also inspected the exact server handlers and the existing two-revision regression. Canonicalization is in GET navigation; posted run/task IDs, scope digest, nonce and displayed batch remain exact. Invalid hidden/unrelated versions refuse, old seal receipts resolve to the named historical version, and the seal verifies immutable source bytes before creating new work. This source inspection does not retroactively change Opus's cannot-tell judgments.
+
+Revision 2 candidate **`af4c20479935b6c101337189e012cb310025f4e3`** uses subscription authentication. Builder ran typecheck and **47 selected tests**, plus the existing desktop/phone journey (**129 checks, zero failures**). Root read both browser reports: the pre-fix phone run failed three reviewer-path/hash cases, and the final run passed all three without clipping. Root inspected the final phone Checks capture. No test was disabled; the focused test-name filter left unrelated tests unselected.
+
+On the exact committed candidate's separate 4187 preview, root reopened actual build 1584 Checks at 390x844: client/document width both **379px**, complete reviewer path wraps over two lines, and zero default revision forms. Screen `output/playwright/same-task-real-review-notes-phone-after.png`, paired with the earlier before capture. Actual desktop root chat retains the draft and all three History versions with no overflow (1389px available/document at the 1400x900 viewport); screen `output/playwright/same-task-real-history-desktop.png`. Installed app remains unchanged. Native final gate and final review are still pending at this entry.
+
+## Final result
+
+- Native run **1593** completed at 01:06:53 UTC on September 15. Its unchanged final gate passed **2,940 tests / 23 existing skips / 167 files**, 323.49s, plus typecheck and build. Check **728**, SHA-256 `2b4e2a16a46523caea0b189ffbf7a9b4e34b0271815cd20c4f0d6c9691481b66`.
+- Native Opus request **28** completed at 01:10:52 UTC, subscription authentication. Reviewer 1594 used one existing bounded format correction, accepted as **1595**: **all four criteria upheld**, seven informational notes and one question, **no problem comments**. Accepted response **731**, SHA-256 `ec6c8c0b57eccf303be2c2f090a9dde9ed4fc215894ffcf79cede64cf0226eee`. Failed-format response 730 remains in history, not rewritten.
+- Opus explicitly based inherited safety/feedback findings on exact regression context and the passing gate. Large server/store files still exceed context limits; final upholds do not mean a full-file audit. Browser report output is not part of the sealed machine check log: root read the local reports, independently checked actual pages, and native evidence preserves eight validated screenshots. These remaining evidence-format limitations are not waived or claimed repaired here.
+- Root read all eight final review comments. They describe the scoped wrapping, retained warning, regressions and evidence limits; the question notes that the worker assessment describes its pre-seal tree. This execution receipt supplies the actual committed candidate and final outcomes. No third revision was created for informational observations.
+- Actual final result **1593** is reachable from the original task and shows Original / Revision 1 / Revision 2, all **Ready to review**, with exact build links **1586 / 1588 / 1593**. At the phone viewport the page remains 379px wide with no horizontal overflow and no default Revise form. Final screen: `output/playwright/same-task-real-result-phone.png`.
+- Final read-only custody check found one root family, exactly three versions, no lineage problem, three completed builders, distinct matching approvals, exact chained bases/heads, and no invalid stored artifacts. The root draft survived browser Back, old links, viewport changes and preview restarts. Live testing used ordinary feedback and a diff annotation; synthetic existing tests covered duplicate/lost-response replay, later batches, failure and unauthorized/stale actions without mutating real unrelated tasks.
+- Fast-forwarded local feature branch to **af4c204**, preserving this root-owned receipt, and ran `npm run build` successfully to align local `dist`. Did not duplicate the full gate. The owned one-off pilot runner was retired after review; installed worker/app and unrelated tasks were left alone. Preview 4187 remains available for inspection.
+
+Use: **open the result → leave feedback or annotate Changes → Revise → review the new plan**. The card and chat stay put; **History** holds each exact version. Existing explicit or automatic approval rules still apply.
+
+Not claimed: physical iOS/Android keyboard behavior, other browser engines/Windows, installation/deployment, an autonomous chat filing success, or completely self-sufficient reviewer context for oversized files. No push, publication, signing or global settings changes occurred.
