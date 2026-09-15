@@ -158,7 +158,7 @@ try {
       await fits(page, name+' result changes');
       check(name+' result keeps exact run', await page.locator(`[data-result-panel][data-result-run="${result}"]`).count() === 1);
       if (name === 'desktop') { await page.locator('[data-review-diff]').scrollIntoViewIfNeeded(); await shot(page, 'desktop-result'); }
-      const note = ('Keep the primary action on one line. '+ 'Preserve exact feedback. '.repeat(10)).trim();
+      const note = 'Keep the primary action on one line. On mobile, leave enough room above the composer to read the latest reply and reach its action. Shorten the confirmation without hiding what will stop. Keep my draft if the connection drops, and keep this revision in the original task history.';
       await page.locator('#comment-form textarea[name="note"]').fill(note);
       await submit(page, page.locator('#comment-form [data-save-feedback]'));
       check(name+' result feedback saved in shared history', store.liveDiffComments(result).some(n => n.note === note));
