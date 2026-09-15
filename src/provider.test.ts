@@ -119,11 +119,12 @@ describe("argv dialects", () => {
     expect(schemaIndex).toBeGreaterThan(-1);
     const schema = JSON.parse(argv[schemaIndex + 1] ?? "null") as Record<string, unknown>;
     expect(schema["type"]).toBe("object");
-    expect((schema["required"] as string[]).sort()).toEqual(["comments", "version"]);
+    expect((schema["required"] as string[]).sort()).toEqual(["comments", "learning", "learningAssessment", "version"]);
     const properties = schema["properties"] as Record<string, unknown>;
     expect(properties).toHaveProperty("comments");
     expect(properties).toHaveProperty("criteria");
     expect(properties["learning"]).toMatchObject({type:"array",maxItems:2,items:{additionalProperties:false}});
+    expect(properties["learningAssessment"]).toMatchObject({type:"object",required:["decision","reason"],additionalProperties:false,properties:{decision:{enum:["propose","none"]},reason:{minLength:1,maxLength:125}}});
     for (const field of ["comments", "criteria"] as const) {
       const shape = properties[field] as { maxItems: number; items: { properties: { note: { minLength: number; maxLength: number } } } };
       expect(shape.maxItems).toBe(REVIEW_OUTPUT_LIMITS[field]);

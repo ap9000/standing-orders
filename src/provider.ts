@@ -234,6 +234,12 @@ const CLAUDE_REVIEW_ISOLATION_ARGV: readonly string[] = [
 const CLAUDE_REVIEW_JSON_SCHEMA = {
   type: "object",
   properties: {
+    learningAssessment: {
+      type: "object", properties: {
+        decision: { type: "string", enum: ["propose", "none"] },
+        reason: { type: "string", minLength: 1, maxLength: 125 },
+      }, required: ["decision", "reason"], additionalProperties: false,
+    },
     learning: {
       type: "array", maxItems: 2, items: {
         type: "object", properties: {
@@ -280,7 +286,7 @@ const CLAUDE_REVIEW_JSON_SCHEMA = {
       },
     },
   },
-  required: ["version", "comments"],
+  required: ["version", "comments", "learningAssessment", "learning"],
   additionalProperties: false,
 } as const;
 

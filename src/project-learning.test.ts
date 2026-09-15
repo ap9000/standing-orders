@@ -43,7 +43,7 @@ describe('quiet learning', () => {
     store.stampRun(run,{baseRevision:head,scopeDigest:store.getScope(id)?.digest ?? ''});
     return run;
   }
-  function capture(index=0, value?: unknown) {
+  function capture(index=0, value?: unknown, learningAssessment?: unknown) {
     const source=start(), run=store.getRun(source)!;
     const patch=`diff --git a/f${index}.ts b/f${index}.ts\n--- a/f${index}.ts\n+++ b/f${index}.ts\n@@ -1 +1 @@\n+export const n=${index};\n`;
     const artifact=storeEvidence(store,evidence,source,'terminal-diff','diff.patch',Buffer.from(patch),'fixture',now,{captureStatus:'ok'});
@@ -54,8 +54,8 @@ describe('quiet learning', () => {
     store.stampProviderStart(admitted.reviewerRunId,now);
     const c: LearningCandidate={kind:'project',observation:`File f${index} retains the boundary.`,action:`Check f${index} boundary cases.`,paths:[`f${index}.ts`],phases:['plan','build','review'],evidence:[{artifactId:artifact,sha256:store.getArtifact(artifact)!.sha256,excerpt:`+export const n=${index};`}]};
     const learning=value===undefined?[c]:typeof value === "function" ? value(c) : value;
-    storeStructuredAttempt(store,evidence,admitted.reviewerRunId,{phase:'reviewer',attempt:1,authoredRunId:admitted.reviewerRunId,raw:JSON.stringify({version:1,comments:[],learning}),accepted:true,normalized:false,now});
-    const args={reviewerRunId:admitted.reviewerRunId,runId:source,evidenceRoot:evidence,artifactId:artifact,author:'reviewer:claude',comments:[],judgements:[],learning,bindings:{diffSha:c.evidence[0]!.sha256,scopeDigest:null,headSha:head,proof:null,checkLog:null,screenshots:[]}};
+    storeStructuredAttempt(store,evidence,admitted.reviewerRunId,{phase:'reviewer',attempt:1,authoredRunId:admitted.reviewerRunId,raw:JSON.stringify({version:1,comments:[],learning,learningAssessment}),accepted:true,normalized:false,now});
+    const args={reviewerRunId:admitted.reviewerRunId,runId:source,evidenceRoot:evidence,artifactId:artifact,author:'reviewer:claude',comments:[],judgements:[],learning,learningAssessment,bindings:{diffSha:c.evidence[0]!.sha256,scopeDigest:null,headSha:head,proof:null,checkLog:null,screenshots:[]}};
     store.ingestReview(args,now);
     return {source,reviewer:admitted.reviewerRunId,artifact,c,args};
   }
@@ -64,6 +64,43 @@ describe('quiet learning', () => {
     const v=view(); changeLearning(store,evidence,{repo,actor:'alex',identity:v.identity,revision:v.revision,action,...(lesson?{lesson:lesson.id,version:lesson.version,sha:lesson.sha}:{})},now);
   }
   const snapshot=(run:number,phase:'plan'|'build'|'review'='build')=>JSON.parse(learningContext(store,evidence,run,phase,now).trim().split('\n').at(-1)!);
+  test('an explicit assessment distinguishes no lesson, a proposal and missing or invalid decisions',()=>{
+    const none=capture(0,[],{decision:'none',reason:'The shared helper and regression already enforce this behavior.'});
+    const proposed=capture(1,undefined,{decision:'propose',reason:'This boundary also applies to other callers.'});
+    const absent=capture(2,[]);
+    const invalid=capture(3,[],{decision:'propose',reason:'Contradicts the empty suggestions.'});
+    const assessments=view().events.filter(e=>e.action==='assessment');
+    expect(assessments).toEqual(expect.arrayContaining([
+      expect.objectContaining({run:none.reviewer,after:'none',reason:'The shared helper and regression already enforce this behavior.'}),
+      expect.objectContaining({run:proposed.reviewer,after:'propose'}),
+      expect.objectContaining({run:absent.reviewer,after:'unassessed'}),
+      expect.objectContaining({run:invalid.reviewer,after:'invalid'}),
+    ]));
+    for(const c of [none,proposed,absent,invalid])expect(store.getRun(c.reviewer)?.outcome).toBe('no-change');
+    const html=learningHtml(view(),'csrf',true);
+    for(const title of ['No lesson needed','Learning suggested','Learning not assessed','Learning assessment invalid'])expect(html).toContain(title);
+    const secret=capture(4,[],{decision:'none',reason:'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'});
+    expect(view().events.find(e=>e.action==='assessment'&&e.run===secret.reviewer)).toMatchObject({after:'invalid'});
+    expect(JSON.stringify(view().events)).not.toContain('sk-ant-api03');
+    const contradiction=capture(5,undefined,{decision:'none',reason:'There are no suggestions.'});
+    expect(view().lessons.some(l=>l.source===contradiction.source)).toBe(false);
+    expect(store.getRun(contradiction.reviewer)?.outcome).toBe('no-change');
+    const malformed=capture(6,[],{decision:['none'],reason:'Wrong decision type.'});
+    expect(view().events.find(e=>e.action==='assessment'&&e.run===malformed.reviewer)).toMatchObject({after:'invalid'});
+    expect(parseReview(JSON.stringify({version:1,comments:[],learning:[],learningAssessment:{decision:'none',reason:'Covered.'}}),new Set())).toMatchObject({ok:true,learningAssessment:{decision:'none',reason:'Covered.'}});
+  });
+  test('assessment and capture commit together, recover from sealed review, and never change on replay',()=>{
+    store.handle.exec("CREATE TRIGGER fixture_assessment_failure BEFORE INSERT ON learning_event WHEN NEW.action='assessment' BEGIN SELECT RAISE(ABORT,'fixture write fault'); END;");
+    const c=capture(0,[],{decision:'none',reason:'Covered by the existing regression.'});
+    expect(store.getRun(c.reviewer)?.outcome).toBe('no-change');
+    expect(store.handle.prepare('SELECT * FROM learning_capture WHERE source=?').get(c.source)).toBeUndefined();
+    store.handle.exec('DROP TRIGGER fixture_assessment_failure');store.close();store=openStore(db);
+    const first=view().events.find(e=>e.action==='assessment');
+    expect(first).toMatchObject({after:'none',reason:'Covered by the existing regression.'});
+    queueLearning(store,c.source,c.reviewer,[],c.c.evidence,now,{decision:'none',reason:'Changed on replay.'});
+    store.close();store=openStore(db);recoverLearning(store,evidence,repo,now);
+    expect(view().events.filter(e=>e.action==='assessment')).toEqual([first]);
+  });
   test('strict core parser stays strict; invalid optional learning and absent learning do not alter it',()=>{
     for(const learning of [undefined,null,{},['invalid']]) expect(parseReview(JSON.stringify({version:1,comments:[],learning}),new Set())).toMatchObject({ok:true,comments:[],criteria:[]});
     expect(parseReview(JSON.stringify({version:1,comments:[],learning:[]}),new Set(),new Set(['c1']))).toMatchObject({ok:false});
@@ -198,16 +235,18 @@ describe('quiet learning', () => {
     let calls=0, brief='';
     const report=await reviewPass(store,{runner:'runner',token:'runner-token',now,evidenceRoot:evidence,scratchRoot:root,agent:async (_file,args)=>{
       calls++; brief=String(args[args.indexOf('-p')+1]);
-      return {code:0,stdout:JSON.stringify({result:JSON.stringify({version:1,comments:[],learning:[{kind:'project',observation:'The boundary remains explicit.',action:'Keep the boundary regression.',paths:['f0.ts'],phases:['build'],evidence:[{artifactId:artifact,sha256:store.getArtifact(artifact)!.sha256,excerpt:'+export const n=0;'}]}]})}),stderr:'',timedOut:false,notFound:false};
+      return {code:0,stdout:JSON.stringify({result:JSON.stringify({version:1,comments:[],learningAssessment:{decision:'propose',reason:'The boundary applies to other callers.'},learning:[{kind:'project',observation:'The boundary remains explicit.',action:'Keep the boundary regression.',paths:['f0.ts'],phases:['build'],evidence:[{artifactId:artifact,sha256:store.getArtifact(artifact)!.sha256,excerpt:'+export const n=0;'}]}]})}),stderr:'',timedOut:false,notFound:false};
     }});
     expect(report[0]?.outcome).toBe('reviewed');expect(calls).toBe(1);expect(view().lessons).toHaveLength(2);
+    expect(view().events.find(e=>e.action==='assessment'&&e.after==='propose')).toMatchObject({reason:'The boundary applies to other callers.'});
     const row=store.handle.prepare("SELECT s.payload FROM learning_snapshot s JOIN run r ON r.id=s.run WHERE r.role='reviewer' ORDER BY r.id DESC LIMIT 1").get();
-    expect(brief).toContain(String(row?.['payload']));expect(brief).toContain('Optional learning');
+    expect(brief).toContain(String(row?.['payload']));expect(brief).toContain('Learning check:');
     expect(brief).toContain('"learning": []');
-    expect(brief).toContain('Zero is valid');
-    expect(brief).toContain('prevention or later reuse');
+    expect(brief).toContain('"learningAssessment"');
+    expect(brief).toContain('a concrete reason');
+    expect(brief).toContain('DIFFERENT future task');
     expect(brief).not.toContain('message must be exactly this JSON');
-    expect(brief.match(/Optional learning:/g)).toHaveLength(1);
+    expect(brief.match(/Learning check:/g)).toHaveLength(1);
     expect(JSON.parse(String(row?.['payload']).trim().split('\n').at(-1)!).lessons).toHaveLength(1);
   });
   test('real HTTP Settings without notifications, project admission, CSRF, viewer and stale forms',async()=>{

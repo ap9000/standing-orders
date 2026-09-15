@@ -9584,6 +9584,7 @@ export class Store {
       reviewerRunId: number;
       evidenceRoot?: string;
       learning?: unknown;
+      learningAssessment?: unknown;
       runId: number;
       artifactId: number;
       author: string;
@@ -9683,7 +9684,7 @@ export class Store {
       queueLearning(this, args.runId, args.reviewerRunId, args.learning, [
         { artifactId: args.artifactId, sha256: args.bindings.diffSha },
         ...[args.bindings.proof, args.bindings.checkLog, args.bindings.context].filter((x): x is { artifactId: number; sha256: string } => x != null),
-      ], now);
+      ], now, args.learningAssessment);
       return { commentIds, folded };
     });
   }

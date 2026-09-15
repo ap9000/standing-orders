@@ -108,18 +108,38 @@ function reviewSnapshot(store: Store, reviewer: number): Record<string, unknown>
   }
   return undefined;
 }
+/** A public decision summary, never a transcript or proof that a lesson helps. */
+function assessmentOf(value: unknown, learning: unknown): { state: string; reason: string } {
+  if (value === undefined) return { state: 'unassessed', reason: 'The review did not include a learning assessment. No decision is inferred.' };
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('shape');
+    const a = value as Record<string, unknown>;
+    if (typeof a['decision'] !== 'string' || !['propose', 'none'].includes(a['decision']) || !text(a['reason'], 500) || scanForSecrets(a['reason']).length) throw new Error('shape');
+    const count = parseLearning(learning === undefined ? [] : learning).length;
+    if ((a['decision'] === 'propose') !== (count > 0)) throw new Error('inconsistent');
+    return { state: String(a['decision']), reason: a['reason'] };
+  } catch { return { state: 'invalid', reason: 'The learning assessment was invalid or disagreed with its suggestions. Core review is unchanged.' }; }
+}
 /** Called only within the successful core-ingest transaction; an outbox gives restart-safe recovery. */
-export function queueLearning(store: Store, source: number, reviewer: number, value: unknown, catalog: readonly { artifactId: number; sha256: string }[], now: Date): void {
+export function queueLearning(store: Store, source: number, reviewer: number, value: unknown, catalog: readonly { artifactId: number; sha256: string }[], now: Date, assessment?: unknown): void {
   const empty = value === undefined || (Array.isArray(value) && value.length === 0);
   const run = store.getRun(source), repo = run && store.refForId(run.taskRef)?.repo;
   if (!repo) return;
   try {
     const snapshot = reviewSnapshot(store, reviewer);
     // Legacy reviews without a learning snapshot need no optional failure.
-    if (empty && !snapshot) return;
+    if (empty && assessment === undefined && !snapshot) return;
     if (!snapshot || snapshot['repo'] !== repo || snapshot['identity'] !== learningIdentity(repo) || learningSha(String(snapshot['payload'])) !== snapshot['sha']) throw new Error('Learning review identity is unavailable.');
-    const payload = empty ? '[]' : JSON.stringify(value);
-    store.savepoint(() => store.handle.prepare('INSERT OR IGNORE INTO learning_capture VALUES (?,?,?,?,?,?,?,?)').run(source, reviewer, repo, learningIdentity(repo), JSON.parse(String(snapshot['payload']).trim().split('\n').at(-1)!).environment, Buffer.byteLength(payload) <= 8000 ? payload : 'null', JSON.stringify(catalog), now.toISOString()));
+    const result = assessmentOf(assessment, value);
+    // A contradictory decision cannot publish suggestions. Keep its sealed
+    // response as evidence; the optional invalid capture never changes core review.
+    const payload = result.state === 'invalid' ? 'null' : empty ? '[]' : JSON.stringify(value);
+    store.savepoint(() => {
+      const inserted = store.handle.prepare('INSERT OR IGNORE INTO learning_capture VALUES (?,?,?,?,?,?,?,?)').run(source, reviewer, repo, learningIdentity(repo), JSON.parse(String(snapshot['payload']).trim().split('\n').at(-1)!).environment, Buffer.byteLength(payload) <= 8000 ? payload : 'null', JSON.stringify(catalog), now.toISOString());
+      if (inserted.changes) {
+        event(store, repo, `reviewer:${store.getRun(reviewer)?.provider ?? 'unknown'}`, 'assessment', 'pending', result.state, result.reason, null, reviewer, [], now, `assessment:${source}`);
+      }
+    });
   } catch { learningFailure(store, repo, source, now); }
 }
 function reviewedSource(store: Store, reviewer: number): number | null {
@@ -175,13 +195,13 @@ export function recoverLearning(store: Store, root: string, repo: string, now = 
       const response = store.artifactsFor(reviewer.id).find(a => a.kind === 'structured-output' && a.captureStatus === 'ok');
       const read = response && readVerifiedArtifact(root, response);
       if (!read?.ok) continue;
-      const value = JSON.parse(normalizeStructuredJson(read.content.toString('utf8')).text).learning;
+      const responseValue = JSON.parse(normalizeStructuredJson(read.content.toString('utf8')).text);
       const diff = store.artifactsFor(source.id).find(a => a.kind === 'terminal-diff');
       const binding = store.criterionReviewsFor(source.id).find(one => one.reviewerRun === reviewer.id);
       const catalog = binding
         ? [{ artifactId: binding.artifact, sha256: binding.artifactSha }, ...[binding.proof, binding.checkLog, binding.context].flatMap(a => a ? [{ artifactId: a.artifact, sha256: a.sha256 }] : [])]
         : diff ? [{ artifactId: diff.id, sha256: diff.sha256 }] : [];
-      if (catalog.length) queueLearning(store, source.id, reviewer.id, value, catalog, now);
+      if (catalog.length) queueLearning(store, source.id, reviewer.id, responseValue.learning, catalog, now, responseValue.learningAssessment);
     } catch { /* malformed sealed response cannot supply learning */ }
   }
   if (missing.length < 50 || cursor.reviewer === cursor.reviewerEnd) cursor.reviewer = cursor.reviewerEnd = 0;

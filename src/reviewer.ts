@@ -178,7 +178,7 @@ export function parseReview(
   patchPaths: ReadonlySet<string>,
   approvedCriteriaIds: ReadonlySet<string> = new Set(),
   provenance?: ReviewProvenanceRules,
-): { ok: true; comments: ReviewComment[]; criteria: ReviewCriterionJudgement[]; learning?: unknown } | { ok: false; problems: ReviewProblem[] } {
+): { ok: true; comments: ReviewComment[]; criteria: ReviewCriterionJudgement[]; learning?: unknown; learningAssessment?: unknown } | { ok: false; problems: ReviewProblem[] } {
   const problems: ReviewProblem[] = [];
   let parsed: unknown;
   try {
@@ -309,7 +309,7 @@ export function parseReview(
   }
 
   if (problems.length > 0) return { ok: false, problems };
-  return { ok: true, comments, criteria, ...(payload["learning"] === undefined ? {} : { learning: payload["learning"] }) };
+  return { ok: true, comments, criteria, ...(payload["learning"] === undefined ? {} : { learning: payload["learning"] }), ...(payload["learningAssessment"] === undefined ? {} : { learningAssessment: payload["learningAssessment"] }) };
 }
 
 /** One line of untrusted text made inert for the brief — the builder's fence. */
@@ -403,12 +403,19 @@ function reviewerBrief(
           '      "note": "why" }',
           "  ],",
         ]),
+    '  "learningAssessment": { "decision": "propose" | "none", "reason": "one concise reason" },',
     '  "learning": []',
     "}",
-    'Optional learning: "learning" may be omitted or contain zero to two suggestions.',
-    "Consider concise, useful evidence-backed lessons for prevention or later reuse.",
-    "Zero is valid when the supplied evidence supports no useful lesson. Never fabricate",
-    "a lesson or imply that an observation proves a remedy works or improves quality.",
+    "Learning check: after judging the result, explicitly assess future reuse in this same reply.",
+    "Check (1) whether the evidence reveals a repeatable pitfall, project convention, user",
+    "correction or useful approach; (2) what a DIFFERENT future task should do differently;",
+    "and (3) whether the supplied code, tests, instructions or lessons already cover it.",
+    "Do not invent recurrence or preferences absent from the supplied evidence.",
+    'Always include learningAssessment and learning. Use decision "propose" with one or two',
+    'supported suggestions, or "none" with an empty array and a concrete reason (for example,',
+    "already enforced by a shared helper, specific to this task, or insufficient evidence).",
+    "The reason is a short decision summary, not a reasoning transcript; at most 500 UTF-8 bytes.",
+    "Do not fill a quota, restate generic advice, or claim an observation proves a remedy or benefit.",
     "Each item: {kind: project|system, observation: one observed fact, action: one advisory",
     "next action, paths: exact reviewed file paths (1..5), phases: plan/build/review (1..3),",
     "evidence: [{artifactId, sha256, excerpt: exact single-line source text}] (1..3)}.",
@@ -1310,6 +1317,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
           artifactId: diff.id,
           author,
           learning: parsed.learning,
+          learningAssessment: parsed.learningAssessment,
           comments: parsed.comments,
           judgements: parsed.criteria,
           bindings: {
