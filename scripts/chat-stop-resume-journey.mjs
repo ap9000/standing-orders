@@ -92,7 +92,12 @@ try {
       const stopCard = page.locator('article').filter({ has: page.locator(`form[action="/chat/proposal/${stop}/confirm"]`) });
       if (await page.locator('#chat-new-update').isVisible()) await page.locator('#chat-new-update').click();
       await stopCard.evaluate(el => scrollTo(0, el.getBoundingClientRect().top + scrollY - 85));
-      check(name+' confirmation names exact task, run and saved-work consequence', (await stopCard.innerText()).includes('Run #'+run.id) && (await stopCard.innerText()).includes(task) && (await stopCard.innerText()).includes('drafts stay saved'));
+      const stopWords = await stopCard.innerText();
+      check(name+' confirmation names exact task, run and saved-work consequence', stopWords.includes('Run #'+run.id) && stopWords.includes(task) && stopWords.includes('Saved work remains'));
+      // Build #1604 feedback: at most two short sentences that still say
+      // saved work remains, other tasks continue, and the pause waits.
+      const consequence = (await stopCard.locator('p').filter({ hasText: 'acknowledges the stop' }).innerText()).trim();
+      check(name+' confirmation consequence is two short sentences naming other tasks and acknowledgement', consequence.includes('other tasks continue') && consequence.length <= 110 && consequence.split(/(?<=\.)\s+/).length <= 2);
       check(name+' confirmation buttons have tap targets and single-line labels', await stopCard.locator('button').evaluateAll(buttons => buttons.every(button => {
         const rect = button.getBoundingClientRect(), range = document.createRange(); range.selectNodeContents(button);
         return rect.height >= 44 && rect.width >= 44 && range.getBoundingClientRect().height < 30;
@@ -134,7 +139,8 @@ try {
       await submit(page, page.locator(`form[action="/chat/proposal/${stale}/confirm"] button`));
       await page.locator('.proposal-task_action.refused').waitFor();
       check(name+' stale card refuses without draft loss', store.getMateProposal(stale).state === 'refused' && await page.locator('.composer textarea').inputValue() === draft);
-      if (name === 'phone') { await page.locator('.proposal-task_action.refused').scrollIntoViewIfNeeded(); await shot(page, 'phone-refusal-draft'); }
+      await page.locator('.proposal-task_action.refused').scrollIntoViewIfNeeded();
+      await shot(page, name === 'phone' ? 'phone-refusal-draft' : 'desktop-refusal-draft');
       // Complete the same task-owned ceremony, entered from the focused chat.
       await page.locator('#task-control-details > summary').click();
       await submit(page, page.locator('.task-resume-form button'));
@@ -168,7 +174,35 @@ try {
       const second = await page.request.post(fixture.url+`/chat/proposal/${revision}/confirm`, { form: { csrf }, maxRedirects: 0 });
       check(name+' revision replay creates no duplicate', second.status() === 303 && store.taskFamilyOf(root, [fixture.repos.main], false).versions.length === 2);
       await fits(page, name+' revision created');
-      if (name === 'phone') await shot(page, 'phone-revision');
+      // Build #1604 feedback (evidence 792): returning to the revision left
+      // the newest message under the phone's fixed composer. The landing is
+      // the receipt itself, with its plan link readable above the composer.
+      const readable = async whole => page.evaluate(whole => {
+        const latest = document.querySelector('#latest'), composer = document.querySelector('.composer'), link = latest?.querySelector('.proposal-review a');
+        if (!latest || !composer || !link) return { ok: false };
+        const covered = getComputedStyle(composer).position === 'fixed' ? composer.getBoundingClientRect().top : innerHeight;
+        const l = latest.getBoundingClientRect(), a = link.getBoundingClientRect();
+        return { ok: latest === document.querySelector('.thread > :last-child') && (!whole || l.top >= 0) && l.bottom <= covered && a.top >= 0 && a.bottom <= covered, latest: [Math.round(l.top), Math.round(l.bottom)], composer: Math.round(covered), link: link.textContent.trim() };
+      }, whole);
+      const landed = await readable(true);
+      check(name+' revision receipt and its plan link are readable above the composer on arrival', landed.ok && landed.link.includes('review'));
+      await shot(page, name === 'phone' ? 'phone-revision' : 'desktop-revision');
+      if (name === 'phone') {
+        // A software keyboard is simulated by shrinking the reported visual
+        // viewport by 336px while the composer is focused; the page's own
+        // viewport script then raises the composer. No physical keyboard,
+        // Safari, or live model is claimed.
+        await page.locator('.composer textarea').focus();
+        await page.locator('.composer textarea').fill(draft);
+        await page.evaluate(() => { Object.defineProperty(visualViewport, 'height', { configurable: true, get: () => innerHeight - 336 }); visualViewport.dispatchEvent(new Event('resize')); });
+        await page.waitForFunction(() => document.documentElement.hasAttribute('data-mobile-keyboard'));
+        const typing = await readable(false);
+        check('phone newest message follows the raised composer while typing (simulated keyboard)', typing.ok && typing.composer < 600 && await page.locator('.composer textarea').inputValue() === draft);
+        await shot(page, 'phone-revision-typing');
+        await page.evaluate(() => { delete visualViewport.height; visualViewport.dispatchEvent(new Event('resize')); });
+        await page.locator('.composer textarea').blur();
+        await page.waitForFunction(() => !document.documentElement.hasAttribute('data-mobile-keyboard'));
+      }
       check(name+' browser has no script errors', errors.length === 0);
       report.viewports.push({ name, width, height });
     } catch (error) {
