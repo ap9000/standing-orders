@@ -350,6 +350,13 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
   if(form){
     var noteBox=form.querySelector('[name=note]'),pathBox=form.querySelector('[name=path]'),lineBox=form.querySelector('[name=line]'),pin=form.querySelector('details.result-pin');
     var limit=document.getElementById('comment-note-limit'),requestBox=form.querySelector('[name=request]');
+    function updateActions(){
+      var typed=!!(noteBox&&noteBox.value.trim()),batch=form.querySelector('[name=batch]');
+      var requestAction=form.querySelector('[data-request-changes]'),saveAction=form.querySelector('[data-save-feedback]');
+      if(requestAction)requestAction.disabled=!typed&&!(batch&&batch.value);
+      if(saveAction)saveAction.disabled=!typed;
+    }
+    updateActions();if(noteBox)noteBox.addEventListener('input',updateActions);
     if(noteBox&&limit&&noteBox.maxLength>0){
       var tally=function(){limit.textContent=noteBox.value.length===0?'up to '+noteBox.maxLength+' characters':noteBox.value.length+' of '+noteBox.maxLength+' characters';};
       tally();noteBox.addEventListener('input',tally);
@@ -369,6 +376,8 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
     var draftKey=draftPrefix+user+':'+task+':'+run;
     var noted=null,conflict=null;try{var here=new URL(location.href);noted=here.searchParams.get('noted');conflict=here.searchParams.get('conflict');}catch(e){}
     var saved=read(draftKey);
+    var recorded=form.querySelector('[data-recorded-requests]');
+    if(saved&&saved.request!==conflict&&recorded&&recorded.value.split(',').includes(saved.request)){write(draftKey,null);saved=null;}
     if(saved&&noted&&saved.request===noted){write(draftKey,null);saved=null;}
     // A fresh request identity: 16 random bytes as hex, the server's own shape.
     function mint(){var bytes=new Uint8Array(16);try{crypto.getRandomValues(bytes);}catch(e){for(var i=0;i<16;i++)bytes[i]=Math.floor(Math.random()*256);}

@@ -7,7 +7,7 @@ import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
 import { chatWorkingHtml, chatActivityDetailsHtml, completedWorkHtml, CHAT_POLISH_CSS } from "./chat-polish.js";
 import { TRANSITIONS_CSS } from "./transitions-recipes.js";
-import { createResultRevision } from "./result-actions.js";
+import { createResultRevision, requestResultChanges } from "./result-actions.js";
 import { CHAT_CONTROLS, chatControlHref, isChatControl } from "./chat-controls.js";
 import { CHAT_TASK_ACTIONS, isChatTaskAction } from "./chat-task-actions.js";
 import { WORKSPACE_MOTION_CSS, WORKSPACE_MOTION_SCRIPT } from "./workspace-motion.js";
@@ -6051,6 +6051,19 @@ export function createDecisionServer(options: ServeOptions): Server {
       const returnTo = resultReturnTarget(body.get("return"), id);
       const selectedTab = parseResultTab(body.get("tab"));
       const back = selectedTab === "summary" ? returnTo : `${returnTo}${returnTo.includes("?") ? "&" : "?"}tab=${selectedTab}`;
+      if (body.get("intent") === "revise") {
+        const result = requestResultChanges(store, evidenceRoot, {
+          run: id, batch: body.get("batch"), source: body.get("source"), actor: who.name,
+          repos: admissionList(), includeUnplaced: visible(null), allowMode: who.via === "cookie",
+          note: body.get("note") ?? "", path: body.get("path") ?? "", line: body.get("line") ?? "", request: body.get("request"),
+        }, now);
+        if (!result.ok) {
+          const request = body.get("request") ?? "";
+          const retryBack = /^[a-f0-9]{32}$/.test(request) ? `${back}${back.includes("?") ? "&" : "?"}conflict=${request}#request-changes` : back;
+          return refuse(response, who, result.status, result.message, retryBack);
+        }
+        return redirect(response, revisionDestination(result.id, returnTo));
+      }
       const terminal = store.artifactsFor(id).find(one => one.kind === "terminal-diff");
       if (terminal === undefined) {
         return refuse(response, who, 400, "this run has no terminal diff to comment on", back);
@@ -13672,7 +13685,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
       icon: `<path d="M14.7 6.3a4 4 0 0 0-5 5L4 17l3 3 5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/>`,
     },
     agents: { label: "Agents change", action: "change agents", icon: `<circle cx="12" cy="12" r="3"/><path d="M12 2v3"/><path d="M12 19v3"/><path d="m4.9 4.9 2.2 2.2"/><path d="m16.9 16.9 2.2 2.2"/><path d="M2 12h3"/><path d="M19 12h3"/><path d="m4.9 19.1 2.2-2.2"/><path d="m16.9 7.1 2.2-2.2"/>` },
-    review: { label: text("operation") === "revise" ? "Revision" : "Feedback", action: text("operation") === "revise" ? "Request changes" : "Save feedback", icon: `<path d="M4 5h16v12H8l-4 3z"/>` },
+    review: { label: text("operation") === "revise" ? "Changes to make" : "Note for later", action: text("operation") === "revise" ? "Request changes" : "Save for later", icon: `<path d="M4 5h16v12H8l-4 3z"/>` },
     control: { label: "Open control", action: "Open", icon: `<path d="M5 12h14m-6-6 6 6-6 6"/>` },
     task_action: { label: "Task update", action: isChatTaskAction(payload["operation"]) ? CHAT_TASK_ACTIONS[payload["operation"]].label : "Unavailable", icon: `<path d="M5 12h14m-6-6 6 6-6 6"/>` },
   };
@@ -13715,7 +13728,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     const notes = [...selected, ...(text("note") === "" ? [] : [{ note: text("note"), path: text("path") || null, line: typeof payload["line"] === "number" ? payload["line"] : null }])];
     what = `<h3>${escape(text("taskTitle") || task)}</h3><ul class="proposal-review-notes">` +
       notes.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)}</li>`).join("") +
-      `</ul>` + (text("operation") === "revise" ? `<p class="meta">Revises this task. Your approval settings still apply.</p>` : `<p class="meta">Saves feedback without starting work.</p>`);
+      `</ul>` + (text("operation") === "revise" ? `<p class="meta">Updates this task. Your approval settings apply.</p>` : `<p class="meta">No work starts.</p>`);
   } else if (view.kind === "next") {
     what = `<h3>Move <a href="${taskHref(task)}">${escape(task)}</a> to the front</h3>` + facts(["current position", `${escape(String(payload["position"] ?? "?"))} of ${escape(String(payload["of"] ?? "?"))}`], ["project", `<span class="mono">${escape(repoId)}</span>`]);
   } else if (view.kind === "reserve") {
@@ -19513,7 +19526,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   if (o.extraChecks !== undefined) checkParts.push(o.extraChecks);
 
   // ---- request changes: both feedback styles, one sealed road ------------
-  const requestParts: string[] = [`<h3>Feedback</h3>`];
+  const requestParts: string[] = [`<h3>What should change?</h3>`];
   const pathWords = (path: string, line: number | null): string => {
     const shownPath = `${path}${line === null ? "" : `:${line}`}`;
     const href = detail.editor === null ? null : editorFileHref(detail.editor.worktree, path, line);
@@ -19521,11 +19534,11 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   };
   if (detail.comments.length > 0) {
     requestParts.push(
-      `<div class="diff-comments" data-result-notes="${detail.comments.length}">` +
+      `<p class="meta">Saved for later · ${detail.comments.length}</p><div class="diff-comments" data-result-notes="${detail.comments.length}">` +
         detail.comments.map(one => `<div class="diff-comment"><span class="diff-comment-pin" aria-hidden="true"></span><p>${one.path === null ? "" : pathWords(one.path, one.line)}${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span></div>`).join("") +
         `</div>`,
     );
-    if (o.csrf !== "") {
+    if (o.csrf !== "" && !detail.canAnnotate) {
       requestParts.push(
         `<form method="post" action="/r/${runId}/revise" class="card revision-from-comments"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="return" value="${escape(o.returnTo)}">${revisionSealFields(detail.comments, detail.sourceDigest)}` +
           `<div><strong>${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready</strong></div>` +
@@ -19551,13 +19564,14 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
         `<input type="hidden" name="csrf" value="${escape(o.csrf)}">` +
         `<input type="hidden" name="tab" value="${o.tab}">` +
         `<input type="hidden" name="return" value="${escape(o.returnTo)}">` +
-        `<input type="hidden" name="request" value="${escape(o.requestToken)}">` +
-        `<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="What should change?" aria-label="review comment" aria-describedby="comment-note-limit"${o.noted ? " autofocus" : ""}></textarea>` +
+        `<input type="hidden" name="request" value="${escape(o.requestToken)}">${revisionSealFields(detail.comments, detail.sourceDigest)}` +
+        `<input type="hidden" data-recorded-requests value="${escape([...detail.comments, ...(detail.pastComments ?? [])].filter(one => one.sourceKey?.startsWith(`review:${o.user}:`)).map(one => one.sourceKey!.slice(`review:${o.user}:`.length)).join(","))}">` +
+        `<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="Describe the change…" aria-label="review comment" aria-describedby="comment-note-limit"${o.noted ? " autofocus" : ""}></textarea>` +
         `<span class="meta diff-comment-limit" id="comment-note-limit">up to ${LIMITS.note} characters</span>` +
-        `<div class="result-feedback-tools"><details class="result-pin"><summary>Attach to a file or line</summary>` +
+        `<details class="result-pin"><summary>Attach to a file or line</summary>` +
         `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="src/…" aria-label="file" class="mono"></label>` +
         `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div></details>` +
-        `<button type="submit">Save note</button></div><p class="meta result-feedback-hint">Save notes, then request changes.</p></form>`,
+        `<div class="result-feedback-actions"><button type="submit" name="intent" value="revise" data-request-changes>Request changes</button><button type="submit" name="intent" value="note" class="quiet" data-save-feedback>Save for later</button></div></form>`,
     );
   }
 
@@ -19613,9 +19627,9 @@ function resultPrimaryAction(detail: ResultDetail, o: ResultPanelOptions, prUrl:
   if (detail.ciFailing && o.csrf !== "") {
     return wrap("draft-repair", `<form method="post" action="/r/${detail.run.id}/draft-repair"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><button type="submit">Draft a repair task</button></form>`);
   }
-  if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="button-link" href="#request-changes">Review ${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"}</a>`);
+  if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="result-feedback-link" href="#request-changes">Review saved notes</a>`);
   if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) return wrap("open-pr", `<a class="button-link" href="${escape(prUrl)}">Open PR #${detail.publication.prNumber}</a>`);
-  if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="button-link" href="#request-changes">Leave feedback</a>`);
+  if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="result-feedback-link" href="#request-changes">Suggest changes</a>`);
   return "";
 }
 

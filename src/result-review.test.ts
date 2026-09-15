@@ -22,6 +22,31 @@ import {
 } from "./result-review.js";
 
 describe("result-first review (workspace package 3): the pure presentation rules", () => {
+  test("request changes and save for later follow the draft, and only acknowledged drafts clear", async () => {
+    for (const conflict of [false, true]) {
+      const token = "a".repeat(32);
+      const win = new Window({ url: `http://fixture/r/1${conflict ? `?conflict=${token}` : ""}` });
+      try {
+        const key = `${REVIEW_DRAFT_PREFIX}alex:root:1`;
+        win.sessionStorage.setItem(key, JSON.stringify({ note: "Preserve this edit", path: "", line: "", request: token, at: Date.now() }));
+        win.document.body.innerHTML = `<section data-result-panel data-result-user="alex" data-result-task="root" data-result-run="1"><form id="comment-form"><textarea name="note"></textarea><input name="request" value="${"b".repeat(32)}"><input name="batch" value=""><input data-recorded-requests value="${token}"><button data-request-changes>Request changes</button><button data-save-feedback>Save for later</button></form></section>`;
+        win.eval(RESULT_REVIEW_SCRIPT);
+        const note = win.document.querySelector('textarea')!;
+        const request = win.document.querySelector<HTMLButtonElement>('[data-request-changes]')!;
+        const later = win.document.querySelector<HTMLButtonElement>('[data-save-feedback]')!;
+        expect(note.value).toBe(conflict ? "Preserve this edit" : "");
+        expect(request.disabled).toBe(!conflict);
+        expect(later.disabled).toBe(!conflict);
+        note.value = "A new change";note.dispatchEvent(new win.Event('input'));
+        expect(request.disabled).toBe(false);expect(later.disabled).toBe(false);
+        note.value = "";
+        win.document.querySelector<HTMLInputElement>('[name=batch]')!.value = "7";
+        note.dispatchEvent(new win.Event('input'));
+        expect(request.disabled).toBe(false);expect(later.disabled).toBe(true);
+      } finally { await win.happyDOM.close(); }
+    }
+  });
+
   test("the local view comes from the URL and anything unknown reads as Summary", () => {
     expect(parseResultTab("changes")).toBe("changes");
     expect(parseResultTab("checks")).toBe("checks");

@@ -450,7 +450,7 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_review",
-    description: "Read get_result in an earlier step. note saves feedback; revise uses selected saved_notes plus optional new note to revise the SAME task. Omitted saved_notes leaves old notes untouched. Requires confirmation and normal approval.",
+    description: "Read get_result first. Use revise for requested changes; note only to save for later. revise uses selected saved_notes plus optional new note on the SAME task. Omitted saved_notes leaves notes untouched. Confirmation and normal approval apply.",
     inputSchema: schema({
       run: { type: "integer", minimum: 1 }, operation: { type: "string", enum: ["note", "revise"] },
       note: { type: "string", maxLength: LIMITS.note }, path: { type: "string", maxLength: 300 },

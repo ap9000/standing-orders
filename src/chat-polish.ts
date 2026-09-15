@@ -90,11 +90,13 @@ export const CHAT_POLISH_CSS = `
   .result-panel .result-request { border-top: 1px solid var(--border); padding-top: 1rem; }
   .result-panel .result-head h2 { color: var(--foreground); }
   .result-panel .result-request h3 { color: var(--foreground); font-size: .875rem; text-transform: none; letter-spacing: 0; }
-  .result-panel .result-feedback-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: .5rem; }
-  .result-panel .result-feedback-tools:has(details[open]) { grid-template-columns: minmax(0, 1fr); }
-  .result-panel .result-feedback-tools > button { justify-self: end; width: auto; min-height: 44px; white-space: nowrap; }
+  .result-panel .result-feedback-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: .5rem; }
+  .result-panel .result-feedback-actions > [data-request-changes] { order: 2; background: var(--foreground); color: var(--background); border-color: var(--foreground); box-shadow: none; }
+  .result-panel .result-feedback-actions > button { width: auto; min-height: 44px; white-space: nowrap; }
+  .result-panel .result-feedback-actions > .quiet { background: transparent; border-color: transparent; box-shadow: none; }
+  .result-panel .result-feedback-actions > button:disabled { opacity: .45; cursor: default; }
+  .result-panel .result-feedback-link { display: inline-flex; align-items: center; min-height: 44px; font-size: .8125rem; text-underline-offset: 3px; }
   .result-panel .result-pin > summary, .result-panel .result-notes > summary, .result-panel .result-details > summary { min-height: 44px; }
-  .result-panel .result-feedback-hint { margin: 0; }
   .result-panel .diff-comment-form textarea { min-height: 80px; margin: 0; font-size: 1rem; }
   .result-panel .result-attention { background: transparent; border: 0; border-radius: 0; box-shadow: none; padding: 0; margin: .75rem 0; color: var(--foreground); }
   .result-panel .result-attention ul { margin: 0; padding-left: 1.15rem; }

@@ -63,7 +63,7 @@ function revisionIdOf(location: string | null): string {
 }
 
 function revisionFormOf(html: string): { batch: string; source: string } {
-  const form = /<form method="post" action="\/r\/[0-9]+\/revise"[\s\S]*?<\/form>/.exec(html)?.[0] ?? "";
+  const form = /<form method="post" action="\/r\/[0-9]+\/revise"[\s\S]*?<\/form>/.exec(html)?.[0] ?? /<form method="post" action="\/r\/[0-9]+\/comment"[\s\S]*?<\/form>/.exec(html)?.[0] ?? "";
   return {
     batch: /name="batch" value="([^"]*)"/.exec(form)?.[1] ?? "",
     source: /name="source" value="([^"]*)"/.exec(form)?.[1] ?? "",
@@ -5930,7 +5930,7 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       const csrf = await csrfOf(cookie);
       const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
       // Advertised: maxlength is LIMITS.note (500), never the old 2000; the helper names it and the textarea points at the helper.
-      expect(html).toContain('<textarea name="note" rows="2" maxlength="500" placeholder="What should change?" aria-label="review comment" aria-describedby="comment-note-limit"></textarea><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
+      expect(html).toContain('<textarea name="note" rows="2" maxlength="500" placeholder="Describe the change…" aria-label="review comment" aria-describedby="comment-note-limit"></textarea><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
       expect(html).not.toContain('maxlength="2000"');
       // The counter rides the result panel's script and reads the textarea's own maxlength.
       expect(html).toContain("limit.textContent=noteBox.value.length===0?'up to '+noteBox.maxLength+' characters':noteBox.value.length+' of '+noteBox.maxLength+' characters'");
@@ -11104,7 +11104,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(before).toContain(`<form method="post" action="/r/${run}/comment" class="diff-comment-form" id="comment-form">`);
     expect(before).toContain('<input type="hidden" name="return" value="/review?result=t-act">');
     // Follow-up on build 1540: this form advertises the server's 500-character limit too, with the same helper.
-    expect(before).toContain('maxlength="500" placeholder="What should change?" aria-label="review comment" aria-describedby="comment-note-limit"></textarea><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
+    expect(before).toContain('maxlength="500" placeholder="Describe the change…" aria-label="review comment" aria-describedby="comment-note-limit"></textarea><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
     expect(before).not.toContain('maxlength="2000"');
     expect(before).not.toContain(`action="/r/${run}/revise"`);
     expect(before).not.toContain("draft-repair");
@@ -11131,8 +11131,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
 
     const after = await (await fetch(url("/review?result=t-act&noted=1"), { headers: { cookie } })).text();
     expect(after).toContain("tighten this");
-    expect(after).toContain(`<form method="post" action="/r/${run}/revise" class="card revision-from-comments">`);
-    expect(after).toContain("2 notes ready");
+    expect(after).toContain('name="intent" value="revise" data-request-changes>Request changes</button>');
+    expect(after).toContain("Saved for later · 2");
     expect(after).toContain('aria-label="review comment" aria-describedby="comment-note-limit" autofocus>');
     // Still the accept decision first: it resolves the state; the seal waits below.
     expect(after).toContain('data-next-action="accept-proof"');
@@ -11519,6 +11519,47 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(await read(`/r/${run}?tab=<script>`)).toContain('<div class="result-view" role="tabpanel" data-result-view="summary">');
   });
 
+  test("request changes directly combines typed feedback with displayed notes, replays once, and rolls back refusals", async () => {
+    const ref = seed("t-direct", "One clear action");
+    const run = build("t-direct", ref, RICH);
+    store.stampRun(run, { scopeDigest: store.getScope("t-direct")!.digest });
+    await boot();
+    const cookie = await login();
+    const read = async () => (await fetch(url(`/chat?task=t-direct&result=${run}`), { headers: { cookie } })).text();
+    const csrf = csrfOf(await read());
+    const send = (fields: Record<string, string>) => post(cookie, `/r/${run}/comment`, { csrf, return: `/chat?task=t-direct&result=${run}`, ...fields });
+    const initial = revisionFormOf(await read());
+    const first = { intent: "revise", request: "a".repeat(32), note: "Make the action clearer.", ...initial };
+    // A failed combined action saves neither the note nor a task.
+    expect((await send({ ...first, source: "stale" })).status).toBe(409);
+    expect(store.allDiffComments(run)).toHaveLength(0);
+    expect(store.revisionsFromRun(run)).toHaveLength(0);
+    expect((await send({ ...first, line: "0", path: "src/a.ts" })).status).toBe(400);
+    expect((await send({ ...first, note: "" })).status).toBe(400);
+    // Save for later is a note only, and the displayed list is exact.
+    expect((await send({ intent: "note", note: "Keep the short label.", request: "b".repeat(32) })).status).toBe(303);
+    expect(store.revisionsFromRun(run)).toHaveLength(0);
+    const saved = store.liveDiffComments(run)[0]!;
+    const shown = revisionFormOf(await read());
+    expect((await send({ intent: "note", note: "Added in another tab.", request: "c".repeat(32) })).status).toBe(303);
+    const combined = { ...first, ...shown, path: "src/a.ts", line: "2" };
+    const result = await send(combined);
+    expect(result.status, await result.text()).toBe(303);
+    const child = revisionIdOf(result.headers.get("location"));
+    expect(store.revisionLineageOf(child, T0)).toMatchObject({ sourceTask: "t-direct", sourceRun: run });
+    expect(store.getScope(child)?.approvedAt).toBeNull();
+    expect(store.allDiffComments(run).find(n => n.id === saved.id)?.consumedBy).toBe(child);
+    expect(store.liveDiffComments(run).map(n => n.note)).toEqual(["Added in another tab."]);
+    const replay = await send(combined);
+    expect(replay.headers.get("location")).toBe(result.headers.get("location"));
+    expect(store.allDiffComments(run)).toHaveLength(3);
+    expect(store.revisionsFromRun(run)).toHaveLength(1);
+    expect((await send({ ...combined, note: "Changed after submitting." })).status).toBe(409);
+    // Reopening the old result can clear this exact acknowledged draft.
+    const recorded = /data-recorded-requests value="([^"]*)"/.exec(await read())?.[1].split(",").sort();
+    expect(recorded).toEqual(["a".repeat(32), "b".repeat(32), "c".repeat(32)]);
+  });
+
   test("result simplicity: name missing verification once, keep details and compact feedback accessible", async () => {
     const ref = seed("t-simple-result", "A concise result");
     const run = build("t-simple-result", ref, { patch: PATCH, handoff: RICH.handoff });
@@ -11536,9 +11577,10 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       expect(field.getAttribute('aria-label')).toBe('review comment');
       expect(field.getAttribute('maxlength')).toBe('500');
       expect(panel.querySelector('#comment-note-limit')?.textContent).toBe('up to 500 characters');
-      expect(panel.querySelector('.result-feedback-tools button')?.textContent).toBe('Save note');
+      expect(panel.querySelector('[data-request-changes]')?.textContent).toBe('Request changes');
+      expect(panel.querySelector('[data-save-feedback]')?.textContent).toBe('Save for later');
       expect(panel.querySelector('.result-pin')?.hasAttribute('open')).toBe(false);
-      expect(panel.textContent).toContain('Save notes, then request changes.');
+      expect(panel.querySelector('.result-feedback-hint')).toBeNull();
     } finally { await win.happyDOM.close(); }
   });
 
@@ -11932,9 +11974,10 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     // The panel shows the batch beside the result with ONE seal, and the focused note box after a receipt.
     const ready = await read(`/chat?task=t-loop&result=${run}&noted=${request}`);
     expect(ready).toContain('<div class="diff-comments" data-result-notes="3">');
-    expect(ready).toContain("<strong>3 notes ready</strong>");
+    expect(ready).toContain("Saved for later · 3");
     expect(ready).toMatch(/name="note"[^>]* autofocus/);
-    expect((ready.match(new RegExp(`action="/r/${run}/revise"`, "g")) ?? []).length).toBe(1);
+    expect((ready.match(/data-request-changes/g) ?? []).length).toBeGreaterThanOrEqual(1);
+    expect(ready).not.toContain('class="card revision-from-comments"');
     // The seal names the displayed batch and source (repair 2026-09-14).
     const seal = revisionFormOf(ready);
     expect(seal.batch).toBe(batch.map(one => one.id).join(","));

@@ -5,11 +5,59 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Store, DiffComment } from "./store.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
-import { isRevisionFeedback, parseRevisionBatch, revisionSourceOf } from "./result-review.js";
+import { isRevisionFeedback, parseRevisionBatch, revisionSourceOf, commentSourceKey, REQUEST_TOKEN } from "./result-review.js";
+import { validateNote, hasForbiddenControls } from "./decision.js";
 import { TASK_TEXT_LIMITS, validateTaskText } from "./task-text.js";
 import { modeFilingCoverage } from "./scope.js";
 
 export type RevisionResult = { ok: true; id: string } | { ok: false; status: number; message: string };
+type RevisionInput = Parameters<typeof createResultRevision>[2];
+
+/** One user action: add the typed change and seal exactly the displayed
+ * saved notes. A refusal rolls back the note; a replay returns the same task. */
+export function requestResultChanges(store: Store, evidenceRoot: string, input: RevisionInput & {
+  note: string; path: string; line: string; request: string | null;
+}, now: Date): RevisionResult {
+  try {
+    return store.transact(() => store.savepoint((): RevisionResult => {
+      const fail = (status: number, message: string): never => { throw new ChangeRequestRefusal(status, message); };
+      if (!input.note.trim()) {
+        if (input.path.trim() || input.line.trim()) return fail(400, "Describe the change before attaching a file or line.");
+        if (!input.batch) return fail(400, "Describe a change or use a saved note.");
+        return createResultRevision(store, evidenceRoot, input, now);
+      }
+      const valid = validateNote(input.note);
+      if (!valid.ok) return fail(400, valid.problem);
+      if (input.request === null || !REQUEST_TOKEN.test(input.request)) return fail(400, "Reload the result before requesting changes. Your draft stays here.");
+      const batch = input.batch === "" ? [] : parseRevisionBatch(input.batch);
+      if (batch === null) return fail(400, "Reload the result to review the saved notes.");
+      const path = input.path.trim() || null;
+      const line = input.line.trim() === "" ? null : Number(input.line);
+      if (path !== null && (path.length > 300 || hasForbiddenControls(path))) return fail(400, "Enter a file path of up to 300 characters, without control characters.");
+      if (line !== null && (path === null || !Number.isInteger(line) || line < 1 || line > 1_000_000)) return fail(400, "Choose a file and a whole line number from 1 to 1,000,000.");
+      const run = store.getRun(input.run);
+      const repo = run === null ? null : store.refById(run.taskRef)?.repo ?? null;
+      if (run === null || (repo === null ? input.includeUnplaced !== true : input.repos !== null && !input.repos.includes(repo))) return fail(404, "No such result.");
+      const artifact = store.artifactsFor(run.id).find(one => one.kind === "terminal-diff");
+      if (!artifact || !readVerifiedArtifact(evidenceRoot, artifact).ok) return fail(409, "The saved changes could not be verified. Restore the result before requesting changes.");
+      const sourceKey = commentSourceKey(input.actor, input.request)!;
+      let noteId = store.addDiffComment({ artifactId: artifact.id, runId: run.id, path, line, note: valid.note, author: input.actor, sourceKey }, now);
+      if (noteId === null) {
+        const earlier = store.diffCommentBySourceKey(sourceKey);
+        if (!earlier || earlier.run !== run.id || earlier.path !== path || earlier.line !== line || earlier.note !== valid.note) return fail(409, "This submission already saved different feedback. Reopen the result and try again.");
+        noteId = earlier.id;
+      }
+      const result = createResultRevision(store, evidenceRoot, { ...input, batch: [...new Set([...batch, noteId])].sort((a, b) => a - b).join(",") }, now);
+      if (!result.ok) return fail(result.status, result.message);
+      return result;
+    }));
+  } catch (error) {
+    if (error instanceof ChangeRequestRefusal) return { ok: false, status: error.status, message: error.message };
+    throw error;
+  }
+}
+class ChangeRequestRefusal extends Error { constructor(readonly status: number, message: string) { super(message); } }
+
 export function createResultRevision(store: Store, evidenceRoot: string, input: {
   run: number; batch: string | null; source: string | null; actor: string;
   repos: readonly string[] | null; includeUnplaced?: boolean; allowMode?: boolean;
