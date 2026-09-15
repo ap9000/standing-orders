@@ -11,6 +11,7 @@ import { adapterFor, auditOf, validateSpec, reportsCost, inspectionOf, MODEL_ID,
 import { runStreamJsonl } from "./exec.js";
 import { REVIEW_OUTPUT_LIMITS, REVIEW_NOTE_CODE_POINTS } from "./structured-output.js";
 import { parseReview } from "./reviewer.js";
+import { evidenceRequest, isEvidenceOnlyReply } from "./review-evidence.js";
 
 const ASK = {
   phase: "build" as const,
@@ -117,13 +118,29 @@ describe("argv dialects", () => {
     const argv = adapterFor("claude").argv({ ...ASK, phase: "review" });
     const schemaIndex = argv.indexOf("--json-schema");
     expect(schemaIndex).toBeGreaterThan(-1);
-    const choices = JSON.parse(argv[schemaIndex + 1] ?? "null").anyOf;
-    expect(choices).toHaveLength(2);
-    expect(choices[1]).toMatchObject({ required: ["version", "readEvidence"], additionalProperties: false, properties: { readEvidence: { required: ["file", "sha256", "offset", "length"], additionalProperties: false, properties: { length: { maximum: 65536 } } } } });
-    const schema = choices[0] as Record<string, unknown>;
+    const schema = JSON.parse(argv[schemaIndex + 1] ?? "null") as Record<string, unknown>;
+    // Run 1638: the API refuses a root union (`tools.N.custom.input_schema.type:
+    // Field required`, and a root type beside anyOf/oneOf is refused too), so
+    // the review and the evidence read request share ONE flat object whose
+    // only required key is version; the parsers, not the schema, tell the
+    // two shapes apart and refuse a mixed one.
     expect(schema["type"]).toBe("object");
-    expect((schema["required"] as string[]).sort()).toEqual(["comments", "learning", "learningAssessment", "version"]);
+    expect(schema["additionalProperties"]).toBe(false);
+    expect(schema["required"]).toEqual(["version"]);
+    for (const combinator of ["anyOf", "oneOf", "allOf", "if", "not", "$ref", "$defs"]) expect(schema).not.toHaveProperty(combinator);
     const properties = schema["properties"] as Record<string, unknown>;
+    expect(Object.keys(properties).sort()).toEqual(["comments", "criteria", "learning", "learningAssessment", "readEvidence", "version"]);
+    expect(properties["readEvidence"]).toMatchObject({ type: "object", required: ["file", "sha256", "offset", "length"], additionalProperties: false, properties: { file: { maxLength: 100 }, sha256: { pattern: "^[0-9a-f]{64}$" }, offset: { minimum: 0 }, length: { minimum: 1, maximum: 65536 } } });
+    // The exact evidence-only reply the read brief dictates is admitted by the
+    // machine parser; a reply carrying readEvidence beside review fields is
+    // refused by parseReview, and one with only version by both.
+    const read = { file: "REVIEW-CONTEXT-ctx-1.txt", sha256: "b".repeat(64), offset: 0, length: 65536 };
+    expect(evidenceRequest(JSON.stringify({ version: 1, readEvidence: read }))).toEqual(read);
+    expect(isEvidenceOnlyReply(JSON.stringify({ version: 1, readEvidence: read, comments: [] }))).toBe(false);
+    const mixed = parseReview(JSON.stringify({ version: 1, readEvidence: read, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "x" }] }), new Set(["src/file.ts"]), new Set(["c1"]));
+    expect(mixed).toMatchObject({ ok: false, problems: [{ reason: expect.stringContaining("readEvidence must be sent alone") }] });
+    expect(evidenceRequest(JSON.stringify({ version: 1 }))).toBeNull();
+    expect(parseReview(JSON.stringify({ version: 1 }), new Set(["src/file.ts"]), new Set(["c1"]))).toMatchObject({ ok: false, problems: [{ reason: "comments must be an array" }] });
     expect(properties).toHaveProperty("comments");
     expect(properties).toHaveProperty("criteria");
     expect(properties["learning"]).toMatchObject({type:"array",maxItems:2,items:{additionalProperties:false}});

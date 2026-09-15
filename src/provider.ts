@@ -230,8 +230,23 @@ const CLAUDE_REVIEW_ISOLATION_ARGV: readonly string[] = [
  * the run's actual signed criteria. Claude-only and review-phase-only: no
  * other provider has this flag, and no other phase asks for structured
  * output.
+ *
+ * Run 1638's fix: ONE flat object, never a top-level union. The evidence
+ * read channel (`readEvidence`, review-evidence.ts) shares this reply
+ * schema and session, and the first draft expressed "a review OR a read
+ * request" as a root `anyOf`. The API refuses that before any model turn
+ * (`tools.N.custom.input_schema.type: Field required`), and a root
+ * `type: "object"` beside the `anyOf` is refused the same way — top-level
+ * unions are unsupported for structured output. So the two reply shapes
+ * are merged into one property set with only `version` required, and
+ * the machine's own parsers do the discrimination the schema cannot:
+ * `isEvidenceOnlyReply`/`evidenceRequest` accept exactly
+ * `{version, readEvidence}` and nothing else; `parseReview` refuses any
+ * reply carrying `readEvidence` (a mixed reply is neither), and still
+ * refuses a review missing its comments or any signed criterion. Nothing
+ * a looser floor lets through lands anywhere but a typed refusal.
  */
-const CLAUDE_REVIEW_RESULT_JSON_SCHEMA = {
+const CLAUDE_REVIEW_JSON_SCHEMA = {
   type: "object",
   properties: {
     learningAssessment: {
@@ -285,24 +300,21 @@ const CLAUDE_REVIEW_RESULT_JSON_SCHEMA = {
         additionalProperties: false,
       },
     },
+    // The read request rides the same structured reply channel and
+    // session. The machine validates the exact allowlist/hash/range
+    // before supplying bytes; this only shapes the request.
+    readEvidence: {
+      type: "object", properties: {
+        file: { type: "string", minLength: 1, maxLength: 100 },
+        sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        offset: { type: "integer", minimum: 0 },
+        length: { type: "integer", minimum: 1, maximum: 65536 },
+      }, required: ["file", "sha256", "offset", "length"], additionalProperties: false,
+    },
   },
-  required: ["version", "comments", "learningAssessment", "learning"],
+  required: ["version"],
   additionalProperties: false,
 } as const;
-
-// Read requests use the same structured reply channel and session. The
-// machine validates the exact allowlist/hash/range before supplying bytes.
-const CLAUDE_REVIEW_JSON_SCHEMA = { anyOf: [CLAUDE_REVIEW_RESULT_JSON_SCHEMA, {
-  type: "object", properties: {
-    version: { type: "integer", enum: [1] },
-    readEvidence: { type: "object", properties: {
-      file: { type: "string", minLength: 1, maxLength: 100 },
-      sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
-      offset: { type: "integer", minimum: 0 },
-      length: { type: "integer", minimum: 1, maximum: 65536 },
-    }, required: ["file", "sha256", "offset", "length"], additionalProperties: false },
-  }, required: ["version", "readEvidence"], additionalProperties: false,
-}] } as const;
 
 const claudeArgv = (invocation: Invocation): string[] => [
   "-p",

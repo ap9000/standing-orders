@@ -44,7 +44,7 @@ import {
   type ReviewContextInventory,
 } from "./review-context.js";
 import { parseReview, reviewPass, REVIEW_CONTEXT_NAME, REVIEW_PATCH_NAME, REVIEW_RUBRIC_NAME, REVIEW_PROOF_NAME } from "./reviewer.js";
-import { evidenceRange, evidenceRequest, REVIEW_READ_LIMITS } from "./review-evidence.js";
+import { evidenceRange, evidenceRequest, isEvidenceOnlyReply, REVIEW_READ_LIMITS } from "./review-evidence.js";
 import type { Runner } from "./builder.js";
 
 const T0 = new Date("2026-09-11T12:00:00.000Z");
@@ -586,6 +586,16 @@ describe("inherited review context (v51)", () => {
     expect(evidenceRange([file], { file: file.name, sha256: file.sha256, offset: bytes.length, length: 1 })).toMatchObject({ content: "", bytes: 0, eof: true });
     for (const patch of [{ length: 65537 }, { length: 0 }, { offset: -1 }, { offset: 0.5 }, { command: "cat /etc/passwd" }]) {
       expect(evidenceRequest(JSON.stringify({ version: 1, readEvidence: { file: file.name, sha256: file.sha256, offset: 0, length: 10, ...patch } }))).toBeNull();
+    }
+    // Run 1638: claude's flat reply schema can carry review keys beside a
+    // read request. Only the exact two-key envelope is a read; a mixed or
+    // incomplete reply is neither served bytes nor treated as a delivery
+    // failure.
+    const exact = { version: 1, readEvidence: { file: file.name, sha256: file.sha256, offset: 0, length: 10 } };
+    expect(isEvidenceOnlyReply(JSON.stringify(exact))).toBe(true);
+    for (const mixed of [{ ...exact, comments: [] }, { ...exact, criteria: [] }, { ...exact, learning: [] }, { version: 1 }, { version: 1, readEvidence: {} }]) {
+      expect(isEvidenceOnlyReply(JSON.stringify(mixed))).toBe(Object.keys(mixed).length === 2);
+      expect(evidenceRequest(JSON.stringify(mixed))).toBeNull();
     }
     expect(() => evidenceRange([file], { file: file.name, sha256: file.sha256, offset: 2, length: 10 })).toThrow(/UTF-8/);
   });

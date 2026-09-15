@@ -77,6 +77,31 @@ turned that visible gap into a refused review; it is narrowed as described
 above, the tick journey asserts the sealed gap, and a focused test refuses an
 inventory whose candidate ancestry git could not prove.
 
+Revision after build 1638 (comment 381): the Claude review session failed
+before any review turn. The reply schema sent with `--json-schema` expressed
+"a review or an evidence read request" as a root `anyOf`; the API refuses
+that before a model turn (`400 tools.2.custom.input_schema.type: Field
+required`), and a root `type` beside the union is refused too, because
+top-level unions are unsupported. The schema is now one flat object whose
+properties are the review fields plus `readEvidence`, with only `version`
+required. The machine parsers keep the strictness the schema no longer can:
+`isEvidenceOnlyReply`/`evidenceRequest` accept exactly
+`{"version":1,"readEvidence":{...}}`; `parseReview` refuses any reply carrying
+`readEvidence` beside review fields and still refuses a review missing
+comments or a signed criterion. Isolation flags and the same-session read loop
+are unchanged. Focused regressions: `src/provider.test.ts` (flat schema, no
+combinators, mixed/incomplete replies), `src/reviewer.test.ts` (parser
+refusal) and `src/review-context.test.ts` (read envelope exactness).
+`scripts/claude-review-schema-smoke.mjs` drives the real `claude` CLI
+through dist's own review adapter in an empty temporary directory; its
+2026-09-15 certificate against `claude-opus-5` is stored at
+`docs/assessments/evidence/review-evidence-refresh/claude-review-schema-smoke-2026-09-15.json`:
+the legacy root-union control was refused before a turn at zero cost, a fresh
+session returned a parseable review, and one session returned an exact
+evidence-only request and then, resumed with the served range, a parseable
+review. No refresh UI, no schema change; the builder ran the focused suites
+and typecheck only, not the full gate.
+
 Validation on the uncommitted candidate based on
 `924fd00731649f88e7450c75776c31474a150e81`:
 

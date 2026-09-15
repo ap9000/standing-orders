@@ -122,6 +122,30 @@ describe("diff paths and the strict parser", () => {
     expect(parsed.ok).toBe(true);
   });
 
+  test("run 1638: a reply carrying readEvidence beside review fields is neither a read nor a review", () => {
+    // Claude's flat structured-output floor admits both key sets in one
+    // object; only the exact evidence-only envelope is a read request, and
+    // parseReview refuses the rest whole — a verdict never rides in a read.
+    const paths = diffPathsOf(PATCH);
+    const read = { file: "REVIEW-CONTEXT-ctx-1.txt", sha256: "a".repeat(64), offset: 0, length: 65536 };
+    for (const payload of [
+      { version: 1, readEvidence: read, comments: [] },
+      { version: 1, readEvidence: read, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "fine" }] },
+      { version: 1, readEvidence: read },
+      { version: 1, readEvidence: null },
+    ]) {
+      const parsed = parseReview(JSON.stringify(payload), paths, new Set(["c1"]));
+      if (parsed.ok) throw new Error("expected refusal");
+      expect(parsed.problems).toEqual([{ reason: expect.stringMatching(/^readEvidence must be sent alone/) }]);
+    }
+    // Without the foreign key the same review is accepted as before.
+    expect(parseReview(JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "fine" }] }), paths, new Set(["c1"])).ok).toBe(true);
+    // A version-only reply, the loosest object the flat schema admits, is
+    // an incomplete review, not an empty one.
+    const bare = parseReview(JSON.stringify({ version: 1 }), paths);
+    expect(bare).toEqual({ ok: false, problems: [{ reason: "comments must be an array" }] });
+  });
+
   test("wholesale strictness: any invalid comment refuses the payload", () => {
     const paths = diffPathsOf(PATCH);
     const refuse = (payload: unknown, why: RegExp) => {

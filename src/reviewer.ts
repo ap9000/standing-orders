@@ -195,6 +195,14 @@ export function parseReview(
     return { ok: false, problems: [{ reason: "not an object" }] };
   }
   const payload = parsed as Record<string, unknown>;
+  // Run 1638: claude's structured-output floor is ONE flat object shared
+  // with the evidence read channel (a top-level union is refused by the
+  // API), so a reply can carry `readEvidence` beside review fields. That
+  // is neither a read request (exact keys only, review-evidence.ts) nor a
+  // review — refused whole, by name, so the correction turn says which.
+  if (payload["readEvidence"] !== undefined) {
+    return { ok: false, problems: [{ reason: 'readEvidence must be sent alone as {"version":1,"readEvidence":{...}}; a reply mixing an evidence request with review fields is neither' }] };
+  }
   if (payload["version"] !== 1) problems.push({ reason: "version must be 1" });
   const list = payload["comments"];
   if (!Array.isArray(list)) {
