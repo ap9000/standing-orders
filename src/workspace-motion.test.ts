@@ -8,7 +8,7 @@ const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
 test('native disclosures retain drafts, interrupt closing, and honor external closes',async()=>{
   const win=new Window();
   try{
-    win.document.body.innerHTML='<details class="task-history"><summary>History</summary><textarea>Keep this draft</textarea></details>';
+    win.document.body.innerHTML='<details class="result-pin"><summary>Attach to a file or line</summary><textarea>Keep this draft</textarea></details>';
     win.eval(WORKSPACE_MOTION_SCRIPT);
     const d=win.document.querySelector('details')!,head=d.querySelector('summary')!,field=d.querySelector('textarea')!;
     expect(d.open).toBe(false);expect(d.querySelector('.t-acc-panel-inner')!.inert).toBe(true);

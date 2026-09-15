@@ -6066,12 +6066,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!note.ok) return refuse(response, who, 400, note.problem, back);
       const rawPath = (body.get("path") ?? "").trim();
       if (rawPath.length > 300 || hasForbiddenControls(rawPath)) {
-        return refuse(response, who, 400, "that path is not a path", back);
+        return refuse(response, who, 400, "Enter a file path of up to 300 characters, without control characters.", back);
       }
       const rawLine = (body.get("line") ?? "").trim();
       const line = rawLine === "" ? null : Number(rawLine);
       if (line !== null && (!Number.isInteger(line) || line < 1 || line > 1_000_000)) {
-        return refuse(response, who, 400, "that line number is not a line number", back);
+        return refuse(response, who, 400, "Enter a whole line number from 1 to 1,000,000, or leave it blank.", back);
       }
       // The form's own request token (package 3) is the dedupe key: a
       // replayed or double submission finds its note already recorded and
@@ -19296,7 +19296,10 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const publication = detail.publication;
   const prUrl = publication === null ? null : safePrUrl(publication.prUrl);
   const attention: string[] = [];
-  if (stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, receipt.reasons));
+  // The visible status already says verification is needed. Only omit the
+  // generic repeat; failed checks, specific reasons and damaged evidence stay.
+  const missingVerdictNamed = o.headStatus !== false && status.token === "verification-needed" && receipt.verdict === null && receipt.reasons.length === 0;
+  if (!missingVerdictNamed && stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, receipt.reasons));
   attention.push(...facts.evidenceProblems);
   if (detail.outsideTouches.length > 0) attention.push(`${detail.outsideTouches.length} changed file${detail.outsideTouches.length === 1 ? "" : "s"} outside the approved paths: ${detail.outsideTouches.join(", ")}.`);
   attention.push(...receipt.caveats);
@@ -19549,12 +19552,12 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
         `<input type="hidden" name="tab" value="${o.tab}">` +
         `<input type="hidden" name="return" value="${escape(o.returnTo)}">` +
         `<input type="hidden" name="request" value="${escape(o.requestToken)}">` +
-        `<label>What should change?<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="Describe the change and why" aria-label="review comment" aria-describedby="comment-note-limit"${o.noted ? " autofocus" : ""}></textarea></label>` +
+        `<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="What should change?" aria-label="review comment" aria-describedby="comment-note-limit"${o.noted ? " autofocus" : ""}></textarea>` +
         `<span class="meta diff-comment-limit" id="comment-note-limit">up to ${LIMITS.note} characters</span>` +
-        `<details class="result-pin"><summary>Attach to a file or line</summary>` +
+        `<div class="result-feedback-tools"><details class="result-pin"><summary>Attach to a file or line</summary>` +
         `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="src/…" aria-label="file" class="mono"></label>` +
         `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div></details>` +
-        `<button type="submit">Save note</button><p class="meta">Notes stay here until you request changes.</p></form>`,
+        `<button type="submit">Save note</button></div><p class="meta result-feedback-hint">Save notes, then request changes.</p></form>`,
     );
   }
 
@@ -19575,7 +19578,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.rootId ?? detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
       (o.back === null ? "" : `<p class="result-back"><a href="${escape(o.back.href)}" data-result-back>← ${escape(o.back.label)}</a></p>`) +
       (detail.history ?? "") +
-      `<header class="result-head"><div><span class="eyebrow">Build #${runId}</span><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status)}</header>` +
+      `<header class="result-head"><div><span class="eyebrow">Build #${runId}</span><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" ? { ...status, label: "Verification needed" } : status)}</header>` +
       `<p class="result-summary">${escape(outcome)}</p>` +
       action +
       (REVIEW_TOKENS.has(status.token) ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +

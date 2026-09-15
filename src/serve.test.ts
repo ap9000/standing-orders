@@ -5930,7 +5930,7 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       const csrf = await csrfOf(cookie);
       const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
       // Advertised: maxlength is LIMITS.note (500), never the old 2000; the helper names it and the textarea points at the helper.
-      expect(html).toContain('<textarea name="note" rows="2" maxlength="500" placeholder="Describe the change and why" aria-label="review comment" aria-describedby="comment-note-limit"></textarea></label><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
+      expect(html).toContain('<textarea name="note" rows="2" maxlength="500" placeholder="What should change?" aria-label="review comment" aria-describedby="comment-note-limit"></textarea><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
       expect(html).not.toContain('maxlength="2000"');
       // The counter rides the result panel's script and reads the textarea's own maxlength.
       expect(html).toContain("limit.textContent=noteBox.value.length===0?'up to '+noteBox.maxLength+' characters':noteBox.value.length+' of '+noteBox.maxLength+' characters'");
@@ -11104,7 +11104,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(before).toContain(`<form method="post" action="/r/${run}/comment" class="diff-comment-form" id="comment-form">`);
     expect(before).toContain('<input type="hidden" name="return" value="/review?result=t-act">');
     // Follow-up on build 1540: this form advertises the server's 500-character limit too, with the same helper.
-    expect(before).toContain('maxlength="500" placeholder="Describe the change and why" aria-label="review comment" aria-describedby="comment-note-limit"></textarea></label><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
+    expect(before).toContain('maxlength="500" placeholder="What should change?" aria-label="review comment" aria-describedby="comment-note-limit"></textarea><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
     expect(before).not.toContain('maxlength="2000"');
     expect(before).not.toContain(`action="/r/${run}/revise"`);
     expect(before).not.toContain("draft-repair");
@@ -11517,6 +11517,29 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(changes).toContain('<div class="result-view" role="tabpanel" data-result-view="summary" hidden>');
     expect(changes).toContain('<div class="diff-review" data-review-diff>');
     expect(await read(`/r/${run}?tab=<script>`)).toContain('<div class="result-view" role="tabpanel" data-result-view="summary">');
+  });
+
+  test("result simplicity: name missing verification once, keep details and compact feedback accessible", async () => {
+    const ref = seed("t-simple-result", "A concise result");
+    const run = build("t-simple-result", ref, { patch: PATCH, handoff: RICH.handoff });
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
+    const win = new Window();
+    try {
+      win.document.body.innerHTML = html;
+      const panel = win.document.querySelector('.result-panel')!;
+      expect(panel.querySelector('.result-head .status-label')?.textContent).toBe('Verification needed');
+      expect(panel.querySelector('.result-attention')).toBeNull();
+      expect(panel.querySelector('[data-result-view="checks"]')?.textContent).toContain('no verification result');
+      const field = panel.querySelector('textarea[name="note"]')!;
+      expect(field.getAttribute('aria-label')).toBe('review comment');
+      expect(field.getAttribute('maxlength')).toBe('500');
+      expect(panel.querySelector('#comment-note-limit')?.textContent).toBe('up to 500 characters');
+      expect(panel.querySelector('.result-feedback-tools button')?.textContent).toBe('Save note');
+      expect(panel.querySelector('.result-pin')?.hasAttribute('open')).toBe(false);
+      expect(panel.textContent).toContain('Save notes, then request changes.');
+    } finally { await win.happyDOM.close(); }
   });
 
   test("package 3 c2: a tampered screenshot, a shortened check log, a failed change-summary capture, and an unverifiable report are named in the open, never rendered, never called validated; an investigation's report is escaped text", async () => {
@@ -11961,7 +11984,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     for (const back of [`/chat?task=t-back&result=${run}`, "/review?result=t-back", `/r/${run}`]) {
       const refused = await post(cookie, `/r/${run}/comment`, { csrf, note: "x", line: "abc", return: back });
       expect(refused.status).toBe(400);
-      expect(await refused.text()).toContain(`<a href="${back.replace(/&/g, "&amp;")}">`);
+      const refusedHtml = await refused.text();
+      expect(refusedHtml).toContain(`<a href="${back.replace(/&/g, "&amp;")}">`);
+      expect(refusedHtml).toContain("Enter a whole line number from 1 to 1,000,000, or leave it blank.");
     }
     const foreign = await post(cookie, `/r/${run}/comment`, { csrf, note: "x", line: "abc", return: `/chat?task=t-back&result=${otherRun}` });
     expect(await foreign.text()).toContain(`<a href="/r/${run}">`);

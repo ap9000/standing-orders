@@ -118,7 +118,7 @@ export const WORKSPACE_MOTION_SCRIPT = String.raw`
   }
   function scan(){
     document.querySelectorAll('details.switcher,details.work-tools').forEach(function(d){enhanceDetails(d,true);});
-    document.querySelectorAll('details.nav-group,details.task-history,details.decision-context,details.result-knowledge,details.chat-activity-details').forEach(function(d){enhanceDetails(d,false);});
+    document.querySelectorAll('details.nav-group,details.task-history,details.decision-context,details.result-knowledge,details.chat-activity-details,details.result-pin,details.result-notes,details.result-details').forEach(function(d){enhanceDetails(d,false);});
     document.querySelectorAll('.result-tabs').forEach(enhanceTabs);
   }
   scan();

@@ -88,6 +88,14 @@ export const CHAT_POLISH_CSS = `
   .chat-overview .chat-overview-stat { box-shadow: none; border: 0; background: transparent; border-radius: 0; }
   .chat-overview .chat-overview-stat + .chat-overview-stat { border-left: 1px solid var(--border); }
   .result-panel .result-request { border-top: 1px solid var(--border); padding-top: 1rem; }
+  .result-panel .result-head h2 { color: var(--foreground); }
+  .result-panel .result-request h3 { color: var(--foreground); font-size: .875rem; text-transform: none; letter-spacing: 0; }
+  .result-panel .result-feedback-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: .5rem; }
+  .result-panel .result-feedback-tools:has(details[open]) { grid-template-columns: minmax(0, 1fr); }
+  .result-panel .result-feedback-tools > button { justify-self: end; width: auto; min-height: 44px; white-space: nowrap; }
+  .result-panel .result-pin > summary, .result-panel .result-notes > summary, .result-panel .result-details > summary { min-height: 44px; }
+  .result-panel .result-feedback-hint { margin: 0; }
+  .result-panel .diff-comment-form textarea { min-height: 80px; margin: 0; font-size: 1rem; }
   .result-panel .result-attention { background: transparent; border: 0; border-radius: 0; box-shadow: none; padding: 0; margin: .75rem 0; color: var(--foreground); }
   .result-panel .result-attention ul { margin: 0; padding-left: 1.15rem; }
   .result-panel .result-attention ul:has(> li:only-child) { list-style: none; padding-left: 0; }
