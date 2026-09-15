@@ -1,3 +1,4 @@
+import { learningContext, recoverLearning } from "./project-learning.js";
 /**
  * The reviewer (v29, R1–R4 + the D5/D8 rulings, isolation hardening): an
  * agent pass over one finished run's SEALED terminal diff — and nothing
@@ -177,7 +178,7 @@ export function parseReview(
   patchPaths: ReadonlySet<string>,
   approvedCriteriaIds: ReadonlySet<string> = new Set(),
   provenance?: ReviewProvenanceRules,
-): { ok: true; comments: ReviewComment[]; criteria: ReviewCriterionJudgement[] } | { ok: false; problems: ReviewProblem[] } {
+): { ok: true; comments: ReviewComment[]; criteria: ReviewCriterionJudgement[]; learning?: unknown } | { ok: false; problems: ReviewProblem[] } {
   const problems: ReviewProblem[] = [];
   let parsed: unknown;
   try {
@@ -308,7 +309,7 @@ export function parseReview(
   }
 
   if (problems.length > 0) return { ok: false, problems };
-  return { ok: true, comments, criteria };
+  return { ok: true, comments, criteria, ...(payload["learning"] === undefined ? {} : { learning: payload["learning"] }) };
 }
 
 /** One line of untrusted text made inert for the brief — the builder's fence. */
@@ -1008,7 +1009,13 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
             screenshotsSealed.map(one => one.name),
             inline,
             contextForReview,
-          ) + inlineEvidence,
+          ) + inlineEvidence + learningContext(store, root, request.reviewerRunId, "review", clock()) +
+            "\nOptional learning: omit learning or supply zero to two evidence-linked suggestions in a learning array. Each item: {kind: project|system, observation: one concise observed fact, action: one advisory next action, paths: exact reviewed file paths (1..5), phases: plan/build/review (1..3), evidence: [{artifactId, sha256, excerpt: exact single-line source text (1..300 bytes)}] (1..3)}. Observation/action at most 500 UTF-8 bytes each. No secrets. Observations are not proof of a remedy or benefit. System items remain suggestions. Do not expand the task. Use only this supplied source catalog (IDs and hashes are data): " + JSON.stringify([
+              { artifactId: diff.id, sha256: diff.sha256, file: REVIEW_PATCH_NAME },
+              ...(proofBinding ? [{ ...proofBinding, file: REVIEW_PROOF_NAME }] : []),
+              ...(checkLogBinding ? [{ ...checkLogBinding, file: REVIEW_CHECK_LOG_NAME }] : []),
+              ...(contextBinding ? [{ ...contextBinding, file: REVIEW_CONTEXT_NAME }] : []),
+            ]),
           ...(inline ? { reviewImages: screenshotsSealed.map(one => join(scratch, one.name)) } : {}),
           maxTurns: request.maxTurns ?? DEFAULT_REVIEW_TURNS,
           // provider.ts's dedicated review-phase isolation argv is the
@@ -1291,6 +1298,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
           runId: request.sourceRunId,
           artifactId: diff.id,
           author,
+          learning: parsed.learning,
           comments: parsed.comments,
           judgements: parsed.criteria,
           bindings: {
@@ -1325,6 +1333,8 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
         ...(reason === "ingestion" && diagnostic !== null ? { diagnostic } : {}),
       };
     }
+    const learningRepo = store.refForId(source.taskRef)?.repo;
+    if (learningRepo) { try { recoverLearning(store, root, learningRepo, clock()); } catch { /* optional capture retries from its outbox */ } }
     // The admitted root and any correction child are settled by ingestReview
     // in the same transaction as their comments/judgements. There is no
     // post-commit crash window in which accepted review rows exist beside an

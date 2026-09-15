@@ -1,3 +1,4 @@
+import { learningContext } from "./project-learning.js";
 /**
  * The planner: an agent that reads the repository and negotiates a plan —
  * never a builder. It has no completion, no commit, and no publication
@@ -873,7 +874,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
       { provider, model },
       {
         phase: "plan",
-        brief: plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? [], request.source),
+        brief: learningContext(store, root, request.runId, "plan", clock()) + plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? [], request.source),
         maxTurns,
         // Claude's built-in `plan` permission mode diverts writes into its
         // own ~/.claude/plans file and refuses the nonce-bound handoff file.

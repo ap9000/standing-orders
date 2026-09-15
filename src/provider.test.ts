@@ -123,6 +123,7 @@ describe("argv dialects", () => {
     const properties = schema["properties"] as Record<string, unknown>;
     expect(properties).toHaveProperty("comments");
     expect(properties).toHaveProperty("criteria");
+    expect(properties["learning"]).toMatchObject({type:"array",maxItems:2,items:{additionalProperties:false}});
     for (const field of ["comments", "criteria"] as const) {
       const shape = properties[field] as { maxItems: number; items: { properties: { note: { minLength: number; maxLength: number } } } };
       expect(shape.maxItems).toBe(REVIEW_OUTPUT_LIMITS[field]);

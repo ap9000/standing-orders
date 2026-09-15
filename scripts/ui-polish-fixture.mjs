@@ -55,6 +55,7 @@ import { storeEvidence, budgetedStatJson, imageDimensions } from '../dist/eviden
 import { parseProof, adjudicate } from '../dist/proof.js';
 import { createDecisionServer } from '../dist/serve.js';
 import { register } from '../dist/runner.js';
+import { queueLearning, recoverLearning, learningContext } from '../dist/project-learning.js';
 import { acquire, release } from '../dist/claim.js';
 
 // The real pilot request's path: its unbroken filename overflowed the
@@ -234,6 +235,7 @@ export function startFixture(options = {}) {
     fileCount: 2, additions: 13, deletions: 1, binaryCount: 0,
     files: [{ path: 'src/payout.ts', additions: 4, deletions: 1 }, { path: 'src/payout.test.ts', additions: 9, deletions: 0 }], filesTruncated: false,
   };
+  if (options.learning) stat.head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
   const fixturePatch = options.sameTaskRevisions ? PATCH + `diff --git a/${LONG_FEEDBACK_PATH} b/${LONG_FEEDBACK_PATH}\n--- a/${LONG_FEEDBACK_PATH}\n+++ b/${LONG_FEEDBACK_PATH}\n@@ -1 +1 @@\n-old\n+new\n` : PATCH;
   if (options.sameTaskRevisions) { stat.files.push({ path: LONG_FEEDBACK_PATH, additions: 1, deletions: 1 }); stat.fileCount++; stat.additions++; stat.deletions++; }
   const fixtureProof = options.sameTaskRevisions ? { ...PROOF, changed: [...PROOF.changed, LONG_FEEDBACK_PATH] } : PROOF;
@@ -251,6 +253,7 @@ export function startFixture(options = {}) {
     screenshots: [{ path: 'evidence/payout-dashboard.png', ok: true, bytes: png.length, dims: imageDimensions(png, 'png') }],
     approvedCriteria: doneScope.acceptance,
   });
+  if (options.learning) store.recordOutcomeFacts(run, { headRevision: stat.head });
   store.saveProofVerdict(run, adjudicated.verdict, adjudicated.reasons, hoursAgo(8.4), adjudicated.matrix);
   store.finishRun(run, { outcome: 'built', committed: true, now: hoursAgo(8.4) });
   store.setTaskState('payout-rounding', 'done', hoursAgo(8.4));
@@ -388,7 +391,7 @@ export function startFixture(options = {}) {
   // A reviewer worker that answers, covering only the empty project so no
   // builder-coverage status above changes; its heartbeat sits an hour
   // ahead so it stays alive for the whole proof run (fixture only).
-  register(store, { name: 'reviewer-1', host: 'fixture-host', capacity: 1, repos: [repo3 ?? repo], now: new Date(now.getTime() + 3_600_000), newToken: () => 'fixture-reviewer-token' });
+  register(store, { name: 'reviewer-1', host: 'fixture-host', capacity: 1, repos: options.learning ? [repo, repo3].filter(Boolean) : [repo3 ?? repo], now: new Date(now.getTime() + 3_600_000), newToken: () => 'fixture-reviewer-token' });
   const reviewed = (id, title, at, settle) => {
     const built = finished(id, title, at, {});
     const asked = store.requestReview(built.runId, 'polish-fixture', hoursAgo(at - 0.1));
@@ -543,6 +546,31 @@ export function startFixture(options = {}) {
     ] }, now);
     store.finishRun(reviewer, { outcome: 'no-change', reason: 'reviewed', now });
   };
+  const captureLearning = () => {
+    const source = store.getRun(run), when = new Date();
+    const asked = store.requestReview(run, 'polish-fixture', when);
+    if (!asked.ok) throw new Error(`synthetic learning review: ${asked.reason}`);
+    const reviewer = store.startRun({ taskRef: source.taskRef, role: 'reviewer', parentRun: run, request: asked.id, leaseId: 'synthetic-learning-review', runner: 'reviewer-1', provider: 'codex', model: 'default', now: when, ...liveRoute('payout-rounding', 'review') });
+    store.stampProviderStart(reviewer, when);
+    const artifact = store.artifactsFor(run).find(a => a.kind === 'terminal-diff');
+    const candidate = { kind: 'project', observation: 'Payout rounding uses cent precision.', action: 'Keep half-cent boundary cases in payout tests.', paths: ['src/payout.ts'], phases: ['plan', 'build', 'review'], evidence: [{ artifactId: artifact.id, sha256: artifact.sha256, excerpt: '+  return Math.round(cents * rate * 100) / 100;' }] };
+    learningContext(store, evidenceRoot, reviewer, 'review', when);
+    queueLearning(store, run, reviewer, [candidate, { ...candidate, kind: 'system', observation: 'Synthetic long-detail boundary: ' + 'source-reference-'.repeat(25), action: 'Keep review context bounded and inspectable. This is a tracked suggestion only.' }], [artifact].map(a => ({ artifactId: a.id, sha256: a.sha256 })), when);
+    store.finishRun(reviewer, { outcome: 'no-change', reason: 'reviewed — synthetic learning fixture', now: when });
+    recoverLearning(store, evidenceRoot, repo, when);
+  };
+  let learningOrdinal = 0;
+  const laterLearningRun = () => {
+    const id = `later-learning-${++learningOrdinal}`, when = new Date();
+    const filed = fileTaskProposal(store, { id, title: 'Later payout boundary check (synthetic)', repo, goal: 'Inspect payout boundary tests.', outOfScope: 'No unrelated changes.', touches: ['src/payout.ts'], acceptance: [{ id: 'c1', statement: 'Payout boundary tests remain meaningful.', how: null, evidence: ['check'] }], filedVia: 'console', planning: 'skip' }, when);
+    if (!filed.ok) throw new Error(filed.reason);
+    approve(store, id, 'polish-fixture', when, store.getScope(id).digest, login.token);
+    const runId = store.startRun({ taskRef: store.lookupRef(id).id, runner: 'night-shift-1', leaseId: `fixture-learning-${id}`, branch: `standing-orders/${id}`, worktree: repo, provider: 'codex', model: 'default', now: when, ...liveRoute(id, 'build') });
+    store.stampRun(runId, { baseRevision: stat.head, scopeDigest: store.getScope(id).digest });
+    const context = learningContext(store, evidenceRoot, runId, 'build', when);
+    store.finishRun(runId, { outcome: 'no-change', reason: 'Synthetic context supplied; no model invoked', now: when });
+    return { runId, context };
+  };
   const startRevision = taskId => {
     const ref = store.lookupRef(taskId);
     const now = new Date();
@@ -579,7 +607,7 @@ export function startFixture(options = {}) {
   return new Promise(resolve => {
     server.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
-      resolve({ url: `http://127.0.0.1:${port}`, name: 'polish-fixture', password: login.token, runId: run, tasks: { long: 'ledger-export', done: 'payout-rounding' }, statusTasks, statusRuns, repos: { main: repo, second: repo2, empty: repo3 }, stop, store, requests, startRevision, finishRevision, addReviewNotes });
+      resolve({ url: `http://127.0.0.1:${port}`, name: 'polish-fixture', password: login.token, runId: run, tasks: { long: 'ledger-export', done: 'payout-rounding' }, statusTasks, statusRuns, repos: { main: repo, second: repo2, empty: repo3 }, stop, store, requests, captureLearning, laterLearningRun, startRevision, finishRevision, addReviewNotes });
     });
   });
 }

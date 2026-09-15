@@ -71,6 +71,7 @@ const args = process.argv.slice(2);
 const flag = name => { const at = args.indexOf(name); return at === -1 ? null : args[at + 1] ?? null; };
 const out = resolve(flag('--out') ?? 'output/playwright/workspace-3-result-2026-09-13');
 const strict = args.includes('--strict');
+const learning = args.includes('--learning');
 const sameTask = args.includes('--same-task-revisions');
 const revisionNames = args.includes('--revision-names');
 const longRequests = args.includes('--long-requests') || revisionNames;
@@ -86,12 +87,12 @@ async function loadPlaywright() {
   throw new Error('playwright not found: install it, or set PLAYWRIGHT_MODULE to its index.mjs');
 }
 
-const VIEWPORTS = { desktop: { width: revisionNames || sameTask ? 1400 : 1440, height: 900 }, phone: { width: 390, height: 844 }, narrow: { width: 320, height: 740 } };
+const VIEWPORTS = { desktop: { width: revisionNames || sameTask || learning ? 1400 : 1440, height: 900 }, phone: { width: 390, height: 844 }, narrow: { width: 320, height: 740 } };
 const report = { generatedAt: new Date().toISOString(), out, fixture: 'scripts/ui-polish-fixture.mjs (synthetic, in-memory; scripted subscription runner, no model)', checks: [], screenshots: [] };
 const check = (name, ok, detail) => { report.checks.push({ name, ok: Boolean(ok), detail }); console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`); };
 
 const { chromium } = await loadPlaywright();
-let fixture = await startFixture({ longRequests, revisionNames, sameTaskRevisions: sameTask, secondProject: sameTask, ...(sameTask ? { directory: join(out, "fixture") } : {}) });
+let fixture = await startFixture({ learning, longRequests, revisionNames, sameTaskRevisions: sameTask, secondProject: sameTask || learning, ...(sameTask || learning ? { directory: join(out, "fixture") } : {}) });
 const browser = await chromium.launch(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {});
 
 async function loginAs(page, name, password) {
@@ -568,6 +569,73 @@ const runId = fixture.runId;
 const task = fixture.tasks.done;
 const chatResult = (id, run, tab) => `/chat?task=${id}&result=${run}${tab ? `&tab=${tab}` : ''}`;
 
+async function learningJourney() {
+  for (const [name, viewport] of [['desktop', VIEWPORTS.desktop], ['phone', VIEWPORTS.phone]]) {
+    if (name === 'phone') { await fixture.stop(); fixture = await startFixture({ learning: true, secondProject: true, directory: join(out, 'fixture') }); }
+    const { ctx, page } = await context(viewport, { reducedMotion: 'reduce' });
+    const settings = `/settings/learning?repo=${encodeURIComponent(fixture.repos.main)}`;
+    await goto(page, '/settings');
+    check(`${name}: Settings exposes Learning without notification credentials`, await page.locator('main a[href="/settings/learning"]').count() === 1, '');
+    await goto(page, settings);
+    check(`${name}: empty learning and ledger states`, (await page.textContent('main')).includes('No lessons yet') && (await page.textContent('main')).includes('No learning changes yet'), '');
+    await shot(page, `${name}-learning-empty`, `${viewport.width}×${viewport.height}: empty Learning settings, synthetic project`);
+    fixture.captureLearning();
+    await goto(page, `/r/${fixture.runId}`);
+    const closed = await page.locator('.result-learning').evaluate(el => !el.open);
+    check(`${name}: useful learning stays closed and keeps the result action`, closed && await page.locator('[data-result-action]').count() === 1, '');
+    // Inspect the diff and leave feedback through the existing result road.
+    await page.locator('.result-tabs a').filter({ hasText: 'Changes' }).click();
+    await page.fill('#comment-form [name="note"]', 'Keep the half-cent boundary regression readable.');
+    await submit(page, '#comment-form button[type="submit"]');
+    await submit(page, '.result-request form[action$="/revise"] button[type="submit"]');
+    check(`${name}: existing feedback creates one unapproved revision`, fixture.store.revisionsFromRun(fixture.runId).length === 1, '');
+    await goto(page, `/r/${fixture.runId}`);
+    await page.locator('.result-learning > summary').focus();
+    await page.keyboard.press('Enter');
+    check(`${name}: disclosure works with keyboard`, await page.locator('.result-learning').evaluate(el => el.open), '');
+    await page.locator('.result-learning [data-lesson]').filter({ hasText: 'Proposed lesson' }).locator('details > summary').click();
+    const button = page.getByRole('button', { name: 'Save lesson', exact: true });
+    await button.scrollIntoViewIfNeeded();
+    check(`${name}: Save lesson has a 44px target`, await button.evaluate(el => el.getBoundingClientRect().height >= 44), '');
+    await shot(page, `${name}-learning-adopt`, `${viewport.width}×${viewport.height}: source-linked lesson in a quiet result disclosure; synthetic data`);
+    await submit(page, '.result-learning button:has-text("Save lesson")');
+    check(`${name}: adoption ledger and system suggestion stay distinct`, (await page.textContent('main')).includes('Adopted advice') && (await page.textContent('main')).includes('No change applied'), '');
+    const staleForm = await page.locator('.learning form').first().evaluate(el => Object.fromEntries(new FormData(el)));
+    await submit(page, '.learning button:has-text("Enable reuse")');
+    const used = fixture.laterLearningRun();
+    const frozen = JSON.parse(used.context.trim().split('\n').at(-1));
+    check(`${name}: a different later run receives the exact adopted advice`, frozen.lessons.length === 1 && frozen.lessons[0].source === fixture.runId && used.context === fixture.store.handle.prepare('SELECT payload FROM learning_snapshot WHERE run=?').get(used.runId).payload, '');
+    await goto(page, settings);
+    await page.locator('[data-learning-event="reuse"] details > summary').first().click();
+    await page.locator('[data-learning-event="reuse"]').first().scrollIntoViewIfNeeded();
+    await shot(page, `${name}-learning-ledger`, `${viewport.width}×${viewport.height}: append-only usage ledger with actor, state, sources and run; synthetic data`);
+    const stale = await page.evaluate(async data => { const r = await fetch('/settings/learning/change', { method: 'POST', body: new URLSearchParams(data) }); return { status: r.status, text: await r.text() }; }, staleForm);
+    check(`${name}: a stale form is refused with recovery`, stale.status === 409 && stale.text.includes('Reload before trying again'), '');
+    // Navigate to a real stale response to inspect its visible failure layout.
+    await page.evaluate(data => { const f = document.createElement('form'); f.method = 'post'; f.action = '/settings/learning/change'; for (const [k,v] of Object.entries(data)) { const i = document.createElement('input'); i.name=k; i.value=v; f.append(i); } document.body.append(f); f.submit(); }, staleForm);
+    await page.waitForLoadState('load'); await page.waitForSelector('.problem');
+    await shot(page, `${name}-learning-error`, `${viewport.width}×${viewport.height}: stale Learning action refused with reload link; synthetic data`);
+    check(`${name}: error state fits and recovery has a 44px target`, (await noOverflow(page)).ok && await page.getByRole('link', {name:'Reload Learning', exact:true}).evaluate(el => el.getBoundingClientRect().height >= 44), '');
+    await goto(page, settings);
+    await submit(page, '.learning button:has-text("Disable lesson")');
+    const next = fixture.laterLearningRun();
+    check(`${name}: disabling excludes future advice and retains the earlier snapshot`, JSON.parse(next.context.trim().split('\n').at(-1)).lessons.length === 0 && fixture.store.handle.prepare('SELECT payload FROM learning_snapshot WHERE run=?').get(used.runId).payload === used.context, '');
+    await goto(page, settings);
+    await page.locator('.learning [data-lesson] details > summary').last().click();
+    check(`${name}: expanded long source details fit without overflow`, (await noOverflow(page)).ok, '');
+    await page.locator('[data-learning-event="reuse"] details > summary').first().click();
+    await page.locator('[data-learning-event="reuse"]').first().getByText('Exact context', {exact:true}).click();
+    check(`${name}: immutable context is readable without overflow`, (await noOverflow(page)).ok, '');
+    const controls = await page.locator('.learning button, .learning summary').evaluateAll(els => els.filter(e => e.checkVisibility()).map(e => ({ height: e.getBoundingClientRect().height, width: e.getBoundingClientRect().width, text: e.textContent })));
+    check(`${name}: visible learning actions and disclosures have 44px targets`, controls.every(c => c.height >= 44), JSON.stringify(controls));
+    check(`${name}: retained ledger includes adoption, disable and reuse`, ['adopt', 'disable', 'reuse'].every(action => fixture.store.handle.prepare('SELECT 1 FROM learning_event WHERE repo=? AND action=?').get(fixture.repos.main, action)), '');
+    // Project filter does not leak the main project's lesson or ledger.
+    await goto(page, `/settings/learning?repo=${encodeURIComponent(fixture.repos.empty)}`);
+    check(`${name}: another project remains empty`, (await page.textContent('main')).includes('No lessons yet') && !(await page.textContent('main')).includes('Payout rounding uses'), '');
+    await ctx.close();
+  }
+}
+
 try {
   // A plain HTTP session for the fact reads (the same login, no browser).
   {
@@ -575,7 +643,9 @@ try {
     cookieHeader = (login.headers.get('set-cookie') ?? '').split(';')[0];
   }
 
-  if (sameTask) {
+  if (learning) {
+    await learningJourney();
+  } else if (sameTask) {
     await sameTaskJourney();
   } else if (longRequests) {
     await longRequestJourney();

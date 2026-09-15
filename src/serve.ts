@@ -1,3 +1,5 @@
+import { changeLearning, learningView } from "./project-learning.js";
+import { learningHtml } from "./workspace-ui.js";
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
@@ -961,8 +963,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
     if (!restricted()) return true;
     const path = url.pathname;
-    const read = new Set(["/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
-    const write = new Set(["/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
+    const read = new Set(["/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const write = new Set(["/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path)
@@ -978,7 +980,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     // Every collection except these three must have a concrete project;
     // NULL otherwise means all rows in legacy store APIs.
-    if (!["/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
+    if (!["/settings", "/settings/learning", "/settings/learning/change", "/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
       refuse(response, who, 403, "No assigned project is available. Ask an instance operator for access.", "/projects"); return false;
     }
     if (request.method === "GET" && path === "/board") {
@@ -1023,7 +1025,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
       url.pathname !== "/chat" && url.pathname !== "/chat/mate/status" && url.pathname !== "/chat/task-status" &&
-      url.pathname !== "/settings" && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" &&
+      !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
 
@@ -2590,6 +2592,22 @@ export function createDecisionServer(options: ServeOptions): Server {
         { chrome: chromeFor(project, "settings"), ...(catalog === null ? {} : { functional: { script: openRouterPickerScript() } }) }));
     }
 
+    if (url.pathname === "/settings/learning") {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
+      if (chosen && (!projects.includes(chosen) || !visible(chosen))) return refuse(response, who, 403, "That project is outside your access.", "/settings/learning");
+      const selector = `<form method="get" action="/settings/learning"><label>Project<select name="repo">${projects.map(p => `<option value="${escape(p)}"${p === chosen ? " selected" : ""}>${escape(p.split("/").at(-1) ?? p)}</option>`).join("")}</select></label><button>Show project</button></form>`;
+      let content = "<p>No project is available.</p>";
+      if (chosen) {
+        try { content = learningHtml(learningView(store, evidenceRoot, chosen, who.name, Math.max(0, Number(url.searchParams.get("before")) || 0)), who.via === "cookie" ? who.session.csrf : "", who.role === "approver"); }
+        catch { content = '<p class="problem" role="alert">Learning is unavailable. Reload to retry. Task results are unchanged.</p>'; }
+      }
+      return sendScreen(response, 200, screen("Learning", `<p><a href="/settings">Settings</a></p><h1>Learning</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
+    }
+    if (url.pathname === "/settings" && (options.telegramTokenFile === undefined || restricted())) {
+      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/learning">Learning</a></p>', { chrome: chromeFor(project, "settings") }));
+    }
+
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
       const existing = loadBotToken({}, options.telegramTokenFile);
       const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
@@ -3208,7 +3226,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       ...(facts === undefined ? {} : { csrf: facts.csrf, returnTo: facts.returnTo }),
       inboxCount: badge.count,
       inboxSaturated: badge.saturated,
-      settings: !restricted() && options.telegramTokenFile !== undefined,
+      settings: true,
       ...(store.isDemo() ? { demo: true } : {}),
       ...(liveMode === null || liveModeTerms === null
         ? {}
@@ -4427,6 +4445,19 @@ export function createDecisionServer(options: ServeOptions): Server {
     // Any accepted mutation may change what the inbox owes; the badge
     // re-counts within five seconds either way, this just makes it exact.
     bustBadge();
+
+    if (url.pathname === "/settings/learning/change") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "Sign in to change learning.", "/settings/learning");
+      const repo = body.get("repo") ?? "", action = body.get("action") ?? "";
+      if (!visible(repo) || ![...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()].includes(repo)) return refuse(response, who, 403, "That project is outside your access.", "/settings/learning");
+      if (["repo", "action", "identity", "revision", "lesson", "version", "sha"].some(k => body.getAll(k).length > 1) || !["adopt", "disable", "reset", "enable", "pause"].includes(action) || !/^[0-9]+$/.test(body.get("revision") ?? "")) return refuse(response, who, 400, "Invalid learning form.", "/settings/learning");
+      try {
+        changeLearning(store, evidenceRoot, { repo, actor: who.name, identity: body.get("identity") ?? "", revision: Number(body.get("revision")), action: action as "adopt" | "disable" | "reset" | "enable" | "pause", lesson: Number(body.get("lesson")), version: Number(body.get("version")), sha: body.get("sha") ?? "" }, clock());
+      } catch (error) {
+        return sendScreen(response, 409, screen("Learning", `<section class="learning"><h1>Learning</h1><p class="problem" role="alert">${escape(error instanceof Error ? error.message : "Learning could not be changed. Reload to retry.")}</p><a class="button-link" href="/settings/learning?repo=${encodeURIComponent(repo)}">Reload Learning</a></section>`));
+      }
+      return redirect(response, `/settings/learning?repo=${encodeURIComponent(repo)}`);
+    }
 
     if (["/control/setup-preview", "/control/setup-approve", "/control/instructions-preview", "/control/instructions-approve"].includes(url.pathname)) {
       const project = projectOf(who, request);
@@ -7759,7 +7790,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       cited.size > 0,
     );
     const publication = store.publicationForRun(run.id);
+    let learning = "";
+    const learningRepo = store.refForId(run.taskRef)?.repo;
+    if (learningRepo && visible(learningRepo)) {
+      try { learning = learningHtml(learningView(store, evidenceRoot, learningRepo, who.name), who.via === "cookie" ? who.session.csrf : "", who.role === "approver", run.id); }
+      catch { /* Learning failures remain available in Settings; the result is independent. */ }
+    }
     return {
+      learning,
       taskId,
       rootId: familyOf(taskId)?.root.id ?? taskId,
       history: (() => { const family = familyOf(taskId); return family === null ? "" : familyHistory(family); })(),
@@ -11400,7 +11438,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS);
+const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -15808,7 +15846,7 @@ function settingsRows(scoped = false, offersSettings = false): NavRow[] {
     { key: "mode", href: "/mode", label: "operating mode", hint: "the signed posture this repository runs under" },
     { key: "system", href: "/system", label: "system", hint: "workers, providers, and grants" },
   ];
-  return scoped ? rows.filter(row => row.key === "people") : rows;
+  return scoped ? rows.filter(row => row.key === "people" || row.key === "settings") : rows;
 }
 /** Which accordion group opens by default for a given active page. */
 const TOOL_KEYS = new Set<Chrome["active"]>(["inbox", "board", "queue", "tasks", "workbench", "recipes", "routines", "ledger"]);
@@ -19250,6 +19288,7 @@ const chatResultHref = (taskId: string, runId: number, tab: ResultTab = "summary
  * only in where the panel sits and which links lead away from it.
  */
 type ResultDetail = {
+  learning?: string;
   rootId?: string;
   history?: string;
   taskId: string;
@@ -19619,6 +19658,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       view("summary", summaryParts) +
       view("changes", changeParts) +
       view("checks", checkParts) +
+      (detail.learning ?? "") +
       `<section class="result-request" id="request-changes">${requestParts.join("\n")}</section>` +
     `</section>`
   );
@@ -20321,6 +20361,7 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return screen("settings", [
     "<h1>settings</h1>",
+    '<p><a href="/settings/learning">Learning</a></p>',
     permissionCard,
     qualityCard,
     pushCard,

@@ -234,6 +234,21 @@ const CLAUDE_REVIEW_ISOLATION_ARGV: readonly string[] = [
 const CLAUDE_REVIEW_JSON_SCHEMA = {
   type: "object",
   properties: {
+    learning: {
+      type: "array", maxItems: 2, items: {
+        type: "object", properties: {
+          kind: { type: "string", enum: ["project", "system"] },
+          observation: { type: "string", minLength: 1, maxLength: 125 },
+          action: { type: "string", minLength: 1, maxLength: 125 },
+          paths: { type: "array", minItems: 1, maxItems: 5, items: { type: "string", minLength: 1, maxLength: 75 } },
+          phases: { type: "array", minItems: 1, maxItems: 3, items: { type: "string", enum: ["plan", "build", "review"] } },
+          evidence: { type: "array", minItems: 1, maxItems: 3, items: {
+            type: "object", properties: { artifactId: { type: "integer", minimum: 1 }, sha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, excerpt: { type: "string", minLength: 1, maxLength: 75 } },
+            required: ["artifactId", "sha256", "excerpt"], additionalProperties: false,
+          } },
+        }, required: ["kind", "observation", "action", "paths", "phases", "evidence"], additionalProperties: false,
+      },
+    },
     version: { type: "integer", enum: [1] },
     comments: {
       type: "array",

@@ -1,3 +1,4 @@
+import { learningContext } from "./project-learning.js";
 /**
  * The first thing here that runs an agent.
  *
@@ -1331,7 +1332,8 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // alone or it undercounts the sealed diff and reads short.
   const pinnedBase = store.firstBuilderBase(taskRef, branch);
   const retryBase = pinnedBase !== null && pinnedBase !== baseRevision ? pinnedBase : null;
-  const briefText = brief(
+  const lessonContext = learningContext(store, root, request.runId, "build", clock());
+  const briefText = lessonContext + brief(
     scope as Scope,
     branch,
     mailbox,

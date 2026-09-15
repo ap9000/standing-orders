@@ -307,6 +307,13 @@ describe("planning mode, against real git", () => {
     }
     const builderRun = runs.find(one => one.role === "builder")!;
     expect(proved.runRoute(builderRun.id)).toMatchObject({ phase: "build", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: routeDigestOf(proved.approvedRouteOf("limiter")!) });
+    // Both real worktree phases supplied the immutable bytes, including an empty selection.
+    for (const one of [...plannerRuns, builderRun]) {
+      const frozen = proved.handle.prepare("SELECT payload FROM learning_snapshot WHERE run=?").get(one.id)?.["payload"];
+      expect(typeof frozen).toBe("string");
+      expect(prompts.some(prompt => prompt.includes(String(frozen)))).toBe(true);
+      expect(JSON.parse(String(frozen).trim().split("\n").at(-1)!).lessons).toEqual([]);
+    }
     proved.close();
   });
 

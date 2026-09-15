@@ -1,3 +1,4 @@
+import { LEARNING_SCHEMA, queueLearning } from "./project-learning.js";
 import { validateTaskText } from "./task-text.js";
 /**
  * The database: a small task store, and the operational overlay beside it.
@@ -85,8 +86,8 @@ import { LEDGER_SCHEMA, installLedgerTriggers, type LedgerEntry } from "./action
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 
-// v57 fences older recipe readers before question-based documents are saved.
-export const SCHEMA_VERSION = 57;
+// v58 fences older readers before project learning and immutable usage history are saved.
+export const SCHEMA_VERSION = 58;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -3467,6 +3468,11 @@ function initializeStore(db: Database, file: string): Store {
       if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table) === undefined) throw new Error(`${file}: workflow recipe metadata is missing; refusing to recreate launch history`);
     }
   }
+  if (preflight !== null && Math.abs(preflight) >= 58) {
+    for (const table of ["learning_capture", "learning_policy", "project_lesson", "learning_event", "learning_snapshot"]) {
+      if (!tableExists(db, table)) throw new Error(`${file}: learning history is missing; refusing to recreate authority`);
+    }
+  }
   // THE SENTINEL IS A CHECKED COMPARE-AND-SET (raw authority repair): the
   // row moves from exactly the version the preflight read to its negative,
   // or this open refuses — a second migrator that raced this one between
@@ -3479,6 +3485,7 @@ function initializeStore(db: Database, file: string): Store {
     }
   }
   db.exec(SCHEMA);
+  db.exec(LEARNING_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
@@ -9576,6 +9583,7 @@ export class Store {
     args: {
       reviewerRunId: number;
       evidenceRoot?: string;
+      learning?: unknown;
       runId: number;
       artifactId: number;
       author: string;
@@ -9672,6 +9680,10 @@ export class Store {
         reason: `reviewed — ${commentIds.length} comment(s)${judged}`,
         now,
       });
+      queueLearning(this, args.runId, args.reviewerRunId, args.learning, [
+        { artifactId: args.artifactId, sha256: args.bindings.diffSha },
+        ...[args.bindings.proof, args.bindings.checkLog, args.bindings.context].filter((x): x is { artifactId: number; sha256: string } => x != null),
+      ], now);
       return { commentIds, folded };
     });
   }

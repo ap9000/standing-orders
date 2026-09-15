@@ -10365,8 +10365,9 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
       "action ledger /ledger",
     ]);
     // Settings is the group's first row only where the console offers it
-    // (this serve has no telegram token file, so it does not).
+    // Learning is available even without a telegram token file.
     expect([...settingsRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
+      "settings /settings",
       "fleet /fleet",
       "requirements /caps",
       "people /people",
@@ -10397,7 +10398,7 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect(menu).toContain('<h2 class="menu-group-label">work tools</h2>');
     expect(menu).toContain('<h2 class="menu-group-label">settings</h2>');
     const rows = [...menu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1]);
-    expect(rows).toEqual(["/", "/board", "/tasks", "/recipes", "/routines", "/workbench", "/ledger", "/fleet", "/caps", "/people", "/mode", "/system"]);
+    expect(rows).toEqual(["/", "/board", "/tasks", "/recipes", "/routines", "/workbench", "/ledger", "/settings", "/fleet", "/caps", "/people", "/mode", "/system"]);
   });
 
   test("every retired destination still answers: the queue redirects to the board's order view; done, review, and activity are views of builds", async () => {
@@ -12658,14 +12659,14 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(/<details class="nav-group" data-group="settings"([^>]*)>/.exec(fleet)?.[1]).toBe(" open");
     expect(fleet).toContain('<a href="/fleet" aria-label="fleet" title="fleet" class="active">fleet</a>');
     const menu = await page(cookie, "/menu");
-    expect([...menu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1])).toEqual(["/", "/board", "/tasks", "/recipes", "/routines", "/workbench", "/ledger", "/fleet", "/caps", "/people", "/mode", "/system"]);
+    expect([...menu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1])).toEqual(["/", "/board", "/tasks", "/recipes", "/routines", "/workbench", "/ledger", "/settings", "/fleet", "/caps", "/people", "/mode", "/system"]);
     // The queue's old address still answers as before.
     const queue = await fetch(url("/queue"), { headers: { cookie }, redirect: "manual" });
     expect(queue.status).toBe(303);
     expect(queue.headers.get("location")).toBe("/board?view=order");
 
     // A project-scoped login sees the SAME reduced tools it saw before —
-    // no portfolio, no fleet/requirements/mode/system, no chat, no settings.
+    // no portfolio, fleet/requirements/mode/system or chat; project Learning is available.
     const minted = store.mintInvite("approver", "alex", now, undefined, [alpha]);
     expect(store.consumeInviteAndCreateAccount({ tokenValue: minted.token, name: "member", credentialHash: hashPassword(memberPassword) }, now).ok).toBe(true);
     const member = await login("member", memberPassword);
@@ -12673,9 +12674,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(primaryOf(memberWork)).toEqual(["/work", "/projects"]);
     expect(tabsOf(memberWork)).toEqual(["/work", "/projects"]);
     const memberMenu = await page(member, "/menu");
-    expect([...memberMenu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1])).toEqual(["/", "/board", "/tasks", "/recipes", "/routines", "/ledger", "/people"]);
-    expect(memberMenu).not.toContain("/settings");
-    for (const path of ["/fleet", "/system", "/caps", "/workbench", "/chat", "/settings"]) expect((await fetch(url(path), { headers: { cookie: member } })).status, path).toBe(403);
+    expect([...memberMenu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1])).toEqual(["/", "/board", "/tasks", "/recipes", "/routines", "/ledger", "/settings", "/people"]);
+    expect(memberMenu).toContain("/settings");
+    expect((await fetch(url("/settings"), { headers: { cookie: member } })).status).toBe(200);
+    for (const path of ["/fleet", "/system", "/caps", "/workbench", "/chat"]) expect((await fetch(url(path), { headers: { cookie: member } })).status, path).toBe(403);
   });
 
   test("same task counts: an older live sibling counts once; released, expired and superseded claims do not look live", async () => {
