@@ -202,3 +202,40 @@ Simplicity pass on these captures: each state has one title, one outcome and one
 Honest labels: synthetic fixture data and a scripted chat provider with zero model calls; the keyboard is a shrunk visual viewport, not a physical phone or Safari; the worker acknowledgement in the browser journey is a direct fenced call, not a live process (real subprocess behaviour is covered by `src/task-control-process.test.ts`, unchanged).
 
 Follow-up receipt: builder Claude Opus 5 (`claude-opus-5`), no subagents, zero live model calls, zero operator interventions or permission questions. Comment 329 recorded 2026-09-15T18:53:28Z; checks and captures ran from about 18:54Z to 18:57Z, roughly 4 minutes, with the handoff written after. One builder correction: none needed — every focused check passed first time. No commit, push, branch switch, installed-database migration, rebuild of the installed root, or provider/permission change.
+
+## Eight-capture follow-up (build #1620 comments 330 and 335): the sealed selection
+
+Branch `standing-orders/revise-revise-revise-chat-stop-resume-20260915-fix-1-fro`, uncommitted on top of `c570410` (the brief in [EIGHT_CAPTURE_REVIEW_2026-09-15.md](EIGHT_CAPTURE_REVIEW_2026-09-15.md) over `7857301`). Verified before any check: `7857301`, `8efa954`, `ec49769` and `a97f74b` are all ancestors of HEAD; the installed checkout and its database were not rebuilt, migrated or read.
+
+Comment 330 was right: the previous proof named eight images but its selection left out states the criteria depend on, while the doc above listed eleven. The proof carries at most eight screenshots (`PROOF_LIMITS.screenshots`); that cap was not raised. Comment 335 fixed the selection, so this follow-up seals exactly those eight and adds the two capture points the journey lacked. **No product code, test, verifier, approval or evidence check changed.** The only source change is `scripts/chat-stop-resume-journey.mjs`: on desktop it now also captures the separate `/t/csv-range-tests` page while it still reads Stopping (before the synthetic acknowledgement changes its state), and on the phone it frames the result so the selected Changes tab, file list and diff start share one 390px viewport, with a new assertion that they do. Eleven of the thirteen captures are byte-identical to the previous follow-up's files, which confirms the product source is unchanged; [follow-up-manifest.json](../evidence/chat-stop-resume-2026-09-15/follow-up-manifest.json) records every hash, the `captureSourceHead` (the product source when the images were captured — `c570410`, not the later commit that stores them), the prior capture head, and which names are sealed versus optional.
+
+**The eight sealed images** (all real Chrome viewport captures, 1440×900 or 390×844, synthetic fixture data, scripted chat provider, zero model calls):
+
+| # | Screenshot | Criteria | What it shows |
+| --- | --- | --- | --- |
+| 1 | [Desktop empty chat](../evidence/chat-stop-resume-2026-09-15/desktop-empty.png) | c3 | Running now, one Stop task control, the empty prompt and composer before any message. |
+| 2 | [Desktop confirmed stop](../evidence/chat-stop-resume-2026-09-15/desktop-stopping.png) | c1, c2 | Chat page: confirmed Stop task? card naming csv-range-tests · Run #9, the header reading Stopping…, the Stop requested receipt, and the unsent draft still in the composer. |
+| 3 | [Desktop task detail while Stopping](../evidence/chat-stop-resume-2026-09-15/desktop-task-detail-stopping.png) | c2 | The separate `/t/csv-range-tests` page for the same run #9, captured before its state changed: Stopping…, View stop details, attempt #9 still running. |
+| 4 | [Phone stale-card refusal](../evidence/chat-stop-resume-2026-09-15/phone-refusal-draft.png) | c2, c3 | 390px: the long unbroken title wraps, the refused Resume task? card says the task changed, and the draft is intact above the tab bar. |
+| 5 | [Desktop result Changes](../evidence/chat-stop-resume-2026-09-15/desktop-result.png) | c3 | Changes tab selected on the exact result, file list with the long inherited path, and the readable payout.ts diff. |
+| 6 | [Phone result Changes](../evidence/chat-stop-resume-2026-09-15/phone-result.png) | c3 | 390px: Changes 3 files selected, the file list and the first diff hunk in one viewport with no document overflow. |
+| 7 | [Desktop revision receipt](../evidence/chat-stop-resume-2026-09-15/desktop-revision.png) | c3 | Same-task revision confirmed: exact saved feedback, Revision created and the review & start in chat link, task still payout-rounding. |
+| 8 | [Phone revision receipt while typing](../evidence/chat-stop-resume-2026-09-15/phone-revision-typing.png) | c3 | 390px simulated keyboard: composer raised with the draft, receipt end and its review link readable above it. |
+
+**Optional captures**, kept in the evidence folder and hashed in the manifest but not in the proof: `desktop-stop-confirm.png` (the pending Stop task? card), `desktop-refusal-draft.png`, `phone-stop-confirm-long.png`, `phone-resume-password.png` (the resume password ceremony) and `phone-revision.png` (arrival at the receipt before typing). They remain byte-identical to the reviewed build. The resume ceremony's behaviour is asserted by the journey ("resume opens existing nonce and password form", "wrong password refuses resume") and by the inherited `serve` and `mate-doors` tests rather than by a sealed image.
+
+**Focused checks run by the builder** (readable output, labelled as the builder journey log and not the machine gate log: [journey-output.txt](../evidence/chat-stop-resume-2026-09-15/journey-output.txt)):
+
+| Command | Result |
+| --- | --- |
+| `npm run typecheck` | Passed, exit 0. |
+| `npx vitest run src/chat-task-actions.test.ts src/mate-doors.test.ts src/mate.test.ts src/task-control-console.test.ts src/task-control.test.ts src/chat-continuity.test.ts src/chat-polish.test.ts src/mobile-viewport.test.ts` | 8 files, 107 tests passed; its setup compiled this worktree's local runtime. |
+| `npx vitest run src/serve.test.ts src/mate-doors.test.ts -t 'chat review|stop confirmation|same task: two revisions'` | 4 selected tests passed (317 excluded by the name filter, none changed or skipped in source). |
+| `node scripts/chat-stop-resume-journey.mjs --capture` | 75 assertions passed at 1440×900 and 390×844; wrote the thirteen captures. |
+| `node scripts/chat-stop-resume-journey.mjs` | 75 assertions passed again in the durable non-capturing mode the proof cites. |
+
+The unchanged approved full verifier was **not** run by the builder; it runs once at the machine's final gate for this exact sealed candidate, and c4 stays pending-verification until then. Remaining gap from repair 1 stands: `scripts/workspace-result-proof.mjs` is outside the verifier and untouched.
+
+Simplicity pass on the two new captures: the task page shows one status (Stopping…), one primary action (View stop details) and its details behind disclosures; the phone result shows one selected tab, the file list and the diff without a second explanation. Nothing was found to remove, so no copy changed.
+
+Follow-up receipt: builder Claude Opus 5 (`claude-opus-5`), no subagents, zero live model calls, zero operator interventions or permission questions. Comment 335 recorded 2026-09-15T19:20:57Z; checks and captures ran from about 19:21Z to 19:26Z, roughly 5 minutes, with the handoff written after. One builder correction: the first phone result capture scrolled the diff into view but left the Changes tab above the fold; the capture now anchors on the tab strip and asserts the tab and diff share the viewport. No commit, push, branch switch, installed-database migration, rebuild of the installed root, or provider/permission change.

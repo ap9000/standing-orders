@@ -109,7 +109,13 @@ try {
       check(name+' stop requested is still stopping', store.stopOf(run.id).settledAt === null && taskControlOf(store, taskRef, new Date()).kind === 'stopping');
       await detail.goto(fixture.url+'/t/'+task);
       check(name+' chat and task show stopping for the same run', await page.locator('[data-task-control="stopping"]').getAttribute('data-control-run') === String(run.id) && await detail.locator('[data-task-control="stopping"]').getAttribute('data-control-run') === String(run.id));
-      if (name === 'desktop') { await page.evaluate(() => scrollTo(0, document.querySelector('#task-chat-live').getBoundingClientRect().top + scrollY - 115)); await shot(page, 'desktop-stopping'); }
+      if (name === 'desktop') {
+        await page.evaluate(() => scrollTo(0, document.querySelector('#task-chat-live').getBoundingClientRect().top + scrollY - 115)); await shot(page, 'desktop-stopping');
+        // Build #1620 feedback: the separate /t/:task page for the same run,
+        // captured while it still reads Stopping and before any state change.
+        await detail.locator('[data-task-control="stopping"]').scrollIntoViewIfNeeded();
+        await shot(detail, 'desktop-task-detail-stopping');
+      }
       const csrf = await page.locator('[name="csrf"]').first().inputValue();
       const replay = await page.request.post(fixture.url+`/chat/proposal/${stop}/confirm`, { form: { csrf }, maxRedirects: 0 });
       check(name+' repeated confirmation records one stop', replay.status() === 303 && store.stopsForTask(taskRef).length === 1);
@@ -157,7 +163,17 @@ try {
       await page.locator('[data-result-tab="changes"]').click();
       await fits(page, name+' result changes');
       check(name+' result keeps exact run', await page.locator(`[data-result-panel][data-result-run="${result}"]`).count() === 1);
-      if (name === 'desktop') { await page.locator('[data-review-diff]').scrollIntoViewIfNeeded(); await shot(page, 'desktop-result'); }
+      if (name === 'desktop') await page.locator('[data-review-diff]').scrollIntoViewIfNeeded();
+      else {
+        // Build #1620 feedback: one 390px viewport holding the selected
+        // Changes tab, the file list and the readable start of the diff.
+        await page.evaluate(() => scrollTo(0, document.querySelector('[data-result-tab="changes"]').getBoundingClientRect().top + scrollY - 70));
+        check('phone result shows the selected Changes tab and the diff in one viewport', await page.evaluate(() => {
+          const tab = document.querySelector('[data-result-tab="changes"]').getBoundingClientRect(), diff = document.querySelector('[data-review-diff]').getBoundingClientRect();
+          return tab.top >= 0 && tab.bottom <= innerHeight && diff.top >= 0 && diff.top + 120 <= innerHeight;
+        }));
+      }
+      await shot(page, name === 'desktop' ? 'desktop-result' : 'phone-result');
       const note = 'Keep the primary action on one line. On mobile, leave enough room above the composer to read the latest reply and reach its action. Shorten the confirmation without hiding what will stop. Keep my draft if the connection drops, and keep this revision in the original task history.';
       await page.locator('#comment-form textarea[name="note"]').fill(note);
       await submit(page, page.locator('#comment-form [data-save-feedback]'));

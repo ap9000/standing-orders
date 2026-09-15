@@ -1,6 +1,7 @@
-# Chat stop/resume evidence follow-up — readable command output
-# Candidate HEAD: 515b30777d8fe4bd5498b669432f80da38b98819 (uncommitted evidence on top)
+# Chat stop/resume eight-capture follow-up — readable builder command output
+# Capture source HEAD: c5704100d91873a33a2a695d5a1223865c6f35f0 (uncommitted journey capture points + evidence on top)
 # Synthetic Chromium fixture data, scripted chat provider, zero live model calls.
+# This is the builder journey log, NOT the machine gate log; the unchanged full verifier runs once at the final machine gate.
 
 $ npm run typecheck
 exit 0 (no output beyond the tsc invocation)
@@ -8,12 +9,12 @@ exit 0 (no output beyond the tsc invocation)
 $ npx vitest run src/chat-task-actions.test.ts src/mate-doors.test.ts src/mate.test.ts src/task-control-console.test.ts src/task-control.test.ts src/chat-continuity.test.ts src/chat-polish.test.ts src/mobile-viewport.test.ts
  Test Files  8 passed (8)
       Tests  107 passed (107)
-   Duration  2.88s (transform 4.87s, setup 111ms, import 6.40s, tests 2.84s, environment 0ms)
+   Duration  2.96s (transform 4.90s, setup 115ms, import 6.43s, tests 2.98s, environment 0ms)
 
 $ npx vitest run src/serve.test.ts src/mate-doors.test.ts -t 'chat review|stop confirmation|same task: two revisions'
  Test Files  2 passed (2)
       Tests  4 passed | 317 skipped (321)
-   Duration  2.22s (transform 2.10s, setup 25ms, import 2.72s, tests 623ms, environment 0ms)
+   Duration  2.36s (transform 2.20s, setup 23ms, import 2.82s, tests 694ms, environment 0ms)
 
 $ node scripts/chat-stop-resume-journey.mjs --capture
 PASS desktop before conversation has no horizontal overflow
@@ -27,6 +28,7 @@ PASS desktop stop preserves composer draft
 PASS desktop stop requested is still stopping
 PASS desktop chat and task show stopping for the same run
 PASS desktop-stopping has no horizontal overflow
+PASS desktop-task-detail-stopping has no horizontal overflow
 PASS desktop repeated confirmation records one stop
 PASS desktop task-page acknowledgement reaches chat without clearing draft
 PASS desktop resume opens existing nonce and password form
@@ -77,6 +79,8 @@ PASS phone task detail after resume has no horizontal overflow
 PASS phone task and chat agree after resume
 PASS phone result changes has no horizontal overflow
 PASS phone result keeps exact run
+PASS phone result shows the selected Changes tab and the diff in one viewport
+PASS phone-result has no horizontal overflow
 PASS phone result feedback saved in shared history
 PASS phone revision card shows exact submitted feedback
 PASS phone long revision feedback has no horizontal overflow
@@ -88,7 +92,7 @@ PASS phone-revision has no horizontal overflow
 PASS phone newest message follows the raised composer while typing (simulated keyboard)
 PASS phone-revision-typing has no horizontal overflow
 PASS phone browser has no script errors
-PASS 72 checks; synthetic Chromium 1440px and 390px journeys; zero live model calls.
+PASS 75 checks; synthetic Chromium 1440px and 390px journeys; zero live model calls.
 
 $ node scripts/chat-stop-resume-journey.mjs
-PASS 72 checks; synthetic Chromium 1440px and 390px journeys; zero live model calls.
+PASS 75 checks; synthetic Chromium 1440px and 390px journeys; zero live model calls.
