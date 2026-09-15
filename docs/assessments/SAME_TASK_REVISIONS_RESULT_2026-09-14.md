@@ -1,25 +1,23 @@
-# Same task revisions — review comments on build #1586
+# Same task revisions — build #1588 feedback
 
-Applied comments **212, 213 and 216** to the previously reviewed implementation. One root task still owns successive versions, exact results and the shared conversation. All changes remain uncommitted.
+Applied comment **246**: reviewer file locations and hashes now wrap in Checks, and the broken-history warning says **task**. All changes are uncommitted.
 
-## Candidate
+## Candidate and scope
 
-- Required branch: `standing-orders/revise-same-task-revisions-20260914-from-3-annotations-o`.
-- Unchanged HEAD: `657b58bb63dc0c8557bec745e3c427a7c1331422` (the reviewed build). The original implementation base was `4755b21af6bf3fa4c76c95697c65f9bc3c283364`.
-- SHA-256 of `git diff --binary --` over the seven source/test/script paths below: `e368af1120315d2dec2c63790b0b728c071a398c38ce2a83b4881903d0855ed4`.
-- The digest excludes this assessment and protocol files. The native gate owns the eventual sealed candidate and the unchanged approved full verifier.
+- Branch: `standing-orders/revise-revise-same-task-revisions-20260914-from-3-annota`.
+- Unchanged HEAD: `70e6d2fba456c1291026e34827d52fdfaebe8e2f` (reviewed build #1588). Original implementation base: `4755b21af6bf3fa4c76c95697c65f9bc3c283364`.
+- Source/test/fixture diff SHA-256: `23134ecb2384053d0264d129c88f76d83b8d8c9beb710f5144d93fa5437b78fa`, from `git diff --binary -- src/serve.ts src/store.ts src/serve.test.ts scripts/ui-polish-fixture.mjs scripts/workspace-result-proof.mjs | shasum -a 256`. Excludes this assessment and protocol files.
+- Build #1586 feedback fixes (212, 213, 216) are inherited in HEAD: truthful family counts, bounded family queries and retained broken-lineage results. This repair leaves that behavior intact and reruns its focused regressions.
 
-## Review findings addressed
+## Small presentation repair
 
-| Comment | Change | Evidence |
-| --- | --- | --- |
-| 212: task chat says Running while Projects/header count it as queued | Project counts enrich only possible live work through the existing Work/dispatch/run projection, then count families in SQL. Final checks, current claims without a run, live independent reviews and older active siblings count once. Work's Running filter includes a family with an older live version while retaining the newest version's state and History notice. Task state and scheduling are unchanged. | Queued-row/native-claim tests during `agent-running` and `verifying-proof`; older sibling, released/expired/superseded claim and reviewer-heartbeat assertions. Both browser journeys inspect actual header and Projects HTML. |
-| 213: opening one task performs fleet-wide lookups | A task uses permission-aware ancestor point reads (the existing 64-task ancestry bound), followed by its own descendant query. Lists select roots and current state in SQL before their page limit, then hydrate every version of those selected families. Work, navigation, Review, palette and mate/fleet chat supply their own limits. Project counts remain SQL aggregates. | With 1,200 unrelated tasks and orphaned build rows, opening a two-version family performs two point reads, one query returning two versions, and zero `lookupRef` calls. A three-family page returns three task rows; fleet chat hydrates 61 for its 60-card page and overflow probe. Orphaned unclaimed builds return no activity candidates. |
-| 216: broken-lineage completions disappear from Review | Review retains an admitted exact result with “History unavailable” in the queue and a safe history warning in the result. Done tasks without a build remain visible too. Scope, evidence and mutation targets stay attached to the requested execution/run. | Server tests cover missing and cross-project ancestry, no-build completions, hidden-result refusal and exact comment targets. Desktop and phone captures show the broken-history warning alongside the preserved result. |
+| Before | After |
+| --- | --- |
+| Reviewer locations in Checks did not inherit feedback wrapping. | One rule, `.result-section[data-cockpit-source="reviewer"] li { overflow-wrap: anywhere; }`, wraps the complete location, note and hash across shared result surfaces. Diff styles are unchanged. |
+| “This execution is shown separately.” | “This task is shown separately.” The warning still names unavailable or incomplete history. |
+| The fixture checked inherited feedback but missed reviewer locations in Checks. | It now includes `docs/assessments/WORKSPACE_5_NAMES_RESULT_2026-09-14.md:28` and a labelled synthetic 64-character hash in an informational reviewer note. The existing journey checks all text bounds, clipping, page width, action size and unchanged diff whitespace. |
 
-Grouping inspects admitted lineage metadata inside SQLite; full task rows leave the database only for the selected family/page or possible live work. There is no raw-row cutoff on versions. A 207-version family retains all siblings on a one-family page. Point and list reads agree on missing, circular, foreign, borrowed-source and over-depth lineage; a depth-65 version is shown separately while all 64 valid ancestors remain available.
-
-No schema, scheduler, provider, dependency, approval, automatic-mode, evidence/reviewer engine or historical-record changes. No subagents, extra model calls, new time limits, commit, merge, push, publication or deployment.
+The pre-fix phone run reproduced three failures: chat/Review grew to 544px and the run page to 560px with the exact reported path plus the added hash. After the repair all three document widths are 390px. Reviewer rows fit their available widths (338px in chat/Review, 306px on the run page), with exact text retained and no clipping. Desktop pages remain 1400px wide.
 
 ## Signed criteria
 
@@ -27,92 +25,71 @@ No schema, scheduler, provider, dependency, approval, automatic-mode, evidence/r
 
 One root task card, canonical task/chat identity and shared conversation persist through two successive revisions. Work counts and state reflect current execution, history exposes exact prior versions, and legacy siblings or broken lineage are not silently hidden
 
-The current store/server regressions and both browser journeys pass. They retain one root Work card and conversation across two revisions, preserve exact History links and show actual current state. New regressions cover family query bounds, old active siblings and the native queued-row count mismatch. See the desktop History and phone live-count captures.
+The selected store/server/mate regressions and both browser journeys preserve one root card, navigation and conversation through two revisions. They check current live/approval/failure counts, exact History versions, bounded family reads, legacy siblings and broken lineage.
 
-Worker checks are complete; the protocol marks this pending-verification for the native final repository gate.
+Worker checks complete; pending the native final repository gate.
 
 ### safety
 
 Grouping and history obey visibility before pagination, unrelated or hidden version access is refused, and canonical navigation never retargets stale mutation, approval, feedback or run-control actions. Existing evidence lineage and fresh approval remain authoritative
 
-The existing two-revision server regression still refuses unrelated/hidden versions, mismatched approval nonces and stale run-control targets. Exact old seal receipts, later notes, fresh per-version approval and immutable original artifacts pass. Added tests prove permission-aware point/list parity and retained exact Review targets despite broken ancestry. No POST routing was changed.
+Existing regressions still enforce visibility before grouping/pagination, refuse unrelated/hidden versions and stale approval/run-control targets, and preserve exact feedback targets, source artifacts and fresh approval. This repair changes one CSS rule and warning wording; no action routing changed.
 
-Worker checks are complete; the protocol marks this pending-verification for the native final repository gate.
+Worker checks complete; pending the native final repository gate.
 
 ### feedback
 
 Plain user feedback and reviewer problems create exactly one intended revision batch with safe retry and later-batch behavior. Informational reviewer notes/questions remain available without generating default revision work
 
-The affected server, result-review, mate and revision-terms suites pass. Browser journeys submit ordinary feedback plus a line annotation, retry lost note/seal responses, create two successive revisions and retain later feedback on the original. Reviewer notes/questions remain available without a default Revise batch; deliberately selecting a question only creates a draft. The existing exact-batch seal remains authoritative.
+The added reviewer location/hash remains informational: it stays visible and never enters the default revision batch. Existing tests and both journeys cover user feedback, reviewer problems, explicit question-to-draft selection, two exact batches, lost-response replay and later feedback.
 
-Worker checks are complete; the protocol marks this pending-verification for the native final repository gate.
+Worker checks complete; pending the native final repository gate.
 
 ### experience
 
 Desktop 1400x900 and phone 390x844 journeys cover result, diff annotation, two revisions, history, draft recovery and failure. Long feedback paths/hashes wrap, actions stay usable, and UI is concise without hiding evidence or approval terms
 
-Both required viewport journeys passed 110 checks. After inspection found a clipped phone header count, the affected 390x844 journey passed 56 checks with an added text-bounds assertion. It covers result, diff annotation, two approvals/revisions, exact History, Back/reload drafts, held/failed/retried work, long paths/hashes, damaged evidence, an empty project and broken-lineage Review. The root agent inspected every capture, including the six refreshed phone captures.
+Both complete synthetic journeys pass at 1400x900 and 390x844: result, Changes/annotation, two revisions and approvals, History, draft reload/Back, hold/failure/retry, damaged evidence and an empty project. New checks measure exact reviewer text and controls on chat, run and Review pages. Diff code retains preformatted whitespace and its own horizontal scroll.
 
-Worker checks are complete; the protocol marks this pending-verification for the native final repository gate.
+Worker checks complete; pending the native final repository gate.
 
 ## Checks actually run
 
-| Command | Result and coverage |
+| Command | Result |
 | --- | --- |
-| `npm run typecheck` | Passed after implementation repairs; also rerun in both final composite commands below. |
-| `npx vitest run src/store.test.ts -t 'same task revision identity'` | 2 selected regressions passed during implementation. |
-| `npx vitest run src/serve.test.ts -t 'same task:|pilot 2: approval'` | 3 selected regressions passed during implementation. |
-| `npx vitest run src/store.test.ts src/serve.test.ts src/workspace-ui.test.ts src/result-review.test.ts src/mate.test.ts src/revision-terms.test.ts` | 488 passed across the six affected files. This was a focused implementation run, not the repository's full suite. |
-| `npm run typecheck && npx vitest run src/store.test.ts src/serve.test.ts` | Passed; 416 tests, including older active siblings, claim expiry/generation, live/dead reviewers and broken Review. Refreshed after final server/CSS changes. |
-| `npm run typecheck && npx vitest run src/store.test.ts src/serve.test.ts -t 'same task|pilot 2: approval'` | Final source check: 6 selected tests passed after excluding orphaned unclaimed build rows from activity candidates. The other 410 were unselected by this command; no tests were disabled or removed. |
-| `PLAYWRIGHT_CHANNEL=chrome node scripts/workspace-result-proof.mjs --same-task-revisions --strict --out output/playwright/same-task-revisions` | 110 passed, zero failed, at 1400x900 and 390x844. Desktop evidence remains valid after the subsequent phone-only CSS repair. |
-| `PLAYWRIGHT_CHANNEL=chrome node scripts/workspace-result-proof.mjs --same-task-revisions --phone-only --strict --out output/playwright/same-task-revisions-phone-refresh` | 56 passed, zero failed; refreshed phone journey after count wrapping, including a text-bounds assertion for every header count. |
+| `npm run build` | Passed; built the runtime for the pre-fix reproduction. |
+| `npm run typecheck && npx vitest run src/store.test.ts src/serve.test.ts src/result-review.test.ts src/mate.test.ts src/workspace-ui.test.ts src/revision-terms.test.ts -t 'same task|revision|reviewer observation|pilot 2: approval'` | Passed: typecheck and 47 selected tests across five suites. The filter left 442 tests unselected; workspace-ui had no matching test. No tests were disabled or removed. Existing Vitest setup rebuilt the repaired source. |
+| `PLAYWRIGHT_CHANNEL=chrome node scripts/workspace-result-proof.mjs --same-task-revisions --phone-only --strict --out output/playwright/same-task-review-wrap-before` | Pre-fix reproduction: exit 1, 61 passed and three reviewer-wrapping failures. All three are resolved by the final run below. |
+| `PLAYWRIGHT_CHANNEL=chrome node scripts/workspace-result-proof.mjs --same-task-revisions --strict --out output/playwright/same-task-review-wrap` | Passed: 129 checks, zero failures, one complete journey at each required viewport. |
 | `git diff --check` | Passed. |
 
-Vitest's existing setup rebuilt the source. The final focused rerun covers the last store-only candidate filter change; the previous server/UI/browser evidence remains valid because that change only avoids enriching unowned stale builds that already projected as non-live. The existing approval, feedback, mate and revision-terms evidence from this session is reused. No approved full verifier was run by this worker.
+The source/test/fixture digest above is the candidate covered by the passing tests and browser run. No full repository verifier was run by this worker. Protocol preflight uses the signed rubric and checks the submission separately; it does not replace the native gate.
 
-The first browser attempt stopped at the new count assertion because its session still selected All projects. The fixture now explicitly selects its main project before inspecting a project header. That setup failure is resolved in the passing runs above. Visual inspection then found the clipped “queued” label and prompted the phone-only CSS repair and rerun.
+## Visual inspection and simplicity
 
-## Simplicity and visual inspection
+Inspected all 14 final viewport captures: result, Checks, approval, live state, failure, History and broken Review at both sizes. Also inspected the pre-fix phone Checks capture. The repaired text wraps inside the page, the short Request change controls remain usable, and the warning explains the task state without adding instructions. History remains keyboard reachable with visible focus. Exact approval terms and the recovered phone draft remain readable while scrolling. No new controls or explanatory paragraphs were added to the product.
 
-| Before | After |
-| --- | --- |
-| Projects/header disagree with a live task's status. | Counts and the current task read live throughout build and final checks, without rewriting the queued task row. |
-| Broken history makes the result vanish from Review. | A short queue warning and the preserved exact result explain the problem; Open task and evidence/approval terms remain available. |
-| Phone header clips the end of “queued”. | Count labels wrap as complete items inside the project pill. The new text-bounds check and refreshed capture confirm all three labels are readable. |
-| Long inherited feedback can dominate a narrow page. | Existing wrapping retains the complete path, hash and exact approval terms; Revise and History stay concise, keyboard reachable and usable. |
+Selected evidence:
 
-Inspected 1400x900 desktop and 390x844 phone captures for result, approval, live work, failure, History and broken Review. Checked alignment, readable text, horizontal overflow, focus, 44px short controls, fixed composer/footer behavior and reduced motion. The phone composer retains its draft while scrolling long approval content. No evidence or consent terms were removed.
+- [Desktop Checks](../../output/playwright/same-task-review-wrap/desktop-same-task-checks.png) and [phone Checks](../../output/playwright/same-task-review-wrap/phone-same-task-checks.png).
+- [Desktop History](../../output/playwright/same-task-review-wrap/desktop-same-task-history.png) and [phone History with recovered draft](../../output/playwright/same-task-review-wrap/phone-same-task-history.png).
+- [Desktop history warning](../../output/playwright/same-task-review-wrap/desktop-same-task-review.png) and [phone history warning](../../output/playwright/same-task-review-wrap/phone-same-task-review.png).
+- [Phone approval terms](../../output/playwright/same-task-review-wrap/phone-same-task-approval.png) and [phone failed revision](../../output/playwright/same-task-review-wrap/phone-same-task-failure.png).
+- [Final browser report](../../output/playwright/same-task-review-wrap/report.json) and [pre-fix reproduction](../../output/playwright/same-task-review-wrap-before/report.json).
 
-## Evidence and provenance
+## Provenance and remaining owner checks
 
-The fixture is synthetic: in-memory records, temporary repositories, sealed example artifacts and a scripted chat response. It exercises real HTTP forms, session drafts, exact-batch seals, approvals and claim/state records, but supplies its own build results. The sample screenshot is explicitly labelled a fixture image. These are browser viewports, not physical iOS/Android hardware.
+The fixture is synthetic: in-memory records, fixture repositories, sealed example artifacts and a scripted chat response. It exercises real HTTP forms, approvals, exact-batch seals, session drafts and state transitions, while supplying completed build artifacts. It makes no model calls. The screenshots show browser viewports, not physical phones; native keyboards/IME and other browser engines remain untested.
 
-Selected protocol captures:
+The operator/root retains actual-result inspection, native Opus review and live follow-up tests as assigned in the plan. This worker does not claim those steps or two model-built revisions. The machine owns the unchanged approved full verifier for its final candidate. No known worker repair or required viewport check remains unfinished.
 
-- [Desktop History](../../output/playwright/same-task-revisions/desktop-same-task-history.png)
-- [Phone live counts](../../output/playwright/same-task-revisions-phone-refresh/phone-same-task-live.png)
-- [Desktop result](../../output/playwright/same-task-revisions/desktop-same-task-result.png)
-- [Phone approval and long feedback](../../output/playwright/same-task-revisions-phone-refresh/phone-same-task-approval.png)
-- [Desktop live counts](../../output/playwright/same-task-revisions/desktop-same-task-live.png)
-- [Desktop broken Review](../../output/playwright/same-task-revisions/desktop-same-task-review.png)
-- [Phone History and recovered draft](../../output/playwright/same-task-revisions-phone-refresh/phone-same-task-history.png)
-- [Phone broken Review](../../output/playwright/same-task-revisions-phone-refresh/phone-same-task-review.png)
+No scheduler, schema, provider, dependency, permission, approval, evidence/reviewer engine or historical-record changes. No subagents, extra model calls, new time limits, commit, merge, push or deployment.
 
-The [two-viewport report](../../output/playwright/same-task-revisions/report.json) and [phone refresh report](../../output/playwright/same-task-revisions-phone-refresh/report.json) include all checks and the additional result/failure captures inspected in this session.
+## Changed paths
 
-## Owner steps and limits
-
-The operator/root still owns actual-result inspection, native Opus review and live follow-up tests as assigned in the plan. This unattended worker made no model calls and does not claim two model-built revisions or completion of those owner steps. The native final gate must run the unchanged approved full verifier for the sealed candidate.
-
-Native mobile keyboards/IME and other browser engines were not tested. The separate workspace-chat-proof script and unrelated result-proof modes were not rerun; the agreed two-viewport journey covered this revision. No known worker implementation or required viewport check remains unfinished.
-
-## Changed source paths
-
+- `src/serve.ts`
+- `src/store.ts`
+- `src/serve.test.ts`
 - `scripts/ui-polish-fixture.mjs`
 - `scripts/workspace-result-proof.mjs`
-- `src/mate-tools.ts`
-- `src/serve.test.ts`
-- `src/serve.ts`
-- `src/store.test.ts`
-- `src/store.ts`
+- `docs/assessments/SAME_TASK_REVISIONS_RESULT_2026-09-14.md`

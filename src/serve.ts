@@ -10169,6 +10169,7 @@ const STYLE = `
   .result-changes li { margin: .2rem 0; overflow-wrap: anywhere; }
   .result-files li, .result-files .mono { overflow-wrap: anywhere; white-space: normal; }
   .result-files li { min-width: 0; }
+  .result-section[data-cockpit-source="reviewer"] li { overflow-wrap: anywhere; }
   @media (max-width: 760px) { .result-panel .pick-file, .result-panel .pick-line { min-height: 44px; min-width: 44px; white-space: nowrap; } }
   .result-files-lead { margin: .25rem 0 .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
   .result-report h3 { margin: .2rem 0 .3rem; font-size: 1rem; }

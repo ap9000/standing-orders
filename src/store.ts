@@ -11643,7 +11643,7 @@ export class Store {
     const current = versions.at(-1)!;
     return { root, current, versions,
       otherActive: versions.filter(one => one.id !== current.id && (one.state === "queued" || one.state === "running")),
-      problem: Number(rows[0]!["broken"]) === 0 ? null : "Task history is unavailable or incomplete. This execution is shown separately." };
+      problem: Number(rows[0]!["broken"]) === 0 ? null : "Task history is unavailable or incomplete. This task is shown separately." };
   }
 
   /** Group and filter BEFORE the family limit; hydrate only that page's

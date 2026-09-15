@@ -11606,7 +11606,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       expect(html).toContain(`class="cockpit-row current" href="/review?result=${id}"`);
       expect(html).toContain(`data-review-task="${id}"`);
       expect(html).toContain("History unavailable");
-      expect(html).toContain("This execution is shown separately.");
+      expect(html).toContain("This task is shown separately.");
       expect(html).not.toContain("secret-source");
       expect(html).not.toContain("Hidden source");
       expect(html).not.toContain("missing-source");

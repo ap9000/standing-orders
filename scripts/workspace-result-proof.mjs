@@ -63,7 +63,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { startFixture, LONG_REQUEST_PATH, LONG_FEEDBACK_PATH } from './ui-polish-fixture.mjs';
+import { startFixture, LONG_REQUEST_PATH, LONG_FEEDBACK_PATH, LONG_REVIEW_PATH, LONG_REVIEW_HASH } from './ui-polish-fixture.mjs';
 import { addApprover, approve, propose } from '../dist/scope.js';
 import { resultFactsFromHtml } from '../dist/result-review.js';
 
@@ -390,6 +390,34 @@ async function sameTaskJourney() {
         await page.reload();
         await page.click('[data-result-tab="checks"]');
         check(`${name}: informational reviewer notes stay available without Revise`, await page.locator('[data-cockpit-source="reviewer"]').innerText().then(text => text.includes('The rounding guard looks good.') && text.includes('Should the helper name be clearer?')) && await page.locator('.revision-from-comments').count() === 0);
+        for (const [place, path] of [['chat', `/chat?task=${root}&result=${sourceRun}&tab=checks`], ['run', `/r/${sourceRun}`], ['review', `/review?result=${root}`]]) {
+          await goto(page, path);
+          await page.click('[data-result-tab="checks"]');
+          const finding = page.locator('[data-cockpit-source="reviewer"] li').filter({ hasText: LONG_REVIEW_PATH });
+          const geometry = await finding.evaluate((el, [path, hash]) => {
+            const bounds = el.getBoundingClientRect(), location = el.querySelector('.mono');
+            const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+            const rects = [];
+            while (walker.nextNode()) {
+              const range = document.createRange(); range.selectNodeContents(walker.currentNode);
+              rects.push(...range.getClientRects());
+            }
+            const unclipped = [el, ...el.querySelectorAll('*')].every(one => {
+              const style = getComputedStyle(one);
+              return !['hidden', 'clip'].includes(style.overflowX) && style.textOverflow !== 'ellipsis' && ['none', '0'].includes(style.webkitLineClamp);
+            });
+            return { exact: location?.textContent === `${path}:28` && el.textContent.includes(hash), unclipped,
+              textFits: rects.every(r => r.left >= bounds.left - 1 && r.right <= bounds.right + 1),
+              width: el.clientWidth, scrollWidth: el.scrollWidth };
+          }, [LONG_REVIEW_PATH, LONG_REVIEW_HASH]);
+          const document = await noOverflow(page);
+          check(`${name} ${place}: Checks wraps the exact reviewer location and hash without clipping`, geometry.exact && geometry.unclipped && geometry.textFits && geometry.scrollWidth <= geometry.width && document.ok, JSON.stringify({ ...geometry, document }));
+          await finding.locator('button').focus();
+          const action = await rect(page, `button[data-review-note="Synthetic reviewer hash: ${LONG_REVIEW_HASH}"]`);
+          check(`${name} ${place}: reviewer action stays visible and single-line`, fits(action, viewport) && (viewport.width > 760 || action.height >= 44) && action.height < 70);
+          if (place === 'chat') await shot(page, `${name}-same-task-checks`, `${viewport.width}×${viewport.height}: exact reported reviewer location and full hash in Checks (synthetic fixture).`);
+        }
+        await goto(page, `/chat?task=${root}&result=${sourceRun}&tab=checks`);
         await page.locator('button[data-review-note="Should the helper name be clearer?"]').click();
         check(`${name}: deliberately selecting a reviewer question creates a feedback draft only`, await page.inputValue('#comment-form textarea[name="note"]') === 'Should the helper name be clearer?' && fixture.store.liveDiffComments(sourceRun).every(one => one.reviewerRun !== null));
       }
@@ -400,6 +428,7 @@ async function sameTaskJourney() {
       const lineButton = page.locator(`button.pick-line[data-path="${LONG_FEEDBACK_PATH}"][data-side="new"]`).first();
       const lineSize = await lineButton.boundingBox();
       check(`${name} revision ${revision}: keyboard opens Changes and phone annotation targets are comfortable`, await visibleTab(page) === 'changes' && (viewport.width > 760 || lineSize.width >= 44 && lineSize.height >= 44));
+      check(`${name} revision ${revision}: diff code preserves whitespace and its own horizontal scroll`, await lineButton.locator('xpath=ancestor::div[contains(@class,"diff-lines")]').evaluate(el => getComputedStyle(el).overflowX === 'auto' && [...el.querySelectorAll('.diff-line code')].every(code => getComputedStyle(code).whiteSpace === 'pre')));
       await lineButton.click();
       const note = `Version ${revision}: keep ${LONG_FEEDBACK_PATH} and ${'a'.repeat(64)} intact. 日本語 😀`;
       await page.fill('#comment-form textarea[name="note"]', note);
@@ -523,6 +552,7 @@ async function sameTaskJourney() {
     fixture.store.markRevision(fixture.store.lookupRef(damagedTask).id, 'missing-synthetic-ancestor', brief.id);
     await goto(page, `/review?result=${damagedTask}`);
     check(`${name}: Review keeps the broken-lineage result with a safe warning`, await page.locator(`.cockpit-row.current[href="/review?result=${damagedTask}"]`).count() === 1 && await page.locator('[data-history-problem]').count() > 0 && !(await page.locator('main').innerText()).includes('missing-synthetic-ancestor') && (await noOverflow(page)).ok);
+    check(`${name}: broken history describes the task in plain English`, (await page.locator('main').innerText()).includes('This task is shown separately.'));
     await shot(page, `${name}-same-task-review`, `${viewport.width}×${viewport.height}: broken-lineage result retained in Review with a history warning (synthetic fixture).`);
     const csrf = await page.locator('input[name=csrf]').first().getAttribute('value');
     await post('/projects/select', { csrf, path: fixture.repos.empty, return: '/work' });

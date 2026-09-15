@@ -60,6 +60,9 @@ import { acquire, release } from '../dist/claim.js';
 // The real pilot request's path: its unbroken filename overflowed the
 // expanded task scope at 390px. Keep it verbatim in synthetic signed terms.
 export const LONG_FEEDBACK_PATH = 'src/inherited-feedback/' + 'exact-feedback-'.repeat(6) + '0123456789abcdef'.repeat(4) + '.ts';
+// Build #1588 feedback: this exact reviewer location overflowed Checks on a phone.
+export const LONG_REVIEW_PATH = 'docs/assessments/WORKSPACE_5_NAMES_RESULT_2026-09-14.md';
+export const LONG_REVIEW_HASH = '0123456789abcdef'.repeat(4);
 export const LONG_ALLOWED_PATH = 'docs/assessments/WORKSPACE_5_LONG_REQUEST_RESULT_2026-09-14.md';
 // Canonical 200-unit Unicode parent for the revision-name layout boundary.
 export const LONG_REVISION_PARENT = 'Fix the payout rounding drift — ' + '日本語 😀 e\u0301 '.repeat(16) + 'cent fix';
@@ -536,6 +539,7 @@ export function startFixture(options = {}) {
     store.addReviewerComments({ reviewerRunId: reviewer, runId, artifactId: store.artifactsFor(runId).find(one => one.kind === 'terminal-diff').id, author: 'reviewer:codex', comments: [
       { path: 'src/payout.ts', line: 43, note: 'The rounding guard looks good.', severity: 'note' },
       { path: 'src/payout.ts', line: 43, note: 'Should the helper name be clearer?', severity: 'question' },
+      { path: LONG_REVIEW_PATH, line: 28, note: `Synthetic reviewer hash: ${LONG_REVIEW_HASH}`, severity: 'note' },
     ] }, now);
     store.finishRun(reviewer, { outcome: 'no-change', reason: 'reviewed', now });
   };
