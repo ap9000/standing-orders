@@ -23,7 +23,9 @@ const BOOT_A = "4cdea6bb-1ac8-4e7c-bfcf-646f89b8a8a7";
 const BOOT_B = "9b1d0e2f-3a4b-4c5d-8e6f-a1b2c3d4e5f6";
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const REPO = resolve("/repo");
-const T0 = new Date("2026-09-12T08:00:00.000Z");
+// The witness is this live process: anchor its whole fixture timeline after
+// the real process birth, including observation, finish and heartbeat times.
+const T0 = new Date();
 const host = hostname();
 
 function scripted(answers: Record<string, { code?: number; stdout?: string }>) {

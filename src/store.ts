@@ -20549,7 +20549,7 @@ export class Store {
         }
         if (witness["pid"] === null) return `run #${id} has an incomplete spawn witness; exit is unproven`;
         const pid = Number(witness["pid"]);
-        if (processMayBeAlive(pid, witness["process_group"] === 1)) return `run #${id}'s process ${pid} may still be running`;
+        if (processMayBeAlive(pid, witness["process_group"] === 1, { observedAt: witness["observed_at"], finishedAt: run.finishedAt })) return `run #${id}'s process ${pid} may still be running`;
       }
       if (run.worktree !== null) {
         try {

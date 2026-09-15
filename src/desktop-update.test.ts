@@ -1,4 +1,5 @@
-import { test, expect } from "vitest";
+import { test, expect, vi } from "vitest";
+import * as childProcess from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync, renameSync, existsSync, statSync, cpSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join, dirname } from "node:path";
@@ -12,6 +13,8 @@ import { previewDesktopUpdate, prepareDesktopUpdate, runDesktopUpdate, readUpdat
 import { superviseDesktopUpdate, runUpdateAttempt, updateRecoveryDefinition, armUpdateRecovery } from "./desktop-update-recovery.js";
 import { launchdPlist } from "./daemon.js";
 import { installUpdateGate, removeUpdateGate, updateAdmissionPaused, freezeUpdateGate, UPDATE_PAUSED } from "./desktop-update-gate.js";
+
+vi.mock("node:child_process", { spy: true });
 
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "so-controlled-update-"))), state = join(root, "state");
@@ -449,4 +452,46 @@ test("an ended run with a live process witness still drains, and cancellation ne
     expect(waiting).toBe(true); expect(f.calls).toEqual([]);
     expect(readUpdateJournal(f.state)?.phase).toBe("cancelled");
   } finally { f.close(); }
+});
+
+test.each(["single reused PID", "absent group", "populated group", "unknown group", "unknown birth"])("updater handles %s without rewriting the historical witness", async state => {
+  const f = fixture();
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  let kill: ReturnType<typeof vi.spyOn> | undefined;
+  let clock: ReturnType<typeof vi.spyOn> | undefined;
+  const ps = vi.mocked(childProcess.execFileSync);
+  try {
+    await f.prepare();
+    const db = f.db();
+    db.exec("INSERT INTO task_ref(backend,external_id) VALUES('builtin','reused')");
+    const ref = db.prepare("SELECT id FROM task_ref WHERE external_id='reused'").get()!.id;
+    const time = "2026-09-12T16:53:59.658Z";
+    const id = db.prepare("INSERT INTO run(task_ref,lease_id,runner,role,started_at,finished_at,outcome) VALUES(?,'finished','fixture','reviewer',?,?,'interrupted')").run(ref, time, time).lastInsertRowid;
+    db.prepare("INSERT INTO run_process(run,pid,host,process_group,observed_at) VALUES(?,?,?,?,?)").run(id, 87803, hostname(), state.includes("group") ? 1 : 0, time);
+    const before = db.prepare("SELECT * FROM run_process WHERE run=?").all(id); db.close();
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    kill = vi.spyOn(process, "kill").mockImplementation(target => {
+      if (target < 0 && state !== "populated group") throw Object.assign(new Error(state), { code: state === "unknown group" ? "EPERM" : "ESRCH" });
+      return true;
+    });
+    ps.mockReturnValue(state === "unknown birth" ? "" : "Mon Sep 14 14:33:43 2026\n");
+    clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-15T00:00:00.000Z"));
+    let waiting = false;
+    await runDesktopUpdate(f.state, { ...f.hooks, sleep: async () => {
+      waiting = true;
+      expect(readUpdateJournal(f.state)?.detail).toContain("may still be running");
+      requestUpdateRestore(f.state);
+    } });
+    const blocked = state === "populated group" || state.startsWith("unknown");
+    expect(waiting).toBe(blocked);
+    expect(readUpdateJournal(f.state)?.phase).toBe(blocked ? "cancelled" : "complete");
+    expect(f.calls.filter(call => call === "swap")).toHaveLength(blocked ? 0 : 1);
+    const after = f.db();
+    expect(after.prepare("SELECT * FROM run_process WHERE run=?").all(id)).toEqual(before); after.close();
+    expect(kill.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+  } finally {
+    kill?.mockRestore(); ps.mockReset(); clock?.mockRestore();
+    Object.defineProperty(process, "platform", originalPlatform);
+    f.close();
+  }
 });

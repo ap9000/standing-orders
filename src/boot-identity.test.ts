@@ -69,7 +69,8 @@ describe("custody across boots", () => {
   let store: Store;
   let dir: string;
   const REPO = resolve("/repo");
-const T0 = new Date("2026-09-12T08:00:00.000Z");
+  // The live process and all run/witness times share a current baseline.
+  const T0 = new Date();
   const host = hostname();
 
   afterEach(() => {

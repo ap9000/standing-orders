@@ -6,9 +6,10 @@
  * against real transactions.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import * as childProcess from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
 import { register } from "./runner.js";
@@ -20,6 +21,7 @@ import { diagnoseTaskDispatch } from "./dispatch.js";
 import { taskReadinessBlocker } from "./dispatch.js";
 
 const T0 = new Date("2026-09-12T08:00:00.000Z");
+vi.mock("node:child_process", { spy: true });
 const later = (ms: number) => new Date(T0.getTime() + ms);
 const REPO = resolve("/repo/stop");
 const tok = (name: string) => `tok-${name}`;
@@ -88,6 +90,40 @@ describe("safe task stop and resume (v52)", () => {
     }
   });
   afterEach(() => store.close());
+
+  test.each([false, true])("quiescence dismisses a proven reused PID only after an absent group, without changing retained rows (group=%s)", group => {
+    const a = runningAttempt(store, "t-reused");
+    store.finishRun(a.runId, { outcome: "failed", reason: "interrupted", now: later(1_000) });
+    store.raw().prepare("INSERT INTO run_process(run,pid,host,process_group,observed_at) VALUES(?,?,?,?,?)")
+      .run(a.runId, 87803, hostname(), group ? 1 : 0, T0.toISOString());
+    const rows = () => store.raw().prepare("SELECT * FROM run_process WHERE run = ?").all(a.runId);
+    const before = rows();
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const kill = vi.spyOn(process, "kill").mockImplementation(target => {
+      if (target < 0) throw Object.assign(new Error("no group"), { code: "ESRCH" });
+      return true;
+    });
+    const ps = vi.mocked(childProcess.execFileSync).mockReturnValue("Mon Sep 14 14:33:43 2026\n");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-15T00:00:00.000Z"));
+    try {
+      expect(store.stopQuiescenceProblem(a.runId)).toBeNull();
+      ps.mockReturnValue("");
+      expect(store.stopQuiescenceProblem(a.runId)).toContain("may still be running");
+      ps.mockReturnValue("Sat Sep 12 08:00:00 2026\n");
+      expect(store.stopQuiescenceProblem(a.runId)).toContain("may still be running");
+      ps.mockReturnValue("Mon Sep 14 14:33:43 2026\n");
+      if (group) {
+        kill.mockReturnValue(true);
+        expect(store.stopQuiescenceProblem(a.runId)).toContain("may still be running");
+      }
+      expect(rows()).toEqual(before);
+      expect(kill.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+    } finally {
+      kill.mockRestore(); ps.mockReset(); clock.mockRestore();
+      Object.defineProperty(process, "platform", originalPlatform);
+    }
+  });
 
   test("a fresh file is born at the current schema with the run_stop table and a hold that admits the stop owner", () => {
     expect(SCHEMA_VERSION).toBe(60);
