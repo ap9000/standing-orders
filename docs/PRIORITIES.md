@@ -72,6 +72,9 @@ implementation history, not current deployment claims.
 4. **After that: small, provenance-backed project learning.** Reuse verified
    commands and repository conventions with visible sources and reset controls.
    Start with proven facts, not a general memory platform.
+   The [review-learning plan](REVIEW_LEARNING_PLAN_2026-09-14.md) now specifies
+   project lessons first, then separately evaluated Standing Orders improvements.
+   It is a researched proposal, not an implemented learning runtime.
 
 Keep real exhausted-subscription fallback certification fail-closed. No new
 task-duration caps, unlimited repair loops, or mandatory extra reviewer stages
