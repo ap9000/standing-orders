@@ -23,9 +23,46 @@ export function chatWorkingHtml(input: { details: string; stopForm?: string; key
     (input.stopForm ?? '') + '</div>';
 }
 
+/** Recorded activity is inspectable, not a row of performance badges. */
+export function chatActivityDetailsHtml(activity: string | null): string {
+  if (!activity) return '';
+  return `<details class="chat-activity-details"><summary>Activity</summary><div class="chat-activity" aria-label="work performed">${activity.split(' · ').map(one => `<span>${escape(one)}</span>`).join('')}</div></details>`;
+}
+
 // Local primitives adapted from the researched interaction patterns. No
 // imported kit, animation runtime, simulated progress, or changed authority.
 export const CHAT_POLISH_CSS = `
+  /* Quiet workspace surfaces: color signals state, not an AI aesthetic. */
+  body { background: var(--background); }
+  .chat-workspace .chat-overview, .chat-workspace .chat-plan, .chat-workspace .result-panel,
+  .chat-workspace .decide-card { background: var(--card); box-shadow: none; }
+  .chat-workspace .result-panel { border-radius: .75rem; }
+  .chat-workspace .chat-empty::before { content: none; }
+  .chat-workspace .thread .msg.mate::before { background: var(--muted); box-shadow: none; border: 0; }
+  .chat-workspace .thread .msg.op { box-shadow: none; border: 0; }
+  .chat-workspace .completion-receipt { background: var(--card); box-shadow: none; }
+  .chat-workspace .completion-receipt::after { content: none; }
+  .chat-workspace .thread { min-height: 0; }
+  .chat-workspace .task-live-summary { margin-bottom: .75rem; padding-bottom: .25rem; }
+  .chat-workspace .task-journey > details, .chat-workspace .result-feedback-history,
+  .chat-workspace .chat-limits, .chat-workspace .task-chat-agents {
+    border: 0; border-radius: 0; background: transparent; box-shadow: none; padding: 0; margin: .25rem 0;
+  }
+  .chat-workspace .task-chat-agents > summary { min-height: 44px; cursor: pointer; font-size: .8125rem; color: var(--muted-foreground); }
+  .chat-workspace .task-chat-agents p { margin: 0 0 .5rem; }
+  .chat-workspace .decide-options .decide-option { border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; padding: .75rem 0; }
+  .chat-workspace .chat-plan { padding: 1rem; margin-top: .5rem; }
+  .chat-workspace .result-knowledge { margin-bottom: .5rem; }
+  .chat-workspace .result-panel [data-result-view] > details { margin-block: 0; padding-block: 0; }
+  .chat-workspace .result-panel [data-result-view] > details > summary { min-height: 44px; display: flex; align-items: center; }
+  .chat-workspace .result-feedback-history > summary { min-height: 44px; }
+  .chat-activity-details { border: 0; background: transparent; box-shadow: none; border-radius: 0; padding: 0; margin: 0; }
+  .chat-activity-details > summary { min-height: 44px; display: flex; align-items: center; gap: .4rem; cursor: pointer; color: var(--muted-foreground); font-size: .75rem; }
+  .chat-activity-details > summary::after { content: '⌄'; }
+  .chat-activity-details[open] > summary::after { transform: rotate(180deg); }
+  .chat-activity-details .chat-activity { gap: .25rem .75rem; }
+  .chat-activity-details .chat-activity span { border: 0; padding: 0; border-radius: 0; font: inherit; font-size: .75rem; }
+  .chat-workspace .chat-message-foot { justify-content: flex-start; align-items: baseline; margin-top: .25rem; }
   .chat-activity-row { border: 0; background: transparent; box-shadow: none; padding: .5rem 0; min-height: 44px; gap: .65rem; }
   .chat-activity-row details { flex: 1; min-width: 0; border: 0; background: transparent; padding: 0; margin: 0; box-shadow: none; }
   .chat-activity-row summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; width: fit-content; font-size: .875rem; font-weight: 550; }
@@ -73,6 +110,7 @@ export const CHAT_POLISH_CSS = `
     @keyframes quiet-activity { 50% { opacity: .35; } }
   }
   @media (max-width: 600px) {
+    .chat-workspace .result-panel { background: transparent; border-radius: 0; }
     .chat-completed .chat-overview-item { align-items: flex-start; flex-wrap: wrap; gap: .35rem; }
     .chat-completed .chat-overview-copy { flex-basis: 65%; }
     .task-live-summary .task-journey { gap: .5rem; }

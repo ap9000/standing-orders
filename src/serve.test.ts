@@ -8787,7 +8787,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     // Concise pass (2026-09-13): one contextual sentence over the empty
     // thread, no intro over the heading, no second hint under the
     // composer, an idle status line with nothing to say, three starters.
-    expect(thread).toContain('<p class="meta">Describe the outcome you want; changes come back as cards you confirm.</p></div>');
+    expect(thread).toContain('<p class="meta">Describe a task or ask about your projects.</p></div>');
     expect(thread).not.toContain("One message is enough.");
     expect(thread).not.toContain("Ask about any project. Changes come back as cards you confirm.");
     expect(thread).not.toContain("Changes appear as cards for you to confirm.");
@@ -8901,12 +8901,12 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     // starters, and an idle status line with nothing to say — no intro
     // sentence under the title and no second hint under the composer.
     const focusedFresh = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
-    expect(focusedFresh).toContain('<div class="chat-empty" data-key="empty"><strong>What do you want to understand or change?</strong><p class="meta">I read the task first — ask anything, or start below.</p></div>');
+    expect(focusedFresh).toContain('<div class="chat-empty" data-key="empty"><strong>What do you want to understand or change?</strong><p class="meta">Ask about progress, review results, or adjust the plan.</p></div>');
     expect(focusedFresh).not.toContain("Ask, steer, or revise this task in the same unified conversation.");
     expect(focusedFresh).not.toContain("choose a useful starting point");
     expect(focusedFresh).not.toContain("Changes appear as cards for you to confirm.");
     expect(focusedFresh).toContain('<p class="meta composer-hint" id="chat-connection" role="status" aria-live="polite"></p>');
-    expect([...focusedFresh.matchAll(/class="quiet">([^<]+)<\/button><\/form>/g)].map(m => m[1]).filter(one => one !== "end the conversation and forget the thread")).toEqual(["what’s happening", "check the proof", "revise scope"]);
+    expect([...focusedFresh.matchAll(/class="quiet">([^<]+)<\/button><\/form>/g)].map(m => m[1]).filter(one => one !== "end the conversation and forget the thread")).toEqual(["what’s happening", "review results", "adjust the plan"]);
     expect(focusedFresh).toContain('href="/chat?task=a" class="active" aria-current="page">Ask</a>');
 
     const unknown = await post(cookie, "/chat", { csrf, task: "not-in-this-workspace", message: "do something" });
@@ -9136,6 +9136,8 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     let html = await page(cookie);
     expect(html).toContain('<div class="msg op" data-message-role="operator" data-key="m1"><p style="white-space:pre-wrap">what is queued?</p></div>');
     expect(html).toContain("I propose moving b to the front.");
+    expect(html).not.toContain('aria-label="suggested questions"');
+    expect(html).toContain('<details class="chat-activity-details"><summary>Activity</summary>');
     expect(html).toContain('class="chat-activity"');
     expect(html).toContain("read 1");
     expect(html).toContain("proposed 1");
@@ -9503,7 +9505,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(answered["pending"]).toBe(false);
     expect(answered["version"]).not.toBe(live["version"]);
     expect((answered["fragments"] as Record<string, string>)["thread"]).toContain('data-message-role="assistant" data-key="m2" id="latest"');
-    expect((answered["fragments"] as Record<string, string>)["thread"]).toContain('data-key="starters"');
+    expect((answered["fragments"] as Record<string, string>)["thread"]).not.toContain('data-key="starters"');
     expect((answered["fragments"] as Record<string, string>)["after"]).toBe('<div id="chat-after-composer" data-chat-region="after"></div>');
     // The task lens: its own version, its approval digest, a live fragment
     // WITHOUT a password or a nonce, and no churn across polls.

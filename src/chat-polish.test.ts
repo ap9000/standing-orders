@@ -1,13 +1,23 @@
 import { describe, expect, test } from 'vitest';
 import { Window } from 'happy-dom';
 import type { ChatSnapshot } from './store.js';
-import { chatWorkingHtml, completedWorkHtml, CHAT_POLISH_CSS } from './chat-polish.js';
+import { chatWorkingHtml, chatActivityDetailsHtml, completedWorkHtml, CHAT_POLISH_CSS } from './chat-polish.js';
 import { knowledgeHtml } from './knowledge-ui.js';
 
 const snapshot = (tasks: ChatSnapshot['tasks']): ChatSnapshot => ({tasks,repos:[],tasksSaturated:false,decisions:[],decisionsSaturated:false,incidents:[],incidentsSaturated:false,routines:[],routinesSaturated:false,publications:[],publicationsSaturated:false});
 const task = (id: string, patch: Partial<ChatSnapshot['tasks'][number]> = {}): ChatSnapshot['tasks'][number] => ({id,title:id,repoIndex:0,state:'done',ageHours:1,strikes:0,proofVerdict:null,proofMatrix:[],...patch});
 
 describe('quiet chat and reference-first knowledge', () => {
+  test('recorded activity stays inspectable without decorative status badges', () => {
+    const win=new Window();try {
+      win.document.body.innerHTML=chatActivityDetailsHtml('read 2 · proposed 0 · <script>');
+      expect(win.document.querySelector('details')?.open).toBe(false);
+      expect(win.document.querySelector('summary')?.textContent).toBe('Activity');
+      expect(win.document.querySelector('.chat-activity')?.textContent).toContain('read 2');
+      expect(win.document.querySelector('script')).toBeNull();
+      expect(chatActivityDetailsHtml(null)).toBe('');
+    } finally {win.close();}
+  });
   test('completion list is bounded, escaped, family-linked, and never invents verified or since-last-visit claims', () => {
     const html=completedWorkHtml(snapshot([task('version',{rootId:'root/a',title:'<img onerror="bad">'}),task('two'),task('three'),task('four')]),['<Project>']);
     const win=new Window();try {

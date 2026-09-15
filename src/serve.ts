@@ -5,7 +5,7 @@ import { learningHtml } from "./workspace-ui.js";
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
-import { chatWorkingHtml, completedWorkHtml, CHAT_POLISH_CSS } from "./chat-polish.js";
+import { chatWorkingHtml, chatActivityDetailsHtml, completedWorkHtml, CHAT_POLISH_CSS } from "./chat-polish.js";
 import { styleAsset } from "./style-asset.js";
 import { MOBILE_VIEWPORT_SCRIPT } from "./mobile-viewport.js";
 import { authorizePlanUnderMode, applyModeToNewFiling, planAutoPending } from "./plan-auto.js";
@@ -8871,7 +8871,9 @@ function agentsCardHtml(taskId: string, view: RouteView | null | undefined, csrf
 /** The chat's always-visible strip: the summary and a way to the details. */
 function agentsStripHtml(view: RouteView | null, taskId: string): string {
   if (view === null) return "";
-  return `<p class="task-chat-agents"><span class="eyebrow">agents</span> <span>${escape(agentsSummaryWords(view))}</span> <a href="${taskHref(taskId)}#agents">details →</a></p>`;
+  // A broken setup is not secondary detail: keep its failure visible.
+  if (view.kind === "unreadable") return `<p class="task-chat-agents">${escape(agentsSummaryWords(view))} <a href="${taskHref(taskId)}#agents">Review agent setup</a></p>`;
+  return `<details class="task-chat-agents"><summary>Agent setup</summary><p>${escape(agentsSummaryWords(view))}</p><a href="${taskHref(taskId)}#agents">View agents</a></details>`;
 }
 
 /** Every character that could open a tag or an attribute, dead at the sink. */
@@ -13404,8 +13406,8 @@ function matePromptStarters(csrf: string, focus: TaskChatFocus | null = null): s
       ] as const
     : [
         ["what’s happening", "Read this task and explain its current status, what is blocking it, and what should happen next."],
-        ["check the proof", "Review the evidence recorded for this task and tell me what is proven and what is still unverified."],
-        ["revise scope", "Read this task and propose a tighter scope if that would improve the outcome. Explain why before I confirm anything."],
+        ["review results", "Review the evidence recorded for this task and tell me what is proven and what is still unverified."],
+        ["adjust the plan", "Read this task and propose a tighter scope if that would improve the outcome. Explain why before I confirm anything."],
       ] as const;
   return `<div class="chat-prompts" aria-label="suggested questions">${prompts.map(([label, message]) =>
     `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
@@ -13471,8 +13473,7 @@ function renderChatText(text: string): string {
 }
 
 function chatActivity(activity: string | null): string {
-  if (activity === null) return "";
-  return `<div class="chat-activity" aria-label="work performed">${activity.split(" · ").map(one => `<span>${escape(one)}</span>`).join("")}</div>`;
+  return chatActivityDetailsHtml(activity);
 }
 
 const CHAT_UI_SCRIPT =
@@ -14097,7 +14098,7 @@ function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; proble
   if (data.messages.length === 0) {
     parts.push(
       `<div class="chat-empty" data-key="empty"><strong>${data.focusTask === null ? "What do you want to get done?" : "What do you want to understand or change?"}</strong>` +
-      `<p class="meta">${data.focusTask === null ? "Describe the outcome you want; changes come back as cards you confirm." : "I read the task first — ask anything, or start below."}</p></div>`,
+      `<p class="meta">${data.focusTask === null ? "Describe a task or ask about your projects." : "Ask about progress, review results, or adjust the plan."}</p></div>`,
     );
   }
   for (const message of data.messages) {
@@ -14122,7 +14123,8 @@ function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; proble
       stopForm:`<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="turn" value="${data.pending.id}"><button type="submit" class="quiet" aria-label="Stop chat response">Stop</button></form>`,
     }));
   }
-  if (data.messages.length > 0 && data.pending === null) parts.push(`<div data-key="starters">${matePromptStarters(data.csrf, data.focusTask)}</div>`);
+  // Suggestions help start a conversation; repeating them after every
+  // response competes with the actual result and its available actions.
   return `<div id="chat-thread" data-chat-region="thread">${parts.join("\n")}</div>`;
 }
 
@@ -14176,7 +14178,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<input type="hidden" name="request" value="${randomBytes(16).toString("hex")}"><input type="hidden" name="request-session" value="${data.session.id}">`,
     data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,
-    `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask === null ? "Describe what you want done…" : "Ask about status, revise scope, or steer the next attempt…"}"></textarea></label>`,
+    `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask === null ? "Describe what you want done…" : "Ask about this task…"}"></textarea></label>`,
     `<button type="submit" aria-label="${data.pending === null ? "send message" : "wait for the current reply before sending"}"${data.pending === null ? "" : " disabled"}>send</button>`,
     `</form>`,
     // Concise pass (2026-09-13): the status line speaks only when there is
@@ -14964,10 +14966,10 @@ function decisionAnswerCard(
   return (
     `<div class="decide-card" data-decision-id="${decision.id}">` +
     `<p class="q">${escape(decision.question)}</p>` +
-    `<details class="decision-context"><summary>Context</summary><p class="meta">${escape(decision.recap)}</p></details>` +
-    `<p class="meta"><span class="mono">${escape(decision.taskId)}</span>${chip ? projectChip(decision.repo) : ""}` +
+    `<details class="decision-context"><summary>Context</summary><p class="meta">${escape(decision.recap)}</p><span class="meta mono">${escape(decision.taskId)}</span></details>` +
+    `<p class="meta">${chip ? projectChip(decision.repo) : ""}` +
     `${isOverdue(decision, now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
-    ` · <a href="/d/${decision.id}${returnTo === null ? "" : `?return=${encodeURIComponent(returnTo)}`}">View details →</a></p>` +
+    ` <a href="/d/${decision.id}${returnTo === null ? "" : `?return=${encodeURIComponent(returnTo)}`}">View details →</a></p>` +
     `<div class="decide-options">${options}</div></div>`
   );
 }
@@ -19433,7 +19435,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const attentionHtml =
     attention.length === 0
       ? ""
-      : `<div class="result-attention" data-result-attention="${attention.length}"><strong>Before you rely on this</strong><ul>${attention.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+      : `<div class="result-attention" data-result-attention="${attention.length}"><ul>${attention.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
 
   // ---- one outcome, one action (repair 2026-09-14) ------------------------
   // The outcome is the handoff's first sentence, bounded; the agent's full
