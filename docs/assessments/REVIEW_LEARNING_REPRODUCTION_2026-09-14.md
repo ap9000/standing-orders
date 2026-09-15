@@ -29,10 +29,10 @@ The first task explicitly asks the normal reviewer to **consider** a reusable le
 
 ## Reproduce this exact before/after
 
-The disposable main checkout intentionally remains at the faulty seed; the fixed candidate is preserved in its native worktree. These commands are read-only:
+The faulty seed is preserved in `before-date`; the fixed candidate is preserved in its native worktree. (The disposable main checkout subsequently advanced for the assessment follow-up.) These commands are read-only:
 
 ```sh
-TZ=America/Los_Angeles node --input-type=module -e 'import {dateLabel} from "/private/tmp/standing-orders-learning-pilot-0xgXFi/repo/src/date-label.mjs"; console.log(dateLabel("2026-01-01"));'
+TZ=America/Los_Angeles node --input-type=module -e 'import {dateLabel} from "/private/tmp/standing-orders-learning-pilot-0xgXFi/before-date/src/date-label.mjs"; console.log(dateLabel("2026-01-01"));'
 # Dec 31, 2025
 
 TZ=America/Los_Angeles node --input-type=module -e 'import {dateLabel} from "/private/tmp/standing-orders-learning-pilot-0xgXFi/worktrees/repo/standing-orders-learning-date-fix-534b052b/src/date-label.mjs"; console.log(dateLabel("2026-01-01"));'
