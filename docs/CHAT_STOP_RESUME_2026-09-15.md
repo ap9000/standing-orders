@@ -152,3 +152,53 @@ the installed root, rerun the full suite in review, change runtime/settings,
 rewrite sealed history or weaken any evidence, approval or execution safeguard.
 The screenshot's old repeated filler was fixture text, not actual model output;
 the prepared script already replaces it with realistic long feedback.
+
+## Evidence follow-up (build #1606 comment 329): current captures on the prepared candidate
+
+Branch `standing-orders/revise-revise-chat-stop-resume-20260915-fix-1-from-1-ann`, uncommitted on top of `515b307`, which already merges deployed `8efa954` with the phone revision `ec49769` and the realistic-feedback script fix `88ef100`. Verified before any check: `a97f74b`, `8efa954` and `ec49769` are all ancestors of HEAD; the installed checkout and its database were not rebuilt, migrated or read. No product code, test, script, history or runtime setting changed in this follow-up: the phone overlap repair, the two-sentence stop consequence and every deployed process-identity fix stand as merged. What was missing — and is now in the sealed tree — is evidence of that exact candidate.
+
+**Inherited controls, unchanged and exercised by this journey.** Chat adds no second task system; each step lands on the control that already owns it:
+
+| Step in chat | Owner (unchanged in this lineage) | Where the journey proves it |
+| --- | --- | --- |
+| Stop task confirmation | `requestTaskStop` in `src/task-control.ts`, called from `src/chat-task-actions.ts` with the exact task, run and current stamp | "stop requested is still stopping", "repeated confirmation records one stop" |
+| Observed status on both screens | `taskControlOf` projection (`src/task-control.ts`) behind `[data-task-control]` on chat and `/t/:task` | "chat and task show stopping for the same run", "task and chat agree after resume" |
+| Worker acknowledgement | `finalizeInterruptedFenced` in `src/claim.ts` (synthetic call in the journey; real subprocess trees in `src/task-control-process.test.ts`) | "task-page acknowledgement reaches chat without clearing draft" |
+| Resume ceremony | `armTaskResume` in `src/serve.ts`, then the task page's own `/t/:task/resume` password form and nonce | "resume opens existing nonce and password form", "wrong password refuses resume" |
+| Stale card | The proposal confirmation door re-checks the task stamp | "stale card refuses without draft loss" |
+| Draft across confirmation, refusal and updates | Tab draft storage and live-region reconciliation in `src/chat-continuity.ts` | every "preserves … draft" and "retains chat draft" check |
+| Feedback and same-task revision | Shared `liveDiffComments` history and the one-task revision lineage (`taskFamilyOf`, `revisionLineageOf`) | "result feedback saved in shared history", "revision preserves one task and result lineage", "revision replay creates no duplicate" |
+
+**Focused checks run by the builder** (readable output: [journey-output.txt](../evidence/chat-stop-resume-2026-09-15/journey-output.txt)):
+
+| Command | Result |
+| --- | --- |
+| `npm run typecheck` | Passed, exit 0. |
+| `npx vitest run src/chat-task-actions.test.ts src/mate-doors.test.ts src/mate.test.ts src/task-control-console.test.ts src/task-control.test.ts src/chat-continuity.test.ts src/chat-polish.test.ts src/mobile-viewport.test.ts` | 8 files, 107 tests passed; its setup compiled this worktree's local runtime. |
+| `npx vitest run src/serve.test.ts src/mate-doors.test.ts -t 'chat review|stop confirmation|same task: two revisions'` | 4 selected tests passed (317 excluded by the name filter, none changed or skipped in source). |
+| `node scripts/chat-stop-resume-journey.mjs --capture` | 72 assertions passed at 1440×900 and 390×844; wrote the eleven captures below. |
+| `node scripts/chat-stop-resume-journey.mjs` | 72 assertions passed again in the durable non-capturing mode the proof cites. |
+
+The unchanged approved full verifier was **not** run by the builder; it runs once at the machine's final gate for this exact sealed candidate, and c4 stays pending-verification until then. Remaining gap from repair 1 stands: `scripts/workspace-result-proof.mjs` is outside the verifier and untouched.
+
+**Screenshots** — all eleven are current Chrome viewport captures of this candidate. Eight are byte-identical to the reviewed build's files (the merge changed nothing they render); the three revision captures now carry the realistic saved feedback instead of the old "Preserve exact feedback" filler, which was fixture text rather than model output. Hashes: [follow-up-manifest.json](../evidence/chat-stop-resume-2026-09-15/follow-up-manifest.json); assertion list: [browser-report.json](../evidence/chat-stop-resume-2026-09-15/browser-report.json).
+
+| Screenshot | What it shows |
+| --- | --- |
+| [Desktop empty chat](../evidence/chat-stop-resume-2026-09-15/desktop-empty.png) | Running task with its Stop control before any message. |
+| [Desktop stop confirmation](../evidence/chat-stop-resume-2026-09-15/desktop-stop-confirm.png) | Stop task? naming the task and Run #, two-sentence consequence, one primary Stop task. |
+| [Desktop stopping](../evidence/chat-stop-resume-2026-09-15/desktop-stopping.png) | Task page reads Stopping… while chat shows the confirmed card and Stop requested receipt; the draft is still in the composer. |
+| [Desktop refusal and draft](../evidence/chat-stop-resume-2026-09-15/desktop-refusal-draft.png) | Stale card refused in plain words; unsent draft intact. |
+| [Desktop result](../evidence/chat-stop-resume-2026-09-15/desktop-result.png) | Exact result, Changes tab, diff and the feedback form. |
+| [Desktop revision](../evidence/chat-stop-resume-2026-09-15/desktop-revision.png) | Same-task revision receipt with the realistic feedback and its review link in view. |
+| [390px long stop confirmation](../evidence/chat-stop-resume-2026-09-15/phone-stop-confirm-long.png) | Long unbroken title wraps; single-line 44px buttons; no overflow. |
+| [390px resume ceremony](../evidence/chat-stop-resume-2026-09-15/phone-resume-password.png) | Resume task? with retained limits, record behind one disclosure, password control. |
+| [390px refusal and draft](../evidence/chat-stop-resume-2026-09-15/phone-refusal-draft.png) | Stale-card refusal with the draft still present under it. |
+| [390px revision](../evidence/chat-stop-resume-2026-09-15/phone-revision.png) | Receipt and plan link readable above the composer on arrival (the repaired defect). |
+| [390px revision, typing](../evidence/chat-stop-resume-2026-09-15/phone-revision-typing.png) | Simulated keyboard: composer raised with the draft; receipt end and link still above it. |
+
+Simplicity pass on these captures: each state has one title, one outcome and one primary action (Stop task, Resume task, review & start in chat); the resume record and worktree path stay behind Stop record and saved work; refusals say what changed and what to do. Nothing further was found to remove without hiding a safeguard, so no copy changed.
+
+Honest labels: synthetic fixture data and a scripted chat provider with zero model calls; the keyboard is a shrunk visual viewport, not a physical phone or Safari; the worker acknowledgement in the browser journey is a direct fenced call, not a live process (real subprocess behaviour is covered by `src/task-control-process.test.ts`, unchanged).
+
+Follow-up receipt: builder Claude Opus 5 (`claude-opus-5`), no subagents, zero live model calls, zero operator interventions or permission questions. Comment 329 recorded 2026-09-15T18:53:28Z; checks and captures ran from about 18:54Z to 18:57Z, roughly 4 minutes, with the handoff written after. One builder correction: none needed — every focused check passed first time. No commit, push, branch switch, installed-database migration, rebuild of the installed root, or provider/permission change.

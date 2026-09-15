@@ -1,0 +1,94 @@
+# Chat stop/resume evidence follow-up — readable command output
+# Candidate HEAD: 515b30777d8fe4bd5498b669432f80da38b98819 (uncommitted evidence on top)
+# Synthetic Chromium fixture data, scripted chat provider, zero live model calls.
+
+$ npm run typecheck
+exit 0 (no output beyond the tsc invocation)
+
+$ npx vitest run src/chat-task-actions.test.ts src/mate-doors.test.ts src/mate.test.ts src/task-control-console.test.ts src/task-control.test.ts src/chat-continuity.test.ts src/chat-polish.test.ts src/mobile-viewport.test.ts
+ Test Files  8 passed (8)
+      Tests  107 passed (107)
+   Duration  2.88s (transform 4.87s, setup 111ms, import 6.40s, tests 2.84s, environment 0ms)
+
+$ npx vitest run src/serve.test.ts src/mate-doors.test.ts -t 'chat review|stop confirmation|same task: two revisions'
+ Test Files  2 passed (2)
+      Tests  4 passed | 317 skipped (321)
+   Duration  2.22s (transform 2.10s, setup 25ms, import 2.72s, tests 623ms, environment 0ms)
+
+$ node scripts/chat-stop-resume-journey.mjs --capture
+PASS desktop before conversation has no horizontal overflow
+PASS desktop empty chat has no horizontal overflow
+PASS desktop-empty has no horizontal overflow
+PASS desktop confirmation names exact task, run and saved-work consequence
+PASS desktop confirmation consequence is two short sentences naming other tasks and acknowledgement
+PASS desktop confirmation buttons have tap targets and single-line labels
+PASS desktop-stop-confirm has no horizontal overflow
+PASS desktop stop preserves composer draft
+PASS desktop stop requested is still stopping
+PASS desktop chat and task show stopping for the same run
+PASS desktop-stopping has no horizontal overflow
+PASS desktop repeated confirmation records one stop
+PASS desktop task-page acknowledgement reaches chat without clearing draft
+PASS desktop resume opens existing nonce and password form
+PASS desktop long resume terms has no horizontal overflow
+PASS desktop password refusal has no horizontal overflow
+PASS desktop wrong password refuses resume
+PASS desktop refusal retains chat draft
+PASS desktop stale card refuses without draft loss
+PASS desktop-refusal-draft has no horizontal overflow
+PASS desktop successful resume returns to draft in same chat
+PASS desktop resume preserves saved work, scope and run history
+PASS desktop task detail after resume has no horizontal overflow
+PASS desktop task and chat agree after resume
+PASS desktop result changes has no horizontal overflow
+PASS desktop result keeps exact run
+PASS desktop-result has no horizontal overflow
+PASS desktop result feedback saved in shared history
+PASS desktop revision card shows exact submitted feedback
+PASS desktop long revision feedback has no horizontal overflow
+PASS desktop revision preserves one task and result lineage
+PASS desktop revision replay creates no duplicate
+PASS desktop revision created has no horizontal overflow
+PASS desktop revision receipt and its plan link are readable above the composer on arrival
+PASS desktop-revision has no horizontal overflow
+PASS desktop browser has no script errors
+PASS phone before conversation has no horizontal overflow
+PASS phone empty chat has no horizontal overflow
+PASS phone confirmation names exact task, run and saved-work consequence
+PASS phone confirmation consequence is two short sentences naming other tasks and acknowledgement
+PASS phone confirmation buttons have tap targets and single-line labels
+PASS phone-stop-confirm-long has no horizontal overflow
+PASS phone stop preserves composer draft
+PASS phone stop requested is still stopping
+PASS phone chat and task show stopping for the same run
+PASS phone repeated confirmation records one stop
+PASS phone task-page acknowledgement reaches chat without clearing draft
+PASS phone resume opens existing nonce and password form
+PASS phone long resume terms has no horizontal overflow
+PASS phone-resume-password has no horizontal overflow
+PASS phone password refusal has no horizontal overflow
+PASS phone wrong password refuses resume
+PASS phone refusal retains chat draft
+PASS phone stale card refuses without draft loss
+PASS phone-refusal-draft has no horizontal overflow
+PASS phone successful resume returns to draft in same chat
+PASS phone resume preserves saved work, scope and run history
+PASS phone task detail after resume has no horizontal overflow
+PASS phone task and chat agree after resume
+PASS phone result changes has no horizontal overflow
+PASS phone result keeps exact run
+PASS phone result feedback saved in shared history
+PASS phone revision card shows exact submitted feedback
+PASS phone long revision feedback has no horizontal overflow
+PASS phone revision preserves one task and result lineage
+PASS phone revision replay creates no duplicate
+PASS phone revision created has no horizontal overflow
+PASS phone revision receipt and its plan link are readable above the composer on arrival
+PASS phone-revision has no horizontal overflow
+PASS phone newest message follows the raised composer while typing (simulated keyboard)
+PASS phone-revision-typing has no horizontal overflow
+PASS phone browser has no script errors
+PASS 72 checks; synthetic Chromium 1440px and 390px journeys; zero live model calls.
+
+$ node scripts/chat-stop-resume-journey.mjs
+PASS 72 checks; synthetic Chromium 1440px and 390px journeys; zero live model calls.
