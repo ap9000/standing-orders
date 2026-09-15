@@ -11600,61 +11600,148 @@ export class Store {
     return this.revisionAncestryStatus(taskId).chain;
   }
 
-  /** Read-only task identity. Admission precedes both lineage and pagination.
-   * Damaged links stay as separate visible cards; never expose a hidden
-   * ancestor's name. Each edge must name its source's actual run/brief.
-   * Current is the newest filed version (ref id breaks timestamp ties).
-   * Older unfinished siblings remain explicit, without changing dispatch. */
-  taskFamiliesAdmitted(admitted: readonly string[] | null, includeUnplaced: boolean): TaskFamily[] {
-    const rows = this.db.prepare(`SELECT task.*, task_ref.repo AS task_repo, task_ref.id AS ref_id
-      FROM task JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
-      WHERE ((task_ref.repo IS NULL AND ? = 1) OR (task_ref.repo IS NOT NULL
-        AND (? = 1 OR task_ref.repo IN (${(admitted ?? []).map(() => "?").join(",")}))))
-      ORDER BY task_ref.id`).all(BUILT_IN, includeUnplaced ? 1 : 0, admitted === null ? 1 : 0, ...(admitted ?? []));
-    const tasks = new Map(rows.map(row => [String(row["id"]), {
-      id: String(row["id"]), title: String(row["title"]), state: String(row["state"]) as TaskState,
-      createdAt: String(row["created_at"]), updatedAt: String(row["updated_at"]),
-      priority: Number(row["priority"] ?? 0), repo: row["task_repo"] === null ? null : String(row["task_repo"]),
-      refId: Number(row["ref_id"]),
-    }]));
-    const families = new Map<string, TaskFamily>();
-    for (const task of tasks.values()) {
-      const ancestry = this.revisionAncestryStatus(task.id);
-      let problem = ancestry.problem === null ? null : "Task history is incomplete or circular. This execution is shown separately.";
-      for (const id of ancestry.chain) {
-        const ancestor = tasks.get(id);
-        if (ancestor === undefined || ancestor.repo !== task.repo) {
-          problem = "Task history is unavailable in this project. This execution is shown separately.";
-          break;
-        }
-        const ref = this.lookupRef(id)!;
-        if (ref.revisionOf === null) continue;
-        const source = this.revisionSourceOf(ref.id);
-        const run = source === null ? null : this.getRun(source.sourceRun);
-        const parent = tasks.get(ref.revisionOf);
-        if (source === null || parent === undefined || run?.taskRef !== parent.refId) {
-          problem = "A revision’s source record is unavailable. This execution is shown separately.";
-          break;
-        }
-      }
-      const root = problem === null ? tasks.get(ancestry.chain.at(-1)!)! : task;
-      let family = families.get(root.id);
-      if (family === undefined) {
-        family = { root, current: task, versions: [], otherActive: [], problem };
-        families.set(root.id, family);
-      }
-      family.versions.push(task);
-    }
-    for (const family of families.values()) {
-      family.versions.sort((a, b) => a.id === family.root.id ? -1 : b.id === family.root.id ? 1 : a.createdAt.localeCompare(b.createdAt) || a.refId - b.refId);
-      family.current = family.versions.at(-1)!;
-      family.otherActive = family.versions.filter(one => one.id !== family.current.id && (one.state === "queued" || one.state === "running"));
-    }
-    return [...families.values()].sort((a, b) => b.current.createdAt.localeCompare(a.current.createdAt) || b.current.refId - a.current.refId);
+  /** Permission-aware metadata projection, shared by bounded lists and counts.
+   * Walk only valid edges down from real roots. Missing, circular, foreign,
+   * over-depth or borrowed-source chains never join another family's card.
+   * The 64-version ancestry bound matches revisionAncestryStatus; it is NOT
+   * a row cap: all siblings and all versions of selected families survive. */
+  private taskFamilyProjection(admitted: readonly string[] | null, includeUnplaced: boolean) {
+    return {
+      params: [BUILT_IN, includeUnplaced ? 1 : 0, admitted === null ? 1 : 0, ...(admitted ?? [])],
+      sql: `WITH RECURSIVE admitted AS (
+        SELECT task_ref.id AS ref_id, task_ref.external_id AS id, task_ref.repo,
+          task_ref.revision_of, task_ref.revision_brief_artifact,
+          task.state, task.created_at, task.updated_at
+        FROM task_ref JOIN task ON task.id = task_ref.external_id
+        WHERE task_ref.backend = ? AND ((task_ref.repo IS NULL AND ? = 1)
+          OR (task_ref.repo IS NOT NULL AND (? = 1 OR task_ref.repo IN (${(admitted ?? []).map(() => "?").join(",")}))))
+      ), lineage(ref_id, root_ref, depth) AS (
+        SELECT ref_id, ref_id, 0 FROM admitted WHERE revision_of IS NULL
+        UNION ALL
+        SELECT child.ref_id, lineage.root_ref, lineage.depth + 1
+        FROM lineage JOIN admitted parent ON parent.ref_id = lineage.ref_id
+        JOIN admitted child ON child.revision_of = parent.id AND child.repo IS parent.repo
+        JOIN artifact brief ON brief.id = child.revision_brief_artifact AND brief.kind = 'revision-brief'
+        JOIN run source_run ON source_run.id = brief.run AND source_run.task_ref = parent.ref_id
+        WHERE lineage.depth < 63
+      ), members AS (
+        SELECT admitted.*, COALESCE(lineage.root_ref, admitted.ref_id) AS root_ref,
+          lineage.ref_id IS NULL AS broken
+        FROM admitted LEFT JOIN lineage ON lineage.ref_id = admitted.ref_id
+      ), ordered AS (
+        SELECT members.*, ROW_NUMBER() OVER (PARTITION BY root_ref
+          ORDER BY (ref_id = root_ref), created_at DESC, ref_id DESC) AS version_rank
+        FROM members
+      )`,
+    };
   }
 
+  private taskFamilyFromRows(rows: Record<string, unknown>[]): TaskFamily {
+    const versions = rows.map(row => ({ ...readTask(row), repo: row["repo"] === null ? null : String(row["repo"]), refId: Number(row["ref_id"]) }));
+    const root = versions.find(one => one.refId === Number(rows[0]!["root_ref"]))!;
+    versions.sort((a, b) => a.id === root.id ? -1 : b.id === root.id ? 1 : a.createdAt.localeCompare(b.createdAt) || a.refId - b.refId);
+    const current = versions.at(-1)!;
+    return { root, current, versions,
+      otherActive: versions.filter(one => one.id !== current.id && (one.state === "queued" || one.state === "running")),
+      problem: Number(rows[0]!["broken"]) === 0 ? null : "Task history is unavailable or incomplete. This execution is shown separately." };
+  }
+
+  /** Group and filter BEFORE the family limit; hydrate only that page's
+   * exact versions, never all tasks followed by a JavaScript slice. */
+  taskFamiliesAdmitted(admitted: readonly string[] | null, includeUnplaced: boolean,
+    options: { limit?: number; states?: readonly TaskState[]; order?: "created" | "updated" } = {}): TaskFamily[] {
+    const projection = this.taskFamilyProjection(admitted, includeUnplaced);
+    const order = options.order === "updated" ? "updated_at" : "created_at";
+    const rows = this.db.prepare(`${projection.sql}, selected AS (
+        SELECT * FROM ordered WHERE version_rank = 1
+          ${options.states === undefined ? "" : `AND state IN (${options.states.map(() => "?").join(",")})`}
+        ORDER BY ${order} DESC, ref_id DESC LIMIT ?
+      ) SELECT task.*, members.repo, members.ref_id, members.root_ref, members.broken
+      FROM selected JOIN members ON members.root_ref = selected.root_ref
+      JOIN task ON task.id = members.id
+      ORDER BY selected.${order} DESC, selected.ref_id DESC, members.ref_id`)
+      .all(...projection.params, ...(options.states ?? []), Math.max(1, Math.floor(options.limit ?? 201)));
+    const grouped = new Map<number, Record<string, unknown>[]>();
+    for (const row of rows) {
+      const root = Number(row["root_ref"]);
+      const family = grouped.get(root) ?? [];
+      family.push(row); grouped.set(root, family);
+    }
+    return [...grouped.values()].map(rows => this.taskFamilyFromRows(rows));
+  }
+
+  /** Opening one task uses at most 64 permission-aware point reads, then
+   * one descendant query rooted at its proven ancestor. No fleet listing,
+   * no per-card materialization of unrelated tasks, no historical writes. */
   taskFamilyOf(taskId: string, admitted: readonly string[] | null, includeUnplaced: boolean): TaskFamily | null {
-    return this.taskFamiliesAdmitted(admitted, includeUnplaced).find(one => one.versions.some(version => version.id === taskId)) ?? null;
+    const point = this.db.prepare(`SELECT task.*, child.id AS ref_id, child.repo, child.revision_of,
+        parent.id AS parent_ref, source_run.task_ref AS source_ref
+      FROM task_ref child JOIN task ON task.id = child.external_id
+      LEFT JOIN task_ref parent ON parent.backend = child.backend AND parent.external_id = child.revision_of AND parent.repo IS child.repo
+      LEFT JOIN artifact brief ON brief.id = child.revision_brief_artifact AND brief.kind = 'revision-brief'
+      LEFT JOIN run source_run ON source_run.id = brief.run
+      WHERE child.backend = ? AND child.external_id = ? AND ((child.repo IS NULL AND ? = 1)
+        OR (child.repo IS NOT NULL AND (? = 1 OR child.repo IN (${(admitted ?? []).map(() => "?").join(",")}))))`);
+    const seen = new Set<string>();
+    let cursor = taskId;
+    let first: Record<string, unknown> | undefined;
+    let root: Record<string, unknown> | undefined;
+    while (seen.size < 64 && !seen.has(cursor)) {
+      const row = point.get(BUILT_IN, cursor, includeUnplaced ? 1 : 0, admitted === null ? 1 : 0, ...(admitted ?? []));
+      if (row === undefined) break;
+      first ??= row;
+      seen.add(cursor);
+      if (row["revision_of"] === null) { root = row; break; }
+      if (row["parent_ref"] === null || row["source_ref"] !== row["parent_ref"]) break;
+      cursor = String(row["revision_of"]);
+    }
+    if (first === undefined) return null;
+    if (root === undefined) return this.taskFamilyFromRows([{ ...first, root_ref: first["ref_id"], broken: 1 }]);
+    // Admission is already proven for the root; each descendant must be in
+    // that SAME project and bind a brief to its parent's own run.
+    const rows = this.db.prepare(`WITH RECURSIVE descendants(ref_id, id, depth) AS (
+        SELECT id, external_id, 0 FROM task_ref WHERE id = ?
+        UNION ALL
+        SELECT child.id, child.external_id, parent.depth + 1 FROM descendants parent
+        JOIN task_ref child ON child.backend = ? AND child.revision_of = parent.id AND child.repo IS ?
+        JOIN task ON task.id = child.external_id
+        JOIN artifact brief ON brief.id = child.revision_brief_artifact AND brief.kind = 'revision-brief'
+        JOIN run source_run ON source_run.id = brief.run AND source_run.task_ref = parent.ref_id
+        WHERE parent.depth < 63
+      ) SELECT task.*, task_ref.repo, descendants.ref_id, ? AS root_ref, 0 AS broken
+      FROM descendants JOIN task ON task.id = descendants.id JOIN task_ref ON task_ref.id = descendants.ref_id`)
+      .all(root["ref_id"], BUILT_IN, root["repo"], root["ref_id"]);
+    return this.taskFamilyFromRows(rows);
+  }
+
+  /** Only possible live executions need dispatch/run enrichment for counts.
+   * Admission binds here too; an orphaned run is merely a candidate, not
+   * evidence of liveness. The caller uses the shared Work projection. */
+  taskActivityCandidates(admitted: readonly string[] | null, includeUnplaced: boolean, now: Date, taskIds?: readonly string[]): TaskVersion[] {
+    return this.db.prepare(`SELECT task.*, task_ref.repo, task_ref.id AS ref_id
+      FROM task_ref JOIN task ON task.id = task_ref.external_id
+      WHERE task_ref.backend = ? AND ((task_ref.repo IS NULL AND ? = 1)
+        OR (task_ref.repo IS NOT NULL AND (? = 1 OR task_ref.repo IN (${(admitted ?? []).map(() => "?").join(",")}))))
+      ${taskIds === undefined ? "" : "AND task.id IN (SELECT value FROM json_each(?))"}
+      AND (EXISTS (SELECT 1 FROM claim WHERE claim.task_ref = task_ref.id AND claim.released_at IS NULL AND claim.expires_at > ?)
+        OR EXISTS (SELECT 1 FROM run WHERE run.task_ref = task_ref.id AND run.outcome IS NULL AND run.role = 'reviewer'))`)
+      .all(BUILT_IN, includeUnplaced ? 1 : 0, admitted === null ? 1 : 0, ...(admitted ?? []), ...(taskIds === undefined ? [] : [JSON.stringify(taskIds)]), now.toISOString())
+      .map(row => ({ ...readTask(row), repo: row["repo"] === null ? null : String(row["repo"]), refId: Number(row["ref_id"]) }));
+  }
+
+  /** Aggregate families in SQL. A live older sibling counts the family once
+   * as live, even if its newest execution is queued or already finished. */
+  taskFamilyCounts(admitted: readonly string[] | null, includeUnplaced: boolean, now: Date, liveTasks: readonly string[]) {
+    const projection = this.taskFamilyProjection(admitted, includeUnplaced);
+    const row = this.db.prepare(`${projection.sql}, live_families AS (
+        SELECT DISTINCT root_ref FROM members WHERE id IN (SELECT value FROM json_each(?))
+      ) SELECT
+        COUNT(CASE WHEN live_families.root_ref IS NOT NULL THEN 1 END) AS running,
+        COUNT(CASE WHEN live_families.root_ref IS NULL AND ordered.state = 'queued' THEN 1 END) AS queued,
+        COUNT(CASE WHEN live_families.root_ref IS NULL AND ordered.state = 'done' AND ordered.updated_at >= ? THEN 1 END) AS doneRecently
+      FROM ordered LEFT JOIN live_families ON live_families.root_ref = ordered.root_ref WHERE version_rank = 1`)
+      .get(...projection.params, JSON.stringify(liveTasks), new Date(now.getTime() - 24 * 60 * 60_000).toISOString())!;
+    return { running: Number(row["running"]), queued: Number(row["queued"]), doneRecently: Number(row["doneRecently"]) };
   }
 
   /**
@@ -13955,7 +14042,7 @@ export class Store {
     const indexOf = (repo: unknown): number => repoIndex.get(String(repo)) ?? -1;
     const hours = (iso: unknown): number => Math.max(0, Math.round((now.getTime() - Date.parse(String(iso))) / 3_600_000));
     return this.transact(() => {
-      const families = this.taskFamiliesAdmitted(admittedRepos, false);
+      const families = this.taskFamiliesAdmitted(admittedRepos, false, { limit: 61 });
       const taskRows = families.slice(0, 61).map(family => {
         const current = family.current;
         const ref = this.lookupRef(current.id)!;
@@ -14349,10 +14436,7 @@ export class Store {
     includeUnplaced = true,
   ): { id: string; title: string; repo: string | null }[] {
     const projects = repo === null ? admitted : admitted === null || admitted.includes(repo) ? [repo] : [];
-    return this.taskFamiliesAdmitted(projects, includeUnplaced)
-      .filter(one => ["queued", "running", "failed"].includes(one.current.state))
-      .sort((a, b) => b.current.updatedAt.localeCompare(a.current.updatedAt) || b.current.refId - a.current.refId)
-      .slice(0, Math.max(1, Math.min(limit, 500)))
+    return this.taskFamiliesAdmitted(projects, includeUnplaced, { states: ["queued", "running", "failed"], order: "updated", limit: Math.max(1, Math.min(limit, 500)) })
       .map(one => ({ id: one.root.id, title: one.root.title, repo: one.root.repo }));
   }
 

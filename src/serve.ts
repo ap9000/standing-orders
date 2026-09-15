@@ -1535,8 +1535,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // stored verdict, and the sealed patch downloads exactly as stored.
       // Admission binds BEFORE the SQL limit (the done page's own rule),
       // and every row is re-proved against the ceiling before ranking.
-      const rows = familiesInView(project).filter(family => family.current.state === "done" && family.problem === null)
-        .slice(0, REVIEW_QUEUE_CAP).flatMap(family => {
+      const rows = familiesInView(project, { states: ["done"], limit: REVIEW_QUEUE_CAP }).flatMap(family => {
           const row = completedRowFor(family.current.id, project);
           return row === null ? [] : [{ ...row, title: family.root.title, ciFailing: ciFailingFor(row.runId, row.prNumber) }];
         });
@@ -3254,34 +3253,39 @@ export function createDecisionServer(options: ServeOptions): Server {
    * the bound, that check is the law.
    */
   function projectFamilyPeek(repo: string, now: Date): ProjectPeek {
-    const families = familiesInView(repo);
-    const since = now.getTime() - 24 * 60 * 60_000;
-    return { waiting: needsYouBadge(repo).count,
-      queued: families.filter(one => one.current.state === "queued").length,
-      running: families.filter(one => one.current.state === "running").length,
-      doneRecently: families.filter(one => one.current.state === "done" && Date.parse(one.current.updatedAt) >= since).length };
+    const projects = visible(repo) ? [repo] : [];
+    const live = store.taskActivityCandidates(projects, false, now)
+      .filter(task => workRowOf(task, now).status.views.includes("running")).map(task => task.id);
+    return { waiting: needsYouBadge(repo).count, ...store.taskFamilyCounts(projects, false, now, live) };
   }
-  function familiesInView(project: string | null): TaskFamily[] {
-    return store.taskFamiliesAdmitted(project === null ? admissionList() : [project], visible(null));
+  function familiesInView(project: string | null, options: Parameters<Store["taskFamiliesAdmitted"]>[2] = {}): TaskFamily[] {
+    return store.taskFamiliesAdmitted(project === null ? admissionList() : visible(project) ? [project] : [], visible(null), options);
   }
   function familyOf(taskId: string): TaskFamily | null {
     return store.taskFamilyOf(taskId, admissionList(), visible(null));
   }
   function workTasksInView(project: string | null): { tasks: (Task & { repo: string | null; family?: TaskFamily })[]; truncated: boolean } {
-    const families = familiesInView(project);
+    const families = familiesInView(project, { limit: WORK_PAGE + 1 });
     return { tasks: families.slice(0, WORK_PAGE).map(family => ({ ...family.current, family })), truncated: families.length > WORK_PAGE };
   }
-  function familyTasksInView(project: string | null, state?: TaskState): (Task & { repo: string | null })[] {
-    return familiesInView(project).filter(family => state === undefined || family.current.state === state)
+  function familyTasksInView(project: string | null, state?: TaskState, limit = 200): (Task & { repo: string | null })[] {
+    return familiesInView(project, { ...(state === undefined ? {} : { states: [state] }), limit })
       .map(family => ({ ...family.current, id: family.root.id, title: family.root.title }));
   }
   function revisionDestination(child: string, back: string): string {
     const root = familyOf(child)?.root.id ?? child;
     return back.startsWith("/chat?") ? `${taskChatHref(root)}&revision=${encodeURIComponent(child)}` : `${taskHref(root)}?version=${encodeURIComponent(child)}`;
   }
+  function earlierLiveVersions(family: TaskFamily, now: Date): string[] {
+    const ids = family.versions.filter(one => one.id !== family.current.id).map(one => one.id);
+    if (ids.length === 0) return [];
+    return store.taskActivityCandidates(family.root.repo === null ? [] : [family.root.repo], family.root.repo === null, now, ids)
+      .filter(task => workRowOf(task, now).status.views.includes("running")).map(task => task.id);
+  }
   function familyHistory(family: TaskFamily): string {
     const warning = family.problem === null ? "" : `<p class="problem" data-history-problem>${escape(family.problem)}</p>`;
-    const active = family.otherActive.length === 0 ? "" : `<p class="problem" data-other-active>${family.otherActive.length} earlier version${family.otherActive.length === 1 ? " is" : "s are"} still waiting or running. Review History.</p>`;
+    const otherActive = new Set([...family.otherActive.map(one => one.id), ...earlierLiveVersions(family, clock())]).size;
+    const active = otherActive === 0 ? "" : `<p class="problem" data-other-active>${otherActive} earlier version${otherActive === 1 ? " is" : "s are"} still waiting or running. Review History.</p>`;
     if (family.versions.length < 2) return warning;
     const versions = family.versions.map((version, index) => {
       const label = index === 0 ? "Original" : `Revision ${index}`;
@@ -3352,15 +3356,21 @@ export function createDecisionServer(options: ServeOptions): Server {
       ? completionReceiptView(store, latest, store.artifactsFor(latest.id), evidenceRoot, reviewFactsFor(latest.id)) : receipt;
     const status = workStatusOf(facts, result == null ? undefined : receiptStatusOf(result));
     if (store.lookupRef(task.id)?.revisionOf !== null && live !== null && status.tone === "live") status.label = "Revising";
+    const earlierLive = task.family === undefined ? [] : earlierLiveVersions(task.family, now);
+    if (earlierLive.length > 0 && !status.views.includes("running")) status.views = [...status.views, "running"];
+    const otherActive = new Set([...(task.family?.otherActive.map(one => one.id) ?? []), ...earlierLive]).size;
     return { ...facts, executionId: task.id, id: task.family?.root.id ?? task.id, title: task.family?.root.title ?? task.title,
-      familyNotice: task.family?.problem ?? (task.family?.otherActive.length ? `${task.family.otherActive.length} earlier versions still waiting or running. Open History.` : null),
+      familyNotice: task.family?.problem ?? (otherActive ? `${otherActive} earlier version${otherActive === 1 ? " is" : "s are"} still waiting or running. Open History.` : null),
       status, resultRunId: latest === null ? null : latest.id };
   }
 
   /** The compact task list for the master pane, the current row marked. */
   function taskListPane(project: string | null, currentId: string | null): string {
-    const all = familyTasksInView(project);
-    const rows = all.filter((one, index) => index < 100 || one.id === currentId);
+    const rows = familyTasksInView(project, undefined, 100);
+    if (currentId !== null && !rows.some(one => one.id === currentId)) {
+      const family = familyOf(currentId);
+      if (family !== null && (project === null || family.root.repo === null || family.root.repo === project)) rows.push({ ...family.current, id: family.root.id, title: family.root.title });
+    }
     const items = rows
       .map(
         task =>
@@ -7663,7 +7673,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    */
   function completedRowFor(taskId: string, project: string | null): CompletedWorkRow | null {
     const family = familyOf(taskId);
-    if (family === null || family.problem !== null) return null;
+    if (family === null) return null;
     const task = store.getTask(taskId);
     const ref = store.lookupRef(taskId);
     if (task === null || ref === null || task.state !== "done") return null;
@@ -7682,6 +7692,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       title: task.title,
       repo: ref.repo,
       completedAt: task.updatedAt,
+      historyProblem: family.problem,
       outcome: run?.outcome ?? null,
       handoff: run?.handoff ?? null,
       costUsd: run?.costUsd ?? null,
@@ -7826,6 +7837,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       title: row.title,
       repo: row.repo,
       completedAt: row.completedAt,
+      historyProblem: row.historyProblem ?? null,
       priority: row.priority,
       intent,
       plan,
@@ -10336,10 +10348,11 @@ const STYLE = `
     }
     .mobile-top .switcher-menu button { min-height: 2.75rem; }
     .mobile-top .pill-status {
-      display: flex; gap: .5rem; overflow: hidden; white-space: nowrap;
+      display: flex; flex-wrap: wrap; gap: .125rem .5rem;
       font-family: var(--font-mono); font-size: .6875rem; font-weight: 500;
       color: var(--muted-foreground); font-variant-numeric: tabular-nums;
     }
+    .mobile-top .pill-status > span { white-space: nowrap; }
     .mobile-top .pill-status .hot { color: var(--brand); }
     .mobile-top .project-pill .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .mobile-top .mobile-new {
@@ -17881,7 +17894,7 @@ export function orderChangedFiles(files: readonly ReviewFileRow[], proofCitesPat
     );
 }
 
-type CompletedWorkRow = ReturnType<Store["listCompletedWorkScoped"]>[number];
+type CompletedWorkRow = ReturnType<Store["listCompletedWorkScoped"]>[number] & { historyProblem?: string | null };
 type RankedReviewRow = CompletedWorkRow & { ciFailing: boolean; priority: ReviewPriority };
 
 /** What the cockpit shows of one selected result — a projection of the
@@ -17892,6 +17905,7 @@ type ReviewCockpitView = {
   title: string;
   repo: string | null;
   completedAt: string;
+  historyProblem: string | null;
   priority: ReviewPriority;
   /** null = no scope was ever filed (a task marked done by hand). */
   intent: {
@@ -18084,7 +18098,7 @@ function reviewCockpitPage(
               `<li><a class="cockpit-row${current ? " current" : ""}" href="${reviewHref(row.taskId)}"${current ? ` aria-current="page"` : ""}>` +
               `<span class="cockpit-row-head"><strong>${escape(row.title)}</strong>${priorityChip(row.priority)}</span>` +
               `<span class="cockpit-row-meta">${escape(when(row.completedAt))}${row.runId === null ? " · no build" : row.outcome === "no-change" ? " · no change" : ""}${row.prNumber === null ? "" : ` · PR #${row.prNumber}`}</span>` +
-              why +
+              (row.historyProblem ? `<span class="cockpit-why" data-history-problem>History unavailable</span>` : why) +
               `</a></li>`
             );
           })
@@ -18135,6 +18149,7 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
       `</header>`,
   );
 
+  if (view.detail === null && view.historyProblem !== null) parts.push(`<p class="problem" data-history-problem>${escape(view.historyProblem)} <a href="${taskHref(view.taskId)}">Open task</a></p>`);
   // The primary next act — exactly one road, chosen from the state.
   parts.push(reviewNextAction(view, csrf, accepted, canAnnotate));
 

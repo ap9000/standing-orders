@@ -399,8 +399,7 @@ export const MATE_TOOLS: MateTool[] = [
       const repo = args["repo"] === undefined ? null : repoPathOf(ctx.who, args["repo"]);
       if (args["repo"] !== undefined && repo === null) return { ok: false, message: "repo must be one of the ids from list_repos" };
       const limit = typeof args["limit"] === "number" ? Math.min(50, Math.max(1, Math.floor(args["limit"]))) : 20;
-      const families = ctx.store.taskFamiliesAdmitted(repo === null ? ctx.who.repos : [repo], false)
-        .filter(one => args["state"] === undefined || one.current.state === args["state"]);
+      const families = ctx.store.taskFamiliesAdmitted(repo === null ? ctx.who.repos : [repo], false, { limit: limit + 1, ...(args["state"] === undefined ? {} : { states: [args["state"] as import("./store.js").TaskState] }) });
       const tasks = families.slice(0, limit).map(one => ({
         repo: `r${ctx.who.repos.indexOf(one.current.repo!) + 1}`, task: one.root.id, execution: one.current.id,
         title: one.root.title, state: one.current.state, historyProblem: one.problem, otherActive: one.otherActive.map(version => version.id),

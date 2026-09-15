@@ -366,6 +366,9 @@ async function sameTaskJourney() {
     const read = async path => (await ctx.request.get(`${fixture.url}${path}`)).text();
     const post = async (path, body) => ctx.request.post(`${fixture.url}${path}`, { form: body, maxRedirects: 0 });
     const fields = selector => page.locator(selector).evaluate(form => Object.fromEntries(new FormData(form)));
+    const projectCsrf = /name="csrf" value="([a-f0-9]+)"/.exec(await read('/projects'))?.[1];
+    if (!projectCsrf) throw new Error('No project selection token');
+    await post('/projects/select', { csrf: projectCsrf, path: fixture.repos.main, return: '/work' });
     const draft = `Keep this ${name} conversation draft through two revisions.`;
     await freshConversation(page, `/chat?task=${root}`);
     await page.fill('.composer textarea[name="message"]', `Remember the ${name} review conversation.`);
@@ -441,9 +444,35 @@ async function sameTaskJourney() {
         check(`${name}: held revision replaces the old completed state`, await page.locator('#task-chat-live').innerText().then(text => text.includes('On hold')));
         fixture.store.unhold(fixture.store.lookupRef(child).id);
       }
+      const countsOf = text => {
+        const match = /<a href="\/runs">(\d+) live<\/a><a href="\/board\?view=order">(\d+) queued<\/a>/.exec(text);
+        if (!match) throw new Error('No project/header counts');
+        return { live: Number(match[1]), queued: Number(match[2]) };
+      };
+      const beforeLive = countsOf(await read(`/t/${root}`));
       const live = fixture.startRevision(child);
       await page.reload();
-      check(`${name} revision ${revision}: actual live revision says Revising`, await page.locator('#task-chat-live').innerText().then(text => text.includes('Revising')));
+      check(`${name} revision ${revision}: actual live revision says Revising with its stored row still queued`, fixture.store.getTask(child).state === 'queued' && await page.locator('#task-chat-live').innerText().then(text => text.includes('Revising')));
+      for (const phase of ['agent-running', 'verifying-proof']) {
+        fixture.store.setRunPhase(live, phase);
+        const header = countsOf(await read(`/t/${root}`));
+        const projects = await read('/projects');
+        check(`${name} revision ${revision}: project/header counts use the native claim during ${phase}`, header.live === beforeLive.live + 1 && header.queued === beforeLive.queued - 1 && projects.includes(`>${header.live} running</a>`) && (header.queued === 0 || projects.includes(`>${header.queued} queued</a>`)), JSON.stringify(header));
+      }
+      if (revision === 1) {
+        await goto(page, `/t/${root}`);
+        check(`${name}: live task and header fit the viewport`, (await noOverflow(page)).ok);
+        if (name === 'phone') check('phone: each header count label is fully visible', await page.locator('.mobile-top .pill-status').evaluate(el => {
+          const bounds = el.getBoundingClientRect();
+          return [...el.children].every(child => {
+            const range = document.createRange(); range.selectNodeContents(child);
+            const text = range.getBoundingClientRect();
+            return text.left >= bounds.left - 1 && text.right <= bounds.right + 1 && text.bottom <= bounds.bottom + 1;
+          });
+        }));
+        await shot(page, `${name}-same-task-live`, `${viewport.width}×${viewport.height}: native-style queued row, live claim in final checks, truthful project/header counts (synthetic fixture).`);
+        await goto(page, `/chat?task=${root}`);
+      }
       if (revision === 2) {
         fixture.finishRevision(live, 'failed');
         await page.reload();
@@ -488,6 +517,13 @@ async function sameTaskJourney() {
     check(`${name}: draft survives Back, old links and reload`, await page.inputValue('.composer textarea[name="message"]') === draft);
     await goto(page, `/chat?task=${fixture.statusTasks.damaged}&result=${fixture.statusRuns.damaged}`);
     check(`${name}: damaged screenshot remains an explicit failure`, await page.locator('.result-panel [data-result-attention]').innerText().then(text => /unavailable|damaged|cannot/i.test(text)) && (await noOverflow(page)).ok);
+    // A broken synthetic lineage remains a readable exact result in Review.
+    const damagedTask = fixture.statusTasks.damaged;
+    const brief = fixture.store.artifactsFor(originalRun).find(one => one.kind === 'revision-brief');
+    fixture.store.markRevision(fixture.store.lookupRef(damagedTask).id, 'missing-synthetic-ancestor', brief.id);
+    await goto(page, `/review?result=${damagedTask}`);
+    check(`${name}: Review keeps the broken-lineage result with a safe warning`, await page.locator(`.cockpit-row.current[href="/review?result=${damagedTask}"]`).count() === 1 && await page.locator('[data-history-problem]').count() > 0 && !(await page.locator('main').innerText()).includes('missing-synthetic-ancestor') && (await noOverflow(page)).ok);
+    await shot(page, `${name}-same-task-review`, `${viewport.width}×${viewport.height}: broken-lineage result retained in Review with a history warning (synthetic fixture).`);
     const csrf = await page.locator('input[name=csrf]').first().getAttribute('value');
     await post('/projects/select', { csrf, path: fixture.repos.empty, return: '/work' });
     await goto(page, '/work');

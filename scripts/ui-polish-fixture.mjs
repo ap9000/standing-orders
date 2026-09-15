@@ -546,7 +546,8 @@ export function startFixture(options = {}) {
     if (!claim.ok) throw new Error(`synthetic revision claim: ${claim.reason}`);
     const runId = store.startRun({ taskRef: ref.id, leaseId: claim.claim.leaseId, runner: 'night-shift-1', branch: `standing-orders/${taskId}`, worktree: join(repo, `.fixture-${taskId}`), now, provider: 'codex', model: 'default', ...liveRoute(taskId, 'build') });
     store.stampRun(runId, { baseRevision: stat.head, scopeDigest: store.getScope(taskId).digest });
-    store.setTaskState(taskId, 'running', now);
+    // Native claims leave task.state queued through the build and final checks.
+    // Preserve that row so counts exercise actual liveness (build #1586).
     return runId;
   };
   const finishRevision = (runId, outcome = 'built') => {

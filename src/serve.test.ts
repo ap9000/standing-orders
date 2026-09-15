@@ -11589,6 +11589,36 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(broken).toContain("The report cannot be shown:");
   });
 
+  test("same task: review retains broken and hidden lineage with a warning and exact result targets", async () => {
+    const source = seed("secret-source", "Hidden source", "/hidden");
+    const sourceRun = build("secret-source", source, RICH);
+    const sourceBrief = store.saveArtifact({ run: sourceRun, kind: "revision-brief", key: "synthetic.json", bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: "a".repeat(64), capture: "synthetic lineage fixture" }, T0);
+    for (const id of ["broken-result", "cross-result", "no-build-history"]) {
+      const ref = seed(id, `Visible ${id}`);
+      if (id === "no-build-history") store.setTaskState(id, "done", T0);
+      else build(id, ref, RICH);
+      store.markRevision(ref, id === "cross-result" ? "secret-source" : "missing-source", sourceBrief);
+    }
+    await boot();
+    const cookie = await login();
+    for (const id of ["broken-result", "cross-result", "no-build-history"]) {
+      const html = await (await fetch(url(`/review?result=${id}`), { headers: { cookie } })).text();
+      expect(html).toContain(`class="cockpit-row current" href="/review?result=${id}"`);
+      expect(html).toContain(`data-review-task="${id}"`);
+      expect(html).toContain("History unavailable");
+      expect(html).toContain("This execution is shown separately.");
+      expect(html).not.toContain("secret-source");
+      expect(html).not.toContain("Hidden source");
+      expect(html).not.toContain("missing-source");
+      if (id !== "no-build-history") {
+        const run = store.runsFor(store.lookupRef(id)!.id)[0]!;
+        expect(html).toContain(`action="/r/${run.id}/comment"`);
+      }
+    }
+    const hidden = await (await fetch(url("/review?result=secret-source"), { headers: { cookie } })).text();
+    expect(hidden).not.toContain('data-review-task="secret-source"');
+  });
+
   test("same task: two revisions keep root navigation, exact history, safe feedback batches and stale actions", async () => {
     const root = "same-root";
     const ref = seed(root, "One task", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
@@ -12648,6 +12678,43 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     for (const path of ["/fleet", "/system", "/caps", "/workbench", "/chat", "/settings"]) expect((await fetch(url(path), { headers: { cookie: member } })).status, path).toBe(403);
   });
 
+  test("same task counts: an older live sibling counts once; released, expired and superseded claims do not look live", async () => {
+    const original = finished("family-root", "One family", alpha, null);
+    const older = seedTask("older-sibling", "Older", alpha);
+    sealScopeFixture(store, "older-sibling", approverToken, "Earlier revision");
+    const newest = finished("newest-sibling", "Newest", alpha, null);
+    const brief = store.saveArtifact({ run: original.run, kind: "revision-brief", key: "fixture.json", bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: "a".repeat(64), capture: "synthetic lineage fixture" }, now);
+    store.markRevision(older, "family-root", brief);
+    store.markRevision(newest.ref, "family-root", brief);
+    register(store, { name: "family-worker", host: "here", capacity: 1, repos: [alpha], now, newToken: () => "family-token" });
+    const claim = acquire(store, older, "family-worker", { token: "family-token", now });
+    if (!claim.ok) throw new Error(claim.reason);
+    const run = store.startRun({ taskRef: older, leaseId: claim.claim.leaseId, runner: "family-worker", branch: "fixture", worktree: join(root, "fixture"), now, ...presented(store, older) });
+    store.setRunPhase(run, "verifying-proof");
+    const cookie = await login(); await openProject(cookie, alpha);
+    const live = await page(cookie, "/t/family-root");
+    expect(live).toContain('<a href="/runs">1 live</a><a href="/board?view=order">0 queued</a>');
+    expect(live).toContain('data-history-version="newest-sibling"');
+    expect(live).toContain("1 earlier version is still waiting or running");
+    expect(await page(cookie, "/projects")).toContain('>1 running</a>');
+    expect(countsOf(await page(cookie, "/work"))["Running"]).toBe(1);
+    // A released or exactly expired lease cannot keep an orphaned run live.
+    release(store, claim.claim.leaseId, now);
+    expect(await page(cookie, "/t/family-root")).toContain('<a href="/runs">0 live</a>');
+    store.raw().prepare("UPDATE claim SET released_at = NULL, expires_at = ? WHERE lease_id = ?").run(now.toISOString(), claim.claim.leaseId);
+    expect(await page(cookie, "/t/family-root")).toContain('<a href="/runs">0 live</a>');
+    // A live newest claim counts once even while an older open run survives.
+    store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = ?").run(now.toISOString(), claim.claim.leaseId);
+    const next = acquire(store, older, "family-worker", { token: "family-token", now });
+    if (!next.ok) throw new Error(next.reason);
+    expect(await page(cookie, "/t/family-root")).toContain('<a href="/runs">1 live</a>');
+    release(store, next.claim.leaseId, now);
+    // Resurrecting a stale lower-generation row cannot override the newest one.
+    store.raw().prepare("UPDATE claim SET released_at = NULL, expires_at = ? WHERE lease_id = ?").run(new Date(now.getTime() + 60000).toISOString(), claim.claim.leaseId);
+    expect(await page(cookie, "/t/family-root")).toContain('<a href="/runs">0 live</a>');
+    expect(store.getTask("older-sibling")!.state).toBe("queued");
+  });
+
   test("pilot 2: approval, queued, build/checks, stop, hold, rescope and failures share one status and primary action", async () => {
     const id = "t-status";
     const ref = seedTask(id, "Keep the full allowed path visible", alpha);
@@ -12709,6 +12776,13 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     for (const phase of ["agent-running", "verifying-proof"] as const) {
       store.setRunPhase(run, phase);
       await agree(id, "running", "Watch the build");
+      // Build #1586: a native claim leaves the row queued, including final checks.
+      expect(store.getTask(id)!.state).toBe("queued");
+      const taskPage = await page(cookie, `/t/${id}`);
+      expect(taskPage).toContain('<a href="/runs">1 live</a><a href="/board?view=order">1 queued</a>');
+      const projects = await page(cookie, "/projects");
+      expect(projects).toContain('>1 running</a>');
+      expect(projects).toContain('>1 queued</a>');
     }
     expect(store.requestRunStop({ runId: run, taskRef: ref, by: "alex", via: "web" }, now).ok).toBe(true);
     await agree(id, "stopping", "View stop details");
@@ -13275,6 +13349,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "running", "completed"]);
     expect(rowsOf(await page(cookie, "/work?view=running")).map(row => row.id)).toContain("t-rev");
     const liveTask = await page(cookie, "/t/t-rev");
+    expect(liveTask).toContain('<a href="/runs">1 live</a>');
+    expect(await page(cookie, "/projects")).toContain('>1 running</a>');
     const historyWindow = new Window();
     try {
       historyWindow.document.body.innerHTML = liveTask;
@@ -13289,6 +13365,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     store.touchRunner('night-shift-1', new Date(now.getTime() - 3_600_000));
     const orphan = await page(cookie, '/t/t-rev');
     expect(orphan).toContain(`review #${admitted.reviewerRunId}</a> · never finished`);
+    expect(orphan).toContain('<a href="/runs">0 live</a>');
     expect(statusOf(orphan)[0]?.label).toBe('Review interrupted');
     store.touchRunner('night-shift-1', now);
 

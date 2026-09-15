@@ -1,22 +1,25 @@
-# Same task revisions — result assessment
+# Same task revisions — review comments on build #1586
 
-Implemented one root task identity across successive feedback revisions. Existing execution records, revision links and exact-batch seals remain authoritative. Changes are uncommitted in the required worktree.
+Applied comments **212, 213 and 216** to the previously reviewed implementation. One root task still owns successive versions, exact results and the shared conversation. All changes remain uncommitted.
 
 ## Candidate
 
-- Branch: `standing-orders/same-task-revisions-20260914`.
-- Unchanged base/HEAD: `4755b21af6bf3fa4c76c95697c65f9bc3c283364`.
-- SHA-256 of `git diff --binary --` for the source/test/script paths listed below: `347b1d17cff448fce409785289db45fefaf85a1c3675143c53d009a77e037773`.
-- Assessment and protocol files are excluded from that source diff digest. The native gate owns the eventual sealed candidate and approved full verification command.
+- Required branch: `standing-orders/revise-same-task-revisions-20260914-from-3-annotations-o`.
+- Unchanged HEAD: `657b58bb63dc0c8557bec745e3c427a7c1331422` (the reviewed build). The original implementation base was `4755b21af6bf3fa4c76c95697c65f9bc3c283364`.
+- SHA-256 of `git diff --binary --` over the seven source/test/script paths below: `e368af1120315d2dec2c63790b0b728c071a398c38ce2a83b4881903d0855ed4`.
+- The digest excludes this assessment and protocol files. The native gate owns the eventual sealed candidate and the unchanged approved full verifier.
 
-## Behavior and boundaries
+## Review findings addressed
 
-- [Store projection](../../src/store.ts) admits projects before grouping or pagination. The root keeps its identity; the newest filed execution supplies current state. Timestamp ties use the execution ref ID. All exact versions remain in History; other queued/running siblings are called out. Missing, circular, cross-project and borrowed-source lineage remain separate with a truthful explanation that does not reveal hidden ancestors.
-- [Server/UI](../../src/serve.ts) uses the root for Work, task navigation, focused/fleet chat, project counts and conversation drafts. History opens exact prior executions and run records. Root navigation reflects approval, actual Revising activity, hold, failure and completion from the current execution. Older child links and old seal receipts resolve to the version they named.
-- POST paths, run IDs, source digests, batch IDs, approval nonces and scopes retain their exact targets. Root navigation does not rewrite mutations. Unrelated and hidden versions/results are refused. Source artifacts and consumed feedback are preserved; earlier feedback is available in a disclosure.
-- [Feedback classification](../../src/result-review.ts) includes plain user feedback and reviewer problems in the requested batch. Reviewer notes/questions remain readable without a default revision CTA. An explicit Request change copies a note into a user draft; replacing an existing draft requires confirmation.
-- [Mate tools](../../src/mate-tools.ts) expose root and current execution separately. The conversation context stays stable across revisions, and prior proposals keep their exact targets. Project/state filtering occurs before list limits. The palette retains the intersection of selected and admitted projects.
-- No schema, scheduler, evidence/reviewer engine, approval policy, automatic-mode rule, provider, dependency, global configuration or verification-command changes. No subagents, extra model calls, new time limits, commit, push, merge or publication.
+| Comment | Change | Evidence |
+| --- | --- | --- |
+| 212: task chat says Running while Projects/header count it as queued | Project counts enrich only possible live work through the existing Work/dispatch/run projection, then count families in SQL. Final checks, current claims without a run, live independent reviews and older active siblings count once. Work's Running filter includes a family with an older live version while retaining the newest version's state and History notice. Task state and scheduling are unchanged. | Queued-row/native-claim tests during `agent-running` and `verifying-proof`; older sibling, released/expired/superseded claim and reviewer-heartbeat assertions. Both browser journeys inspect actual header and Projects HTML. |
+| 213: opening one task performs fleet-wide lookups | A task uses permission-aware ancestor point reads (the existing 64-task ancestry bound), followed by its own descendant query. Lists select roots and current state in SQL before their page limit, then hydrate every version of those selected families. Work, navigation, Review, palette and mate/fleet chat supply their own limits. Project counts remain SQL aggregates. | With 1,200 unrelated tasks and orphaned build rows, opening a two-version family performs two point reads, one query returning two versions, and zero `lookupRef` calls. A three-family page returns three task rows; fleet chat hydrates 61 for its 60-card page and overflow probe. Orphaned unclaimed builds return no activity candidates. |
+| 216: broken-lineage completions disappear from Review | Review retains an admitted exact result with “History unavailable” in the queue and a safe history warning in the result. Done tasks without a build remain visible too. Scope, evidence and mutation targets stay attached to the requested execution/run. | Server tests cover missing and cross-project ancestry, no-build completions, hidden-result refusal and exact comment targets. Desktop and phone captures show the broken-history warning alongside the preserved result. |
+
+Grouping inspects admitted lineage metadata inside SQLite; full task rows leave the database only for the selected family/page or possible live work. There is no raw-row cutoff on versions. A 207-version family retains all siblings on a one-family page. Point and list reads agree on missing, circular, foreign, borrowed-source and over-depth lineage; a depth-65 version is shown separately while all 64 valid ancestors remain available.
+
+No schema, scheduler, provider, dependency, approval, automatic-mode, evidence/reviewer engine or historical-record changes. No subagents, extra model calls, new time limits, commit, merge, push, publication or deployment.
 
 ## Signed criteria
 
@@ -24,94 +27,91 @@ Implemented one root task identity across successive feedback revisions. Existin
 
 One root task card, canonical task/chat identity and shared conversation persist through two successive revisions. Work counts and state reflect current execution, history exposes exact prior versions, and legacy siblings or broken lineage are not silently hidden
 
-Checked with the store family regression (205 legacy siblings plus a revision of a revision), the server two-revision flow, mate identity checks and both browser journeys. One root Work card, shared session/draft, current state and exact history pass. Hidden/broken lineage stays visible only within its admitted scope. See the desktop and phone History captures.
+The current store/server regressions and both browser journeys pass. They retain one root Work card and conversation across two revisions, preserve exact History links and show actual current state. New regressions cover family query bounds, old active siblings and the native queued-row count mismatch. See the desktop History and phone live-count captures.
 
-Worker verification is complete for this criterion; the proof marks it pending-verification for the native final repository gate.
+Worker checks are complete; the protocol marks this pending-verification for the native final repository gate.
 
 ### safety
 
 Grouping and history obey visibility before pagination, unrelated or hidden version access is refused, and canonical navigation never retargets stale mutation, approval, feedback or run-control actions. Existing evidence lineage and fresh approval remain authoritative
 
-Checked hidden, unrelated, missing, cyclic and borrowed-source lineage; admission before grouping and limits; exact historical forms; old seal receipts; mismatched approval nonce and stop-run targets; fresh approval per revision; immutable source evidence. A reproduced palette admission regression was fixed and its regression now passes.
+The existing two-revision server regression still refuses unrelated/hidden versions, mismatched approval nonces and stale run-control targets. Exact old seal receipts, later notes, fresh per-version approval and immutable original artifacts pass. Added tests prove permission-aware point/list parity and retained exact Review targets despite broken ancestry. No POST routing was changed.
 
-Worker verification is complete for this criterion; the proof marks it pending-verification for the native final repository gate.
+Worker checks are complete; the protocol marks this pending-verification for the native final repository gate.
 
 ### feedback
 
 Plain user feedback and reviewer problems create exactly one intended revision batch with safe retry and later-batch behavior. Informational reviewer notes/questions remain available without generating default revision work
 
-Checked plain feedback plus annotation, mixed reviewer problems, informational-only findings, forged informational batches, lost note/seal responses, second revisions and later batches. Existing source/batch sealing remains the boundary. Draft replacement confirmation is covered by the existing result-review test file.
+The affected server, result-review, mate and revision-terms suites pass. Browser journeys submit ordinary feedback plus a line annotation, retry lost note/seal responses, create two successive revisions and retain later feedback on the original. Reviewer notes/questions remain available without a default Revise batch; deliberately selecting a question only creates a draft. The existing exact-batch seal remains authoritative.
 
-Worker verification is complete for this criterion; the proof marks it pending-verification for the native final repository gate.
+Worker checks are complete; the protocol marks this pending-verification for the native final repository gate.
 
 ### experience
 
 Desktop 1400x900 and phone 390x844 journeys cover result, diff annotation, two revisions, history, draft recovery and failure. Long feedback paths/hashes wrap, actions stay usable, and UI is concise without hiding evidence or approval terms
 
-The existing synthetic browser proof passes 98 checks across 1400x900 and 390x844. It covers result, annotation, two revisions, History, Back/reload drafts, hold/failure/recovery, damaged screenshot, empty project, long paths/hashes, keyboard activation and usable buttons. All eight resulting viewport captures were visually inspected; the final keyboard run preserves these layouts.
+Both required viewport journeys passed 110 checks. After inspection found a clipped phone header count, the affected 390x844 journey passed 56 checks with an added text-bounds assertion. It covers result, diff annotation, two approvals/revisions, exact History, Back/reload drafts, held/failed/retried work, long paths/hashes, damaged evidence, an empty project and broken-lineage Review. The root agent inspected every capture, including the six refreshed phone captures.
 
-Worker verification is complete for this criterion; the proof marks it pending-verification for the native final repository gate.
+Worker checks are complete; the protocol marks this pending-verification for the native final repository gate.
 
 ## Checks actually run
 
-| Command | Result and candidate coverage |
+| Command | Result and coverage |
 | --- | --- |
-| `npm run typecheck` | Passed after the final source repair. |
-| `npx vitest run src/store.test.ts src/serve.test.ts src/workspace-ui.test.ts src/result-review.test.ts src/mate.test.ts src/revision-terms.test.ts` | 486 passed in six affected files. This was the broad focused implementation run, not the full repository suite. |
-| `npx vitest run src/serve.test.ts` | 303 passed after the final server repair, including old seal receipts and retained historical result links. |
-| `npx vitest run src/store.test.ts` | 110 passed after the final palette admission repair. |
-| `npx vitest run src/mate.test.ts` | 35 passed after the selected-project-before-limit repair. |
-| `npx vitest run src/serve.test.ts -t 'palette'` | Three selected tests passed after the palette repair; the other 300 were unselected by this focused command, not changed or disabled. |
-| `npm run build` | Passed during implementation; the final store/server test setup also rebuilt the source successfully. |
-| `PLAYWRIGHT_CHANNEL=chrome node scripts/workspace-result-proof.mjs --same-task-revisions --strict --out output/playwright/same-task-revisions` | Final run: 98 passed, zero failed. Same existing journey and fixture, both required viewports, reduced motion. |
+| `npm run typecheck` | Passed after implementation repairs; also rerun in both final composite commands below. |
+| `npx vitest run src/store.test.ts -t 'same task revision identity'` | 2 selected regressions passed during implementation. |
+| `npx vitest run src/serve.test.ts -t 'same task:|pilot 2: approval'` | 3 selected regressions passed during implementation. |
+| `npx vitest run src/store.test.ts src/serve.test.ts src/workspace-ui.test.ts src/result-review.test.ts src/mate.test.ts src/revision-terms.test.ts` | 488 passed across the six affected files. This was a focused implementation run, not the repository's full suite. |
+| `npm run typecheck && npx vitest run src/store.test.ts src/serve.test.ts` | Passed; 416 tests, including older active siblings, claim expiry/generation, live/dead reviewers and broken Review. Refreshed after final server/CSS changes. |
+| `npm run typecheck && npx vitest run src/store.test.ts src/serve.test.ts -t 'same task|pilot 2: approval'` | Final source check: 6 selected tests passed after excluding orphaned unclaimed build rows from activity candidates. The other 410 were unselected by this command; no tests were disabled or removed. |
+| `PLAYWRIGHT_CHANNEL=chrome node scripts/workspace-result-proof.mjs --same-task-revisions --strict --out output/playwright/same-task-revisions` | 110 passed, zero failed, at 1400x900 and 390x844. Desktop evidence remains valid after the subsequent phone-only CSS repair. |
+| `PLAYWRIGHT_CHANNEL=chrome node scripts/workspace-result-proof.mjs --same-task-revisions --phone-only --strict --out output/playwright/same-task-revisions-phone-refresh` | 56 passed, zero failed; refreshed phone journey after count wrapping, including a text-bounds assertion for every header count. |
 | `git diff --check` | Passed. |
 
-The final affected-file reruns refresh the changed store, server and mate behavior; evidence from the unchanged workspace UI, result-review and revision-terms tests is reused. The last browser run covers the final source and updated keyboard/target assertions. No approved full verifier was run by this worker.
+Vitest's existing setup rebuilt the source. The final focused rerun covers the last store-only candidate filter change; the previous server/UI/browser evidence remains valid because that change only avoids enriching unowned stale builds that already projected as non-live. The existing approval, feedback, mate and revision-terms evidence from this session is reused. No approved full verifier was run by this worker.
 
-A focused negative regression first reproduced the palette leak (selecting /hidden returned a hidden task despite admission limited to /visible). Intersecting selected/admitted projects fixed it; the full affected store file now passes. Earlier browser failures reproduced horizontal overflow from long changed-file paths/hashes and exposed the affected Add note interaction; those failures are resolved in the final passing journey.
+The first browser attempt stopped at the new count assertion because its session still selected All projects. The fixture now explicitly selects its main project before inspecting a project header. That setup failure is resolved in the passing runs above. Visual inspection then found the clipped “queued” label and prompted the phone-only CSS repair and rerun.
 
 ## Simplicity and visual inspection
 
-| Before | After / observed evidence |
+| Before | After |
 | --- | --- |
-| Revisions appear as separate task destinations and can leave the original looking complete. | One root identity with current execution state; a compact History disclosure names Original, Revision 1 and Revision 2, including the failed prior attempt. |
-| Verbose Create revision controls and repeated revision instructions. | Revise with the batch count; exact inherited terms and fresh approval remain in the review. |
-| Informational reviewer comments look like default revision work. | Notes/questions remain in Checks; only an explicit user action copies one into feedback. |
-| Long changed-file path/hash expanded the 390px page to 551px. | Paths/hashes wrap within the viewport, with no horizontal overflow. Phone line annotation targets are at least 44 by 44px; Revise stays single-line and at least 44px high. |
-| A later execution could be mistaken for the answer to an old seal receipt. | The old receipt opens its exact historical execution, with a link back to current work. |
+| Projects/header disagree with a live task's status. | Counts and the current task read live throughout build and final checks, without rewriting the queued task row. |
+| Broken history makes the result vanish from Review. | A short queue warning and the preserved exact result explain the problem; Open task and evidence/approval terms remain available. |
+| Phone header clips the end of “queued”. | Count labels wrap as complete items inside the project pill. The new text-bounds check and refreshed capture confirm all three labels are readable. |
+| Long inherited feedback can dominate a narrow page. | Existing wrapping retains the complete path, hash and exact approval terms; Revise and History stay concise, keyboard reachable and usable. |
 
-The browser activates Changes, approval details and History by keyboard. It preserves the chat draft through both revisions, old links, Back and reload, and preserves per-run annotation drafts. Captures show readable contrast/alignment and a concise failure state with Review and retry. Scrolling exposes full approval content; no signed terms were removed. Motion checks use the existing reduced-motion path.
+Inspected 1400x900 desktop and 390x844 phone captures for result, approval, live work, failure, History and broken Review. Checked alignment, readable text, horizontal overflow, focus, 44px short controls, fixed composer/footer behavior and reduced motion. The phone composer retains its draft while scrolling long approval content. No evidence or consent terms were removed.
 
-## Screenshots and fixture provenance
+## Evidence and provenance
 
-The result evidence, completion records and chat runner are explicitly synthetic. The fixture drives real HTTP forms, exact-batch seals, approval and claim/state records; it supplies the build outcomes and stored example evidence without invoking a model. The displayed example result image is labelled as a fixture image, not a live application result.
+The fixture is synthetic: in-memory records, temporary repositories, sealed example artifacts and a scripted chat response. It exercises real HTTP forms, session drafts, exact-batch seals, approvals and claim/state records, but supplies its own build results. The sample screenshot is explicitly labelled a fixture image. These are browser viewports, not physical iOS/Android hardware.
 
-- [desktop result](../../output/playwright/same-task-revisions/desktop-same-task-result.png)
-- [desktop approval](../../output/playwright/same-task-revisions/desktop-same-task-approval.png)
-- [desktop failure](../../output/playwright/same-task-revisions/desktop-same-task-failure.png)
-- [desktop history](../../output/playwright/same-task-revisions/desktop-same-task-history.png)
-- [phone result](../../output/playwright/same-task-revisions/phone-same-task-result.png)
-- [phone approval](../../output/playwright/same-task-revisions/phone-same-task-approval.png)
-- [phone failure](../../output/playwright/same-task-revisions/phone-same-task-failure.png)
-- [phone history](../../output/playwright/same-task-revisions/phone-same-task-history.png)
+Selected protocol captures:
 
-The detailed generated report is [report.json](../../output/playwright/same-task-revisions/report.json). The eight captures are also named in the protocol proof for machine collection.
+- [Desktop History](../../output/playwright/same-task-revisions/desktop-same-task-history.png)
+- [Phone live counts](../../output/playwright/same-task-revisions-phone-refresh/phone-same-task-live.png)
+- [Desktop result](../../output/playwright/same-task-revisions/desktop-same-task-result.png)
+- [Phone approval and long feedback](../../output/playwright/same-task-revisions-phone-refresh/phone-same-task-approval.png)
+- [Desktop live counts](../../output/playwright/same-task-revisions/desktop-same-task-live.png)
+- [Desktop broken Review](../../output/playwright/same-task-revisions/desktop-same-task-review.png)
+- [Phone History and recovered draft](../../output/playwright/same-task-revisions-phone-refresh/phone-same-task-history.png)
+- [Phone broken Review](../../output/playwright/same-task-revisions-phone-refresh/phone-same-task-review.png)
 
-## Remaining owner steps and limits
+The [two-viewport report](../../output/playwright/same-task-revisions/report.json) and [phone refresh report](../../output/playwright/same-task-revisions-phone-refresh/report.json) include all checks and the additional result/failure captures inspected in this session.
 
-Per the agreed plan, the parent/root still owns inspection of the actual result, native Opus review and live follow-up through the application. This worker did not invoke those models or claim two live model-built revisions. The native final gate must run the unchanged approved full command for its sealed candidate.
+## Owner steps and limits
 
-Phone evidence is a real Chrome browser at a 390x844 viewport, not physical iOS/Android hardware. Native mobile keyboards/IME and other browser engines were not tested. The older optional result-proof modes and workspace-chat-proof script were not rerun; the agreed two-viewport journey supplies this task's browser evidence. These are stated verification limits, not claims of future success.
+The operator/root still owns actual-result inspection, native Opus review and live follow-up tests as assigned in the plan. This unattended worker made no model calls and does not claim two model-built revisions or completion of those owner steps. The native final gate must run the unchanged approved full verifier for the sealed candidate.
+
+Native mobile keyboards/IME and other browser engines were not tested. The separate workspace-chat-proof script and unrelated result-proof modes were not rerun; the agreed two-viewport journey covered this revision. No known worker implementation or required viewport check remains unfinished.
 
 ## Changed source paths
 
 - `scripts/ui-polish-fixture.mjs`
 - `scripts/workspace-result-proof.mjs`
 - `src/mate-tools.ts`
-- `src/mate.test.ts`
-- `src/mate.ts`
-- `src/result-review.test.ts`
-- `src/result-review.ts`
 - `src/serve.test.ts`
 - `src/serve.ts`
 - `src/store.test.ts`

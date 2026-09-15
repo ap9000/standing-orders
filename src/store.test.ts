@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { SCHEMA_VERSION, databasePath, openStore, BUILT_IN, type Capability, type Store } from "./store.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
@@ -32,6 +32,66 @@ const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: str
 });
 
 describe("same task revision identity (read projection)", () => {
+  test("point reads and family pages do not hydrate 1,200 unrelated tasks; counts aggregate before limits", () => {
+    const store = openStore(":memory:");
+    try {
+      const make = (id: string, repo = "/visible") => {
+        store.createTask({ id, title: id }, T0);
+        const ref = store.refFor(BUILT_IN, id).id;
+        store.placeTask(ref, repo); return ref;
+      };
+      const root = make("root");
+      const child = make("child");
+      const run = store.startRun({ taskRef: root, leaseId: "fixture", runner: "fixture", branch: "fixture", worktree: "/fixture", now: T0, ...bareLegacy("build") });
+      store.finishRun(run, { outcome: "built", now: T0 });
+      const artifact = store.saveArtifact({ run, kind: "revision-brief", key: "fixture.json", bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: "a".repeat(64), capture: "synthetic lineage fixture" }, T0);
+      store.markRevision(child, "root", artifact);
+      store.setTaskState("root", "done", T0);
+      store.setTaskState("child", "done", T0);
+      for (let i = 0; i < 1200; i++) {
+        const ref = make(`unrelated-${i}`);
+        // Old unowned build rows must not turn the activity count back into
+        // a fleet-wide hydration. Only a live claim can make these run.
+        store.startRun({ taskRef: ref, leaseId: `orphan-${i}`, runner: "fixture", branch: "fixture", worktree: "/fixture", now: T0, ...bareLegacy("build") });
+      }
+      make("secret", "/hidden");
+      const materialized: number[] = [];
+      let points = 0;
+      const raw = store.raw(), prepare = raw.prepare.bind(raw);
+      const spy = vi.spyOn(raw, "prepare").mockImplementation(sql => {
+        const statement = prepare(sql);
+        const all = statement.all.bind(statement), get = statement.get.bind(statement);
+        vi.spyOn(statement, "all").mockImplementation((...params) => { const rows = all(...params); materialized.push(rows.length); return rows; });
+        vi.spyOn(statement, "get").mockImplementation((...params) => { points++; return get(...params); });
+        return statement;
+      });
+      const lookups = vi.spyOn(store, "lookupRef");
+      expect(store.taskFamilyOf("child", ["/visible"], false)?.versions.map(one => one.id)).toEqual(["root", "child"]);
+      expect(points).toBe(2);
+      expect(materialized).toEqual([2]);
+      expect(lookups).not.toHaveBeenCalled();
+      materialized.length = 0;
+      expect(store.taskFamilyOf("secret", ["/visible"], false)).toBeNull();
+      expect(materialized).toEqual([]);
+      const page = store.taskFamiliesAdmitted(["/visible"], false, { limit: 3 });
+      expect(page).toHaveLength(3);
+      expect(materialized).toEqual([3]);
+      materialized.length = 0;
+      expect(store.taskFamiliesAdmitted(["/visible"], false, { states: ["done"], limit: 1 })[0]?.versions).toHaveLength(2);
+      expect(materialized).toEqual([2]);
+      materialized.length = 0;
+      expect(store.taskFamilyCounts(["/visible"], false, T0, ["root", "child", "secret"]))
+        .toEqual({ running: 1, queued: 1200, doneRecently: 0 });
+      expect(materialized).toEqual([]);
+      expect(store.taskActivityCandidates(["/visible"], false, T0)).toEqual([]);
+      materialized.length = 0;
+      expect(store.chatSnapshot(["/visible"], T0).tasks).toHaveLength(60);
+      expect(Math.max(...materialized)).toBe(61);
+      expect(store.chatSnapshot(["/visible"], T0).tasksSaturated).toBe(true);
+      spy.mockRestore(); lookups.mockRestore();
+    } finally { store.close(); }
+  });
+
   test("groups before pages, keeps exact versions and active siblings, and admits before lineage", () => {
     const store = openStore(":memory:");
     try {
@@ -58,6 +118,7 @@ describe("same task revision identity (read projection)", () => {
       expect(families[0]!.current.id).toBe("revision-2");
       expect(families[0]!.versions).toHaveLength(207);
       expect(families[0]!.otherActive).toHaveLength(205);
+      expect(store.taskFamiliesAdmitted(["/visible"], false, { limit: 1 })[0]!.versions).toHaveLength(207);
       expect(store.taskFamilyOf("sibling-0", ["/visible"], false)?.root.id).toBe("root");
       expect(store.chatSnapshot(["/visible"], T0).tasks).toHaveLength(2);
       expect(store.chatSnapshot(["/visible"], T0).tasks[0]).toMatchObject({ id: "revision-2", rootId: "root", title: "root", state: "queued" });
@@ -76,11 +137,23 @@ describe("same task revision identity (read projection)", () => {
         expect(family.problem).not.toBeNull();
         expect(family.problem).not.toContain("secret");
         expect(family.versions.map(one => one.id)).toEqual([id]);
+        expect(store.taskFamiliesAdmitted(["/visible"], false).find(one => one.root.id === id)).toEqual(family);
       }
       expect(store.taskFamilyOf("secret-root", ["/visible"], false)).toBeNull();
       expect(store.taskFamiliesAdmitted([], false)).toEqual([]);
       expect(store.paletteTasks("/hidden", 10, ["/visible"], false)).toEqual([]);
       expect(store.paletteTasks("/visible", 1, ["/visible"], false)).toHaveLength(1);
+      // The existing ancestry depth bound applies equally to point and list
+      // reads. It never becomes a raw-row limit that discards siblings.
+      for (let i = 0; i <= 64; i++) {
+        make(`depth-${i}`);
+        if (i > 0) link(`depth-${i}`, `depth-${i - 1}`);
+      }
+      expect(store.taskFamilyOf("depth-63", ["/visible"], false)?.versions).toHaveLength(64);
+      const tooDeep = store.taskFamilyOf("depth-64", ["/visible"], false)!;
+      expect(tooDeep.problem).not.toBeNull();
+      expect(tooDeep.versions.map(one => one.id)).toEqual(["depth-64"]);
+      expect(store.taskFamiliesAdmitted(["/visible"], false).find(one => one.root.id === "depth-64")).toEqual(tooDeep);
     } finally { store.close(); }
   });
 });
