@@ -1,87 +1,108 @@
-# Quiet project learning — implementation result
+# Quiet project learning — revision 1 result
 
 ## Outcome and candidate
 
-Implemented optional review learning, explicit adoption, bounded advisory reuse, and Settings → Learning. A stored observation, adoption, or usage record does **not** prove a remedy works or demonstrate quality improvement.
+Repaired recovery starvation, unscoped planner advice, the optional review output contract, and the four native-gate test expectations. Presentation, schema, approvals, routing, and the approved verification command remain unchanged. An observation, adoption, or usage record does not establish that a remedy works or that quality improved.
 
-Base and unchanged HEAD: `2a008a0dd63425ad00a368884f359dbd120afd27`. Branch: `standing-orders/quiet-project-learning-20260914`. All changes remain uncommitted. No installation database was opened or migrated, and no deployment, network write, extra model call, subagent, instruction-file edit, or verification-command change was made.
+Source: run **1596**, candidate `0abc9ccab24887fc18a6eceffabda262296bd990`, source scope digest `e3ff58c506e5b60354cf0cbb4522e129`. Read `AGENTS.md`, the canonical rubric, and the operator-supplied sealed revision brief at `output/playwright/repair-brief-1596-1.json`.
 
-Source/script/test candidate manifest SHA-256: `1ac58db4cec7d532292a6ea9f6cf3366a59ed50a06598b58008c24ff6b0b746c`. Exact per-file hashes: [candidate-sha256.txt](../../output/playwright/review-learning-2026-09-14/candidate-sha256.txt). The manifest excludes this assessment and the protocol files to avoid a recursive hash.
+Branch: `standing-orders/quiet-project-learning-20260914-fix-1`. HEAD remains the source candidate; every repair is uncommitted. The source candidate's native gate failed four tests. Its earlier local results must not be described as a passing full gate.
 
-## Implementation
+Final changed source/test manifest SHA-256: `3255dd2aa6ba0b153cfc8a18a70f5ccc7d6431f06082d64ce70c53980d2296dd`. Hash the following UTF-8 lines including their trailing newlines to reproduce that identity. This assessment and protocol files are excluded to avoid recursive hashes.
 
-- The existing review response may contain zero to two suggestions. Core comments, criterion judgments, bindings, informational-note filtering, and revision batches retain their existing strict rules. Optional learning is separately validated after the core transaction commits.
-- A small v58 capture queue retains optional input and the exact supplied artifact catalog alongside the successful review. Recovery deduplicates by source review and normalized finding; a failed queue write can recover from the sealed accepted response and immutable review snapshot. Invalid learning records an issue without changing the completed task or accepted review.
-- Proposals bind repository identity, source/reviewer run IDs, exact artifact hashes and excerpts, relevant source paths, phases, platform, source revision, code/configuration fingerprints, and the configured verification/setup environment. Inherited context reuses the existing ancestry-custody validator. Proposed remedies remain advice. Only supported project lessons can be adopted; system suggestions have no adoption or application path.
-- Explicit adoption and enabling reuse are separate actions. Selection supplies at most five lessons and 16,000 UTF-8 bytes, including its advisory wrapper. It rejects disabled, wrong-project, unsupported, conflicting, changed-code/configuration, changed-environment, unauthorized-adopter, and damaged inputs. Differing advice on overlapping paths is conservatively excluded. There is no learned-command executor, routing authority, global configuration change, or scheduler.
-- A run receives its exact frozen payload, including an empty selection. Planner and builder briefs, and the existing reviewer call, use those recorded bytes. Snapshot and source-content triggers prohibit updates/deletion; event history is append-only. Disable/reset affects future selection and retains active snapshots, code, approvals and history.
-- Settings is reachable without notification configuration and for project-scoped accounts. Learning lists only admitted projects and uses keyset pagination of 20 ledger entries. The ledger shows actor, UTC time, before/after state, reason, source links, affected run links and current outcomes. Exact context is available on demand. Reset records the disabled lessons individually and retains their source links.
-- Web changes require the existing authenticated session, CSRF/origin checks, current account standing and project admission, plus exact repository identity, project revision, and lesson version/hash. Mutations recheck account access inside the write transaction, so a stale concurrent form loses atomically.
+```text
+26d3878e81802e8c6595ac27e13858c2696222f4c04eded5af3cc9adf1c6917f  src/migration-v53-process-custody.test.ts
+f5c1a5a69fe763bc425438ed3fded48c69718b3d20389bead7b3a35d879e322c  src/planner.test.ts
+f86e787d77fb90f6673306ff326a897e58519613dae62b4cb0ec34bf31f6ac21  src/project-access-ledger.test.ts
+ed2c0ff6e48d5a9c09162f861e2fd23962a314fb2dfbd0709b35694852bfbd99  src/project-learning.test.ts
+1823fb6671c5cc7e242b137c8ef1dbd2f74757b301aa92ea4825eaa5d8d5364c  src/project-learning.ts
+1cfa09831dfdf0b463c3418f5a16b2b380a5f898e860ac11ed82259fd8eced16  src/recipe-creator.test.ts
+ac7c8fbfc9ababa567f60768763f5d12d7f65913a65b775e8efb3b777f712bc7  src/reviewer.ts
+fb40828620b556217e46c41b2369017c2e2ab5e4e351331f5d8c113aa3222f60  src/task-control.test.ts
+```
 
-## Checks actually run
+## Repairs
 
-- `npm run typecheck` — Passed on final source tree.
-- `npx vitest run src/project-learning.test.ts src/migration-v58-project-learning.test.ts src/schema-epoch.test.ts src/store.test.ts src/reviewer.test.ts src/provider.test.ts src/builder.test.ts src/planner.test.ts src/serve.test.ts src/workspace-ui.test.ts src/review-context.test.ts` — 817 tests passed across 11 affected files.
-- `npx vitest run src/project-learning.test.ts` — 13 tests passed, including the added project-scoped account regression.
-- `npm run build && PLAYWRIGHT_CHANNEL=chrome node scripts/workspace-result-proof.mjs --learning --strict --out "$(mktemp -d /tmp/so-learning-proof.XXXXXX)"` — Build passed; 32 browser assertions passed at 1400x900 and 390x844 after the final CSS repair.
-- `git diff --check` — Passed; no whitespace errors.
+- **Recovery:** omitted learning used to leave no capture row; the newest 50 accepted reviews could occupy every fallback scan forever. Empty or omitted input now gets immutable `[]` bookkeeping when its verified review snapshot exists. Empty captures do not occupy the processing batch or add no-op ledger entries. Legacy reviews without snapshots remain compatible.
+- Both fallback recovery and pending capture processing use batches of at most 50. Per-store, per-project cursors move past unreadable sources and retryable writes. Each sweep fixes an upper run/source ID so new arrivals cannot indefinitely postpone an older retry. A restart begins with the oldest missing work; completed and empty capture rows persist. This adds no schema, setting, scheduler, or time limit. Identity, source lineage, catalog membership, artifact bytes and excerpts still determine eligibility; a cursor never does.
+- **Planning:** a planner with no scope and no signed scope digest may receive verified project/plan advice. Scoped planners, builders, and reviewers retain path filtering. Both paths retain adoption/access, phase, platform, current code/configuration/environment, dirty-file, conflict, five-lesson and 16,000-byte checks. The advisory wrapper explicitly grants no file-write authority. Scope, route, permissions and approval are never changed by selection; exact snapshots remain immutable.
+- **Review output:** `learning` is shown with the core JSON shape and explained once beside it. The reviewer is asked to consider concise evidence-backed prevention or reuse lessons; omission and zero suggestions remain valid. The artifact catalog remains separate data. Core parsing, criterion completeness, provider schema optionality and review failure rules are unchanged. No extra model call was added.
+- **Native test expectations:** the three schema assertions now expect v58. The project-access test checks that scoped Settings and Learning return 200 without foreign-project content, rejects foreign Learning URLs, and retains denials for global administration and mutations. No checks were skipped or removed; predecessor-version and old-reader fencing assertions remain intact.
 
-The 817-test affected suite ran before adding one account-isolation regression and a CSS-only source-excerpt margin repair. The final 13-test learning run covers the added regression; the final browser run covers the CSS repair. Other affected evidence is reused for unchanged behavior. Typecheck covers the final tree. Counts overlap and are not summed. The native machine gate alone owns the unchanged full verifier; this attempt did not run it.
+## Checks actually run on the final source/test candidate
 
-The migration test uses disposable SQLite files: removes only the additive learning objects to reproduce the v57 predecessor shape, retains a task, observes committed `-57` before DDL from another connection, checks the older-reader version contract, verifies v58 and foreign keys, reopens idempotently, and refuses missing current learning metadata. Existing schema-epoch tests exercise non-migrating and mid-flight readers. No real database upgrade or installed v57 process was used.
+| Command | Result |
+| --- | --- |
+| `npm run typecheck && npx vitest run src/project-learning.test.ts src/planner.test.ts src/reviewer.test.ts src/provider.test.ts src/structured-output.test.ts src/builder.test.ts` | Exit 0; typecheck and 358 tests in six affected files passed. Vitest built the candidate runtime through the existing setup. |
+| `npx vitest run src/migration-v53-process-custody.test.ts src/recipe-creator.test.ts src/task-control.test.ts src/project-access-ledger.test.ts src/migration-v58-project-learning.test.ts src/schema-epoch.test.ts` | Exit 0; 39 tests in six affected files passed. |
+| `node output/playwright/learning-recovery-audit.mjs "$PWD"` | Exit 0; 51 reviews, older lesson recovered, 51 capture rows, core reviewer outcome no-change, failure retained (synthetic fixture). |
+| `git diff --exit-code 0abc9ccab24887fc18a6eceffabda262296bd990 -- src/workspace-ui.ts src/serve.ts src/result-review.ts scripts/ui-polish-fixture.mjs scripts/workspace-result-proof.mjs && git diff --check` | Exit 0; UI and browser scripts match the source candidate, and no whitespace errors were found. |
 
-Provider evidence is synthetic. One existing reviewer invocation captures learning and receives its frozen adopted lesson without a reflection call. Real-worktree planner/builder integration asserts that their actual prompts contain their exact empty snapshots; nonempty selection is tested for all three phases. Root owns real-provider corrected-task/later-task acceptance and independent Opus review.
+The final two focused suites cover **397 tests** without overlap. The initial five-file run had 45 passes and two new fixture failures: the unscoped helper omitted its legacy spend stamp, and failing every no-op write made the recovery fixture exceed the existing test timeout. Both fixtures were corrected. The recovery regression still fails valid learning writes while 50 later reviews omit learning; empty bookkeeping is now tested through the production path. No time limit changed. An intermediate 14-test learning run passed; its count overlaps the final 358 and is not added again.
 
-## Desktop and phone journey
+The audit's first invocation supplied `$PWD/dist`; the helper appends `dist` itself and refused that path before exercising code. The corrected invocation supplies the checkout root and imports this candidate's compiled runtime. Its `runtimeCandidate` is the unchanged HEAD, so the manifest above identifies the uncommitted repair it exercised. The wrapper and its underlying root helper are operator-provided acceptance evidence, not a newly added repository dependency.
 
-Reused `scripts/ui-polish-fixture.mjs` and `scripts/workspace-result-proof.mjs --learning` with isolated repositories and an in-memory store. Headless installed Chrome ran one 1400×900 journey and one 390×844 journey: open Settings and its empty ledger; capture a project lesson and long system suggestion; inspect the result diff; leave feedback and create one unapproved revision; open learning with the keyboard; inspect the source and save; enable reuse; select for a different later run; inspect the ledger; refuse a stale form; disable; verify an empty future selection and retained snapshot/history; and verify another project stays empty. No real model is invoked by this browser fixture.
+The regression checks old-lesson recovery, proposed status, completed core reviews, empty-input bookkeeping, no no-op capture ledger entries, restart deduplication, and retained failure history. The real-worktree planner negotiation now seeds an adopted plan-only lesson and verifies its exact payload in genuinely unscoped planner prompts. It also verifies a proposed scope, no builder before approval, and no plan-only lesson in the later builder snapshot. Existing learning tests cover bounds, conflicts, drift, dirty code, revoked adoption, stale forms, reset, tampered artifacts, system suggestions and project access.
 
-All 32 assertions passed. [Browser report](../../output/playwright/review-learning-2026-09-14/report.json) and screenshots live in the same folder. The report's original temporary paths identify the capture location; the PNG files are copied byte-for-byte here for durable evidence.
+All database work used disposable fixtures. The v58 migration test checks data retention, the committed `-57` epoch before DDL, older-reader refusal, foreign keys, missing metadata and idempotent reopening. The migration implementation did not change. No real database, installed service, global configuration or permission was changed. No full verifier, real provider, extra model, subagent, deployment, push, publication, signing, or git history operation was used.
 
-Simplicity pass, observed and repaired:
+## Inherited desktop and phone evidence
 
-- Before: adoption could be clicked outside its source disclosure. After: **Save lesson** is inside **Source and use**, after applicability, evidence and the adoption terms.
-- Before: system suggestions repeated adoption wording and the ledger repeated states. After: system suggestions say **No change applied** and offer no adoption control; routine ledger headings say the change once.
-- Before: the generic stale-form page had a small back link. After: **Reload Learning** has a 44px target and a specific recovery destination.
-- Before: default blockquote indentation squeezed source code into a narrow phone column. After: source excerpts use the available width and wrap safely.
-- Verified closed useful disclosure, unchanged result primary action/navigation, keyboard Enter, readable expanded hashes/context, long text, no horizontal document overflow, and 44px learning buttons/disclosures. The viewports are browser emulation; physical phone/Safari behavior was not tested.
+Presentation is byte-identical to the source candidate. Per the revision scope, this attempt inherits the original UI journey rather than rerunning it. The operator staged eight original PNGs, the original report and `PROVENANCE.md` in `output/playwright/review-learning-2026-09-14/`. These are **run 1596 / candidate 0abc9cc captures**, showing synthetic data; they are not new repair screenshots or real-provider evidence. Their original capture directory was `/tmp/so-learning-proof.UtlcnU`, and the report timestamp is `2026-09-15T01:55:51.217Z`. Native source artifacts remain in the installation evidence store; final source-artifact custody uses the existing native review-context path.
+
+The inherited report records **32 passes, zero failures**, one journey each at **1400×900** and **390×844**: empty Settings; a source-linked proposed lesson and long system suggestion; result inspection; feedback and one unapproved revision; keyboard disclosure; adoption; enabled later reuse; a stale action and reload recovery; disabling with retained snapshot/history; foreign-project exclusion; readable details and 44px controls. This attempt read the report and visually inspected all eight actual PNGs. Physical iPhone/Safari behavior was not exercised.
+
+Simplicity review: the source disclosure keeps the evidence and adoption terms before **Save lesson**; system suggestions say **No change applied**; the ledger exposes details on demand; **Reload Learning** gives a clear recovery action. Source hashes wrap within the phone column, short actions stay on one line, and the result navigation is unchanged. No additional presentation defect was found. The earlier source-excerpt width repair and its screenshots are inherited, not claimed as work in this revision.
+
+Exact staged screenshot bytes (paths are relative to `output/playwright/review-learning-2026-09-14/`):
+
+| Screenshot | Dimensions | SHA-256 |
+| --- | --- | --- |
+| [desktop-learning-empty.png](../../output/playwright/review-learning-2026-09-14/desktop-learning-empty.png) | 1400×900 | `a56b6fcb7d2e426775b13d97cf1a98f52afb854e601fb6ee9e2ca3941feb4643` |
+| [desktop-learning-adopt.png](../../output/playwright/review-learning-2026-09-14/desktop-learning-adopt.png) | 1400×900 | `e8d10f08069f2ef0cb2c9826dabbecc520501d6a80b240a274812ad2d81ae989` |
+| [desktop-learning-ledger.png](../../output/playwright/review-learning-2026-09-14/desktop-learning-ledger.png) | 1400×900 | `ddbf49a1ac252e185ec62c02d9f0f40c975079b8a0ef428825eb690bab4a563b` |
+| [desktop-learning-error.png](../../output/playwright/review-learning-2026-09-14/desktop-learning-error.png) | 1400×900 | `d2669e89d9e7535ac7f7fb09edd5e73ff140bd922a48d22603cc32b18ddfdb8b` |
+| [phone-learning-empty.png](../../output/playwright/review-learning-2026-09-14/phone-learning-empty.png) | 390×844 | `768f6c8affa8391d9a94bb187b631adeb0902eadb7c2347c8aa7f5d0dbcef0a8` |
+| [phone-learning-adopt.png](../../output/playwright/review-learning-2026-09-14/phone-learning-adopt.png) | 390×844 | `93281ea2fa3fc441e81731c1847c48d1513f3b2c3d50a35683e57ff96376275c` |
+| [phone-learning-ledger.png](../../output/playwright/review-learning-2026-09-14/phone-learning-ledger.png) | 390×844 | `b3f544476267c2ef87c1ad0beb8a539cd1dce65e7c7f1344f6a141bb9098b134` |
+| [phone-learning-error.png](../../output/playwright/review-learning-2026-09-14/phone-learning-error.png) | 390×844 | `b1c151b886a91c1cdb61c40a01b30b07307d49b0f31f11c6b3b2347ab302303f` |
 
 ## Signed acceptance evidence
+
+Each criterion is pending the native final check and its evidence validation for this candidate. This attempt did not run that unchanged full command.
 
 ### capture
 
 Optional review learning cites verified source artifacts, deduplicates across retry and restart, and remains proposed until adopted. Missing invalid or absent learning never weakens core review or blocks task completion. Existing reviews and feedback batches stay compatible
 
-Parser, capture, exact-source, restart/replay, optional-storage-failure and strict-review regressions passed; see project-learning.ts and reviewer.ts. The protocol proof marks native final verification as pending.
+The recovery regression and root audit verify recovery after 50 newer omitted-learning reviews. Existing strict-parser, exact-source, failure, restart and feedback tests passed. The output contract remains optional.
 
 ### reuse
 
 Later planner builder and reviewer runs receive at most five eligible adopted project lessons as bounded advisory context with immutable exact usage snapshots. Disabled stale tampered conflicting or unauthorized guidance is excluded and no lesson overrides scope approvals verification or route
 
-Bounded phase/path selection, conflict/configuration/evidence exclusions and immutable payload checks passed; planner/builder prompt integration and the synthetic reviewer reuse check passed. The protocol proof marks native final verification as pending.
+The actual unscoped planner journey now receives its immutable adopted plan-only lesson before a scope exists; build still requires approval. The focused planner/builder/reviewer and learning tests preserve bounds, exclusion checks and exact snapshots.
 
 ### ledger
 
 Settings exposes a quiet project-filtered paginated change ledger with actor time before-after reason evidence and affected runs. Adopt disable reset and reuse are observable and stale-safe. Reset retains history and system suggestions never appear as applied improvements
 
-HTTP, state-transition, append-only, reset and pagination regressions passed. Desktop/phone ledger screenshots show the source/run links and exact-context disclosure. The protocol proof marks native final verification as pending.
+The scoped Settings test now asserts intended access while retaining global and foreign-project denials. Adoption, disable, reset, paging and stale-action regressions passed. Empty input is accounted for without no-op ledger rows; original desktop/phone ledger screenshots retain source custody.
 
 ### safety
 
 Project isolation CSRF authorization concurrent actions prompt-injection input evidence integrity and applicable configuration boundaries fail safely. Any storage migration preserves data and correctly fences older readers, tested only on disposable databases
 
-Project access, CSRF, stale concurrent actions, adversarial text, immutable content, changed identity/configuration and disposable migration/epoch checks passed. The protocol proof marks native final verification as pending.
+Focused project-access, learning and schema/migration tests passed against disposable databases. Artifact, identity, approval, route, CSRF, concurrent/stale-action and configuration fences are preserved. No schema or production configuration changed.
 
 ### experience
 
 One desktop 1400x900 and phone 390x844 journey covers result lesson adoption later reuse disable and retained ledger, plus empty long and error states. Concise copy readable details usable keyboard and 44px controls, no new primary navigation or competing routine CTA
 
-Both exact-viewport journeys passed all 32 browser assertions, including feedback/revision compatibility, empty/long/stale states and 44px actions. Final screenshots were visually inspected. The protocol proof marks native final verification as pending.
+The original 32-assertion desktop/phone journey and eight inspected source PNGs cover empty, long and error states, feedback/revision, adoption, reuse and retained history. The UI/script equality check passed. No new browser capture is claimed.
 
-## Limits and remaining system-level work
+## Limits and ownership
 
-Learning uses exact text evidence, local repository identity and deterministic applicability; it does not evaluate semantic truth or measure benefit. A matching excerpt proves provenance, not that the suggested remedy is correct. Operator adoption grants advisory reuse only. Conservative conflicts and fingerprint changes may suppress useful advice. The list shows the latest 50 proposals and selection examines at most 100 adopted candidates; the append-only ledger remains paginated and retains older history.
+The first real CSV pilot review omitted learning. This revision verifies nonempty capture and reuse through deterministic fixtures, including the actual planner and reviewer invocation paths; it does not establish nonempty real-provider reuse or measured benefit. Root owns the real-provider pilot and independent Opus review. No such acceptance is self-certified here.
 
-Database/filesystem failure can prevent any durable write; the controller makes a best-effort learning/action-ledger diagnostic while preserving core completion. It never substitutes an unproven identity when a review snapshot cannot be recovered.
-
-Root must conduct the assigned real-provider acceptance and independent Opus review. A release owner must perform any eventual v58 installation migration through the existing guarded update process. Program-level improvements remain tracked suggestions. The separate development/held-out baseline comparisons, recurrence/quality measurements, normal repair tasks, release authority and rollback described in plan steps 3–4 remain future work. No quality gain is claimed from this implementation or its test count.
+Recovery needs readable sealed evidence, the original project identity, a valid review snapshot and functioning storage. It does not manufacture missing provenance. Cursor position is process-local; restart retries oldest pending work, with immutable capture records preserving progress. Existing limits remain: 50 displayed proposals, at most 100 adopted candidates examined, five lessons and 16,000 context bytes. Conservative conflicts/fingerprint changes may exclude useful advice. Adoption grants advisory reuse only; program-level suggestions remain unapplied. Any eventual installation migration requires the existing guarded release process outside this task.

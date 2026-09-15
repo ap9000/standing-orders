@@ -22,7 +22,8 @@ import { register } from "./runner.js";
 import { approve, propose, type AcceptanceCriterion } from "./scope.js";
 import type { Runner } from "./builder.js";
 import { createDecisionServer } from "./serve.js";
-import { readVerifiedArtifact } from "./evidence.js";
+import { readVerifiedArtifact, storeEvidence } from "./evidence.js";
+import { changeLearning, learningContext, learningView } from "./project-learning.js";
 import { decodePlanContractRecord, decodePlannerSource, PLANNER_SOURCE_LIMITS } from "./planner-source.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
 
@@ -213,6 +214,35 @@ describe("planning mode, against real git", () => {
   test("the whole negotiation: ask, answer, draft, approve, build — in that order, never earlier", async () => {
     const { runnerToken, approverToken } = await setup();
 
+    // A prior accepted review supplies plan-only advice. The new task still
+    // has no scope: exercise the real requested-planner prompt before approval.
+    const seeded = openStore(db);
+    const head = (await git(["rev-parse", "HEAD"])).stdout.trim();
+    const evidenceRoot = join(base, "evidence");
+    seeded.createTask({ id: "lesson-source", title: "Document the boundary" }, T0);
+    const sourceRef = seeded.refFor("built-in", "lesson-source").id;
+    seeded.placeTask(sourceRef, repo);
+    const source = seeded.startRun({taskRef:sourceRef,leaseId:"lesson-source",runner:"builder-1",role:"builder",branch:"fixture",worktree:repo,provider:"claude",model:"sonnet",now:T0,route:{routeDigest:"legacy",phase:"build",provider:"claude",model:"sonnet",chosen:"legacy"}});
+    seeded.stampRun(source,{baseRevision:head});
+    const artifact = storeEvidence(seeded,evidenceRoot,source,"terminal-diff","diff.patch",Buffer.from("diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n+hello\n"),"fixture",T0,{captureStatus:"ok"});
+    seeded.finishRun(source,{outcome:"built",now:T0});
+    seeded.handle.prepare("UPDATE task SET state='done' WHERE id='lesson-source'").run();
+    const askedReview = seeded.requestReview(source,"alex",T0);
+    if (!askedReview.ok) throw Error(askedReview.reason);
+    const admitted = seeded.admitReview(askedReview.id,{runner:"builder-1",token:runnerToken,provider:"claude",model:"sonnet"},T0);
+    if (!admitted.ok) throw Error(admitted.reason);
+    learningContext(seeded,evidenceRoot,admitted.reviewerRunId,"review",T0);
+    seeded.stampProviderStart(admitted.reviewerRunId,T0);
+    const diffSha = seeded.getArtifact(artifact)!.sha256;
+    seeded.ingestReview({reviewerRunId:admitted.reviewerRunId,runId:source,evidenceRoot,artifactId:artifact,author:"reviewer:claude",comments:[],judgements:[],learning:[{kind:"project",observation:"The readme identifies the project boundary.",action:"Read the project boundary before drafting a plan.",paths:["README.md"],phases:["plan"],evidence:[{artifactId:artifact,sha256:diffSha,excerpt:"+hello"}]}],bindings:{diffSha,scopeDigest:null,headSha:head,proof:null,checkLog:null,screenshots:[]}},T0);
+    let learning = learningView(seeded,evidenceRoot,repo,"alex");
+    const lesson = learning.lessons[0]!;
+    changeLearning(seeded,evidenceRoot,{repo,actor:"alex",identity:learning.identity,revision:learning.revision,action:"adopt",lesson:lesson.id,version:lesson.version,sha:lesson.sha},T0);
+    learning = learningView(seeded,evidenceRoot,repo,"alex");
+    changeLearning(seeded,evidenceRoot,{repo,actor:"alex",identity:learning.identity,revision:learning.revision,action:"enable"},T0);
+    expect(seeded.getScope("limiter")).toBeNull();
+    seeded.close();
+
     await run(["task", "plan", "limiter", "--as", "alex", "--token", approverToken, "--json"], planningAgent);
     expect(payload().ok).toBe(true);
 
@@ -307,12 +337,17 @@ describe("planning mode, against real git", () => {
     }
     const builderRun = runs.find(one => one.role === "builder")!;
     expect(proved.runRoute(builderRun.id)).toMatchObject({ phase: "build", provider: "claude", model: "sonnet", chosen: "recommended", routeDigest: routeDigestOf(proved.approvedRouteOf("limiter")!) });
-    // Both real worktree phases supplied the immutable bytes, including an empty selection.
+    // Actual unscoped planner prompts contain the exact adopted advice. Build
+    // remains approval-gated and excludes the plan-only lesson.
     for (const one of [...plannerRuns, builderRun]) {
       const frozen = proved.handle.prepare("SELECT payload FROM learning_snapshot WHERE run=?").get(one.id)?.["payload"];
       expect(typeof frozen).toBe("string");
       expect(prompts.some(prompt => prompt.includes(String(frozen)))).toBe(true);
-      expect(JSON.parse(String(frozen).trim().split("\n").at(-1)!).lessons).toEqual([]);
+      const supplied = JSON.parse(String(frozen).trim().split("\n").at(-1)!);
+      if (one.role === "planner") {
+        expect(supplied.scopeDigest).toBe("");
+        expect(supplied.lessons).toMatchObject([{id:lesson.id,phases:["plan"]}]);
+      } else expect(supplied.lessons).toEqual([]);
     }
     proved.close();
   });

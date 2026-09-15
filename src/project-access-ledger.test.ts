@@ -77,7 +77,7 @@ describe("project access and the action ledger", () => {
 
   test("all accessible collections and direct links exclude other projects, including cached chrome", async () => {
     await get("/projects", "owner");
-    for (const path of ["/", "/projects", "/people", "/tasks", "/tasks/new", "/board", "/board?scope=all", "/board?view=order", "/runs", "/review", "/done", "/routines", "/ledger", "/t/alpha-task"]) {
+    for (const path of ["/", "/projects", "/people", "/tasks", "/tasks/new", "/board", "/board?scope=all", "/board?view=order", "/runs", "/review", "/done", "/routines", "/ledger", "/settings", "/settings/learning", "/t/alpha-task"]) {
       const response = await get(path);
       expect(response.status, path).toBe(200);
       const text = await response.text();
@@ -88,9 +88,14 @@ describe("project access and the action ledger", () => {
     }
     expect((await get("/t/beta-task")).status).toBe(404);
     expect((await get("/ledger?project=" + encodeURIComponent(beta))).status).toBe(403);
+    expect((await get("/settings/learning?repo=" + encodeURIComponent(beta))).status).toBe(403);
+    const settings = await (await get("/settings")).text();
+    expect(settings).toContain('href="/settings/learning"');
+    expect(settings).not.toContain('action="/settings/quality-default"');
+    expect(settings).not.toContain('action="/settings/telegram"');
     const header = await fetch(base + "/tasks", { headers: { authorization: `Bearer member:${password}`, "x-standing-orders-project": beta } });
     expect(header.status).toBe(403);
-    for (const path of ["/settings", "/system", "/fleet", "/projects/browse", "/projects/github", "/chat", "/workbench", "/control", "/unknown-new-route"]) expect((await get(path)).status, path).toBe(403);
+    for (const path of ["/settings/quality-default", "/settings/telegram", "/system", "/fleet", "/projects/browse", "/projects/github", "/chat", "/workbench", "/control", "/unknown-new-route"]) expect((await get(path)).status, path).toBe(403);
   });
 
   test("operators can manage assigned work; forged bodies, foreign resources, and viewers cannot", async () => {

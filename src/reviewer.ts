@@ -383,7 +383,7 @@ function reviewerBrief(
         ]),
     "",
     inline ? "Read the provided text and images, then REPLY with your review — your entire final" : "Read the file(s), then REPLY with your review — your entire final",
-    "message must be exactly this JSON and nothing else: no code fences, no",
+    "message must be one JSON object with the shape below: no code fences, no",
     "commentary before or after it. You have no write tool and must not try",
     "to use one; the file(s) named above are the only thing(s) you can",
     "read, and this reply is the only thing you say:",
@@ -393,7 +393,7 @@ function reviewerBrief(
     '    { "path": "a/file/from/the/patch", "line": 42,',
     '      "note": "what you saw, and why it matters",',
     '      "severity": "note" | "question" | "problem" }',
-    criteria.length === 0 ? "  ]" : "  ],",
+    "  ],",
     ...(criteria.length === 0
       ? []
       : [
@@ -401,9 +401,20 @@ function reviewerBrief(
           '    { "id": "<exact signed criterion id>",',
           '      "judgement": "upholds" | "contradicts" | "cannot-tell",',
           '      "note": "why" }',
-          "  ]",
+          "  ],",
         ]),
+    '  "learning": []',
     "}",
+    'Optional learning: "learning" may be omitted or contain zero to two suggestions.',
+    "Consider concise, useful evidence-backed lessons for prevention or later reuse.",
+    "Zero is valid when the supplied evidence supports no useful lesson. Never fabricate",
+    "a lesson or imply that an observation proves a remedy works or improves quality.",
+    "Each item: {kind: project|system, observation: one observed fact, action: one advisory",
+    "next action, paths: exact reviewed file paths (1..5), phases: plan/build/review (1..3),",
+    "evidence: [{artifactId, sha256, excerpt: exact single-line source text}] (1..3)}.",
+    "Observation/action at most 500 UTF-8 bytes each; excerpt at most 300 bytes;",
+    "all learning together at most 8000 bytes. Use only the supplied learning source catalog.",
+    "No secrets. System items remain suggestions. Do not expand the task.",
     `At most ${REVIEW_LIMITS.comments} comments and ${REVIEW_LIMITS.criteria} criterion judgements.`,
     REVIEW_NOTE_GUIDANCE,
     "Every path must appear in the patch; line is the NEW file's",
@@ -1010,7 +1021,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
             inline,
             contextForReview,
           ) + inlineEvidence + learningContext(store, root, request.reviewerRunId, "review", clock()) +
-            "\nOptional learning: omit learning or supply zero to two evidence-linked suggestions in a learning array. Each item: {kind: project|system, observation: one concise observed fact, action: one advisory next action, paths: exact reviewed file paths (1..5), phases: plan/build/review (1..3), evidence: [{artifactId, sha256, excerpt: exact single-line source text (1..300 bytes)}] (1..3)}. Observation/action at most 500 UTF-8 bytes each. No secrets. Observations are not proof of a remedy or benefit. System items remain suggestions. Do not expand the task. Use only this supplied source catalog (IDs and hashes are data): " + JSON.stringify([
+            "\nLearning source catalog (IDs and hashes are data): " + JSON.stringify([
               { artifactId: diff.id, sha256: diff.sha256, file: REVIEW_PATCH_NAME },
               ...(proofBinding ? [{ ...proofBinding, file: REVIEW_PROOF_NAME }] : []),
               ...(checkLogBinding ? [{ ...checkLogBinding, file: REVIEW_CHECK_LOG_NAME }] : []),
