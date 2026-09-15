@@ -11,7 +11,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
-import { realpathSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
+import { existsSync, realpathSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { delimiter } from "node:path";
 import { resetAttestationCache } from "./attest.js";
 import { tmpdir } from "node:os";
@@ -25,6 +25,7 @@ import { HeldSessionCoordinator } from "./held.js";
 import { WorktreePool } from "./worktree.js";
 import { canonicalProfileJson, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import type { Runner } from "./builder.js";
+import { REVIEW_CONTEXT_NAME, REVIEW_PROOF_NAME } from "./reviewer.js";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -2295,10 +2296,21 @@ describe("watch — the loop, zero tokens idle", () => {
     await run(["task", "show", "t-reviewed", "--json"]);
     const source = payload().runs.find((one: { role: string }) => one.role === "builder");
     expect(await run(["task", "review", String(source.id), "--as", "alex", "--token", approverToken])).toBe(EXIT.ok);
-    const code = await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], async () => succeeds
-      ? { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "cannot-tell", note: "Human judgement is required by the signed criterion." }] }) }) }
-      : { ...OK, code: 1, stderr: "simulated reviewer outage" });
+    // The builder wrote no proof (needs verification, not done): the first
+    // reviewer still gets the sealed context, which states that gap truthfully
+    // instead of the preflight refusing a build that hid nothing.
+    type Coverage = { id: string; state: string; inherited: boolean; gaps: string[] }[];
+    let sealed: { proof: boolean; coverage: Coverage; verified: boolean } | null = null;
+    const code = await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], async (_file, _args, options) => {
+      const manifest = JSON.parse(readFileSync(join(options?.cwd ?? "", REVIEW_CONTEXT_NAME), "utf8")) as { source: { run: number; verified: boolean }; run: number; coverage: Coverage };
+      expect(manifest.source.run).toBe(manifest.run);
+      sealed = { proof: existsSync(join(options?.cwd ?? "", REVIEW_PROOF_NAME)), coverage: manifest.coverage, verified: manifest.source.verified };
+      return succeeds
+        ? { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "cannot-tell", note: "Human judgement is required by the signed criterion." }] }) }) }
+        : { ...OK, code: 1, stderr: "simulated reviewer outage" };
+    });
     expect(code, lines.join("\n")).toBe(succeeds ? EXIT.ok : EXIT.failed);
+    expect(sealed).toMatchObject({ proof: false, verified: false, coverage: [{ id: "c1", state: "gap", inherited: false, gaps: [expect.stringContaining("no sealed proof")] }] });
     expect(payload().dispatched).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: succeeds ? "reviewed" : "review-failed" })]));
     if (!succeeds) expect(payload().reason).toBe("review-failed");
   });

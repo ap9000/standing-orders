@@ -381,6 +381,29 @@ describe("inherited review context (v51)", () => {
     expect(f.store.criterionReviewsFor(f.sourceRun)).toEqual([]);
   });
 
+  test("first-review preflight: a candidate whose own ancestry the machine could not validate refuses; a truthful gap does not", async () => {
+    const f = await firstReady(); expect(f.ask().ok).toBe(true);
+    // Capture where git cannot prove the candidate head: the sealed
+    // inventory records that as a capture failure, not a guess.
+    const broken: typeof exec = (file, args, options) => args.includes("merge-base")
+      ? Promise.resolve({ ...OK, code: 128, stderr: "fatal: simulated object store outage" })
+      : exec(file, args, options);
+    const run = f.store.getRun(f.sourceRun)!;
+    const stored = await captureReviewContext(f.store, broken, {
+      runId: f.sourceRun, taskRef: f.sourceTaskRef, head: f.shas.source, base: run.baseRevision,
+      rubric: RUBRIC.map(one => ({ id: one.id, statement: one.statement, evidence: one.evidence })),
+      patchPaths: patchPathsOf(f.repo, run.baseRevision!, f.shas.source), worktree: f.repo, root: f.evidenceRoot, now: () => T0,
+    });
+    expect(stored!.inventory).toMatchObject({ source: { run: f.sourceRun }, ancestry: { verified: false, detail: expect.stringMatching(/git exit 128/) } });
+    expect(stored!.inventory.gaps.some(one => one.reason === "capture-failed" && one.path === null)).toBe(true);
+    let calls = 0;
+    const reports = await f.pass(async () => { calls++; return { ...OK, stdout: spoken(firstVerdict()) }; });
+    expect(calls).toBe(0);
+    expect(reports[0]).toMatchObject({ outcome: "failed", detail: "evidence", attempt: 1 });
+    expect(f.store.getRun(f.store.runsFor(f.sourceTaskRef).find(one => one.role === "reviewer")!.id)!.reason).toMatch(/^reviewer-evidence/);
+    expect(f.store.criterionReviewsFor(f.sourceRun)).toEqual([]);
+  });
+
   test.each(["gate", "custody", "route"] as const)("first review: %s lost during evidence delivery cannot be ingested", async change => {
     const f = await firstReady(); expect(f.ask().ok).toBe(true);
     let calls = 0;

@@ -46,9 +46,15 @@ schema 60; that record is not proof that any old candidate now passes review.
 The builder seals full files for ordinary builds as well as revisions. Changed
 files omitted from proof path hints are also delivered. The first reviewer gets
 a compact manifest, full sealed files and bounded same-session range reads.
-Preflight checks artifact integrity, candidate/ancestry and required source
-inputs. Per-criterion gaps remain visible; an unrelated redacted fixture does
-not prevent inspecting clean source and tests.
+Preflight refuses ambiguous, truncated, failed or tampered sealed inputs, a
+malformed proof, drifted custody and a first-review inventory whose own
+candidate head the machine could not validate. A truthful gap is not a
+refusal: a build that wrote no proof, an oversized path inventory or a stale
+ancestor stays a named per-criterion gap the reviewer judges, exactly as the
+v51 revision contract already did. The review-only and explicit-retry tick
+journeys (build without a proof, then first review) cover that distinction;
+an unrelated redacted fixture does not prevent inspecting clean source and
+tests.
 
 New verification uses a separate machine receipt in the existing schema-60
 artifact store. It records the exact candidate, approved grant, actual result
@@ -63,6 +69,13 @@ within the existing byte/request bounds. Only evidence-only requests and failed
 transport with no substantive reply qualify. Changed session, route, custody,
 unknown file/hash, tampering and exhaustion stop. Successful negative reviews
 remain final; the one-successful-root-review invariant stays intact.
+
+Revision after build 1635's native gate (3103 passed, 2 failed): both
+failures were the review-only success and explicit-retry tick journeys, whose
+builder writes no proof. The blanket "source or ancestry unverified" refusal
+turned that visible gap into a refused review; it is narrowed as described
+above, the tick journey asserts the sealed gap, and a focused test refuses an
+inventory whose candidate ancestry git could not prove.
 
 Validation on the uncommitted candidate based on
 `924fd00731649f88e7450c75776c31474a150e81`:

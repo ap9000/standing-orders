@@ -450,7 +450,7 @@ function reviewerBrief(
  * cite it, and what it is NOT — every earlier judgement in it is data. */
 function reviewContextBriefLines(context: ReviewContextInventory): string[] {
   const coverage = context.coverage.map(one =>
-    `| ${one.id}: ${one.state === "patch" ? "judged from this run's own patch" : one.state === "context" ? `inherited — sealed context ${one.items.join(", ")}` : `inherited — CONTEXT GAP (${one.gaps.map(inert).join("; ")})${one.items.length > 0 ? `; partial context ${one.items.join(", ")}` : ""}`}`,
+    `| ${one.id}: ${one.state === "patch" ? "judged from this run's own patch" : one.state === "context" ? `${one.inherited ? "inherited — " : ""}sealed context ${one.items.join(", ")}` : `${one.inherited ? "inherited — " : ""}CONTEXT GAP (${one.gaps.map(inert).join("; ")})${one.items.length > 0 ? `; partial context ${one.items.join(", ")}` : ""}`}`,
   );
   return [
     "",
@@ -796,7 +796,14 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
       }
       const custodyProblem = reviewContextCustodyProblem(store, root, parsedContext.inventory);
       if (custodyProblem !== null) return { ok: false, reason: "evidence", message: custodyProblem };
-      if (!parsedContext.inventory.source.verified || !parsedContext.inventory.ancestry.verified) return { ok: false, reason: "evidence", message: "Required source evidence or candidate ancestry is missing or invalid." };
+      // A truthful gap — a build that wrote no proof, an oversized path
+      // inventory, a stale ancestor — stays a CONTEXT GAP the reviewer judges
+      // (v51); tampering was refused live above. What refuses here is a
+      // candidate the machine never bound: a first-review inventory whose
+      // own head could not be validated cannot say what it covers.
+      if (parsedContext.inventory.source.run === parsedContext.inventory.run && !parsedContext.inventory.ancestry.verified) {
+        return { ok: false, reason: "evidence", message: `The exact candidate could not be validated for first-review evidence: ${parsedContext.inventory.ancestry.detail}` };
+      }
       contextForReview = parsedContext.inventory;
       contextBinding = { artifactId: contextArtifact.id, sha256: contextArtifact.sha256 };
     }
