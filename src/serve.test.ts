@@ -1148,8 +1148,11 @@ describe("the operations console", () => {
     const count = mode === "mixed" ? 2 : 1;
     const runView = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
     expect(runView).toContain("tighten the guard here");
-    expect(runView).toContain(`${count} note${count === 1 ? "" : "s"} ready`);
-    expect(runView).toContain(">Revise</button>");
+    // Since a97f74b the saved notes count and one Request changes action
+    // ride the comment form; the sealed batch is still the displayed list.
+    expect(runView).toContain(`Saved for later · ${count}`);
+    expect(runView).toContain('data-request-changes>Request changes</button>');
+    expect(runView).not.toContain('class="card revision-from-comments"');
     // The form names the exact batch and source it displays (repair
     // 2026-09-14); a bare seal is an out-of-date form and is refused.
     const sealForm = revisionFormOf(runView);
@@ -9062,7 +9065,11 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain(`<a class="button-link" href="/chat?task=${taskId}" data-filed-task="${taskId}">Open task <span class="mono">${taskId}</span> →</a>`);
     expect(html).toContain(`href="/t/${taskId}">overview</a>`);
     const focused = await (await fetch(url(`/chat?task=${taskId}`), { headers: { cookie } })).text();
-    expect(focused).toContain("The planner is preparing a scope for you");
+    // Since f53b7f1 the task status card alone names planning: the live
+    // region carries the requested plan and no second planning card.
+    expect(focused).toContain('data-plan="requested"');
+    expect(focused).toContain('<section class="card task-journey" aria-label="task progress"');
+    expect(focused).not.toContain("The planner is preparing a scope for you");
     expect(focused).toContain(`data-chat-task="${taskId}"`);
     // Confirming again creates no second task: the door says so, no redirect into a lens.
     const again = await post(cookie, "/chat/proposal/1/confirm", { csrf });
@@ -12604,10 +12611,12 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(aside).toContain('<span class="mono">claude</span> not yet checked');
     // The compact strip lives in the live region, which phones keep even
     // when the desktop context panel is hidden.
-    const strip = /<p class="task-chat-agents">(.*?)<\/p>/s.exec(chat)?.[1] ?? "";
-    expect(strip).toContain('<span class="eyebrow">agents</span>');
-    expect(strip).toContain("claude · sonnet plans; claude · opus builds and repairs; codex · gpt-5-codex reviews");
-    expect(strip).toContain('href="/t/payouts#agents"');
+    // Since 4ce2b88 the strip is one Agent setup disclosure: the summary
+    // and a way to the task's agents, no decorative eyebrow.
+    const strip = /<details class="task-chat-agents">(.*?)<\/details>/s.exec(chat)?.[1] ?? "";
+    expect(strip).toContain("<summary>Agent setup</summary>");
+    expect(strip).toContain("<p>claude · sonnet plans; claude · opus builds and repairs; codex · gpt-5-codex reviews</p>");
+    expect(strip).toContain('<a href="/t/payouts#agents">View agents</a>');
     const css = await stylesOf(chat, base);
     expect(css).toContain(".task-chat-workspace .task-chat-context { display: none; }");
     expect(css).toContain(".task-chat-agents {");

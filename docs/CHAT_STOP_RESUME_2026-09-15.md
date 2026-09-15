@@ -59,3 +59,26 @@ All images are real Chrome viewport captures of synthetic fixture data. They are
 - Elapsed reference: lease creation at 2026-09-15T14:10:42.834Z to receipt at 2026-09-15T14:33:31.362309+00:00, 1368.5 seconds (22.8 minutes). This includes tool waits and fixture debugging; earlier dispatch time is not measured.
 - Operator interventions: zero; no permission questions or manual operator repairs. Builder corrections included a missing worktree in a new test fixture, an outdated schema assertion (58 → current 60), hidden-control waiting and feedback-button selectors in the browser script, choosing installed Chrome after a cached Chromium executable was absent, and the reproduced long-title CSS defect. Failed exploratory checks were corrected before the passing results above.
 - No commit, branch switch, push, PR, deployment, installed-database migration, provider/permission change, or full-verifier invocation was performed by the builder. Source HEAD remains the approved baseline; the machine owns the commit and final gate.
+
+## Repair 1 (c4): the final gate on `b8594f1`
+
+The machine's full verifier on the sealed candidate `b8594f1` exited 1: 5 files, 9 tests failed. Diagnosis on this repair branch (`standing-orders/chat-stop-resume-20260915-fix-1`) reproduced all nine and traced each to an assertion that the `native-chat-flow` baseline lineage had left behind, not to the stop/resume behavior. No product code changed in this repair; no test was deleted or skipped.
+
+| Failing test | Cause | Repair |
+| --- | --- | --- |
+| `migration-v53-process-custody`, `migration-v58-project-learning`, `recipe-creator` (v56 upgrade) | Pinned `SCHEMA_VERSION` to 58; `6c12fc1` (before baseline `a97f74b`) bumped it to 60. Migrations are additive and stamp the version last, so old files land at the current version. | Pins moved to 60, matching `task-control.test.ts`. |
+| `project-knowledge` (v58 upgrade) | Asserted the migrated file's `schema_version` is 59; current is 60 for the same reason. | Expected file version 60. |
+| `serve` legacy long plain/annotated/mixed feedback (3) | Expected the pre-`a97f74b` "N note(s) ready" card with a bare Revise button. `a97f74b` intentionally shows "Saved for later · N" and one Request changes submit inside the comment form; the sealed batch and `/r/:run/revise` road are unchanged and still exercised. | Assert the current projection and the absence of the old card; seal, refusal and replay assertions kept. |
+| `serve` task filed from chat → focused conversation | Expected the "The planner is preparing a scope for you" card that `f53b7f1` removed because the task status card already names planning. | Assert the one task-journey card with `data-plan="requested"` and no second planning card. |
+| `serve` focused chat agents strip | Expected the `<p class="task-chat-agents">` eyebrow strip that `4ce2b88` turned into an `Agent setup` disclosure. | Match the disclosure: summary, agents sentence, View agents link; jargon check kept. |
+
+A sixth `serve` case (`opening a project: outside the ceiling refused`) failed only while `TMPDIR` pointed inside this checkout, because the "not a git repository" fixture path then sat inside this worktree. It passes under the default temporary directory, which is what the gate uses; the earlier `TMPDIR` advice above is unnecessary and was not used for the results below.
+
+| Command | Result |
+| --- | --- |
+| `npm run typecheck` | Passed. |
+| `npx vitest run src/serve.test.ts src/project-knowledge.test.ts src/recipe-creator.test.ts src/migration-v53-process-custody.test.ts src/migration-v58-project-learning.test.ts` | 5 files, 329 tests passed (exit 0). |
+
+The unchanged approved full verifier was not run by the builder; it runs once at the machine's final gate for this repaired candidate. Remaining gap: `scripts/workspace-result-proof.mjs` (an older package's browser proof) still looks for "2 notes ready"; it is not part of the verifier and was left outside this criterion repair.
+
+Repair receipt: builder Claude Opus 5 (`claude-opus-5`), no subagents, no live model calls, zero operator interventions. Started 2026-09-15T15:54:55Z (steering note) and finished about 2026-09-15T16:02Z, roughly 7 minutes including two full `serve.test.ts` runs. No commit, push, branch switch, migration of the installed database, or provider/permission change.
