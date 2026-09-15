@@ -1,0 +1,80 @@
+import type { ChatSnapshot } from './store.js';
+
+const escape = (value: string): string => value.replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]!));
+
+/** Presentation only. These are recorded completions, not a claim that
+ * work happened since the user last visited, or that every result passed. */
+export function completedWorkHtml(snapshot: ChatSnapshot, projectLabels: readonly string[]): string {
+  const completed = snapshot.tasks.filter(task => task.state === 'done'
+    && task.proofVerdict !== 'short' && task.proofVerdict !== 'refuted'
+    && !task.historyProblem && !task.otherActive?.length
+    && task.dispatch?.condition !== 'waiting').slice(0, 3);
+  if (!completed.length) return '';
+  return `<section class="chat-completed" aria-label="Completed work"><h3>Completed work</h3>` + completed.map(task => {
+    return `<a class="chat-overview-item" href="/t/${encodeURIComponent(task.rootId ?? task.id)}"><span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectLabels[task.repoIndex] ?? `Project ${task.repoIndex + 1}`)}</span></span><span class="chat-completed-action">Open task <span aria-hidden="true">→</span></span></a>`;
+  }).join('') + '</section>';
+}
+
+/** Keep activity truthful: the turn's recorded step count is not a
+ * percentage or an invented tool phase. Billing detail stays available. */
+export function chatWorkingHtml(input: { details: string; stopForm?: string; keyed?: boolean }): string {
+  return `<div class="chat-thinking chat-activity-row" id="latest" role="status"${input.keyed ? ' data-key="pending"' : ''}>` +
+    `<span class="activity-dot" aria-hidden="true"></span><details><summary>Working<span class="activity-ellipsis" aria-hidden="true">…</span></summary><p class="meta">${escape(input.details)}</p></details>` +
+    (input.stopForm ?? '') + '</div>';
+}
+
+// Local primitives adapted from the researched interaction patterns. No
+// imported kit, animation runtime, simulated progress, or changed authority.
+export const CHAT_POLISH_CSS = `
+  .chat-activity-row { border: 0; background: transparent; box-shadow: none; padding: .5rem 0; min-height: 44px; gap: .65rem; }
+  .chat-activity-row details { flex: 1; min-width: 0; border: 0; background: transparent; padding: 0; margin: 0; box-shadow: none; }
+  .chat-activity-row summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; width: fit-content; font-size: .875rem; font-weight: 550; }
+  .chat-activity-row summary::after { content: '⌄'; margin-left: .65rem; color: var(--muted-foreground); }
+  .chat-activity-row details[open] summary::after { transform: rotate(180deg); }
+  .chat-activity-row .meta { padding-bottom: .5rem; overflow-wrap: anywhere; }
+  .activity-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+  .task-live-summary { border-bottom: 1px solid var(--border); margin-bottom: 1rem; padding-bottom: .5rem; }
+  .task-live-summary .task-journey, .task-live-summary .task-control { border: 0; border-radius: 0; box-shadow: none; background: transparent; margin: 0; padding: .65rem 0; }
+  .task-live-summary .task-journey h2 { font-size: 1rem; }
+  .task-live-summary .agents-strip { margin: .4rem 0; }
+  .chat-decisions .chat-section-head { margin-bottom: .5rem; }
+  .chat-decisions h2 { font-size: .875rem; font-weight: 550; color: var(--muted-foreground); }
+  .decision-context summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; font-size: .8125rem; color: var(--muted-foreground); }
+  .decision-context { border: 0; padding: 0; margin: 0; background: transparent; box-shadow: none; }
+  .decide-options { display: grid; gap: .5rem; }
+  .decide-options .decide-option { margin: 0; padding: .65rem .75rem; border: 1px solid var(--border); border-radius: .75rem; background: var(--background); }
+  .decide-options .decide-option .meta { display: block; margin-top: .3rem; overflow-wrap: anywhere; }
+  .decide-options .decide-option button { min-height: 44px; max-width: 100%; white-space: normal; text-align: left; }
+  .chat-completed { margin-top: 1rem; }
+  .chat-completed h3 { font-size: .8125rem; font-weight: 550; margin: 0 0 .25rem; color: var(--muted-foreground); }
+  .chat-completed-action { flex: none; font-size: .75rem; white-space: nowrap; color: var(--muted-foreground); }
+  .chat-overview .chat-overview-stat { box-shadow: none; border: 0; background: transparent; border-radius: 0; }
+  .chat-overview .chat-overview-stat + .chat-overview-stat { border-left: 1px solid var(--border); }
+  .result-panel .result-request { border-top: 1px solid var(--border); padding-top: 1rem; }
+  .result-panel .result-attention { background: transparent; border: 1px solid var(--border); border-left: 3px solid var(--muted-foreground); border-radius: .65rem; color: var(--foreground); }
+  .result-panel .result-attention ul { margin-bottom: 0; }
+  .result-panel .result-knowledge { border: 0; border-top: 1px solid var(--border); background: transparent; box-shadow: none; border-radius: 0; padding: .25rem 0; }
+  .result-panel .revision-from-comments { border: 0; background: transparent; box-shadow: none; padding: .5rem 0; }
+  .result-panel .result-pin summary { font-size: .8125rem; min-height: 44px; display: flex; align-items: center; cursor: pointer; }
+  .result-panel .diff-comment-limit { font-size: .75rem; }
+  .chat-main .chat-plan { box-shadow: none; }
+  .chat-main .chat-task-back { display: none; }
+  .knowledge-library .knowledge-intro { padding: .5rem 0 1.25rem; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+  .knowledge-library .knowledge-instructions { line-height: 1.65; margin-bottom: .5rem; }
+  .knowledge-library .knowledge-editor summary { width: fit-content; font-size: .875rem; font-weight: 550; }
+  .knowledge-library .knowledge-editor, .knowledge-library > details { border: 0; border-bottom: 1px solid var(--border); border-radius: 0; box-shadow: none; background: transparent; padding: 0; }
+  .knowledge-library .knowledge-editor { border-bottom: 0; }
+  .knowledge-library .card { border: 0; border-bottom: 1px solid var(--border); border-radius: 0; padding: 0 0 .5rem; margin: 0; box-shadow: none; background: transparent; }
+  .knowledge-library .card[open] { padding-bottom: 1rem; }
+  .knowledge-library .card > summary { padding: .85rem 0; }
+  @media (prefers-reduced-motion: no-preference) {
+    .chat-activity-row .activity-dot { animation: quiet-activity 1.8s ease-in-out infinite; }
+    .chat-completed .chat-overview-item { transition: background-color 140ms ease; }
+    @keyframes quiet-activity { 50% { opacity: .35; } }
+  }
+  @media (max-width: 600px) {
+    .chat-completed .chat-overview-item { align-items: flex-start; flex-wrap: wrap; gap: .35rem; }
+    .chat-completed .chat-overview-copy { flex-basis: 65%; }
+    .task-live-summary .task-journey { gap: .5rem; }
+  }
+`;

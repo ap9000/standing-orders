@@ -318,6 +318,7 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
   if(panel){
     var tabs=panel.querySelectorAll('[data-result-tab]'),views=panel.querySelectorAll('[data-result-view]');
     function show(name){
+      var tabField=panel.querySelector('#comment-form input[name="tab"]');if(tabField)tabField.value=name;
       Array.prototype.forEach.call(views,function(view){var on=view.getAttribute('data-result-view')===name;view.hidden=!on;});
       Array.prototype.forEach.call(tabs,function(tab){var on=tab.getAttribute('data-result-tab')===name;tab.setAttribute('aria-selected',on?'true':'false');tab.tabIndex=on?0:-1;});
     }

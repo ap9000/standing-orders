@@ -5,6 +5,7 @@ import { learningHtml } from "./workspace-ui.js";
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
+import { chatWorkingHtml, completedWorkHtml, CHAT_POLISH_CSS } from "./chat-polish.js";
 import { styleAsset } from "./style-asset.js";
 import { MOBILE_VIEWPORT_SCRIPT } from "./mobile-viewport.js";
 import { authorizePlanUnderMode, applyModeToNewFiling, planAutoPending } from "./plan-auto.js";
@@ -6029,7 +6030,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       // the chat's result view, or the run page — validated to those exact
       // shapes. A refusal sends them back THERE, where the browser has kept
       // their draft, so a failed submission is recoverable in place.
-      const back = resultReturnTarget(body.get("return"), id);
+      const returnTo = resultReturnTarget(body.get("return"), id);
+      const selectedTab = parseResultTab(body.get("tab"));
+      const back = selectedTab === "summary" ? returnTo : `${returnTo}${returnTo.includes("?") ? "&" : "?"}tab=${selectedTab}`;
       const terminal = store.artifactsFor(id).find(one => one.kind === "terminal-diff");
       if (terminal === undefined) {
         return refuse(response, who, 400, "this run has no terminal diff to comment on", back);
@@ -11480,7 +11483,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS + KNOWLEDGE_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -13097,7 +13100,8 @@ function taskChatContext(focus: TaskChatFocus): string {
 function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
   const approval = focus.approval;
   if (focus.plan === "requested") {
-    return `<section class="card chat-action-card"><span class="eyebrow">planning now</span><h2>The planner is preparing a scope for you</h2><p class="meta">It is reading the repository first. This conversation updates when the plan is ready; nothing builds before you approve it.</p></section>`;
+    // The task status already names planning. No second status card.
+    return "";
   }
   if (approval === null) return "";
   const scope = approval.scope;
@@ -13199,6 +13203,7 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
   const polling = !inert && ((focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled" || focus.control.kind === "stopping" || focus.control.kind === "stop");
   return (
     `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-execution="${escape(focus.executionId)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}" data-approval="${escape(focus.approval?.digest ?? "")}" data-plan="${escape(focus.plan ?? "")}">` +
+    `<div class="task-live-summary">` +
     (receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status) : taskStatusCard(focus.status, focus.id, focus.dispatch, focus.liveRun?.id ?? null, focus.approval !== null && focus.dispatch?.action === "approve-scope")) +
     // The exact-run control (v52): the SAME component the task page
     // renders, refreshed with the live region — typed input in the
@@ -13207,12 +13212,13 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     // The compact agents strip (v47): always visible, phones included,
     // where the desktop context panel is hidden.
     agentsStripHtml(focus.route, focus.executionId) +
+    `</div>` +
     milestoneProgressHtml(focus.milestoneProgress) +
     planRevisionLedgerHtml(focus.planRevisions, focus.executionId, csrf) +
     approvalCard + focus.history +
     (focus.decisions.length === 0
       ? ""
-      : `<section class="chat-decisions"><div class="chat-section-head"><span class="eyebrow">needs your answer</span><h2>Keep the work moving</h2></div>${focus.decisions.map(one => focus.approval !== null || inert
+      : `<section class="chat-decisions"><div class="chat-section-head"><h2>Needs your answer</h2></div>${focus.decisions.map(one => focus.approval !== null || inert
         ? `<div class="decide-card"><p class="q">${escape(one.question)}</p><p class="meta">${escape(oneLineOf(one.recap, 160))}</p><a href="/d/${one.id}?return=${encodeURIComponent(taskChatHref(focus.id))}">Review and answer →</a></div>`
         : decisionAnswerCard(one, csrf, focus.now, false, taskChatHref(focus.id))).join("")}</section>`) +
     (focus.result === null || receiptLeads ? "" : `<details class="task-previous-result"><summary>Previous result</summary>${completionReceiptCard(focus.result, focus.id, "chat")}</details>`) +
@@ -13261,7 +13267,7 @@ function chatFleetOverview(
   interactive: boolean,
 ): string {
   if (snapshot === null) {
-    return `<section class="card chat-overview"><div class="chat-overview-head"><div><span class="eyebrow">live overview</span><h2>Portfolio pulse unavailable</h2></div></div><p class="meta">The conversation is still available; refresh to try the live project summary again.</p></section>`;
+    return `<section class="card chat-overview"><h2>Project summary unavailable</h2><p class="meta">Reload to try again. You can still use chat.</p></section>`;
   }
   const total = (key: keyof ProjectPeek): number => projects.reduce((sum, one) => sum + (one.peek?.[key] ?? 0), 0);
   const needsYou = total("waiting");
@@ -13322,7 +13328,7 @@ function chatFleetOverview(
   const briefing = "Brief me on what needs my attention, what is building, and the highest-leverage next action across every project.";
   return (
     `<section class="card chat-overview" aria-label="live portfolio overview" data-card-kind="fleet-overview">` +
-    `<div class="chat-overview-head"><div><span class="eyebrow">live overview</span><h2>Across ${projects.length} project${projects.length === 1 ? "" : "s"}</h2></div>` +
+    `<div class="chat-overview-head"><h2>${projects.length} project${projects.length === 1 ? "" : "s"}</h2>` +
     (interactive
       ? `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" name="message" value="${escape(briefing)}" class="quiet">brief me</button></form>`
       : `<a href="/board?scope=all" class="chat-overview-link">open board</a>`) +
@@ -13334,7 +13340,8 @@ function chatFleetOverview(
     `<a href="/done" class="chat-overview-stat"><b>${done}</b><span>done today</span></a>` +
     `</div>` +
     (rows.length === 0 ? `<p class="chat-overview-clear"><span class="dot dot-ok"></span>No tasks are waiting and no builds are running.</p>` : `<div class="chat-overview-items">${rows.join("")}</div>`) +
-    (saturated ? `<p class="meta chat-overview-note">Showing a bounded live view; ask for a narrower project or state to go deeper.</p>` : "") +
+    completedWorkHtml(snapshot, projects.map(project => project.label)) +
+    (saturated ? `<p class="meta chat-overview-note">Some items aren’t shown. Open Work to see more.</p>` : "") +
     `</section>`
   );
 }
@@ -13632,7 +13639,7 @@ function chatPage(chrome: Chrome, data: {
     );
   }
   if (data.pending !== null) {
-    parts.push(`<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>Working on it</strong><span class="meta">turn #${data.pending.id}${subscription ? " · membership-backed" : ` · up to ${chatMoney(data.pending.reservedMicrousd)} reserved`} · this page refreshes itself</span></p></div>`);
+    parts.push(chatWorkingHtml({details:`Turn #${data.pending.id}${subscription ? " · subscription" : ` · up to ${chatMoney(data.pending.reservedMicrousd)} reserved`}`}));
     parts.push(`<p class="meta"><a href="/chat">refresh now</a></p>`);
     return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask, data.resultPanel ?? null), { chrome, functional: { script: CHAT_UI_SCRIPT + (data.focusTask === null ? "" : RESULT_REVIEW_SCRIPT), fetches: data.focusTask !== null }, refreshSeconds: 3 });
   }
@@ -14110,12 +14117,10 @@ function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; proble
   parts.push(`</div>`);
   if (data.pending !== null) {
     const subscription = data.pending.reservedMicrousd === 0;
-    parts.push(
-      `<div class="card chat-thinking" id="latest" aria-live="polite" data-key="pending"><span class="thinking-orb"></span><p><strong>${data.focusTask === null ? "Working across your projects" : `Working on ${escape(data.focusTask.title)}`}</strong>` +
-      `<span class="meta">turn #${data.pending.id} · ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"}${subscription ? " · membership-backed" : ` · up to ${chatMoney(data.pending.reservedMicrousd)} reserved`}</span></p>` +
-      `<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="turn" value="${data.pending.id}">` +
-      `<button type="submit" class="quiet">stop</button></form></div>`,
-    );
+    parts.push(chatWorkingHtml({keyed:true,
+      details:`Turn #${data.pending.id} · ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"}${subscription ? " · subscription" : ` · up to ${chatMoney(data.pending.reservedMicrousd)} reserved`}`,
+      stopForm:`<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="turn" value="${data.pending.id}"><button type="submit" class="quiet" aria-label="Stop chat response">Stop</button></form>`,
+    }));
   }
   if (data.messages.length > 0 && data.pending === null) parts.push(`<div data-key="starters">${matePromptStarters(data.csrf, data.focusTask)}</div>`);
   return `<div id="chat-thread" data-chat-region="thread">${parts.join("\n")}</div>`;
@@ -14959,10 +14964,10 @@ function decisionAnswerCard(
   return (
     `<div class="decide-card" data-decision-id="${decision.id}">` +
     `<p class="q">${escape(decision.question)}</p>` +
-    `<p class="meta">${escape(oneLineOf(decision.recap, 160))}</p>` +
+    `<details class="decision-context"><summary>Context</summary><p class="meta">${escape(decision.recap)}</p></details>` +
     `<p class="meta"><span class="mono">${escape(decision.taskId)}</span>${chip ? projectChip(decision.repo) : ""}` +
     `${isOverdue(decision, now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
-    ` · <a href="/d/${decision.id}${returnTo === null ? "" : `?return=${encodeURIComponent(returnTo)}`}">the full question →</a></p>` +
+    ` · <a href="/d/${decision.id}${returnTo === null ? "" : `?return=${encodeURIComponent(returnTo)}`}">View details →</a></p>` +
     `<div class="decide-options">${options}</div></div>`
   );
 }
@@ -19628,7 +19633,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   if (o.extraChecks !== undefined) checkParts.push(o.extraChecks);
 
   // ---- request changes: both feedback styles, one sealed road ------------
-  const requestParts: string[] = [`<h3>Request changes</h3>`];
+  const requestParts: string[] = [`<h3>Feedback</h3>`];
   const pathWords = (path: string, line: number | null): string => {
     const shownPath = `${path}${line === null ? "" : `:${line}`}`;
     const href = detail.editor === null ? null : editorFileHref(detail.editor.worktree, path, line);
@@ -19644,7 +19649,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       requestParts.push(
         `<form method="post" action="/r/${runId}/revise" class="card revision-from-comments"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="return" value="${escape(o.returnTo)}">${revisionSealFields(detail.comments, detail.sourceDigest)}` +
           `<div><strong>${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready</strong></div>` +
-          `<button type="submit">Revise</button></form>`,
+          `<button type="submit">Request changes</button></form>`,
       );
     }
   }
@@ -19664,14 +19669,15 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     requestParts.push(
       `<form method="post" action="/r/${runId}/comment" class="diff-comment-form" id="comment-form">` +
         `<input type="hidden" name="csrf" value="${escape(o.csrf)}">` +
+        `<input type="hidden" name="tab" value="${o.tab}">` +
         `<input type="hidden" name="return" value="${escape(o.returnTo)}">` +
         `<input type="hidden" name="request" value="${escape(o.requestToken)}">` +
         `<label>What should change?<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="Describe the change and why" aria-label="review comment" aria-describedby="comment-note-limit"${o.noted ? " autofocus" : ""}></textarea></label>` +
         `<span class="meta diff-comment-limit" id="comment-note-limit">up to ${LIMITS.note} characters</span>` +
-        `<details class="result-pin"><summary>Pin to a file or line <span class="meta">(optional — or choose Annotate in Changes)</span></summary>` +
+        `<details class="result-pin"><summary>Attach to a file or line</summary>` +
         `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="src/…" aria-label="file" class="mono"></label>` +
         `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div></details>` +
-        `<button type="submit">Add note</button></form>`,
+        `<button type="submit">Save note</button><p class="meta">Notes stay here until you request changes.</p></form>`,
     );
   }
 
@@ -19727,7 +19733,7 @@ function resultPrimaryAction(detail: ResultDetail, o: ResultPanelOptions, prUrl:
   if (detail.ciFailing && o.csrf !== "") {
     return wrap("draft-repair", `<form method="post" action="/r/${detail.run.id}/draft-repair"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><button type="submit">Draft a repair task</button></form>`);
   }
-  if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="button-link" href="#request-changes">Revise <span class="meta">from ${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"}</span></a>`);
+  if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="button-link" href="#request-changes">Review ${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"}</a>`);
   if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) return wrap("open-pr", `<a class="button-link" href="${escape(prUrl)}">Open PR #${detail.publication.prNumber}</a>`);
   if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="button-link" href="#request-changes">Request changes</a>`);
   return "";

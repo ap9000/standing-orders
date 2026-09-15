@@ -9012,7 +9012,11 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const cookie = await login();
     const html = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
     const csrf = csrfFrom(html);
-    expect(html).toContain("Keep the work moving");
+    expect(html).toContain("Needs your answer");
+    expect(html).not.toContain("Keep the work moving");
+    expect(html).toContain('<details class="decision-context"><summary>Context</summary>');
+    expect(html).toContain('The old structure is removed.');
+    expect(html).toContain('irreversible');
     expect(html).toContain(`action="/d/${decision}/answer"`);
     expect(html).toContain('name="return" value="/chat?task=a"');
     expect(html).toContain(`/d/${decision}?return=%2Fchat%3Ftask%3Da`);
@@ -11859,6 +11863,11 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const foreign = await post(cookie, `/r/${run}/comment`, { csrf, note: "x", line: "abc", return: `/chat?task=t-back&result=${otherRun}` });
     expect(await foreign.text()).toContain(`<a href="/r/${run}">`);
     expect(store.liveDiffComments(run)).toHaveLength(0);
+    const savedInChanges = await post(cookie, `/r/${run}/comment`, { csrf, note: "Keep this view", return: `/chat?task=t-back&result=${run}`, tab: "changes" });
+    expect(savedInChanges.status).toBe(303);
+    expect(savedInChanges.headers.get("location")).toBe(`/chat?task=t-back&result=${run}&tab=changes&noted=1#request-changes`);
+    const refusedInChecks = await post(cookie, `/r/${run}/comment`, { csrf, note: "x", line: "abc", return: `/r/${run}`, tab: "checks" });
+    expect(await refusedInChecks.text()).toContain(`<a href="/r/${run}?tab=checks">`);
     // The chat lens never shows another task's run as its result.
     const wrong = await read(`/chat?task=t-back&result=${otherRun}`);
     expect(wrong).not.toContain('<section class="card result-panel"');

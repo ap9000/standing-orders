@@ -227,6 +227,18 @@ describe("result-first review (workspace package 3): the pure presentation rules
   for (const severity of [null, "note", "question"]) expect(isRevisionFeedback({ reviewerRun: 9, severity })).toBe(false);
 });
 
+test("switching result tabs also preserves the selected view when a note is submitted", async () => {
+  const window = new Window({ url: "http://fixture/chat?task=root&result=1" });
+  try {
+    window.document.body.innerHTML = `<section data-result-panel><a href="?tab=summary" data-result-tab="summary">Summary</a><a href="?tab=changes" data-result-tab="changes">Changes</a><div data-result-view="summary"></div><div data-result-view="changes" hidden></div><form id="comment-form"><input name="tab" value="summary"></form></section>`;
+    window.eval(RESULT_REVIEW_SCRIPT);
+    window.document.querySelector<HTMLAnchorElement>('[data-result-tab="changes"]')!.click();
+    expect(window.document.querySelector<HTMLInputElement>('[name="tab"]')!.value).toBe("changes");
+    expect(window.document.querySelector<HTMLElement>('[data-result-view="changes"]')!.hidden).toBe(false);
+    expect(new URL(window.location.href).searchParams.get("tab")).toBe("changes");
+  } finally { await window.happyDOM.close(); }
+});
+
 test("selecting a reviewer observation preserves a draft unless its replacement is confirmed", async () => {
   const window = new Window({ url: "http://fixture/chat?task=root&result=1" });
   try {
