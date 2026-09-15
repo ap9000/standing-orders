@@ -1,3 +1,5 @@
+import { verificationEvidence, REVIEW_GATE_NAME } from "./verification-evidence.js";
+import { run as gitRead } from "./exec.js";
 import { learningContext, recoverLearning } from "./project-learning.js";
 import { knowledgeContext } from "./project-knowledge.js";
 /**
@@ -57,7 +59,7 @@ import { evidenceRoot, readMailbox, readVerifiedArtifact, sniffImageKind, storeE
 import type { Runner } from "./builder.js";
 import { CLAUDE_LIMITS } from "./scope.js";
 import { parseProof, serializeProof, type ApprovedCriterion, type CriterionJudgementWord, type ProofVerdict } from "./proof.js";
-import { citesSuppliedProvenance, parseReviewContext, reviewContextRules, reviewContextCustodyProblem, reviewContextManifest, reviewContextFileName, type ReviewContextInventory } from "./review-context.js";
+import { captureReviewContext, citesSuppliedProvenance, parseReviewContext, reviewContextRules, reviewContextCustodyProblem, reviewContextManifest, reviewContextFileName, type ReviewContextInventory } from "./review-context.js";
 import {
   normalizeStructuredJson,
   storeStructuredAttempt,
@@ -69,7 +71,7 @@ import {
   REVIEW_NOTE_GUIDANCE,
 } from "./structured-output.js";
 
-import { evidenceRequest, evidenceRange, REVIEW_READ_BRIEF, REVIEW_READ_LIMITS } from "./review-evidence.js";
+import { isEvidenceOnlyReply, evidenceRequest, evidenceRange, REVIEW_READ_BRIEF, REVIEW_READ_LIMITS } from "./review-evidence.js";
 
 const DEFAULT_REVIEW_TIMEOUT_MS = 20 * 60_000;
 const DEFAULT_REVIEW_TURNS = CLAUDE_LIMITS.maxTurns;
@@ -335,12 +337,14 @@ function reviewerBrief(
   screenshotFiles: readonly string[],
   inline: boolean = false,
   context: ReviewContextInventory | null = null,
+  hasGate = false,
 ): string {
   const files = [
     REVIEW_PATCH_NAME,
     ...(criteria.length > 0 ? [REVIEW_RUBRIC_NAME] : []),
     ...(hasProof ? [REVIEW_PROOF_NAME] : []),
     ...(hasCheckLog ? [REVIEW_CHECK_LOG_NAME] : []),
+    ...(hasGate ? [REVIEW_GATE_NAME] : []),
     ...screenshotFiles,
     ...(context === null ? [] : [REVIEW_CONTEXT_NAME, ...context.items.map(one => reviewContextFileName(one.id))]),
   ];
@@ -363,6 +367,7 @@ function reviewerBrief(
       : "in your working directory — the exact, sealed diff of the finished run",
     ...(criteria.length > 0 ? [`under review, its signed rubric, and whatever of its proof, verification`, `log, and screenshots actually exist.`] : ["under review."]),
     REVIEW_READ_BRIEF,
+    ...(hasGate ? [`${REVIEW_GATE_NAME} is the machine verification receipt: exact candidate, approved command, result and retained log binding. Shortened or redacted verbose output is not a failed gate; omitted output is unavailable and must never be claimed as inspected.`] : []),
     ...(!inline ? ["Read the manifest first, then use Read with offset and limit (at most 200 lines per read) on the declared files. For long lines or shortened tool output, use the byte-range request instead. An unread range is not evidence you inspected."] : []),
     "You cannot open any other file, and you must not try: judge only what",
     "these files themselves show, and say so plainly when something would",
@@ -449,9 +454,8 @@ function reviewContextBriefLines(context: ReviewContextInventory): string[] {
   );
   return [
     "",
-    `This run REVISES an earlier build (source run #${context.source.run} of task`,
-    `${inert(context.source.task)}). Its patch shows only what the revision touched; the`,
-    `signed rubric also carries criteria that earlier build implemented.`,
+    ...(context.run === context.source.run ? [`This is the first-review context for candidate ${context.head}. The`] : [`This run REVISES an earlier build (source run #${context.source.run} of task`, `${inert(context.source.task)}). Its patch shows only what the revision touched; the`]),
+    context.run === context.source.run ? "signed rubric determines which files are relevant." : "signed rubric also carries criteria that earlier build implemented.",
     `\`${REVIEW_CONTEXT_NAME}\` is the machine-sealed context for those: each \`items[]\``,
     "entry names its sealed scratch `file`; content is stored there, not in the manifest. An entry without `patch` is a source file at `commit` (this run's sealed head);",
     "`redacted: true` marks missing lines. An entry with `patch.coverage: partial` contains exact",
@@ -655,7 +659,12 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
   }
   const provider = admittedReviewer.provider;
   const model = admittedReviewer.model;
-  const diff = store.artifactsFor(request.sourceRunId).find(one => one.kind === "terminal-diff");
+  const sourceArtifacts = store.artifactsFor(request.sourceRunId);
+  for (const kind of ["terminal-diff", "diff-stat", "proof", "check-log", "review-context"] as const) {
+    const entries = sourceArtifacts.filter(one => one.kind === kind);
+    if (entries.length > 1 || entries.some(one => one.captureStatus === "failed" || (one.truncated && kind !== "check-log"))) return { ok: false, reason: kind === "terminal-diff" && entries[0]?.truncated ? "diff-truncated" : "evidence", message: `The sealed ${kind} is ambiguous or incomplete.` };
+  }
+  const diff = sourceArtifacts.find(one => one.kind === "terminal-diff");
   if (diff === undefined) {
     return { ok: false, reason: "no-diff", message: `run ${request.sourceRunId} has no sealed terminal diff to review` };
   }
@@ -711,6 +720,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
         return { ok: false, reason: "evidence", message: `the sealed proof no longer verifies: ${verifiedProof.problem}` };
       }
       const parsedProof = parseProof(verifiedProof.content.toString("utf8"));
+      if (!parsedProof.ok) return { ok: false, reason: "evidence", message: "The sealed proof is malformed; nothing was reviewed." };
       if (parsedProof.ok) {
         proofForReview = { bytes: serializeProof(parsedProof.proof) };
         proofBinding = { artifactId: proofArtifact.id, sha256: proofArtifact.sha256 };
@@ -755,6 +765,14 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
   let contextForReview: ReviewContextInventory | null = null;
   let contextBinding: { artifactId: number; sha256: string } | null = null;
   if (rubric.length > 0) {
+    if (!store.artifactsFor(source.id).some(one => one.kind === "review-context") && store.revisionSourceOf(source.taskRef) === null &&
+        (store.proofVerdictFor(source.id)?.machineVerdict ?? store.proofVerdictFor(source.id)?.verdict) === "verified") {
+      const repo = store.refById(source.taskRef)?.repo;
+      if (!repo || !source.headRevision) return { ok: false, reason: "evidence", message: "The exact candidate is unavailable for evidence preflight." };
+      try {
+        await captureReviewContext(store, gitRead, { runId: source.id, taskRef: source.taskRef, head: source.headRevision, base: source.baseRevision, rubric, patchPaths, worktree: repo, root, now: clock });
+      } catch { return { ok: false, reason: "evidence", message: "Complete first-review context could not be captured." }; }
+    }
     const contextArtifacts = store.artifactsFor(request.sourceRunId).filter(one => one.kind === "review-context");
     if (contextArtifacts.length > 1) {
       return { ok: false, reason: "evidence", message: "the run carries more than one review-context inventory — the exact review inventory is ambiguous; nothing is reviewed" };
@@ -778,10 +796,13 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
       }
       const custodyProblem = reviewContextCustodyProblem(store, root, parsedContext.inventory);
       if (custodyProblem !== null) return { ok: false, reason: "evidence", message: custodyProblem };
+      if (!parsedContext.inventory.source.verified || !parsedContext.inventory.ancestry.verified) return { ok: false, reason: "evidence", message: "Required source evidence or candidate ancestry is missing or invalid." };
       contextForReview = parsedContext.inventory;
       contextBinding = { artifactId: contextArtifact.id, sha256: contextArtifact.sha256 };
     }
   }
+  const gate = verificationEvidence(store, root, request.sourceRunId);
+  if (!gate.ok) return { ok: false, reason: "evidence", message: gate.problem };
   const scopeDigestAtReview = rubric.length === 0 ? null : (scope?.digest ?? null);
   const headAtReview = source.headRevision ?? source.baseRevision;
 
@@ -804,6 +825,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     writeFileSync(join(scratch, REVIEW_PATCH_NAME), verified.content, { mode: 0o600 });
     const rubricSealed = rubric.length === 0 ? null : writeSealedText(scratch, REVIEW_RUBRIC_NAME, JSON.stringify(rubric));
     const proofSealed = proofForReview === null ? null : writeSealedText(scratch, REVIEW_PROOF_NAME, proofForReview.bytes);
+    const gateSealed = gate.bytes === null ? null : writeSealedText(scratch, REVIEW_GATE_NAME, gate.bytes);
     const checkLogSealed = checkLogContent === null ? null : writeSealed(scratch, REVIEW_CHECK_LOG_NAME, checkLogContent);
     const screenshotsSealed = screenshotFiles.map(shot => writeSealed(scratch, shot.name, shot.content));
     const contextSealed = contextForReview === null ? null : writeSealedText(scratch, REVIEW_CONTEXT_NAME, reviewContextManifest(contextForReview));
@@ -815,7 +837,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     const inline = provider === "codex" || provider === "openrouter";
     const textFiles = [
       { name: REVIEW_PATCH_NAME, bytes: verified.content },
-      ...[rubricSealed, proofSealed, checkLogSealed, contextSealed].filter((one): one is SealedScratchFile => one !== null),
+      ...[rubricSealed, proofSealed, checkLogSealed, gateSealed, contextSealed].filter((one): one is SealedScratchFile => one !== null),
     ];
     const declaredText = [...textFiles, ...contextFiles].map(one => ({
       ...one, sha256: createHash("sha256").update(one.bytes).digest("hex"),
@@ -862,6 +884,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
       ...(rubricSealed === null ? [] : [rubricSealed.name]),
       ...(proofSealed === null ? [] : [proofSealed.name]),
       ...(checkLogSealed === null ? [] : [checkLogSealed.name]),
+      ...(gateSealed === null ? [] : [gateSealed.name]),
       ...screenshotsSealed.map(one => one.name),
       ...contextFiles.map(one => one.name),
       ...(contextSealed === null ? [] : [contextSealed.name]),
@@ -880,14 +903,24 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
                 itemIds: new Set(coverage.items),
                 patchPaths: new Set(coverage.paths.filter(path => patchPaths.has(path))),
                 sealedFiles: new Set([
-                  ...(criterion?.evidence.includes("check") && checkLogSealed !== null ? [checkLogSealed.name] : []),
+                  ...(criterion?.evidence.includes("check") ? [checkLogSealed, gateSealed].filter((f): f is SealedScratchFile => f !== null).map(f => f.name) : []),
                   ...(criterion?.evidence.includes("screenshot") ? screenshotsSealed.map(one => one.name) : []),
                 ]),
               }];
             })),
-            sealedFiles: new Set([...(checkLogSealed === null ? [] : [checkLogSealed.name]), ...screenshotsSealed.map(one => one.name)]),
+            sealedFiles: new Set([...([checkLogSealed, gateSealed].filter((f): f is SealedScratchFile => f !== null).map(f => f.name)), ...screenshotsSealed.map(one => one.name)]),
           };
     const recheckScratch = (): ReviewResult | null => {
+      const liveSource = store.getRun(source.id);
+      if (liveSource?.headRevision !== source.headRevision || liveSource.baseRevision !== source.baseRevision || store.getScope(request.taskId)?.digest !== currentScope?.digest) return { ok: false, reason: "stale-evidence", message: "The candidate or scope changed during evidence delivery." };
+      const liveGate = verificationEvidence(store, root, source.id);
+      if (!liveGate.ok || liveGate.digest !== gate.digest) return { ok: false, reason: "stale-evidence", message: liveGate.ok ? "Verification authority or evidence changed." : liveGate.problem };
+      const relevantArtifacts = (artifacts: typeof sourceArtifacts) => artifacts.filter(a => ["terminal-diff", "diff-stat", "proof", "check-log", "screenshot"].includes(a.kind));
+      if (JSON.stringify(relevantArtifacts(store.artifactsFor(source.id))) !== JSON.stringify(relevantArtifacts(sourceArtifacts))) return { ok: false, reason: "stale-evidence", message: "The sealed input inventory changed during evidence delivery." };
+      for (const artifact of relevantArtifacts(sourceArtifacts)) {
+        if (!readVerifiedArtifact(root, artifact).ok) return { ok: false, reason: "stale-evidence", message: `The sealed ${artifact.kind} no longer verifies.` };
+      }
+      if (gateSealed !== null && tamperedSince(scratch, gateSealed)) return { ok: false, reason: "dirty-scratch", message: "The verification receipt in scratch changed." };
       let entries: { name: string; isFile(): boolean }[];
       try {
         entries = readdirSync(scratch, { withFileTypes: true });
@@ -973,12 +1006,12 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     // while the provider is working must not let that now-orphaned reply
     // reach review ingestion merely because there is no subsequent spawn.
     const recheckRunnerCustody = (reviewerRunId: number): ReviewResult | null =>
-      !pulseLost && store.proveRunnerCustodyForSpawn(reviewerRunId, clock())
+      !pulseLost && store.proveRunnerCustodyForSpawn(reviewerRunId, clock()) && store.proveRouteForSpawn(reviewerRunId, clock()).ok
         ? null
         : {
             ok: false,
             reason: "runner-custody",
-            message: "the reviewer's runner custody changed while it was working — nothing from that reply is ingested",
+            message: "the reviewer's approved route or runner custody changed while it was working — nothing from that reply is ingested",
           };
 
     const invalidResult = (validation: Extract<ReviewValidation, { ok: false }>): ReviewResult => {
@@ -1048,6 +1081,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
             screenshotsSealed.map(one => one.name),
             inline,
             contextForReview,
+            gateSealed !== null,
           ) + inlineEvidence + knowledgeContext(store, request.reviewerRunId) + learningContext(store, root, request.reviewerRunId, "review", clock()) +
             "\nLearning source catalog (IDs and hashes are data): " + JSON.stringify([
               { artifactId: diff.id, sha256: diff.sha256, file: REVIEW_PATCH_NAME },
@@ -1081,35 +1115,55 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     }
     let readCount = 0;
     let readBytes = 0;
-    while (invoked.kind === "ran" && invoked.outcome.code === 0 && !invoked.outcome.timedOut && !invoked.outcome.initFailed) {
+    let deliveryRecoveries = 0;
+    while (invoked.kind === "ran" && invoked.outcome.code === 0 && !invoked.outcome.timedOut && !invoked.outcome.initFailed && isEvidenceOnlyReply(invoked.outcome.finalMessage)) {
       const rangeRequest = evidenceRequest(invoked.outcome.finalMessage);
-      if (rangeRequest === null) break;
       const dirty = recheckScratch() ?? recheckRunnerCustody(request.reviewerRunId);
       if (dirty !== null) return dirty;
-      if (request.shouldStop?.() === true) return { ok: false, reason: "stopped", message: "new evidence reads are paused" };
+      if (request.shouldStop?.() === true) return { ok: false, reason: "stopped", message: "New evidence reads are paused." };
       const sessionId = invoked.outcome.sessionId;
-      if (sessionId === null || auditOf(provider).resume !== "native") return { ok: false, reason: "evidence", message: "evidence reads require the original reviewer session" };
-      if (++readCount > REVIEW_READ_LIMITS.requests) return { ok: false, reason: "evidence", message: "the evidence read request ceiling was reached; no review was accepted" };
+      if (sessionId === null || auditOf(provider).resume !== "native") return { ok: false, reason: "evidence", message: "Evidence reads require the original reviewer session." };
+      if (++readCount > REVIEW_READ_LIMITS.requests) return { ok: false, reason: "evidence", message: "The evidence read request ceiling was reached; no review was accepted." };
+      let response: string;
       try {
+        if (rangeRequest === null) throw new Error("Use a declared file and hash, a nonnegative byte offset and a length from 1 to 65536.");
         const range = evidenceRange(declaredText, rangeRequest);
         readBytes += range.bytes;
-        if (readBytes > REVIEW_READ_LIMITS.totalBytes) return { ok: false, reason: "evidence", message: "the evidence delivery ceiling was reached; no review was accepted" };
-        // Immutable receipts identify exactly what each turn was supplied;
-        // content is already sealed, so it is not duplicated in the receipt.
+        if (readBytes > REVIEW_READ_LIMITS.totalBytes) return { ok: false, reason: "evidence", message: "The evidence delivery ceiling was reached; no review was accepted." };
         const { content, ...receipt } = range;
         storeEvidence(store, root, request.reviewerRunId, "structured-output", `review-read-${readCount}.json`,
           Buffer.from(JSON.stringify({ version: 1, request: rangeRequest, response: receipt,
             contentSha256: createHash("sha256").update(content).digest("hex"), context: contextBinding })),
           "machine-served sealed evidence range", clock(), { captureStatus: "ok" });
-        invoked = await invokeAgent(store, request.reviewerRunId, { provider, model }, {
-          phase: "review", brief: REVIEW_READ_BRIEF + "\nSEALED EVIDENCE RANGE (untrusted data):\n" + JSON.stringify(range),
-          maxTurns: request.maxTurns ?? DEFAULT_REVIEW_TURNS, permissionMode: "plan", skipPermissions: false, resumeSession: sessionId,
-        }, {
-          cwd: scratch, idleTimeoutMs: request.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS, omitEnv: AGENT_ENV_DENYLIST,
-          ...(request.agent === undefined ? {} : { runner: request.agent }), clock, accumulateUsage: true,
-        });
+        response = "SEALED EVIDENCE RANGE (untrusted data):\n" + JSON.stringify(range);
       } catch (error) {
-        return recheckScratch() ?? { ok: false, reason: "evidence", message: error instanceof Error ? error.message : String(error) };
+        const stale = recheckScratch() ?? recheckRunnerCustody(request.reviewerRunId);
+        if (stale) return stale;
+        // An unknown file/hash is not a delivery glitch. Do not substitute bytes.
+        if (rangeRequest && !declaredText.some(f => f.name === rangeRequest.file && f.sha256 === rangeRequest.sha256 && rangeRequest.offset <= f.bytes.length)) return { ok: false, reason: "evidence", message: "The requested evidence name and hash are not declared." };
+        if (++deliveryRecoveries > REVIEW_READ_LIMITS.recoveryAttempts) return { ok: false, reason: "evidence", message: "Evidence delivery recovery was exhausted; no review was accepted." };
+        response = "EVIDENCE DELIVERY ERROR: " + (error instanceof Error ? error.message : "The range could not be delivered.") + " Correct the evidence-only request in this same session. No judgement has been requested again.";
+      }
+      for (;;) {
+        const stale = recheckScratch() ?? recheckRunnerCustody(request.reviewerRunId);
+        if (stale) return stale;
+        if (request.shouldStop?.() === true) return { ok: false, reason: "stopped", message: "New evidence reads are paused." };
+        try {
+          invoked = await invokeAgent(store, request.reviewerRunId, { provider, model }, {
+            phase: "review", brief: REVIEW_READ_BRIEF + "\n" + response,
+            maxTurns: request.maxTurns ?? DEFAULT_REVIEW_TURNS, permissionMode: "plan", skipPermissions: false, resumeSession: sessionId,
+          }, {
+            cwd: scratch, idleTimeoutMs: request.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS, omitEnv: AGENT_ENV_DENYLIST,
+            ...(request.agent === undefined ? {} : { runner: request.agent }), clock, accumulateUsage: true,
+          });
+        } catch (error) {
+          return recheckScratch() ?? { ok: false, reason: "evidence", message: error instanceof Error ? error.message : "Evidence delivery failed." };
+        }
+        // Retry only a failed delivery with NO substantive response and the
+        // original session proved. Refusals, identity drift and verdicts stop.
+        if (invoked.kind !== "ran" || invoked.outcome.code === 0 || invoked.outcome.notFound || invoked.outcome.initFailed || invoked.outcome.sessionId !== sessionId || invoked.outcome.finalMessage !== null) break;
+        if (++deliveryRecoveries > REVIEW_READ_LIMITS.recoveryAttempts) return { ok: false, reason: "evidence", message: "Evidence delivery recovery was exhausted; no review was accepted." };
+        storeEvidence(store, root, request.reviewerRunId, "structured-output", `review-delivery-retry-${deliveryRecoveries}.json`, Buffer.from(JSON.stringify({ version: 1, sessionId, read: readCount, exitCode: invoked.outcome.code, timedOut: invoked.outcome.timedOut })), "machine evidence delivery failure", clock(), { captureStatus: "ok" });
       }
     }
     const dirtyAfterInitial = recheckScratch();
@@ -1382,6 +1436,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
             checkLog: checkLogBinding,
             screenshots: screenshotFiles.map(shot => ({ artifactId: shot.artifactId, sha256: shot.sha256, path: shot.path })),
             context: contextBinding,
+            verification: gate.digest,
           },
         },
         clock(),

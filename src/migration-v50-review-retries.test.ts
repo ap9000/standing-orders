@@ -9,11 +9,11 @@
  * the pass cannot prove refuses the open in words.
  */
 import { describe, test, expect } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { openStore, REVIEW_ROOT_ATTEMPTS, SCHEMA_VERSION, type Database, type Store } from "./store.js";
+import { openStore, openStoreNoMigrate, REVIEW_ROOT_ATTEMPTS, SCHEMA_VERSION, type Database, type Store } from "./store.js";
 import { storeEvidence } from "./evidence.js";
 import { register } from "./runner.js";
 import { addApprover } from "./scope.js";
@@ -471,5 +471,36 @@ describe("schema v50: bounded review retries upgrade a v49 database without rewr
         rmSync(dir, { recursive: true, force: true });
       }
     }
+  });
+});
+
+
+describe("schema 60 compatibility without manual refresh", () => {
+  test("fresh and reopened v60 preserves every historical review row and receipt", () => {
+    const root = mkdtempSync(join(tmpdir(), "refresh-migration-")), file = join(root, "test.db");
+    try {
+      let store = openStore(file); seed(store, join(root, "evidence"));
+      expect(SCHEMA_VERSION).toBe(60);
+      expect(store.raw().prepare("PRAGMA table_info(run)").all().some(row => row["name"] === "review_refresh")).toBe(false);
+      expect(store.raw().prepare("PRAGMA table_info(review_request)").all().some(row => row["name"] === "refresh_json")).toBe(false);
+      const tables = ["run", "review_request", "criterion_review", "diff_comment", "artifact", "proof_verdict"];
+      const before = tables.map(t => store.raw().prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());
+      store.close(); store = openStore(file);
+      expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(60);
+      tables.forEach((t, index) => expect(store.raw().prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()).toEqual(before[index]));
+      expect(store.raw().prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      store.close(); store = openStore(file); expect(store.criterionReviewsFor(1)).not.toEqual([]); store.close();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  test.each([61, -61])("schema %s refuses before every write and preserves bytes", version => {
+    const root = mkdtempSync(join(tmpdir(), "refresh-refusal-")), file = join(root, "test.db");
+    try {
+      const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(version); store.close();
+      const before = readFileSync(file);
+      expect(() => openStore(file)).toThrow(/newer build/);
+      expect(readFileSync(file)).toEqual(before);
+      expect(openStoreNoMigrate(file).ok).toBe(false);
+      expect(readFileSync(file)).toEqual(before);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

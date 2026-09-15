@@ -1,67 +1,90 @@
-# Refresh missing review evidence without rebuilding
+# Complete evidence for the first review
 
-The sealed-file handoff prerequisite was deployed on September 15 at
-21:56 UTC: candidate `6b79fd6ac00d2de0e2643047aa22abe021e70cb8`, schema 60.
-This brief is the durable input for `review-evidence-refresh-20260915`.
+## Current direction
 
-## Outcome
+The signed scope c332cc9a443c8079f0fed12fa29a0e36 and decision 5 replace the
+manual review refresh plan. Assemble and validate criterion-relevant evidence
+before the first reviewer. Use existing sealed full files and range reads in
+that same session. There is no manual Refresh review action or second successful
+review path. Keep deployed schema 60 compatibility; no migration is needed.
 
-An authenticated user can ask for a fresh review of the same finished candidate
-when the earlier review could not see enough evidence. The current code and its
-passing verification stay unchanged. Both reviews remain visible in history.
+## Implementation and acceptance
 
-This completes the handoff-size repair for Telegram run 1627; it does not accept
-its current `cannot-tell` result or automatically rerun reviews until one passes.
+- Preflight sealed evidence and exact candidate bindings before substantive
+  review. Missing or tampered required inputs remain explicit failures.
+- Retain a machine-owned gate receipt that binds the candidate, approved command,
+  exit status and retained log bytes independently of shortened verbose output.
+  Legacy null capture metadata alone is not a failure. Never reconstruct a
+  missing receipt from agent claims or invent missing historical output.
+- Deliver complete relevant files through the existing sealed-file handoff and
+  same-session range reads. Unrelated secret-redacted fixtures must not hide
+  complete criterion-relevant source/tests; relevant redaction remains a gap.
+- Bound evidence-delivery retries within the same review session. Recheck
+  authority, custody and input bindings. Do not rebuild or repeat unchanged
+  verification. Never retry a substantive negative verdict for approval.
+- Remove only unfinished manual refresh CLI, chat, result and schema-62 work.
+  Preserve useful drafts, historical evidence and ordinary retry safeguards.
+- Add focused regressions in existing suites, including run-1627-shaped legacy
+  proof metadata and a 14,572-byte retained log from 100,541 bytes. Standing
+  Orders runs the unchanged approved native final gate and Opus review.
 
-## Smallest implementation
+No Telegram import or deployment occurs here. A later combined candidate gets
+its normal first review. Genuine failed tests, authority drift, tampering and
+irrecoverable missing evidence stay visible.
 
-1. Extend the existing review request, admission and ingestion path with an
-   explicit evidence-refresh request. Ordinary review/retry rules remain intact.
-   Authenticate the operator and recheck project access, current scope, route,
-   runner custody and existing spending authority. Do not add a scheduler.
-2. Bind the request to the source run, exact candidate, scope/route digests,
-   terminal diff, proof, original passing verification command and receipt, and
-   ancestry. Compare those bindings again at admission, before provider calls,
-   and atomically at ingestion. Changed or missing gate evidence refuses reuse.
-3. Derive fresh context from exact Git objects using the new sealed-file handoff.
-   Store it under the new request/reviewer, not as a second ambiguous artifact
-   on the old source run. Capture and delivery remain secret-filtered and
-   read-only; no checkout substitution or provider permission expansion.
-4. Append new judgements with their own context binding. Preserve the old review,
-   old evidence, and `cannot-tell`. Failed refreshes cannot replace a valid
-   current review. Duplicate requests are idempotent; concurrent requests admit
-   only one active review. Keep normal retry policy, no automatic verdict hunting.
-5. Expose one clear **Refresh review** action when evidence was missing, through
-   the existing authenticated CLI, shared chat action and result control. Show
-   the reason and precise effect before confirmation; no extra order form.
+## Historical decisions
 
-## Constraints to inspect before editing
+The earlier plan proposed a manual Refresh review action and decision 4 chose a
+60-to-62 migration that refused 61/-61. Decision 5 explicitly retired that
+requirement in favor of the latest signed scope. These are historical decisions,
+not current implementation requirements. The sealed-file prerequisite was
+recorded as deployed at candidate 6b79fd6ac00d2de0e2643047aa22abe021e70cb8,
+schema 60; that record is not proof that any old candidate now passes review.
 
-- `Store.rootReviewAdmissionProblem`, `requestReview`, `admitReview`, and
-  `admitRun` all enforce the successful-root rule. Extend the specific authorized
-  refresh case consistently; do not simply delete the rule.
-- `review()` and `Store.ingestReview` require singular source context artifacts.
-  Preserve legacy behavior and add a request-specific binding for the new path.
-- Result summaries and criterion-history queries must choose the latest valid
-  completed review deterministically without erasing historical rows.
-- Deploy the verified handoff runtime before real refresh use. Do not update
-  its code while an agent is running. Required input must be committed into the
-  next task branch before first dispatch.
-- Coordinate schema versions with the unshipped Telegram schema-61 change.
-  Never produce two incompatible formats both labelled 61. Prefer existing
-  durable request metadata where appropriate, not a parallel authority ledger.
+## Implemented behavior and evidence
 
-## Lean acceptance
+The builder seals full files for ordinary builds as well as revisions. Changed
+files omitted from proof path hints are also delivered. The first reviewer gets
+a compact manifest, full sealed files and bounded same-session range reads.
+Preflight checks artifact integrity, candidate/ancestry and required source
+inputs. Per-criterion gaps remain visible; an unrelated redacted fixture does
+not prevent inspecting clean source and tests.
 
-Reuse existing review/store/CLI/chat tests for one successful unchanged-candidate
-refresh, duplicate/concurrent requests, and rejection after head/scope/route,
-gate/context or custody changes. Confirm no builder or full verifier executes
-for an evidence-only request. Preserve old review bytes and newly bound receipts.
-For any UI change, use one desktop and one phone journey with a clear pending,
-success and refusal state. One native full gate for the new harness candidate.
+New verification uses a separate machine receipt in the existing schema-60
+artifact store. It records the exact candidate, approved grant, actual result
+and retained log hash/size. Legacy single-attempt headers are read only after
+checking the original grant, candidate inventory and retained log. An absent or
+ambiguous header cannot be reconstructed; historical multi-attempt logs without
+a sufficient receipt are refused. Receipt/authority changes stop delivery and
+final ingestion. Secret-shaped receipt content is filtered before storage.
 
-Final real acceptance: request the supported refresh for run 1627 at
-`3102879d2c38d6ef925f26c3e5c9e30110aaf3b8`, let the independent approved
-reviewer inspect the actual restart/rate-limit tests, and read its judgements.
-Only then qualify the Telegram candidate for deployment. The prior root
-availability diagnostic is not a substitute for that independent review.
+Delivery recovery allows at most two attempts in the original reviewer session,
+within the existing byte/request bounds. Only evidence-only requests and failed
+transport with no substantive reply qualify. Changed session, route, custody,
+unknown file/hash, tampering and exhaustion stop. Successful negative reviews
+remain final; the one-successful-root-review invariant stays intact.
+
+Validation on the uncommitted candidate based on
+`924fd00731649f88e7450c75776c31474a150e81`:
+
+- `npm run typecheck` passed.
+- The five focused builder, reviewer, context, context end-to-end and schema-60
+  migration suites passed: 345 tests. The real Git/tick journey covers build,
+  first review, revision build and its first review, with full files supplied.
+- Realistic isolated fixtures cover null proof capture metadata, 14,572 retained
+  bytes from 100,541, complete source/test files, unrelated redaction, failed
+  checks, missing receipts, tampering and bounded delivery recovery. Run 1627's
+  actual sealed files were not supplied or changed; no old verdict was replaced.
+- Simplicity pass: the draft added a Refresh review button, preview and chat/CLI
+  confirmations. Those controls and schema-62 code are absent. Chromium at
+  1440×900 and 390×844 opened the result and diff, submitted long feedback and
+  created revisions requiring approval. Empty feedback kept submission disabled;
+  keyboard tabs worked, horizontal overflow was absent and the phone primary
+  button stayed on one line at 44px high. Tampered check-log evidence remained
+  visible. Screenshots are under `output/playwright/first-review/`.
+  These are browser viewports, not physical phone/Safari testing.
+
+Standing Orders must run the unchanged approved native final gate and Opus
+review for the sealed candidate. Neither was run or represented as passed by the
+builder. No deployment, Telegram import, live database edit or history rewrite
+was performed.

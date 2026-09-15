@@ -1,3 +1,4 @@
+import { isVerificationReceipt } from "./verification-evidence.js";
 /**
  * Inherited review context (v51, contract handoff task 3): the bounded,
  * sealed source-and-ancestry inventory a REVISION's reviewer is shown
@@ -104,7 +105,7 @@ export type ContextGapReason =
   | "secret-redacted"
   | "capture-failed";
 
-export type ContextItemWhy = "source-criterion-evidence" | "source-changed-path";
+export type ContextItemWhy = "source-criterion-evidence" | "source-changed-path" | "candidate-changed-path";
 
 export type ReviewContextItem = {
   /** `ctx-<n>`: the provenance token a reviewer cites in its notes. */
@@ -200,7 +201,7 @@ export type ReviewContextInventory = {
   schema: 1 | 2 | 3;
   /** Tree identity is independent of whether content fits capture bounds. */
   identities?: ReviewContextIdentity[];
-  bindings?: { run: number; sha256: string }[];
+  bindings?: { run: number; sha256: string; candidate?: true }[];
   run: number;
   head: string;
   base: string | null;
@@ -249,7 +250,7 @@ function historicalReviewerLineage(store: Store, reviewerId: number) {
 
 /** Fingerprint every input the ancestor review depended on, including
  * absent inputs and later additions. No transcript or checkout is copied. */
-export function reviewContextBindingOf(store: Store, runId: number): { run: number; sha256: string } {
+export function reviewContextBindingOf(store: Store, runId: number, candidate = false): { run: number; sha256: string; candidate?: true } {
   const run = store.getRun(runId);
   const taskId = run === null ? null : store.externalIdFor(run.taskRef);
   const scope = taskId === null ? null : store.getScope(taskId);
@@ -258,22 +259,22 @@ export function reviewContextBindingOf(store: Store, runId: number): { run: numb
     task: taskId, head: run?.headRevision ?? null, base: run?.baseRevision ?? null, scopeDigest: run?.scopeDigest ?? null,
     currentScope: scope?.digest ?? null, termsProblem: scope?.termsProblem ?? null,
     revisionOf: ref?.revisionOf ?? null, revisionBrief: ref?.revisionBriefArtifact ?? null,
-    artifacts: store.artifactsFor(runId).filter(one => CONTEXT_INPUT_KINDS.has(one.kind)),
-    reviews: store.criterionReviewsFor(runId),
-    reviewerLineages: [...new Set(store.criterionReviewsFor(runId).map(one => one.reviewerRun))].map(id => historicalReviewerLineage(store, id)),
+    artifacts: store.artifactsFor(runId).filter(one => (CONTEXT_INPUT_KINDS.has(one.kind) && (!candidate || one.kind !== "review-context")) || isVerificationReceipt(one)),
+    reviews: candidate ? [] : store.criterionReviewsFor(runId),
+    reviewerLineages: candidate ? [] : [...new Set(store.criterionReviewsFor(runId).map(one => one.reviewerRun))].map(id => historicalReviewerLineage(store, id)),
   };
-  return { run: runId, sha256: createHash("sha256").update(JSON.stringify(state)).digest("hex") };
+  return { run: runId, sha256: createHash("sha256").update(JSON.stringify(state)).digest("hex"), ...(candidate ? { candidate: true as const } : {}) };
 }
 
 /** Re-prove sealed context before spending and inside final ingestion. */
 export function reviewContextCustodyProblem(store: Store, root: string, inventory: ReviewContextInventory): string | null {
   const run = store.getRun(inventory.run);
-  const source = run === null ? null : store.revisionSourceOf(run.taskRef);
+  const source = run === null ? null : store.revisionSourceOf(run.taskRef) ?? { sourceRun: run.id, sourceTask: store.externalIdFor(run.taskRef) };
   if (run === null || run.headRevision !== inventory.head || run.baseRevision !== inventory.base || source?.sourceRun !== inventory.source.run || source.sourceTask !== inventory.source.task) return "the review context's run, head, base or revision ancestry changed";
   if (!inventory.bindings?.length || inventory.bindings.length > REVIEW_CONTEXT_LIMITS.ancestors || !inventory.bindings.some(one => one.run === inventory.source.run)) return "the review context has no complete bounded source binding";
   for (const binding of inventory.bindings) {
-    if (reviewContextBindingOf(store, binding.run).sha256 !== binding.sha256) return `ancestor run #${binding.run}'s scope, ancestry, evidence inventory or review context changed`;
-    for (const artifact of store.artifactsFor(binding.run).filter(one => CONTEXT_INPUT_KINDS.has(one.kind))) {
+    if (reviewContextBindingOf(store, binding.run, binding.candidate === true).sha256 !== binding.sha256) return `ancestor run #${binding.run}'s scope, ancestry, evidence inventory or review context changed`;
+    for (const artifact of store.artifactsFor(binding.run).filter(one => CONTEXT_INPUT_KINDS.has(one.kind) || isVerificationReceipt(one))) {
       try { if (!readVerifiedArtifact(root, artifact).ok) return `ancestor run #${binding.run}'s ${artifact.kind} bytes no longer verify`; }
       catch { return `ancestor run #${binding.run}'s ${artifact.kind} cannot be read`; }
     }
@@ -339,7 +340,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   if (!str(r["head"], 40) || !SHA1.test(r["head"])) return { ok: false, problem: "head must be a 40-hex commit" };
   if (!optionalStr(r["base"], 40)) return { ok: false, problem: "base must be a string or null" };
   const bindings = r["bindings"];
-  if (bindings !== undefined && (!Array.isArray(bindings) || bindings.length > REVIEW_CONTEXT_LIMITS.ancestors || !bindings.every(one => one !== null && typeof one === "object" && Number.isSafeInteger(one.run) && one.run > 0 && typeof one.sha256 === "string" && /^[0-9a-f]{64}$/.test(one.sha256)) || new Set(bindings.map(one => one.run)).size !== bindings.length)) return { ok: false, problem: "source bindings are malformed" };
+  if (bindings !== undefined && (!Array.isArray(bindings) || bindings.length > REVIEW_CONTEXT_LIMITS.ancestors || !bindings.every(one => one !== null && typeof one === "object" && Number.isSafeInteger(one.run) && one.run > 0 && typeof one.sha256 === "string" && /^[0-9a-f]{64}$/.test(one.sha256) && (one.candidate === undefined || one.candidate === true)) || new Set(bindings.map(one => one.run)).size !== bindings.length)) return { ok: false, problem: "source bindings are malformed" };
   const source = r["source"];
   if (source === null || typeof source !== "object" || Array.isArray(source)) return { ok: false, problem: "source must be an object" };
   const so = source as Record<string, unknown>;
@@ -388,7 +389,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     if (it["sha256"] !== sha256) return { ok: false, problem: `item ${index}: sha256 does not match its content` };
     if (!Number.isSafeInteger(it["sourceRun"]) || Number(it["sourceRun"]) <= 0) return { ok: false, problem: `item ${index}: sourceRun must be a positive integer` };
     if (!strList(it["criteria"], 12)) return { ok: false, problem: `item ${index}: criteria must be a list of ids` };
-    if (!Array.isArray(it["why"]) || it["why"].length === 0 || it["why"].length > 2 || !it["why"].every(w => w === "source-criterion-evidence" || w === "source-changed-path")) {
+    if (!Array.isArray(it["why"]) || it["why"].length === 0 || it["why"].length > 2 || !it["why"].every(w => w === "source-criterion-evidence" || w === "source-changed-path" || w === "candidate-changed-path")) {
       return { ok: false, problem: `item ${index}: why must name how the path became relevant` };
     }
     if (it["unchangedSinceSource"] !== null && typeof it["unchangedSinceSource"] !== "boolean") return { ok: false, problem: `item ${index}: unchangedSinceSource must be boolean or null` };
@@ -671,10 +672,9 @@ export type CaptureReviewContextArgs = {
 };
 
 /**
- * Capture and store the inventory for a revision run. Returns null — and
- * stores nothing — when the task is not a revision: an ordinary run's
- * reviewer keeps exactly the inputs it always had. Every other outcome
- * stores a parseable inventory; problems become gaps in it, never a
+ * Capture complete criterion-relevant files for every rubric-bearing build.
+ * Ordinary builds bind their own candidate; revisions also bind their ancestry.
+ * Every capture stores a parseable inventory; problems become gaps in it, never a
  * missing or truncated file.
  */
 export async function captureReviewContext(
@@ -682,8 +682,7 @@ export async function captureReviewContext(
   git: GitRunner,
   args: CaptureReviewContextArgs,
 ): Promise<{ inventory: ReviewContextInventory; artifactId: number } | null> {
-  const lineage = store.revisionSourceOf(args.taskRef);
-  if (lineage === null) return null;
+  const lineage = store.revisionSourceOf(args.taskRef) ?? { sourceRun: args.runId, sourceTask: store.externalIdFor(args.taskRef)! };
   const inventory = await deriveReviewContext(store, git, args, lineage);
   let encoded = serializeReviewContext(inventory);
   if (Buffer.byteLength(encoded, "utf8") > EVIDENCE_CAPS["review-context"]) {
@@ -724,7 +723,7 @@ export async function deriveReviewContext(
   const inventory: ReviewContextInventory = {
     schema: 3,
     identities: [],
-    bindings: [reviewContextBindingOf(store, lineage.sourceRun)],
+    bindings: [reviewContextBindingOf(store, lineage.sourceRun, lineage.sourceRun === args.runId)],
     run: args.runId,
     head: args.head,
     base: args.base,
@@ -874,6 +873,12 @@ export async function deriveReviewContext(
       relevance.set(path, entry);
     }
   }
+  // A proof's path citations are relevance hints, not permission to omit other
+  // changed files. Deliver new revision files and tests in full as supplemental
+  // context without inventing criterion ownership or inheriting a judgement.
+  for (const path of args.patchPaths) {
+    if (safeContextPath(path) && !relevance.has(path)) relevance.set(path, { criteria: new Set(), why: new Set(["candidate-changed-path"]) });
+  }
   const candidates = [...relevance.keys()].sort((a, b) => {
     const aSpecific = relevance.get(a)!.why.has("source-criterion-evidence") ? 0 : 1;
     const bSpecific = relevance.get(b)!.why.has("source-criterion-evidence") ? 0 : 1;
@@ -1014,7 +1019,7 @@ export async function deriveReviewContext(
     const complete = plan.paths.length > 0 && plan.paths.every(path => itemsByPath.has(path) && !itemsByPath.get(path)!.redacted && !itemsByPath.get(path)!.patch) && inventory.source.verified && inventory.ancestry.verified;
     const state: CriterionContextCoverage["state"] = complete && relevantGaps.length === 0 ? (touched && plan.paths.every(path => args.patchPaths.has(path)) ? "patch" : "context") : "gap";
     const gapsFor = state === "gap" && relevantGaps.length === 0 ? [plan.paths.length === 0 ? "no relevant source paths are known" : "inherited context is incomplete"] : relevantGaps;
-    return { id: plan.id, state, inherited: plan.inherited, paths: plan.paths, items, gaps: gapsFor, priorSupport };
+    return { id: plan.id, state, inherited: plan.inherited && lineage.sourceRun !== args.runId, paths: plan.paths, items, gaps: gapsFor, priorSupport };
   });
   return finish(coverage);
 }

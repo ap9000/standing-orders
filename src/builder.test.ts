@@ -1,3 +1,4 @@
+import { isVerificationReceipt, verificationEvidence } from "./verification-evidence.js";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { agentExitWords, build, PROTECTED, proveApprovedProfile, verificationExecutableMissing, type Runner } from "./builder.js";
 import { routeDigestOf } from "./phase-routing.js";
@@ -2927,7 +2928,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     expect(pids).toEqual(Array.from({ length: calls }, (_, i) => 10_001 + i));
     expect(checks).toBe(moved ? 0 : 1);
     expect(store.proofVerdictFor(req.runId)).toMatchObject({ verdict: behavior === "correct" ? "verified" : "refuted" });
-    const attempts = store.artifactsFor(req.runId).filter(one => one.kind === "structured-output");
+    const attempts = store.artifactsFor(req.runId).filter(one => one.kind === "structured-output" && !isVerificationReceipt(one));
     expect(attempts.length).toBe(calls);
     const original = readVerifiedArtifact(join2(wt, ".evidence"), attempts.find(one => one.key.endsWith("builder-proof-response-0.txt"))!);
     expect(original.ok && original.content.toString("utf8")).toContain("requires evidence:");
@@ -3011,6 +3012,10 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     } });
     expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
     expect(checks).toBe(1);
+    const gate = verificationEvidence(store, join2(wt, ".evidence"), req.runId!);
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(JSON.parse(gate.bytes!)).toMatchObject({ head: store.getRun(req.runId!)!.headRevision, command: { command: "final-check" }, result: { ran: true, exitCode } });
+    expect(store.artifactsFor(req.runId!).filter(isVerificationReceipt)).toHaveLength(1);
     expect(agentCalls).toHaveLength(1); // no extra model turn to restate success
     expect(agentCalls[0]!.join(" ")).toContain("use pending-verification");
     expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: exitCode === 0 ? "verified" : "refuted" });

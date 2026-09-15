@@ -1,3 +1,4 @@
+import { verificationEvidence } from "./verification-evidence.js";
 import { LEARNING_SCHEMA, queueLearning } from "./project-learning.js";
 import { KNOWLEDGE_SCHEMA } from "./project-knowledge.js";
 import { validateTaskText } from "./task-text.js";
@@ -9375,6 +9376,7 @@ export class Store {
         headSha: string | null;
         proof: { artifactId: number; sha256: string } | null;
         checkLog: { artifactId: number; sha256: string } | null;
+        verification?: string;
         screenshots: readonly { artifactId: number; sha256: string; path?: string }[];
         /** v51: the sealed review-context inventory, or null when the run
          * captured none. Absent (undefined) reads as null — every caller
@@ -9621,6 +9623,7 @@ export class Store {
         headSha: string | null;
         proof: { artifactId: number; sha256: string } | null;
         checkLog: { artifactId: number; sha256: string } | null;
+        verification?: string;
         screenshots: readonly { artifactId: number; sha256: string; path?: string }[];
         context?: { artifactId: number; sha256: string } | null;
       };
@@ -9674,6 +9677,13 @@ export class Store {
         if (!parsed.ok) throw new ReviewBindingError(parsed.problem);
         const problem = reviewContextCustodyProblem(this, args.evidenceRoot, parsed.inventory);
         if (problem !== null) throw new ReviewBindingError(problem);
+      }
+      if (args.bindings.verification !== undefined) {
+        const route = this.proveRouteForSpawn(args.reviewerRunId, now);
+        if (!route.ok) throw new ReviewBindingError(route.problem);
+        if (args.evidenceRoot === undefined) throw new ReviewBindingError("Verification evidence root is missing");
+        const gate = verificationEvidence(this, args.evidenceRoot, args.runId);
+        if (!gate.ok || gate.digest !== args.bindings.verification) throw new ReviewBindingError(gate.ok ? "Verification authority or receipt changed" : gate.problem);
       }
       const commentIds = this.addReviewerComments(
         { reviewerRunId: args.reviewerRunId, runId: args.runId, artifactId: args.artifactId, author: args.author, comments: args.comments },

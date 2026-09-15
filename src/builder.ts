@@ -1,3 +1,4 @@
+import { sealVerificationReceipt } from "./verification-evidence.js";
 import { learningContext } from "./project-learning.js";
 import { knowledgeContext } from "./project-knowledge.js";
 /**
@@ -2562,6 +2563,8 @@ async function settleProof(
     );
   }
 
+  if (configured !== null && checkLog.length > 0) sealVerificationReceipt(store, root, runId, sealedHead, configured, verifyCommand, now());
+
   // 4. The sealed diff-stat, restated for adjudication — a truncated or
   // failed capture cannot prove a claimed path absent.
   const statArtifact = store.getArtifact(statArtifactId);
@@ -2597,15 +2600,11 @@ async function settleProof(
   const scope = store.getScope(request.taskId);
   const approvedCriteria = (scope?.acceptance ?? []).map(c => ({ id: c.id, statement: c.statement, evidence: c.evidence }));
 
-  // v51 (inherited review context): a REVISION seals the bounded source
-  // and ancestry context its reviewer needs for criteria outside its own
-  // patch — read from git objects at the exact sealed head, bound to the
-  // source run, and stored as one more verified artifact. Any other run
-  // captures nothing and adjudicates exactly as before. A capture that
-  // throws stores nothing; the reviewer then sees every inherited
-  // criterion as a coverage gap rather than a silently missing file.
+  // Seal full files before the first review of every rubric-bearing build.
+  // Revisions also retain their source and ancestry bindings. Capture failures
+  // remain explicit gaps; the reviewer cannot treat missing context as proof.
   let reviewContext: Parameters<typeof adjudicate>[0]["reviewContext"];
-  if (approvedCriteria.length > 0 && store.revisionSourceOf(captured.taskRef) !== null) {
+  if (approvedCriteria.length > 0) {
     try {
       const captureResult = await captureReviewContext(store, captured.git, {
         runId,

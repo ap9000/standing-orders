@@ -1,3 +1,9 @@
+import { runOperate } from "./operate.js";
+import { executeMateTool } from "./mate-tools.js";
+import { applyChatTaskAction } from "./chat-task-actions.js";
+import { createDecisionServer } from "./serve.js";
+import { verificationEvidence, REVIEW_GATE_NAME, sealVerificationReceipt } from "./verification-evidence.js";
+import { verifyApproverByPassword } from "./principal.js";
 /**
  * Inherited review context (v51, contract handoff task 3), end to end
  * against a REAL git repository and a fresh store: a small revision to a
@@ -134,6 +140,9 @@ describe("inherited review context (v51)", () => {
     baseFiles?: Record<string, string | Buffer>;
     sourcePatch?: (patch: string) => string;
     shortenedLog?: boolean;
+    machineGate?: boolean;
+    databaseFile?: string;
+    rootOnly?: boolean;
     guardSource?: string;
     revisionFiles?: Record<string, string>;
     intermediateFiles?: Record<string, string>;
@@ -156,7 +165,7 @@ describe("inherited review context (v51)", () => {
     const intermediate = options.intermediateFiles ? commitFiles(repo, options.intermediateFiles, "uncovered change") : null;
     const revision = commitFiles(repo, options.revisionFiles ?? { "src/report.ts": REPORT_TS_V2 }, "revision");
 
-    const store = openStore(":memory:");
+    const store = openStore(options.databaseFile ?? ":memory:");
     stores.push(store);
     const evidenceRoot = temp("so-ctx-evidence-");
     const alex = addApprover(store, "alex", T0);
@@ -199,7 +208,8 @@ describe("inherited review context (v51)", () => {
       screenshots: [],
     };
     const sourceProofArtifact = storeEvidence(store, evidenceRoot, sourceRun, "proof", "proof.json", Buffer.from(JSON.stringify(sourceProof), "utf8"), "agent-authored proof (validated, re-serialized)", T0);
-    const checkLog = options.shortenedLog ? store.getArtifact(storeEvidence(store, evidenceRoot, sourceRun, "check-log", "check-log.txt", Buffer.from("npm test: exit 0\n[output shortened]\nall green\n"), "bounded verification log", T0, { captureStatus: "ok", sourceBytesOriginal: 100000 })) : null;
+    if (options.machineGate) store.setVerifyCommand({ repo, command: "npm test", timeoutMs: 60000, approvedBy: "alex" }, T0);
+    const checkLog = options.machineGate ? store.getArtifact(storeEvidence(store, evidenceRoot, sourceRun, "check-log", "check-log.txt", Buffer.from("=== Attempt summary ===\n- Project check · attempt 1: (exit 0)\n\n=== Project check · attempt 1 ===\n$ npm test\n(exit 0)\n\n--- stdout ---\nall green\n… output shortened; ending follows …\n\n--- stderr ---\n".padEnd(14566, " ")), "sh -c npm test (attempt recorded)", T0, { captureStatus: "ok", sourceBytesOriginal: 100541 })) : options.shortenedLog ? store.getArtifact(storeEvidence(store, evidenceRoot, sourceRun, "check-log", "check-log.txt", Buffer.from("npm test: exit 0\n[output shortened]\nall green\n"), "bounded verification log", T0, { captureStatus: "ok", sourceBytesOriginal: 100000 })) : null;
     store.recordOutcomeFacts(sourceRun, { headRevision: source, handoff: "capped retries" });
     store.finishRun(sourceRun, { outcome: "built", committed: true, now: T0 });
 
@@ -224,6 +234,8 @@ describe("inherited review context (v51)", () => {
       }
       store.finishRun(priorReviewer, { outcome: "no-change", reason: "reviewed — 0 comment(s), 2 judgement(s)", now: T0 });
     }
+
+    if (options.rootOnly) return { repo, store, evidenceRoot, approverToken: alex.token, sourceTaskRef, sourceRun, sourceDiffArtifact, sourceProofArtifact, revisionTaskId: "feat", revisionTaskRef: sourceTaskRef, revisionRun: sourceRun, shas: { base, source, revision: source } };
 
     // The revision: sealed through the real road with the source scope's
     // rubric (or a deliberately changed one), then approved and built at
@@ -278,6 +290,144 @@ describe("inherited review context (v51)", () => {
       root: f.evidenceRoot,
       now: () => T0,
     });
+
+  const firstReady = async () => {
+    const databaseFile = join(temp("first-review-db-"), "test.db");
+    const f = await seed({ databaseFile, rootOnly: true, machineGate: true, priorJudgements: [],
+      baseFiles: { "src/guard.ts": "// retry context café 🔎\n".repeat(4000) + GUARD_TS.replace("n < 3", "n < 9"), "src/telegram.ts": "// retained source\n".repeat(5000) + "export const restart = false;\n", "src/telegram.test.ts": "// retained tests\n".repeat(5000) + "// old tests\n" },
+      guardSource: "// retry context café 🔎\n".repeat(4000) + GUARD_TS,
+      extraSourceFiles: { "src/telegram.ts": "// retained source\n".repeat(5000) + "export const restart = true;\n", "src/telegram.test.ts": "// retained tests\n".repeat(5000) + "// restart and rate-limit assertions at end\n", "src/unrelated-secret-fixture.test.ts": "// AKIAABCDEFGHIJKLMNOP\n" } });
+    f.store.saveProofVerdict(f.sourceRun, "verified", ["the repository's approved verification command passed"], T0,
+      RUBRIC.map(c => ({ id: c.id, statement: c.statement, requiredEvidence: [...c.evidence], state: "pass", detail: [], answered: [], review: null })), "verified");
+    const login = verifyApproverByPassword(f.store, "alex", f.approverToken, [f.repo]);
+    if (!login.ok) throw new Error("login");
+    const ask = () => f.store.requestReview(f.sourceRun, "alex", T0);
+    const pass = (agent: Runner) => reviewPass(f.store, { runner: "builder-1", token: "tok-builder-1", now: T0, evidenceRoot: f.evidenceRoot, scratchRoot: temp("first-review-scratch-"), agent });
+    return { ...f, databaseFile, ask, pass, who: login.who };
+  };
+  const firstVerdict = (judgement = "upholds") => ({ version: 1, comments: [], criteria: RUBRIC.map(c => ({ id: c.id, judgement: c.id === "c4" ? "cannot-tell" : judgement, note: c.id === "c4" ? "The unrelated fixture is redacted; its lines remain unavailable." : `src/${c.id === "c1" ? "limit" : c.id === "c2" ? "guard" : "report"}.ts supplies the criterion's complete source.` })) });
+
+  test("first review: legacy null proof capture and 14572/100541 log retain full source/tests without rebuilding", async () => {
+    const f = await firstReady();
+    expect(f.store.getArtifact(f.sourceProofArtifact)!.captureStatus).toBeNull();
+    const log = f.store.artifactsFor(f.sourceRun).find(a => a.kind === "check-log")!;
+    expect(log).toMatchObject({ bytesStored: 14572, bytesOriginal: 100541, truncated: true });
+    const before = f.store.artifactsFor(f.sourceRun).map(a => ({ row: a, bytes: readFileSync(join(f.evidenceRoot, a.key)) }));
+    expect(f.ask().ok).toBe(true);
+    let calls = 0;
+    const reports = await f.pass(async (_file, _args, options) => {
+      calls++;
+      const manifest = JSON.parse(readFileSync(join(options!.cwd!, REVIEW_CONTEXT_NAME), "utf8"));
+      const receipt = JSON.parse(readFileSync(join(options!.cwd!, REVIEW_GATE_NAME), "utf8"));
+      expect(receipt).toMatchObject({ source: "legacy machine log header", head: f.shas.source, result: { exitCode: 0 }, log: { bytesStored: 14572, bytesOriginal: 100541 } });
+      for (const path of ["src/telegram.ts", "src/telegram.test.ts", "src/guard.ts"]) {
+        const item = manifest.items.find((i: {path: string}) => i.path === path);
+        expect(readFileSync(join(options!.cwd!, item.file), "utf8")).toBe(git(f.repo, "show", `${f.shas.source}:${path}`) + "\n");
+        expect(item.redacted).toBe(false);
+      }
+      expect(manifest.coverage.find((c: {id: string}) => c.id === "c2").gaps).toEqual([]);
+      expect(JSON.stringify(manifest)).not.toContain("AKIAABCDEFGHIJKLMNOP");
+      return { ...OK, stdout: spoken(firstVerdict()) };
+    });
+    expect(reports[0]).toMatchObject({ outcome: "reviewed" }); expect(calls).toBe(1);
+    for (const a of before) { expect(f.store.getArtifact(a.row.id)).toEqual(a.row); expect(readFileSync(join(f.evidenceRoot, a.row.key))).toEqual(a.bytes); }
+    expect(f.store.runsFor(f.sourceTaskRef).filter(r => r.role !== "reviewer")).toHaveLength(1);
+    expect(f.store.criterionReviewsFor(f.sourceRun)).toHaveLength(4);
+    expect(f.ask()).toMatchObject({ ok: false, reason: "already-reviewed" });
+    const context = f.store.artifactsFor(f.sourceRun).find(a => a.kind === "review-context")!;
+    const parsed = parseReviewContext(readFileSync(join(f.evidenceRoot, context.key), "utf8"));
+    expect(parsed.ok && reviewContextCustodyProblem(f.store, f.evidenceRoot, parsed.inventory)).toBeNull();
+  });
+
+  test("first review: two connections still admit one reviewer and cannot request a second successful review", async () => {
+    const f = await firstReady(); const other = openStore(f.databaseFile); stores.push(other);
+    const asked = f.ask(); expect(asked.ok).toBe(true); if (!asked.ok) throw new Error(asked.reason);
+    expect(other.requestReview(f.sourceRun, "alex", T0)).toMatchObject({ ok: false, reason: "already-requested" });
+    const spec = { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: "sonnet" };
+    expect(f.store.admitReview(asked.id, spec, T0).ok).toBe(true);
+    expect(other.admitReview(asked.id, spec, T0)).toMatchObject({ ok: false, reason: "gone" });
+  });
+
+  test("retired refresh: CLI, shared chat and result have no manual refresh controls", async () => {
+    const f = await firstReady();
+    const lines: string[] = [];
+    expect(await runOperate("task", ["review", String(f.sourceRun), "--refresh", "--as", "alex", "--token", f.approverToken, "--json"], line => lines.push(line), { databaseFile: f.databaseFile, now: T0 })).not.toBe(0);
+    expect(executeMateTool({ store: f.store, who: f.who, now: T0, evidenceRoot: f.evidenceRoot, draft: () => { throw new Error("No refresh card may be created"); } }, "propose_task_action", { task: "feat", operation: "refresh_review", run: f.sourceRun }).ok).toBe(false);
+    const server = createDecisionServer({ store: f.store, evidenceRoot: f.evidenceRoot, repo: f.repo, clock: () => T0 });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const base = `http://127.0.0.1:${(server.address() as {port:number}).port}`;
+      const login = await fetch(base + "/login", { method: "POST", redirect: "manual", body: new URLSearchParams({ name: "alex", token: f.approverToken }) });
+      const cookie = login.headers.getSetCookie().map(c => c.split(";")[0]).join("; ");
+      const html = await (await fetch(base + `/r/${f.sourceRun}`, { headers: { cookie } })).text();
+      expect(html).not.toMatch(/Refresh review|data-refresh-state|refresh_review/);
+      expect(f.store.openReviewRequests()).toHaveLength(0);
+    } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+
+  test.each(["head", "scope", "route", "gate", "proof", "approval", "failed-capture", "context", "missing-log"] as const)("first-review preflight: %s drift refuses without a provider", async change => {
+    const f = await firstReady(); expect(f.ask().ok).toBe(true);
+    await capture(f);
+    if (change === "head") f.store.recordOutcomeFacts(f.sourceRun, { headRevision: "f".repeat(40) });
+    if (change === "scope") f.store.raw().prepare("UPDATE run SET scope_digest = 'changed' WHERE id = ?").run(f.sourceRun);
+    if (change === "route") f.store.raw().prepare("UPDATE task_scope SET approved_route_json = '{}' WHERE task_id = ?").run("feat");
+    if (change === "approval") f.store.clearVerifyCommand(f.repo, "alex", T0);
+    if (change === "failed-capture") f.store.raw().prepare("UPDATE artifact SET capture_status = 'failed' WHERE id = ?").run(f.sourceProofArtifact);
+    if (change === "gate" || change === "proof" || change === "missing-log") { const a = f.store.artifactsFor(f.sourceRun).find(a => a.kind === (change === "proof" ? "proof" : "check-log"))!; if (change === "missing-log") rmSync(join(f.evidenceRoot, a.key)); else writeFileSync(join(f.evidenceRoot, a.key), "tampered"); }
+    if (change === "context") storeEvidence(f.store, f.evidenceRoot, f.sourceRun, "review-context", "changed.json", Buffer.from("{}"), "test", T0);
+    let calls = 0;
+    const result = await f.pass(async () => { calls++; return { ...OK, stdout: spoken(firstVerdict()) }; });
+    expect(calls).toBe(0); expect(result.every(r => r.outcome !== "reviewed")).toBe(true);
+    expect(f.store.criterionReviewsFor(f.sourceRun)).toEqual([]);
+  });
+
+  test.each(["gate", "custody", "route"] as const)("first review: %s lost during evidence delivery cannot be ingested", async change => {
+    const f = await firstReady(); expect(f.ask().ok).toBe(true);
+    let calls = 0;
+    await f.pass(async () => {
+      calls++;
+      if (change === "gate") f.store.clearVerifyCommand(f.repo, "alex", T0);
+      if (change === "route") f.store.raw().prepare("UPDATE task_scope SET approved_route_json = '{}' WHERE task_id = ?").run("feat");
+      if (change === "custody") register(f.store, { name: "builder-1", host: "replacement", capacity: 9, repos: [f.repo], now: new Date(T0.getTime() + 1), newToken: () => "replacement" });
+      return { ...OK, stdout: JSON.stringify({ session_id: "first-session", result: JSON.stringify({ version: 1, readEvidence: { file: REVIEW_GATE_NAME, sha256: "a".repeat(64), offset: 0, length: 10 } }) }) };
+    });
+    expect(calls).toBe(1); expect(f.store.criterionReviewsFor(f.sourceRun)).toEqual([]);
+  });
+
+  test.each(["legacy-header-missing", "failed-check", "receipt", "receipt-tampered", "new-grant"] as const)("machine gate receipt: %s never invents or waives historical evidence", async variant => {
+    const f = await firstReady();
+    const command = f.store.liveVerifyCommand(f.repo)!;
+    const log = f.store.artifactsFor(f.sourceRun).find(a => a.kind === "check-log")!;
+    if (variant === "legacy-header-missing") {
+      const bytes = Buffer.from("all green; the agent says npm test passed");
+      writeFileSync(join(f.evidenceRoot, log.key), bytes);
+      f.store.raw().prepare("UPDATE artifact SET sha256 = ?, bytes_stored = ? WHERE id = ?").run(sha256(bytes), bytes.length, log.id);
+    } else {
+      sealVerificationReceipt(f.store, f.evidenceRoot, f.sourceRun, f.shas.source, command, { configured: true, ran: true, exitCode: variant === "failed-check" ? 1 : 0 }, T0);
+      if (variant === "receipt-tampered") {
+        const receipt = f.store.artifactsFor(f.sourceRun).find(a => a.capture === "machine verification receipt v1")!;
+        writeFileSync(join(f.evidenceRoot, receipt.key), "{}");
+      }
+      if (variant === "new-grant") f.store.setVerifyCommand({ repo: f.repo, command: "npm test", timeoutMs: 60000, approvedBy: "alex" }, T0);
+    }
+    const checked = verificationEvidence(f.store, f.evidenceRoot, f.sourceRun);
+    expect(checked.ok).toBe(variant === "receipt");
+    if (checked.ok) expect(JSON.parse(checked.bytes!)).toMatchObject({ head: f.shas.source, command: { id: command.id }, result: { exitCode: 0 }, log: { sha256: log.sha256, bytesStored: 14572 } });
+    if (variant === "failed-check") {
+      f.store.saveProofVerdict(f.sourceRun, "refuted", ["The actual check failed."], T0, [], "refuted");
+      const failure = verificationEvidence(f.store, f.evidenceRoot, f.sourceRun);
+      expect(failure.ok && JSON.parse(failure.bytes!).result.exitCode).toBe(1);
+    }
+  });
+
+  test.each(["contradicts", "cannot-tell"])("first substantive %s verdict is ingested once and never retried for approval", async judgement => {
+    const f = await firstReady(); expect(f.ask().ok).toBe(true);
+    let calls = 0;
+    expect((await f.pass(async () => { calls++; return { ...OK, stdout: spoken(firstVerdict(judgement)) }; }))[0]?.outcome).toBe("reviewed");
+    expect(calls).toBe(1);
+    expect(f.store.criterionReviewsFor(f.sourceRun)[0]?.judgement).toBe(judgement);
+    expect(f.ask()).toMatchObject({ ok: false, reason: "already-reviewed" });
+  });
 
   test.each(["intact", "tampered", "missing", "failed", "changed-scope"] as const)("shortened check log: %s keeps integrity separate from completeness", async variant => {
     const f = await seed({ shortenedLog: true });
@@ -574,15 +724,24 @@ describe("inherited review context (v51)", () => {
     expect(matrix.find(row => row.id === "c1")?.coverage?.items).toEqual([byPath.get("src/limit.ts")!.id]);
   });
 
-  test("an ordinary (non-revision) run captures no inventory and adjudicates exactly as before", async () => {
+  test("new revision files omitted from proof path hints are still sealed in full", async () => {
+    const content = "// surrounding test context\n".repeat(3000) + "export const restartRegression = true;\n";
+    const f = await seed({ revisionFiles: { "src/report.ts": REPORT_TS_V2, "src/new-tests.ts": content } });
+    const inventory = (await capture(f))!.inventory;
+    expect(inventory.items.find(item => item.path === "src/new-tests.ts")).toMatchObject({ content, redacted: false, why: ["candidate-changed-path"] });
+    expect(parseReviewContext(serializeReviewContext(inventory)).ok).toBe(true);
+  });
+
+  test("an ordinary run seals full files for its first reviewer without inheriting a verdict", async () => {
     const f = await seed();
     const captured = await captureReviewContext(f.store, exec, {
       runId: f.sourceRun, taskRef: f.sourceTaskRef, head: f.shas.source, base: f.shas.base,
       rubric: RUBRIC.map(one => ({ id: one.id, statement: one.statement, evidence: one.evidence })),
       patchPaths: new Set(), worktree: f.repo, root: f.evidenceRoot, now: () => T0,
     });
-    expect(captured).toBeNull();
-    expect(f.store.artifactsFor(f.sourceRun).some(one => one.kind === "review-context")).toBe(false);
+    expect(captured!.inventory.items.map(item => item.path)).toEqual(["src/guard.ts", "src/limit.ts", "src/report.ts"]);
+    expect(captured!.inventory.coverage.every(row => !row.inherited)).toBe(true);
+    expect(f.store.artifactsFor(f.sourceRun).some(one => one.kind === "review-context")).toBe(true);
     const { matrix } = adjudicate({ proofArtifactPresent: false, proofParse: null, handoffPresent: true, terminalDiffPresent: true, terminalDiffCaptureStatus: "ok", diffStat: null, verifyCommand: { configured: false }, screenshots: [], approvedCriteria: [{ id: "c1", statement: "x", evidence: ["check"] }] });
     expect(matrix[0]).not.toHaveProperty("coverage");
   });
@@ -984,6 +1143,41 @@ describe("inherited review context (v51)", () => {
       expect(received).toBe(text);
       expect(calls).toBeGreaterThan(2);
       expect(f.store.runsFor(f.revisionTaskRef).find(one => one.role === "reviewer")!.costUsd).toBeCloseTo(calls * 0.01);
+    });
+
+    test.each(["transient", "exhausted", "malformed-range", "authority", "negative"] as const)("same-session evidence delivery recovery: %s", async variant => {
+      const f = await readyForReview();
+      const item = f.inventory.items.find(i => i.path === "src/limit.ts")!;
+      let calls = 0;
+      let delivered = "";
+      const reports = await passOnce(f, async (_file, args) => {
+        calls++;
+        const prompt = args[args.indexOf("-p") + 1]!;
+        if (calls > 1) expect(args).toEqual(expect.arrayContaining(["--resume", "delivery-session"]));
+        let reply: unknown;
+        if (calls === 1 || (variant === "malformed-range" && calls === 2)) {
+          if (calls === 2) expect(prompt).toContain("EVIDENCE DELIVERY ERROR");
+          reply = { version: 1, readEvidence: { file: reviewContextFileName(item.id), sha256: item.sha256, offset: 0, length: variant === "malformed-range" && calls === 1 ? 999999 : 65536 } };
+        } else if (variant === "exhausted" || ((variant === "transient" || variant === "authority") && calls === 2)) {
+          if (variant === "authority") f.store.raw().prepare("UPDATE task_scope SET approved_route_json = '{}' WHERE task_id = ?").run(f.revisionTaskId);
+          return { ...OK, code: 1, stdout: JSON.stringify({ session_id: "delivery-session" }), stderr: "connection closed during evidence delivery" };
+        } else {
+          const range = JSON.parse(prompt.split("\n").at(-1)!); delivered = range.content;
+          reply = { version: 1, comments: [], criteria: judgements({ judgement: variant === "negative" ? "contradicts" : "cannot-tell", note: `${item.id} was delivered; this is the final finding.` }) };
+        }
+        return { ...OK, stdout: JSON.stringify({ session_id: "delivery-session", result: JSON.stringify(reply) }) };
+      });
+      if (variant === "authority" || variant === "exhausted") {
+        expect(reports[0]?.outcome).not.toBe("reviewed");
+        expect(f.store.criterionReviewsFor(f.revisionRun)).toEqual([]);
+        expect(calls).toBe(variant === "authority" ? 2 : 4);
+      } else {
+        expect(reports[0]?.outcome).toBe("reviewed");
+        expect(delivered).toBe(item.content);
+        expect(calls).toBe(variant === "negative" ? 2 : 3);
+      }
+      expect(f.store.runsFor(f.revisionTaskRef).filter(r => r.role === "reviewer")).toHaveLength(1);
+      expect(f.store.runsFor(f.revisionTaskRef).filter(r => r.role !== "reviewer")).toHaveLength(1);
     });
 
     test.each(["path", "hash", "range", "scratch", "symlink", "artifact", "head", "session", "custody"] as const)("inline ranges refuse %s drift without accepting a review", async variant => {

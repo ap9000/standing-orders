@@ -138,9 +138,30 @@ describe("inherited review context through the tick (v51)", () => {
       sourceRun = built.id;
       sourceHead = built.headRevision!;
       expect(store.proofVerdictFor(sourceRun)?.matrix.map(row => row.state)).toEqual(["pass", "pass", "pass"]);
-      expect(store.artifactsFor(sourceRun).some(one => one.kind === "review-context")).toBe(false);
+      const context = store.artifactsFor(sourceRun).find(one => one.kind === "review-context")!;
+      const sealed = readVerifiedArtifact(join(base, "evidence"), context);
+      expect(sealed.ok).toBe(true);
+      const parsed = parseReviewContext(sealed.ok ? sealed.content.toString("utf8") : "");
+      expect(parsed.ok && parsed.inventory.items.map(item => item.path)).toEqual(["src/guard.ts", "src/limit.ts", "src/report.ts"]);
+      expect(parsed.ok && parsed.inventory.coverage.every(row => !row.inherited)).toBe(true);
       store.close();
     }
+    // The first reviewer gets complete files before any revision exists.
+    await run(["task", "review", String(sourceRun), "--as", "alex", "--token", approverToken, "--json"], none);
+    let firstReviewCalls = 0;
+    await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], async (_file, args, options) => {
+      firstReviewCalls++;
+      const manifest = JSON.parse(readFileSync(join(options!.cwd!, REVIEW_CONTEXT_NAME), "utf8"));
+      expect(manifest.head).toBe(sourceHead);
+      expect(args[args.indexOf("-p") + 1]).toContain("first-review context");
+      for (const [path, content] of Object.entries({ "src/limit.ts": LIMIT_TS, "src/guard.ts": GUARD_TS, "src/report.ts": REPORT_TS })) {
+        expect(readFileSync(join(options!.cwd!, manifest.items.find((item: { path: string }) => item.path === path).file), "utf8")).toBe(content);
+      }
+      return { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: STATEMENTS.map((_, index) => ({ id: `c${index + 1}`, judgement: "cannot-tell", note: "Complete source is available; runtime behavior has not been demonstrated." })) }) }) };
+    });
+    expect(firstReviewCalls).toBe(1);
+    expect(payload().dispatched).toEqual(expect.arrayContaining([expect.objectContaining({ id: `review of run ${sourceRun}`, outcome: "reviewed" })]));
+
     // A revision starts from its recorded source without landing that
     // feature on main or overriding the dispatcher's base manually.
     expect((await git(["rev-parse", "HEAD"])).stdout.trim()).not.toBe(sourceHead);
