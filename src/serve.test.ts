@@ -11723,6 +11723,107 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(damaged).not.toContain("secret-lineage");
   });
 
+  test("chat review: messages save shared feedback and create one same-task revision through the normal approval door", async () => {
+    const { verifyApproverStanding } = await import("./principal.js");
+    const { subscriptionCredentialKey } = await import("./converse.js");
+    const root = "chat-review-root";
+    const repo = (await import("node:fs")).realpathSync(evidenceRoot);
+    const ref = seed(root, "Simplify navigation", repo);
+    const run = build(root, ref, RICH);
+    store.stampRun(run, { scopeDigest: store.getScope(root)!.digest });
+    const now = new Date();
+    const verified = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, [repo]);
+    if (!verified.ok) throw new Error(verified.reason);
+    store.setChatConfig({ provider: "claude-subscription", model: "opus", dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, "alex", now);
+    const session = store.mintMateSession({ approver: "alex", approverGeneration: verified.who.generation, credentialKey: subscriptionCredentialKey("claude-subscription"), ceilingMicrousd: 0, ceilingDigest: verified.who.ceilingDigest, termsDigest: "fixture" }, now);
+    const thread = store.openMateThread("alex", verified.who.ceilingDigest, now).thread;
+    const answers: MateProviderAnswer[] = [];
+    const contexts: string[] = [];
+    const tool = (name: string, args: Record<string, unknown>): MateProviderAnswer => ({ text: "", calls: [{ id: name, name, args }], tokensIn: 1, tokensOut: 1, reportedCostMicrousd: null });
+    const done = (): MateProviderAnswer => ({ text: "Review the card to confirm.", calls: [], tokensIn: 1, tokensOut: 1, reportedCostMicrousd: null });
+    await boot({ repo, subscriptionChatRunner: async (request: import("./subscription-chat.js").SubscriptionMateRequest) => {
+      contexts.push(request.history.filter(one => one.role === "operator").map(one => one.text).join("\n"));
+      const answer = answers.shift(); if (!answer) throw new Error("No scripted answer");
+      return { ok: true, answer };
+    } });
+    const cookie = await login();
+    const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
+    const csrf = csrfOf(await read("/chat"));
+    const send = async (message: string) => {
+      const response = await post(cookie, "/chat", { csrf, task: root, result: String(run), message });
+      expect(response.status).toBe(303);
+      expect(response.headers.get("location")).not.toContain("said=");
+      for (let i = 0; i < 100 && store.liveMateTurnFor("alex") !== null; i++) await new Promise(resolve => setTimeout(resolve, 10));
+      expect(store.liveMateTurnFor("alex")).toBeNull();
+      const proposal = store.listMateProposals(thread.id, ["pending"]).at(-1)!;
+      expect(proposal?.kind, JSON.stringify(store.listMateMessages(thread.id, 10))).toBe("review");
+      return proposal;
+    };
+    answers.push(tool("get_result", { task: root, run }), tool("propose_review", { run, operation: "note", note: "Use shorter labels." }), done());
+    const saved = await send("Save this feedback: use shorter labels.");
+    expect(contexts.some(one => one.includes(`viewing result #${run} from execution ${root}`))).toBe(true);
+    expect(store.liveDiffComments(run)).toHaveLength(0);
+    expect((await post(cookie, `/chat/proposal/${saved.id}/confirm`, { csrf })).status).toBe(303);
+    const note = store.liveDiffComments(run)[0]!;
+    expect(note).toMatchObject({ note: "Use shorter labels.", author: "alex" });
+    for (const page of [`/chat?task=${root}&result=${run}`, `/r/${run}`, `/review?result=${root}`]) expect(await read(page)).toContain("Use shorter labels.");
+    expect(store.taskFamilyOf(root, [repo], false)?.versions).toHaveLength(1);
+    answers.push(tool("get_result", { task: root, run }), tool("propose_review", { run, operation: "revise", saved_notes: [note.id], note: "Keep the primary action on one line.", path: "src/a.ts", line: 2 }), done());
+    const revise = await send("Apply that feedback and keep the primary action on one line.");
+    const card = await read(`/chat?task=${root}`);
+    expect(card).toContain('data-card-kind="review"');
+    expect(card).toContain("Use shorter labels.");
+    expect(card).toContain("Keep the primary action on one line.");
+    expect(card).toContain(">Request changes</button>");
+    // Another tab adds feedback after the card was shown; it must remain unconsumed.
+    await post(cookie, `/r/${run}/comment`, { csrf, note: "A later note, not in this revision." });
+    const confirmed = await post(cookie, `/chat/proposal/${revise.id}/confirm`, { csrf });
+    const child = revisionIdOf(confirmed.headers.get("location"));
+    expect(confirmed.headers.get("location")).toBe(`/chat?task=${root}&revision=${child}`);
+    expect(store.revisionLineageOf(child, now)).toMatchObject({ root, sourceTask: root, sourceRun: run });
+    expect(store.liveDiffComments(run).map(one => one.note)).toEqual(["A later note, not in this revision."]);
+    expect(approvalOf(store.getScope(child)).approved).toBe(false);
+    expect(await read(`/chat?task=${root}`)).toContain(`action="/t/${child}/approve"`);
+    expect(await read("/work")).toContain(`data-task="${root}"`);
+    await post(cookie, `/chat/proposal/${revise.id}/confirm`, { csrf });
+    expect(store.taskFamilyOf(root, [repo], false)?.versions).toHaveLength(2);
+    expect(store.allDiffComments(run)).toHaveLength(3);
+    expect(store.getMateSession(session)?.spentMicrousd).toBe(0);
+  });
+
+  test("chat review refuses unread, stale, inaccessible and damaged results without saving partial feedback", async () => {
+    const { verifyApproverStanding } = await import("./principal.js");
+    const { executeMateTool } = await import("./mate-tools.js");
+    const { readChatResult, applyChatReview } = await import("./chat-review.js");
+    const ref = seed("review-guard", "Guard feedback");
+    const run = build("review-guard", ref, RICH);
+    store.stampRun(run, { scopeDigest: store.getScope("review-guard")!.digest });
+    const verified = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, ["/repo/main"]);
+    if (!verified.ok) throw new Error(verified.reason);
+    const who = verified.who;
+    const ctx = { store, who, now: T0, evidenceRoot, step: 1, readDecisions: new Map(), readResults: new Map(), draft: () => 1 };
+    expect(executeMateTool(ctx, "propose_review", { run, operation: "revise", note: "Fix it." })).toMatchObject({ ok: false });
+    const read = readChatResult(store, who, evidenceRoot, "review-guard", run);
+    if (!read.ok) throw new Error(read.message);
+    const request = { snapshot: read.snapshot, operation: "revise" as const, note: "Fix this.", path: null, line: null, notes: [] };
+    const other = seed("review-other", "Private", "/repo/other");
+    const otherRun = build("review-other", other, RICH);
+    expect(readChatResult(store, who, evidenceRoot, "review-other", otherRun)).toMatchObject({ ok: false });
+    expect(readChatResult(store, who, evidenceRoot, "review-guard", otherRun)).toMatchObject({ ok: false });
+    // An invalid inherited source binding fails after the new note was tentatively saved.
+    store.raw().prepare("UPDATE run SET scope_digest = ? WHERE id = ?").run("f".repeat(64), run);
+    expect(applyChatReview(store, who, evidenceRoot, request, T0, false)).toMatchObject({ ok: false });
+    expect(store.allDiffComments(run)).toHaveLength(0);
+    store.raw().prepare("UPDATE run SET scope_digest = ? WHERE id = ?").run(store.getScope("review-guard")!.digest, run);
+    // New scope: old card stays attached to the old terms and refuses.
+    propose(store, { taskId: "review-guard", goal: "Different terms", touches: [], now: T0 });
+    expect(applyChatReview(store, who, evidenceRoot, request, T0, false)).toMatchObject({ ok: false, message: expect.stringContaining("changed") });
+    expect(store.allDiffComments(run)).toHaveLength(0);
+    const artifact = store.artifactsFor(run).find(one => one.kind === "terminal-diff")!;
+    writeFileSync(join(evidenceRoot, artifact.key), "changed after capture");
+    expect(readChatResult(store, who, evidenceRoot, "review-guard", run)).toMatchObject({ ok: false });
+  });
+
   test.each([
     ["ASCII limit", "A".repeat(200), "A".repeat(189) + " — revision"],
     ["astral limit", "😀".repeat(100), "😀".repeat(94) + " — revision"],

@@ -124,7 +124,7 @@ describe("the mate's turn", () => {
     });
 
   test("the intake contract treats one outcome as enough and asks only material questions", () => {
-    expect(MATE_CONTRACT_VERSION).toBe(8);
+    expect(MATE_CONTRACT_VERSION).toBe(9);
     expect(MATE_CONTRACT).toContain("read get_agents and answer in its words");
     expect(MATE_CONTRACT).toContain("never an agent that is not listed");
     expect(MATE_CONTRACT).toContain("a plain-language outcome is enough to draft a task");
@@ -174,7 +174,7 @@ describe("the mate's turn", () => {
     ]);
     const live = session();
     const outcome = await turn("how do things stand?", script.fetcher, { session: live });
-    expect(outcome).toMatchObject({ ok: true, steps: 3, proposals: 0, stoppedAtCap: false, activity: "read 3 · proposed 0 · 3 steps" });
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ ok: true, steps: 3, proposals: 0, stoppedAtCap: false, activity: "read 3 · proposed 0 · 3 steps" });
     if (!outcome.ok) throw new Error("unreachable");
     expect(outcome.settledMicrousd).toBe(3 * PER_STEP);
     expect(store.getMateTurn(outcome.turn)).toMatchObject({ state: "answered", steps: 3, settledMicrousd: 3 * PER_STEP, tokensIn: 300, tokensOut: 60 });

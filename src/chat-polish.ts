@@ -96,6 +96,9 @@ export const CHAT_POLISH_CSS = `
   .result-panel .result-pin summary { font-size: .8125rem; min-height: 44px; display: flex; align-items: center; cursor: pointer; }
   .result-panel .diff-comment-limit { font-size: .75rem; }
   .chat-main .chat-plan { box-shadow: none; }
+  .proposal-review-notes { margin: .5rem 0; padding-left: 1.15rem; overflow-wrap: anywhere; }
+  .proposal-review-notes li + li { margin-top: .5rem; }
+  .proposal-actions .button-link, .proposal-actions button { min-height: 44px; white-space: nowrap; }
   .chat-main .chat-task-back { display: none; }
   .knowledge-library .knowledge-intro { padding: .5rem 0 1.25rem; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
   .knowledge-library .knowledge-instructions { line-height: 1.65; margin-bottom: .5rem; }

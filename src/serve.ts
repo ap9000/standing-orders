@@ -6,6 +6,11 @@ import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
 import { chatWorkingHtml, chatActivityDetailsHtml, completedWorkHtml, CHAT_POLISH_CSS } from "./chat-polish.js";
+import { TRANSITIONS_CSS } from "./transitions-recipes.js";
+import { createResultRevision } from "./result-actions.js";
+import { CHAT_CONTROLS, chatControlHref, isChatControl } from "./chat-controls.js";
+import { CHAT_TASK_ACTIONS, isChatTaskAction } from "./chat-task-actions.js";
+import { WORKSPACE_MOTION_CSS, WORKSPACE_MOTION_SCRIPT } from "./workspace-motion.js";
 import { styleAsset } from "./style-asset.js";
 import { MOBILE_VIEWPORT_SCRIPT } from "./mobile-viewport.js";
 import { authorizePlanUnderMode, applyModeToNewFiling, planAutoPending } from "./plan-auto.js";
@@ -2507,6 +2512,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               problem: url.searchParams.get("said") ?? focusProblem ?? said,
               now,
               resultPanel,
+              resultRunId: resultRun?.id ?? null,
             }),
           );
         }
@@ -3167,7 +3173,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const sensitiveChrome = sensitive && s.forceSensitive !== true && s.chrome !== undefined
       ? beatScript(!restricted()) + sidebarScript()
       : "";
-    const script = functional + (chromeLayer ? chromeScript(!restricted()) : sensitiveChrome);
+    const script = functional + (chromeLayer ? chromeScript(!restricted()) + WORKSPACE_MOTION_SCRIPT : sensitiveChrome);
     const nonce = script === "" ? undefined : randomBytes(16).toString("base64");
     const body = chromeLayer
       ? `${s.body}\n${paletteTagCached(s.chrome?.project ?? null)}\n${KBD_HELP}`
@@ -5604,7 +5610,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!dismissMateProposal(store, principal, id, now)) noteMate(who.session.csrf, null, "that proposal was already acted on");
         return redirect(response, chatReturnWithLatest(back));
       }
-      const outcome = confirmMateProposal(store, principal, id, now, { confirm: body.get("confirm") === "yes", via: "web" });
+      const outcome = confirmMateProposal(store, principal, id, now, { confirm: body.get("confirm") === "yes", via: "web", evidenceRoot });
       if (!outcome.ok && (outcome.reason === "not-yours" || outcome.reason === "standing")) {
         return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, back);
       }
@@ -5617,6 +5623,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       // the card carrying the door's words.
       if (outcome.ok && outcome.kind === "task" && outcome.taskId !== null && taskChatFocus(outcome.taskId, now, who, { mintNonce: false }) !== null) {
         return redirect(response, `${taskChatHref(outcome.taskId)}#task-chat-live`);
+      }
+      if (outcome.ok && outcome.kind === "review" && outcome.taskId !== null) {
+        const proposal = store.getMateProposal(id)!;
+        return redirect(response, proposal.payload["operation"] === "revise"
+          ? revisionDestination(outcome.taskId, taskChatHref(outcome.taskId))
+          : `${taskChatHref(outcome.taskId)}&result=${Number(proposal.payload["run"])}#request-changes`);
       }
       return redirect(response, chatReturnWithLatest(back));
     }
@@ -5659,6 +5671,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       const back = focusTask === null ? "/chat" : taskChatHref(focusTask.id);
       const said = (status: number, words: string, session: number | null = null): void =>
         wantsJson ? respond(response, status, "application/json", JSON.stringify({ ok: false, said: words, session })) : redirect(response, chatReturnWithSaid(back, words));
+      const resultValue = body.get("result");
+      const viewedRun = resultValue === null ? null : /^[0-9]{1,15}$/.test(resultValue) ? store.getRun(Number(resultValue)) : null;
+      if (resultValue !== null && (body.getAll("result").length !== 1 || viewedRun === null || focusTask === null || !runVisible(viewedRun) || !focusTask.family.versions.some(one => one.refId === viewedRun.taskRef))) {
+        return said(409, "That result is no longer available for this task. Review the task before sending.");
+      }
+      const resultContext = viewedRun === null ? "" : ` The operator is viewing result #${viewedRun.id} from execution ${store.externalIdFor(viewedRun.taskRef)}. Use get_result for that exact execution and run when responding to feedback; do not substitute another result.`;
       const enabled = chatEnablement();
       if (!enabled.ok) return said(409, enabled.why);
       // A live mate session: the message is a mate turn — no password, the
@@ -5677,7 +5695,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return said(400, `a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`, mateSession.id);
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(requestId === null ? {} : { requestId }), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(requestId === null ? {} : { requestId }), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
           })
@@ -6151,178 +6169,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 404, "no such run");
       }
       const back = resultReturnTarget(body.get("return"), id);
-      const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
-      const sourceScope = store.getScope(sourceTaskId);
-      const sourceFamily = familyOf(sourceTaskId);
-      if (sourceFamily === null || sourceFamily.problem !== null) return refuse(response, who, 409, "The revision history cannot be verified in this project.", back);
-      const repo = taskRepoOf(found.taskRef);
-      // THE DISPLAYED BATCH (repair 2026-09-14, finding 2): the form names
-      // the exact note ids its reader saw and the source terms it was
-      // rendered against. The seal binds to those ids and nothing else —
-      // "every live note at POST time" would let an old submission, a
-      // replay, or a second tab consume notes its reader never displayed.
-      const batchIds = parseRevisionBatch(body.get("batch"));
-      const postedSource = body.get("source");
-      if (batchIds === null || postedSource === null || postedSource === "") {
-        return refuse(response, who, 400, "this form is out of date — it names no note batch; reload the result and create the revision from the notes shown there", back);
-      }
-      const byId = new Map(store.allDiffComments(id).map(one => [one.id, one] as const));
-      const named = batchIds.map(one => byId.get(one));
-      if (named.some(one => one === undefined)) {
-        return refuse(response, who, 400, "this batch names notes that are not on this result — reload the result", back);
-      }
-      const batch = named as DiffComment[];
-      // A replay must match the immutable brief's entire batch and source,
-      // not just a subset whose notes happen to name the same child. Read-only
-      // replay can return its original child even after the source is rescoped.
-      const replayChild = (notes: DiffComment[]): string | null => {
-        const child = notes[0]?.consumedBy;
-        if (!child || notes.length !== batchIds.length || notes.some(one => one.consumedBy !== child)) return null;
-        const ref = store.lookupRef(child);
-        const lineage = ref === null ? null : store.revisionSourceOf(ref.id);
-        if (ref === null || !visible(ref.repo) || lineage === null || lineage.sourceRun !== id || lineage.sourceTask !== sourceTaskId) return null;
-        try {
-          const read = readVerifiedArtifact(evidenceRoot, lineage.briefArtifact);
-          if (!read.ok) return null;
-          const brief = JSON.parse(read.content.toString("utf8"));
-          if (brief.sourceRun !== id || brief.sourceTask !== sourceTaskId || revisionSourceOf(brief.sourceScopeDigest) !== postedSource || !Array.isArray(brief.comments)) return null;
-          return brief.comments.length === batchIds.length && brief.comments.every((one: { id: number }, at: number) => one.id === batchIds[at]) ? child : null;
-        } catch {
-          return null;
-        }
-      };
-      // A retry of an OLD request: every note it names is already sealed
-      // into one revision — that revision is the answer, and no note added
-      // since is touched. A batch partly sealed elsewhere is refused whole.
-      const consumers = new Set(batch.map(one => one.consumedBy).filter((one): one is string => one !== null));
-      const replay = replayChild(batch);
-      if (replay !== null) return redirect(response, revisionDestination(replay, back));
-      if (consumers.size > 0) {
-        return refuse(response, who, 409, `some of these notes were already sealed into revision ${[...consumers].join(", ")}; the others are still waiting — reload the result to see the current batch`, back);
-      }
-      if (postedSource !== revisionSourceOf(sourceScope?.digest ?? null)) {
-        return refuse(response, who, 409, "the task's terms changed since this page was shown — reload the result and read the current terms before creating a revision", back);
-      }
-      if (batch.some(one => one.supersededBy !== null)) {
-        return refuse(response, who, 409, "a note in this batch was superseded — reload the result to see the current batch", back);
-      }
-      if (batch.some(one => !isRevisionFeedback(one))) return refuse(response, who, 409, "Review observations are not requested changes. Use Request change to add your feedback first.", back);
-      const comments = batch;
-      // Keep the subject recognizable, including when revising a revision.
-      // Reserve the suffix before truncating, at whole grapheme boundaries.
-      const suffix = " — revision";
-      const subject = (store.getTask(sourceTaskId)?.title ?? "").trim().replace(/(?: — revision)+$/u, "").trim() || "Task";
-      let prefix = "";
-      for (const { segment } of new Intl.Segmenter("en", { granularity: "grapheme" }).segment(subject)) {
-        if ((prefix + segment + suffix).length > TASK_TEXT_LIMITS.title) break;
-        prefix += segment;
-      }
-      const candidateTitle = `${prefix.trimEnd() || "Task"}${suffix}`;
-      const title = validateTaskText({ title: candidateTitle }) === null ? candidateTitle : `Task${suffix}`;
-      const feedbackKind = comments.every(one => one.path !== null) ? "annotations" : "feedback";
-      const terminal = store.artifactsFor(id).find(one => one.kind === "terminal-diff");
-      if (terminal !== undefined) {
-        const proven = readVerifiedArtifact(evidenceRoot, terminal);
-        if (!proven.ok) {
-          return refuse(response, who, 409, `the reviewed diff no longer verifies (${proven.problem}) — the batch cannot seal against it`, back);
-        }
-      }
-      // The brief is serialized and size-checked BEFORE anything is created
-      // (Codex M5-M8 audit, IV-3): a structured artifact must never pass
-      // through byte truncation — truncated JSON is not a smaller brief,
-      // it is no brief wearing one's name.
-      const brief = {
-        schema: 1 as const,
-        sourceTask: sourceTaskId,
-        sourceRun: id,
-        sourceScopeDigest: sourceScope?.digest ?? null,
-        head: found.headRevision,
-        diffArtifactSha: terminal?.sha256 ?? null,
-        comments: comments.map(one => ({
-          id: one.id,
-          path: one.path,
-          line: one.line,
-          note: one.note,
-          author: one.author,
-          createdAt: one.createdAt,
-        })),
-      };
-      const briefBytes = Buffer.from(JSON.stringify(brief, null, 2), "utf8");
-      if (briefBytes.length > EVIDENCE_CAPS["revision-brief"]) {
-        return refuse(response, who, 400, "this batch is too large for one brief — seal it in parts", back);
-      }
-      // The file first, under a nonce name — a file whose seal fails is an
-      // orphan on disk, never authority. Then ONE transaction: task with
-      // the source scope's limits INHERITED (audit IV-2 — a revision that
-      // drops the exclusions is an approval screen telling a lie), the
-      // artifact row, the relation, and exactly this comment batch.
-      const briefName = `revision-brief-${randomBytes(6).toString("hex")}.json`;
-      const key = writeEvidenceFile(evidenceRoot, id, briefName, briefBytes);
-      // C1's revision arm: when the SEALER is the mode's signer and the
-      // mode auto-approves their filings, the revision task approves
-      // inside the same transaction, with mode provenance. Everything
-      // else about the seal is unchanged; without coverage, the revision
-      // keeps its own approval ceremony.
-      const sealed = store.transact(() => {
-        // Coverage first (cookie road only): its budget and escalated
-        // posture ride the FILING so the digest binds them (surfaces
-        // round 1, finding 2) — never a stamp after the fact.
-        const coverage = who.via === "cookie" ? modeFilingCoverage(store, repo, who.name, now) : null;
-        // ONE revision boundary (contract handoff task 2): the source's
-        // goal, exclusions, touches, rubric, risk, quality, posture,
-        // budget, overrides and pins are read from the SOURCE ROWS inside
-        // the seal, which re-proves the task/run/scope-digest binding and
-        // the brief's custody first — the scope read above only names the
-        // digest this batch was drafted against.
-        const result = store.sealRevision(
-          {
-            source: { task: sourceTaskId, run: id, scopeDigest: sourceScope?.digest ?? null },
-            brief: { evidenceRoot, key, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "machine-authored revision brief (exit 0)" },
-            child: {
-              title: `Revise ${sourceTaskId} from ${comments.length} annotation${comments.length === 1 ? "" : "s"} on build #${id}`,
-              repair: `apply the ${feedbackKind} recorded on build #${id}; the revision brief carries the exact batch`,
-            },
-            commentIds: comments.map(one => one.id),
-            coverage,
-          },
-          now,
-        );
-        if (result.ok) {
-          // The unchanged legacy title above feeds the store's existing slug
-          // and collision handling. Set only this new row's display title,
-          // atomically with its seal; retries returned earlier, untouched.
-          store.raw().prepare("UPDATE task SET title = ? WHERE id = ?").run(title, result.id);
-        }
-        if (result.ok && coverage !== null) {
-          // A scope whose profile could not resolve is unapprovable by the
-          // human road (approve() refuses) — the mode road refuses too.
-          const filedScope = store.getScope(result.id);
-          if (filedScope?.profileState === "resolved") {
-            // A false answer here is the coordinator quarantine (review
-            // finding 7): the revision stays honestly unapproved and the
-            // task page it redirects to says so in the quarantine words.
-            void store.sealScopeApproval(result.id, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
-          }
-        }
-        return result;
-      });
-      if (!sealed.ok) {
-        // Two sealers of one batch race on the consumption count; the
-        // loser is sent to the winner's revision — the one that consumed
-        // EXACTLY this batch, never merely the newest child of the run — so
-        // a double click or a two-tab submission lands on ONE revision.
-        if (sealed.reason === "duplicate" || sealed.reason === "comments-taken") {
-          const settled = store.allDiffComments(id).filter(one => batchIds.includes(one.id));
-          const takers = new Set(settled.map(one => one.consumedBy).filter((one): one is string => one !== null));
-          const winner = replayChild(settled);
-          if (winner !== null) return redirect(response, revisionDestination(winner, back));
-          if (takers.size > 0) {
-            return refuse(response, who, 409, `some of these notes were just sealed into revision ${[...takers].join(", ")}; the others are still waiting — reload the result to see the current batch`, back);
-          }
-        }
-        return refuse(response, who, 409, `could not seal the revision: ${sealed.detail}`, back);
-      }
-      return redirect(response, revisionDestination(sealed.id, back));
+      const result = createResultRevision(store, evidenceRoot, {
+        run: id, batch: body.get("batch"), source: body.get("source"), actor: who.name,
+        repos: admissionList(), includeUnplaced: visible(null), allowMode: who.via === "cookie",
+      }, now);
+      if (!result.ok) return refuse(response, who, result.status, result.message, back);
+      return redirect(response, revisionDestination(result.id, back));
     }
 
     const draftRepair = /^\/r\/([0-9]{1,15})\/draft-repair$/.exec(url.pathname);
@@ -11485,7 +11337,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -13245,7 +13097,7 @@ function chatWorkspace(content: string, projects: readonly ChatProjectPulse[], c
   // screen and becomes the dedicated view, with Back to chat, when the
   // screen has no room for both (CSS decides; the markup is the same).
   if (resultPanel !== null) {
-    return `<div class="chat-workspace task-chat-workspace result-open" data-chat-result-open><section class="chat-main">${content}</section><aside class="chat-result" aria-label="result">${resultPanel}</aside></div>`;
+    return `<div class="chat-workspace task-chat-workspace result-open" data-chat-result-open><section class="chat-main">${content}</section><aside class="chat-result t-panel-slide" data-open="true" aria-label="result">${resultPanel}</aside></div>`;
   }
   return `<div class="chat-workspace task-chat-workspace">${taskChatContext(focus)}<section class="chat-main">${content}</section></div>`;
 }
@@ -13820,6 +13672,9 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
       icon: `<path d="M14.7 6.3a4 4 0 0 0-5 5L4 17l3 3 5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/>`,
     },
     agents: { label: "Agents change", action: "change agents", icon: `<circle cx="12" cy="12" r="3"/><path d="M12 2v3"/><path d="M12 19v3"/><path d="m4.9 4.9 2.2 2.2"/><path d="m16.9 16.9 2.2 2.2"/><path d="M2 12h3"/><path d="M19 12h3"/><path d="m4.9 19.1 2.2-2.2"/><path d="m16.9 7.1 2.2-2.2"/>` },
+    review: { label: text("operation") === "revise" ? "Revision" : "Feedback", action: text("operation") === "revise" ? "Request changes" : "Save feedback", icon: `<path d="M4 5h16v12H8l-4 3z"/>` },
+    control: { label: "Open control", action: "Open", icon: `<path d="M5 12h14m-6-6 6 6-6 6"/>` },
+    task_action: { label: "Task update", action: isChatTaskAction(payload["operation"]) ? CHAT_TASK_ACTIONS[payload["operation"]].label : "Unavailable", icon: `<path d="M5 12h14m-6-6 6 6-6 6"/>` },
   };
   const presentation = presentations[view.kind];
   const facts = (...rows: [string, string][]): string => {
@@ -13845,6 +13700,22 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
         ["out of scope", escape(text("not"))],
         ["may touch", Array.isArray(payload["touches"]) ? (payload["touches"] as string[]).map(one => `<span class="mono">${escape(one)}</span>`).join("<br>") : ""],
       );
+  } else if (view.kind === "task_action") {
+    const operation = payload["operation"];
+    what = `<h3>${escape(text("taskTitle") || task)}</h3><p>${escape(isChatTaskAction(operation) ? CHAT_TASK_ACTIONS[operation].detail : "Action unavailable.")}</p>` +
+      (text("dependency") === "" ? "" : `<p>${escape(text("dependencyTitle"))}</p>`);
+  } else if (view.kind === "control") {
+    const control = payload["control"];
+    const label = isChatControl(control) ? CHAT_CONTROLS[control].label : "Control unavailable";
+    what = `<h3>${escape(label)}</h3>${text("taskTitle") === "" ? "" : `<p>${escape(text("taskTitle"))}</p>`}`;
+  } else if (view.kind === "review") {
+    const snapshot = payload["snapshot"] as import("./chat-review.js").ReviewSnapshot | undefined;
+    const ids = Array.isArray(payload["notes"]) ? payload["notes"] as number[] : [];
+    const selected = snapshot?.notes.filter(one => ids.includes(one.id)) ?? [];
+    const notes = [...selected, ...(text("note") === "" ? [] : [{ note: text("note"), path: text("path") || null, line: typeof payload["line"] === "number" ? payload["line"] : null }])];
+    what = `<h3>${escape(text("taskTitle") || task)}</h3><ul class="proposal-review-notes">` +
+      notes.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)}</li>`).join("") +
+      `</ul>` + (text("operation") === "revise" ? `<p class="meta">Revises this task. Your approval settings still apply.</p>` : `<p class="meta">Saves feedback without starting work.</p>`);
   } else if (view.kind === "next") {
     what = `<h3>Move <a href="${taskHref(task)}">${escape(task)}</a> to the front</h3>` + facts(["current position", `${escape(String(payload["position"] ?? "?"))} of ${escape(String(payload["of"] ?? "?"))}`], ["project", `<span class="mono">${escape(repoId)}</span>`]);
   } else if (view.kind === "reserve") {
@@ -13955,7 +13826,9 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   let acts = "";
   if (view.state === "pending" && !inert) {
     acts =
-      view.kind === "cancel"
+      view.kind === "control"
+        ? (isChatControl(payload["control"]) ? `<a class="button-link" href="${escape(chatControlHref(payload["control"], task))}">${escape(CHAT_CONTROLS[payload["control"]].label)}</a>` : `<p>Control unavailable.</p>`)
+        : view.kind === "cancel"
         ? `<p class="meta">cancelling is armed on the task itself — <a href="${taskHref(task)}">open ${escape(task)}</a></p>` +
           `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button type="submit" class="quiet">dismiss</button></form>`
         : `<div class="acts">` +
@@ -13970,7 +13843,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     const filed = outcome !== null && typeof outcome.taskId === "string" ? outcome.taskId : null;
     acts =
       `<p class="done">${escape(said ?? "confirmed")}` +
-      ((view.kind === "scope" || view.kind === "agents") && filed !== null
+      ((view.kind === "scope" || view.kind === "agents" || (view.kind === "review" && text("operation") === "revise")) && filed !== null
         ? ` — <a href="${taskChatHref(filed)}#task-chat-action">review & start in chat</a>`
         : "") +
       `</p>` +
@@ -14136,6 +14009,7 @@ function mateAfterComposerHtml(data: { messages: MateMessage[]; pending: MateTur
 
 function matePage(chrome: Chrome, data: MateThreadRows & {
   session: MateSession;
+  resultRunId?: number | null;
   latched: ChatTurn[];
   config: import("./store.js").ChatConfig;
   turnsToday: number;
@@ -14178,6 +14052,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<input type="hidden" name="request" value="${randomBytes(16).toString("hex")}"><input type="hidden" name="request-session" value="${data.session.id}">`,
     data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,
+    data.resultRunId == null ? "" : `<input type="hidden" name="result" value="${data.resultRunId}">`,
     `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask === null ? "Describe what you want done…" : "Ask about this task…"}"></textarea></label>`,
     `<button type="submit" aria-label="${data.pending === null ? "send message" : "wait for the current reply before sending"}"${data.pending === null ? "" : " disabled"}>send</button>`,
     `</form>`,
@@ -19737,7 +19612,7 @@ function resultPrimaryAction(detail: ResultDetail, o: ResultPanelOptions, prUrl:
   }
   if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="button-link" href="#request-changes">Review ${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"}</a>`);
   if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) return wrap("open-pr", `<a class="button-link" href="${escape(prUrl)}">Open PR #${detail.publication.prNumber}</a>`);
-  if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="button-link" href="#request-changes">Request changes</a>`);
+  if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="button-link" href="#request-changes">Leave feedback</a>`);
   return "";
 }
 

@@ -16,6 +16,8 @@ import { runMateTurn, type MateTurnOutcome } from "./mate.js";
 import { confirmMateProposal, dismissMateProposal } from "./mate-doors.js";
 import { projectName } from "./project.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
+import { CHAT_CONTROLS, chatControlHref, isChatControl } from "./chat-controls.js";
+import { CHAT_TASK_ACTIONS, isChatTaskAction } from "./chat-task-actions.js";
 
 export type MateCliSeams = {
   fetcher?: typeof fetch;
@@ -92,7 +94,16 @@ export function proposalLines(proposals: readonly MateProposal[], repos: readonl
       const path = /^r[0-9]+$/.test(id) ? repos[Number(id.slice(1)) - 1] : undefined;
       return path === undefined ? id : `${id} ${projectName(path)}`;
     })();
-    const what =
+    const what = one.kind === "task_action"
+      ? `${isChatTaskAction(payload["operation"]) ? CHAT_TASK_ACTIONS[payload["operation"]].label : "Unavailable"}: ${t("taskTitle") || t("task")}${t("dependencyTitle") ? ` · ${t("dependencyTitle")}` : ""}`
+      : one.kind === "review"
+      ? `${t("operation") === "revise" ? "request a revision" : "save feedback"} for ${t("taskTitle") || t("task")}: ${t("note")}${Array.isArray(payload["notes"]) && payload["notes"].length > 0 ? ` (saved notes: ${payload["notes"].join(", ")})` : ""}`
+      : one.kind === "control"
+      ? (isChatControl(payload["control"]) ? `${CHAT_CONTROLS[payload["control"]].label}: ${chatControlHref(payload["control"], t("task"))} (open in the console)` : "control unavailable")
+      : one.kind === "steer" ? `guide ${t("task")}'s next attempt: ${t("note")}`
+      : one.kind === "agents" ? `change agents for ${t("task")}: ${t("role")} ${t("provider")} ${t("model")} ${t("risk")}`
+      : one.kind === "repair" ? `${t("operation")} dependency ${t("blocker")} for ${t("task")}`
+      :
       one.kind === "task"
         ? `file "${t("title")}" in ${repoLabel}${payload["report"] === true ? " (a scout task — it delivers a report, never a branch)" : ""}`
         : one.kind === "next"
@@ -116,6 +127,13 @@ export function proposalLines(proposals: readonly MateProposal[], repos: readonl
 /** The lines for one proposal, its answer context included when it is an answer. */
 export function proposalBlock(store: Store, proposal: MateProposal, repos: readonly string[], number: number): string[] {
   const [line] = proposalLines([proposal], repos, () => number);
+  if (proposal.kind === "review") {
+    const snapshot = proposal.payload["snapshot"] as import("./chat-review.js").ReviewSnapshot | undefined;
+    const selected = Array.isArray(proposal.payload["notes"]) ? proposal.payload["notes"] as number[] : [];
+    const notes = snapshot?.notes.filter(one => selected.includes(one.id)) ?? [];
+    return [line as string, ...notes.map(one => `     ${one.path === null ? "" : `${one.path}${one.line === null ? "" : `:${one.line}`}: `}${one.note}`),
+      proposal.payload["operation"] === "revise" ? "     Creates a revision of the same task; approval is separate." : "     Saves feedback; no work starts."];
+  }
   return proposal.kind === "answer" ? [line as string, ...answerContextLines(store, proposal.payload)] : [line as string];
 }
 
@@ -267,6 +285,10 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   // The REPL. Text is a turn; a few words are acts on the cards.
   say("say something, or: proposals · confirm N · dismiss N · open N · end · quit");
   const openTask = (proposal: MateProposal): void => {
+    if (proposal.kind === "control" && isChatControl(proposal.payload["control"])) {
+      say(`Open in the console: ${chatControlHref(proposal.payload["control"], String(proposal.payload["task"] ?? ""))}`);
+      return;
+    }
     const taskId = typeof proposal.payload["task"] === "string" ? (proposal.payload["task"] as string) : null;
     if (taskId === null) {
       say("that proposal names no task yet");
@@ -300,7 +322,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
         emit({ ok: done, act: "dismiss", proposal: proposal.id });
         say(done ? `dismissed ${act[2]}` : "that proposal was already acted on");
       } else {
-        const outcome = confirmMateProposal(store, who, proposal.id, now, { confirm: act[3] !== undefined, via: "cli" });
+        const outcome = confirmMateProposal(store, who, proposal.id, now, { confirm: act[3] !== undefined, via: "cli", ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }) });
         emit({ ok: outcome.ok, act: "confirm", proposal: proposal.id, ...(outcome.ok ? { said: outcome.said, taskId: outcome.taskId } : { reason: outcome.reason, said: outcome.said }) });
         say(outcome.ok ? outcome.said : outcome.reason === "needs-confirm" ? `${outcome.said}: confirm ${act[2]} yes` : `refused: ${outcome.said}`);
         if (outcome.ok && outcome.kind === "scope" && outcome.taskId !== null) say(`approve it with your password: standing-orders task approve ${outcome.taskId}`);

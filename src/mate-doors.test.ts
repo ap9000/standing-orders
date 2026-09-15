@@ -32,7 +32,7 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
   const session = () =>
     store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey: CREDENTIAL, ceilingMicrousd: 5_000_000, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64) }, clock());
   /** An answered turn holding one pending proposal of the given kind. */
-  const pending = (kind: "task" | "next" | "reserve" | "hold" | "steer" | "answer" | "repair" | "agents", payload: Record<string, unknown>): number => {
+  const pending = (kind: "task" | "next" | "reserve" | "hold" | "steer" | "answer" | "repair" | "agents" | "task_action" | "control", payload: Record<string, unknown>): number => {
     const thread = store.openMateThread("alex", who.ceilingDigest, clock()).thread;
     const live = store.activeMateSession("alex")!;
     const opened = store.openMateTurn({ approver: "alex", session: live.id, thread: thread.id, credentialKey: CREDENTIAL, reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, clock());
@@ -56,6 +56,45 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     }
   });
   afterEach(() => store.close());
+
+  test("chat task actions share retry, planning and dependency records; stale cards and cycles refuse", () => {
+    session();
+    const make = (task: string, operation: string, dependency?: string) => {
+      let payload: Record<string, unknown> | null = null;
+      const result = executeMateTool({ store, who, now: clock(), step: 1, readDecisions: new Map(),
+        draft: (_kind, value) => { payload = value; return 1; } }, "propose_task_action", { task, operation, ...(dependency ? { dependency } : {}) });
+      expect(result).toMatchObject({ ok: true });
+      return pending("task_action", payload!);
+    };
+    const wait = make("a", "wait_for", "b");
+    expect(store.blockers("a")).toEqual([]);
+    expect(confirmMateProposal(store, who, wait, clock(), { via: "cli" })).toMatchObject({ ok: true });
+    expect(store.blockers("a")).toEqual(["b"]);
+    const cycle = make("b", "wait_for", "a");
+    expect(confirmMateProposal(store, who, cycle, clock(), { via: "cli" })).toMatchObject({ ok: false });
+    expect(store.blockers("b")).toEqual([]);
+    const remove = make("a", "stop_waiting", "b");
+    expect(confirmMateProposal(store, who, remove, clock(), { via: "cli" })).toMatchObject({ ok: true });
+    expect(store.blockers("a")).toEqual([]);
+    const plan = make("a", "plan");
+    expect(confirmMateProposal(store, who, plan, clock(), { via: "cli" })).toMatchObject({ ok: true });
+    expect(store.lookupRef("a")?.plan).toBe("requested");
+    store.setTaskState("b", "failed", clock());
+    const retry = make("b", "retry");
+    expect(confirmMateProposal(store, who, retry, clock(), { via: "cli" })).toMatchObject({ ok: true });
+    expect(store.getTask("b")?.state).toBe("queued");
+    const stale = make("c", "plan");
+    store.setTaskState("c", "done", clock());
+    expect(confirmMateProposal(store, who, stale, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "stale" });
+    const controls = pending("control", { control: "providers", task: "" });
+    expect(confirmMateProposal(store, who, controls, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "not-confirmable" });
+    fileTaskProposal(store, { id: "private-task", title: "Private title", repo: "/not-admitted", filedVia: "cli" }, T0);
+    const ctx = { store, who, now: clock(), step: 1, readDecisions: new Map(), draft: () => 1 };
+    expect(executeMateTool(ctx, "show_control", { control: "projects", task: "private-task" })).toMatchObject({ ok: false });
+    expect(executeMateTool(ctx, "propose_task_action", { task: "b", operation: "retry", dependency: "private-task" })).toMatchObject({ ok: false });
+    expect(executeMateTool(ctx, "show_control", { control: "https://example.com" })).toMatchObject({ ok: false });
+    expect(executeMateTool(ctx, "show_control", { control: "providers" })).toMatchObject({ ok: true });
+  });
 
   test("an explicitly ended conversation refuses an old card although the principal still stands", () => {
     const sessionId = session();

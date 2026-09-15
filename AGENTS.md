@@ -15,6 +15,13 @@ Example: show **Plan ready**, a short outcome, and **Review plan**. Omit **Your 
 
 Carry this check into Standing Orders task acceptance criteria and review feedback for UI work. Do not claim future agents followed it until their output has been inspected.
 
+## Chat and UI consistency
+
+- Treat chat as another way to use the same product, not a separate task system. Reuse the action that owns the change and the same saved state, history, permissions, and approvals.
+- For every new user action, provide a chat proposal or a clearly labelled path to its existing control. A link is not a completed action; identify any remaining chat-only gap.
+- Preserve task and result identity when revising. Show the exact feedback being submitted, reject stale cards, and prevent duplicate work.
+- Verify both directions where affected: a chat action appears in the relevant screen, and changes made there are available to chat. Never ask for passwords or API keys in conversation.
+
 ## Lean verification
 
 - During implementation, run typecheck and tests for the affected behavior. Add a small regression for each reproduced bug; reuse existing tests instead of adding overlapping suites.

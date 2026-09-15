@@ -87,8 +87,8 @@ import { LEDGER_SCHEMA, installLedgerTriggers, type LedgerEntry } from "./action
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 
-// v59 fences older readers before project knowledge and frozen run context are saved.
-export const SCHEMA_VERSION = 59;
+// v60 fences older readers before the new chat action cards are saved.
+export const SCHEMA_VERSION = 60;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -394,7 +394,7 @@ export type MateThread = { id: number; approver: string; ceilingDigest: string; 
 
 export type MateMessage = { id: number; thread: number; turn: number | null; role: "operator" | "assistant"; text: string; activity: string | null; createdAt: string };
 
-export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "steer" | "scope" | "cancel" | "answer" | "repair" | "agents";
+export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "steer" | "scope" | "cancel" | "answer" | "repair" | "agents" | "review" | "control" | "task_action";
 
 /** A coordinator's proposal over the MCP gateway (mate arc v3): the same
  * kinds as the mate's (no `task` — filing has its own door), confirmed by
@@ -1765,7 +1765,7 @@ CREATE TABLE IF NOT EXISTS mate_proposal (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
   turn           INTEGER NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','steer','scope','cancel','answer','repair','agents')),
+  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','steer','scope','cancel','answer','repair','agents','review','control','task_action')),
   payload_json   TEXT NOT NULL,
   ceiling_digest TEXT NOT NULL,
   state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
@@ -4545,6 +4545,7 @@ function migrate(db: Database, origin: number | null): void {
   addColumn(db, "routine", "route_json", "TEXT");
   addColumn(db, "routine", "approved_route_json", "TEXT");
   rebuildMateProposalForV48(db);
+  rebuildMateProposalForV60(db);
   db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
 
   // v49: reviews have no task claim. Bind watch-owned reviews explicitly so
@@ -5038,6 +5039,19 @@ const MATE_PROPOSAL_V43_DDL = (name: string): string =>
   MATE_PROPOSAL_V42_DDL(name).replace("'hold','unhold'", "'hold','unhold','steer'");
 const MATE_PROPOSAL_V48_DDL = (name: string): string =>
   MATE_PROPOSAL_V43_DDL(name).replace("'answer','repair'", "'answer','repair','agents'");
+const MATE_PROPOSAL_V60_DDL = (name: string): string =>
+  MATE_PROPOSAL_V48_DDL(name).replace("'agents'", "'agents','review','control','task_action'");
+
+function isMateProposalV60(db: Database): boolean {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
+  return row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(MATE_PROPOSAL_V60_DDL("mate_proposal"));
+}
+
+export function rebuildMateProposalForV60(db: Database): void {
+  rebuildExact(db, "mate_proposal", MATE_PROPOSAL_V48_DDL, MATE_PROPOSAL_V60_DDL,
+    ["id", "thread", "turn", "kind", "payload_json", "ceiling_digest", "state", "created_at", "resolved_at", "resolved_by", "outcome_json"]);
+  db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
+}
 
 /**
  * v33 (mate v3): `answer` joins mate_proposal's kinds — an EXACT recognizer
@@ -5047,6 +5061,7 @@ const MATE_PROPOSAL_V48_DDL = (name: string): string =>
  * shipped index is recreated; foreign keys are checked before commit.
  */
 export function rebuildMateProposalForV33(db: Database): void {
+  if (isMateProposalV60(db)) return;
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
   if (row === undefined) return;
   const stored = canonicalDdl(String(row["sql"]));
@@ -5083,6 +5098,7 @@ export function rebuildMateProposalForV33(db: Database): void {
 /** v42: `repair` joins the mate proposal kinds through the same exact,
  * row-preserving copy-rename used for v33. */
 export function rebuildMateProposalForV42(db: Database): void {
+  if (isMateProposalV60(db)) return;
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
   if (row !== undefined && (canonicalDdl(String(row["sql"])) === canonicalDdl(MATE_PROPOSAL_V43_DDL("mate_proposal")) || canonicalDdl(String(row["sql"])) === canonicalDdl(MATE_PROPOSAL_V48_DDL("mate_proposal")))) return;
   rebuildExact(
@@ -5098,6 +5114,7 @@ export function rebuildMateProposalForV42(db: Database): void {
 /** v43: `steer` joins the mate proposal kinds through the same exact,
  * row-preserving copy-rename used for v33 and v42. */
 export function rebuildMateProposalForV43(db: Database): void {
+  if (isMateProposalV60(db)) return;
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
   if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(MATE_PROPOSAL_V48_DDL("mate_proposal"))) return;
   rebuildExact(
@@ -5113,6 +5130,7 @@ export function rebuildMateProposalForV43(db: Database): void {
 /** v48: `agents` joins the mate proposal kinds — the same exact,
  * row-preserving copy-rename as v33, v42, and v43. */
 export function rebuildMateProposalForV48(db: Database): void {
+  if (isMateProposalV60(db)) return;
   rebuildExact(
     db,
     "mate_proposal",

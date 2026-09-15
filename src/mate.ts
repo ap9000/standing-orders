@@ -38,6 +38,7 @@ import {
 import { scanForSecrets } from "./evidence.js";
 import { MATE_CONTRACT } from "./mate-contract.js";
 import { MATE_MAX_PROPOSALS_PER_TURN, MATE_TOOL_SCHEMAS, executeMateTool, isMateTool, mateViewContextFor, redactForMate, toolResultBytes } from "./mate-tools.js";
+import type { ReviewSnapshot } from "./chat-review.js";
 import { composeSubscriptionMatePrompt, performSubscriptionMateRequest, type SubscriptionMateRunner } from "./subscription-chat.js";
 import { withDispatchDiagnoses } from "./dispatch.js";
 
@@ -116,7 +117,7 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
   "request-changed": "That send was already received with different text or task context. Reload the conversation before sending a new message.",
 };
 
-const READ_TOOLS = new Set(["recap", "list_repos", "list_tasks", "get_task", "get_project_knowledge", "list_decisions", "get_decision", "queue"]);
+const READ_TOOLS = new Set(["recap", "list_repos", "list_tasks", "get_task", "get_result", "get_controls", "get_agents", "get_project_knowledge", "list_decisions", "get_decision", "queue"]);
 
 /** The last messages of the thread as provider-neutral history, newest kept first until the byte cap. */
 export function historyFor(store: Store, thread: number): MateHistoryMessage[] {
@@ -245,6 +246,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   let reads = 0;
   let steps = 0;
   const readDecisions = new Map<number, number>();
+  const readResults = new Map<number, { step: number; snapshot: ReviewSnapshot }>();
   let tokensIn = 0;
   let tokensOut = 0;
   let settled = 0;
@@ -387,7 +389,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     }
     history.push({ role: "assistant", text: answer.text, calls: answer.calls });
     for (const call of answer.calls) {
-      const outcome = executeMateTool({ store, who, now: clock(), draft, step: steps, readDecisions, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }) }, call.name, call.args, view);
+      const outcome = executeMateTool({ store, who, now: clock(), draft, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       history.push({ role: "tool", callId: call.id, name: call.name, result: capped(outcome.ok ? outcome.body : { ok: false, message: outcome.message }) });
     }

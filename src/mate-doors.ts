@@ -21,6 +21,8 @@ import { proposeGuarded } from "./scope.js";
 import { isRiskLevel, PHASES, riskTitle, specWords } from "./phase-routing.js";
 import { isProviderId } from "./provider.js";
 import type { Phase, ProviderId } from "./provider.js";
+import { applyChatReview, type ReviewRequest } from "./chat-review.js";
+import { applyChatTaskAction } from "./chat-task-actions.js";
 
 export type ProposalKind = MateProposal["kind"];
 
@@ -49,6 +51,7 @@ export type DoorRefusal =
   | "refused";
 
 export type DoorOptions = {
+  evidenceRoot?: string;
   /** The existing ceremony for an irreversible decision option: `confirm=yes`, typed explicitly (ruling 12). */
   confirm?: boolean;
   /** Which surface answered — recorded on the decision. Named by the caller, never defaulted (v3 review, finding 1). */
@@ -105,6 +108,7 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
     if (proposal.kind === "cancel") {
       return { ok: false, kind: proposal.kind, reason: "not-confirmable", said: "cancelling is armed on the task itself — open the task" } as const;
     }
+    if (proposal.kind === "control") return { ok: false, kind: proposal.kind, reason: "not-confirmable", said: "Open the linked control to complete this action." } as const;
     // An irreversible answer takes the explicit field BEFORE the CAS: a
     // missing confirmation leaves the card pending, not refused.
     const needsConfirm = proposal.kind === "answer" && proposal.payload["reversible"] === false && options.confirm !== true;
@@ -261,6 +265,18 @@ function executeProposal(
   if (taskId === null) return refuse("unknown-task", "no such task");
   const ref = store.lookupRef(taskId);
   if (ref === null || !admitted(ref.repo)) return refuse("unknown-task", "no such task in your projects");
+  if (kind === "task_action") {
+    const result = applyChatTaskAction(store, actor, payload, now, options.via === "web");
+    return result.ok ? { ok: true, kind, taskId: result.taskId, said: result.said } : refuse("stale", result.message);
+  }
+
+  if (kind === "review") {
+    if (options.evidenceRoot === undefined) return refuse("refused", "The saved result is not available on this connection.");
+    const request = payload as unknown as ReviewRequest;
+    if (request.snapshot == null || request.snapshot.task !== taskId || (request.operation !== "note" && request.operation !== "revise")) return refuse("refused", "This feedback card is incomplete. Ask again.");
+    const result = applyChatReview(store, actor, options.evidenceRoot, request, now, options.via === "web");
+    return result.ok ? { ok: true, kind, taskId: result.taskId, said: result.said } : refuse("stale", result.message);
+  }
 
   // The place the proposer saw must be the place the task holds now
   // (round-2 ruling 10; round-3 ruling 6): the revision alone misses a

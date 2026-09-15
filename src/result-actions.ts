@@ -1,0 +1,197 @@
+/** Shared result-to-revision action for the result form and chat.
+ * The caller authenticates; this service checks project access and the exact
+ * displayed note batch, then uses the existing atomic revision/approval boundary.
+ */
+import { createHash, randomBytes } from "node:crypto";
+import type { Store, DiffComment } from "./store.js";
+import { EVIDENCE_CAPS, readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
+import { isRevisionFeedback, parseRevisionBatch, revisionSourceOf } from "./result-review.js";
+import { TASK_TEXT_LIMITS, validateTaskText } from "./task-text.js";
+import { modeFilingCoverage } from "./scope.js";
+
+export type RevisionResult = { ok: true; id: string } | { ok: false; status: number; message: string };
+export function createResultRevision(store: Store, evidenceRoot: string, input: {
+  run: number; batch: string | null; source: string | null; actor: string;
+  repos: readonly string[] | null; includeUnplaced?: boolean; allowMode?: boolean;
+}, now: Date): RevisionResult {
+  return store.transact((): RevisionResult => {
+    const id = input.run;
+    const visible = (repo: string | null) => repo === null ? input.includeUnplaced === true : input.repos === null || input.repos.includes(repo);
+    const fail = (status: number, message: string): RevisionResult => ({ ok: false, status, message });
+    const found = store.getRun(id);
+    if (found === null || !visible(store.refById(found.taskRef)?.repo ?? null)) return fail(404, "No such result.");
+    const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
+    const sourceScope = store.getScope(sourceTaskId);
+    const sourceFamily = store.taskFamilyOf(sourceTaskId, input.repos, input.includeUnplaced ?? false);
+    if (sourceFamily === null || sourceFamily.problem !== null) return fail(409, "The revision history cannot be verified in this project.");
+    const repo = store.refById(found.taskRef)?.repo ?? null;
+    // THE DISPLAYED BATCH (repair 2026-09-14, finding 2): the form names
+    // the exact note ids its reader saw and the source terms it was
+    // rendered against. The seal binds to those ids and nothing else —
+    // "every live note at POST time" would let an old submission, a
+    // replay, or a second tab consume notes its reader never displayed.
+    const batchIds = parseRevisionBatch(input.batch);
+    const postedSource = input.source;
+    if (batchIds === null || postedSource === null || postedSource === "") {
+      return fail(400, "this form is out of date — it names no note batch; reload the result and create the revision from the notes shown there");
+    }
+    const byId = new Map(store.allDiffComments(id).map(one => [one.id, one] as const));
+    const named = batchIds.map(one => byId.get(one));
+    if (named.some(one => one === undefined)) {
+      return fail(400, "this batch names notes that are not on this result — reload the result");
+    }
+    const batch = named as DiffComment[];
+    // A replay must match the immutable brief's entire batch and source,
+    // not just a subset whose notes happen to name the same child. Read-only
+    // replay can return its original child even after the source is rescoped.
+    const replayChild = (notes: DiffComment[]): string | null => {
+      const child = notes[0]?.consumedBy;
+      if (!child || notes.length !== batchIds.length || notes.some(one => one.consumedBy !== child)) return null;
+      const ref = store.lookupRef(child);
+      const lineage = ref === null ? null : store.revisionSourceOf(ref.id);
+      if (ref === null || !visible(ref.repo) || lineage === null || lineage.sourceRun !== id || lineage.sourceTask !== sourceTaskId) return null;
+      try {
+        const read = readVerifiedArtifact(evidenceRoot, lineage.briefArtifact);
+        if (!read.ok) return null;
+        const brief = JSON.parse(read.content.toString("utf8"));
+        if (brief.sourceRun !== id || brief.sourceTask !== sourceTaskId || revisionSourceOf(brief.sourceScopeDigest) !== postedSource || !Array.isArray(brief.comments)) return null;
+        return brief.comments.length === batchIds.length && brief.comments.every((one: { id: number }, at: number) => one.id === batchIds[at]) ? child : null;
+      } catch {
+        return null;
+      }
+    };
+    // A retry of an OLD request: every note it names is already sealed
+    // into one revision — that revision is the answer, and no note added
+    // since is touched. A batch partly sealed elsewhere is refused whole.
+    const consumers = new Set(batch.map(one => one.consumedBy).filter((one): one is string => one !== null));
+    const replay = replayChild(batch);
+    if (replay !== null) return { ok: true, id: replay };
+    if (consumers.size > 0) {
+      return fail(409, `some of these notes were already sealed into revision ${[...consumers].join(", ")}; the others are still waiting — reload the result to see the current batch`);
+    }
+    if (postedSource !== revisionSourceOf(sourceScope?.digest ?? null)) {
+      return fail(409, "the task's terms changed since this page was shown — reload the result and read the current terms before creating a revision");
+    }
+    if (batch.some(one => one.supersededBy !== null)) {
+      return fail(409, "a note in this batch was superseded — reload the result to see the current batch");
+    }
+    if (batch.some(one => !isRevisionFeedback(one))) return fail(409, "Review observations are not requested changes. Use Request change to add your feedback first.");
+    const comments = batch;
+    // Keep the subject recognizable, including when revising a revision.
+    // Reserve the suffix before truncating, at whole grapheme boundaries.
+    const suffix = " — revision";
+    const subject = (store.getTask(sourceTaskId)?.title ?? "").trim().replace(/(?: — revision)+$/u, "").trim() || "Task";
+    let prefix = "";
+    for (const { segment } of new Intl.Segmenter("en", { granularity: "grapheme" }).segment(subject)) {
+      if ((prefix + segment + suffix).length > TASK_TEXT_LIMITS.title) break;
+      prefix += segment;
+    }
+    const candidateTitle = `${prefix.trimEnd() || "Task"}${suffix}`;
+    const title = validateTaskText({ title: candidateTitle }) === null ? candidateTitle : `Task${suffix}`;
+    const feedbackKind = comments.every(one => one.path !== null) ? "annotations" : "feedback";
+    const terminal = store.artifactsFor(id).find(one => one.kind === "terminal-diff");
+    if (terminal !== undefined) {
+      const proven = readVerifiedArtifact(evidenceRoot, terminal);
+      if (!proven.ok) {
+        return fail(409, `the reviewed diff no longer verifies (${proven.problem}) — the batch cannot seal against it`);
+      }
+    }
+    // The brief is serialized and size-checked BEFORE anything is created
+    // (Codex M5-M8 audit, IV-3): a structured artifact must never pass
+    // through byte truncation — truncated JSON is not a smaller brief,
+    // it is no brief wearing one's name.
+    const brief = {
+      schema: 1 as const,
+      sourceTask: sourceTaskId,
+      sourceRun: id,
+      sourceScopeDigest: sourceScope?.digest ?? null,
+      head: found.headRevision,
+      diffArtifactSha: terminal?.sha256 ?? null,
+      comments: comments.map(one => ({
+        id: one.id,
+        path: one.path,
+        line: one.line,
+        note: one.note,
+        author: one.author,
+        createdAt: one.createdAt,
+      })),
+    };
+    const briefBytes = Buffer.from(JSON.stringify(brief, null, 2), "utf8");
+    if (briefBytes.length > EVIDENCE_CAPS["revision-brief"]) {
+      return fail(400, "this batch is too large for one brief — seal it in parts");
+    }
+    // The file first, under a nonce name — a file whose seal fails is an
+    // orphan on disk, never authority. Then ONE transaction: task with
+    // the source scope's limits INHERITED (audit IV-2 — a revision that
+    // drops the exclusions is an approval screen telling a lie), the
+    // artifact row, the relation, and exactly this comment batch.
+    const briefName = `revision-brief-${randomBytes(6).toString("hex")}.json`;
+    const key = writeEvidenceFile(evidenceRoot, id, briefName, briefBytes);
+    // C1's revision arm: when the SEALER is the mode's signer and the
+    // mode auto-approves their filings, the revision task approves
+    // inside the same transaction, with mode provenance. Everything
+    // else about the seal is unchanged; without coverage, the revision
+    // keeps its own approval ceremony.
+    const sealed = store.transact(() => {
+      // Coverage first (cookie road only): its budget and escalated
+      // posture ride the FILING so the digest binds them (surfaces
+      // round 1, finding 2) — never a stamp after the fact.
+      const coverage = input.allowMode === true ? modeFilingCoverage(store, repo, input.actor, now) : null;
+      // ONE revision boundary (contract handoff task 2): the source's
+      // goal, exclusions, touches, rubric, risk, quality, posture,
+      // budget, overrides and pins are read from the SOURCE ROWS inside
+      // the seal, which re-proves the task/run/scope-digest binding and
+      // the brief's custody first — the scope read above only names the
+      // digest this batch was drafted against.
+      const result = store.sealRevision(
+        {
+          source: { task: sourceTaskId, run: id, scopeDigest: sourceScope?.digest ?? null },
+          brief: { evidenceRoot, key, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "machine-authored revision brief (exit 0)" },
+          child: {
+            title: `Revise ${sourceTaskId} from ${comments.length} annotation${comments.length === 1 ? "" : "s"} on build #${id}`,
+            repair: `apply the ${feedbackKind} recorded on build #${id}; the revision brief carries the exact batch`,
+          },
+          commentIds: comments.map(one => one.id),
+          coverage,
+        },
+        now,
+      );
+      if (result.ok) {
+        // The unchanged legacy title above feeds the store's existing slug
+        // and collision handling. Set only this new row's display title,
+        // atomically with its seal; retries returned earlier, untouched.
+        store.raw().prepare("UPDATE task SET title = ? WHERE id = ?").run(title, result.id);
+      }
+      if (result.ok && coverage !== null) {
+        // A scope whose profile could not resolve is unapprovable by the
+        // human road (approve() refuses) — the mode road refuses too.
+        const filedScope = store.getScope(result.id);
+        if (filedScope?.profileState === "resolved") {
+          // A false answer here is the coordinator quarantine (review
+          // finding 7): the revision stays honestly unapproved and the
+          // task page it redirects to says so in the quarantine words.
+          void store.sealScopeApproval(result.id, input.actor, now, {}, { kind: "mode", modeDigest: coverage.digest });
+        }
+      }
+      return result;
+    });
+    if (!sealed.ok) {
+      // Two sealers of one batch race on the consumption count; the
+      // loser is sent to the winner's revision — the one that consumed
+      // EXACTLY this batch, never merely the newest child of the run — so
+      // a double click or a two-tab submission lands on ONE revision.
+      if (sealed.reason === "duplicate" || sealed.reason === "comments-taken") {
+        const settled = store.allDiffComments(id).filter(one => batchIds.includes(one.id));
+        const takers = new Set(settled.map(one => one.consumedBy).filter((one): one is string => one !== null));
+        const winner = replayChild(settled);
+        if (winner !== null) return { ok: true, id: winner };
+        if (takers.size > 0) {
+          return fail(409, `some of these notes were just sealed into revision ${[...takers].join(", ")}; the others are still waiting — reload the result to see the current batch`);
+        }
+      }
+      return fail(409, `could not seal the revision: ${sealed.detail}`);
+    }
+    return { ok: true, id: sealed.id };
+
+  });
+}
