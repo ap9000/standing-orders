@@ -117,7 +117,10 @@ describe("argv dialects", () => {
     const argv = adapterFor("claude").argv({ ...ASK, phase: "review" });
     const schemaIndex = argv.indexOf("--json-schema");
     expect(schemaIndex).toBeGreaterThan(-1);
-    const schema = JSON.parse(argv[schemaIndex + 1] ?? "null") as Record<string, unknown>;
+    const choices = JSON.parse(argv[schemaIndex + 1] ?? "null").anyOf;
+    expect(choices).toHaveLength(2);
+    expect(choices[1]).toMatchObject({ required: ["version", "readEvidence"], additionalProperties: false, properties: { readEvidence: { required: ["file", "sha256", "offset", "length"], additionalProperties: false, properties: { length: { maximum: 65536 } } } } });
+    const schema = choices[0] as Record<string, unknown>;
     expect(schema["type"]).toBe("object");
     expect((schema["required"] as string[]).sort()).toEqual(["comments", "learning", "learningAssessment", "version"]);
     const properties = schema["properties"] as Record<string, unknown>;

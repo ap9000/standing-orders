@@ -19,7 +19,7 @@ import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
 import { register } from "./runner.js";
 import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
-import { parseReviewContext } from "./review-context.js";
+import { parseReviewContext, reviewContextManifest, reviewContextFileName } from "./review-context.js";
 import { REVIEW_CONTEXT_NAME } from "./reviewer.js";
 import type { Runner } from "./builder.js";
 import { createHash } from "node:crypto";
@@ -180,6 +180,7 @@ describe("inherited review context through the tick (v51)", () => {
     expect(payload().dispatched).toEqual(expect.arrayContaining([expect.objectContaining({ id: revisionId, outcome: "built" })]));
     let revisionRun: number;
     let contextSha: string;
+    let manifest: string;
     let itemIdFor: (path: string) => string;
     {
       const store = openStore(db);
@@ -194,6 +195,7 @@ describe("inherited review context through the tick (v51)", () => {
       const parsed = parseReviewContext(read.content.toString("utf8"));
       if (!parsed.ok) throw new Error(parsed.problem);
       const inventory = parsed.inventory;
+      manifest = reviewContextManifest(inventory);
       expect(inventory).toMatchObject({ run: revisionRun, head: built.headRevision, source: { task: "feat", run: sourceRun, head: sourceHead, verified: true }, ancestry: { verified: true } });
       const byPath = new Map(inventory.items.map(one => [one.path, one]));
       itemIdFor = path => byPath.get(path)!.id;
@@ -224,7 +226,8 @@ describe("inherited review context through the tick (v51)", () => {
     let reviewPrompt = "";
     const reviewer: Runner = async (_file, args, options) => {
       const cwd = options?.cwd ?? "";
-      sawContextFile = createHash("sha256").update(readFileSync(join(cwd, REVIEW_CONTEXT_NAME))).digest("hex") === contextSha;
+      sawContextFile = readFileSync(join(cwd, REVIEW_CONTEXT_NAME), "utf8") === manifest;
+      expect(readFileSync(join(cwd, reviewContextFileName(itemIdFor("src/limit.ts"))), "utf8")).toBe(LIMIT_TS);
       reviewPrompt = args[args.indexOf("-p") + 1] ?? "";
       const review = {
         version: 1,

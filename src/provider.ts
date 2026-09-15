@@ -231,7 +231,7 @@ const CLAUDE_REVIEW_ISOLATION_ARGV: readonly string[] = [
  * other provider has this flag, and no other phase asks for structured
  * output.
  */
-const CLAUDE_REVIEW_JSON_SCHEMA = {
+const CLAUDE_REVIEW_RESULT_JSON_SCHEMA = {
   type: "object",
   properties: {
     learningAssessment: {
@@ -289,6 +289,20 @@ const CLAUDE_REVIEW_JSON_SCHEMA = {
   required: ["version", "comments", "learningAssessment", "learning"],
   additionalProperties: false,
 } as const;
+
+// Read requests use the same structured reply channel and session. The
+// machine validates the exact allowlist/hash/range before supplying bytes.
+const CLAUDE_REVIEW_JSON_SCHEMA = { anyOf: [CLAUDE_REVIEW_RESULT_JSON_SCHEMA, {
+  type: "object", properties: {
+    version: { type: "integer", enum: [1] },
+    readEvidence: { type: "object", properties: {
+      file: { type: "string", minLength: 1, maxLength: 100 },
+      sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      offset: { type: "integer", minimum: 0 },
+      length: { type: "integer", minimum: 1, maximum: 65536 },
+    }, required: ["file", "sha256", "offset", "length"], additionalProperties: false },
+  }, required: ["version", "readEvidence"], additionalProperties: false,
+}] } as const;
 
 const claudeArgv = (invocation: Invocation): string[] => [
   "-p",

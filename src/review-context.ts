@@ -21,7 +21,8 @@
  *    evidence it cited per criterion) and its sealed diff-stat. Every item
  *    binds to the source run, the commit, the path, the blob id, and a
  *    SHA-256 of the stored bytes.
- *  - Bounds are explicit and honest: an oversized file remains a NAMED
+ *  - Storage ceilings are independent of prompt delivery. A pathological
+ *    oversized file remains a NAMED
  *    GAP. Schema 2 may also supply bounded partial ancestor patch sections
  *    with exact artifact ranges and all intervening sealed changes. Tree
  *    identity is proved independently of full-file capture. Binary,
@@ -47,7 +48,7 @@ import type { Artifact, Store } from "./store.js";
 
 /** Explicit bounds. Content bytes are UTF-8 of the stored (possibly
  * redacted) text; the aggregate is the sum over every stored item. */
-export const REVIEW_CONTEXT_LIMITS = {
+export const LEGACY_REVIEW_CONTEXT_LIMITS = {
   /** One complete file or partial patch chain. Larger files stay gaps. */
   itemBytes: 48 * 1024,
   /** Every item's bytes together. Whatever would cross it is a named gap. */
@@ -60,6 +61,32 @@ export const REVIEW_CONTEXT_LIMITS = {
   priorReviews: 48,
   ancestors: 16,
 } as const;
+
+/** Storage ceilings, independent of delivery. Ordinary large files remain whole.
+ * The encoded artifact allows worst-case JSON escaping plus metadata. */
+export const REVIEW_CONTEXT_LIMITS = {
+  ...LEGACY_REVIEW_CONTEXT_LIMITS,
+  itemBytes: 8 * 1024 * 1024,
+  aggregateBytes: 32 * 1024 * 1024,
+  items: 200,
+} as const;
+
+/** Only this compact projection enters prompts. Full bytes remain sealed in
+ * the artifact and are materialized under generated, flat scratch names. */
+export function reviewContextFileName(id: string): string {
+  if (!ITEM_ID.test(id)) throw new Error("invalid context item id");
+  return `REVIEW-CONTEXT-${id}.txt`;
+}
+
+export function reviewContextManifest(inventory: ReviewContextInventory): string {
+  return JSON.stringify({
+    ...inventory,
+    format: "review-context-manifest-v1",
+    items: inventory.items.map(({ content: _content, ...item }) => ({
+      ...item, file: reviewContextFileName(item.id),
+    })),
+  });
+}
 
 export type ContextGapReason =
   | "source-missing"
@@ -100,7 +127,7 @@ export type ReviewContextItem = {
    * when ancestry could not be verified, so nothing is claimed. */
   unchangedSinceSource: boolean | null;
   redacted: boolean;
-  /** Schema 2 only. Content is concatenated exact artifact ranges, NEVER
+  /** Schema 2/3 only. Content is concatenated exact artifact ranges, NEVER
    * a complete file. Segments are ordered from oldest to newest. */
   patch?: { coverage: "partial"; segments: AncestorPatchSegment[] };
 };
@@ -170,7 +197,7 @@ export type CriterionContextCoverage = {
 };
 
 export type ReviewContextInventory = {
-  schema: 1 | 2;
+  schema: 1 | 2 | 3;
   /** Tree identity is independent of whether content fits capture bounds. */
   identities?: ReviewContextIdentity[];
   bindings?: { run: number; sha256: string }[];
@@ -305,7 +332,8 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   const str = (value: unknown, max = 2000): value is string => typeof value === "string" && value.length <= max && !hasForbiddenControls(value);
   const strList = (value: unknown, max = 64): value is string[] => Array.isArray(value) && value.length <= max && value.every(one => str(one, 300));
   const optionalStr = (value: unknown, max = 2000): value is string | null => value === null || str(value, max);
-  if (r["schema"] !== 1 && r["schema"] !== 2) return { ok: false, problem: "unsupported review context schema" };
+  if (r["schema"] !== 1 && r["schema"] !== 2 && r["schema"] !== 3) return { ok: false, problem: "unsupported review context schema" };
+  const contentLimits = r["schema"] === 3 ? REVIEW_CONTEXT_LIMITS : LEGACY_REVIEW_CONTEXT_LIMITS;
   if (r["schema"] === 1 && r["identities"] !== undefined) return { ok: false, problem: "identities require schema 2" };
   if (!Number.isSafeInteger(r["run"]) || Number(r["run"]) <= 0) return { ok: false, problem: "run must be a positive integer" };
   if (!str(r["head"], 40) || !SHA1.test(r["head"])) return { ok: false, problem: "head must be a 40-hex commit" };
@@ -328,7 +356,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   if (![li["itemBytes"], li["aggregateBytes"], li["items"]].every(one => Number.isSafeInteger(one) && Number(one) > 0)) return { ok: false, problem: "limits are malformed" };
 
   const identities: ReviewContextIdentity[] = [];
-  if (r["schema"] === 2) {
+  if (r["schema"] !== 1) {
     if (!Array.isArray(r["identities"]) || r["identities"].length > REVIEW_CONTEXT_LIMITS.candidatePaths) return { ok: false, problem: "identities must be a bounded array" };
     for (const one of r["identities"]) {
       if (one === null || typeof one !== "object" || Array.isArray(one)) return { ok: false, problem: "identity must be an object" };
@@ -340,7 +368,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   }
 
   const items: ReviewContextItem[] = [];
-  if (!Array.isArray(r["items"]) || r["items"].length > REVIEW_CONTEXT_LIMITS.items) return { ok: false, problem: `items must be an array of at most ${REVIEW_CONTEXT_LIMITS.items}` };
+  if (!Array.isArray(r["items"]) || r["items"].length > contentLimits.items) return { ok: false, problem: `items must be an array of at most ${contentLimits.items}` };
   const ids = new Set<string>();
   const paths = new Set<string>();
   let aggregate = 0;
@@ -353,9 +381,9 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     if (!str(it["blob"], 40) || !SHA1.test(it["blob"])) return { ok: false, problem: `item ${index}: blob must be a 40-hex object id` };
     if (typeof it["content"] !== "string" || it["content"].includes("\u0000")) return { ok: false, problem: `item ${index}: content must be a NUL-free string` };
     const bytes = Buffer.byteLength(it["content"], "utf8");
-    if (bytes > REVIEW_CONTEXT_LIMITS.itemBytes || it["bytes"] !== bytes) return { ok: false, problem: `item ${index}: bytes must equal the content's UTF-8 length and fit the item limit` };
+    if (bytes > contentLimits.itemBytes || it["bytes"] !== bytes) return { ok: false, problem: `item ${index}: bytes must equal the content's UTF-8 length and fit the item limit` };
     aggregate += bytes;
-    if (aggregate > REVIEW_CONTEXT_LIMITS.aggregateBytes) return { ok: false, problem: "items exceed the aggregate content limit" };
+    if (aggregate > contentLimits.aggregateBytes) return { ok: false, problem: "items exceed the aggregate content limit" };
     const sha256 = createHash("sha256").update(it["content"], "utf8").digest("hex");
     if (it["sha256"] !== sha256) return { ok: false, problem: `item ${index}: sha256 does not match its content` };
     if (!Number.isSafeInteger(it["sourceRun"]) || Number(it["sourceRun"]) <= 0) return { ok: false, problem: `item ${index}: sourceRun must be a positive integer` };
@@ -368,7 +396,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     let patch: ReviewContextItem["patch"];
     if (it["patch"] !== undefined) {
       const p = it["patch"] as ReviewContextItem["patch"];
-      if (r["schema"] !== 2 || p === null || typeof p !== "object" || p.coverage !== "partial" || !Array.isArray(p.segments) || p.segments.length === 0 || p.segments.length > REVIEW_CONTEXT_LIMITS.ancestors + 1 || it["redacted"] !== false) return { ok: false, problem: `item ${index}: unsupported partial patch` };
+      if (r["schema"] === 1 || p === null || typeof p !== "object" || p.coverage !== "partial" || !Array.isArray(p.segments) || p.segments.length === 0 || p.segments.length > REVIEW_CONTEXT_LIMITS.ancestors + 1 || it["redacted"] !== false) return { ok: false, problem: `item ${index}: unsupported partial patch` };
       let total = 0;
       const runs = new Set<number>();
       const lineage = [...((bindings ?? []) as { run: number }[]).map(one => one.run), Number(r["run"])];
@@ -384,7 +412,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
       if (total !== bytes) return { ok: false, problem: `item ${index}: patch ranges do not cover its content` };
       patch = { coverage: "partial", segments: p.segments.map(s => ({ run: s.run, base: s.base, head: s.head, artifact: s.artifact, sha256: s.sha256, offset: s.offset, bytes: s.bytes })) };
     } else if (it["redacted"] === false && createHash("sha1").update(`blob ${bytes}\0`).update(it["content"], "utf8").digest("hex") !== it["blob"]) return { ok: false, problem: `item ${index}: git blob identity does not match its content` };
-    if (r["schema"] === 2 && !identities.some(one => one.path === it["path"] && one.blob === it["blob"] && one.sourceRun === it["sourceRun"] && one.unchangedSinceSource === it["unchangedSinceSource"])) return { ok: false, problem: `item ${index}: no matching tree identity` };
+    if (r["schema"] !== 1 && !identities.some(one => one.path === it["path"] && one.blob === it["blob"] && one.sourceRun === it["sourceRun"] && one.unchangedSinceSource === it["unchangedSinceSource"])) return { ok: false, problem: `item ${index}: no matching tree identity` };
     paths.add(it["path"]);
     ids.add(it["id"]);
     items.push({
@@ -436,7 +464,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     if (p["support"] === "eligible" && !(p["statementMatches"] && p["ancestryVerified"] && p["relevantUnchanged"] && p["bindingsVerified"])) {
       return { ok: false, problem: `priorReview ${index}: claims eligibility without every proof` };
     }
-    if (r["schema"] === 2 && p["relevantUnchanged"] && ((p["relevantPaths"] as string[]).length === 0 || !(p["relevantPaths"] as string[]).every(path => identities.some(one => one.path === path && one.unchangedSinceSource === true)))) return { ok: false, problem: `priorReview ${index}: unchanged paths lack tree identity` };
+    if (r["schema"] !== 1 && p["relevantUnchanged"] && ((p["relevantPaths"] as string[]).length === 0 || !(p["relevantPaths"] as string[]).every(path => identities.some(one => one.path === path && one.unchangedSinceSource === true)))) return { ok: false, problem: `priorReview ${index}: unchanged paths lack tree identity` };
     priorReview.push({
       criterionId: p["criterionId"], sourceRun: Number(p["sourceRun"]), reviewerRun: Number(p["reviewerRun"]), author: p["author"],
       judgement: p["judgement"] as CriterionJudgementWord, note: p["note"], statementMatches: p["statementMatches"], ancestryVerified: p["ancestryVerified"],
@@ -453,13 +481,13 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     const c = one as Record<string, unknown>;
     if (
       !str(c["id"], 64) || coverageIds.has(c["id"]) || (c["state"] !== "patch" && c["state"] !== "context" && c["state"] !== "gap") ||
-      typeof c["inherited"] !== "boolean" || !strList(c["paths"], 200) || !strList(c["items"], 64) || !strList(c["gaps"], 64) ||
+      typeof c["inherited"] !== "boolean" || !strList(c["paths"], 200) || !strList(c["items"], r["schema"] === 3 ? contentLimits.items : 64) || !strList(c["gaps"], r["schema"] === 3 ? 400 : 64) ||
       (c["priorSupport"] !== "eligible" && c["priorSupport"] !== "invalid" && c["priorSupport"] !== "none")
     ) {
       return { ok: false, problem: `coverage ${index}: malformed` };
     }
     if ((c["items"] as string[]).some(id => !ids.has(id) || !items.find(item => item.id === id)?.criteria.includes(String(c["id"])))) return { ok: false, problem: `coverage ${index}: names an item that is not in the inventory` };
-    if (items.some(item => item.patch !== undefined && (c["items"] as string[]).includes(item.id)) && (c["state"] !== "gap" || (c["gaps"] as string[]).length === 0)) return { ok: false, problem: `coverage ${index}: partial patches require an explicit gap` };
+    if (items.some(item => (item.patch !== undefined || item.redacted) && (c["items"] as string[]).includes(item.id)) && (c["state"] !== "gap" || (c["gaps"] as string[]).length === 0)) return { ok: false, problem: `coverage ${index}: partial patches require an explicit gap; redacted items do too` };
     coverageIds.add(c["id"]);
     coverage.push({
       id: c["id"], state: c["state"] as CriterionContextCoverage["state"], inherited: c["inherited"], paths: [...(c["paths"] as string[])],
@@ -471,7 +499,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     ok: true,
     inventory: {
       schema: r["schema"],
-      ...(r["schema"] === 2 ? { identities } : {}),
+      ...(r["schema"] !== 1 ? { identities } : {}),
       ...(bindings === undefined ? {} : { bindings: bindings as { run: number; sha256: string }[] }),
       run: Number(r["run"]),
       head: r["head"],
@@ -619,7 +647,7 @@ async function ancestorPatch(
     const index = /^index ([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})(?: [0-7]{6})?$/m.exec(section.content.toString("utf8"));
     if (index === null || !(a?.object ?? "0".repeat(40)).startsWith(index[1]!) || !(b?.object ?? "0".repeat(40)).startsWith(index[2]!)) return fail(`run #${runId}'s path patch does not bind both tree blobs`);
     total += section.content.length;
-    if (total > REVIEW_CONTEXT_LIMITS.itemBytes) return fail("the ancestor patch chain exceeds the item budget; no segments were omitted", "over-limit");
+    if (total > LEGACY_REVIEW_CONTEXT_LIMITS.itemBytes) return fail("the ancestor patch chain exceeds the item budget; no segments were omitted", "over-limit");
     segments.push({ run: runId, base, head, artifact: artifact.id, sha256: artifact.sha256, offset: section.offset, bytes: section.content.length });
     contents.push(section.content);
   }
@@ -694,7 +722,7 @@ export async function deriveReviewContext(
   const sourceRun = store.getRun(lineage.sourceRun);
   const sourceProblems: string[] = [];
   const inventory: ReviewContextInventory = {
-    schema: 2,
+    schema: 3,
     identities: [],
     bindings: [reviewContextBindingOf(store, lineage.sourceRun)],
     run: args.runId,

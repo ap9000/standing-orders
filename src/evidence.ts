@@ -95,7 +95,7 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   // never byte-truncated — the capture sheds whole items against its own
   // aggregate content limit (REVIEW_CONTEXT_LIMITS) and this cap only has
   // to hold the JSON-escaped form of that bounded content plus provenance.
-  "review-context": 768 * 1024,
+  "review-context": 200 * 1024 * 1024,
 };
 
 export function evidenceRoot(home: string): string {

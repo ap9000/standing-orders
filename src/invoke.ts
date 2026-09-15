@@ -122,9 +122,12 @@ export async function invokeAgent(
   runId: number,
   spec: AgentSpec,
   invocation: Omit<Invocation, "model">,
-  options: RunOptions & { runner?: ProviderRunner; clock?: () => Date; versionProbe?: VersionProbe; keyHome?: string },
+  options: RunOptions & { runner?: ProviderRunner; clock?: () => Date; versionProbe?: VersionProbe; keyHome?: string; accumulateUsage?: boolean },
 ): Promise<InvokeResult> {
   const clock = options.clock ?? (() => new Date());
+  if (options.accumulateUsage && (invocation.phase !== "review" || invocation.resumeSession === null)) {
+    throw new Error("accumulated usage is only for evidence reads in an existing reviewer session");
+  }
   const run = store.getRun(runId);
   if (run === null || run.outcome !== null) {
     throw new Error(
@@ -229,6 +232,7 @@ export async function invokeAgent(
     timeoutMs: _hardTimeout,
     idleTimeoutMs: _idleTimeout,
     stdin: _callerStdin,
+    accumulateUsage: _accumulateUsage,
     ...runOptions
   } = options;
   // The live setting is read STRICTLY (atomic authority closure): a
@@ -458,9 +462,9 @@ export async function invokeAgent(
             : "the provider session id was different from the identity durably recorded when the stream initialized"
         : null;
   store.recordUsage(runId, {
-    ...(envelope.tokensIn === null ? {} : { tokensIn: envelope.tokensIn }),
-    ...(envelope.tokensOut === null ? {} : { tokensOut: envelope.tokensOut }),
-    ...(envelope.costUsd === null ? {} : { costUsd: envelope.costUsd }),
+    ...(envelope.tokensIn === null ? {} : { tokensIn: envelope.tokensIn + (options.accumulateUsage ? run.tokensIn ?? 0 : 0) }),
+    ...(envelope.tokensOut === null ? {} : { tokensOut: envelope.tokensOut + (options.accumulateUsage ? run.tokensOut ?? 0 : 0) }),
+    ...(envelope.costUsd === null ? {} : { costUsd: envelope.costUsd + (options.accumulateUsage ? run.costUsd ?? 0 : 0) }),
     ...(envelope.usageRaw === null ? {} : { usageJson: envelope.usageRaw }),
   });
 
