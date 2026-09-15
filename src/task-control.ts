@@ -123,6 +123,8 @@ export type StopRequest = {
    * is durable (the lapse interval would take the same road within
    * seconds for a request filed elsewhere). */
   held?: { stop(runId: number): Promise<void> } | undefined;
+  /** A composing confirmation transaction runs this effect only after it commits. */
+  deferSignal?: ((signal: () => void) => void) | undefined;
 };
 
 export type StopOutcome =
@@ -143,12 +145,17 @@ export function requestTaskStop(store: Store, request: StopRequest, now: Date): 
   }
   const asked = store.requestRunStop({ runId: request.runId, taskRef: ref.id, by: request.by, via: request.via }, now);
   if (!asked.ok) return asked;
-  const terminated = terminateStoppedAttempt(store, request.runId);
-  if (request.held !== undefined && store.heldSessionOf(request.runId) !== null) {
-    void request.held.stop(request.runId).catch(() => {
-      // The lapse interval retries the same fence; the durable row stands.
-    });
-  }
+  let terminated = 0;
+  const signal = (): void => {
+    terminated = terminateStoppedAttempt(store, request.runId);
+    if (request.held !== undefined && store.heldSessionOf(request.runId) !== null) {
+      void request.held.stop(request.runId).catch(() => {
+        // The lapse interval retries the same fence; the durable row stands.
+      });
+    }
+  };
+  if (request.deferSignal) request.deferSignal(signal);
+  else signal();
   return { ok: true, stop: asked.stop, repeated: asked.repeated, terminated, taskId: request.taskId };
 }
 

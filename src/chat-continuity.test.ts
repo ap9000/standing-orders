@@ -761,3 +761,23 @@ test("repair c7: FormData sent without a submit event still binds the payload; n
   type("");
   expect(requestOf()).not.toBe(beforeClear);
 });
+
+test("stop and resume confirmations keep the unsent draft; refreshed status and refusal never clear it", async () => {
+  const stopLive = (state: string) => `<section id="task-chat-live" data-task="task-a"><section data-task-status><h2>${state}</h2></section></section>`;
+  mount(html({ live: stopLive("Working") }));
+  window.eval(CHAT_CONTINUITY_SCRIPT);
+  enter("Keep this unsent feedback draft");
+  const original = box();
+  const confirm = window.document.querySelector('form[action="/chat/proposal/5/confirm"]')!;
+  expect(submit(confirm)).toBe(true);
+  expect(submit(confirm)).toBe(false);
+  expect(JSON.parse(window.sessionStorage.getItem(key)!)).toMatchObject({ text: "Keep this unsent feedback draft", submitted: false });
+  for (const [index, state] of ["Stopping", "Paused", "This attempt changed. Review the current task before confirming."].entries()) {
+    response = async () => json({ ...idle, version: `stop-${index}`, fragments: { thread: thread(message(1, "op", "Stop task")), after: '<div id="chat-after-composer" data-chat-region="after"></div>', live: stopLive(state) } });
+    await check();
+    expect(window.document.getElementById("task-chat-live")!.textContent).toContain(state);
+    expect(box()).toBe(original);
+    expect(box().value).toBe("Keep this unsent feedback draft");
+    expect(posts()).toHaveLength(0);
+  }
+});

@@ -1,8 +1,11 @@
-import type { Store } from "./store.js";
+import { verifiedAuthor, type Store } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
+import { requestTaskStop, taskControlOf, type StopRequest } from "./task-control.js";
 import { authorizePlanUnderMode } from "./plan-auto.js";
 
 export const CHAT_TASK_ACTIONS = {
+  stop: { label: "Stop task", detail: "Requests an end to this attempt’s processes. Work and drafts stay saved; other tasks keep running. The task pauses once shutdown is confirmed." },
+  resume: { label: "Review resume", detail: "Opens password confirmation to lift this stop’s hold and continue from saved work. Other holds and approval requirements still apply." },
   retry: { label: "Try again", detail: "Queues another attempt. Existing approvals and holds still apply." },
   plan: { label: "Plan first", detail: "Requests a plan. Building still requires approval." },
   wait_for: { label: "Add dependency", detail: "Waits for the selected task to finish." },
@@ -20,7 +23,14 @@ export function chatTaskStamp(store: Store, who: VerifiedApprover, task: string)
   return JSON.stringify([task, row.state, row.updatedAt, store.getScope(task)?.digest ?? null,
     ref.plan, store.runsFor(ref.id)[0]?.id ?? null, store.blockers(task).sort()]);
 }
-export function applyChatTaskAction(store: Store, who: VerifiedApprover, payload: Record<string, unknown>, now: Date, web: boolean):
+/** Only current, eligible controls can become cards; retain the exact run the reader saw. */
+export function chatTaskRun(store: Store, task: string, operation: "stop" | "resume", now: Date): number | null {
+  const ref = store.lookupRef(task);
+  if (ref === null) return null;
+  const control = taskControlOf(store, ref.id, now);
+  return (operation === "stop" && control.kind === "stop") || (operation === "resume" && control.kind === "paused") ? control.run : null;
+}
+export function applyChatTaskAction(store: Store, who: VerifiedApprover, payload: Record<string, unknown>, now: Date, web: boolean, controls: Pick<StopRequest, "held" | "deferSignal"> = {}):
   { ok: true; taskId: string; said: string } | { ok: false; message: string } {
   const task = payload["task"], operation = payload["operation"];
   if (typeof task !== "string" || !isChatTaskAction(operation)) return { ok: false, message: "This task action is incomplete." };
@@ -28,6 +38,16 @@ export function applyChatTaskAction(store: Store, who: VerifiedApprover, payload
   if (stamp === null || stamp !== payload["stamp"]) return { ok: false, message: "This task changed. Review it again before confirming." };
   const ref = store.lookupRef(task)!;
   if (store.openContestFor(ref.id) !== null) return { ok: false, message: "Wait for the agent comparison to finish." };
+  if (operation === "stop" || operation === "resume") {
+    if (store.isDemo()) return { ok: false, message: "The demo authorizes nothing." };
+    const run = chatTaskRun(store, task, operation, now);
+    if (run === null || run !== payload["run"]) return { ok: false, message: "This attempt changed. Review the current task before confirming." };
+    // Resume remains the existing nonce + password ceremony. A proposal only opens it.
+    if (operation === "resume") return { ok: true, taskId: task, said: `Resume review requested for ${task}. Complete the password confirmation on the task to resume.` };
+    const result = requestTaskStop(store, { taskId: task, runId: run, by: verifiedAuthor(who.name), via: web ? "web" : "cli", ...controls }, now);
+    return result.ok ? { ok: true, taskId: task, said: `Stop requested for ${task}, run #${run}.` }
+      : { ok: false, message: result.detail };
+  }
   if (operation === "retry") {
     const result = store.requeueTask(task, who.name, now);
     return result.ok ? { ok: true, taskId: task, said: "Task queued again." } : { ok: false, message:

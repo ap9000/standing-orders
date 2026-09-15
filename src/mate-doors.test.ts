@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { fileTaskProposal } from "./proposal.js";
 import { verifyApproverStanding, type VerifiedApprover } from "./principal.js";
@@ -6,6 +6,10 @@ import { credentialKeyOf } from "./converse.js";
 import { confirmMateProposal, dismissMateProposal } from "./mate-doors.js";
 import { executeMateTool } from "./mate-tools.js";
 import { approve, approvalOf, hashToken, propose } from "./scope.js";
+import { register } from "./runner.js";
+import { acquire } from "./claim.js";
+import { chatTaskStamp } from "./chat-task-actions.js";
+import * as taskControls from "./task-control.js";
 import { routeDigestOf } from "./phase-routing.js";
 
 /** A task with no scope presents the bare word `legacy` for the exact pair
@@ -94,6 +98,42 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     expect(executeMateTool(ctx, "propose_task_action", { task: "b", operation: "retry", dependency: "private-task" })).toMatchObject({ ok: false });
     expect(executeMateTool(ctx, "show_control", { control: "https://example.com" })).toMatchObject({ ok: false });
     expect(executeMateTool(ctx, "show_control", { control: "providers" })).toMatchObject({ ok: true });
+  });
+
+  test("stop confirmation commits its receipt before signalling; rollback and replay signal nothing", () => {
+    store.saveApprover("alex", hashToken("password"), clock()); who = principal(); session();
+    for (const phase of ["build", "plan", "review"]) store.setPhaseConfig("installation", phase, "claude", "sonnet", "test", clock());
+    propose(store, { taskId: "a", goal: "Keep the saved work", now: clock() });
+    expect(approve(store, "a", "alex", clock(), store.getScope("a")!.digest, "password").ok).toBe(true);
+    register(store, { name: "worker", host: "test", capacity: 1, repos: [REPO], now: clock(), newToken: () => "worker-token" });
+    const ref = store.lookupRef("a")!.id;
+    const claim = acquire(store, ref, "worker", { token: "worker-token", now: clock() });
+    if (!claim.ok) throw new Error(claim.reason);
+    const route = store.routeAuthorityFor(ref, "builder", null);
+    if (!route?.ok) throw new Error("route");
+    const run = store.startRun({ taskRef: ref, leaseId: claim.claim.leaseId, runner: "worker", branch: "branch", worktree: "/pool/a", route: route.stamp, now: clock() });
+    const id = pending("task_action", { task: "a", operation: "stop", run, stamp: chatTaskStamp(store, who, "a") });
+    const signal = vi.fn(() => expect(store.getMateProposal(id)?.state).toBe("confirmed"));
+    const original = taskControls.requestTaskStop;
+    const service = vi.spyOn(taskControls, "requestTaskStop").mockImplementation((s, request, now) => original(s, { ...request,
+      deferSignal: effect => request.deferSignal!(() => { signal(); effect(); }),
+    }, now));
+    const cas = store.casMateProposal.bind(store);
+    const failing = vi.spyOn(store, "casMateProposal").mockImplementation((...args) => {
+      if (args[2] === "confirmed") throw new Error("receipt failed");
+      return cas(...args);
+    });
+    try {
+      expect(() => confirmMateProposal(store, who, id, clock(), { via: "web" })).toThrow("receipt failed");
+      expect(signal).not.toHaveBeenCalled();
+      expect(store.stopOf(run)).toBeNull();
+      expect(store.getMateProposal(id)?.state).toBe("pending");
+      failing.mockRestore();
+      expect(confirmMateProposal(store, who, id, clock(), { via: "web" }).ok).toBe(true);
+      expect(signal).toHaveBeenCalledTimes(1);
+      expect(confirmMateProposal(store, who, id, clock(), { via: "web" }).ok).toBe(false);
+      expect(signal).toHaveBeenCalledTimes(1);
+    } finally { failing.mockRestore(); service.mockRestore(); }
   });
 
   test("an explicitly ended conversation refuses an old card although the principal still stands", () => {

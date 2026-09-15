@@ -154,10 +154,11 @@ function encodePng(width, height, rgb) {
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
 }
 
-function seedRepo(path, name) {
+function seedRepo(path, name, git = true) {
   mkdirSync(join(path, 'src'), { recursive: true });
   writeFileSync(join(path, 'package.json'), JSON.stringify({ name, private: true }, null, 2));
   writeFileSync(join(path, 'src', 'payout.ts'), 'export function settle(cents: number, rate: number): number {\n  return Math.round(cents * rate * 100) / 100;\n}\n');
+  if (!git) return;
   try {
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: path, stdio: 'ignore' });
     execFileSync('git', ['add', '-A'], { cwd: path, stdio: 'ignore' });
@@ -170,17 +171,17 @@ export function startFixture(options = {}) {
   mkdirSync(parent, { recursive: true });
   const root = realpathSync(mkdtempSync(join(parent, 'standing-orders-ui-polish-')));
   const repo = join(root, 'portfolio-console');
-  seedRepo(repo, 'portfolio-console');
+  seedRepo(repo, 'portfolio-console', options.git !== false);
   // The second project (workspace package 1): a deliberately long path so
   // a phone task list has something to wrap, and so All-projects rows
   // span two projects and must wear their labels.
   const repo2 = options.secondProject === true
     ? join(root, 'clients', 'northwind-operations', 'ops-console-with-a-very-long-repository-name-for-overflow-checks')
     : null;
-  if (repo2 !== null) seedRepo(repo2, 'ops-console');
+  if (repo2 !== null) seedRepo(repo2, 'ops-console', options.git !== false);
   // An enrolled project with no tasks at all, for the empty Work views.
   const repo3 = options.secondProject === true ? join(root, 'clients', 'empty-sandbox') : null;
-  if (repo3 !== null) seedRepo(repo3, 'empty-sandbox');
+  if (repo3 !== null) seedRepo(repo3, 'empty-sandbox', options.git !== false);
   const evidenceRoot = join(root, 'evidence');
   mkdirSync(evidenceRoot, { recursive: true });
 
@@ -531,7 +532,7 @@ export function startFixture(options = {}) {
     }
     return { ok: true, answer: { text: 'One task is waiting for your approval (**Rework the portfolio ledger export**) and one finished with verified evidence (**Fix the payout rounding drift**). Nothing is building right now.', calls: [], tokensIn: 100, tokensOut: 40, reportedCostMicrousd: null } };
   };
-  const server = createDecisionServer({ store, evidenceRoot, ...(repo2 === null ? { repo } : { repos: [repo, repo2, repo3] }), chatEnv: {}, subscriptionChatRunner: runner });
+  const server = createDecisionServer({ store, evidenceRoot, ...(repo2 === null ? { repo } : { repos: [repo, repo2, repo3] }), chatEnv: {}, subscriptionChatRunner: options.runner ?? runner });
   const addReviewNotes = runId => {
     const source = store.getRun(runId), now = new Date();
     const taskId = store.externalIdFor(source.taskRef);

@@ -1,0 +1,32 @@
+{
+  "baseline": "a97f74b996fdef66b7aa1884c7e79a051b45af72",
+  "recordedAt": "2026-09-15T14:33:31.362309+00:00",
+  "codeSha256": "d567aa7328b221fae76cc7a9f288c51f5ace73c85d023c274a2b371dc94590ea",
+  "codePaths": [
+    "scripts/chat-stop-resume-journey.mjs",
+    "scripts/ui-polish-fixture.mjs",
+    "src/chat-continuity.test.ts",
+    "src/chat-polish.ts",
+    "src/chat-task-actions.test.ts",
+    "src/chat-task-actions.ts",
+    "src/mate-contract.ts",
+    "src/mate-doors.test.ts",
+    "src/mate-doors.ts",
+    "src/mate-tools.ts",
+    "src/mate.test.ts",
+    "src/serve.ts",
+    "src/task-control-console.test.ts",
+    "src/task-control.test.ts",
+    "src/task-control.ts"
+  ],
+  "screenshots": {
+    "desktop-empty.png": "4cc33b537922e7b0e1643b117d89b4a1a6ae3df02958d8acafa1971addc329d5",
+    "desktop-stop-confirm.png": "04150e749f0d5a80a068643e758fcbc60dcb4c21ce02d9476598584e51e4a42d",
+    "desktop-stopping.png": "75c53c8a45861ba29e8598b738f025ec15533e3fd881fea87888eadd078e6233",
+    "desktop-result.png": "d6fc22d289342a825fb3c681c24f567035bf8340d3d8384da02d6b2564cd24b0",
+    "phone-stop-confirm-long.png": "a1fdd49120fd2d5fcbdc85b9b7b326557504ddbd25cc5213e7e038905afdb2f0",
+    "phone-resume-password.png": "736c2ba38795ccb2a91643e8290c484c9059d4bab32d6390cbd0b14549b6ce2b",
+    "phone-refusal-draft.png": "aa01c7f7a38465ff50960159169fc87b86380c16fc3fba9ee35a32c5b841654e",
+    "phone-revision.png": "c4b3f3f0ee628a0cda1ee1e0182081440f5dbc2059e8b2dcfc375f0a24accd13"
+  }
+}

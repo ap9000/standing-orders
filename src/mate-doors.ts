@@ -52,6 +52,7 @@ export type DoorRefusal =
 
 export type DoorOptions = {
   evidenceRoot?: string;
+  held?: import("./task-control.js").StopRequest["held"];
   /** The existing ceremony for an irreversible decision option: `confirm=yes`, typed explicitly (ruling 12). */
   confirm?: boolean;
   /** Which surface answered — recorded on the decision. Named by the caller, never defaulted (v3 review, finding 1). */
@@ -88,7 +89,8 @@ function payloadPlanning(payload: Record<string, unknown>): "auto" | "required" 
  */
 export function confirmMateProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date, options: DoorOptions): DoorOutcome {
   if (!isVerifiedApprover(who)) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" };
-  return store.transact(() => {
+  const signals: (() => void)[] = [];
+  const result = store.transact(() => {
     if (!reproveApprover(store, who).ok) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" } as const;
     const proposal = store.getMateProposal(proposalId);
     if (proposal === null) return { ok: false, kind: null, reason: "not-yours", said: "no such proposal" } as const;
@@ -116,10 +118,12 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
     if (!store.casMateProposal(proposalId, "pending", "confirming", who.name, null, now)) {
       return { ok: false, kind: proposal.kind, reason: "not-pending", said: "this proposal was already acted on" } as const;
     }
-    const outcome = executeProposal(store, who, proposal.kind, proposal.payload, now, options);
+    const outcome = executeProposal(store, who, proposal.kind, proposal.payload, now, { ...options, deferSignal: signal => signals.push(signal) });
     store.casMateProposal(proposalId, "confirming", outcome.ok ? "confirmed" : "refused", who.name, { ...outcome }, now);
     return outcome;
   });
+  for (const signal of signals) signal();
+  return result;
 }
 
 /** The operator declines the mate's card: `pending → dismissed`. */
@@ -143,7 +147,8 @@ export function dismissMateProposal(store: Store, who: VerifiedApprover, proposa
  */
 export function confirmCoordinatorProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date, options: DoorOptions): DoorOutcome {
   if (!isVerifiedApprover(who)) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" };
-  return store.transact(() => {
+  const signals: (() => void)[] = [];
+  const result = store.transact(() => {
     if (!reproveApprover(store, who).ok) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" } as const;
     const proposal = store.getCoordinatorProposal(proposalId);
     if (proposal === null || !who.repos.includes(proposal.repo)) return { ok: false, kind: null, reason: "not-yours", said: "no such proposal in your projects" } as const;
@@ -159,10 +164,12 @@ export function confirmCoordinatorProposal(store: Store, who: VerifiedApprover, 
     if (!store.casCoordinatorProposal(proposalId, "pending", "confirming", who.name, null, now)) {
       return { ok: false, kind: proposal.kind, reason: "not-pending", said: "this proposal was already acted on" } as const;
     }
-    const outcome = executeProposal(store, who, proposal.kind, proposal.payload, now, { ...options, scopeAuthor: "coordinator" });
+    const outcome = executeProposal(store, who, proposal.kind, proposal.payload, now, { ...options, scopeAuthor: "coordinator", deferSignal: signal => signals.push(signal) });
     store.casCoordinatorProposal(proposalId, "confirming", outcome.ok ? "confirmed" : "refused", who.name, { ...outcome }, now);
     return outcome;
   });
+  for (const signal of signals) signal();
+  return result;
 }
 
 export function dismissCoordinatorProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date): boolean {
@@ -192,7 +199,7 @@ function executeProposal(
   kind: ProposalKind,
   payload: Record<string, unknown>,
   now: Date,
-  options: DoorOptions & { scopeAuthor?: "mate" | "coordinator" },
+  options: DoorOptions & { scopeAuthor?: "mate" | "coordinator"; deferSignal: NonNullable<import("./task-control.js").StopRequest["deferSignal"]> },
 ): DoorOutcome {
   if (!isVerifiedApprover(actor) || !reproveApprover(store, actor).ok) return { ok: false, kind, reason: "standing", said: "your approver standing changed — sign in again" };
   const taskId = payloadString(payload, "task");
@@ -266,7 +273,7 @@ function executeProposal(
   const ref = store.lookupRef(taskId);
   if (ref === null || !admitted(ref.repo)) return refuse("unknown-task", "no such task in your projects");
   if (kind === "task_action") {
-    const result = applyChatTaskAction(store, actor, payload, now, options.via === "web");
+    const result = applyChatTaskAction(store, actor, payload, now, options.via === "web", { held: options.held, deferSignal: options.deferSignal });
     return result.ok ? { ok: true, kind, taskId: result.taskId, said: result.said } : refuse("stale", result.message);
   }
 

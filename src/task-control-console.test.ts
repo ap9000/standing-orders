@@ -159,6 +159,58 @@ describe("the exact-run control on the console (v52)", () => {
     expect(controlOf(await page(cookie, "/chat?task=payouts"))).toContain('data-task-control="paused"');
   });
 
+  test("chat proposals stop once and open the shared resume ceremony without granting resume authority", async () => {
+    const { executeMateTool } = await import("./mate-tools.js");
+    const { verifyApproverStanding } = await import("./principal.js");
+    const { subscriptionCredentialKey } = await import("./converse.js");
+    const ref = seed("payouts"), { runId, leaseId } = live("payouts", ref);
+    const now = new Date();
+    const verified = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, [resolve("/repo/main")]);
+    if (!verified.ok) throw new Error(verified.reason);
+    const who = verified.who, credentialKey = subscriptionCredentialKey("codex-subscription");
+    const session = store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey, ceilingMicrousd: 0, ceilingDigest: who.ceilingDigest, termsDigest: "test" }, now);
+    const thread = store.openMateThread("alex", who.ceilingDigest, now).thread;
+    const make = (operation: "stop" | "resume") => {
+      const opened = store.openMateTurn({ approver: "alex", session, thread: thread.id, credentialKey, reservedMicrousd: 0, dailyTurns: 50, weeklyCeilingMicrousd: 0, deadlineMs: 60_000 }, now);
+      if (!opened.ok) throw new Error(opened.reason);
+      const started = store.startMateTurn(opened.id, now);
+      if (!started.ok) throw new Error("start failed");
+      let id = 0;
+      const made = executeMateTool({ store, who, now, step: 1, readDecisions: new Map(), draft: (kind, payload) => {
+        id = store.draftMateProposal({ thread: thread.id, turn: opened.id, kind, payload, ceilingDigest: who.ceilingDigest }, now); return id;
+      } }, "propose_task_action", { task: "payouts", operation, run: runId });
+      expect(made).toMatchObject({ ok: true });
+      store.finalizeMateTurn(opened.id, started.generation, { state: "answered", settledMicrousd: 0, tokensIn: 1, tokensOut: 1 }, now);
+      return id;
+    };
+    const cookie = await loginAs("alex", approverToken), csrf = csrfOf(await page(cookie, "/t/payouts"));
+    const stop = make("stop"), staleStop = make("stop");
+    expect(store.stopOf(runId)).toBeNull();
+    expect((await post(cookie, `/chat/proposal/${stop}/confirm`, { csrf: "bad" })).status).toBe(403);
+    expect(store.stopOf(runId)).toBeNull();
+    expect((await post(cookie, `/chat/proposal/${stop}/confirm`, { csrf })).status).toBe(303);
+    expect(store.getMateProposal(stop)?.outcome).toMatchObject({ said: expect.stringContaining("Stop requested") });
+    expect(store.stopOf(runId)?.settledAt).toBeNull();
+    await post(cookie, `/chat/proposal/${stop}/confirm`, { csrf });
+    await post(cookie, `/chat/proposal/${staleStop}/confirm`, { csrf });
+    expect(store.stopsForTask(ref)).toHaveLength(1);
+    expect(store.getMateProposal(staleStop)?.state).toBe("refused");
+    finalizeInterruptedFenced(store, { leaseId, runId, taskId: "payouts", stopRun: runId, now });
+    const resume = make("resume");
+    const armed = await post(cookie, `/chat/proposal/${resume}/confirm`, { csrf });
+    expect(armed.status).toBe(200);
+    const ceremony = await armed.text();
+    expect(ceremony).toContain('action="/t/payouts/resume"');
+    expect(ceremony).toContain('name="return" value="chat"');
+    expect(store.stopOf(runId)?.resumedAt).toBeNull();
+    const nonce = /name="nonce" value="([A-Za-z0-9_-]+)"/.exec(ceremony)![1]!;
+    expect((await post(cookie, "/t/payouts/resume", { csrf, run: String(runId), nonce, token: "wrong" })).status).toBe(403);
+    expect(store.stopOf(runId)?.resumedAt).toBeNull();
+    expect((await post(cookie, "/t/payouts/resume", { csrf, run: String(runId), nonce, token: approverToken, return: "chat" })).headers.get("location")).toBe("/chat?task=payouts#task-control");
+    expect((await post(cookie, "/t/payouts/resume", { csrf, run: String(runId), nonce, token: approverToken })).status).toBe(409);
+    expect(store.runsFor(ref)).toHaveLength(1);
+  });
+
   test("c8: stop is an approver's browser act — viewer, bearer, missing csrf, a finished run, another task's run, and a foreign project are refused", async () => {
     const ref = seed("payouts");
     const { runId, leaseId } = live("payouts", ref);
@@ -215,10 +267,11 @@ describe("the exact-run control on the console (v52)", () => {
     const armed = await post(alex, "/t/payouts/resume-arm", { csrf, run: String(runId) });
     expect(armed.status).toBe(200);
     const ceremony = await armed.text();
-    expect(ceremony).toContain(`resume run #${runId} of`);
-    expect(ceremony).toContain('<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>');
-    expect(ceremony).toContain("fresh proof");
-    expect(ceremony).toContain("nothing is approved");
+    expect(ceremony).toContain(`Run #${runId}`);
+    expect(ceremony).toContain("Resume task?");
+    expect(ceremony).toContain('<label>Confirm with your password<input type="password" name="token" autocomplete="current-password"></label>');
+    expect(ceremony).toContain("fresh evidence");
+    expect(ceremony).toContain("no new approval");
     const nonce = /name="nonce" value="([A-Za-z0-9_-]+)"/.exec(ceremony)?.[1];
     if (nonce === undefined) throw new Error("no nonce on the ceremony");
     // Wrong password: refused, nonce untouched.

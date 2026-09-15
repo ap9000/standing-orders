@@ -1,9 +1,10 @@
+import { taskControlOf } from "./task-control.js";
 import { validateScopeText, validateTaskText, TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
 import { conversationKnowledge } from "./project-knowledge.js";
 import { readChatResult, reviewInputProblem, type ReviewSnapshot } from "./chat-review.js";
 import { CHAT_CONTROLS, isChatControl } from "./chat-controls.js";
 import { LIMITS } from "./decision.js";
-import { CHAT_TASK_ACTIONS, chatTaskStamp, isChatTaskAction } from "./chat-task-actions.js";
+import { CHAT_TASK_ACTIONS, chatTaskRun, chatTaskStamp, isChatTaskAction } from "./chat-task-actions.js";
 /**
  * The mate's tools (mate arc §2): reads over the approver's ceiling and
  * proposals that become rows — never a write. Every result passes through
@@ -380,17 +381,22 @@ export function agentsOver(store: Store, taskId: string, now: Date): Record<stri
 export const MATE_TOOLS: MateTool[] = [
   {
     name: "propose_task_action",
-    description: "Propose retry, plan, wait_for or stop_waiting on an exact current execution. Confirmation preserves approvals and holds.",
-    inputSchema: schema({ task: TASK_ARG, operation: { type: "string", enum: Object.keys(CHAT_TASK_ACTIONS) }, dependency: TASK_ARG }, ["task", "operation"]),
+    description: "Propose stop, resume, retry, plan, wait_for or stop_waiting on the exact current execution. For stop/resume, pass control.run from get_task. Resume opens the existing password ceremony; it does not start work.",
+    inputSchema: schema({ task: TASK_ARG, operation: { type: "string", enum: Object.keys(CHAT_TASK_ACTIONS) }, dependency: TASK_ARG, run: { type: "integer", minimum: 1 } }, ["task", "operation"]),
     handle: (ctx, args) => {
       const task = taskIdOf(args), operation = args["operation"];
       if (task === null || !isChatTaskAction(operation)) return { ok: false, message: "Choose a task and an available action." };
       const stamp = chatTaskStamp(ctx.store, ctx.who, task);
       if (stamp === null) return { ok: false, message: "Read the current task version before proposing this action." };
+      const run = operation === "stop" || operation === "resume" ? chatTaskRun(ctx.store, task, operation, ctx.now) : null;
+      if ((operation === "stop" || operation === "resume") && (run === null || run !== args["run"])) {
+        return { ok: false, message: "Read the current task and its eligible control.run before proposing stop or resume. A stopping attempt must finish stopping first; a stopped review uses Review again on the task." };
+      }
+      if (operation !== "stop" && operation !== "resume" && args["run"] !== undefined) return { ok: false, message: "This action does not use a run." };
       const dependency = args["dependency"];
       if (operation !== "wait_for" && operation !== "stop_waiting" && dependency !== undefined) return { ok: false, message: "This action does not use a dependency." };
       if ((operation === "wait_for" || operation === "stop_waiting") && (typeof dependency !== "string" || admittedRef(ctx, dependency) === null)) return notFound();
-      const id = ctx.draft("task_action", { task, taskTitle: ctx.store.getTask(task)!.title, operation, stamp,
+      const id = ctx.draft("task_action", { task, taskTitle: ctx.store.getTask(task)!.title, operation, stamp, ...(run === null ? {} : { run }),
         ...(typeof dependency === "string" ? { dependency, dependencyTitle: ctx.store.getTask(dependency)?.title ?? dependency } : {}) });
       return id === null ? tooMany() : { ok: true, body: { proposal: id, action: CHAT_TASK_ACTIONS[operation].label, awaiting: "confirmation" } };
     },
@@ -400,7 +406,7 @@ export const MATE_TOOLS: MateTool[] = [
     description: "List direct chat actions and available UI controls. A control link does not execute an action.",
     inputSchema: schema({}),
     handle: () => ({ ok: true, body: {
-      confirmedInChat: ["create task", "change scope", "choose agents", "prioritize", "assign worker", "hold", "remove hold", "guide next attempt", "repair dependency", "add or remove dependency", "retry task", "request plan", "answer decision", "save result feedback", "request same-task revision"],
+      confirmedInChat: ["create task", "change scope", "choose agents", "prioritize", "assign worker", "hold", "remove hold", "guide next attempt", "repair dependency", "add or remove dependency", "retry task", "request plan", "stop current attempt", "review resume with password", "answer decision", "save result feedback", "request same-task revision"],
       existingControls: Object.entries(CHAT_CONTROLS).map(([id, entry]) => ({ id, label: entry.label, needsTask: "target" in entry })),
       rule: "Approvals, credentials and dedicated controls retain their existing checks. Never claim a control was used just because its card is shown.",
     } }),
@@ -552,6 +558,11 @@ export const MATE_TOOLS: MateTool[] = [
           title: task.title,
           state: task.state,
           dispatch: diagnoseTaskDispatch(ctx.store, taskId, ctx.now),
+          control: (() => {
+            const control = taskControlOf(ctx.store, ref.id, ctx.now);
+            return { state: control.kind, run: control.kind === "none" ? null : control.run,
+              action: control.kind === "stop" ? "stop" : control.kind === "paused" ? "resume" : control.kind === "review-stopped" ? "Review again on task" : null };
+          })(),
           dependencies: ctx.store.blockers(taskId).map(blocker => {
             const blockerRef = admittedRef(ctx, blocker);
             const state = blockerRef === null ? null : ctx.store.getTask(blocker)?.state ?? null;
