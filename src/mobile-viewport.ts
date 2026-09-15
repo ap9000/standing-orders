@@ -12,8 +12,14 @@ export const MOBILE_VIEWPORT_SCRIPT = String.raw`
     if(!editing)baseline=window.innerHeight;
     var gap=Math.max(0,window.innerHeight-viewport.height-viewport.offsetTop);
     var open=phone.matches&&viewport.scale===1&&editing&&(gap>120||baseline-viewport.height>120);
+    // A reader at the end of a thread stays there when the keyboard rises:
+    // the page grows room beneath the raised composer, so the newest
+    // message must follow it up instead of hiding behind it.
+    var opening=open&&!root.hasAttribute('data-mobile-keyboard');
+    var atEnd=opening&&window.innerHeight+window.scrollY>=root.scrollHeight-120;
     root.toggleAttribute('data-mobile-keyboard',Boolean(open));
     root.style.setProperty('--keyboard-inset',open?Math.round(gap)+'px':'0px');
+    if(atEnd)window.scrollTo({top:root.scrollHeight,behavior:'instant'});
   }
   function schedule(){if(!frame)frame=requestAnimationFrame(update);}
   viewport.addEventListener('resize',schedule);

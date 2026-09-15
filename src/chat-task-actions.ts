@@ -4,7 +4,9 @@ import { requestTaskStop, taskControlOf, type StopRequest } from "./task-control
 import { authorizePlanUnderMode } from "./plan-auto.js";
 
 export const CHAT_TASK_ACTIONS = {
-  stop: { label: "Stop task", detail: "Requests an end to this attempt’s processes. Work and drafts stay saved; other tasks keep running. The task pauses once shutdown is confirmed." },
+  // Build #1604 feedback: one short consequence that still says saved work
+  // remains, other tasks continue, and the pause waits for acknowledgement.
+  stop: { label: "Stop task", detail: "Pauses this task once the run acknowledges the stop. Saved work remains; other tasks continue." },
   resume: { label: "Review resume", detail: "Opens password confirmation to lift this stop’s hold and continue from saved work. Other holds and approval requirements still apply." },
   retry: { label: "Try again", detail: "Queues another attempt. Existing approvals and holds still apply." },
   plan: { label: "Plan first", detail: "Requests a plan. Building still requires approval." },

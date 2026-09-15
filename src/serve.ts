@@ -5626,8 +5626,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       if (outcome.ok && outcome.kind === "review" && outcome.taskId !== null) {
         const proposal = store.getMateProposal(id)!;
+        // A revision confirmed here returns to its receipt: the newest
+        // reply, whose confirmed card names the revision and links to the
+        // plan. Landing at the top left that message under the phone's
+        // fixed composer (build #1604 feedback).
         return redirect(response, proposal.payload["operation"] === "revise"
-          ? revisionDestination(outcome.taskId, taskChatHref(outcome.taskId))
+          ? chatReturnWithLatest(revisionDestination(outcome.taskId, taskChatHref(outcome.taskId)))
           : `${taskChatHref(outcome.taskId)}&result=${Number(proposal.payload["run"])}#request-changes`);
       }
       if (outcome.ok && outcome.kind === "task_action" && outcome.taskId !== null) {
@@ -11015,6 +11019,10 @@ const STYLE = `
        keyboard; hardware-keyboard focus and pinch zoom keep it available. */
     html[data-mobile-keyboard] .tabbar { display: none; }
     html[data-mobile-keyboard] .chat-workspace .composer { bottom: calc(var(--keyboard-inset, 0px) + .5rem); }
+    /* The raised composer needs the same room beneath the thread as the
+       resting one, or the newest message hides behind it while typing. */
+    html[data-mobile-keyboard] main:has(.chat-workspace) { padding-bottom: calc(var(--keyboard-inset, 0px) + var(--composer-height, 4rem) + 1.5rem); }
+    html[data-mobile-keyboard] main:has(.chat-workspace) :is(input, textarea, button, summary, a) { scroll-margin-block: 6rem calc(var(--keyboard-inset, 0px) + var(--composer-height, 4rem) + 1.5rem); }
     html[data-mobile-keyboard] .chat-new-update-holder { bottom: calc(var(--keyboard-inset, 0px) + var(--composer-height, 4rem) + 1rem); }
     html[data-mobile-keyboard] .sticky-actions { bottom: .5rem; }
     .work-tools > summary, .work-tools-menu a, .work-views a { min-height: 2.75rem; }
