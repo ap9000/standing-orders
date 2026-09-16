@@ -68,3 +68,56 @@ their bot locally. Fixture success is not a live phone result. Keep screenshots,
 scope approval, resume/cancel/settings handoffs and other actual gaps explicit
 in the parity matrix; do not label a computer-only instruction as full phone
 support. These are subsequent feature slices, not reasons to widen this repair.
+
+## Implementation record (2026-09-16, fixture-verified, not a live trial)
+
+Built as a same-family revision on `db5e213` (the merge of candidate
+`a29756` with accepted `d864295`); the review-format and subscription-chat
+fixes are untouched. What changed, by gap:
+
+1. **Durable output.** `telegram_conversation_part` (schema v63, additive;
+   `migration-v63-telegram-delivery.test.ts` upgrades from the exact v61 and
+   v62 shapes and their sentinels, keeps every conversation row and token,
+   and shows the rollback as the wind-back). `runTelegramConversation` plans
+   the whole outbound half — reply parts and cards, tokens minted with them
+   — in one transaction before any send, then sends each part fenced on
+   the claim, the live pairing and the session's ceiling digest. Sent means
+   a confirmed message id and nothing else. `retry_after` writes the
+   outbox's bot-wide `telegram_retry` row, so the conversation and the
+   outbox pause together; other refusals and lost answers back off
+   (5s, 15s, 60s, 5min) with `uncertain` counted on the part, and the pass
+   report names the wait. A restart resumes from the first unsent part
+   without a model call. A card whose proposal was already acted on is
+   dropped as moot; a changed ceiling fails the row `unsent:…` and tells
+   the phone without project data; unsent parts give up explicitly after
+   the card lifetime. Exactly-once is not claimed: a lost answer may have
+   reached Telegram, and a resend then duplicates — the row says so.
+2. **Original binding.** `bindTelegramConversationSession` records the
+   session before the first dispatch. A later attempt reads
+   `mateRequestReceipt` in that session first — whatever session is live —
+   and recovers the original turn's outcome: answered → parts planned and
+   sent; running past its deadline → swept and reported as crashed;
+   superseded by the console ending the session → reported as such. No
+   receipt means no dispatch happened, and only then is a fresh session
+   resolved. The inbound row still precedes acknowledgement; claims renew
+   as before.
+3. **Revalidation.** The engine's hook is unchanged (before admission,
+   after every provider wait and before any tool); the bridge now re-proves
+   pairing and ceiling before every outgoing part after the registry read,
+   and a tap's principal is minted against the ceiling read for that
+   update. Tests cover unpair and unenroll between two model steps.
+
+Evidence lives in `src/telegram-mate.test.ts` (outage, 429, no-id, restart
+after a confirmed part, moot card, unenrolled while waiting, session
+replaced after an answered and after an unfinished attempt, between-step
+revocation, tap-then-console and console-then-tap orders, and the reply-to-
+result journey under a signed automatic-approval mode alongside the manual
+one) and `src/migration-v63-telegram-delivery.test.ts`. The parity matrix is
+checked column for column (support, how, remaining gap) and every handoff
+row is labelled an incomplete phone action.
+
+Best-effort notices (a refusal, a failed turn, a changed ceiling) carry no
+project data and are still sent once without persistence; the row's
+outcome records the refusal regardless. Real Telegram acceptance remains
+pending exactly as stated above: no bot is configured or paired, and
+fixture success is not a live phone result.

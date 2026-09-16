@@ -169,6 +169,49 @@ revalidation hook at the engine; `src/mate-doors.test.ts` the telegram
 surface and the external commit hook;
 `src/migration-v62-telegram-conversation.test.ts` the 61→62 upgrade.
 
+### Recovery revision (2026-09-16, same family; supersedes the delivery and receipt lines above)
+
+The three reproduced gaps and where each fix lives; the full record is in
+[TELEGRAM_RECOVERY_REVISION_2026-09-16.md](TELEGRAM_RECOVERY_REVISION_2026-09-16.md).
+
+- **Durable replies and cards (schema v63).** Once a turn is answered —
+  or recovered from its receipt — the reply, split at Telegram's bound,
+  and one card per pending proposal are written to
+  `telegram_conversation_part` in ONE transaction, the cards' tokens
+  minted with them, before any send. Each part goes out under the row's
+  claim, the live pairing and the session's ceiling digest; only a
+  confirmed message id marks it sent. Telegram's `retry_after` pauses
+  every send bot-wide through the outbox's own `telegram_retry` row; a
+  lost network answer or an ok without an id is counted `uncertain` and
+  retried with bounded backoff (a resend may duplicate — said, never
+  hidden); a restart resumes from the first unsent part with no model
+  call, proposal, task or revision. A row is `done` only when every part
+  is sent or moot (its proposal already acted on elsewhere). Unsent
+  parts fail the row explicitly (`unsent:…`) after the card lifetime.
+- **The original session, bound before dispatch.** The row records the
+  session BEFORE `runMateTurn` is called; a later attempt reads the
+  engine's receipt in THAT session, so a crash followed by the console
+  ending and replacing the session recovers the original turn (answered
+  → its reply is sent; running past its deadline or superseded → the
+  phone is told the attempt did not complete) and never dispatches anew.
+- **Revalidation.** Unchanged in the engine (before admission, after
+  every provider wait, before any tool) and now on every outgoing part
+  after the registry read; a tap's principal is minted against the
+  ceiling read for that update. A change between two model steps stops
+  the turn before the second step's tools run.
+
+Verified by the same suite: reply outage with two uncertain attempts,
+`retry_after` on a card pausing the outbox too and resuming with the same
+tokens, an ok without a message id, a crash after the first confirmed
+part of a long reply, a card made moot by a console confirmation, a
+project unenrolled while the reply waits, the session replaced after a
+crash (answered and unfinished), unpair/unenroll between two steps, the
+tap-then-console order, and the reply-to-result journey under a signed
+automatic-approval mode (the revision approved with basis `mode`, queued
+unattended, no password step on the card). `src/migration-v63-telegram-delivery.test.ts`
+upgrades from the deployed v61 and the candidate v62 shapes and shows the
+rollback (drop the parts table, stamp v62).
+
 ### Live acceptance gap (unchanged)
 
 Read-only bridge status on 2026-09-16: token absent, paired false. No real

@@ -24,7 +24,7 @@ import { isDirectChatProvider, subscriptionCredentialKey } from "./converse.js";
 import { MATE_MESSAGE_MAX_CHARS, runMateTurn } from "./mate.js";
 import { confirmMateProposal, dismissMateProposal, type DoorOptions, type DoorOutcome } from "./mate-doors.js";
 import { MATE_TOOL_SCHEMAS } from "./mate-tools.js";
-import { verifyApproverStanding, type VerifiedApprover } from "./principal.js";
+import { ceilingDigestOf, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { canonicalProject } from "./project.js";
 import type { ChatConfig, MateProposal, MateSession, MateThread, Store, SubscriptionChatProviderId, TelegramBinding, TelegramConversation } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
@@ -85,28 +85,36 @@ export function telegramRequestId(botId: string, bindingId: number, updateId: nu
   return createHash("sha256").update(`telegram:${botId}:${bindingId}:${updateId}`).digest("hex").slice(0, 32);
 }
 
+/** The one channel problem that is transient: the registry could not be read now. Retried, never a refusal. */
+export const UNREADABLE_REGISTRY = "current project access could not be read";
+
 /**
  * Is the channel still what a turn opened under? The live binding must be
  * the SAME row and generation, its approver still an approver, and the
  * enrolled ceiling (reloaded now) still the exact list the principal
- * holds. A string names what changed; null means nothing did.
+ * holds — or, for a reply recovered after a restart, the ceiling digest
+ * its session was minted under. A string names what changed; null means
+ * nothing did.
  */
 export async function telegramChannelProblem(
   store: Store,
-  expected: { botId: string; bindingId: number; approverGeneration: number; repos: readonly string[] },
+  expected: { botId: string; bindingId: number; approverGeneration: number } & ({ repos: readonly string[] } | { ceilingDigest: string }),
   readProjects: () => Promise<readonly string[]>,
 ): Promise<string | null> {
   let registry: readonly string[];
   try {
     registry = await readProjects();
   } catch {
-    return "current project access could not be read";
+    return UNREADABLE_REGISTRY;
   }
   const binding = store.liveTelegramBinding(expected.botId);
   if (binding === null || binding.id !== expected.bindingId || binding.approverGeneration !== expected.approverGeneration) return "this chat is no longer paired";
   if (store.accountOf(binding.approver)?.role !== "approver") return "the paired account is no longer an approver";
   const repos = telegramConversationRepos(store, binding.approver, registry);
-  if (repos.length !== expected.repos.length || repos.some((one, index) => one !== expected.repos[index])) return "the connected projects changed";
+  const same = "repos" in expected
+    ? repos.length === expected.repos.length && repos.every((one, index) => one === expected.repos[index])
+    : ceilingDigestOf(repos) === expected.ceilingDigest;
+  if (!same) return "the connected projects changed";
   return null;
 }
 
@@ -328,20 +336,20 @@ export const TELEGRAM_ACTION_PARITY: Record<string, { support: ParitySupport; ho
   queue: { support: "direct", how: "Read during a turn.", gap: null },
   get_result: { support: "direct", how: "Read during a turn; the phone card shows the verification verdict, never a local link.", gap: "Screenshots and secure remote evidence links are not delivered to the phone yet." },
   get_controls: { support: "direct", how: "Read during a turn.", gap: null },
-  show_control: { support: "handoff", how: "The card names the control and the task; the operator opens it on the computer. No link is sent.", gap: null },
-  propose_task: { support: "direct", how: "Card with Confirm/Dismiss through confirmMateProposal (filed as a mate proposal, via telegram). Scope approval stays on the computer.", gap: null },
-  propose_scope: { support: "direct", how: "Confirm rewrites the scope through the shared door; the password approval that follows is a handoff.", gap: null },
+  show_control: { support: "handoff", how: "The card names the control and the task; the operator opens it on the computer. No link is sent.", gap: "Incomplete phone action: the control itself runs on the computer." },
+  propose_task: { support: "direct", how: "Card with Confirm/Dismiss through confirmMateProposal (filed as a mate proposal, via telegram). Scope approval stays on the computer.", gap: "Scope approval (the password) stays on the computer." },
+  propose_scope: { support: "direct", how: "Confirm rewrites the scope through the shared door; the password approval that follows is a handoff.", gap: "Approving the rewritten scope needs the password on the computer." },
   propose_next: { support: "direct", how: "Confirm through the shared door with the queue revision it saw.", gap: null },
   propose_reserve: { support: "direct", how: "Confirm through the shared door.", gap: null },
-  propose_agents: { support: "direct", how: "Confirm through the shared route-edit door; renewed approval stays on the computer.", gap: null },
+  propose_agents: { support: "direct", how: "Confirm through the shared route-edit door; renewed approval stays on the computer.", gap: "Renewed approval after the route change happens on the computer." },
   propose_hold: { support: "direct", how: "Confirm through the shared door.", gap: null },
   propose_unhold: { support: "direct", how: "Confirm through the shared door.", gap: null },
   propose_steer: { support: "direct", how: "Confirm through the shared door; the guidance is shown verbatim on the card.", gap: null },
   propose_dependency_repair: { support: "direct", how: "Confirm retry/unlink/replace through the shared door with both projects re-checked.", gap: null },
-  propose_task_action: { support: "direct", how: "stop, retry, plan, wait_for and stop_waiting confirm through the shared door (a stop is audited via telegram); resume confirms only the request and hands off to the password step.", gap: "resume completes on the computer." },
+  propose_task_action: { support: "direct", how: "stop, retry, plan, wait_for and stop_waiting confirm through the shared door (a stop is audited via telegram); resume confirms only the request and hands off to the password step.", gap: "resume completes on the computer (incomplete phone action)." },
   propose_answer: { support: "direct", how: "Confirm answers through the shared door, audited via telegram; an irreversible option arms a second tap first.", gap: null },
-  propose_review: { support: "direct", how: "note saves feedback; revise creates the same-family revision through the shared result service, honouring automatic approval settings.", gap: null },
-  propose_cancel: { support: "handoff", how: "The door refuses cancel from any card; the phone says to arm it on the task itself.", gap: "No phone path to cancel by design." },
+  propose_review: { support: "direct", how: "note saves feedback; revise creates the same-family revision through the shared result service, honouring automatic approval settings.", gap: "Under manual approval the revision is approved on the computer; under a signed automatic-approval mode it runs unattended." },
+  propose_cancel: { support: "handoff", how: "The door refuses cancel from any card; the phone says to arm it on the task itself.", gap: "Incomplete phone action: no phone path to cancel by design." },
 };
 
 /** Every tool the model can call, mapped; a new tool must name its phone road. */
@@ -509,6 +517,11 @@ export function confirmedCardText(outcome: DoorOutcome, proposal: MateProposal):
 
 export type ConversationReport = { answered: number; refused: number; problems: string[] };
 
+/** A part's next attempt after a failed send: bounded backoff by attempt, or Telegram's own retry_after when it named a longer one. */
+export const PART_RETRY_MS = [5_000, 15_000, 60_000, 300_000] as const;
+/** Unsent parts are retried this long after the message arrived (the card's own lifetime); then the row fails, explicitly unsent. */
+export const DELIVERY_MAX_AGE_MS = CARD_TTL_MS;
+
 function splitParts(text: string): string[] {
   if (text.length <= PART_CAP) return [text];
   const parts: string[] = [];
@@ -546,17 +559,33 @@ export async function processTelegramConversations(args: {
     try {
       await runTelegramConversation(row, args);
     } catch (error) {
-      // The claim lapses on its own; the receipt makes the retry safe.
+      // The claim lapses on its own; the receipt and the persisted parts make the retry safe.
       args.report.problems.push(`telegram chat for update ${row.updateId}: ${error instanceof Error ? error.message : String(error)}`);
       return;
     }
   }
 }
 
-async function runTelegramConversation(
-  row: TelegramConversation,
-  args: { store: Store; botId: string; transport: Transport; owner: string; clock: () => Date; readProjects: () => Promise<readonly string[]>; options: TelegramConversationOptions; report: ConversationReport },
-): Promise<void> {
+class PlanRefused extends Error {}
+
+type TurnArgs = { store: Store; botId: string; transport: Transport; owner: string; clock: () => Date; readProjects: () => Promise<readonly string[]>; options: TelegramConversationOptions; report: ConversationReport };
+
+/**
+ * One claimed message, in order of what is already known about it:
+ *
+ * 1. Unsent parts exist — the turn already answered; send what remains.
+ *    No registry resolution beyond the fence, no model, no proposal.
+ * 2. A session was bound before a dispatch — read the engine's receipt
+ *    THERE. A receipt names the original turn: recover its outcome, even
+ *    if that session has since been ended and replaced from the console.
+ * 3. Otherwise resolve the session and thread, bind the session to the
+ *    row BEFORE dispatching, run the turn, persist its reply and cards
+ *    as parts in one transaction, then send them.
+ *
+ * Every outgoing part is fenced on the row's claim, the live pairing and
+ * the ceiling the turn opened under; only a confirmed message id counts.
+ */
+async function runTelegramConversation(row: TelegramConversation, args: TurnArgs): Promise<void> {
   const { store, botId, transport, owner, clock, readProjects, options, report } = args;
   const finish = (result: Parameters<Store["finishTelegramConversation"]>[2]): boolean => store.finishTelegramConversation(row.id, owner, result, clock());
   const held = (): boolean => store.renewTelegramConversation(row.id, owner, CONVERSATION_CLAIM_MS, clock());
@@ -578,44 +607,152 @@ async function runTelegramConversation(
     return;
   }
   const chatId = binding.chatId;
-  let replyMessageId: string | null = null;
-  /** One outbound part: fenced on the claim AND the channel right before
-   * the transport call. Model text and cards need the whole channel (the
-   * pairing and the exact ceiling they were composed under); a notice that
-   * says only "this changed, nothing happened" needs the pairing alone. */
-  const say = async (text: string, keyboard?: Keyboard, replyTo: number | null = null, fence: "channel" | "pairing" = "channel"): Promise<{ ok: true; messageId: string | null } | { ok: false; error: string }> => {
-    const problem = fence === "channel"
-      ? await telegramChannelProblem(store, { botId, bindingId: binding.id, approverGeneration: binding.approverGeneration, repos: expectedRepos }, readProjects)
-      : pairingProblem();
-    if (problem !== null) return { ok: false, error: problem };
-    if (!held()) return { ok: false, error: "the claim on this message lapsed" };
-    let answer: Awaited<ReturnType<Transport>>;
-    try {
-      answer = await transport("sendMessage", {
-        chat_id: chatId,
-        text,
-        link_preview_options: { is_disabled: true },
-        ...(replyTo === null ? {} : { reply_parameters: { message_id: replyTo } }),
-        ...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }),
-      });
-    } catch {
-      return { ok: false, error: "Telegram transport failed" };
-    }
-    if (!answer.ok) return { ok: false, error: answer.description ?? "sendMessage failed" };
-    const id = (answer.result as { message_id?: number } | undefined)?.message_id;
-    const messageId = Number.isSafeInteger(id) && id! > 0 ? String(id) : null;
-    if (messageId !== null) replyMessageId = messageId;
-    return { ok: true, messageId };
-  };
-  let expectedRepos: readonly string[] = [];
   const pairingProblem = (): string | null => {
     const live = store.liveTelegramBinding(botId);
     if (live === null || live.id !== binding.id || live.approverGeneration !== binding.approverGeneration) return "this chat is no longer paired";
     if (store.accountOf(live.approver)?.role !== "approver") return "the paired account is no longer an approver";
     return null;
   };
+  /** A notice that carries no project data — "this changed, nothing happened" — sent once, best effort, under the pairing fence alone. */
+  const notify = async (text: string): Promise<void> => {
+    if (pairingProblem() !== null || !held()) return;
+    try {
+      const answer = await transport("sendMessage", { chat_id: chatId, text, link_preview_options: { is_disabled: true }, reply_parameters: { message_id: Number(row.messageId) } });
+      if (!answer.ok) report.problems.push(`telegram chat notice for update ${row.updateId} could not be sent: ${answer.description ?? "sendMessage failed"}`);
+    } catch {
+      report.problems.push(`telegram chat notice for update ${row.updateId} could not be sent: Telegram transport failed`);
+    }
+  };
 
-  // 2. The ceiling, reloaded now.
+  /** The outbound half: send every pending part in order, each fenced; done only when every part is sent or moot. */
+  const deliver = async (outcomeWord: string): Promise<void> => {
+    // The row as it is NOW: the session was bound after this claim read it.
+    const bound = store.getTelegramConversation(row.id)?.session ?? null;
+    const session = bound === null ? null : store.getMateSession(bound);
+    if (session === null) { finish({ state: "failed", outcome: "unsent:no-session" }); report.refused++; return; }
+    const defer = (until: Date, why: string): void => {
+      report.problems.push(`telegram chat reply for update ${row.updateId} is waiting to be sent: ${why}`);
+      finish({ state: "queued", outcome: "delivering", nextAttemptAt: until.toISOString() });
+    };
+    for (const part of store.listTelegramConversationParts(row.id)) {
+      if (part.state !== "pending") continue;
+      const now = clock();
+      if (part.kind === "card") {
+        const proposal = part.proposal === null ? null : store.getMateProposal(part.proposal);
+        if (proposal === null || proposal.state !== "pending") {
+          // Confirmed or dismissed from the console or the terminal before the card went out: moot, not lost.
+          if (!store.dropTelegramConversationPart(row.id, part.ordinal, owner, proposal === null ? "the proposal is gone" : `the proposal was already ${proposal.state}`, now)) return;
+          continue;
+        }
+      }
+      if (now.getTime() - Date.parse(row.createdAt) > DELIVERY_MAX_AGE_MS) {
+        report.problems.push(`telegram chat reply for update ${row.updateId} was not sent within a day: ${part.lastError ?? "unsent"}`);
+        finish({ state: "failed", outcome: `unsent:gave-up:${part.lastError ?? "unsent"}` });
+        report.refused++;
+        return;
+      }
+      // Telegram's own retry_after, shared with the outbox: nothing goes out while it holds.
+      const limitedUntil = store.telegramRetryAt(botId);
+      if (limitedUntil > now.toISOString()) { defer(new Date(limitedUntil), "Telegram asked for a pause"); return; }
+      // The channel the reply was composed under, re-proved after the registry read; then the claim.
+      const problem = await telegramChannelProblem(store, { botId, bindingId: binding.id, approverGeneration: binding.approverGeneration, ceilingDigest: session.ceilingDigest }, readProjects);
+      if (problem === UNREADABLE_REGISTRY) { defer(new Date(clock().getTime() + PART_RETRY_MS[0]), problem); return; }
+      if (problem !== null) {
+        report.problems.push(`telegram chat reply for update ${row.updateId} was not sent: ${problem}`);
+        await notify(`${problem.charAt(0).toUpperCase()}${problem.slice(1)}, so the assistant's reply was not sent. Nothing was changed. Send your message again if you still want it.`);
+        finish({ state: "failed", outcome: `unsent:${problem}` });
+        report.refused++;
+        return;
+      }
+      if (!held()) return;
+      const backoff = new Date(clock().getTime() + PART_RETRY_MS[Math.min(part.attempts, PART_RETRY_MS.length - 1)]!);
+      let answer: Awaited<ReturnType<Transport>>;
+      try {
+        answer = await transport("sendMessage", {
+          chat_id: chatId,
+          text: part.text,
+          link_preview_options: { is_disabled: true },
+          ...(part.replyTo === null ? {} : { reply_parameters: { message_id: Number(part.replyTo) } }),
+          ...(part.keyboard === null ? {} : { reply_markup: { inline_keyboard: part.keyboard } }),
+        });
+      } catch {
+        // The answer was lost: Telegram may or may not have the message. Said so, retried, counted.
+        const error = "Telegram transport failed; delivery may be uncertain";
+        if (store.settleTelegramConversationPart(row.id, part.ordinal, owner, { ok: false, error, uncertain: true, retryAt: backoff.toISOString() }, clock())) defer(backoff, error);
+        return;
+      }
+      if (!answer.ok) {
+        const retry = answer.parameters?.retry_after;
+        const retryAfter = typeof retry === "number" && Number.isFinite(retry) && retry > 0 ? Math.ceil(retry) : null;
+        const error = `${answer.description ?? "sendMessage failed"}${retryAfter === null ? "" : ` (retry after ${retryAfter}s)`}`;
+        let until = backoff;
+        if (retryAfter !== null) {
+          const paused = new Date(clock().getTime() + retryAfter * 1_000);
+          store.deferTelegram(botId, paused.toISOString());
+          if (paused > until) until = paused;
+        }
+        if (store.settleTelegramConversationPart(row.id, part.ordinal, owner, { ok: false, error, uncertain: false, retryAt: until.toISOString() }, clock())) defer(until, error);
+        return;
+      }
+      const id = (answer.result as { message_id?: number } | undefined)?.message_id;
+      if (!Number.isSafeInteger(id) || id! <= 0) {
+        const error = "Telegram returned no confirmed message identity";
+        if (store.settleTelegramConversationPart(row.id, part.ordinal, owner, { ok: false, error, uncertain: true, retryAt: backoff.toISOString() }, clock())) defer(backoff, error);
+        return;
+      }
+      const messageId = String(id);
+      if (!store.settleTelegramConversationPart(row.id, part.ordinal, owner, { ok: true, messageId }, clock())) return;
+      if (part.keyboard !== null) store.placeTelegramProposalActions(part.keyboard.flat().map(one => one.callback_data), messageId);
+    }
+    if (finish({ state: "done", outcome: outcomeWord })) report.answered++;
+  };
+
+  /** The reply and one card per pending proposal, persisted with the cards' tokens in ONE transaction before any send. */
+  const plan = (session: number, turn: number, reply: string, proposals: readonly MateProposal[], repos: readonly string[]): boolean => {
+    try {
+      return store.transact(() => {
+        const now = clock();
+        const parts: Parameters<Store["planTelegramConversationParts"]>[3][number][] = splitParts(reply).map((text, index) => ({ kind: "reply", text, replyTo: index === 0 ? row.messageId : null }));
+        for (const proposal of proposals) {
+          const preview = proposalPreview(store, proposal, repos);
+          const keyboard = preview.buttons ? mintCardTokens(store, binding, proposal.id, now).keyboard : null;
+          parts.push({ kind: "card", text: preview.text, proposal: proposal.id, keyboard });
+        }
+        // A lapsed claim (or parts already planned by another claimant) keeps nothing minted here.
+        if (!store.planTelegramConversationParts(row.id, owner, { session, turn }, parts, now)) throw new PlanRefused();
+        return true;
+      });
+    } catch (error) {
+      if (error instanceof PlanRefused) return false;
+      throw error;
+    }
+  };
+
+  /** The recorded turn's outcome — nothing dispatched — from the session it was receipted under. */
+  const recover = async (session: number, turnId: number, repos: readonly string[]): Promise<void> => {
+    // A turn that died past its deadline is swept to failed first, so a
+    // restart reports the truth instead of waiting on a ghost.
+    store.sweepStaleMateTurns(clock());
+    const turn = store.getMateTurn(turnId);
+    if (turn === null) { finish({ state: "failed", outcome: "replayed:missing" }); report.refused++; return; }
+    store.bindTelegramConversationTurn(row.id, owner, session, turnId);
+    if (turn.state === "queued" || turn.state === "running") { requeue("replayed:running"); return; }
+    if (turn.state !== "answered") {
+      await notify(`Your earlier message was received, but the assistant's reply did not complete (${phoneText(turn.failureReason ?? "unknown", 40)}). Nothing was changed. Send it again if you still want it.`);
+      finish({ state: "failed", outcome: `replayed:${turn.failureReason ?? "failed"}` });
+      report.refused++;
+      return;
+    }
+    const reply = store.listMateMessages(turn.thread, 200).find(one => one.turn === turn.id && one.role === "assistant")?.text ?? "(the reply text is no longer in the thread)";
+    const proposals = store.listMateProposals(turn.thread, ["pending"]).filter(one => one.turn === turn.id);
+    if (!plan(session, turnId, reply, proposals, repos) && store.listTelegramConversationParts(row.id).length === 0) return;
+    await deliver("replayed");
+  };
+
+  // 2. Parts already planned: the turn answered; only the sending remains.
+  if (store.listTelegramConversationParts(row.id).length > 0) { await deliver("replayed"); return; }
+
+  // 3. The ceiling, reloaded now.
   let registry: readonly string[];
   try {
     registry = await readProjects();
@@ -625,12 +762,18 @@ async function runTelegramConversation(
     return;
   }
   const repos = telegramConversationRepos(store, binding.approver, registry);
-  expectedRepos = repos;
 
-  // 3. The session and thread — shared with the console and the CLI.
+  // 4. A session bound before an earlier dispatch: the receipt lives there,
+  // whatever session is live today.
+  if (row.session !== null) {
+    const receipt = store.mateRequestReceipt(row.session, row.request);
+    if (receipt !== null) { await recover(row.session, receipt.turn, repos); return; }
+  }
+
+  // 5. The session and thread — shared with the console and the CLI.
   const resolved = resolveTelegramMate(store, binding, repos, clock());
   if (!resolved.ok) {
-    if (resolved.said !== null) await say(resolved.said, undefined, Number(row.messageId), "pairing");
+    if (resolved.said !== null) await notify(resolved.said);
     finish({ state: "failed", outcome: `refused:${resolved.reason}` });
     report.refused++;
     return;
@@ -640,8 +783,11 @@ async function runTelegramConversation(
     const problem = await telegramChannelProblem(store, { botId, bindingId: binding.id, approverGeneration: binding.approverGeneration, repos: who.repos }, readProjects);
     return problem === null ? { ok: true } : { ok: false, reason: problem };
   };
+  // Bound BEFORE the dispatch, under the claim: a crash from here on finds
+  // the receipt in this session, not in whichever session is live later.
+  if (!store.bindTelegramConversationSession(row.id, owner, session.id)) return;
 
-  // 4. The turn. The claim is renewed while the model works; the poll lease
+  // 6. The turn. The claim is renewed while the model works; the poll lease
   // is the caller's. The request id is the receipt: a second pass after a
   // crash gets the original turn back, never a second dispatch.
   const heartbeat = setInterval(() => { held(); }, 30_000);
@@ -662,7 +808,7 @@ async function runTelegramConversation(
 
   if (!outcome.ok && "refused" in outcome) {
     if (outcome.refused === "concurrent") { requeue("busy"); return; }
-    await say(`${outcome.message.charAt(0).toUpperCase()}${outcome.message.slice(1)}. Nothing was changed.`, undefined, Number(row.messageId), "pairing");
+    await notify(`${outcome.message.charAt(0).toUpperCase()}${outcome.message.slice(1)}. Nothing was changed.`);
     finish({ state: "failed", outcome: `refused:${outcome.refused}` });
     report.refused++;
     return;
@@ -671,65 +817,15 @@ async function runTelegramConversation(
     // Truthful: what failed, that nothing was kept, and that a new message
     // is a new turn. A failed turn's drafts are already gone.
     const words = outcome.failed === "revoked" ? `${outcome.message.charAt(0).toUpperCase()}${outcome.message.slice(1)}.` : `The assistant's reply did not complete: ${outcome.message}. Nothing it proposed was kept. Send your message again if you still want it.`;
-    await say(phoneText(words, 1_000), undefined, Number(row.messageId), "pairing");
+    await notify(phoneText(words, 1_000));
     finish({ state: "failed", outcome: `failed:${outcome.failed}` });
     report.refused++;
     return;
   }
+  if (outcome.replayed) { await recover(session.id, outcome.turn, who.repos); return; }
 
-  let reply: string;
-  let proposals: MateProposal[];
-  let outcomeWord: string;
-  if (outcome.replayed) {
-    // The receipt named an earlier turn: recover ITS outcome, dispatch
-    // nothing. A turn that died past its deadline is swept to failed first,
-    // so a restart reports the truth instead of waiting on a ghost.
-    store.sweepStaleMateTurns(clock());
-    const turn = store.getMateTurn(outcome.turn);
-    if (turn === null) { finish({ state: "failed", outcome: "replayed:missing" }); report.refused++; return; }
-    if (turn.state === "queued" || turn.state === "running") { requeue("replayed:running"); return; }
-    if (turn.state !== "answered") {
-      await say(`Your earlier message was received, but the assistant's reply did not complete (${phoneText(turn.failureReason ?? "unknown", 40)}). Nothing was changed. Send it again if you still want it.`, undefined, Number(row.messageId), "pairing");
-      finish({ state: "failed", outcome: `replayed:${turn.failureReason ?? "failed"}` });
-      report.refused++;
-      return;
-    }
-    reply = store.listMateMessages(thread.id, 200).find(one => one.turn === turn.id && one.role === "assistant")?.text ?? "(the reply text is no longer in the thread)";
-    proposals = store.listMateProposals(thread.id, ["pending"]).filter(one => one.turn === turn.id);
-    outcomeWord = "replayed";
-  } else {
-    reply = outcome.reply;
-    proposals = store.listMateProposals(thread.id, ["pending"]).filter(one => one.turn === outcome.turn);
-    outcomeWord = "answered";
-  }
-
-  // 5. The reply, then one card per proposal, each part fenced.
-  const parts = splitParts(reply);
-  for (const [index, part] of parts.entries()) {
-    const sent = await say(part, undefined, index === 0 ? Number(row.messageId) : null);
-    if (!sent.ok) {
-      report.problems.push(`telegram chat reply for update ${row.updateId} could not be sent: ${sent.error}`);
-      finish({ state: "failed", outcome: `unsent:${sent.error}`, replyMessageId });
-      report.refused++;
-      return;
-    }
-  }
-  for (const proposal of proposals) {
-    const preview = proposalPreview(store, proposal, who.repos);
-    if (!preview.buttons) {
-      const sent = await say(preview.text);
-      if (!sent.ok) { report.problems.push(`telegram chat card for proposal ${proposal.id} could not be sent: ${sent.error}`); break; }
-      continue;
-    }
-    const minted = mintCardTokens(store, binding, proposal.id, clock());
-    const sent = await say(preview.text, minted.keyboard);
-    if (!sent.ok) {
-      store.consumeTelegramProposalActions(proposal.id, clock());
-      report.problems.push(`telegram chat card for proposal ${proposal.id} could not be sent: ${sent.error}`);
-      break;
-    }
-    if (sent.messageId !== null) store.placeTelegramProposalActions(minted.tokens, sent.messageId);
-  }
-  finish({ state: "done", outcome: outcomeWord, replyMessageId });
-  report.answered++;
+  // 7. The reply and its cards: durable first, then sent.
+  const proposals = store.listMateProposals(thread.id, ["pending"]).filter(one => one.turn === outcome.turn);
+  if (!plan(session.id, outcome.turn, outcome.reply, proposals, who.repos) && store.listTelegramConversationParts(row.id).length === 0) return;
+  await deliver("answered");
 }

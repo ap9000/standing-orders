@@ -486,13 +486,13 @@ describe("schema 62 compatibility without manual refresh", () => {
   // the unchanged fence must refuse anything above this build exactly as
   // v60 refused 61.
   const V61_TABLES = ["notification_delivery", "telegram_outbound_message", "telegram_retry"];
-  const V62_TABLES = ["telegram_conversation", "telegram_proposal_action"];
+  const V62_TABLES = ["telegram_conversation_part", "telegram_conversation", "telegram_proposal_action"];
   const V61_COLUMNS = ["provenance_scope", "project", "task_ref", "task_id", "source_run"];
   test.each([60, -60, 61, -61])("a v%s evidence store upgrades to v62 and reopens preserving every historical review row and receipt, and no schema-62 refresh object exists", version => {
     const root = mkdtempSync(join(tmpdir(), "refresh-migration-")), file = join(root, "test.db");
     try {
       let store = openStore(file); seed(store, join(root, "evidence"));
-      expect(SCHEMA_VERSION).toBe(62);
+      expect(SCHEMA_VERSION).toBe(63);
       expect(store.raw().prepare("PRAGMA table_info(run)").all().some(row => row["name"] === "review_refresh")).toBe(false);
       expect(store.raw().prepare("PRAGMA table_info(review_request)").all().some(row => row["name"] === "refresh_json")).toBe(false);
       // The retired schema-62 draft (a refresh request ledger, a second
@@ -529,19 +529,19 @@ describe("schema 62 compatibility without manual refresh", () => {
       raw.prepare("UPDATE schema_version SET version = ?").run(version);
       raw.close();
       store = openStore(file);
-      expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(62);
+      expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(63);
       for (const table of [...V61_TABLES, ...V62_TABLES]) expect(store.raw().prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.["n"]).toBe(0);
       for (const column of V61_COLUMNS) expect(store.raw().prepare("PRAGMA table_info(notification)").all().some(row => row["name"] === column)).toBe(true);
       expect(String(store.raw().prepare("SELECT sql FROM sqlite_master WHERE name = 'run_stop'").get()?.["sql"])).toContain("'cli','web','telegram'");
       tables.forEach((t, index) => expect(store.raw().prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()).toEqual(before[index]));
       expect(store.raw().prepare("PRAGMA foreign_key_check").all()).toEqual([]);
       store.close(); store = openStore(file);
-      expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(62);
+      expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(63);
       tables.forEach((t, index) => expect(store.raw().prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()).toEqual(before[index]));
       expect(store.criterionReviewsFor(1)).not.toEqual([]); store.close();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
-  test.each([63, -63])("schema %s refuses before every write and preserves bytes — the fence an older reader applies to this v62 file", version => {
+  test.each([64, -64])("schema %s refuses before every write and preserves bytes — the fence an older reader applies to this v63 file", version => {
     const root = mkdtempSync(join(tmpdir(), "refresh-refusal-")), file = join(root, "test.db");
     try {
       const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(version); store.close();
@@ -552,10 +552,10 @@ describe("schema 62 compatibility without manual refresh", () => {
       expect(readFileSync(file)).toEqual(before);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
-  test("-62 is an impossible marker: an upgrade never begins at the version it upgrades to", () => {
+  test("-63 is an impossible marker: an upgrade never begins at the version it upgrades to", () => {
     const root = mkdtempSync(join(tmpdir(), "refresh-refusal-")), file = join(root, "test.db");
     try {
-      const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(-62); store.close();
+      const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(-63); store.close();
       const before = readFileSync(file);
       expect(() => openStore(file)).toThrow(/mid-flight marker no build ever wrote/);
       expect(readFileSync(file)).toEqual(before);

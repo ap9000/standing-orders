@@ -92,7 +92,9 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // provenance and Telegram destination receipts, and readers below v61 refuse it.
 // v62 adds the durable Telegram conversation queue and proposal-card tokens,
 // and admits 'telegram' as a stop's audit source; readers below v62 refuse it.
-export const SCHEMA_VERSION = 62;
+// v63 adds the durable outbound parts of a Telegram conversation (the reply
+// and its cards, persisted before any send); readers below v63 refuse it.
+export const SCHEMA_VERSION = 63;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -1116,6 +1118,31 @@ export type TelegramConversation = {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+};
+
+/** One outbound part of a conversation — a slice of the reply or one proposal card — durable before it is sent (v63). */
+export type TelegramConversationPart = {
+  conversation: number;
+  ordinal: number;
+  kind: "reply" | "card";
+  text: string;
+  /** The operator's message the first reply part answers. */
+  replyTo: string | null;
+  /** The pending proposal a card carries; null once that proposal is gone. */
+  proposal: number | null;
+  /** The inline keyboard exactly as sent; its callback data are the card's opaque tokens, minted with the part. */
+  keyboard: { text: string; callback_data: string }[][] | null;
+  /** `dropped`: a card whose proposal was resolved elsewhere before it went out — moot, never a lost message. */
+  state: "pending" | "sent" | "dropped";
+  /** Telegram's confirmed message id — the only thing that makes a part sent. */
+  messageId: string | null;
+  attempts: number;
+  /** Sends whose answer was lost: a later attempt may have duplicated the part. */
+  uncertain: number;
+  nextAttemptAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  sentAt: string | null;
 };
 
 /** What one opaque proposal-card token means (v62). */
@@ -2681,6 +2708,38 @@ CREATE TABLE IF NOT EXISTS telegram_proposal_action (
 );
 CREATE INDEX IF NOT EXISTS telegram_proposal_action_by_proposal ON telegram_proposal_action (proposal);
 
+-- v63: the outbound half of a conversation, durable BEFORE any send. Once
+-- the engine's turn is answered (or recovered from its receipt), the exact
+-- reply text, split into Telegram-sized parts, and one card per pending
+-- proposal are written here in one transaction; the bridge then sends
+-- them in order under the row's claim, marking a part sent only when
+-- Telegram confirmed a message id. A crash, an outage, a rate limit or a
+-- restart resumes from the first unsent part — never another model call,
+-- proposal, task or revision. A card's buttons are minted with the part,
+-- so a resend carries the same tokens. A part whose network answer was
+-- lost is counted as uncertain: a resend may duplicate it, and the row
+-- says so instead of claiming an exactly-once Telegram cannot provide.
+CREATE TABLE IF NOT EXISTS telegram_conversation_part (
+  conversation    INTEGER NOT NULL REFERENCES telegram_conversation(id) ON DELETE CASCADE,
+  ordinal         INTEGER NOT NULL,
+  kind            TEXT NOT NULL CHECK (kind IN ('reply','card')),
+  text            TEXT NOT NULL,
+  reply_to        TEXT,
+  proposal        INTEGER REFERENCES mate_proposal(id) ON DELETE SET NULL,
+  keyboard_json   TEXT,
+  state           TEXT NOT NULL CHECK (state IN ('pending','sent','dropped')),
+  message_id      TEXT,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  uncertain       INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_error      TEXT,
+  created_at      TEXT NOT NULL,
+  sent_at         TEXT,
+  PRIMARY KEY (conversation, ordinal),
+  CHECK ((state = 'sent') = (message_id IS NOT NULL)),
+  CHECK ((state = 'sent') = (sent_at IS NOT NULL))
+);
+
 -- The bridge's poll lease and cursor, per bot. One live poller at a time;
 -- the cursor only ever moves forward, and only under a live generation.
 CREATE TABLE IF NOT EXISTS bridge_lease (
@@ -3652,6 +3711,9 @@ function initializeStore(db: Database, file: string): Store {
     for (const table of ["telegram_conversation", "telegram_proposal_action"]) {
       if (!tableExists(db, table)) throw new Error(`${file}: Telegram conversation history is missing; refusing to recreate it`);
     }
+  }
+  if (preflight !== null && Math.abs(preflight) >= 63) {
+    if (!tableExists(db, "telegram_conversation_part")) throw new Error(`${file}: Telegram reply history is missing; refusing to recreate it`);
   }
   if (preflight !== null && preflight > 0 && preflight < SCHEMA_VERSION) {
     const stamped = db.prepare("UPDATE schema_version SET version = ? WHERE version = ?").run(-preflight, preflight);
@@ -21143,6 +21205,20 @@ export class Store {
     return Number(changes) === 1;
   }
 
+  /**
+   * Bind the session a turn is about to be dispatched under, BEFORE the
+   * dispatch: the engine receipts the request inside that session, so a
+   * later attempt — after a crash, even after the session was ended and
+   * replaced from the console — reads the receipt where it was written
+   * instead of resolving today's session and finding nothing there.
+   */
+  bindTelegramConversationSession(id: number, owner: string, session: number): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE telegram_conversation SET session = ? WHERE id = ? AND claim_owner = ? AND state = 'running'")
+      .run(session, id, owner);
+    return Number(changes) === 1;
+  }
+
   /** Bind the admitted turn to its row as soon as the engine's receipt names it. */
   bindTelegramConversationTurn(id: number, owner: string, session: number, turn: number): boolean {
     const { changes } = this.db
@@ -21177,6 +21253,102 @@ export class Store {
               WHERE id = ? AND claim_owner = ? AND claim_expires_at > ? AND state = 'running'`,
           )
           .run(result.state, result.outcome, result.replyMessageId ?? null, stamp, id, owner, stamp);
+    return Number(changes) === 1;
+  }
+
+  // ---- the outbound parts (v63) ------------------------------------------------
+
+  /**
+   * Persist the whole outbound half of a turn — every reply part and every
+   * card, with the cards' tokens already minted — in one transaction, BEFORE
+   * any send. Only the claim holder may, and only once: a row that already
+   * has parts keeps them (a retry resumes, never re-plans). The turn's
+   * identity rides the row too, so the parts answer to exactly that turn.
+   */
+  planTelegramConversationParts(
+    id: number,
+    owner: string,
+    turn: { session: number; turn: number },
+    parts: readonly { kind: TelegramConversationPart["kind"]; text: string; replyTo?: string | null; proposal?: number | null; keyboard?: TelegramConversationPart["keyboard"] }[],
+    now: Date,
+  ): boolean {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const held = this.db
+        .prepare("SELECT 1 AS hit FROM telegram_conversation WHERE id = ? AND claim_owner = ? AND claim_expires_at > ? AND state = 'running'")
+        .get(id, owner, stamp);
+      if (held === undefined) return false;
+      const existing = this.db.prepare("SELECT COUNT(*) AS n FROM telegram_conversation_part WHERE conversation = ?").get(id);
+      if (Number(existing?.["n"] ?? 0) > 0) return false;
+      this.db.prepare("UPDATE telegram_conversation SET session = ?, turn = ? WHERE id = ?").run(turn.session, turn.turn, id);
+      const insert = this.db.prepare(
+        `INSERT INTO telegram_conversation_part (conversation, ordinal, kind, text, reply_to, proposal, keyboard_json, state, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      );
+      parts.forEach((part, ordinal) => {
+        insert.run(id, ordinal, part.kind, part.text, part.replyTo ?? null, part.proposal ?? null, part.keyboard == null ? null : JSON.stringify(part.keyboard), stamp);
+      });
+      return true;
+    });
+  }
+
+  listTelegramConversationParts(conversation: number): TelegramConversationPart[] {
+    return this.db.prepare("SELECT * FROM telegram_conversation_part WHERE conversation = ? ORDER BY ordinal").all(conversation).map(readTelegramConversationPart);
+  }
+
+  /**
+   * Settle one send attempt under the row's claim. A confirmed message id
+   * is the only success: the part is sent, and a reply part's id becomes
+   * the row's reply id. Anything else leaves the part pending with its
+   * attempt counted, its error named, its next attempt scheduled, and —
+   * when the answer was lost rather than refused — its uncertainty counted.
+   * A lapsed claim settles nothing, so a reclaimer's outcome stands.
+   */
+  settleTelegramConversationPart(
+    conversation: number,
+    ordinal: number,
+    owner: string,
+    outcome: { ok: true; messageId: string } | { ok: false; error: string; uncertain: boolean; retryAt: string },
+    now: Date,
+  ): boolean {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const held = this.db
+        .prepare("SELECT 1 AS hit FROM telegram_conversation WHERE id = ? AND claim_owner = ? AND claim_expires_at > ? AND state = 'running'")
+        .get(conversation, owner, stamp);
+      if (held === undefined) return false;
+      const { changes } = outcome.ok
+        ? this.db
+            .prepare(
+              `UPDATE telegram_conversation_part SET state = 'sent', message_id = ?, sent_at = ?, attempts = attempts + 1, next_attempt_at = NULL, last_error = NULL
+                WHERE conversation = ? AND ordinal = ? AND state = 'pending'`,
+            )
+            .run(outcome.messageId, stamp, conversation, ordinal)
+        : this.db
+            .prepare(
+              `UPDATE telegram_conversation_part SET attempts = attempts + 1, uncertain = uncertain + ?, next_attempt_at = ?, last_error = ?
+                WHERE conversation = ? AND ordinal = ? AND state = 'pending'`,
+            )
+            .run(outcome.uncertain ? 1 : 0, outcome.retryAt, outcome.error, conversation, ordinal);
+      if (Number(changes) !== 1) return false;
+      if (outcome.ok) {
+        const part = this.db.prepare("SELECT kind FROM telegram_conversation_part WHERE conversation = ? AND ordinal = ?").get(conversation, ordinal);
+        if (part?.["kind"] === "reply") this.db.prepare("UPDATE telegram_conversation SET reply_message_id = ? WHERE id = ?").run(outcome.messageId, conversation);
+      }
+      return true;
+    });
+  }
+
+  /** A card whose proposal no longer waits (confirmed or dismissed from another surface, or gone) is moot: dropped with the reason, never sent. */
+  dropTelegramConversationPart(conversation: number, ordinal: number, owner: string, reason: string, now: Date): boolean {
+    const stamp = now.toISOString();
+    const held = this.db
+      .prepare("SELECT 1 AS hit FROM telegram_conversation WHERE id = ? AND claim_owner = ? AND claim_expires_at > ? AND state = 'running'")
+      .get(conversation, owner, stamp);
+    if (held === undefined) return false;
+    const { changes } = this.db
+      .prepare("UPDATE telegram_conversation_part SET state = 'dropped', last_error = ?, next_attempt_at = NULL WHERE conversation = ? AND ordinal = ? AND state = 'pending'")
+      .run(reason, conversation, ordinal);
     return Number(changes) === 1;
   }
 
@@ -22180,6 +22352,27 @@ function readTelegramConversation(row: Record<string, unknown>): TelegramConvers
     createdAt: String(row["created_at"]),
     startedAt: text("started_at"),
     finishedAt: text("finished_at"),
+  };
+}
+
+function readTelegramConversationPart(row: Record<string, unknown>): TelegramConversationPart {
+  const text = (key: string): string | null => (row[key] === null || row[key] === undefined ? null : String(row[key]));
+  return {
+    conversation: Number(row["conversation"]),
+    ordinal: Number(row["ordinal"]),
+    kind: String(row["kind"]) as TelegramConversationPart["kind"],
+    text: String(row["text"]),
+    replyTo: text("reply_to"),
+    proposal: row["proposal"] === null || row["proposal"] === undefined ? null : Number(row["proposal"]),
+    keyboard: row["keyboard_json"] === null || row["keyboard_json"] === undefined ? null : JSON.parse(String(row["keyboard_json"])) as TelegramConversationPart["keyboard"],
+    state: String(row["state"]) as TelegramConversationPart["state"],
+    messageId: text("message_id"),
+    attempts: Number(row["attempts"]),
+    uncertain: Number(row["uncertain"]),
+    nextAttemptAt: text("next_attempt_at"),
+    lastError: text("last_error"),
+    createdAt: String(row["created_at"]),
+    sentAt: text("sent_at"),
   };
 }
 

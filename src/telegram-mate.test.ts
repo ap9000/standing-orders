@@ -29,7 +29,8 @@ import { acquire } from "./claim.js";
 import { runOperate, EXIT } from "./operate.js";
 import { saveRepos } from "./repos.js";
 import { run as exec } from "./exec.js";
-import { CONVERSATION_CLAIM_MS, TELEGRAM_ACTION_PARITY, mintCardTokens, parityGaps, proposalPreview, telegramRequestId } from "./telegram-mate.js";
+import { CONVERSATION_CLAIM_MS, PART_RETRY_MS, TELEGRAM_ACTION_PARITY, mintCardTokens, parityGaps, proposalPreview, telegramRequestId } from "./telegram-mate.js";
+import { modeDigestOf, modeTermsJson, presetTerms } from "./modes.js";
 import type { SubscriptionMateRequest, SubscriptionMateRunner } from "./subscription-chat.js";
 import { TURN_WALL_CLOCK_MS } from "./converse.js";
 
@@ -41,10 +42,18 @@ const USER = 31337;
 type Call = { id: string; name: string; args: Record<string, unknown> };
 type Answer = { text: string; calls?: Call[]; before?: () => void | Promise<void> };
 
+/** What the scripted wire does to one sendMessage: nothing special, a lost answer, an ok with no message id, or Telegram's own refusal. */
+type SendFault = "throw" | "no-id" | { ok: false; description?: string; parameters?: { retry_after?: number } } | null;
+
 function scriptedTransport() {
   const calls: { method: string; params: Record<string, unknown>; messageId: number | null }[] = [];
   const updates: unknown[][] = [];
   let nextMessageId = 100;
+  const script = {
+    /** Consulted before every sendMessage with the attempt count so far; a fault is recorded as an attempt, never as a send. */
+    fault: null as ((params: Record<string, unknown>, attempt: number) => SendFault) | null,
+  };
+  const attempts = () => calls.filter(call => call.method.startsWith("sendMessage"));
   const transport: TelegramTransport = async (method, params) => {
     if (method === "getUpdates") {
       calls.push({ method, params, messageId: null });
@@ -52,6 +61,13 @@ function scriptedTransport() {
       return { ok: true, result: (updates.shift() ?? []).filter(update => Number((update as { update_id: number }).update_id) >= offset) };
     }
     if (method === "sendMessage") {
+      const fault = script.fault === null ? null : script.fault(params, attempts().length);
+      if (fault !== null) {
+        calls.push({ method: "sendMessage:failed", params, messageId: null });
+        if (fault === "throw") throw new Error("socket hang up");
+        if (fault === "no-id") return { ok: true, result: {} };
+        return fault;
+      }
       const messageId = nextMessageId++;
       calls.push({ method, params, messageId });
       return { ok: true, result: { message_id: messageId } };
@@ -75,7 +91,7 @@ function scriptedTransport() {
     };
     return { messageId: sent.messageId as number, text: String(sent.params["text"]), rows, button };
   };
-  return { transport, calls, updates, sends, texts, edits, acks, card };
+  return { transport, calls, updates, sends, attempts, texts, edits, acks, card, set fault(value: typeof script.fault) { script.fault = value; } };
 }
 
 const textUpdate = (id: number, text: string, extra: Record<string, unknown> = {}) => ({
@@ -312,6 +328,41 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(script.texts().at(-1)).toContain("— revision");
   });
 
+  test("the same journey under a signed automatic-approval mode: the phone's revision is approved under that policy and runs unattended; nothing asks for a password", async () => {
+    const terms = { ...presetTerms("hands-off", new Date(now.getTime() + 24 * 3_600_000).toISOString()), autoApproveFiling: true };
+    store.signMode({ repo, name: "hands-off", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, now);
+    const { run } = seedSource("payout");
+    store.enqueueNotification({ dedupeKey: `result:${run}`, kind: "report-ready", subject: "Result ready", body: "Built and verified.", source: { run } }, now);
+    expect(await pass({ deliver: true })).toMatchObject({ ok: true, report: { sent: 1 } });
+    const resultMessage = script.sends()[0]!.messageId as number;
+    answers.push(
+      { text: "Reading the result.", calls: [{ id: "r1", name: "get_result", args: { task: "payout", run } }] },
+      { text: "Proposing the change.", calls: [{ id: "r2", name: "propose_review", args: { run, operation: "revise", note: "Add a test for the over-limit case." } }] },
+      { text: "I proposed a revision of payout with your feedback. Confirm it to create the revision." },
+    );
+    script.updates.push([textUpdate(5, "Add a test for the over-limit case.", { reply_to_message: { message_id: resultMessage } })]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, chatAnswered: 1, problems: [] } });
+    const sent = script.card();
+    expect(sent.text).toContain(`Request changes to result #${run} of Guard the payout path (payout)`);
+    expect(sent.text).toContain("Its approval follows your settings.");
+    expect(await tapPass(sent.button(/^Confirm$/), sent.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
+    const proposal = store.listMateProposals(store.liveMateThreadFor("alex")!.id)[0]!;
+    expect(proposal.outcome).toMatchObject({ ok: true, via: "telegram", said: "Revision created under your automatic approval settings." });
+    const child = (proposal.outcome as { taskId: string }).taskId;
+    expect(store.taskFamilyOf("payout", [repo], false)?.versions.map(one => one.id)).toEqual(["payout", child]);
+    expect(store.revisionSourceOf(store.lookupRef(child)!.id)).toMatchObject({ sourceRun: run, sourceTask: "payout" });
+    // Approved under the signed mode — the same policy the console's form applies — so a worker can take it without anyone at the computer.
+    const scope = store.getScope(child)!;
+    expect(scope.approvedDigest).toBe(scope.digest);
+    expect(scope.approvalBasis).toBe("mode");
+    expect(store.getTask(child)?.state).toBe("queued");
+    expect(script.edits().at(-1)).toBe("✓ Revision created under your automatic approval settings.");
+    expect(script.edits().at(-1)).not.toMatch(/password|Approve the revision/);
+    // A second tap on the same card creates nothing more.
+    expect(await tapPass(sent.button(/^Confirm$/), sent.messageId)).toMatchObject({ ok: true, report: { ignored: 1 } });
+    expect(store.taskFamilyOf("payout", [repo], false)?.versions).toHaveLength(2);
+  });
+
   test.each([
     { from: { id: USER + 1 } }, { chat: { id: CHAT + 1, type: "private" } }, { chat: { id: CHAT, type: "group" } },
     { forward_origin: {} }, { forward_date: 1 }, { via_bot: {} }, { sender_chat: {} }, { caption: "photo" },
@@ -368,6 +419,32 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     } else {
       expect(script.sends()).toEqual([]);
     }
+  });
+
+  test.each(["unpair", "unenroll"])("%s between two model steps stops the turn before the second step's tools run: nothing proposed, no project data sent afterwards", async change => {
+    answers.push(
+      { text: "Reading.", calls: [{ id: "s1", name: "list_tasks", args: {} }] },
+      {
+        text: "Holding it.",
+        calls: [{ id: "s2", name: "propose_hold", args: { task: "a", reason: "wait" } }],
+        before: () => { if (change === "unpair") store.unpairTelegram(BOT, "alex", now); else projects = []; },
+      },
+      { text: "never reached" },
+    );
+    task("a");
+    script.updates.push([textUpdate(2, "hold task a")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, chatRefused: 1 } });
+    // The second step was already on the wire when the channel changed; nothing after it ran or went out.
+    expect(requests).toHaveLength(2);
+    expect(answers).toHaveLength(1);
+    const row = store.listTelegramConversations(BOT)[0]!;
+    expect(row).toMatchObject({ state: "failed", outcome: expect.stringMatching(/^failed:revoked|^failed:superseded/) });
+    expect(store.getMateTurn(row.turn!)).toMatchObject({ state: "failed" });
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_proposal").get()?.["n"]).toBe(0);
+    expect(store.activeHolds(store.lookupRef("a")!.id, now)).toEqual([]);
+    expect(store.listTelegramConversationParts(row.id)).toEqual([]);
+    if (change === "unenroll") expect(script.texts()).toEqual([expect.stringContaining("the connected projects changed")]);
+    else expect(script.sends()).toEqual([]);
   });
 
   test("long text is refused whole with no model call; a reply to a digest naming two tasks asks which", async () => {
@@ -431,6 +508,204 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "failed", outcome: "replayed:crashed" });
   });
 
+  describe("outgoing replies and cards are durable before they are sent", () => {
+    const draft = () => answers.push(
+      { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Add the limit", goal: "Add a payout limit.", acceptance: [{ id: "c1", statement: "The limit holds.", evidence: ["manual-review"] }] } }] },
+      { text: "Proposed. Confirm to file." },
+    );
+    const row = () => store.listTelegramConversations(BOT)[0]!;
+    const parts = () => store.listTelegramConversationParts(row().id);
+    const turns = () => Number(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()?.["n"]);
+    const later = (ms: number) => { now = new Date(now.getTime() + ms); };
+
+    test("a lost network answer: the reply and card were persisted first, the send is counted uncertain, and the retry needs no model call", async () => {
+      draft();
+      script.fault = () => "throw";
+      script.updates.push([textUpdate(2, "add a payout limit")]);
+      const first = await pass();
+      expect(first).toMatchObject({ ok: true, report: { chatQueued: 1, problems: [expect.stringContaining("is waiting to be sent: Telegram transport failed; delivery may be uncertain")] } });
+      expect(first.ok && first.report.chatAnswered).toBeFalsy();
+      expect(row()).toMatchObject({ state: "queued", outcome: "delivering", replyMessageId: null, nextAttemptAt: new Date(now.getTime() + PART_RETRY_MS[0]).toISOString() });
+      expect(row().turn).not.toBeNull();
+      // The exact output, per part, before any send: the reply answering the operator's message, then the card with its tokens already minted.
+      expect(parts().map(one => [one.kind, one.state, one.attempts, one.uncertain, one.replyTo, one.messageId])).toEqual([["reply", "pending", 1, 1, "1002", null], ["card", "pending", 0, 0, null, null]]);
+      expect(parts()[0]).toMatchObject({ text: "Proposed. Confirm to file.", lastError: "Telegram transport failed; delivery may be uncertain" });
+      expect(parts()[1]!.keyboard!.flat().map(one => one.text)).toEqual(["Confirm", "Dismiss"]);
+      const tokens = parts()[1]!.keyboard!.flat().map(one => one.callback_data);
+      expect(tokens.map(one => store.getTelegramProposalAction(one)?.messageId)).toEqual([null, null]);
+      expect(script.attempts()).toHaveLength(1);
+      expect(requests).toHaveLength(2);
+      // Too early: nothing is claimed. Then a second lost answer, counted again, with the longer wait.
+      later(1_000);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [] } });
+      expect(script.attempts()).toHaveLength(1);
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("delivery may be uncertain")] } });
+      expect(parts()[0]).toMatchObject({ state: "pending", attempts: 2, uncertain: 2, nextAttemptAt: new Date(now.getTime() + PART_RETRY_MS[1]).toISOString() });
+      // The wire returns: both parts go out in order, once each, and only now is the row done — with no third model call and no second turn.
+      script.fault = null;
+      later(PART_RETRY_MS[1]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(script.texts()).toEqual(["Proposed. Confirm to file.", expect.stringContaining("Create task in repo: Add the limit")]);
+      expect(script.sends()[0]!.params["reply_parameters"]).toEqual({ message_id: 1002 });
+      expect(parts().map(one => [one.state, one.messageId, one.attempts])).toEqual([["sent", "100", 3], ["sent", "101", 1]]);
+      expect(row()).toMatchObject({ state: "done", outcome: "replayed", replyMessageId: "100" });
+      expect(requests).toHaveLength(2);
+      expect(turns()).toBe(1);
+      // The card that finally went out carries the tokens minted with the part, now placed on the confirmed message; a tap confirms once.
+      expect(script.card().rows.flat().map(one => one.callback_data)).toEqual(tokens);
+      expect(tokens.map(one => store.getTelegramProposalAction(one)?.messageId)).toEqual(["101", "101"]);
+      expect(await tapPass(tokens[0]!, 101)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
+      expect(store.handle.prepare("SELECT COUNT(*) AS n FROM task").get()?.["n"]).toBe(1);
+    });
+
+    test("Telegram's retry_after on the card pauses every send bot-wide — the outbox included — and the card resumes with the same tokens after it", async () => {
+      draft();
+      script.fault = params => params["reply_markup"] === undefined ? null : { ok: false, description: "Too Many Requests", parameters: { retry_after: 7 } };
+      script.updates.push([textUpdate(2, "add a payout limit")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, problems: [expect.stringContaining("is waiting to be sent: Too Many Requests (retry after 7s)")] } });
+      const pausedUntil = new Date(now.getTime() + 7_000).toISOString();
+      expect(store.telegramRetryAt(BOT)).toBe(pausedUntil);
+      expect(row()).toMatchObject({ state: "queued", outcome: "delivering", nextAttemptAt: pausedUntil, replyMessageId: "100" });
+      expect(parts().map(one => [one.kind, one.state, one.attempts, one.uncertain])).toEqual([["reply", "sent", 1, 0], ["card", "pending", 1, 0]]);
+      const planned = parts()[1]!.keyboard!.flat().map(one => one.callback_data);
+      // The pause holds the outbox's own rows too, and the conversation is not claimed before it ends — even after a restart.
+      script.fault = null;
+      store.enqueueNotification({ dedupeKey: "fact", kind: "report-ready", subject: "A fact", body: "landed", source: { taskRef: task("a") } }, now);
+      store.close(); store = openStore(file);
+      later(6_999);
+      expect(await pass({ deliver: true })).toMatchObject({ ok: true, report: { sent: 0 } });
+      expect(script.attempts()).toHaveLength(2);
+      later(1);
+      expect(await pass({ deliver: true })).toMatchObject({ ok: true, report: { sent: 1, chatAnswered: 1, problems: [] } });
+      expect(script.card().rows.flat().map(one => one.callback_data)).toEqual(planned);
+      expect(parts()[1]).toMatchObject({ state: "sent", messageId: String(script.card().messageId), attempts: 2 });
+      expect(row()).toMatchObject({ state: "done", outcome: "replayed" });
+      expect(requests).toHaveLength(2);
+      expect(turns()).toBe(1);
+      expect(await tapPass(planned[0]!, script.card().messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
+    });
+
+    test("an ok answer without a message id is not a delivery: the part stays pending and uncertain, and the row is not done until Telegram confirms one", async () => {
+      answers.push({ text: "Nothing waits on you." });
+      script.fault = () => "no-id";
+      script.updates.push([textUpdate(2, "what needs me?")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("Telegram returned no confirmed message identity")] } });
+      expect(parts()).toEqual([expect.objectContaining({ kind: "reply", state: "pending", messageId: null, attempts: 1, uncertain: 1, lastError: "Telegram returned no confirmed message identity" })]);
+      expect(row()).toMatchObject({ state: "queued", outcome: "delivering", replyMessageId: null });
+      script.fault = null;
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+      expect(parts()[0]).toMatchObject({ state: "sent", messageId: "100", attempts: 2, uncertain: 1 });
+      expect(row()).toMatchObject({ state: "done", replyMessageId: "100" });
+      expect(requests).toHaveLength(1);
+    });
+
+    test("a crash after the first part of a long reply was confirmed: the restart sends only the rest, with no model call", async () => {
+      const long = "The queue is quiet. ".repeat(220);
+      answers.push({ text: long });
+      let renewals = 0;
+      const original = store.renewTelegramConversation.bind(store);
+      const dying = vi.spyOn(store, "renewTelegramConversation").mockImplementation((...args) => { if (++renewals === 2) throw new Error("power cut"); return original(...args); });
+      script.updates.push([textUpdate(2, "how is the queue?")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("power cut")] } });
+      dying.mockRestore();
+      expect(script.texts()).toEqual([long.slice(0, 3_900)]);
+      expect(parts().map(one => [one.state, one.messageId])).toEqual([["sent", "100"], ["pending", null]]);
+      expect(row()).toMatchObject({ state: "running", replyMessageId: "100" });
+      store.close(); store = openStore(file);
+      later(CONVERSATION_CLAIM_MS + 1_000);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(script.texts()).toEqual([long.slice(0, 3_900), long.slice(3_900)]);
+      expect(parts().map(one => [one.state, one.messageId])).toEqual([["sent", "100"], ["sent", "101"]]);
+      expect(row()).toMatchObject({ state: "done", outcome: "replayed", attempts: 2 });
+      expect(requests).toHaveLength(1);
+      expect(turns()).toBe(1);
+    });
+
+    test("a card whose proposal was confirmed on the console before it went out is dropped as moot, and the row still completes", async () => {
+      draft();
+      script.fault = params => params["reply_markup"] === undefined ? null : "throw";
+      script.updates.push([textUpdate(2, "add a payout limit")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1 } });
+      const proposal = store.listMateProposals(store.liveMateThreadFor("alex")!.id, ["pending"])[0]!;
+      expect(confirmMateProposal(store, who(), proposal.id, now, { via: "web" })).toMatchObject({ ok: true, kind: "task" });
+      script.fault = null;
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+      expect(parts().map(one => [one.kind, one.state, one.lastError])).toEqual([["reply", "sent", null], ["card", "dropped", "the proposal was already confirmed"]]);
+      expect(script.sends()).toHaveLength(1);
+      expect(store.handle.prepare("SELECT COUNT(*) AS n FROM task").get()?.["n"]).toBe(1);
+    });
+
+    test("a project unenrolled while the reply waits: the model's text never goes out under a changed ceiling, and the row says so", async () => {
+      answers.push({ text: "Two tasks are queued." });
+      script.fault = () => "throw";
+      script.updates.push([textUpdate(2, "how do things stand?")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1 } });
+      script.fault = null;
+      projects = [];
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1, problems: [expect.stringContaining("was not sent: the connected projects changed")] } });
+      expect(script.texts()).toEqual([expect.stringMatching(/^The connected projects changed, so the assistant's reply was not sent\. Nothing was changed\./)]);
+      expect(parts()[0]).toMatchObject({ state: "pending", messageId: null });
+      expect(row()).toMatchObject({ state: "failed", outcome: "unsent:the connected projects changed" });
+    });
+  });
+
+  describe("the original turn is bound before the first dispatch", () => {
+    const replaceSession = () => {
+      const original = store.activeMateSession("alex")!;
+      store.endMateSession(original.id, "alex", now);
+      const me = who();
+      const replacement = store.mintMateSession({ approver: "alex", approverGeneration: me.generation, credentialKey: subscriptionCredentialKey("claude-subscription"), ceilingMicrousd: 0, ceilingDigest: me.ceilingDigest, termsDigest: "t".repeat(64) }, now);
+      return { original, replacement };
+    };
+
+    test("the session is on the row before the harness is called, and a crash after the answer with the session then ended and replaced from the console recovers the original turn from ITS receipt", async () => {
+      let boundAtDispatch: number | null | undefined;
+      answers.push({ text: "Nothing waits on you right now.", before: () => { boundAtDispatch = store.listTelegramConversations(BOT)[0]!.session; } });
+      const dying = vi.spyOn(store, "bindTelegramConversationTurn").mockImplementationOnce(() => { throw new Error("power cut"); });
+      script.updates.push([textUpdate(2, "what needs me?")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("power cut")] } });
+      dying.mockRestore();
+      expect(boundAtDispatch).toBe(store.activeMateSession("alex")!.id);
+      expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "running", session: boundAtDispatch, turn: null });
+      expect(script.sends()).toEqual([]);
+      const { original, replacement } = replaceSession();
+      store.close(); store = openStore(file);
+      now = new Date(T0.getTime() + CONVERSATION_CLAIM_MS + 1_000);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(requests).toHaveLength(1);
+      expect(script.texts()).toEqual(["Nothing waits on you right now."]);
+      const row = store.listTelegramConversations(BOT)[0]!;
+      expect(row).toMatchObject({ state: "done", outcome: "replayed", session: original.id, attempts: 2 });
+      expect(store.getMateTurn(row.turn!)).toMatchObject({ session: original.id, state: "answered" });
+      expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()?.["n"]).toBe(1);
+      // The console's replacement session was neither used nor touched.
+      expect(store.activeMateSession("alex")?.id).toBe(replacement);
+      expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn WHERE session = ?").get(replacement)?.["n"]).toBe(0);
+    });
+
+    test("a crash while the harness was answering, with the session then replaced, is reported as an unfinished attempt — once, with no new dispatch", async () => {
+      answers.push({ text: "Still thinking." });
+      const dying = vi.spyOn(store, "finalizeChatTurn").mockImplementationOnce(() => { throw new Error("power cut"); });
+      script.updates.push([textUpdate(2, "what needs me?")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("power cut")] } });
+      dying.mockRestore();
+      const { original } = replaceSession();
+      store.close(); store = openStore(file);
+      now = new Date(T0.getTime() + TURN_WALL_CLOCK_MS + CONVERSATION_CLAIM_MS + 60_000);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1 } });
+      expect(requests).toHaveLength(1);
+      // Ending the session from the console superseded the running turn; that is the word the phone gets, not a silent restart.
+      expect(script.texts()).toEqual([expect.stringContaining("the assistant's reply did not complete (superseded). Nothing was changed.")]);
+      expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "failed", outcome: "replayed:superseded", session: original.id });
+      expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()?.["n"]).toBe(1);
+      expect(store.listTelegramConversationParts(store.listTelegramConversations(BOT)[0]!.id)).toEqual([]);
+    });
+  });
+
   test("a console confirmation racing the tap wins once: the tap shows the recorded outcome and files nothing", async () => {
     answers.push(
       { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Add the limit", goal: "Add a payout limit.", acceptance: [{ id: "c1", statement: "The limit holds.", evidence: ["manual-review"] }] } }] },
@@ -459,6 +734,22 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(await pass()).toMatchObject({ ok: true, report: { ignored: 1 } });
     expect(script.acks()).toHaveLength(acksBefore);
     expect(tasks()).toBe(before);
+  });
+
+  test("the other order: the tap confirms first, and a console confirmation of the same card afterwards is refused as already acted on", async () => {
+    answers.push(
+      { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Add the limit", goal: "Add a payout limit.", acceptance: [{ id: "c1", statement: "The limit holds.", evidence: ["manual-review"] }] } }] },
+      { text: "Proposed. Confirm to file." },
+    );
+    script.updates.push([textUpdate(2, "add a payout limit")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+    const sent = script.card();
+    const proposal = store.listMateProposals(store.liveMateThreadFor("alex")!.id, ["pending"])[0]!;
+    expect(await tapPass(sent.button(/^Confirm$/), sent.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
+    const tasks = Number(store.handle.prepare("SELECT COUNT(*) AS n FROM task").get()?.["n"]);
+    expect(confirmMateProposal(store, who(), proposal.id, now, { via: "web" })).toMatchObject({ ok: false, reason: "not-pending" });
+    expect(Number(store.handle.prepare("SELECT COUNT(*) AS n FROM task").get()?.["n"])).toBe(tasks);
+    expect(store.getMateProposal(proposal.id)?.outcome).toMatchObject({ ok: true, via: "telegram" });
   });
 
   test("a busy engine defers the phone's message instead of failing it; an incompatible console session is never ended from the phone", async () => {
@@ -693,16 +984,26 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     });
   });
 
-  test("every mate tool has a phone road, and the committed matrix agrees with the code line for line", () => {
+  test("every mate tool has a phone road, and the committed matrix agrees with the code column for column — support, how and remaining gap; every handoff is labelled an incomplete phone action", () => {
     expect(parityGaps()).toEqual([]);
     expect(Object.keys(TELEGRAM_ACTION_PARITY).sort()).toEqual(MATE_TOOL_SCHEMAS.map(tool => tool.name).sort());
     const doc = readFileSync(join(__dirname, "..", "docs", "TELEGRAM_ACTION_PARITY_2026-09-16.md"), "utf8");
+    const rows = new Map(doc.split("\n").filter(line => /^\| `[a-z_]+` \|/.test(line)).map(line => {
+      const cells = line.split(" | ").map(cell => cell.replace(/^\| |\|$/g, "").trim());
+      return [cells[0]!.replace(/`/g, ""), { support: cells[1], how: cells[2], test: cells[3], gap: cells[4] }] as const;
+    }));
+    expect([...rows.keys()].sort()).toEqual(MATE_TOOL_SCHEMAS.map(tool => tool.name).sort());
     for (const tool of MATE_TOOL_SCHEMAS) {
-      const row = TELEGRAM_ACTION_PARITY[tool.name]!;
-      expect(doc, `matrix row for ${tool.name}`).toContain(`| \`${tool.name}\` | ${row.support} |`);
-      if (row.gap !== null) expect(doc, `gap for ${tool.name}`).toContain(row.gap);
+      const code = TELEGRAM_ACTION_PARITY[tool.name]!;
+      const row = rows.get(tool.name)!;
+      expect(row, `matrix row for ${tool.name}`).toMatchObject({ support: code.support, how: code.how, gap: code.gap ?? "none" });
+      expect(row.test, `test column for ${tool.name}`).not.toBe("");
+      // A handoff does nothing on the phone: its row must say so where the reader looks for what is missing.
+      if (code.support === "handoff") expect(code.gap, `${tool.name} is a handoff`).toMatch(/incomplete phone action/i);
+      if (code.support === "missing") expect(code.gap, `${tool.name} is missing`).not.toBeNull();
     }
     expect(doc).toContain("not a live Telegram");
+    expect(doc).toContain("incomplete phone action");
   });
 
   describe("production wiring", () => {
