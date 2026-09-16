@@ -158,6 +158,63 @@ export function loadConsoleUrl(env: Record<string, string | undefined>, dir: str
   return configured === undefined || configured === null || configured === "" ? null : configured.replace(/\/+$/, "");
 }
 
+/** A dotted IPv4 that names this machine or no machine: loopback, unspecified. */
+function isLocalIpv4(address: string): boolean {
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(address) || address === "0.0.0.0";
+}
+
+/**
+ * Names a browser cannot leave this machine with: never a phone destination.
+ * The URL parser hands back a canonical hostname, so an IPv6 literal arrives
+ * compressed — `::1`, `::`, and an embedded IPv4 as two hex groups
+ * (`::ffff:7f00:1` is 127.0.0.1 mapped; `::7f00:1` the deprecated
+ * compatible form) — and those groups are decoded and judged as the IPv4
+ * they carry.
+ */
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1" || host === "::" || isLocalIpv4(host)) return true;
+  const embedded = /^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (embedded === null) return false;
+  const high = parseInt(embedded[1]!, 16), low = parseInt(embedded[2]!, 16);
+  return isLocalIpv4(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+}
+
+/**
+ * The origin a phone link may open, or null. The SAME console-url setting
+ * the mirrors use — read again on every call, never cached, so a changed or
+ * removed setting stops the next link — held to a stricter shape than a
+ * mirror link: exactly an https origin (no credentials, path, query,
+ * fragment), not loopback, and, when the console this process co-hosts
+ * states its own `--public-url`, exactly that origin. A model, a Host
+ * header or a proposal field never supplies it, and nothing here probes
+ * the address: a valid shape is a place to send a person, not a promise
+ * that it answers.
+ */
+export function phoneOrigin(env: Record<string, string | undefined>, dir: string, options: { serverOrigin?: string | null } = {}): string | null {
+  const configured = loadConsoleUrl(env, dir);
+  if (configured === null) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(configured);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") return null;
+  if (parsed.pathname !== "/" && parsed.pathname !== "") return null;
+  if (parsed.hostname === "" || isLoopbackHost(parsed.hostname)) return null;
+  if (options.serverOrigin !== undefined && options.serverOrigin !== null) {
+    let server: URL;
+    try {
+      server = new URL(options.serverOrigin);
+    } catch {
+      return null;
+    }
+    if (server.origin !== parsed.origin) return null;
+  }
+  return parsed.origin;
+}
+
 /** Where in the console this notification wants a person. */
 export function linkFor(consoleUrl: string | null, notification: Notification): string | null {
   if (consoleUrl === null) return null;

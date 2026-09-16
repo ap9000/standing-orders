@@ -15,8 +15,11 @@ Meaning of the support column:
   with `via: telegram` on the proposal outcome (and on the decision or stop
   it wrote). Web and CLI show the same rows afterwards.
 - **handoff** — an incomplete phone action: the phone names the existing
-  authenticated control and the task; it does nothing itself and sends no
-  link. Its remaining-gap column says so.
+  authenticated control and the task, and — when a trusted HTTPS console
+  address is configured — carries ONE url button that opens that exact
+  control in the signed-in console. The button is navigation only: it
+  does nothing itself, grants nothing, and the control still runs in the
+  console. Its remaining-gap column says so.
 - **missing** — no phone path. None today; a new tool without a row fails
   the suite.
 
@@ -37,20 +40,47 @@ that waits for the operator's bot configuration and pairing.
 | `queue` | direct | Read during a turn. | engine read tools (`mate.test.ts`), same turn path | none |
 | `get_result` | direct | Read during a turn; the phone card shows the verification verdict, never a local link. | reply-to-result test (`get_result` then `propose_review`) | Screenshots and secure remote evidence links are not delivered to the phone yet. |
 | `get_controls` | direct | Read during a turn. | engine read tools (`mate.test.ts`), same turn path | none |
-| `show_control` | handoff | The card names the control and the task; the operator opens it on the computer. No link is sent. | control card test: no button, no link, a forged tap changes nothing | Incomplete phone action: the control itself runs on the computer. |
-| `propose_task` | direct | Card with Confirm/Dismiss through confirmMateProposal (filed as a mate proposal, via telegram). Scope approval stays on the computer. | first test: filed task, outcome `via: telegram`, replay does nothing twice | Scope approval (the password) stays on the computer. |
-| `propose_scope` | direct | Confirm rewrites the scope through the shared door; the password approval that follows is a handoff. | scope card test | Approving the rewritten scope needs the password on the computer. |
+| `show_control` | handoff | The card names the control and the task, with one url button to that exact console control when a trusted https console-url is configured; the button opens the signed-in console and acts on nothing. | control card tests: url button to the exact control under a trusted origin, none without one, a forged tap changes nothing; production wiring (pass, follower, watch with `--public-url`) | Incomplete phone action: the control itself runs in the console, after sign-in. |
+| `propose_task` | direct | Card with Confirm/Dismiss through confirmMateProposal (filed as a mate proposal, via telegram). The confirmed card links Review & start for the filed task while its scope waits; under a signed automatic mode it says the scope is approved and links the task. | first test (unconfigured: one next action in words, no localhost); filed-task link test (Review & start, duplicate tap, `/task` before and after approval); automatic-approval journey (no second approval instruction) | Under manual approval the password step happens in the console, reached from the card's button. |
+| `propose_scope` | direct | Confirm rewrites the scope through the shared door; the confirmed card links Review & start for the exact task. | scope card test (Review & start button, no second instruction) | Approving the rewritten scope needs the password, in the console. |
 | `propose_next` | direct | Confirm through the shared door with the queue revision it saw. | queue card test | none |
 | `propose_reserve` | direct | Confirm through the shared door. | queue card test | none |
-| `propose_agents` | direct | Confirm through the shared route-edit door; renewed approval stays on the computer. | agents card test (route override written) | Renewed approval after the route change happens on the computer. |
+| `propose_agents` | direct | Confirm through the shared route-edit door; when the change stales the approval, the confirmed card links Review & start for the exact task. | agents card test (route override written; staled approval said once, unlinked without an origin) | Renewed approval after the route change happens in the console. |
 | `propose_hold` | direct | Confirm through the shared door. | hold/unhold card test | none |
 | `propose_unhold` | direct | Confirm through the shared door. | hold/unhold card test | none |
 | `propose_steer` | direct | Confirm through the shared door; the guidance is shown verbatim on the card. | steer card test | none |
 | `propose_dependency_repair` | direct | Confirm retry/unlink/replace through the shared door with both projects re-checked. | repair card test (retry); unlink/replace share the door path proven in `mate-doors.test.ts` | none |
-| `propose_task_action` | direct | stop, retry, plan, wait_for and stop_waiting confirm through the shared door (a stop is audited via telegram); resume confirms only the request and hands off to the password step. | task-action card test: retry, plan, wait_for, stop_waiting, stale refusal, stop (`run_stop.requested_via = telegram`); resume card copy | resume completes on the computer (incomplete phone action). |
+| `propose_task_action` | direct | stop, retry, plan, wait_for and stop_waiting confirm through the shared door (a stop is audited via telegram); resume confirms only the request, says nothing has resumed, and links the task where the password step lives. | task-action card test: retry, plan, wait_for, stop_waiting, stale refusal, stop (`run_stop.requested_via = telegram`); resume confirm says nothing resumed and links the task | resume completes in the console (incomplete phone action). |
 | `propose_answer` | direct | Confirm answers through the shared door, audited via telegram; an irreversible option arms a second tap first. | answer card test: reversible, irreversible arm/cancel/yes, `answered_via = telegram` | none |
-| `propose_review` | direct | note saves feedback; revise creates the same-family revision through the shared result service, honouring automatic approval settings. | reply-to-result test (revise, manual approval), automatic-approval journey test (revise under a signed mode), review note card test | Under manual approval the revision is approved on the computer; under a signed automatic-approval mode it runs unattended. |
-| `propose_cancel` | handoff | The door refuses cancel from any card; the phone says to arm it on the task itself. | cancel card test: no button, no link, a forged tap changes nothing | Incomplete phone action: no phone path to cancel by design. |
+| `propose_review` | direct | note saves feedback; revise creates the same-family revision through the shared result service, honouring automatic approval settings; the confirmed card links Review & start for the revision while it waits, or the task once approved. | reply-to-result test (revise, manual approval: Review & start for the exact revision), automatic-approval journey test (revise under a signed mode: Open task), review note card test | Under manual approval the revision is approved in the console, reached from the card's button; under a signed automatic-approval mode it runs unattended. |
+| `propose_cancel` | handoff | The door refuses cancel from any card; the card links the exact task's Cancel control when a trusted https console-url is configured, and the cancel is armed there. | cancel card test (Cancel task button under a trusted origin, none without one, a forged tap changes nothing) | Incomplete phone action: no phone path to cancel by design; the button only opens the task. |
+
+## Three kinds of phone road (2026-09-16 phone handoff)
+
+- **In-chat action** — a `direct` row's Confirm button. The shared door
+  acts inside the update's transaction, recorded `via: telegram`. The
+  card's confirmed text follows the recorded state, not the door's
+  wording: a scope approved under a signed automatic mode is said to be
+  approved and is not asked for again; a scope still waiting has one
+  next action; a confirmed resume says nothing has resumed yet.
+- **Secure phone handoff** — a url button to the exact existing control or
+  result (`chatControlHref`, `chatResultHref`: the recorded task, the
+  recorded run, never the latest run by guess). Minted immediately before
+  each send or edit from the console-url setting, held to an https origin
+  with no credentials, path, query, fragment or loopback (IPv4, IPv6 and
+  IPv4-mapped spellings), and — inside `up`, where this process co-hosts
+  the console — equal to that console's `--public-url`, or no button. A
+  url is never persisted, never a callback token, and never sent for a
+  task outside the phone's current project ceiling. Opening it lands on
+  the ordinary sign-in, which returns to that same-site path and nothing
+  else; the GET acts on nothing. `/task` carries the same one button.
+- **Remaining gaps** — an unconfigured or unmatched console address gives
+  one honest line and no link (no localhost, no promise of parity).
+  Passwords are never typed in chat; approval, resume, cancel,
+  publication and settings still complete in the console. Screenshots and
+  secure remote evidence links are not delivered to the phone. The actual
+  bot stays unpaired and no physical phone, OS or reboot trial has run:
+  every row here is fixture-proved against a scripted Bot API.
 
 ## Boundaries every row shares
 
@@ -76,5 +106,6 @@ that waits for the operator's bot configuration and pairing.
 - A Telegram-minted session only exists when the approver has none; an
   incompatible console or CLI session is refused, never ended from the phone.
 - Passwords are never asked for. Approval of a scope, resume, cancellation,
-  publication and every settings control stay on the computer.
+  publication and every settings control complete in the console; a url
+  button only opens the signed-in control that owns them.
 - A direct-API chat configuration is never spent from the phone.

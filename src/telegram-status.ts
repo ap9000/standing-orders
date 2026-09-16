@@ -3,6 +3,7 @@
 import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
 import { scanForSecrets } from "./evidence.js";
 import type { Notification, Store } from "./store.js";
+import { CHAT_CONTROLS, chatControlHref, chatResultHref, type ChatControl } from "./chat-controls.js";
 
 export type PhoneCommand = { kind: "status" } | { kind: "help" } | { kind: "task"; id: string };
 
@@ -26,7 +27,7 @@ export const PHONE_HELP = [
   "",
   "The slash commands only read status. To answer an agent's question, tap its decision buttons; reply to that decision message to attach a note. Reply to a result message to ask for changes to that exact result.",
   "",
-  "Approvals with a password, cancelling, and publishing still happen in the Standing Orders console. The computer and bridge must be awake and connected to reply.",
+  "Password approvals, cancelling and publishing happen in the Standing Orders console. A button that opens the console only takes you there — sign in, and nothing changes until you act. The computer and bridge must be awake and connected to reply.",
 ].join("\n");
 
 /** A third-party transport receives a small display copy, not logs, paths,
@@ -103,14 +104,41 @@ export function phoneStatus(store: Store, repos: readonly string[], now: Date): 
   });
 }
 
+/** A fixed console destination for one task, named beside its label; the origin joins it only on the wire. */
+export type PhoneTaskLink = { label: string; path: string };
+/** Where the rest lives when no button can say so: the closing line of an unlinked `/task`. */
+export const PHONE_CONSOLE_FOOTER = "Read-only status. Evidence files and full actions are in the console.";
+
+/**
+ * Where `/task`'s one button goes, from the recorded diagnosis: the exact
+ * saved result's checks (a recorded verdict) or changes (none yet) for a
+ * finished task; the approval control while the scope waits; the task's
+ * own page for retry, hold, dependency and resume ceremonies; the task lens
+ * otherwise (a worker that must be started is not a browser step, and the
+ * lens says so). Only a task inside the phone's ceiling gets here.
+ */
+function taskLinkFor(id: string, d: DispatchDiagnosis, result: { run: number; verdict: boolean } | null): PhoneTaskLink {
+  const control = (name: ChatControl): PhoneTaskLink => ({ label: CHAT_CONTROLS[name].label, path: chatControlHref(name, id) });
+  if (result !== null) return result.verdict ? { label: "Review checks", path: chatResultHref(id, result.run, "checks") } : { label: "Review changes", path: chatResultHref(id, result.run, "changes") };
+  switch (d.action) {
+    case "approve-scope": return control("approval");
+    case "retry-task": case "unhold": case "inspect-hold": case "repair-dependency": case "retry-review": case "resume-run": return control("recovery");
+    default: return control("task");
+  }
+}
+
 export function phoneTask(store: Store, repos: readonly string[], id: string, now: Date): string {
+  return phoneTaskView(store, repos, id, now).text;
+}
+
+export function phoneTaskView(store: Store, repos: readonly string[], id: string, now: Date): { text: string; link: PhoneTaskLink | null } {
   return store.transact(() => {
     const ref = store.lookupRef(id);
     // Check admission before reading a title, run, proof, or diagnosis.
     const task = ref?.repo != null && repos.includes(ref.repo) ? store.getTask(id) : null;
-    if (task === null || ref?.repo == null) return "No such task in your connected projects. Send /status for task IDs.";
+    if (task === null || ref?.repo == null) return { text: "No such task in your connected projects. Send /status for task IDs.", link: null };
     const d = diagnoseTaskDispatch(store, id, now);
-    if (d === null) return "This task's status is unavailable. Open it in the console before retrying.";
+    if (d === null) return { text: "This task's status is unavailable. Open it in the console before retrying.", link: null };
     const lines = [plain(task.title, 140), `${plain(id, 64)} · ${projectLabel(ref.repo)}`, `As of ${now.toISOString().replace("T", " ").slice(0, 19)} UTC`, "", plain(d.summary, 160)];
     const blocker = d.blockerTaskId === null ? null : store.lookupRef(d.blockerTaskId);
     const hiddenDependency = blocker !== null && (blocker.repo === null || !repos.includes(blocker.repo));
@@ -129,8 +157,10 @@ export function phoneTask(store: Store, repos: readonly string[], id: string, no
         lines.push(checkpoint === null ? "No milestone progress has been recorded for this attempt." : `Latest agent-reported milestone update: ${plain(checkpoint.createdAt, 40)} (not independent proof).`);
       }
     }
+    let link: PhoneTaskLink | null = null;
     if (result !== undefined) {
       const proof = store.proofVerdictFor(result.id);
+      link = taskLinkFor(id, d, { run: result.id, verdict: proof !== null });
       const proofWords = { verified: "Checks verified at completion", attested: "Agent-reported evidence, not independently verified checks", short: "Required evidence is missing", refuted: "Evidence conflicts with the approved result" };
       lines.push(`Recorded evidence: ${proof === null ? "No completion proof recorded" : proofWords[proof.verdict]}.`);
       if (proof !== null && proof.matrix.length > 0) lines.push(`Acceptance checks: ${proof.matrix.filter(row => row.state === "pass").length}/${proof.matrix.length} satisfied in the recorded evidence.`);
@@ -139,8 +169,10 @@ export function phoneTask(store: Store, repos: readonly string[], id: string, no
       const delivery = publication?.remoteState === "MERGED" ? "Merge observed on GitHub" : publication?.remoteState === "CLOSED" ? "Pull request closed, not merged" : publication?.state === "opened" ? `Pull request #${publication.prNumber ?? "?"} opened; not recorded as merged` : publication?.state === "pushed" ? "Branch pushed; pull request not yet recorded" : publication?.state === "intended" ? "Publication queued; not yet confirmed" : publication?.state === "failed" ? "Publication failed; the local result is preserved" : result.role === "scout" ? "Report saved locally" : "Result saved locally; no publication recorded";
       lines.push(`Delivery: ${delivery}.`);
     }
-    lines.push("", `Next: ${nextStep(d)}`, "", "Read-only status. Evidence files and full actions are in the console.");
-    return lines.join("\n");
+    if (result === undefined) link = taskLinkFor(id, d, null);
+    // Said once: the button is where; the sender adds the closing line when no button can ride.
+    lines.push("", `Next: ${nextStep(d)}`);
+    return { text: lines.join("\n"), link };
   });
 }
 

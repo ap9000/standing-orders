@@ -8,7 +8,7 @@ import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
 import { chatWorkingHtml, chatActivityDetailsHtml, completedWorkHtml, CHAT_POLISH_CSS } from "./chat-polish.js";
 import { TRANSITIONS_CSS } from "./transitions-recipes.js";
 import { createResultRevision, requestResultChanges } from "./result-actions.js";
-import { CHAT_CONTROLS, chatControlHref, isChatControl } from "./chat-controls.js";
+import { CHAT_CONTROLS, chatControlHref, chatResultHref as sharedResultHref, isChatControl } from "./chat-controls.js";
 import { CHAT_TASK_ACTIONS, isChatTaskAction } from "./chat-task-actions.js";
 import { WORKSPACE_MOTION_CSS, WORKSPACE_MOTION_SCRIPT } from "./workspace-motion.js";
 import { styleAsset } from "./style-asset.js";
@@ -748,7 +748,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (options.setupCode !== undefined && store.listApprovers().length === 0) {
         return page(response, 200, signupPage(null, setupAttemptsLeft));
       }
-      return page(response, 200, loginPage(null));
+      return page(response, 200, loginPage(null, loginReturn(url.searchParams.get("return"))));
     }
     if (url.pathname === "/signup" && method === "POST") {
       // Only while the table is empty, only with the printed code, only
@@ -799,10 +799,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       const body = await form(request);
       const name = body.get("name");
       const token = body.get("token");
+      // The destination a deep link asked for rides the form as a same-site
+      // path, re-checked here on both roads: a failed sign-in keeps it, a
+      // successful one lands on it. Nothing about the sign-in itself changes.
+      const returnTo = loginReturn(body.get("return"));
       const authenticated =
         name !== null && token !== null ? authenticateAccount(store, name, token) : null;
       if (authenticated === null || !authenticated.ok) {
-        return page(response, 403, loginPage("wrong username or password"));
+        return page(response, 403, loginPage("wrong username or password", returnTo));
       }
       const id = randomBytes(32).toString("hex");
       sessions.set(id, {
@@ -820,7 +824,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         "Set-Cookie",
         `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`,
       );
-      return redirect(response, "/");
+      return redirect(response, returnTo);
     }
 
     if (url.pathname === "/logout" && method === "POST") {
@@ -901,8 +905,10 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (who === null) {
+      // A GET to an exact task or result (a phone's deep link) signs in and
+      // comes back to it — the destination is a same-site path only.
       return method === "GET"
-        ? redirect(response, "/login")
+        ? redirect(response, loginHref(url.pathname + url.search))
         : respond(response, 401, "text/plain; charset=utf-8", "authenticate first");
     }
 
@@ -11987,13 +11993,14 @@ function joinDeadPage(): string {
   ].join("\n"), { nav: false });
 }
 
-function loginPage(problem: string | null): string {
+function loginPage(problem: string | null, returnTo = "/"): string {
   return shell("standing-orders", [
     `<div class="login-viewport"><div class="login-shell">`,
     `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
     `<div class="login-card">`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
+    returnTo === "/" ? "" : `<input type="hidden" name="return" value="${escape(returnTo)}">`,
     `<label>username<input type="text" name="name" autocomplete="username" autofocus></label>`,
     `<label>password<input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">sign in</button>`,
@@ -15726,6 +15733,50 @@ function safeReturn(raw: string | null | undefined): string {
   return raw;
 }
 
+/**
+ * The destination a sign-in returns to (a phone's deep link to an exact
+ * task or result): `safeReturn`, then narrower still — never the sign-in,
+ * sign-up, join or sign-out roads themselves (a loop, or a token in a
+ * path), never an encoded second scheme or host once the browser decodes
+ * it, never a query key that could carry a secret, and never a region
+ * fetch (`?fragment=`), which is a piece of a page and not a place to
+ * land. Only the app's own pages qualify: the task lens, the chat, the
+ * work and board views, and the fixed control destinations a phone
+ * button can name. Nothing here is a second redirect framework: one
+ * same-site path, or "/".
+ */
+const LOGIN_RETURN_PAGES = /^\/(t\/[^/]+|chat|work|board|projects|routines|recipes|fleet|settings(\/[a-z-]+)?|mode)$/;
+function loginReturn(raw: string | null | undefined): string {
+  const safe = safeReturn(raw);
+  if (safe === "/") return "/";
+  let parsed: URL;
+  try {
+    parsed = new URL(safe, "http://standing-orders.local");
+  } catch {
+    return "/";
+  }
+  if (parsed.origin !== "http://standing-orders.local" || parsed.username !== "" || parsed.password !== "") return "/";
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(parsed.pathname);
+  } catch {
+    return "/";
+  }
+  if (/^\/\/|\\|[\r\n\t\u0000-\u001f]/.test(decodedPath) || /^\/(login|logout|signup|join)(\/|$)/.test(decodedPath)) return "/";
+  if (!LOGIN_RETURN_PAGES.test(decodedPath) || parsed.searchParams.has("fragment")) return "/";
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (/token|password|secret|csrf|code|key|auth/i.test(key)) parsed.searchParams.delete(key);
+  }
+  const query = parsed.searchParams.toString();
+  return `${parsed.pathname}${query === "" ? "" : `?${query}`}`;
+}
+
+/** The sign-in page that comes back to `path` afterwards, or plain /login when the path is not one to come back to. */
+function loginHref(path: string): string {
+  const back = loginReturn(path);
+  return back === "/" ? "/login" : `/login?return=${encodeURIComponent(back)}`;
+}
+
 /** Chat actions may return only to the unified chat or one task-focused
  * lens. Other same-site paths are valid elsewhere, but not for chat forms. */
 function safeChatReturn(raw: string | null | undefined): string {
@@ -19243,8 +19294,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
 /** The chat's result detail (package 3): the same panel the run page
  * and the cockpit render, opened beside the conversation when the screen
  * has room and as a dedicated view with Back to chat when it does not. */
-const chatResultHref = (taskId: string, runId: number, tab: ResultTab = "summary"): string =>
-  `/chat?task=${encodeURIComponent(taskId)}&result=${runId}${tab === "summary" ? "" : `&tab=${tab}`}`;
+const chatResultHref = (taskId: string, runId: number, tab: ResultTab = "summary"): string => sharedResultHref(taskId, runId, tab);
 
 /**
  * ONE result presentation (workspace package 3) for the run page, the

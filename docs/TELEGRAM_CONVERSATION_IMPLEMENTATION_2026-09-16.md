@@ -217,6 +217,19 @@ unattended, no password step on the card). `src/migration-v63-telegram-delivery.
 upgrades from the deployed v61 and the candidate v62 shapes and shows the
 rollback (drop the parts table, stamp v62).
 
+### Phone handoff revision (2026-09-16, same family; supersedes "no button and no link" above)
+
+Handoff cards, confirmed staged cards and `/task` now carry ONE url button
+to the exact existing console control or recorded result, minted at send
+time from the trusted https console-url (or the co-hosted `--public-url`)
+and never persisted or treated as authority; outcome text follows the
+recorded approval state; the ordinary sign-in returns to the exact
+same-site destination. The full record, the boundaries and the remaining
+unpaired-phone gap are in
+[TELEGRAM_PHONE_HANDOFF_2026-09-16.md](TELEGRAM_PHONE_HANDOFF_2026-09-16.md);
+the per-tool roads are in
+[TELEGRAM_ACTION_PARITY_2026-09-16.md](TELEGRAM_ACTION_PARITY_2026-09-16.md).
+
 ### Live acceptance gap (unchanged)
 
 Read-only bridge status on 2026-09-16: token absent, paired false. No real

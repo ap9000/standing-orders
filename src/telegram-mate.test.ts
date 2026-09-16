@@ -29,7 +29,8 @@ import { acquire } from "./claim.js";
 import { runOperate, EXIT } from "./operate.js";
 import { saveRepos } from "./repos.js";
 import { run as exec } from "./exec.js";
-import { CONVERSATION_CLAIM_MS, PART_RETRY_MS, TELEGRAM_ACTION_PARITY, mintCardTokens, parityGaps, proposalPreview, telegramRequestId } from "./telegram-mate.js";
+import { CONVERSATION_CLAIM_MS, NO_PHONE_LINK, NO_TASK_LINK, PART_RETRY_MS, TELEGRAM_ACTION_PARITY, mintCardTokens, parityGaps, proposalPreview, telegramRequestId } from "./telegram-mate.js";
+import { saveConsoleUrl, CONSOLE_URL_ENV } from "./webhooks.js";
 import { modeDigestOf, modeTermsJson, presetTerms } from "./modes.js";
 import type { SubscriptionMateRequest, SubscriptionMateRunner } from "./subscription-chat.js";
 import { TURN_WALL_CLOCK_MS } from "./converse.js";
@@ -115,6 +116,8 @@ describe("Telegram conversation: the same chat, from the phone", () => {
   let answers: Answer[];
   let requests: SubscriptionMateRequest[];
   let script: ReturnType<typeof scriptedTransport>;
+  /** The trusted https origin the wiring reads before every card and `/task`; null is the unconfigured phone. */
+  let origin: string | null;
 
   const runner: SubscriptionMateRunner = async request => {
     requests.push(request);
@@ -131,7 +134,11 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: BOT, chatId: String(CHAT), userId: String(USER), updateId: 1 }, now).ok).toBe(true);
   };
   const pass = (extra: Partial<Parameters<typeof bridgePass>[1]> = {}) =>
-    bridgePass(store, { botId: BOT, transport: script.transport, clock: () => now, deliver: false, readProjects, conversation: { evidenceRoot, subscriptionRunner: runner }, ...extra });
+    bridgePass(store, { botId: BOT, transport: script.transport, clock: () => now, deliver: false, readProjects, conversation: { evidenceRoot, subscriptionRunner: runner, phoneOrigin: () => origin }, ...extra });
+  /** The url row of the last edit or send carrying a keyboard: label and href, or [] when none rides it. */
+  const urlButtons = (call: { params: Record<string, unknown> } | undefined) =>
+    ((call?.params["reply_markup"] as { inline_keyboard?: { text: string; url?: string }[][] } | undefined)?.inline_keyboard ?? []).flat().filter(one => one.url !== undefined).map(one => [one.text, one.url]);
+  const lastEdit = () => script.calls.filter(call => call.method === "editMessageText").at(-1);
   const who = () => {
     const verified = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, [repo]);
     if (!verified.ok) throw new Error(verified.reason);
@@ -194,6 +201,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     repo = join(dir, "repo");
     mkdirSync(evidenceRoot); mkdirSync(repo);
     now = T0;
+    origin = null;
     projects = [repo];
     answers = [];
     requests = [];
@@ -268,7 +276,10 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.getTask(filed)).toMatchObject({ title: "Tighten the payout guard" });
     expect(store.lookupRef(filed)?.repo).toBe(repo);
     expect(script.acks().at(-1)).toBe("✓ done");
-    expect(script.edits().at(-1)).toMatch(/^✓ filed .*\n\nApprove its scope in Standing Orders on the computer before work starts\.$/s);
+    // No trusted origin: one next action in words, one honest line about the missing setup, no localhost.
+    expect(script.edits().at(-1)).toBe(`✓ filed ${filed} — review and approve its scope to start work\n\nApprove it in Standing Orders on the computer.\n\n${NO_PHONE_LINK}`);
+    expect(script.edits().at(-1)).not.toMatch(/localhost|127\.0\.0\.1/);
+    expect(urlButtons(lastEdit())).toEqual([]);
     // /task reads the filed task on the same view.
     script.updates.push([textUpdate(nextUpdate++, `/task ${filed}`)]);
     expect(await pass()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
@@ -287,6 +298,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
   });
 
   test("a reply to a result message binds that exact run; confirming creates the same-family revision, audited as telegram", async () => {
+    origin = "https://console.example";
     const { run } = seedSource("payout");
     // The result reaches the phone through the outbox with its exact task/run provenance.
     store.enqueueNotification({ dedupeKey: `result:${run}`, kind: "report-ready", subject: "Result ready", body: "Built and verified.", source: { run } }, now);
@@ -320,15 +332,24 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.getTask(child)?.title).toBe("Guard the payout path (payout) — revision");
     expect(store.revisionSourceOf(store.lookupRef(child)!.id)).toMatchObject({ sourceRun: run, sourceTask: "payout" });
     expect(store.allDiffComments(run).map(one => [one.author, one.note, one.consumedBy])).toEqual([["alex", "Rename the guard and add a test for the over-limit case.", child]]);
-    expect(script.edits().at(-1)).toContain("✓ Revision created. Review and approve it to start.");
-    expect(script.edits().at(-1)).toContain("Approve the revision in Standing Orders on the computer");
-    // The revision's own status reads from the phone, on the same records.
+    // A manual approval: the door's one sentence, and ONE button to the exact revision's approval control — no second instruction.
+    expect(script.edits().at(-1)).toBe("✓ Revision created. Review and approve it to start.");
+    expect(urlButtons(lastEdit())).toEqual([["Review & start", `https://console.example/chat?task=${encodeURIComponent(child)}#task-chat-action`]]);
+    expect(store.getScope(child)?.approvedDigest ?? null).toBeNull();
+    // The revision's own status reads from the phone, on the same records, with the same precise button.
     script.updates.push([textUpdate(nextUpdate++, `/task ${child}`)]);
     expect(await pass()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
     expect(script.texts().at(-1)).toContain("— revision");
+    expect(script.texts().at(-1)).not.toContain("Read-only status");
+    expect(urlButtons(script.sends().at(-1))).toEqual([["Review & start", `https://console.example/chat?task=${encodeURIComponent(child)}#task-chat-action`]]);
+    // The source result itself: the exact run's checks, never the latest run by guess.
+    script.updates.push([textUpdate(nextUpdate++, "/task payout")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
+    expect(urlButtons(script.sends().at(-1))).toEqual([["Review changes", `https://console.example/chat?task=payout&result=${run}&tab=changes`]]);
   });
 
   test("the same journey under a signed automatic-approval mode: the phone's revision is approved under that policy and runs unattended; nothing asks for a password", async () => {
+    origin = "https://console.example";
     const terms = { ...presetTerms("hands-off", new Date(now.getTime() + 24 * 3_600_000).toISOString()), autoApproveFiling: true };
     store.signMode({ repo, name: "hands-off", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, now);
     const { run } = seedSource("payout");
@@ -357,7 +378,9 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(scope.approvalBasis).toBe("mode");
     expect(store.getTask(child)?.state).toBe("queued");
     expect(script.edits().at(-1)).toBe("✓ Revision created under your automatic approval settings.");
-    expect(script.edits().at(-1)).not.toMatch(/password|Approve the revision/);
+    expect(script.edits().at(-1)).not.toMatch(/password|Approve/);
+    // Approved from the recorded scope, so the button opens the task — not a second approval.
+    expect(urlButtons(lastEdit())).toEqual([["Open task", `https://console.example/chat?task=${encodeURIComponent(child)}`]]);
     // A second tap on the same card creates nothing more.
     expect(await tapPass(sent.button(/^Confirm$/), sent.messageId)).toMatchObject({ ok: true, report: { ignored: 1 } });
     expect(store.taskFamilyOf("payout", [repo], false)?.versions).toHaveLength(2);
@@ -881,17 +904,22 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(executeMateTool(ctx, "propose_agents", { task: "f", role: "reviewer", agent: { provider: "codex", model: "gpt-5-codex" } })).toMatchObject({ ok: true });
       const agents = card("agents", drafted!);
       expect(agents.preview.text).toContain("Change agents for work f: reviewer: codex gpt-5-codex");
-      expect(agents.preview.text).toContain("renewed approval on the computer");
+      expect(agents.preview.text).toContain("renewed approval before work starts");
       expect(await tapPass(agents.confirm, agents.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
       expect(store.refForId(store.lookupRef("f")!.id)?.routeOverrides).toEqual([expect.objectContaining({ phase: "review", provider: "codex", model: "gpt-5-codex" })]);
-      expect(script.edits().at(-1)).toContain("Open Standing Orders on the computer to finish this step.");
-      // Scope: rewritten through the guarded proposal; approval is the password ceremony, named as the next step.
+      // The route change staled f's approval: the recorded scope waits again, and the card says so once, unlinked here.
+      expect(script.edits().at(-1)).toBe(`✓ Agents changed for work f: the reviewer is now codex · gpt-5-codex\n\nApprove it in Standing Orders on the computer.\n\n${NO_PHONE_LINK}`);
+      expect(store.getScope("f")?.approvedDigest ?? null).not.toBe(store.getScope("f")?.digest);
+      expect(urlButtons(lastEdit())).toEqual([]);
+      // Scope: rewritten through the guarded proposal; approval is the password ceremony, reached by one precise button under a trusted origin.
+      origin = "https://console.example";
       const scope = card("scope", { task: "d", taskTitle: "work d", goal: "Do d with a smaller blast radius", acceptance: [{ id: "c1", statement: "d is smaller", evidence: ["manual-review"] }], sawDigest: store.getScope("d")?.digest ?? null });
-      expect(scope.preview.text).toContain("approve the new scope with your password on the computer");
+      expect(scope.preview.text).toContain("the new scope still needs your password approval");
       expect(await tapPass(scope.confirm, scope.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
       expect(outcome(scope.id).outcome).toMatchObject({ ok: true, via: "telegram" });
       expect(store.getScope("d")).toMatchObject({ goal: "Do d with a smaller blast radius", proposedVia: "mate" });
-      expect(script.edits().at(-1)).toMatch(/^✓ d's scope rewritten — approve it with your password on the task\n\nOpen Standing Orders/);
+      expect(script.edits().at(-1)).toBe("✓ d's scope rewritten — approve it with your password on the task");
+      expect(urlButtons(lastEdit())).toEqual([["Review & start", "https://console.example/chat?task=d#task-chat-action"]]);
     });
 
     test("answers: a reversible option answers on the first confirm; an irreversible one arms a yes/cancel pair, and cancel restores the card", async () => {
@@ -973,10 +1001,22 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(await tapPass(stop.confirm, stop.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
       expect(store.stopOf(run)).toMatchObject({ requestedBy: "alex", requestedVia: "telegram", settledAt: null });
       expect(outcome(stop.id).outcome).toMatchObject({ ok: true, said: `Stop requested for t, run #${run}.`, via: "telegram" });
-      // Resume is a password ceremony: the card says so before and after.
+      // Resume is a password ceremony: the card says so before and after, and confirming resumes nothing.
+      // The stopped attempt ends and its stop settles, so the task is paused — the state a resume card is minted from.
+      store.finishRun(run, { outcome: "failed", reason: "interrupted", committed: true, now });
+      expect(store.stopOf(run)?.settledAt).not.toBeNull();
+      origin = "https://console.example";
       const resume = card("task_action", { task: "t", taskTitle: "work t", operation: "resume", run, stamp: stamp("t") });
-      expect(resume.preview.text).toContain("Confirming opens the password step on the computer; it does not resume work from here.");
-      expect(TELEGRAM_ACTION_PARITY["propose_task_action"]?.gap).toContain("resume completes on the computer");
+      expect(resume.preview.text).toContain("Confirming only requests the resume. Work resumes after the password step on the task, not from here.");
+      expect(urlButtons(script.sends().at(-1))).toEqual([]);
+      const stateBefore = store.getTask("t")?.state;
+      expect(await tapPass(resume.confirm, resume.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
+      expect(script.edits().at(-1)).toBe("✓ Resume review requested for t. Complete the password confirmation on the task to resume.\n\nNothing has resumed yet: the password step on the task finishes it.");
+      expect(script.edits().at(-1)).not.toMatch(/resumed\.|is running/);
+      expect(urlButtons(lastEdit())).toEqual([["Open task", "https://console.example/chat?task=t"]]);
+      expect(store.getTask("t")?.state).toBe(stateBefore);
+      expect(store.stopOf(run)).toMatchObject({ requestedVia: "telegram", resumedAt: null, resumedVia: null });
+      expect(TELEGRAM_ACTION_PARITY["propose_task_action"]?.gap).toContain("resume completes in the console");
     });
 
     test("review note saves feedback without a revision; cancel and console controls are handoffs with no button", async () => {
@@ -994,22 +1034,144 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       const cancel = card("cancel", { task: "z", taskTitle: "work z", reason: "no longer needed" });
       expect(cancel.preview).toMatchObject({ buttons: false });
       expect(cancel.preview.text).toContain("Cancelling is armed on the task itself, never from a card.");
-      expect(cancel.preview.text).toContain("Open Standing Orders on the computer to finish this step.");
+      expect(cancel.preview.text).toContain("This step finishes in Standing Orders.");
       expect(cancel.preview.text).not.toMatch(/http|localhost|\//);
       const control = card("control", { control: "publish", task: "z", taskTitle: "work z" });
       expect(control.preview).toMatchObject({ buttons: false });
       expect(control.preview.text).toContain("Review publication for work z");
       expect(control.preview.text).not.toMatch(/http|localhost|\//);
-      // A tap on a handoff card (a forged keyboard) changes nothing.
+      // A tap on a handoff card (a forged keyboard) changes nothing; unconfigured, the repaint says why there is no button.
       expect(await tapPass(cancel.confirm, cancel.messageId)).toMatchObject({ ok: true, report: { ignored: 1 } });
       expect(store.getTask("z")?.state).not.toBe("cancelled");
       expect(outcome(cancel.id).state).toBe("pending");
+      expect(script.edits().at(-1)).toBe(`${cancel.preview.text}\n\n${NO_PHONE_LINK}`);
+      expect(urlButtons(lastEdit())).toEqual([]);
     });
 
     test("previews never carry paths, secrets or digests a person typed into a title or a note", () => {
       task("p", `see /Users/private/notes and token sk-${"X".repeat(40)}`);
       const steer = card("steer", { task: "p", taskTitle: `see /Users/private/notes and token sk-${"X".repeat(40)}`, note: `look in C:\\Users\\me and ${"d".repeat(64)}` });
       expect(steer.preview.text).not.toMatch(/\/Users|C:\\|X{40}|d{64}/);
+    });
+  });
+
+  describe("secure phone handoffs: one url button to the exact existing control, minted from the trusted origin at send time", () => {
+    test("handoff cards link the exact control or task page; the link is navigation only, and a forged tap still changes nothing", async () => {
+      origin = "https://console.example";
+      task("z");
+      answers.push(
+        { text: "Pointing you at it.", calls: [{ id: "c1", name: "show_control", args: { control: "publish", task: "z" } }, { id: "c2", name: "propose_cancel", args: { task: "z", reason: "no longer needed" } }] },
+        { text: "Two cards: the publication control and the cancel step." },
+      );
+      script.updates.push([textUpdate(2, "publish z, or cancel it")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, chatAnswered: 1, problems: [] } });
+      const cards = script.sends().filter(call => call.params["reply_markup"] !== undefined);
+      expect(cards).toHaveLength(2);
+      expect(cards.map(one => urlButtons(one))).toEqual([
+        [["Review publication", "https://console.example/t/z"]],
+        [["Cancel task", "https://console.example/t/z"]],
+      ]);
+      // Navigation, never authority: no callback token was minted for a handoff card, and its text says the step finishes in the console once.
+      expect(cards.every(one => (one.params["reply_markup"] as { inline_keyboard: { callback_data?: string }[][] }).inline_keyboard.flat().every(button => button.callback_data === undefined))).toBe(true);
+      expect(store.handle.prepare("SELECT COUNT(*) AS n FROM telegram_proposal_action").get()!["n"]).toBe(0);
+      for (const one of cards) {
+        expect(String(one.params["text"])).toContain("This step finishes in Standing Orders.");
+        expect(String(one.params["text"])).not.toContain("No phone link");
+      }
+      // A forged tap (a callback that names no token) on the linked card: acknowledged, nothing done, the card repainted with its current link.
+      const pending = store.listMateProposals(store.liveMateThreadFor("alex")!.id, ["pending"]);
+      const forged = mintCardTokens(store, binding(), pending.find(one => one.kind === "cancel")!.id, now, String(cards[1]!.messageId));
+      const forgedPass = await tapPass(forged.tokens[0]!, cards[1]!.messageId as number);
+      expect(forgedPass).toMatchObject({ ok: true, report: { ignored: 1 } });
+      expect(forgedPass.report.chatConfirmed).toBeUndefined();
+      expect(store.getTask("z")?.state).toBe("queued");
+      expect(urlButtons(lastEdit())).toEqual([["Cancel task", "https://console.example/t/z"]]);
+      expect(requests).toHaveLength(2);
+    });
+
+    test("a card planned under one setting is sent under the CURRENT one: a lost send retried after the address was removed carries no link and says so, with no model call", async () => {
+      origin = "https://console.example";
+      task("z");
+      answers.push(
+        { text: "Pointing you at it.", calls: [{ id: "c1", name: "show_control", args: { control: "publish", task: "z" } }] },
+        { text: "Open the publication control." },
+      );
+      // The reply goes out; the card's send loses its answer.
+      script.fault = (params, attempt) => attempt === 1 && params["reply_markup"] !== undefined ? "throw" : null;
+      script.updates.push([textUpdate(2, "publish z")]);
+      const lost = await pass();
+      expect(lost).toMatchObject({ ok: true, report: { chatQueued: 1 } });
+      expect(lost.report.chatAnswered ?? 0).toBe(0);
+      expect(script.attempts().filter(call => call.method === "sendMessage:failed")).toHaveLength(1);
+      expect(urlButtons(script.attempts().at(-1))).toEqual([["Review publication", "https://console.example/t/z"]]);
+      const before = requests.length;
+      // The setting goes away before the retry: the persisted card carries no url (none was stored) and the resend says why.
+      origin = null;
+      script.fault = null;
+      now = new Date(now.getTime() + PART_RETRY_MS[0] + 1);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      const resent = script.sends().at(-1)!;
+      expect(resent.params["reply_markup"]).toBeUndefined();
+      expect(String(resent.params["text"])).toContain(NO_PHONE_LINK);
+      expect(requests).toHaveLength(before);
+      expect(store.listTelegramConversationParts(store.listTelegramConversations(BOT)[0]!.id).map(one => [one.kind, one.state, one.keyboard])).toEqual([["reply", "sent", null], ["card", "sent", null]]);
+      // Restored: the next card links again.
+      origin = "https://console.example";
+      answers.push({ text: "Again.", calls: [{ id: "c2", name: "show_control", args: { control: "settings" } }] }, { text: "Settings." });
+      script.updates.push([textUpdate(3, "open settings")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+      expect(urlButtons(script.sends().at(-1))).toEqual([["Open settings", "https://console.example/settings"]]);
+    });
+
+    test("a stale or foreign identity gets no link even under a trusted origin, and the card says that rather than blaming setup", async () => {
+      origin = "https://console.example";
+      const foreign = join(dir, "elsewhere");
+      mkdirSync(foreign);
+      store.createTask({ id: "far", title: "far away" }, now);
+      store.placeTask(store.refFor("built-in", "far").id, foreign);
+      const away = card("control", { control: "publish", task: "far", taskTitle: "far away" });
+      expect(await tapPass(away.confirm, away.messageId)).toMatchObject({ ok: true, report: { ignored: 1 } });
+      expect(urlButtons(lastEdit())).toEqual([]);
+      expect(script.edits().at(-1)).toContain(NO_TASK_LINK);
+      const gone = card("control", { control: "publish", task: "vanished", taskTitle: "vanished" });
+      expect(await tapPass(gone.confirm, gone.messageId)).toMatchObject({ ok: true, report: { ignored: 1 } });
+      expect(urlButtons(lastEdit())).toEqual([]);
+      expect(script.edits().at(-1)).toContain(NO_TASK_LINK);
+      // Access revoked between the card and the tap: silence, no repaint, no link.
+      const later = card("control", { control: "publish", task: "far", taskTitle: "far away" });
+      store.unpairTelegram(BOT, "alex", now);
+      expect(await tapPass(later.confirm, later.messageId)).toMatchObject({ ok: true, report: { ignored: 1 } });
+      expect(script.calls.filter(call => call.method === "editMessageText")).toHaveLength(2);
+    });
+
+    test("a filed task links Review & start while its scope waits, and a duplicate tap neither files nor links twice; `/task` follows the recorded state", async () => {
+      origin = "https://console.example";
+      answers.push(
+        { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Tighten the payout guard", goal: "Refuse a payout over the limit.", acceptance: [{ id: "c1", statement: "Over-limit payouts are refused.", evidence: ["manual-review"] }] } }] },
+        { text: "Confirm it to file it." },
+      );
+      script.updates.push([textUpdate(2, "file the payout guard task")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+      const sent = script.card();
+      // A confirmable card keeps its two callback buttons alone.
+      expect(sent.rows.flat().map(one => one.text)).toEqual(["Confirm", "Dismiss"]);
+      expect(await tapPass(sent.button(/^Confirm$/), sent.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
+      const filed = (store.listMateProposals(store.liveMateThreadFor("alex")!.id)[0]!.outcome as { taskId: string }).taskId;
+      expect(script.edits().at(-1)).toBe(`✓ filed ${filed} — review and approve its scope to start work`);
+      expect(urlButtons(lastEdit())).toEqual([["Review & start", `https://console.example/chat?task=${encodeURIComponent(filed)}#task-chat-action`]]);
+      const modelCalls = requests.length;
+      expect(await tapPass(sent.button(/^Confirm$/), sent.messageId)).toMatchObject({ ok: true, report: { ignored: 1 } });
+      expect(store.taskFamilyOf(filed, [repo], false)?.versions).toHaveLength(1);
+      expect(requests).toHaveLength(modelCalls);
+      // /task before and after approval: the button names the recorded next step, never a stale one.
+      script.updates.push([textUpdate(nextUpdate++, `/task ${filed}`)]);
+      expect(await pass()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
+      expect(urlButtons(script.sends().at(-1))).toEqual([["Review & start", `https://console.example/chat?task=${encodeURIComponent(filed)}#task-chat-action`]]);
+      const scope = store.getScope(filed)!;
+      expect(approve(store, filed, "alex", now, scope.digest, token).ok).toBe(true);
+      script.updates.push([textUpdate(nextUpdate++, `/task ${filed}`)]);
+      expect(await pass()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
+      expect(urlButtons(script.sends().at(-1))).toEqual([["Open task", `https://console.example/chat?task=${encodeURIComponent(filed)}`]]);
     });
   });
 
@@ -1059,6 +1221,35 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(store.activeMateSession("alex")).toMatchObject({ ceilingDigest: ceilingDigestOf([repo]) });
     });
 
+    test("the pass links handoff cards and `/task` from the console-url setting only when it is an https origin, re-read every time: an http, path-prefixed or removed setting sends no link", async () => {
+      stub();
+      await saveRepos(join(dir, "repos.json"), [repo]);
+      task("z");
+      store.close();
+      expect(saveConsoleUrl(dir, "https://console.example:8443/")).toMatchObject({ ok: true });
+      answers.push({ text: "Pointing.", calls: [{ id: "c1", name: "show_control", args: { control: "publish", task: "z" } }] }, { text: "The publication control." });
+      script.updates.push([textUpdate(2, "publish z"), textUpdate(3, "/task z")]);
+      const lines: string[] = [];
+      expect(await operate(["bridge", "telegram", "--inbound-only", "--json"], lines)).toBe(EXIT.ok);
+      expect(urlButtons(script.sends().find(call => String(call.params["text"]).startsWith("Review publication")))).toEqual([["Review publication", "https://console.example:8443/t/z"]]);
+      expect(urlButtons(script.sends().find(call => String(call.params["text"]).startsWith("work z")))).toEqual([["Open task", "https://console.example:8443/chat?task=z"]]);
+      // The generic setting still accepts http and a path prefix for the mirrors; the phone refuses both, and the environment override is read the same way.
+      for (const [setting, env] of [["http://console.example:8443", undefined], ["https://console.example/base", undefined], [undefined, "https://user:pw@console.example"], [undefined, "https://localhost:4180"]] as const) {
+        if (setting !== undefined) expect(saveConsoleUrl(dir, setting)).toMatchObject({ ok: true });
+        else rmSync(join(dir, "console-url"), { force: true });
+        vi.stubEnv(CONSOLE_URL_ENV, env ?? "");
+        answers.push({ text: "Again.", calls: [{ id: "c2", name: "show_control", args: { control: "publish", task: "z" } }] }, { text: "Again the control." });
+        script.updates.push([textUpdate(10 + script.sends().length, "publish z")]);
+        expect(await operate(["bridge", "telegram", "--inbound-only", "--json"], []), `${setting ?? env}`).toBe(EXIT.ok);
+        const sent = script.sends().at(-1)!;
+        expect(sent.params["reply_markup"], `${setting ?? env}`).toBeUndefined();
+        expect(String(sent.params["text"]), `${setting ?? env}`).toContain(NO_PHONE_LINK);
+        expect(String(sent.params["text"])).not.toMatch(/localhost|http:/);
+      }
+      vi.stubEnv(CONSOLE_URL_ENV, "");
+      store = openStore(file);
+    });
+
     test("`bridge telegram --follow` answers while it stays on the wire, and a watch's embedded follower does the same for the normal worker", async () => {
       stub();
       await saveRepos(join(dir, "repos.json"), [repo]);
@@ -1074,20 +1265,29 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       });
       expect(report).toMatchObject({ chatQueued: 1, chatAnswered: 1 });
       expect(script.texts()).toEqual(["Nothing is waiting on you."]);
-      // The watch (what `up` runs per project): its embedded follower carries the conversation too.
+      // The watch (what `up` runs per project): its embedded follower carries the conversation too, and its
+      // phone links must name the console this process co-hosts — the stated --public-url — or not exist.
       await exec("git", ["init", "-q", "-b", "main"], { cwd: repo });
       await exec("git", ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "first"], { cwd: repo });
       const runnerToken = register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: new Date() }).token;
+      task("z");
       store.close();
-      answers.push({ text: "Still nothing waiting." });
-      script.updates.push([textUpdate(3, "and now?")]);
-      const lines: string[] = [];
-      const code = await runOperate("watch", ["--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", join(dir, "pool"), "--for", "1500", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000"],
-        line => lines.push(line), { databaseFile: file, now: new Date(), telegramTransport: script.transport, mateSeams: { subscriptionRunner: runner } });
-      expect(code, lines.join("\n")).toBe(EXIT.ok);
-      expect(script.texts(), lines.join("\n")).toEqual(["Nothing is waiting on you.", "Still nothing waiting."]);
+      expect(saveConsoleUrl(dir, "https://console.example")).toMatchObject({ ok: true });
+      const watch = async (publicUrl: string, update: number, text: string) => {
+        answers.push({ text: "Pointing.", calls: [{ id: `w${update}`, name: "show_control", args: { control: "publish", task: "z" } }] }, { text });
+        script.updates.push([textUpdate(update, "publish z")]);
+        const lines: string[] = [];
+        const code = await runOperate("watch", ["--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", join(dir, "pool"), "--public-url", publicUrl, "--for", "1500", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000"],
+          line => lines.push(line), { databaseFile: file, now: new Date(), telegramTransport: script.transport, mateSeams: { subscriptionRunner: runner } });
+        expect(code, lines.join("\n")).toBe(EXIT.ok);
+        expect(script.texts().at(-2), lines.join("\n")).toBe(text);
+        return urlButtons(script.sends().at(-1));
+      };
+      expect(await watch("https://console.example", 3, "Still nothing waiting.")).toEqual([["Review publication", "https://console.example/t/z"]]);
+      expect(await watch("https://elsewhere.example", 4, "Once more.")).toEqual([]);
+      expect(String(script.sends().at(-1)!.params["text"])).toContain(NO_PHONE_LINK);
       store = openStore(file);
-      expect(store.listTelegramConversations(BOT).map(one => one.state)).toEqual(["done", "done"]);
+      expect(store.listTelegramConversations(BOT).map(one => one.state)).toEqual(["done", "done", "done"]);
     });
   });
 });

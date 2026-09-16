@@ -113,3 +113,73 @@ checked2026-09-16: a standard button has one action type, such as `url` for
 navigation or `callback_data` for a callback. Use the ordinary URL type here,
 not `login_url`, and keep the existing authenticated web app responsible for
 the actual action.
+
+## Implementation record (2026-09-16, fixture-verified, not a live trial)
+
+Built on `36a563c` (schema63 unchanged; no migration, queue, scheduler or
+new setting). Where each piece lives:
+
+1. **Trusted origin.** `phoneOrigin` in `src/webhooks.ts` re-reads the SAME
+   console-url setting the mirrors use (`loadConsoleUrl`), on every call,
+   and returns exactly an https origin or null: no credentials, path,
+   query or fragment; not localhost, `*.localhost`, `127.x`, `0.0.0.0`,
+   `::1`, `::`, nor an IPv4-mapped or IPv4-compatible IPv6 literal that
+   embeds one of those (`[::ffff:127.0.0.1]`, which the URL parser
+   canonicalises to `[::ffff:7f00:1]`). The generic setting still accepts
+   http and a path prefix for the mirrors. `telegramConversation` in
+   `src/operate.ts` wires it into the bridge pass, the follower and the
+   watch's embedded follower; inside `up`, the console's `--public-url`
+   rides each project's watch and a mismatch yields no link. Nothing is
+   probed, cached or persisted.
+2. **Precise buttons.** `chatControlHref` and the shared `chatResultHref`
+   (`src/chat-controls.ts`) name the destinations. Handoff cards (cancel,
+   console controls) carry one url button; confirmed task, scope, agents,
+   manual-revision and resume cards carry one to the approval control
+   while the recorded scope waits or to the task otherwise; `/task` carries
+   the exact recorded run's Checks (a verdict was recorded) or Changes,
+   the approval control, the recovery page, or the task. Confirmable cards
+   keep Confirm/Dismiss alone. A url is never a token: placement operates
+   only on callback tokens, and a forged tap on a handoff card acts on
+   nothing. A task outside the phone's current ceiling gets no link.
+3. **Truthful outcomes.** `confirmedCardText` reads the recorded scope's
+   approval standing, never the door's sentence: automatic approval says
+   so and asks for nothing; a waiting scope has one next action; a confirmed
+   resume says nothing has resumed yet. Unconfigured: one line
+   (`NO_PHONE_LINK`), no localhost. Help and the parity matrix were
+   reworded to match.
+4. **Sign-in return.** `loginReturn` in `src/serve.ts` narrows `safeReturn`
+   further (only the app's own pages — task lens, chat, work, board and
+   the fixed control destinations — no sign-in/sign-up/join/sign-out
+   roads, no region fetch, no encoded second scheme or host,
+   secret-looking query keys dropped). An
+   unauthenticated GET redirects to `/login?return=<path>`, the form
+   carries it as a hidden same-site path, a failed attempt keeps it, and
+   success lands on it. Authentication, allowed-host, HTTPS, SameSite,
+   CSRF, approval and project checks are untouched; the result view still
+   binds `?result=` to a finished run of that exact task. The approval
+   button's `#task-chat-action` fragment is not sent to the server and is
+   not relied on: after sign-in the task lens itself shows the control.
+5. **Durable delivery unchanged.** Parts persist origin-free text and
+   callback tokens only; the url row and the missing-setup line are
+   minted at send time from the persisted proposal, so a retry after the
+   setting changed or vanished carries the current truth. `/task` and
+   `/status` narrow the registry to the paired account's own projects
+   after the await, with the pairing re-checked (the reproduced
+   excluded-project leak).
+
+Verified by `src/webhooks.test.ts` (origin shapes, loopback spellings,
+co-hosted mismatch, removal), `src/telegram-status.test.ts` (`/task`
+destinations, restricted account, unconfigured footer),
+`src/telegram-mate.test.ts` (handoff and confirmed cards, staged resume,
+automatic mode, stale/foreign identity, revocation across awaits,
+duplicate tap, lost send retried after the setting was removed with no
+model call, production pass/follower/watch wiring with `--public-url`) and
+`src/serve.test.ts` (deep link → failed → successful sign-in → exact
+result; redirect attacks stay local).
+
+### Live acceptance gap (unchanged)
+
+The bot remains unpaired and no console-url is set on the live plane:
+fixtures prove the implementation, not a physical phone, Telegram or
+OS-reboot trial. Root inspects a desktop and phone-width journey on the
+accepted candidate before claiming phone readiness.

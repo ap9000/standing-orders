@@ -3,9 +3,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { openStore, type Store } from "./store.js";
-import { addApprover } from "./scope.js";
+import { addApprover, approve } from "./scope.js";
 import { bridgePass, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport } from "./telegram.js";
-import { PHONE_HELP, phoneCommand, phoneStatus, phoneTask } from "./telegram-status.js";
+import { PHONE_HELP, phoneCommand, phoneStatus, phoneTask, phoneTaskView } from "./telegram-status.js";
+import { propose } from "./scope.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
 import { runOperate, EXIT } from "./operate.js";
 import { saveRepos } from "./repos.js";
@@ -35,11 +36,14 @@ describe("read-only phone status", () => {
   let store: Store;
   let dir: string;
   let db: string;
+  let operatorToken: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "so-phone-status-"));
     db = join(dir, "orders.db");
     store = openStore(db);
-    expect(addApprover(store, "operator", NOW).ok).toBe(true);
+    const operator = addApprover(store, "operator", NOW);
+    if (!operator.ok) throw new Error("bootstrap");
+    operatorToken = operator.token;
   });
   afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
@@ -69,6 +73,90 @@ describe("read-only phone status", () => {
 
   const pass = (s: ReturnType<typeof scripted>, readProjects: () => Promise<readonly string[]> = async () => [REPO]) =>
     bridgePass(store, { botId: BOT, transport: s.transport, clock: () => NOW, deliver: false, readProjects });
+
+  test("`/task` names ONE precise destination from the recorded state: the exact result's checks or changes, the approval control, the recovery page, or the task itself", () => {
+    const { run } = result("verified-one", "verified");
+    expect(phoneTaskView(store, [REPO], "verified-one", NOW).link).toEqual({ label: "Review checks", path: `/chat?task=verified-one&result=${run}&tab=checks` });
+    const bare = result("no-verdict", null);
+    expect(phoneTaskView(store, [REPO], "no-verdict", NOW).link).toEqual({ label: "Review changes", path: `/chat?task=no-verdict&result=${bare.run}&tab=changes` });
+    // The result named is this execution's own recorded run, not the newest run anywhere.
+    expect(bare.run).not.toBe(run);
+    task("scoped");
+    for (const phase of ["build", "plan", "review"]) store.setPhaseConfig("installation", phase, "claude", "sonnet", "operator", NOW);
+    propose(store, { taskId: "scoped", goal: "do it", now: NOW });
+    const scoped = phoneTaskView(store, [REPO], "scoped", NOW);
+    expect(diagnoseTaskDispatch(store, "scoped", NOW)?.action).toBe("approve-scope");
+    expect(scoped.link).toEqual({ label: "Review & start", path: "/chat?task=scoped#task-chat-action" });
+    expect(scoped.text).not.toContain("Read-only status");
+    const failed = task("stopped");
+    store.setTaskState("stopped", "failed", NOW);
+    void failed;
+    expect(diagnoseTaskDispatch(store, "stopped", NOW)?.action).toBe("retry-task");
+    expect(phoneTaskView(store, [REPO], "stopped", NOW).link).toEqual({ label: "Review recovery options", path: "/t/stopped" });
+    // A worker that must be started: the task lens, whose words say what remains.
+    const idle = task("idle-task");
+    void idle;
+    propose(store, { taskId: "idle-task", goal: "wait for a worker", now: NOW });
+    expect(approve(store, "idle-task", "operator", NOW, store.getScope("idle-task")!.digest, operatorToken).ok).toBe(true);
+    expect(["start-worker", "approve-scope"]).toContain(diagnoseTaskDispatch(store, "idle-task", NOW)?.action);
+    expect(phoneTaskView(store, [REPO], "idle-task", NOW).link?.path.startsWith("/chat?task=idle-task")).toBe(true);
+    // Foreign or unknown: no text about it, no link.
+    task("foreign", FOREIGN, "hidden-title");
+    expect(phoneTaskView(store, [REPO], "foreign", NOW)).toEqual({ text: phoneTask(store, [REPO], "nope", NOW), link: null });
+    expect(phoneTaskView(store, [REPO], "nope", NOW).link).toBeNull();
+  });
+
+  test("a restricted account's `/task` and `/status` see only the projects it may access, even when the registry names more — no title, no link, no status line leaks", async () => {
+    // A second approver, allowed only REPO, paired to this phone; the registry (the console's managed list) still names both projects.
+    expect(addApprover(store, "limited", NOW, { name: "operator", token: operatorToken }).ok).toBe(true);
+    expect(store.setAccountProjects("limited", [REPO], "operator", NOW).ok).toBe(true);
+    expect(store.accountCanAccess("limited", FOREIGN)).toBe(false);
+    const code = mintPairingCode();
+    store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "limited", by: "operator", ttlMs: PAIRING_TTL_MS }, NOW);
+    expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: BOT, chatId: String(CHAT), userId: String(USER), updateId: 1 }, NOW).ok).toBe(true);
+    task("allowed-task", REPO, "Allowed project task");
+    task("private-task", FOREIGN, "PRIVATE PROJECT SENTINEL");
+    const s = scripted();
+    const registry = async () => [REPO, FOREIGN];
+    const passWith = () => bridgePass(store, { botId: BOT, transport: s.transport, clock: () => NOW, deliver: false, readProjects: registry, conversation: { evidenceRoot: dir, phoneOrigin: () => "https://console.example", subscriptionRunner: async () => { throw new Error("a read-only command must not call a provider"); } } });
+    s.updates.push([command(2, "/task private-task"), command(3, "/status"), command(4, "/task allowed-task")]);
+    expect(await passWith()).toMatchObject({ ok: true, report: { statusReplies: 3, problems: [] } });
+    const [hidden, status, allowed] = s.calls.filter(c => c.method === "sendMessage");
+    expect(String(hidden!.params["text"])).toBe("No such task in your connected projects. Send /status for task IDs.");
+    expect(hidden!.params["reply_markup"]).toBeUndefined();
+    expect(String(status!.params["text"])).not.toMatch(/PRIVATE PROJECT SENTINEL|private-task|secret-project/);
+    expect(String(status!.params["text"])).toContain("allowed-task");
+    expect(allowed!.params["reply_markup"]).toEqual({ inline_keyboard: [[{ text: "Open task", url: "https://console.example/chat?task=allowed-task" }]] });
+    expect(s.texts().join("\n")).not.toContain("PRIVATE PROJECT SENTINEL");
+  });
+
+  test("the reply carries the button only under a trusted origin read at reply time; unconfigured, the same text says the console is where", async () => {
+    pair();
+    const { run } = result("verified-one", "verified");
+    const s = scripted();
+    let origin: string | null = null;
+    const passWith = () => bridgePass(store, { botId: BOT, transport: s.transport, clock: () => NOW, deliver: false, readProjects: async () => [REPO], conversation: { evidenceRoot: dir, phoneOrigin: () => origin } });
+    const sends = () => s.calls.filter(c => c.method === "sendMessage");
+    s.updates.push([command(2, "/task verified-one")]);
+    expect(await passWith()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
+    expect(sends().at(-1)!.params["reply_markup"]).toBeUndefined();
+    expect(s.texts().at(-1)).toContain("Read-only status. Evidence files and full actions are in the console.");
+    origin = "https://console.example";
+    s.updates.push([command(3, "/task verified-one")]);
+    expect(await passWith()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
+    expect(sends().at(-1)!.params["reply_markup"]).toEqual({ inline_keyboard: [[{ text: "Review checks", url: `https://console.example/chat?task=verified-one&result=${run}&tab=checks` }]] });
+    expect(s.texts().at(-1)).not.toContain("Read-only status");
+    expect(s.texts().at(-1)).toContain("Next: Open this task's result");
+    // /status and /help never carry a button, and nothing changed.
+    s.updates.push([command(4, "/status"), command(5, "/help")]);
+    expect(await passWith()).toMatchObject({ ok: true, report: { statusReplies: 2 } });
+    expect(sends().slice(-2).every(c => c.params["reply_markup"] === undefined)).toBe(true);
+    expect(PHONE_HELP).toContain("nothing changes until you act");
+    expect(PHONE_HELP).not.toMatch(/localhost|http/);
+    for (const table of ["run", "claim", "mate_turn", "mate_proposal", "telegram_action", "telegram_proposal_action"]) {
+      expect(store.raw().prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!["n"]).toBe(table === "run" ? 1 : 0);
+    }
+  });
 
   test("commands are explicit, bounded, and never interpret prose or shell syntax", () => {
     expect(phoneCommand("/task mobile-nav")).toEqual({ kind: "task", id: "mobile-nav" });

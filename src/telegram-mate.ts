@@ -29,7 +29,7 @@ import { canonicalProject } from "./project.js";
 import type { ChatConfig, MateProposal, MateSession, MateThread, Store, SubscriptionChatProviderId, TelegramBinding, TelegramConversation } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { phoneText, projectLabel } from "./telegram-status.js";
-import { CHAT_CONTROLS, isChatControl } from "./chat-controls.js";
+import { CHAT_CONTROLS, chatControlHref, isChatControl, type ChatControl } from "./chat-controls.js";
 import { CHAT_TASK_ACTIONS, isChatTaskAction } from "./chat-task-actions.js";
 import type { TelegramTransport } from "./telegram.js";
 
@@ -51,6 +51,13 @@ export type TelegramConversationOptions = {
   subscriptionRunner?: SubscriptionMateRunner;
   /** The held-session supervisor in this process, when there is one (a stop fences through it). */
   held?: DoorOptions["held"];
+  /**
+   * The https origin a phone link may open, read again on EVERY call (a
+   * card is linked immediately before it is sent or edited, never from a
+   * stored URL), or null when no trusted origin is configured. Production
+   * wires `phoneOrigin` from webhooks.ts; absent, no card carries a link.
+   */
+  phoneOrigin?: () => string | null;
 };
 
 /** One Bot API call, the shape telegram.ts injects. */
@@ -187,7 +194,93 @@ export function replyContextFor(taskId: string, run: number | null): string {
   ].join(" ");
 }
 
-const HANDOFF = "Open Standing Orders on the computer to finish this step.";
+/** A step the phone cannot take itself: said once; the button (or its absence) says where. */
+const HANDOFF = "This step finishes in Standing Orders.";
+/** No trusted https origin is configured: one honest line, no localhost, no promise. */
+export const NO_PHONE_LINK = "No phone link: this console has no HTTPS address set (standing-orders webhook set console-url https://…), so open Standing Orders on the computer.";
+/** An origin exists but the card's task is not one this phone may reach now: said as that, never as missing setup. */
+export const NO_TASK_LINK = "No phone link: this task is outside your connected projects now, so open Standing Orders on the computer.";
+
+/** A fixed console destination beside its button label. The path is one of chat-controls' own; the origin joins it only at send time. */
+export type PhoneLink = { label: string; path: string };
+
+/** Is this task one the phone's ceiling admits right now? A link names a stored identity, never a model's word alone. */
+function taskInCeiling(store: Store, taskId: string, repos: readonly string[]): boolean {
+  const ref = store.lookupRef(taskId);
+  return ref !== null && ref.repo !== null && repos.includes(ref.repo);
+}
+
+/** The recorded scope's standing — none filed yet (a planner is drafting), waiting for approval, or approved (by hand or under a signed mode). Read from the row, never from an outcome's words. */
+function approvalState(store: Store, taskId: string): "none" | "waiting" | "approved" {
+  const scope = store.getScope(taskId);
+  if (scope === null) return "none";
+  return scope.approvedDigest != null && scope.approvedDigest === scope.digest ? "approved" : "waiting";
+}
+
+function controlLink(control: ChatControl, taskId: string): PhoneLink {
+  return { label: CHAT_CONTROLS[control].label, path: chatControlHref(control, taskId) };
+}
+
+/**
+ * Where a task's next step lives, from its recorded state: the approval
+ * control while its scope waits for one, else the task itself.
+ */
+function taskLink(store: Store, taskId: string, repos: readonly string[]): PhoneLink | null {
+  if (!taskInCeiling(store, taskId, repos)) return null;
+  return controlLink(approvalState(store, taskId) === "waiting" ? "approval" : "task", taskId);
+}
+
+/**
+ * The link a PENDING card carries: only the handoff kinds (cancel, a console
+ * control), whose whole point is where to go. Confirmable cards keep their
+ * Confirm/Dismiss buttons alone — a second button on a card that acts is a
+ * choice the operator did not need.
+ */
+export function proposalLink(store: Store, proposal: MateProposal, repos: readonly string[]): PhoneLink | null {
+  const payload = proposal.payload;
+  const task = typeof payload["task"] === "string" ? payload["task"] : "";
+  if (proposal.kind === "cancel") return task !== "" && taskInCeiling(store, task, repos) ? controlLink("cancel", task) : null;
+  if (proposal.kind === "control") {
+    const control = payload["control"];
+    if (!isChatControl(control)) return null;
+    if ("href" in CHAT_CONTROLS[control]) return controlLink(control, task);
+    return task !== "" && taskInCeiling(store, task, repos) ? controlLink(control, task) : null;
+  }
+  return null;
+}
+
+/**
+ * The link a CONFIRMED card carries: the exact recorded task the outcome
+ * names, where its remaining step lives — the approval control while the
+ * scope waits for one (a manual approval), the task otherwise (an
+ * automatic approval, a staged resume). Kinds whose outcome is complete
+ * carry none.
+ */
+export function confirmedLink(store: Store, outcome: DoorOutcome, proposal: MateProposal, repos: readonly string[]): PhoneLink | null {
+  if (!outcome.ok || outcome.taskId === null) return null;
+  const staged = proposal.kind === "task" || proposal.kind === "scope" || proposal.kind === "agents"
+    || (proposal.kind === "task_action" && proposal.payload["operation"] === "resume")
+    || (proposal.kind === "review" && proposal.payload["operation"] === "revise");
+  return staged ? taskLink(store, outcome.taskId, repos) : null;
+}
+
+/** One url button: navigation only — it opens the console's own authenticated control and grants nothing. */
+export function phoneLinkButton(origin: string | null, link: PhoneLink | null): InlineButton[] | null {
+  if (origin === null || link === null) return null;
+  return [{ text: link.label, url: `${origin}${link.path}` }];
+}
+
+/** Why a card that wanted a link carries none — null when it carries one. */
+function linkNote(origin: string | null, link: PhoneLink | null): string | null {
+  if (origin === null) return NO_PHONE_LINK;
+  return link === null ? NO_TASK_LINK : null;
+}
+
+/** The keyboard as sent: the persisted callback rows, then the link row minted now. */
+function keyboardWith(callbacks: CallbackKeyboard | null, link: InlineButton[] | null): Keyboard | undefined {
+  const rows: Keyboard = [...(callbacks ?? []), ...(link === null ? [] : [link])];
+  return rows.length === 0 ? undefined : rows;
+}
 
 function lines(text: string, cap: number): string[] {
   return phoneText(text, cap).split("\n").map(line => `| ${line}`);
@@ -208,6 +301,8 @@ export function proposalPreview(store: Store, proposal: MateProposal, repos: rea
     text: [headline, ...body, ...(consequence === null ? [] : ["", consequence]), "", "Confirm or Dismiss below. Nothing changes until you confirm."].join("\n"),
     buttons: true,
   });
+  // A handoff's text is origin-free on purpose: it is persisted before the
+  // send, and the button or the missing-setup line joins it at send time.
   const handoff = (headline: string, body: string[] = []): { text: string; buttons: boolean } => ({ text: [headline, ...body, "", HANDOFF].join("\n"), buttons: false });
 
   switch (proposal.kind) {
@@ -241,10 +336,10 @@ export function proposalPreview(store: Store, proposal: MateProposal, repos: rea
         ...(t("risk") === "" ? [] : [`risk ${t("risk", 32)}`]),
         ...(t("role") === "" ? [] : [payload["clear"] === true ? `${t("role", 32)}: back to the recommendation` : `${t("role", 32)}: ${t("provider", 40)} ${t("model", 80)}`]),
       ];
-      return card(`Change agents for ${taskName}: ${parts.join("; ")}`, [], "Changing agents or risk needs renewed approval on the computer before work starts.");
+      return card(`Change agents for ${taskName}: ${parts.join("; ")}`, [], "Changing agents or risk needs renewed approval before work starts.");
     }
     case "scope":
-      return card(`Rewrite the scope of ${taskName}:`, [`Goal: ${t("goal", 600)}`, ...(t("not") === "" ? [] : [`Not: ${t("not", 300)}`])], "After confirming, approve the new scope with your password on the computer.");
+      return card(`Rewrite the scope of ${taskName}:`, [`Goal: ${t("goal", 600)}`, ...(t("not") === "" ? [] : [`Not: ${t("not", 300)}`])], "After confirming, the new scope still needs your password approval before work starts.");
     case "answer": {
       const id = typeof payload["decision"] === "number" ? payload["decision"] : null;
       const decision = id === null ? null : store.getDecision(id);
@@ -264,7 +359,7 @@ export function proposalPreview(store: Store, proposal: MateProposal, repos: rea
       const action = isChatTaskAction(operation) ? CHAT_TASK_ACTIONS[operation] : null;
       const dependency = t("dependencyTitle", 120) || t("dependency", 64);
       if (action === null) return handoff(`An unavailable action was proposed for ${taskName}.`);
-      return card(`${action.label}: ${taskName}${dependency === "" ? "" : ` · ${dependency}`}`, [action.detail], operation === "resume" ? "Confirming opens the password step on the computer; it does not resume work from here." : null);
+      return card(`${action.label}: ${taskName}${dependency === "" ? "" : ` · ${dependency}`}`, [action.detail], operation === "resume" ? "Confirming only requests the resume. Work resumes after the password step on the task, not from here." : null);
     }
     case "review": {
       const revise = payload["operation"] === "revise";
@@ -333,20 +428,20 @@ export const TELEGRAM_ACTION_PARITY: Record<string, { support: ParitySupport; ho
   queue: { support: "direct", how: "Read during a turn.", gap: null },
   get_result: { support: "direct", how: "Read during a turn; the phone card shows the verification verdict, never a local link.", gap: "Screenshots and secure remote evidence links are not delivered to the phone yet." },
   get_controls: { support: "direct", how: "Read during a turn.", gap: null },
-  show_control: { support: "handoff", how: "The card names the control and the task; the operator opens it on the computer. No link is sent.", gap: "Incomplete phone action: the control itself runs on the computer." },
-  propose_task: { support: "direct", how: "Card with Confirm/Dismiss through confirmMateProposal (filed as a mate proposal, via telegram). Scope approval stays on the computer.", gap: "Scope approval (the password) stays on the computer." },
-  propose_scope: { support: "direct", how: "Confirm rewrites the scope through the shared door; the password approval that follows is a handoff.", gap: "Approving the rewritten scope needs the password on the computer." },
+  show_control: { support: "handoff", how: "The card names the control and the task, with one url button to that exact console control when a trusted https console-url is configured; the button opens the signed-in console and acts on nothing.", gap: "Incomplete phone action: the control itself runs in the console, after sign-in." },
+  propose_task: { support: "direct", how: "Card with Confirm/Dismiss through confirmMateProposal (filed as a mate proposal, via telegram). The confirmed card links Review & start for the filed task while its scope waits; under a signed automatic mode it says the scope is approved and links the task.", gap: "Under manual approval the password step happens in the console, reached from the card's button." },
+  propose_scope: { support: "direct", how: "Confirm rewrites the scope through the shared door; the confirmed card links Review & start for the exact task.", gap: "Approving the rewritten scope needs the password, in the console." },
   propose_next: { support: "direct", how: "Confirm through the shared door with the queue revision it saw.", gap: null },
   propose_reserve: { support: "direct", how: "Confirm through the shared door.", gap: null },
-  propose_agents: { support: "direct", how: "Confirm through the shared route-edit door; renewed approval stays on the computer.", gap: "Renewed approval after the route change happens on the computer." },
+  propose_agents: { support: "direct", how: "Confirm through the shared route-edit door; when the change stales the approval, the confirmed card links Review & start for the exact task.", gap: "Renewed approval after the route change happens in the console." },
   propose_hold: { support: "direct", how: "Confirm through the shared door.", gap: null },
   propose_unhold: { support: "direct", how: "Confirm through the shared door.", gap: null },
   propose_steer: { support: "direct", how: "Confirm through the shared door; the guidance is shown verbatim on the card.", gap: null },
   propose_dependency_repair: { support: "direct", how: "Confirm retry/unlink/replace through the shared door with both projects re-checked.", gap: null },
-  propose_task_action: { support: "direct", how: "stop, retry, plan, wait_for and stop_waiting confirm through the shared door (a stop is audited via telegram); resume confirms only the request and hands off to the password step.", gap: "resume completes on the computer (incomplete phone action)." },
+  propose_task_action: { support: "direct", how: "stop, retry, plan, wait_for and stop_waiting confirm through the shared door (a stop is audited via telegram); resume confirms only the request, says nothing has resumed, and links the task where the password step lives.", gap: "resume completes in the console (incomplete phone action)." },
   propose_answer: { support: "direct", how: "Confirm answers through the shared door, audited via telegram; an irreversible option arms a second tap first.", gap: null },
-  propose_review: { support: "direct", how: "note saves feedback; revise creates the same-family revision through the shared result service, honouring automatic approval settings.", gap: "Under manual approval the revision is approved on the computer; under a signed automatic-approval mode it runs unattended." },
-  propose_cancel: { support: "handoff", how: "The door refuses cancel from any card; the phone says to arm it on the task itself.", gap: "Incomplete phone action: no phone path to cancel by design." },
+  propose_review: { support: "direct", how: "note saves feedback; revise creates the same-family revision through the shared result service, honouring automatic approval settings; the confirmed card links Review & start for the revision while it waits, or the task once approved.", gap: "Under manual approval the revision is approved in the console, reached from the card's button; under a signed automatic-approval mode it runs unattended." },
+  propose_cancel: { support: "handoff", how: "The door refuses cancel from any card; the card links the exact task's Cancel control when a trusted https console-url is configured, and the cancel is armed there.", gap: "Incomplete phone action: no phone path to cancel by design; the button only opens the task." },
 };
 
 /** Every tool the model can call, mapped; a new tool must name its phone road. */
@@ -356,10 +451,14 @@ export function parityGaps(): string[] {
 
 // ---- proposal cards on the wire ------------------------------------------------------
 
-type Keyboard = { text: string; callback_data: string }[][];
+/** One inline button: an opaque callback token (a real in-chat act) or a url (navigation, never authority). */
+export type InlineButton = { text: string; callback_data: string } | { text: string; url: string };
+type Keyboard = InlineButton[][];
+/** What a part persists: callback tokens only. A url is minted at send time, never stored. */
+type CallbackKeyboard = { text: string; callback_data: string }[][];
 
 /** Mint the card's tokens before the send, so a tap can never name a token that does not exist. */
-export function mintCardTokens(store: Store, binding: TelegramBinding, proposal: number, now: Date, messageId?: string): { keyboard: Keyboard; tokens: string[] } {
+export function mintCardTokens(store: Store, binding: TelegramBinding, proposal: number, now: Date, messageId?: string): { keyboard: CallbackKeyboard; tokens: string[] } {
   const confirm = randomBytes(16).toString("hex");
   const dismiss = randomBytes(16).toString("hex");
   for (const [token, phase] of [[confirm, "confirm"], [dismiss, "dismiss"]] as const) {
@@ -425,6 +524,7 @@ export function applyProposalTap(
   }
   const who = verified.who;
   const preview = proposalPreview(store, proposal, repos);
+  const origin = options.phoneOrigin?.() ?? null;
 
   if (action.phase === "dismiss") {
     if (!store.consumeTelegramProposalAction(token, now)) { ack("that button was already used"); return { effects, confirmed: false, ignored: true }; }
@@ -444,9 +544,13 @@ export function applyProposalTap(
     return { effects, confirmed: false, ignored: false };
   }
   if (!preview.buttons) {
+    // A forged keyboard on a handoff card: nothing acts; the card is
+    // repainted with its current link (or the honest absence of one).
     store.consumeTelegramProposalActions(proposal.id, now);
-    ack("this step finishes on the computer");
-    edit(preview.text);
+    const wanted = proposalLink(store, proposal, repos);
+    const link = phoneLinkButton(origin, wanted);
+    ack(link === null ? "this step finishes on the computer" : "open the button below to finish this step");
+    edit(handoffCardText(preview.text, linkNote(origin, wanted)), keyboardWith(null, link));
     return { effects, confirmed: false, ignored: true };
   }
   const irreversible = proposal.kind === "answer" && proposal.payload["reversible"] === false;
@@ -494,20 +598,46 @@ export function applyProposalTap(
   }
   store.consumeTelegramProposalActions(proposal.id, now);
   ack(outcome.ok ? "✓ done" : "not done");
-  edit(confirmedCardText(outcome, proposal));
+  const wanted = confirmedLink(store, outcome, proposal, repos);
+  const link = phoneLinkButton(origin, wanted);
+  edit(confirmedCardText(store, outcome, proposal, linkNote(origin, wanted)), keyboardWith(null, link));
   return { effects, confirmed: outcome.ok, ignored: false };
 }
 
-/** The resolved card, with the honest remaining step where one exists. */
-export function confirmedCardText(outcome: DoorOutcome, proposal: MateProposal): string {
+/** A handoff card as sent or repainted: its persisted words, plus the one line saying why no link rides it. */
+export function handoffCardText(text: string, note: string | null): string {
+  return note === null ? text : `${text}\n\n${note}`;
+}
+
+/**
+ * The resolved card, from what is RECORDED about the task the outcome
+ * names — never from a word search over the door's sentence. A scope that
+ * still waits for approval has one next action: approve it (the button, or
+ * the console on the computer when no link exists). A scope approved under
+ * a signed mode asks for nothing more. A staged resume says what remains.
+ */
+export function confirmedCardText(store: Store, outcome: DoorOutcome, proposal: MateProposal, note: string | null): string {
   const said = phoneText(outcome.said, 600);
   if (!outcome.ok) return `✗ Not done: ${said}`;
-  const next =
-    proposal.kind === "task" ? "\n\nApprove its scope in Standing Orders on the computer before work starts."
-    : proposal.kind === "scope" || proposal.kind === "agents" ? `\n\n${HANDOFF}`
-    : proposal.kind === "task_action" && proposal.payload["operation"] === "resume" ? `\n\n${HANDOFF}`
-    : proposal.kind === "review" && proposal.payload["operation"] === "revise" && /approve/i.test(outcome.said) ? "\n\nApprove the revision in Standing Orders on the computer, or ask here for its status with /task." : "";
-  return `✓ ${said}${next}`;
+  const taskId = outcome.taskId;
+  const resume = proposal.kind === "task_action" && proposal.payload["operation"] === "resume";
+  const revise = proposal.kind === "review" && proposal.payload["operation"] === "revise";
+  const staged = proposal.kind === "task" || proposal.kind === "scope" || proposal.kind === "agents" || resume || revise;
+  if (!staged || taskId === null) return `✓ ${said}`;
+  const state = approvalState(store, taskId);
+  const approval = state === "waiting";
+  // The door's sentence carries an approval instruction for a filed task or
+  // a revision; under a signed automatic mode the recorded scope is already
+  // approved, and the card says that instead of asking again.
+  const words =
+    proposal.kind === "task" && state === "approved" ? `${said.split(" — ")[0]} — approved under your automatic approval settings; nothing more is needed from you.`
+    : revise && state === "approved" ? "Revision created under your automatic approval settings."
+    : said;
+  const next = resume ? "Nothing has resumed yet: the password step on the task finishes it."
+    : approval && note !== null ? "Approve it in Standing Orders on the computer."
+    : "";
+  const setup = (approval || resume) && note !== null ? note : "";
+  return [`✓ ${words}`, ...[next, setup].filter(one => one !== "")].join("\n\n");
 }
 
 // ---- the queued turn ---------------------------------------------------------------
@@ -651,8 +781,11 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
       // Telegram's own retry_after, shared with the outbox: nothing goes out while it holds.
       const limitedUntil = store.telegramRetryAt(botId);
       if (limitedUntil > now.toISOString()) { defer(new Date(limitedUntil), "Telegram asked for a pause"); return; }
-      // The channel the reply was composed under, re-proved after the registry read; then the claim.
-      const problem = await telegramChannelProblem(store, { botId, bindingId: binding.id, approverGeneration: binding.approverGeneration, ceilingDigest: session.ceilingDigest }, readProjects);
+      // The channel the reply was composed under, re-proved after ONE registry read; then the claim.
+      let registry: readonly string[] | null = null;
+      try { registry = await readProjects(); } catch { registry = null; }
+      const read = registry;
+      const problem = read === null ? UNREADABLE_REGISTRY : await telegramChannelProblem(store, { botId, bindingId: binding.id, approverGeneration: binding.approverGeneration, ceilingDigest: session.ceilingDigest }, async () => read);
       if (problem === UNREADABLE_REGISTRY) { defer(new Date(clock().getTime() + PART_RETRY_MS[0]), problem); return; }
       if (problem !== null) {
         report.problems.push(`telegram chat reply for update ${row.updateId} was not sent: ${problem}`);
@@ -662,15 +795,24 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
         return;
       }
       if (!held()) return;
+      // A card's link is minted NOW, from the persisted proposal and the
+      // origin configured at this moment: a retry after the setting changed
+      // or went away carries the current truth, never a stored URL.
+      const repos = telegramConversationRepos(store, binding.approver, read ?? []);
+      const proposal = part.kind === "card" && part.proposal !== null ? store.getMateProposal(part.proposal) : null;
+      const origin = proposal === null ? null : options.phoneOrigin?.() ?? null;
+      const wanted = proposal === null ? null : proposalLink(store, proposal, repos);
+      const keyboard = keyboardWith(part.keyboard, phoneLinkButton(origin, wanted));
+      const text = proposal !== null && part.keyboard === null ? handoffCardText(part.text, linkNote(origin, wanted)) : part.text;
       const backoff = new Date(clock().getTime() + PART_RETRY_MS[Math.min(part.attempts, PART_RETRY_MS.length - 1)]!);
       let answer: Awaited<ReturnType<Transport>>;
       try {
         answer = await transport("sendMessage", {
           chat_id: chatId,
-          text: part.text,
+          text,
           link_preview_options: { is_disabled: true },
           ...(part.replyTo === null ? {} : { reply_parameters: { message_id: Number(part.replyTo) } }),
-          ...(part.keyboard === null ? {} : { reply_markup: { inline_keyboard: part.keyboard } }),
+          ...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }),
         });
       } catch {
         // The answer was lost: Telegram may or may not have the message. Said so, retried, counted.
@@ -700,6 +842,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
       }
       const messageId = String(id);
       if (!store.settleTelegramConversationPart(row.id, part.ordinal, owner, { ok: true, messageId }, clock())) return;
+      // Placement names the persisted callback tokens only; a url row is not a token.
       if (part.keyboard !== null) store.placeTelegramProposalActions(part.keyboard.flat().map(one => one.callback_data), messageId);
     }
     if (finish({ state: "done", outcome: outcomeWord })) report.answered++;

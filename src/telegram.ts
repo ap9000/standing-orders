@@ -23,11 +23,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
 import type { Store, Decision, Notification, TelegramBinding, TelegramDelivery } from "./store.js";
-import { phoneCommand, phoneStatus, phoneTask, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
+import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import {
   applyProposalTap,
   processTelegramConversations,
+  phoneLinkButton,
+  type InlineButton,
   replyContextFor,
   telegramConversationRepos,
   telegramRequestId,
@@ -1061,11 +1063,24 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
     };
     if (!stillPaired()) return;
     let response = PHONE_HELP;
+    // `/task` may carry ONE url button to the exact recorded task or result:
+    // minted from the trusted origin read now, never persisted, never a token.
+    let button: InlineButton[] | null = null;
     if (command.kind !== "help") {
       try {
-        const repos = [...new Set(await context.readProjects?.() ?? [])];
+        // The registry, then — after the await — the pairing again and the
+        // account's OWN ceiling over it: a project this approver was never
+        // given, or lost since, is not read, named or linked from here.
+        const registry = await context.readProjects?.() ?? [];
         if (!stillPaired()) return;
-        response = command.kind === "status" ? phoneStatus(store, repos, clock()) : phoneTask(store, repos, command.id, clock());
+        const repos = telegramConversationRepos(store, binding.approver, registry);
+        if (command.kind === "status") response = phoneStatus(store, repos, clock());
+        else {
+          const view = phoneTaskView(store, repos, command.id, clock());
+          button = phoneLinkButton(context.conversation?.phoneOrigin?.() ?? null, view.link);
+          // A destination with no trusted origin to carry it: the words say where instead.
+          response = button === null && view.link !== null ? `${view.text}\n\n${PHONE_CONSOLE_FOOTER}` : view.text;
+        }
       } catch {
         // No registry paths, SQLite errors, credentials, or stale snapshots
         // leave on the failure road. A new request can try again.
@@ -1085,6 +1100,7 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
       text: response,
       reply_parameters: { message_id: message.message_id },
       link_preview_options: { is_disabled: true },
+      ...(button === null ? {} : { reply_markup: { inline_keyboard: [button] } }),
     });
     if (sent.ok) report.statusReplies = (report.statusReplies ?? 0) + 1;
     else report.problems.push(`phone status reply failed for update ${update.update_id}; send a new command to retry`);
@@ -1213,7 +1229,7 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
       });
     });
   };
-  const editText = (text: string, keyboard?: { text: string; callback_data: string }[][]): void => {
+  const editText = (text: string, keyboard?: InlineButton[][]): void => {
     if (message === undefined) return;
     const chatId = message.chat === undefined ? null : String(message.chat.id);
     const messageId = message.message_id;
@@ -1400,7 +1416,7 @@ function answerNow(
   choice: string,
   binding: TelegramBinding,
   ack: (text?: string) => void,
-  editText: (text: string, keyboard?: { text: string; callback_data: string }[][]) => void,
+  editText: (text: string, keyboard?: InlineButton[][]) => void,
 ): void {
   const { store, clock, report } = context;
   // The live draft is the note that travels — consumed WITH the answer in

@@ -217,7 +217,7 @@ import { isDirectChatProvider, isSubscriptionChatProvider, priceOf, PRICED_MODEL
 import { resolvePhaseAgent, resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, routeOfTask, INSTALLATION_SCOPE, type TaskRoute } from "./agentconfig.js";
 import { isRiskLevel, legOf, projectRoute, riskConsequence, routeDigestOf, routeWords, RISK_LEVELS, PHASES as ROUTE_PHASES, type ReadinessLookup, type ReadinessObservation, type RiskLevel, type RouteOverride, type RouteStamp } from "./phase-routing.js";
 import { observeProviderReadiness, reportProviderReadinessAuthed } from "./runner.js";
-import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
+import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, phoneOrigin, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validModelId, validateSpec, type ProviderAudit, type ProviderId, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { attestProvider, attestationOf, versionInRange, type AttestOutcome, type AttestationRange } from "./attest.js";
 import { recognizesEligible } from "./exhaustion.js";
@@ -850,11 +850,16 @@ function telegramCanDeliver(context: { databaseFile: string; telegramTokenFile: 
  * root the console reads results from, the same membership harness seam
  * the CLI's chat uses, and this process's held-session supervisor for a
  * confirmed stop. The pass, the follower and the watch all wire it. */
-function telegramConversation(context: Context): TelegramConversationOptions {
+function telegramConversation(context: Context, options: { serverOrigin?: string } = {}): TelegramConversationOptions {
   return {
     evidenceRoot: context.evidenceRoot,
     ...(context.mateSeams?.subscriptionRunner === undefined ? {} : { subscriptionRunner: context.mateSeams.subscriptionRunner }),
     ...(context.heldCoordinator === undefined ? {} : { held: context.heldCoordinator }),
+    // Re-read on every card and every `/task`: the same console-url the
+    // mirrors use, held to an https origin, and — inside `up`, where this
+    // process also serves the console — equal to that console's own
+    // `--public-url`, or no link at all.
+    phoneOrigin: () => phoneOrigin(process.env, dirname(context.databaseFile), { serverOrigin: options.serverOrigin ?? null }),
   };
 }
 
@@ -7523,10 +7528,11 @@ async function runWatchLoop(args: {
   const followSource = loadBotToken(process.env, context.telegramTokenFile);
   if (followSource !== null) {
     const transport = context.telegramTransport ?? createTransport(followSource.token);
+    const publicUrl = text(flags, "public-url");
     follower = followBridge(store, {
       readProjects: telegramReadProjects(context),
       canDeliver: telegramCanDeliver(context, followSource.token),
-      conversation: telegramConversation(context),
+      conversation: telegramConversation(context, publicUrl === undefined ? {} : { serverOrigin: publicUrl }),
       botId: followSource.botId,
       transport,
       signal: followController.signal,
@@ -8359,6 +8365,10 @@ async function upCommand(
     copy.set("token", runnerToken);
     copy.set("repo", repo);
     copy.set("pool", pool);
+    // The co-hosted console's stated origin rides into each loop's follower:
+    // a phone link must name THIS console, or not exist.
+    const publicUrl = text(flags, "public-url");
+    if (publicUrl !== undefined) copy.set("public-url", publicUrl);
     return copy;
   };
   const prefix = (repo: string): string => (activeRepos.size > 1 ? `[${projectName(repo)}] ` : "");

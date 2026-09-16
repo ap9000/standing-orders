@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
-import { saveWebhook, saveConsoleUrl, loadWebhookTargets, loadConsoleUrl, linkFor, webhookPass, effectivePrimary, savePrimary, clearWebhook } from "./webhooks.js";
+import { saveWebhook, saveConsoleUrl, loadWebhookTargets, loadConsoleUrl, linkFor, webhookPass, effectivePrimary, savePrimary, clearWebhook, phoneOrigin, CONSOLE_URL_ENV } from "./webhooks.js";
 
 const T0 = new Date("2026-08-13T22:00:00.000Z");
 
@@ -136,6 +136,46 @@ describe("the console URL is parsed, not pattern-matched (attended A5)", () => {
       expect(saveConsoleUrl(dir, "not a url")).toMatchObject({ ok: false });
       expect(saveConsoleUrl(dir, "http://host:4180/base/")).toMatchObject({ ok: true });
       expect(loadConsoleUrl({}, dir)).toBe("http://host:4180/base");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the phone origin: the same console-url setting, held to an https origin and re-read every time", () => {
+  test("only a clean https origin qualifies; http, credentials, path, query, fragment, loopback and a removed setting give no link; a co-hosted --public-url must match exactly", () => {
+    const dir = mkdtempSync(join(tmpdir(), "phone-origin-"));
+    try {
+      expect(phoneOrigin({}, dir)).toBeNull();
+      expect(saveConsoleUrl(dir, "https://console.example:8443/")).toMatchObject({ ok: true });
+      expect(phoneOrigin({}, dir)).toBe("https://console.example:8443");
+      // The generic mirror setting keeps accepting http and a path prefix (unrelated consumers rely on it); the phone refuses both.
+      expect(saveConsoleUrl(dir, "http://console.example:8443")).toMatchObject({ ok: true });
+      expect(loadConsoleUrl({}, dir)).toBe("http://console.example:8443");
+      expect(phoneOrigin({}, dir)).toBeNull();
+      expect(saveConsoleUrl(dir, "https://console.example/base/")).toMatchObject({ ok: true });
+      expect(loadConsoleUrl({}, dir)).toBe("https://console.example/base");
+      expect(phoneOrigin({}, dir)).toBeNull();
+      // The environment wins over the file and is parsed to the same rule — nothing the setter refused can arrive through it either.
+      // Loopback under every spelling the parser canonicalises: dotted, IPv6, and an IPv4 mapped or embedded in IPv6.
+      for (const bad of ["https://user:pw@console.example", "https://console.example/?q=1", "https://console.example/#frag", "https://localhost:4180", "https://127.0.0.1:4180", "https://127.1.2.3", "https://0.0.0.0", "https://[::1]:4180", "https://[::]:4180", "https://[::ffff:127.0.0.1]", "https://[::ffff:7f00:1]", "https://[0:0:0:0:0:ffff:127.0.0.1]:4180", "https://[::ffff:0.0.0.0]", "https://[::127.0.0.1]", "https://app.localhost", "ftp://console.example", "console.example", "not a url", "   "]) {
+        expect(phoneOrigin({ [CONSOLE_URL_ENV]: bad }, dir), bad).toBeNull();
+      }
+      expect(phoneOrigin({ [CONSOLE_URL_ENV]: "https://Console.Example:443/" }, dir)).toBe("https://console.example");
+      // A public address embedded the same way is not loopback, and neither is a routable literal.
+      expect(phoneOrigin({ [CONSOLE_URL_ENV]: "https://[::ffff:203.0.113.9]" }, dir)).toBe("https://[::ffff:cb00:7109]");
+      expect(phoneOrigin({ [CONSOLE_URL_ENV]: "https://[2001:db8::10]:8443" }, dir)).toBe("https://[2001:db8::10]:8443");
+      // Co-hosted with a stated public origin: equal or nothing.
+      expect(saveConsoleUrl(dir, "https://console.example")).toMatchObject({ ok: true });
+      expect(phoneOrigin({}, dir, { serverOrigin: "https://console.example" })).toBe("https://console.example");
+      expect(phoneOrigin({}, dir, { serverOrigin: "https://console.example/" })).toBe("https://console.example");
+      expect(phoneOrigin({}, dir, { serverOrigin: "https://elsewhere.example" })).toBeNull();
+      expect(phoneOrigin({}, dir, { serverOrigin: "https://console.example:8443" })).toBeNull();
+      expect(phoneOrigin({}, dir, { serverOrigin: "not a url" })).toBeNull();
+      expect(phoneOrigin({}, dir, { serverOrigin: null })).toBe("https://console.example");
+      // Removed: the very next read is null — nothing was cached.
+      rmSync(join(dir, "console-url"));
+      expect(phoneOrigin({}, dir)).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

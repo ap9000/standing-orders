@@ -24,6 +24,13 @@ export type ChatControl = keyof typeof CHAT_CONTROLS;
 export function isChatControl(value: unknown): value is ChatControl {
   return typeof value === "string" && Object.hasOwn(CHAT_CONTROLS, value);
 }
+/** The exact recorded result of one execution, opened where the console's
+ * own result panel lives: the task lens names the execution, the run names
+ * the result, and the tab names what to read first. Never the latest run. */
+export type ChatResultTab = "summary" | "checks" | "changes";
+export function chatResultHref(task: string, run: number, tab: ChatResultTab = "summary"): string {
+  return `/chat?task=${encodeURIComponent(task)}&result=${run}${tab === "summary" ? "" : `&tab=${tab}`}`;
+}
 export function chatControlHref(control: ChatControl, task: string): string {
   const entry = CHAT_CONTROLS[control];
   if ("href" in entry) return entry.href;

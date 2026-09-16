@@ -307,6 +307,73 @@ describe("the web decision view", () => {
     expect(response.headers.get("set-cookie")).toBeNull();
   });
 
+  test("a phone's deep link to an exact task or result survives sign-in: the unauthenticated GET, a failed attempt and the successful one all keep the same-site destination, and opening it acts on nothing", async () => {
+    const destination = `/chat?task=t-1&result=${store.runsFor(taskRef)[0]!.id}&tab=checks`;
+    const anonymous = await fetch(url(destination), { redirect: "manual" });
+    expect(anonymous.status).toBe(303);
+    expect(anonymous.headers.get("location")).toBe(`/login?return=${encodeURIComponent(destination)}`);
+    // The sign-in page carries the destination as a hidden field — a path, never a token.
+    const form = await (await fetch(url(anonymous.headers.get("location")!))).text();
+    expect(form).toContain(`<input type="hidden" name="return" value="${destination.replace(/&/g, "&amp;")}">`);
+    // A wrong password keeps it for the next try.
+    const wrong = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name: "alex", token: "guessing", return: destination }), redirect: "manual" });
+    expect(wrong.status).toBe(403);
+    expect(wrong.headers.get("set-cookie")).toBeNull();
+    expect(await wrong.text()).toContain(`name="return" value="${destination.replace(/&/g, "&amp;")}"`);
+    // The right one lands exactly there, with the ordinary cookie and nothing else changed.
+    const right = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken, return: destination }), redirect: "manual" });
+    expect(right.status).toBe(303);
+    expect(right.headers.get("location")).toBe(destination);
+    const cookie = (right.headers.get("set-cookie") ?? "").split(";")[0] as string;
+    expect(right.headers.get("set-cookie")).toContain("HttpOnly; SameSite=Strict");
+    const landed = await fetch(url(destination), { headers: { cookie }, redirect: "manual" });
+    expect(landed.status).toBe(200);
+    expect(await landed.text()).toContain("t-1");
+    expect(store.getDecision(decisionId)?.state).toBe("open");
+    expect(store.getTask("t-1")?.state).not.toBe("cancelled");
+    // The plain sign-in still lands on the front page.
+    const plain = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken }), redirect: "manual" });
+    expect(plain.headers.get("location")).toBe("/");
+    expect(await (await fetch(url("/login"))).text()).not.toContain('name="return"');
+  });
+
+  test.each([
+    ["//evil.example/x", "/"],
+    ["https://evil.example/x", "/"],
+    ["/\\evil.example", "/"],
+    ["%2F%2Fevil.example", "/"],
+    ["/%2F%2Fevil.example", "/"],
+    ["/%5Cevil.example", "/"],
+    ["/login?return=/t/t-1", "/"],
+    ["/login", "/"],
+    ["/logout", "/"],
+    ["/signup", "/"],
+    ["/join/abcdefghijklmnop", "/"],
+    ["/t/t-1%0d%0aSet-Cookie:%20x=y", "/"],
+    ["t/t-1", "/"],
+    ["", "/"],
+    [`/t/${"x".repeat(600)}`, "/"],
+    ["/t/t-1?token=leaked&password=p&csrf=c&tab=checks", "/t/t-1?tab=checks"],
+    ["/chat?task=t-1&result=7&tab=changes", "/chat?task=t-1&result=7&tab=changes"],
+    ["/work", "/work"],
+    ["/settings#providers", "/settings"],
+    ["/board?fragment=1", "/"],
+    ["/chat?task=t-1&fragment=rail", "/"],
+    ["/api/tasks", "/"],
+    ["/t/t-1/evidence/x.png", "/"],
+  ])("a sign-in return of %j stays on this site as %j — no open redirect, encoded bypass, recursive sign-in, secret query or region fetch survives", async (given, expected) => {
+    const posted = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken, return: given }), redirect: "manual" });
+    expect(posted.status).toBe(303);
+    expect(posted.headers.get("location")).toBe(expected);
+    // The same rule decides whether the anonymous redirect names a return at all.
+    if (given.startsWith("/") && !given.startsWith("//")) {
+      const anonymous = await fetch(url(given), { redirect: "manual" });
+      if (anonymous.status === 303 && anonymous.headers.get("location")?.startsWith("/login")) {
+        expect(anonymous.headers.get("location")).toBe(expected === "/" ? "/login" : `/login?return=${encodeURIComponent(expected)}`);
+      }
+    }
+  });
+
   test("a host this server was never told to be is refused before routing", async () => {
     // fetch silently corrects a spoofed Host header, which is exactly why a
     // rebound DNS name needs raw HTTP to simulate.
