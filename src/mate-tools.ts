@@ -45,7 +45,8 @@ export type MateToolContext = {
   /** Where evidence lives, when the surface knows — a scout's report reads from here. */
   evidenceRoot?: string;
   /** Records the screenshots this turn selected, under the turn, for a channel that delivers files; returns how many are recorded. Absent: nothing durable is kept. */
-  selectEvidence?: (rows: readonly Omit<MateTurnEvidence, "turn" | "ordinal" | "createdAt">[]) => number;
+  /** Return the exact artifact ids reserved under this running turn, including earlier calls. */
+  selectEvidence?: (rows: readonly Omit<MateTurnEvidence, "turn" | "ordinal" | "createdAt">[]) => readonly number[];
   /** How this surface delivers selected images: Telegram sends them as documents after the reply; every other surface shows identity only. */
   mediaDelivery?: "documents";
 };
@@ -480,25 +481,32 @@ export const MATE_TOOLS: MateTool[] = [
       const ref = ctx.store.lookupRef(task);
       if (ref === null) return { ok: false, message: "That task is not in your projects." };
       // Only what THIS ask selected is recorded under the turn; the turn's own cap still holds across asks.
-      const recorded = ctx.selectEvidence?.(selection.selected.map(one => ({ taskId: task, taskRef: ref.id, run: selection.run, artifact: one.artifact, sha256: one.sha256, format: one.format, bytes: one.bytes, caption: one.caption }))) ?? 0;
-      const chosen = new Set(selection.selected.map(one => one.artifact));
+      const recorded = new Set(ctx.selectEvidence?.(selection.selected.map(one => ({ taskId: task, taskRef: ref.id, run: selection.run, artifact: one.artifact, sha256: one.sha256, format: one.format, bytes: one.bytes, caption: one.caption }))) ?? []);
+      const documents = ctx.mediaDelivery === "documents";
+      const selectedImages = documents ? selection.selected.filter(one => recorded.has(one.artifact)) : selection.selected;
+      const chosen = new Set(selectedImages.map(one => one.artifact));
+      const continuation = documents
+        ? (ids === undefined ? selection.images.slice(Number(args["offset"] ?? 0)) : selection.selected).filter(one => !recorded.has(one.artifact))
+        : selection.images.slice(selection.nextOffset ?? selection.images.length);
+      const nextOffset = ids === undefined ? continuation[0]?.ordinal === undefined ? null : continuation[0].ordinal - 1 : null;
+      const nextIds = continuation.slice(0, RESULT_IMAGES_PER_TURN_CAP).map(one => one.artifact);
       const total = selection.images.length;
-      const remaining = selection.nextOffset === null ? 0 : total - selection.nextOffset;
-      const positions = selection.selected.length === 0 ? "" : selection.selected.length === 1 ? `screenshot ${selection.selected[0]!.ordinal}` : `screenshots ${selection.selected[0]!.ordinal}–${selection.selected.at(-1)!.ordinal}`;
-      const more = remaining === 0 ? "" : ` ${remaining} more remain: ask again with offset ${selection.nextOffset} or by image id.`;
-      const delivery = ctx.mediaDelivery !== "documents"
+      const contiguous = selectedImages.every((one, index) => index === 0 || one.ordinal === selectedImages[index - 1]!.ordinal + 1);
+      const positions = selectedImages.length === 0 ? "" : selectedImages.length === 1 ? `screenshot ${selectedImages[0]!.ordinal}` : `screenshots ${contiguous ? `${selectedImages[0]!.ordinal}–${selectedImages.at(-1)!.ordinal}` : selectedImages.map(one => one.ordinal).join(", ")}`;
+      const more = continuation.length === 0 ? "" : ` ${continuation.length} more remain: ask in a new reply for image ids ${nextIds.join(", ")}.`;
+      const delivery = !documents
         ? "This surface does not send image files. Name the result so the operator can open it."
-        : recorded === 0
-          ? selection.selected.length === 0 ? "No image files will be sent." : `No more image files can be sent with this reply: its limit of ${RESULT_IMAGES_PER_TURN_CAP} is reached. Ask again for the rest.`
-          : recorded === total
-            ? `${recorded} image file(s) will be sent to this chat after your reply. Say they follow; do not say they were delivered.`
-            : `${recorded} of ${total} image file(s) (${positions}) will be sent to this chat after your reply. Say they follow; do not say they were delivered.${more}`;
+        : selectedImages.length === 0
+          ? selection.selected.length === 0 ? "No image files will be sent." : `No more image files can be sent with this reply: its limit of ${RESULT_IMAGES_PER_TURN_CAP} is reached.${more}`
+          : selectedImages.length === total
+            ? `${selectedImages.length} image file(s) will be sent to this chat after your reply. Say they follow; do not say they were delivered.`
+            : `${selectedImages.length} of ${total} image file(s) (${positions}) will be sent to this chat after your reply. Say they follow; do not say they were delivered.${more}`;
       return { ok: true, body: {
         task: selection.task, label: selection.label, root: selection.root, currentExecution: selection.currentExecution, isCurrent: selection.currentExecution === selection.task,
         run: selection.run, title: selection.title, report: selection.report,
         imageCount: total, images: selection.images.map(one => ({ id: one.artifact, position: one.ordinal, format: one.format, bytes: one.bytes, caption: one.caption, selected: chosen.has(one.artifact) })),
-        selected: selection.selected.map(one => one.artifact), selectedCount: selection.selected.length, sendCount: ctx.mediaDelivery === "documents" ? recorded : 0,
-        nextImageOffset: selection.nextOffset,
+        selected: selectedImages.map(one => one.artifact), selectedCount: selectedImages.length, sendCount: documents ? selectedImages.length : 0,
+        nextImageOffset: nextOffset, nextImageIds: nextIds,
         unavailable: selection.unavailable.map(one => ({ id: one.artifact, problem: one.problem })),
         delivery,
       } };

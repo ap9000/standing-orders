@@ -335,3 +335,25 @@ stays as it is, and no row or receipt is rewritten.
   6,000,000 µ$ (was 5,000,000): the worst-case reservation grows with the
   tool contract's bytes and had reached that fixture's ceiling; nothing
   about the reservation rule changed.
+
+### Follow-up: exact selection when a reply is partly full
+
+Independent testing of `5809e9b` found one remaining selection issue: request
+image 9, then the first page in the same turn. Only images 9 and 1–7 are
+reserved, but the tool marked 1–8 selected and pointed the next page at 9,
+skipping image 8. Two projects sharing a turn hit the same limit.
+
+The follow-up keeps the existing eight-image bound and database schema. The
+engine returns the exact artifact IDs reserved under the turn, not just a
+count. The tool derives its selected flags, count and caption positions from
+those IDs. Continuation points to the first remaining image and also names
+the exact remaining IDs, so a later request can avoid already-selected images.
+Nonconsecutive choices read “screenshots 3, 9”, not “3–9”. Web/CLI still expose
+selection metadata without claiming files were delivered.
+
+Prepared-fix checks: typecheck and the existing chat-evidence, mate and
+telegram-mate suites passed (105 tests). The independent privacy, pagination
+with partly filled capacity, and lost-notice restart reproductions passed.
+These are synthetic local checks, not a native final gate, independent review,
+deployment or real Telegram/phone trial. The next native revision must still
+run its normal final gate and review on its exact candidate.

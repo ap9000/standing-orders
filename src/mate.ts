@@ -273,8 +273,11 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     return store.draftMateProposal({ thread: thread.id, turn: turnId, kind, payload, ceilingDigest: who.ceilingDigest }, clock());
   };
   /** The screenshots a tool selected, kept under THIS turn: a failed turn deletes them with its drafts; a channel plans sends only from an answered turn. */
-  const selectEvidence = (rows: readonly Omit<MateTurnEvidence, "turn" | "ordinal" | "createdAt">[]): number =>
+  const selectEvidence = (rows: readonly Omit<MateTurnEvidence, "turn" | "ordinal" | "createdAt">[]): readonly number[] => {
     store.recordMateTurnEvidence(turnId, rows, RESULT_IMAGES_PER_TURN_CAP, clock());
+    if (store.getMateTurn(turnId)?.state !== "running") return [];
+    return store.listMateTurnEvidence(turnId).map(one => one.artifact);
+  };
 
   /** The turn ends failed: its drafts are deleted, its cost settled — the whole reservation when any of it is unknown. */
   const fail = (failed: MateFailure, message: string, unknownSpend: boolean): MateTurnOutcome => {
