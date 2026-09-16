@@ -30,3 +30,11 @@ Carry this check into Standing Orders task acceptance criteria and review feedba
 - Let Standing Orders run the unchanged approved full verification command once at the final machine gate for the candidate. Do not duplicate that full suite in the builder or independent review. A failed gate or changed candidate still needs fresh verification; never delete tests, add skips, or waive approval or evidence checks to save time.
 - Reuse valid evidence for unchanged code and the same agent session where already supported. Do not build new orchestration just to reduce test overhead. No new agent time limits.
 - Report the checks actually run, the exact candidate they cover, and any remaining gaps. Broaden checks only for a specific uncovered risk; say why.
+
+## Keep the installed tool current
+
+- Deployment means the running UI and background worker use the same verified build and compatible database format, not merely that source was merged or a package was built.
+- Check running build identity before real end-to-end work. Report version drift and update through the normal drain, backup, compatibility and health checks; never replace a runtime underneath active work.
+- Prefer the latest verified candidate. Never bypass signing, approvals, process-exit checks or evidence requirements to install a newer build. Report a blocked update plainly instead of claiming the installation is current.
+- Use realistic sample feedback in user-facing screenshots. Keep long-content coverage, label synthetic journeys clearly, and do not present test filler as actual agent output.
+- Before the first dispatch, verify the task branch starts at the intended verified base and required input documents are committed or supplied through a durable supported handoff. Do not fix a mistaken first-attempt base by moving its branch forward and expecting a smaller review diff: whole-task evidence remains pinned to the original base. Preserve that attempt and use an explicitly scoped corrective task with the right starting branch when needed.
