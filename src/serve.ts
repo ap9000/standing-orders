@@ -8201,20 +8201,6 @@ function reviewRetryPanel(
   );
 }
 
-/** v40: the independent reviewer's own judgement on one criterion — a
- * SECOND badge beside the machine's own matrixStateBadge, never a
- * replacement for it, so a render can say "the machine attested it;
- * reviewer:codex contradicted c2" instead of pretending the machine
- * always disagreed. Reuses the matrix's own three badge colors (done /
- * failed / manual-review) rather than inventing a fourth vocabulary —
- * `contradicts` reads exactly as alarming as `failed` already does. */
-function reviewJudgementBadge(review: CriterionMatrixRow["review"]): string {
-  if (review === null) return "";
-  const cls = review.judgement === "upholds" ? "badge-done" : review.judgement === "contradicts" ? "badge-failed" : "badge-manual-review";
-  const word = review.judgement === "upholds" ? "upheld" : review.judgement === "contradicts" ? "contradicted" : "uncertain";
-  return ` <span class="badge ${cls}" data-review-judgement="${escape(review.judgement)}" title="${escape(review.author)}: ${escape(review.note)}">reviewer: ${escape(word)}</span>`;
-}
-
 /** A one-line summary of the matrix for list rows too dense for the full
  * table (done, builds, board, inbox) — "2/3 criteria", plus a worst-state
  * badge so trouble is visible without opening the row. `[]` renders
@@ -8256,54 +8242,64 @@ function evidenceLinksFor(artifacts: readonly Artifact[]): EvidenceLinkMap {
   return map;
 }
 
-/** The shared criterion-to-evidence matrix — one table, rendered
- * identically everywhere a build's result appears (v39). `[]` renders
- * nothing: a grandfathered run's result card is unchanged. `compact`
- * drops the per-row detail line, for surfaces that only have room for a
- * summary (board, inbox, chat, builds list). Each row also names the
- * proof's OWN answered evidence refs, not only the required kinds (review
- * finding) — linked to the underlying artifact when `runId`/`links` are
- * given and a link resolves; plain text otherwise. */
+/** Read the approved requirement first; inspect its saved evidence on demand.
+ * Machine results, reviewer judgements and missing context remain separate.
+ * Warnings stay outside the disclosure, including on compact surfaces. */
 function criterionMatrixHtml(
   matrix: readonly CriterionMatrixRow[],
   options: { compact?: boolean; runId?: number; links?: EvidenceLinkMap; fileAnchors?: ReadonlyMap<string, string> } = {},
 ): string {
   if (matrix.length === 0) return "";
-  const compact = options.compact === true;
-  const answeredHtml = (row: CriterionMatrixRow): string => {
-    const answered = row.answered ?? [];
-    if (answered.length === 0) return "";
-    const items = answered.map((a: CriterionEvidenceRef) => {
-      const text = `${escape(a.kind)}: ${escape(a.ref)}`;
-      // The review cockpit (Priority 5): a changed-path citation whose
-      // file is in the parsed sealed patch links to THAT file's section on
-      // the same page; every other ref keeps its artifact link.
-      const anchor = a.kind === "changed-path" ? options.fileAnchors?.get(a.ref) : undefined;
-      if (anchor !== undefined) return `<a href="#${anchor}">${text}</a>`;
-      const artifactId = options.links?.get(`${a.kind}:${a.ref}`) ?? (a.kind === "changed-path" ? options.links?.get("changed-path:*") : undefined);
-      return artifactId !== undefined && options.runId !== undefined
-        ? `<a href="/r/${options.runId}/evidence/${artifactId}">${text}</a>`
-        : text;
-    });
-    return ` <span class="meta">[answered: ${items.join(", ")}]</span>`;
+  const kinds: Record<CriterionEvidenceRef["kind"], string> = {
+    check: "Checks", "changed-path": "Changed files", screenshot: "Screenshots", "manual-review": "Human review",
   };
-  return (
-    `<div class="result-section criterion-matrix"><strong>acceptance</strong><ul>` +
-    matrix
-      .map(
-        row =>
-          `<li>${matrixStateBadge(row.state)}${reviewJudgementBadge(row.review)}${coverageBadge(row.coverage)} <code>${escape(row.id)}</code> ${escape(row.statement)}` +
-          ` <span class="meta">[requires: ${row.requiredEvidence.map(escape).join(", ")}]</span>` +
-          answeredHtml(row) +
-          (compact || row.detail.length === 0 ? "" : `<br><span class="meta">${row.detail.map(escape).join("; ")}</span>`) +
-          // A context GAP is never folded into the compact view: the words
-          // that say what is missing are the point (v51).
-          (row.coverage === undefined || (compact && row.coverage.state !== "gap") ? "" : `<br><span class="meta" data-context-coverage="${escape(row.coverage.state)}">context: ${escape(coverageStateWords(row.coverage))}</span>`) +
-          `</li>`,
-      )
-      .join("") +
-    `</ul></div>`
-  );
+  const evidenceLink = (a: CriterionEvidenceRef): string => {
+    const text = `<code>${escape(a.ref)}</code>`;
+    const anchor = a.kind === "changed-path" ? options.fileAnchors?.get(a.ref) : undefined;
+    if (anchor !== undefined) return `<a href="#${escape(anchor)}">${text}</a>`;
+    const artifactId = options.links?.get(`${a.kind}:${a.ref}`) ?? (a.kind === "changed-path" ? options.links?.get("changed-path:*") : undefined);
+    return artifactId !== undefined && options.runId !== undefined
+      ? `<a href="/r/${options.runId}/evidence/${artifactId}">${text}</a>`
+      : text;
+  };
+  const rows = matrix.map((row, index) => {
+    const state = row.state;
+    const label = state === "pass" ? "Evidence checks passed" : state === "manual-review" ? "Needs human review" : state === "missing" ? "Evidence missing" : "Evidence failed";
+    const cls = state === "pass" ? "badge-done" : state === "manual-review" ? "badge-manual-review" : "badge-failed";
+    const warnings: string[] = [];
+    // Only replace the known boilerplate. Other recorded failure details
+    // remain verbatim, so concision cannot hide a different problem.
+    const detail = row.detail.filter(line => !(state === "manual-review" && /^criterion "[^"\n]+" requires manual-review evidence — an operator must accept it before this can verify$/.test(line)));
+    if (state === "manual-review") warnings.push(`<p class="requirement-next">Inspect the saved evidence before accepting this result.</p>`);
+    if (state !== "pass" && detail.length > 0) warnings.push(`<ul class="requirement-issues">${detail.map(line => `<li>${escape(line)}</li>`).join("")}</ul>`);
+    const review = row.review;
+    if (review !== null && review.judgement !== "upholds") {
+      warnings.push(`<div class="requirement-warning" data-review-judgement="${escape(review.judgement)}"><strong>${review.judgement === "contradicts" ? "Reviewer found a problem" : "Reviewer could not confirm this"}</strong><p>${escape(review.note)}</p></div>`);
+    }
+    const coverage = row.coverage;
+    if (coverage !== undefined && (coverage.state === "gap" || coverage.gaps.length > 0)) {
+      warnings.push(`<div class="requirement-warning" data-context-coverage="${escape(coverage.state)}"><strong>Review context is missing</strong>${coverage.gaps.length === 0 ? `<p>The saved context cannot support this requirement.</p>` : `<ul>${coverage.gaps.map(gap => `<li>${escape(gap)}</li>`).join("")}</ul>`}${coverage.priorSupport === "invalid" ? `<p>The earlier review no longer supports this requirement.</p>` : ""}</div>`);
+    }
+    const answered = row.answered ?? [];
+    const groups = Object.entries(kinds).flatMap(([kind, name]) => {
+      const refs = answered.filter(one => one.kind === kind);
+      return refs.length === 0 ? [] : [`<div class="requirement-evidence-group"><strong>${name} · ${refs.length}</strong><ul>${refs.map(ref => `<li>${evidenceLink(ref)}</li>`).join("")}</ul></div>`];
+    }).join("");
+    const reviewDetails = review === null ? "" : `<div class="requirement-evidence-group"><strong>Independent review</strong><p>${review.judgement === "upholds" ? `${escape(review.note)} ` : ""}<span class="meta">${escape(review.author)}</span></p></div>`;
+    return `<li class="requirement" data-criterion-id="${escape(row.id)}">` +
+      `<div class="requirement-heading"><span>Requirement ${index + 1}</span><span class="badge ${cls}" data-matrix-state="${escape(state)}">${label}</span></div>` +
+      `<p class="requirement-statement">${escape(row.statement)}</p>` +
+      (review?.judgement === "upholds" ? `<p class="requirement-review" data-review-judgement="upholds">Reviewer confirmed</p>` : "") +
+      warnings.join("") +
+      `<details class="requirement-evidence"><summary>View evidence</summary><div class="requirement-evidence-body">` +
+      `<p class="meta">Required: ${row.requiredEvidence.map(kind => kinds[kind]).join(", ") || "No evidence types specified"}</p>` +
+      (answered.length === 0 ? `<p class="meta">No evidence was submitted for this requirement.</p>` : groups) +
+      (state !== "pass" || detail.length === 0 ? "" : `<div class="requirement-evidence-group"><strong>Verification notes</strong><ul>${detail.map(line => `<li>${escape(line)}</li>`).join("")}</ul></div>`) +
+      reviewDetails +
+      (coverage === undefined ? "" : `<p class="meta"${coverage.state === "gap" ? "" : ` data-context-coverage="${escape(coverage.state)}"`}>Review context: ${escape(coverageStateWords(coverage))}</p>`) +
+      `<p class="meta">Requirement ID: <code>${escape(row.id)}</code></p></div></details></li>`;
+  }).join("");
+  return `<div class="result-section criterion-matrix"><strong>Requirements · ${matrix.length}</strong><ol class="requirement-list">${rows}</ol></div>`;
 }
 
 /** What the task and approval views show about a drafted plan's contract
@@ -8380,28 +8376,18 @@ function planContractHtml(view: PlanContractView | null, mode: "full" | "ceremon
   );
 }
 
-/** v51: where a reviewer's evidence for a criterion comes from — the
- * revision's own patch, sealed inherited context, or a named gap. Absent
- * on every run that captured no inventory, so nothing older changes. */
-function coverageBadge(coverage: CriterionMatrixRow["coverage"]): string {
-  if (coverage === undefined) return "";
-  const cls = coverage.state === "gap" ? "badge-failed" : coverage.state === "context" ? "badge-manual-review" : "badge";
-  const word = coverage.state === "gap" ? "context gap" : coverage.state === "context" ? "sealed context" : "in patch";
-  return ` <span class="badge ${cls}" data-context-coverage="${escape(coverage.state)}" title="${escape(coverageStateWords(coverage))}">${escape(word)}</span>`;
-}
-
-/** The semantic-coverage line (v51): what an independent reviewer settled,
- * under which policy, shown apart from the machine proof — the same
- * `coverageWords` the CLI prints. Empty for a run with no rubric. */
+/** One policy summary beneath the requirements. Per-requirement concerns
+ * are already visible in the matrix; do not repeat their full text here. */
 function semanticCoverageHtml(matrix: readonly CriterionMatrixRow[], qualityMode: "default" | "strict"): string {
   const coverage = semanticCoverage(matrix, qualityMode);
-  const lines = coverageWords(coverage);
-  if (lines.length === 0) return "";
-  return (
-    `<div class="result-section semantic-coverage" data-semantic-coverage="${coverage.satisfied === null ? "unsettled" : coverage.satisfied ? "satisfied" : "unsatisfied"}" data-coverage-policy="${coverage.policy}">` +
-    lines.map((line, index) => `<p class="meta"${index === 0 ? "" : ' data-context-gap=""'}>${escape(line)}</p>`).join("") +
-    `</div>`
-  );
+  if (coverage.total === 0) return "";
+  const outcome = coverage.satisfied === null
+    ? "No independent review is recorded."
+    : `Independent review confirmed ${coverage.upheld.length} of ${coverage.total} requirements.`;
+  const policy = coverage.required
+    ? coverage.satisfied ? "Required review is complete." : "Required review is incomplete."
+    : "Independent review is optional for this scope.";
+  return `<div class="result-section semantic-coverage" data-semantic-coverage="${coverage.satisfied === null ? "unsettled" : coverage.satisfied ? "satisfied" : "unsatisfied"}" data-coverage-policy="${coverage.policy}"><p class="${coverage.required && !coverage.satisfied ? "requirement-warning" : "meta"}">${outcome} ${policy}</p></div>`;
 }
 
 /** The exact path limits, one per line (UI polish 2026-09-13): a long
@@ -9311,7 +9297,7 @@ const STYLE = `
   .cockpit-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; margin: 0 0 .35rem; }
   .cockpit-next { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .85rem 0 1rem; padding: .85rem 1rem;
     border-color: var(--glass-border); background: color-mix(in srgb, var(--glass-strong) 88%, transparent); }
-  .cockpit-next > div { display: grid; gap: .2rem; min-width: 0; }
+  .cockpit-next > div { display: grid; gap: .2rem; min-width: 0; overflow-wrap: anywhere; }
   .cockpit-next .meta { font-size: .78rem; line-height: 1.45; }
   .cockpit-next form { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0; }
   .cockpit-next form input[type=text] { min-width: 9rem; margin: 0; }
@@ -9463,6 +9449,29 @@ const STYLE = `
   }
   .result-section ul { margin: .375rem 0 0; padding-left: 1.25rem; }
   .result-section li { margin: .25rem 0; }
+  .criterion-matrix .requirement-list { list-style: none; margin: .4rem 0 0; padding: 0; }
+  .criterion-matrix .requirement { margin: 0; padding: 1rem 0; border-bottom: 1px solid var(--border); min-width: 0; overflow-wrap: anywhere; }
+  .criterion-matrix .requirement:last-child { border-bottom: 0; }
+  .requirement-heading { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem .75rem; font-size: .75rem; color: var(--muted-foreground); }
+  .requirement-heading .badge { margin: 0; white-space: normal; }
+  .requirement-statement { margin: .5rem 0; line-height: 1.55; white-space: pre-wrap; }
+  .requirement-review { margin: .4rem 0; font-size: .78rem; color: var(--muted-foreground); }
+  .requirement-next { margin: .5rem 0; font-size: .8125rem; }
+  .requirement-warning { margin: .65rem 0; padding: .6rem .75rem; border-left: 2px solid var(--warning); background: var(--warning-soft); font-size: .8125rem; }
+  .requirement-warning strong { font-size: .78rem; }
+  .requirement-warning p { margin: .3rem 0 0; }
+  .requirement-issues { font-size: .8125rem; }
+  .criterion-matrix .requirement-evidence { margin: .35rem 0 0; padding: 0; border: 0; border-radius: 0; background: none; }
+  .requirement-evidence > summary { display: flex; align-items: center; gap: .5rem; min-height: 44px; width: fit-content; padding: .35rem .1rem; cursor: pointer; list-style: none; font-size: .8125rem; }
+  .requirement-evidence > summary::-webkit-details-marker { display: none; }
+  .requirement-evidence > summary::after { content: "+"; color: var(--muted-foreground); }
+  .requirement-evidence[open] > summary::after { content: "−"; }
+  .requirement-evidence-body { padding: .25rem .75rem .65rem; border-left: 1px solid var(--border); }
+  .requirement-evidence-body p { margin: .35rem 0; }
+  .requirement-evidence-group { margin: .7rem 0; }
+  .requirement-evidence-group > strong { font-size: .75rem; color: var(--muted-foreground); }
+  .requirement-evidence-group code { white-space: normal; overflow-wrap: anywhere; font-size: .75rem; }
+  .requirement-evidence-group a { display: inline-block; padding: .4rem 0; }
   .question { font-size: 1.125rem; font-weight: 600; letter-spacing: -0.01em; margin: 1rem 0; white-space: pre-wrap; }
   .answered {
     border: 1px solid color-mix(in srgb, var(--success) 35%, transparent); background: var(--success-soft);
@@ -19585,16 +19594,14 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     if (proof.matrix.length === 0) {
       checkParts.push(detail.signedCriteria > 0 ? `<p class="meta">The approved scope has ${detail.signedCriteria} requirement${detail.signedCriteria === 1 ? "" : "s"}, but this build has no requirement-by-requirement verification.</p>` : `<p class="meta">This scope signed no acceptance checks.</p>`);
     } else {
-      checkParts.push(`<div class="result-matrix"><strong class="result-label">${proof.matrix.length} requirement${proof.matrix.length === 1 ? "" : "s"}</strong>${criterionMatrixHtml(proof.matrix, { runId, links: proof.matrixLinks, fileAnchors: detail.fileAnchors })}</div>`);
+      checkParts.push(criterionMatrixHtml(proof.matrix, { runId, links: proof.matrixLinks, fileAnchors: detail.fileAnchors }));
     }
     checkParts.push(semanticCoverageHtml(proof.matrix, proof.qualityMode));
     if (proof.machineVerdict !== null && proof.machineVerdict !== proof.verdict) checkParts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
     checkParts.push(repairChainHtml(proof.repairChain));
-    const judgements = proof.matrix.filter(one => one.review !== null);
-    if (judgements.length > 0 || detail.reviewerFindings.length > 0) {
+    if (detail.reviewerFindings.length > 0) {
       checkParts.push(
         `<div class="result-section" data-cockpit-source="reviewer"><strong>independent review</strong><ul>` +
-          judgements.map(one => `<li>${reviewJudgementBadge(one.review)} <code>${escape(one.id)}</code> <span class="meta">${escape(one.review?.author ?? "")}: ${escape(one.review?.note ?? "")}</span></li>`).join("") +
           reviewerNotes +
           `</ul></div>`,
       );

@@ -4,7 +4,7 @@
   "synthetic": true,
   "sourceHashes": {
     "src/serve.ts": "083d46b4ea3a6315481199f36bf6759002fc6c9497238ffa0d6234f1aea0085b",
-    "src/serve.test.ts": "2a751190df1228926ce351cc1165bfb8d39c585199c71010838549e2ce899cfd"
+    "src/serve.test.ts": "969e2cc37dd3480b09fd0697781b09ecce30cc74f44591452d35f17b5f8ac9a5"
   },
   "artifacts": [
     {
@@ -138,7 +138,14 @@
     "typecheck": "passed",
     "build": "passed",
     "focused": "5 existing serve tests passed; other tests not selected",
-    "command": "npx vitest run src/serve.test.ts -t 'v40: the criterion matrix|semantic coverage and context gaps|intent to diff:|evidence:|actions: only applicable' --reporter=dot"
+    "command": "npx vitest run src/serve.test.ts -t 'v40: the criterion matrix|semantic coverage and context gaps|intent to diff:|evidence:|actions: only applicable' --reporter=dot",
+    "builder": {
+      "typecheck": "passed after the test repair",
+      "focused": "6 serve tests passed, then a 126-test name-filtered slice of src/serve.test.ts passed; other files not selected",
+      "command": "npx vitest run src/serve.test.ts -t 'evidence is labeled by source|v40: the criterion matrix|semantic coverage and context gaps|intent to diff:|actions: only applicable|run evidence:' --reporter=dot",
+      "log": "evidence/clear-acceptance/builder-checks.txt",
+      "verify": "node evidence/clear-acceptance/verify-manifest.mjs"
+    }
   },
   "observations": {
     "desktop": {
@@ -168,6 +175,7 @@
     },
     "journeys": "Both desktop and phone inspected changes, entered realistic feedback, and created a revision showing Needs your approval. The evidence link downloaded the sealed fixture diff. Enter/Space toggle evidence and show keyboard focus.",
     "limitations": "Chromium viewport checks, not physical iPhone/Safari. Dense terms copied from run 1699 into isolated fixture state; concern and human-review combinations are synthetic, not fresh judgements on that live result.",
-    "reuse": "After the final scoped long-path CSS repair, only affected desktop/phone failure views were rebuilt and recaptured. Other unchanged presentation and journey evidence is reused from this same agent session."
+    "reuse": "After the final scoped long-path CSS repair, only affected desktop/phone failure views were rebuilt and recaptured. Other unchanged presentation and journey evidence is reused from this same agent session.",
+    "builderRepair": "The prepared filter token 'evidence:' matched 'run evidence: own artifacts', not 'evidence is labeled by source', which still asserted the removed 'reviewer:codex: the guard is a TODO' judgement line and failed. Its assertion now checks the visible contradiction warning and the author under View evidence. src/serve.ts is byte-identical to the inspected build, so every screenshot is reused unchanged."
   }
 }
