@@ -8264,13 +8264,12 @@ function criterionMatrixHtml(
   };
   const rows = matrix.map((row, index) => {
     const state = row.state;
-    const label = state === "pass" ? "Evidence checks passed" : state === "manual-review" ? "Needs human review" : state === "missing" ? "Evidence missing" : "Evidence failed";
+    const label = state === "pass" ? "Evidence checks passed" : state === "manual-review" ? "Human review" : state === "missing" ? "Evidence missing" : "Evidence failed";
     const cls = state === "pass" ? "badge-done" : state === "manual-review" ? "badge-manual-review" : "badge-failed";
     const warnings: string[] = [];
     // Only replace the known boilerplate. Other recorded failure details
     // remain verbatim, so concision cannot hide a different problem.
     const detail = row.detail.filter(line => !(state === "manual-review" && /^criterion "[^"\n]+" requires manual-review evidence — an operator must accept it before this can verify$/.test(line)));
-    if (state === "manual-review") warnings.push(`<p class="requirement-next">Inspect the saved evidence before accepting this result.</p>`);
     if (state !== "pass" && detail.length > 0) warnings.push(`<ul class="requirement-issues">${detail.map(line => `<li>${escape(line)}</li>`).join("")}</ul>`);
     const review = row.review;
     if (review !== null && review.judgement !== "upholds") {
@@ -9456,7 +9455,6 @@ const STYLE = `
   .requirement-heading .badge { margin: 0; white-space: normal; }
   .requirement-statement { margin: .5rem 0; line-height: 1.55; white-space: pre-wrap; }
   .requirement-review { margin: .4rem 0; font-size: .78rem; color: var(--muted-foreground); }
-  .requirement-next { margin: .5rem 0; font-size: .8125rem; }
   .requirement-warning { margin: .65rem 0; padding: .6rem .75rem; border-left: 2px solid var(--warning); background: var(--warning-soft); font-size: .8125rem; }
   .requirement-warning strong { font-size: .78rem; }
   .requirement-warning p { margin: .3rem 0 0; }

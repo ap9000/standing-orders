@@ -11106,7 +11106,6 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(passed.querySelector(".requirement-evidence a")?.getAttribute("href")).toBe("#" + diffFileAnchor("src/payout/guard.ts"));
     expect(requirements[1]!.querySelector(".requirement-issues")?.textContent).toContain("the screenshot did not validate");
     expect(requirements[1]!.querySelector(".requirement-issues")?.closest("details")).toBeNull();
-    expect(requirements[2]!.querySelector(".requirement-next")?.textContent).toContain("before accepting");
     expect(html).not.toContain("[answered:");
     await matrixWindow.happyDOM.close();
     expect(html).toContain("the screenshot did not validate");
