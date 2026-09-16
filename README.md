@@ -628,6 +628,16 @@ Then cron the pass next to `tick`:
 standing-orders bridge telegram        # sends pending, applies taps, exits
 ```
 
+Once paired, an ordinary message in that chat talks to the same assistant
+as the console's chat page and `standing-orders chat`: the same saved
+thread, the same proposal cards (Confirm or Dismiss under each one), the
+same confirm doors, with the phone recorded as the source. `/status`,
+`/task <id>` and `/help` stay cheap, model-free reads. Reply to a result
+message to ask for changes to that exact result; approvals that take a
+password, cancelling and publishing still happen on the computer. Chat from
+the phone uses your configured membership provider only; a direct-API
+configuration is never spent from Telegram.
+
 `bridge telegram status` shows the token source, the binding, and what is
 waiting. For answers in seconds instead of at the next cron firing,
 `standing-orders bridge telegram --follow` stays on the wire — one long-poll

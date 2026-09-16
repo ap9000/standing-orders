@@ -55,8 +55,17 @@ export type DoorOptions = {
   held?: import("./task-control.js").StopRequest["held"];
   /** The existing ceremony for an irreversible decision option: `confirm=yes`, typed explicitly (ruling 12). */
   confirm?: boolean;
-  /** Which surface answered — recorded on the decision. Named by the caller, never defaulted (v3 review, finding 1). */
-  via: "web" | "cli";
+  /** Which surface answered — recorded on the decision, the stop and the
+   * proposal's outcome. Named by the caller, never defaulted (v3 review,
+   * finding 1); `telegram` is the paired phone, never relabelled as the CLI. */
+  via: "web" | "cli" | "telegram";
+  /**
+   * A composing caller already inside a transaction (the Telegram bridge
+   * applies a tap in the update's own transaction) hands the door its
+   * commit hook: the stop's process signal then fires after THAT commit,
+   * never before it, exactly as the door's own transaction would order it.
+   */
+  deferSignal?: ((signal: () => void) => void) | undefined;
 };
 
 /** A coordinator proposal lives seven days (§9); the door refuses an older one whatever the sweep did (v3 review, finding 3). */
@@ -90,6 +99,7 @@ function payloadPlanning(payload: Record<string, unknown>): "auto" | "required" 
 export function confirmMateProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date, options: DoorOptions): DoorOutcome {
   if (!isVerifiedApprover(who)) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" };
   const signals: (() => void)[] = [];
+  const defer = options.deferSignal ?? ((signal: () => void) => signals.push(signal));
   const result = store.transact(() => {
     if (!reproveApprover(store, who).ok) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" } as const;
     const proposal = store.getMateProposal(proposalId);
@@ -118,8 +128,10 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
     if (!store.casMateProposal(proposalId, "pending", "confirming", who.name, null, now)) {
       return { ok: false, kind: proposal.kind, reason: "not-pending", said: "this proposal was already acted on" } as const;
     }
-    const outcome = executeProposal(store, who, proposal.kind, proposal.payload, now, { ...options, deferSignal: signal => signals.push(signal) });
-    store.casMateProposal(proposalId, "confirming", outcome.ok ? "confirmed" : "refused", who.name, { ...outcome }, now);
+    const outcome = executeProposal(store, who, proposal.kind, proposal.payload, now, { ...options, deferSignal: defer });
+    // The recorded outcome names the surface that confirmed — the audit a
+    // card shows on every other surface afterwards.
+    store.casMateProposal(proposalId, "confirming", outcome.ok ? "confirmed" : "refused", who.name, { ...outcome, via: options.via }, now);
     return outcome;
   });
   for (const signal of signals) signal();
@@ -273,7 +285,9 @@ function executeProposal(
   const ref = store.lookupRef(taskId);
   if (ref === null || !admitted(ref.repo)) return refuse("unknown-task", "no such task in your projects");
   if (kind === "task_action") {
-    const result = applyChatTaskAction(store, actor, payload, now, options.via === "web", { held: options.held, deferSignal: options.deferSignal });
+    // An attended surface (the console, the paired phone) honours the
+    // operator's own automatic-approval mode; the CLI keeps its ceremony.
+    const result = applyChatTaskAction(store, actor, payload, now, options.via !== "cli", { held: options.held, deferSignal: options.deferSignal, via: options.via });
     return result.ok ? { ok: true, kind, taskId: result.taskId, said: result.said } : refuse("stale", result.message);
   }
 
@@ -281,7 +295,7 @@ function executeProposal(
     if (options.evidenceRoot === undefined) return refuse("refused", "The saved result is not available on this connection.");
     const request = payload as unknown as ReviewRequest;
     if (request.snapshot == null || request.snapshot.task !== taskId || (request.operation !== "note" && request.operation !== "revise")) return refuse("refused", "This feedback card is incomplete. Ask again.");
-    const result = applyChatReview(store, actor, options.evidenceRoot, request, now, options.via === "web");
+    const result = applyChatReview(store, actor, options.evidenceRoot, request, now, options.via !== "cli");
     return result.ok ? { ok: true, kind, taskId: result.taskId, said: result.said } : refuse("stale", result.message);
   }
 

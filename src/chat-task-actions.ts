@@ -32,7 +32,7 @@ export function chatTaskRun(store: Store, task: string, operation: "stop" | "res
   const control = taskControlOf(store, ref.id, now);
   return (operation === "stop" && control.kind === "stop") || (operation === "resume" && control.kind === "paused") ? control.run : null;
 }
-export function applyChatTaskAction(store: Store, who: VerifiedApprover, payload: Record<string, unknown>, now: Date, web: boolean, controls: Pick<StopRequest, "held" | "deferSignal"> = {}):
+export function applyChatTaskAction(store: Store, who: VerifiedApprover, payload: Record<string, unknown>, now: Date, web: boolean, controls: Pick<StopRequest, "held" | "deferSignal"> & { via?: StopRequest["via"] } = {}):
   { ok: true; taskId: string; said: string } | { ok: false; message: string } {
   const task = payload["task"], operation = payload["operation"];
   if (typeof task !== "string" || !isChatTaskAction(operation)) return { ok: false, message: "This task action is incomplete." };
@@ -46,7 +46,8 @@ export function applyChatTaskAction(store: Store, who: VerifiedApprover, payload
     if (run === null || run !== payload["run"]) return { ok: false, message: "This attempt changed. Review the current task before confirming." };
     // Resume remains the existing nonce + password ceremony. A proposal only opens it.
     if (operation === "resume") return { ok: true, taskId: task, said: `Resume review requested for ${task}. Complete the password confirmation on the task to resume.` };
-    const result = requestTaskStop(store, { taskId: task, runId: run, by: verifiedAuthor(who.name), via: web ? "web" : "cli", ...controls }, now);
+    const { via, ...rest } = controls;
+    const result = requestTaskStop(store, { taskId: task, runId: run, by: verifiedAuthor(who.name), via: via ?? (web ? "web" : "cli"), ...rest }, now);
     return result.ok ? { ok: true, taskId: task, said: `Stop requested for ${task}, run #${run}.` }
       : { ok: false, message: result.detail };
   }

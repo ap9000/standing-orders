@@ -376,4 +376,22 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     expect(confirmMateProposal(store, copy, id, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "standing" });
     expect(store.getMateProposal(id)?.state).toBe("pending");
   });
+
+  test("the paired phone is a door surface of its own: the outcome names it, the decision records it, and a composing caller's commit hook orders the stop signal after its own commit", () => {
+    session();
+    const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l-a", runner: "r", branch: "b", worktree: "/w", ...bareLegacy("build", "claude", null), now: T0 });
+    store.saveDecision({ run, urgency: "blocking", recap: "r", question: "Which?", options: [{ id: "x", label: "X", consequence: "cx", reversible: true }], recommendation: "x" }, T0);
+    const decision = store.listDecisions("open")[0]!.id;
+    const answer = pending("answer", { decision, task: "a", option: "x", optionLabel: "X", reversible: true, rationale: "x" });
+    expect(confirmMateProposal(store, who, answer, clock(), { via: "telegram" })).toMatchObject({ ok: true, kind: "answer" });
+    expect(store.getDecision(decision)).toMatchObject({ answeredBy: "alex", answeredVia: "telegram" });
+    expect(store.getMateProposal(answer)?.outcome).toMatchObject({ ok: true, via: "telegram" });
+    // A caller already inside a transaction hands the door its commit hook: nothing signals until it commits.
+    const hold = pending("hold", { task: "b", reason: "wait", sawHold: null });
+    const deferred: (() => void)[] = [];
+    const outcome = store.transact(() => confirmMateProposal(store, who, hold, clock(), { via: "telegram", deferSignal: signal => deferred.push(signal) }));
+    expect(outcome).toMatchObject({ ok: true, kind: "hold" });
+    expect(store.getMateProposal(hold)?.outcome).toMatchObject({ said: "b held: wait", via: "telegram" });
+    expect(deferred).toEqual([]);
+  });
 });

@@ -103,3 +103,79 @@ Protocol references checked September16:
 - https://core.telegram.org/bots/faq (polling and rate limits)
 
 Keep plain messages/buttons; new rich-message APIs aren't needed for this slice.
+
+## Implementation record (2026-09-16, fixture-verified, not a live trial)
+
+Built on deployed `4bad388` (input commit `cc9ef83`). What the paired phone
+does now, and where each piece lives:
+
+- **Ordinary text is a mate turn.** `src/telegram.ts` routes a paired,
+  private, initial plain-text message (not a `/status`-class command, not a
+  reply to a decision message) into a durable `telegram_conversation` row in
+  the same transaction that marks the update applied; the poll cursor moves
+  only after that. `src/telegram-mate.ts` then claims the row outside any
+  transaction and runs `runMateTurn` with a request id derived from bot,
+  binding and update, so the engine's own `mate-send` receipt makes a replay
+  or a restart return the original turn — never a second dispatch, task,
+  revision or approval. A crash mid-turn is reported as exactly that.
+- **One session, one thread.** The phone reuses the approver's live
+  membership session when its generation, credential and enrolled ceiling
+  match (the console's managed list, canonical, in order, narrowed by
+  account access), mints one under the same terms only when none is live,
+  and refuses — without ending anything — when the live session or thread
+  belongs to a different ceiling or provider. A direct-API configuration is
+  never spent from the phone.
+- **Channel standing, re-proved.** `MateTurnInput.revalidate` runs before
+  admission, after every provider wait and before any tool runs; the bridge
+  runs the same check before every outgoing part. An unpairing, a rotated
+  generation, a downgraded role or a changed enrollment mid-turn ends the
+  turn with its drafts discarded; a still-paired chat is told, in words
+  that carry no project data, that nothing happened.
+- **Cards and doors.** Each pending proposal is one concise message with
+  opaque Confirm/Dismiss tokens (`telegram_proposal_action`), confirmed
+  through `confirmMateProposal` with `via: "telegram"` inside the update's
+  transaction; a stop's process signal is deferred past that commit. The
+  proposal outcome records the surface; `decision.answered_via` and
+  `run_stop.requested_via` admit `telegram` (schema v62 rebuilds `run_stop`
+  by exact recognizer). Irreversible answers arm a yes/cancel pair first.
+  Cancel and console controls are handoff cards with no button and no link.
+- **Replies bind to exact results.** A reply to a message the bridge sent
+  carries that message's recorded task/run into the turn as server-authored
+  context; a message naming several tasks asks which; text over the
+  engine's 2,000-character bound is refused whole, never truncated.
+- **Wiring.** `bridge telegram` (cron pass), `bridge telegram --follow`, and
+  the watch's embedded follower (what `up` runs per project) all carry the
+  conversation, with the same evidence root and membership harness seam the
+  console and CLI use. The follower runs turns beside the poll and renews
+  the lease each cycle; the pass renews it under the same owner while a
+  turn runs.
+- **Matrix.** `TELEGRAM_ACTION_PARITY` in `src/telegram-mate.ts` names a
+  road for every `MATE_TOOL_SCHEMAS` entry; `src/telegram-mate.test.ts`
+  refuses an unnamed tool and checks
+  [the committed matrix](TELEGRAM_ACTION_PARITY_2026-09-16.md) row by row.
+
+Verified by `src/telegram-mate.test.ts` (scripted Bot API, scripted
+membership harness): create through text, confirm from the phone, the same
+thread and card read from the console's rows and from `standing-orders
+chat`, `/task` on the filed task, a reply to a delivered result creating a
+same-family revision, replay of both updates, a crash between receipt and
+reply recovered after restart, a crash during the harness reported
+truthfully, a console confirmation racing a tap, wrong sender/chat/forwarded
+envelopes, stale and foreign buttons, long text, an ambiguous digest reply,
+revocation and enrollment change while the harness answers, a busy engine
+deferring the message, an incompatible console session left standing, and
+every confirmable kind through its card. `src/mate.test.ts` covers the
+revalidation hook at the engine; `src/mate-doors.test.ts` the telegram
+surface and the external commit hook;
+`src/migration-v62-telegram-conversation.test.ts` the 61→62 upgrade.
+
+### Live acceptance gap (unchanged)
+
+Read-only bridge status on 2026-09-16: token absent, paired false. No real
+Telegram message was sent or received by this build; the scripted transport
+proves the code paths, not a phone journey. After root deploys an accepted
+candidate, the operator connects the bot in settings and pairs; the first
+live trial should run the same journey (text → card → confirm → `/task` →
+reply to a result → revision) and record real message ids. Screenshots and
+secure remote evidence links are not delivered to the phone yet; result
+cards carry the verification verdict in words.

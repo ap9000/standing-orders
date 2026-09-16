@@ -24,6 +24,17 @@ import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
 import type { Store, Decision, Notification, TelegramBinding, TelegramDelivery } from "./store.js";
 import { phoneCommand, phoneStatus, phoneTask, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
+import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
+import {
+  applyProposalTap,
+  processTelegramConversations,
+  replyContextFor,
+  telegramConversationRepos,
+  telegramRequestId,
+  tooLongText,
+  whichTaskText,
+  type TelegramConversationOptions,
+} from "./telegram-mate.js";
 
 /** Read the enrolled project list on demand. No callback means no task data,
  * never an implicit all-database ceiling. Shared by pass and embedded follower. */
@@ -183,6 +194,14 @@ export type BridgeReport = {
   digests?: number;
   /** Successful replies to read-only phone commands, separate from outbox sends. */
   statusReplies?: number;
+  /** Ordinary messages persisted for the shared assistant this pass. */
+  chatQueued?: number;
+  /** Assistant replies delivered (including a recovered earlier reply). */
+  chatAnswered?: number;
+  /** Messages settled without a reply from the assistant: refused, failed, unpaired, or answered deterministically. */
+  chatRefused?: number;
+  /** Proposal cards confirmed by a tap this pass. */
+  chatConfirmed?: number;
 };
 
 type Effect = () => Promise<void>;
@@ -206,6 +225,8 @@ export async function bridgePass(
     readProjects?: TelegramReadProjects;
     /** Reload channel configuration before every outbound part. */
     canDeliver?: () => boolean;
+    /** Ordinary text talks to the shared assistant. Absent: text that is not a command or a decision note is ignored, as before. */
+    conversation?: TelegramConversationOptions;
   },
 ): Promise<{ ok: true; report: BridgeReport } | { ok: false; reason: "bridge-busy"; message: string }> {
   const clock = options.clock ?? (() => new Date());
@@ -227,7 +248,19 @@ export async function bridgePass(
     if (options.deliver !== false) {
       await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver);
     }
-    await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report, 0, undefined, options.readProjects);
+    await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report, 0, undefined, options.readProjects, options.conversation);
+    if (options.conversation !== undefined && options.readProjects !== undefined) {
+      // The queued turns, outside any transaction. A model turn can outlive
+      // the poll lease, so the lease is renewed under the same owner while
+      // they run — the follower's own fenced renewal, reused.
+      const renew = setInterval(() => { store.acquireBridgeLease(botId, owner, BRIDGE_LEASE_MS, clock()); }, 30_000);
+      renew.unref?.();
+      try {
+        await processConversations(store, botId, transport, owner, clock, report, options.readProjects, options.conversation);
+      } finally {
+        clearInterval(renew);
+      }
+    }
   } finally {
     // Handed back so the next cron firing is not told busy for the rest of
     // this pass's TTL. A crash skips this and the lease expires instead —
@@ -259,6 +292,10 @@ export type FollowReport = {
   ignored: number;
   problems: string[];
   statusReplies?: number;
+  chatQueued?: number;
+  chatAnswered?: number;
+  chatRefused?: number;
+  chatConfirmed?: number;
 };
 
 /**
@@ -289,6 +326,8 @@ export async function followBridge(
     readProjects?: TelegramReadProjects;
     /** Reload channel configuration before every outbound part. */
     canDeliver?: () => boolean;
+    /** Ordinary text talks to the shared assistant. */
+    conversation?: TelegramConversationOptions;
     pollSeconds?: number;
     /** One line per cycle that did something — the follower's narration hook. */
     onCycle?: (report: BridgeReport) => void;
@@ -316,6 +355,24 @@ export async function followBridge(
 
   const total: FollowReport = { cycles: 0, sent: 0, answered: 0, paired: 0, ignored: 0, problems: [] };
   let failures = 0;
+  // Queued turns run BESIDE the poll, never inside a cycle: a long model
+  // turn must not stall the long poll, and each cycle's lease re-acquire is
+  // the renewal that keeps this the only live poller meanwhile. One
+  // processor at a time; its counts land on the totals when it finishes.
+  let inFlight: Promise<void> | null = null;
+  const kick = (): void => {
+    if (inFlight !== null || options.conversation === undefined || options.readProjects === undefined) return;
+    const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
+    inFlight = processConversations(store, botId, transport, owner, clock, report, options.readProjects, options.conversation, signal)
+      .catch(error => { report.problems.push(`telegram chat: ${error instanceof Error ? error.message : String(error)}`); })
+      .finally(() => {
+        inFlight = null;
+        if ((report.chatAnswered ?? 0) > 0) total.chatAnswered = (total.chatAnswered ?? 0) + (report.chatAnswered ?? 0);
+        if ((report.chatRefused ?? 0) > 0) total.chatRefused = (total.chatRefused ?? 0) + (report.chatRefused ?? 0);
+        total.problems.push(...report.problems);
+        if ((report.chatAnswered ?? 0) > 0 || (report.chatRefused ?? 0) > 0 || report.problems.length > 0) options.onCycle?.(report);
+      });
+  };
 
   try {
     while (!signal.aborted) {
@@ -334,8 +391,9 @@ export async function followBridge(
         await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver);
       }
       await drainUpdates(
-        store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal, options.readProjects,
+        store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal, options.readProjects, options.conversation,
       );
+      kick();
 
       total.cycles++;
       total.sent += report.sent;
@@ -343,8 +401,11 @@ export async function followBridge(
       total.paired += report.paired;
       total.ignored += report.ignored;
       if (report.statusReplies !== undefined) total.statusReplies = (total.statusReplies ?? 0) + report.statusReplies;
+      if (report.chatQueued !== undefined) total.chatQueued = (total.chatQueued ?? 0) + report.chatQueued;
+      if (report.chatRefused !== undefined) total.chatRefused = (total.chatRefused ?? 0) + report.chatRefused;
+      if (report.chatConfirmed !== undefined) total.chatConfirmed = (total.chatConfirmed ?? 0) + report.chatConfirmed;
       total.problems.push(...report.problems);
-      if (report.sent > 0 || report.answered > 0 || report.paired > 0 || (report.statusReplies ?? 0) > 0 || report.problems.length > 0) {
+      if (report.sent > 0 || report.answered > 0 || report.paired > 0 || (report.statusReplies ?? 0) > 0 || (report.chatQueued ?? 0) > 0 || (report.chatRefused ?? 0) > 0 || (report.chatConfirmed ?? 0) > 0 || report.problems.length > 0) {
         options.onCycle?.(report);
       }
 
@@ -367,10 +428,25 @@ export async function followBridge(
       }
     }
   } finally {
+    // A turn in flight finishes on its own bounds (the engine's wall clock);
+    // its reply is fenced on the claim and the channel like every other part.
+    if (inFlight !== null) await inFlight;
     store.releaseBridgeLease(botId, owner, clock());
   }
 
   return total;
+}
+
+/** The queued turns for one bot, counted onto the pass's report. */
+async function processConversations(
+  store: Store, botId: string, transport: TelegramTransport, owner: string, clock: () => Date, report: BridgeReport,
+  readProjects: TelegramReadProjects, conversation: TelegramConversationOptions, signal?: AbortSignal,
+): Promise<void> {
+  const chat = { answered: 0, refused: 0, problems: [] as string[] };
+  await processTelegramConversations({ store, botId, transport, owner, clock, readProjects, options: conversation, report: chat, ...(signal === undefined ? {} : { signal }) });
+  if (chat.answered > 0) report.chatAnswered = (report.chatAnswered ?? 0) + chat.answered;
+  if (chat.refused > 0) report.chatRefused = (report.chatRefused ?? 0) + chat.refused;
+  report.problems.push(...chat.problems);
 }
 
 // ---- outbound --------------------------------------------------------------
@@ -706,6 +782,9 @@ type Context = {
   clock: () => Date;
   report: BridgeReport;
   readProjects?: TelegramReadProjects | undefined;
+  conversation?: TelegramConversationOptions | undefined;
+  /** The enrolled ceiling read for THIS update, when a proposal tap needs it; null when it could not be read. */
+  projects: readonly string[] | null;
 };
 
 async function drainUpdates(
@@ -720,8 +799,9 @@ async function drainUpdates(
   pollSeconds = 0,
   signal?: AbortSignal,
   readProjects?: TelegramReadProjects,
+  conversation?: TelegramConversationOptions,
 ): Promise<void> {
-  const context: Context = { store, botId, transport, clock, report, readProjects };
+  const context: Context = { store, botId, transport, clock, report, readProjects, conversation, projects: null };
   let offset = cursor + 1;
 
   for (let page = 0; page < PAGE_BUDGET; page++) {
@@ -743,6 +823,11 @@ async function drainUpdates(
     if (updates.length === 0) return;
 
     for (const update of updates) {
+      // A proposal tap confirms as a principal minted against the CURRENT
+      // enrolled ceiling, and the registry is a file read: it happens
+      // before the update's transaction, and only once the envelope has
+      // proved the exact paired sender and chat — a stranger reads nothing.
+      context.projects = await projectsForTap(context, update);
       const effects = applyUpdate(context, update);
       // Effects are Telegram-side conveniences — acks, edits, replies. They
       // retry-or-drop; they never decide whether the cursor moves, because
@@ -760,6 +845,22 @@ async function drainUpdates(
   }
   // The budget ran out with Telegram still holding pages: said, not hidden.
   report.backlog = true;
+}
+
+async function projectsForTap(context: Context, update: Update): Promise<readonly string[] | null> {
+  const callback = update.callback_query;
+  if (callback === undefined || context.conversation === undefined || context.readProjects === undefined) return null;
+  const binding = context.store.liveTelegramBinding(context.botId);
+  if (
+    binding === null || callback.from === undefined || String(callback.from.id) !== binding.userId ||
+    callback.message?.chat === undefined || String(callback.message.chat.id) !== binding.chatId ||
+    context.store.getTelegramProposalAction(callback.data ?? "") === null
+  ) return null;
+  try {
+    return telegramConversationRepos(context.store, binding.approver, await context.readProjects());
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -800,7 +901,17 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
     // Replies to decisions retain their existing note meaning, even if the
     // note starts with a slash. New read commands are direct messages only.
     if (message.reply_to_message === undefined && applyPhoneRead(context, update, effects)) return;
-    // Not a pairing: maybe a free-text note. Every condition or silence.
+    // A reply to a decision message this bot sent is a note, exactly as
+    // before. Everything else that is ordinary text talks to the shared
+    // assistant when a conversation is configured; otherwise silence.
+    const binding = store.liveTelegramBinding(botId);
+    const repliedDecision = binding !== null && message.reply_to_message !== undefined
+      ? store.decisionForTelegramMessage(binding.id, binding.chatId, String(message.reply_to_message.message_id))
+      : null;
+    if (repliedDecision === null && context.conversation !== undefined && context.readProjects !== undefined) {
+      applyConversation(context, update, effects);
+      return;
+    }
     applyNote(context, update, effects);
     return;
   }
@@ -841,6 +952,82 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
       link_preview_options: { is_disabled: true },
     });
   });
+}
+
+/**
+ * An ordinary message from the paired person: persisted for the shared
+ * assistant in THIS transaction — before the cursor moves — with the exact
+ * binding, sender, update, message and the request identity the engine
+ * receipts its turn under. Two things are answered here and now without a
+ * model: text over the engine's bound (never truncated), and a reply to a
+ * message that carried several tasks (never guessed). Everything hostile is
+ * silence, as for every other inbound shape.
+ */
+function applyConversation(context: Context, update: Update, effects: Effect[]): void {
+  const { store, botId, transport, clock, report } = context;
+  const message = update.message as NonNullable<Update["message"]>;
+  const chat = message.chat;
+  const from = message.from;
+  const binding = store.liveTelegramBinding(botId);
+  if (
+    binding === null || store.accountOf(binding.approver)?.role !== "approver" ||
+    chat === undefined || chat.type !== "private" || String(chat.id) !== binding.chatId ||
+    from === undefined || String(from.id) !== binding.userId ||
+    message.text === undefined ||
+    message.forward_origin !== undefined || message.forward_date !== undefined ||
+    message.via_bot !== undefined || message.sender_chat !== undefined || message.caption !== undefined
+  ) {
+    report.ignored++;
+    return;
+  }
+  const say = (text: string): void => {
+    effects.push(async () => {
+      await transport("sendMessage", {
+        chat_id: binding.chatId,
+        text,
+        reply_parameters: { message_id: message.message_id },
+        link_preview_options: { is_disabled: true },
+      });
+    });
+  };
+  const text = message.text.trim();
+  if (text === "") {
+    report.ignored++;
+    return;
+  }
+  if (text.length > MATE_MESSAGE_MAX_CHARS) {
+    say(tooLongText(text.length));
+    report.chatRefused = (report.chatRefused ?? 0) + 1;
+    return;
+  }
+  // A reply binds to what the replied-to message carried: exactly one task
+  // (and its run) pins the turn; several ask which; none is a plain turn.
+  let context_: string | null = null;
+  let taskId: string | null = null;
+  let sourceRun: number | null = null;
+  const replyTo = message.reply_to_message === undefined ? null : String(message.reply_to_message.message_id);
+  if (replyTo !== null) {
+    const bindings = store.telegramMessageBindings(binding, replyTo).filter(one => one.taskId !== null);
+    const tasks = [...new Set(bindings.map(one => one.taskId as string))];
+    if (tasks.length > 1) {
+      say(whichTaskText(tasks));
+      report.chatRefused = (report.chatRefused ?? 0) + 1;
+      return;
+    }
+    if (tasks.length === 1) {
+      taskId = tasks[0] as string;
+      sourceRun = bindings.find(one => one.run !== null)?.run ?? null;
+      context_ = replyContextFor(taskId, sourceRun);
+    }
+  }
+  store.enqueueTelegramConversation(
+    {
+      binding, updateId: update.update_id, messageId: String(message.message_id), replyTo,
+      request: telegramRequestId(botId, binding.id, update.update_id), text, context: context_, taskId, sourceRun,
+    },
+    clock(),
+  );
+  report.chatQueued = (report.chatQueued ?? 0) + 1;
 }
 
 function applyPhoneRead(context: Context, update: Update, effects: Effect[]): boolean {
@@ -1054,6 +1241,20 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
   }
 
   const action = store.getTelegramAction(token);
+  if (action === null && context.conversation !== undefined && store.getTelegramProposalAction(token) !== null) {
+    // A proposal card's button: the shared confirm door, inside this
+    // update's transaction, with the stop's process signal deferred to
+    // after its commit (the door's own ordering, preserved from here).
+    const tapped = applyProposalTap(store, binding, token, message, context.projects, context.conversation, clock());
+    for (const effect of tapped.effects) {
+      if (effect.kind === "ack") ack(effect.text);
+      else if (effect.kind === "edit") editText(effect.text, effect.keyboard);
+      else effects.push(async () => { effect.run(); });
+    }
+    if (tapped.confirmed) report.chatConfirmed = (report.chatConfirmed ?? 0) + 1;
+    if (tapped.ignored) report.ignored++;
+    return;
+  }
   if (
     action === null ||
     action.binding !== binding.id ||

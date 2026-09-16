@@ -18,13 +18,15 @@ export function phoneCommand(text: string): PhoneCommand | null {
 export const PHONE_HELP = [
   "Standing Orders on your phone",
   "",
+  "Send a message to talk with the same assistant as the console and the terminal. It proposes changes as cards; nothing changes until you tap Confirm.",
+  "",
   "/status — recent work across your connected projects",
   "/task <id> — status, evidence, and the next step for one task",
   "/help — these commands",
   "",
-  "These commands only read status; they do not use an AI model or change tasks. To answer an agent's question, tap its decision buttons. Reply to that decision message to attach a note.",
+  "The slash commands only read status. To answer an agent's question, tap its decision buttons; reply to that decision message to attach a note. Reply to a result message to ask for changes to that exact result.",
   "",
-  "New tasks, revisions, approvals, and publishing still use the Standing Orders console. The computer and bridge must be awake and connected to reply.",
+  "Approvals with a password, cancelling, and publishing still happen in the Standing Orders console. The computer and bridge must be awake and connected to reply.",
 ].join("\n");
 
 /** A third-party transport receives a small display copy, not logs, paths,
@@ -41,7 +43,10 @@ function plain(value: string, cap: number): string {
   return text.length <= cap ? text : text.slice(0, cap - 2).replace(/[\uD800-\uDBFF]$/, "") + "…";
 }
 
-function projectLabel(repo: string): string {
+/** The same display scrub for every phone-bound string a person or a model authored. */
+export const phoneText = plain;
+
+export function projectLabel(repo: string): string {
   return plain(repo.split(/[\\/]/).filter(Boolean).pop() ?? "project", 48);
 }
 

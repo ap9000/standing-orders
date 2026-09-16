@@ -74,6 +74,11 @@ Source links: [claim](../src/claim.ts), [operate](../src/operate.ts),
 
 ## Unified-chat action inventory
 
+Superseded on 2026-09-16 by the shared conversation slice: the current,
+test-checked row for every mate tool is
+[TELEGRAM_ACTION_PARITY_2026-09-16.md](TELEGRAM_ACTION_PARITY_2026-09-16.md).
+The table below is the historical state of this delivery-only slice.
+
 Web and CLI below describe source-backed service paths, not a fresh end-to-end
 certification of those channels. Telegram has no model/tool loop in this slice.
 Every later integration must retain the same actor/project ceiling and current

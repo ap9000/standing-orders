@@ -121,6 +121,7 @@ import {
   type FollowReport,
   type TelegramTransport,
 } from "./telegram.js";
+import type { TelegramConversationOptions } from "./telegram-mate.js";
 import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import { ask, askHidden, confirm, interactive } from "./prompt.js";
@@ -842,6 +843,18 @@ function telegramCanDeliver(context: { databaseFile: string; telegramTokenFile: 
   return () => {
     const current = loadBotToken(process.env, context.telegramTokenFile);
     return current?.token === token && effectivePrimary(process.env, dirname(context.databaseFile), true).channel === "telegram";
+  };
+}
+
+/** Ordinary paired text talks to the shared assistant: the same evidence
+ * root the console reads results from, the same membership harness seam
+ * the CLI's chat uses, and this process's held-session supervisor for a
+ * confirmed stop. The pass, the follower and the watch all wire it. */
+function telegramConversation(context: Context): TelegramConversationOptions {
+  return {
+    evidenceRoot: context.evidenceRoot,
+    ...(context.mateSeams?.subscriptionRunner === undefined ? {} : { subscriptionRunner: context.mateSeams.subscriptionRunner }),
+    ...(context.heldCoordinator === undefined ? {} : { held: context.heldCoordinator }),
   };
 }
 
@@ -7513,6 +7526,7 @@ async function runWatchLoop(args: {
     follower = followBridge(store, {
       readProjects: telegramReadProjects(context),
       canDeliver: telegramCanDeliver(context, followSource.token),
+      conversation: telegramConversation(context),
       botId: followSource.botId,
       transport,
       signal: followController.signal,
@@ -7523,6 +7537,9 @@ async function runWatchLoop(args: {
         progress(
           `watch: bridge sent ${cycle.sent}, answered ${cycle.answered}, paired ${cycle.paired}` +
             ((cycle.statusReplies ?? 0) > 0 ? `, status replies ${cycle.statusReplies}` : "") +
+            ((cycle.chatQueued ?? 0) > 0 ? `, chat received ${cycle.chatQueued}` : "") +
+            ((cycle.chatAnswered ?? 0) > 0 ? `, chat replied ${cycle.chatAnswered}` : "") +
+            ((cycle.chatConfirmed ?? 0) > 0 ? `, chat confirmed ${cycle.chatConfirmed}` : "") +
             (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s)` : ""),
         );
       },
@@ -8746,6 +8763,7 @@ async function bridgeCommand(
       const report = await followBridge(store, {
         readProjects: telegramReadProjects(context),
         canDeliver: telegramCanDeliver(context, source.token),
+        conversation: telegramConversation(context),
         ...(flags.has("inbound-only") ? { deliver: false } : {}),
         botId: source.botId,
         transport,
@@ -8776,6 +8794,7 @@ async function bridgeCommand(
   const passed = await bridgePass(store, {
     readProjects: telegramReadProjects(context),
     canDeliver: telegramCanDeliver(context, source.token),
+    conversation: telegramConversation(context),
     botId: source.botId,
     transport,
     clock,
@@ -8787,9 +8806,10 @@ async function bridgeCommand(
 
   const { report } = passed;
   const broke = report.problems.length > 0;
-  const idle = report.sent === 0 && report.answered === 0 && report.paired === 0 && (report.statusReplies ?? 0) === 0;
+  const idle = report.sent === 0 && report.answered === 0 && report.paired === 0 && (report.statusReplies ?? 0) === 0
+    && (report.chatQueued ?? 0) === 0 && (report.chatAnswered ?? 0) === 0 && (report.chatRefused ?? 0) === 0 && (report.chatConfirmed ?? 0) === 0;
   const lines = () => [
-    `Sent ${report.sent}, answered ${report.answered}, paired ${report.paired}, ignored ${report.ignored}, status replies ${report.statusReplies ?? 0}.`,
+    `Sent ${report.sent}, answered ${report.answered}, paired ${report.paired}, ignored ${report.ignored}, status replies ${report.statusReplies ?? 0}, chat received ${report.chatQueued ?? 0}, chat replied ${report.chatAnswered ?? 0}, chat confirmed ${report.chatConfirmed ?? 0}.`,
     ...(report.backlog ? ["Telegram still holds more updates than one pass's budget — run it again."] : []),
     ...report.problems.map(problem => `  problem: ${problem}`),
   ];

@@ -90,7 +90,9 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 
 // v60 fenced older readers before the chat action cards; v61 adds notification
 // provenance and Telegram destination receipts, and readers below v61 refuse it.
-export const SCHEMA_VERSION = 61;
+// v62 adds the durable Telegram conversation queue and proposal-card tokens,
+// and admits 'telegram' as a stop's audit source; readers below v62 refuse it.
+export const SCHEMA_VERSION = 62;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -627,14 +629,17 @@ export type RunStop = {
   run: number;
   taskRef: number;
   requestedBy: string;
-  requestedVia: "cli" | "web";
+  requestedVia: StopVia;
   requestedAt: string;
   settledAt: string | null;
   settlement: StopSettlement | null;
   resumedAt: string | null;
   resumedBy: string | null;
-  resumedVia: "cli" | "web" | null;
+  resumedVia: StopVia | null;
 };
+
+/** Which surface asked for a stop or a resume — named by the caller, never defaulted. */
+export type StopVia = "cli" | "web" | "telegram";
 
 /** One ROOT review attempt of a source run (v50): the reviewer run, its
  * ordinal, how it ended, and the request it was spent on. */
@@ -1077,6 +1082,53 @@ export type TelegramAction = {
   consumedAt: string | null;
   /** Binds a confirm to the exact note it displayed; null = no note armed. */
   noteDigest: string | null;
+};
+
+/** One ordinary paired Telegram message on its way through the shared mate engine (v62). */
+export type TelegramConversation = {
+  id: number;
+  binding: number;
+  botId: string;
+  chatId: string;
+  userId: string;
+  approver: string;
+  approverGeneration: number;
+  updateId: number;
+  messageId: string;
+  replyTo: string | null;
+  /** The mate request receipt identity: 32 hex, derived from bot, binding and update. */
+  request: string;
+  text: string;
+  /** Server-authored context for the turn — the exact task/result a reply bound to. */
+  context: string | null;
+  taskId: string | null;
+  sourceRun: number | null;
+  state: "queued" | "running" | "done" | "failed";
+  claimOwner: string | null;
+  claimExpiresAt: string | null;
+  attempts: number;
+  nextAttemptAt: string | null;
+  session: number | null;
+  turn: number | null;
+  /** A short outcome word: answered, replayed, refused:<reason>, failed:<reason>, revoked, … */
+  outcome: string | null;
+  replyMessageId: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
+/** What one opaque proposal-card token means (v62). */
+export type TelegramProposalAction = {
+  token: string;
+  binding: number;
+  proposal: number;
+  phase: "confirm" | "dismiss" | "yes" | "cancel";
+  chatId: string;
+  messageId: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  consumedAt: string | null;
 };
 
 /** A park that never became a decision. Stays in every brief until resolved. */
@@ -2573,6 +2625,62 @@ CREATE TABLE IF NOT EXISTS telegram_note_draft (
 CREATE UNIQUE INDEX IF NOT EXISTS telegram_note_draft_live
   ON telegram_note_draft (binding, decision) WHERE state IN ('pending','armed');
 
+-- v62: the durable inbound conversation queue. An ordinary paired message
+-- becomes a row in the SAME transaction that marks its update applied, so
+-- the poll cursor never moves past text nobody holds. The row carries the
+-- exact binding, sender, update, message and the request identity the
+-- shared mate engine receipts it under; the async model turn runs OUTSIDE
+-- any transaction under a short claim, and a replay or restart finds the
+-- receipt instead of dispatching the provider again.
+CREATE TABLE IF NOT EXISTS telegram_conversation (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  binding             INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE RESTRICT,
+  bot_id              TEXT NOT NULL,
+  chat_id             TEXT NOT NULL,
+  user_id             TEXT NOT NULL,
+  approver            TEXT NOT NULL,
+  approver_generation INTEGER NOT NULL,
+  update_id           INTEGER NOT NULL UNIQUE,
+  message_id          TEXT NOT NULL,
+  reply_to            TEXT,
+  request             TEXT NOT NULL UNIQUE,
+  text                TEXT NOT NULL,
+  context             TEXT,
+  task_id             TEXT,
+  source_run          INTEGER,
+  state               TEXT NOT NULL CHECK (state IN ('queued','running','done','failed')),
+  claim_owner         TEXT,
+  claim_expires_at    TEXT,
+  attempts            INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at     TEXT,
+  session             INTEGER,
+  turn                INTEGER,
+  outcome             TEXT,
+  reply_message_id    TEXT,
+  created_at          TEXT NOT NULL,
+  started_at          TEXT,
+  finished_at         TEXT
+);
+CREATE INDEX IF NOT EXISTS telegram_conversation_queue ON telegram_conversation (bot_id, state, id);
+
+-- v62: opaque one-tap tokens for the mate's proposal cards, the same shape
+-- as telegram_action for decisions: callback_data carries only the token,
+-- and what a tap MEANS (which binding, which proposal, which phase) lives
+-- here. Consumed exactly once; an irreversible answer arms a yes/cancel
+-- pair first, exactly as a decision button does.
+CREATE TABLE IF NOT EXISTS telegram_proposal_action (
+  token       TEXT PRIMARY KEY,
+  binding     INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE RESTRICT,
+  proposal    INTEGER NOT NULL REFERENCES mate_proposal(id) ON DELETE CASCADE,
+  phase       TEXT NOT NULL CHECK (phase IN ('confirm','dismiss','yes','cancel')),
+  chat_id     TEXT NOT NULL,
+  message_id  TEXT,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT,
+  consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS telegram_proposal_action_by_proposal ON telegram_proposal_action (proposal);
+
 -- The bridge's poll lease and cursor, per bot. One live poller at a time;
 -- the cursor only ever moves forward, and only under a live generation.
 CREATE TABLE IF NOT EXISTS bridge_lease (
@@ -3309,13 +3417,13 @@ CREATE TABLE IF NOT EXISTS run_stop (
   run           INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
   task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
   requested_by  TEXT NOT NULL,
-  requested_via TEXT NOT NULL CHECK (requested_via IN ('cli','web')),
+  requested_via TEXT NOT NULL CHECK (requested_via IN ('cli','web','telegram')),
   requested_at  TEXT NOT NULL,
   settled_at    TEXT,
   settlement    TEXT CHECK (settlement IN ('interrupted','recovered','held','finished')),
   resumed_at    TEXT,
   resumed_by    TEXT,
-  resumed_via   TEXT CHECK (resumed_via IN ('cli','web')),
+  resumed_via   TEXT CHECK (resumed_via IN ('cli','web','telegram')),
   CHECK ((settled_at IS NULL) = (settlement IS NULL)),
   CHECK (resumed_at IS NULL OR settled_at IS NOT NULL),
   CHECK ((resumed_at IS NULL) = (resumed_by IS NULL))
@@ -3538,6 +3646,11 @@ function initializeStore(db: Database, file: string): Store {
     }
     for (const column of ["provenance_scope", "project", "task_ref", "task_id", "source_run"]) {
       if (!hasColumn(db, "notification", column)) throw new Error(`${file}: notification provenance is missing; refusing to recreate authority`);
+    }
+  }
+  if (preflight !== null && Math.abs(preflight) >= 62) {
+    for (const table of ["telegram_conversation", "telegram_proposal_action"]) {
+      if (!tableExists(db, table)) throw new Error(`${file}: Telegram conversation history is missing; refusing to recreate it`);
     }
   }
   if (preflight !== null && preflight > 0 && preflight < SCHEMA_VERSION) {
@@ -4668,6 +4781,12 @@ function migrate(db: Database, origin: number | null): void {
   addColumn(db, "notification", "task_id", "TEXT");
   addColumn(db, "notification", "source_run", "INTEGER REFERENCES run(id)");
 
+  // v62 (Telegram conversation): a stop confirmed from a paired phone is
+  // recorded as exactly that. The audit CHECK admits 'telegram' through the
+  // exact-recognizer rebuild; every v52 row, id and settlement is carried
+  // whole, and an unknown shape refuses rather than being guessed.
+  rebuildRunStopForV62(db);
+
   // v53 (OS containment and login recovery): four additive, nullable
   // columns on run_process. A legacy witness has NULL in all four, which
   // every reader treats as "unknown boot, observed containment" — the
@@ -5105,6 +5224,30 @@ const MATE_PROPOSAL_V48_DDL = (name: string): string =>
   MATE_PROPOSAL_V43_DDL(name).replace("'answer','repair'", "'answer','repair','agents'");
 const MATE_PROPOSAL_V60_DDL = (name: string): string =>
   MATE_PROPOSAL_V48_DDL(name).replace("'agents'", "'agents','review','control','task_action'");
+
+const RUN_STOP_V52_DDL = (name: string): string => `CREATE TABLE ${name} (
+  run           INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
+  task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  requested_by  TEXT NOT NULL,
+  requested_via TEXT NOT NULL CHECK (requested_via IN ('cli','web')),
+  requested_at  TEXT NOT NULL,
+  settled_at    TEXT,
+  settlement    TEXT CHECK (settlement IN ('interrupted','recovered','held','finished')),
+  resumed_at    TEXT,
+  resumed_by    TEXT,
+  resumed_via   TEXT CHECK (resumed_via IN ('cli','web')),
+  CHECK ((settled_at IS NULL) = (settlement IS NULL)),
+  CHECK (resumed_at IS NULL OR settled_at IS NOT NULL),
+  CHECK ((resumed_at IS NULL) = (resumed_by IS NULL))
+)`;
+const RUN_STOP_V62_DDL = (name: string): string =>
+  RUN_STOP_V52_DDL(name).replace("requested_via IN ('cli','web')", "requested_via IN ('cli','web','telegram')").replace("resumed_via IN ('cli','web')", "resumed_via IN ('cli','web','telegram')");
+
+/** v62: the stop audit admits 'telegram'. Rows, ids and settlements are carried whole. */
+export function rebuildRunStopForV62(db: Database): void {
+  rebuildExact(db, "run_stop", RUN_STOP_V52_DDL, RUN_STOP_V62_DDL,
+    ["run", "task_ref", "requested_by", "requested_via", "requested_at", "settled_at", "settlement", "resumed_at", "resumed_by", "resumed_via"]);
+}
 
 function isMateProposalV60(db: Database): boolean {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
@@ -20531,7 +20674,7 @@ export class Store {
    * finds its own row and answers the same, never a second stop.
    */
   requestRunStop(
-    args: { runId: number; taskRef: number; by: string; via: "cli" | "web" },
+    args: { runId: number; taskRef: number; by: string; via: StopVia },
     now: Date,
   ):
     | { ok: true; stop: RunStop; repeated: boolean }
@@ -20714,7 +20857,7 @@ export class Store {
    * and this refuses in those words.
    */
   resumeRunStop(
-    args: { runId: number; taskRef: number; by: string; via: "cli" | "web" },
+    args: { runId: number; taskRef: number; by: string; via: StopVia },
     now: Date,
   ):
     | { ok: true; stop: RunStop }
@@ -20930,6 +21073,174 @@ export class Store {
       )
       .run(updateId, now.toISOString(), result);
     return Number(changes) > 0;
+  }
+
+  // ---- the conversation queue (v62) ------------------------------------------
+
+  /** Persist one ordinary message before its update is acknowledged. The caller's transaction also marks the update applied. */
+  enqueueTelegramConversation(
+    row: {
+      binding: TelegramBinding; updateId: number; messageId: string; replyTo: string | null; request: string; text: string;
+      context: string | null; taskId: string | null; sourceRun: number | null;
+    },
+    now: Date,
+  ): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO telegram_conversation (binding, bot_id, chat_id, user_id, approver, approver_generation, update_id, message_id, reply_to,
+           request, text, context, task_id, source_run, state, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
+      )
+      .run(
+        row.binding.id, row.binding.botId, row.binding.chatId, row.binding.userId, row.binding.approver, row.binding.approverGeneration,
+        row.updateId, row.messageId, row.replyTo, row.request, row.text, row.context, row.taskId, row.sourceRun, now.toISOString(),
+      );
+    return Number(inserted.lastInsertRowid);
+  }
+
+  getTelegramConversation(id: number): TelegramConversation | null {
+    const row = this.db.prepare("SELECT * FROM telegram_conversation WHERE id = ?").get(id);
+    return row === undefined ? null : readTelegramConversation(row);
+  }
+
+  listTelegramConversations(botId: string): TelegramConversation[] {
+    return this.db.prepare("SELECT * FROM telegram_conversation WHERE bot_id = ? ORDER BY id").all(botId).map(readTelegramConversation);
+  }
+
+  /**
+   * Claim the oldest message that still needs a turn: queued, or running
+   * under a claim that lapsed (a crash mid-turn), and not deferred past now.
+   * One at a time per bot — the mate runs one turn per approver anyway.
+   */
+  claimTelegramConversation(botId: string, owner: string, ttlMs: number, now: Date): TelegramConversation | null {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const row = this.db
+        .prepare(
+          `SELECT * FROM telegram_conversation
+            WHERE bot_id = ? AND state IN ('queued','running')
+              AND (claim_expires_at IS NULL OR claim_expires_at <= ?)
+              AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+            ORDER BY id LIMIT 1`,
+        )
+        .get(botId, stamp, stamp);
+      if (row === undefined) return null;
+      this.db
+        .prepare(
+          `UPDATE telegram_conversation SET state = 'running', claim_owner = ?, claim_expires_at = ?, attempts = attempts + 1,
+             started_at = COALESCE(started_at, ?), next_attempt_at = NULL WHERE id = ?`,
+        )
+        .run(owner, new Date(now.getTime() + ttlMs).toISOString(), stamp, Number(row["id"]));
+      return this.getTelegramConversation(Number(row["id"]));
+    });
+  }
+
+  /** Extend a held claim; false means it lapsed and somebody else may hold the row. */
+  renewTelegramConversation(id: number, owner: string, ttlMs: number, now: Date): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE telegram_conversation SET claim_expires_at = ? WHERE id = ? AND claim_owner = ? AND claim_expires_at > ? AND state = 'running'")
+      .run(new Date(now.getTime() + ttlMs).toISOString(), id, owner, now.toISOString());
+    return Number(changes) === 1;
+  }
+
+  /** Bind the admitted turn to its row as soon as the engine's receipt names it. */
+  bindTelegramConversationTurn(id: number, owner: string, session: number, turn: number): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE telegram_conversation SET session = ?, turn = ? WHERE id = ? AND claim_owner = ?")
+      .run(session, turn, id, owner);
+    return Number(changes) === 1;
+  }
+
+  /**
+   * Settle a claimed row: done or failed with its outcome word, or back to
+   * queued for a later attempt (a busy engine). Only the claim holder may;
+   * a lapsed claim settles nothing, so a reclaimer's outcome stands.
+   */
+  finishTelegramConversation(
+    id: number,
+    owner: string,
+    result: { state: "done" | "failed"; outcome: string; replyMessageId?: string | null } | { state: "queued"; outcome: string; nextAttemptAt: string },
+    now: Date,
+  ): boolean {
+    const stamp = now.toISOString();
+    const { changes } = result.state === "queued"
+      ? this.db
+          .prepare(
+            `UPDATE telegram_conversation SET state = 'queued', outcome = ?, next_attempt_at = ?, claim_owner = NULL, claim_expires_at = NULL
+              WHERE id = ? AND claim_owner = ? AND claim_expires_at > ? AND state = 'running'`,
+          )
+          .run(result.outcome, result.nextAttemptAt, id, owner, stamp)
+      : this.db
+          .prepare(
+            `UPDATE telegram_conversation SET state = ?, outcome = ?, reply_message_id = COALESCE(?, reply_message_id), finished_at = ?,
+               claim_owner = NULL, claim_expires_at = NULL
+              WHERE id = ? AND claim_owner = ? AND claim_expires_at > ? AND state = 'running'`,
+          )
+          .run(result.state, result.outcome, result.replyMessageId ?? null, stamp, id, owner, stamp);
+    return Number(changes) === 1;
+  }
+
+  /** The exact task/run bindings of one outbound message this bot sent: a
+   * plain fact names one, a digest part may name several, a reply names none. */
+  telegramMessageBindings(binding: TelegramBinding, messageId: string): { taskId: string | null; taskRef: number | null; run: number | null; project: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT DISTINCT task_id, task_ref, source_run, project FROM telegram_outbound_message
+          WHERE binding = ? AND chat_id = ? AND message_id = ? ORDER BY notification`,
+      )
+      .all(binding.id, binding.chatId, messageId)
+      .map(row => ({
+        taskId: row["task_id"] === null ? null : String(row["task_id"]),
+        taskRef: row["task_ref"] === null ? null : Number(row["task_ref"]),
+        run: row["source_run"] === null ? null : Number(row["source_run"]),
+        project: row["project"] === null ? null : String(row["project"]),
+      }));
+  }
+
+  // ---- proposal-card tokens (v62) ---------------------------------------------
+
+  createTelegramProposalAction(
+    action: { token: string; binding: number; proposal: number; phase: TelegramProposalAction["phase"]; chatId: string; messageId?: string; ttlMs?: number },
+    now: Date,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO telegram_proposal_action (token, binding, proposal, phase, chat_id, message_id, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        action.token, action.binding, action.proposal, action.phase, action.chatId, action.messageId ?? null, now.toISOString(),
+        action.ttlMs === undefined ? null : new Date(now.getTime() + action.ttlMs).toISOString(),
+      );
+  }
+
+  getTelegramProposalAction(token: string): TelegramProposalAction | null {
+    const row = this.db.prepare("SELECT * FROM telegram_proposal_action WHERE token = ?").get(token);
+    return row === undefined ? null : readTelegramProposalAction(row);
+  }
+
+  /** Consume once. False means somebody already did, or it expired. */
+  consumeTelegramProposalAction(token: string, now: Date): boolean {
+    const stamp = now.toISOString();
+    const { changes } = this.db
+      .prepare("UPDATE telegram_proposal_action SET consumed_at = ? WHERE token = ? AND consumed_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
+      .run(stamp, token, stamp);
+    return Number(changes) > 0;
+  }
+
+  /** Kill every live token on a proposal — after it resolves, or when a challenge is cancelled. */
+  consumeTelegramProposalActions(proposal: number, now: Date, phases?: readonly TelegramProposalAction["phase"][]): void {
+    const filter = phases === undefined ? "" : ` AND phase IN (${phases.map(() => "?").join(",")})`;
+    this.db
+      .prepare(`UPDATE telegram_proposal_action SET consumed_at = ? WHERE proposal = ? AND consumed_at IS NULL${filter}`)
+      .run(now.toISOString(), proposal, ...(phases ?? []));
+  }
+
+  /** Stamp the message a card's keyboard actually landed on. */
+  placeTelegramProposalActions(tokens: readonly string[], messageId: string): void {
+    for (const token of tokens) {
+      this.db.prepare("UPDATE telegram_proposal_action SET message_id = ? WHERE token = ?").run(messageId, token);
+    }
   }
 
   // ---- delivery claiming ---------------------------------------------------
@@ -21802,13 +22113,13 @@ function readRunStop(row: Record<string, unknown>): RunStop {
     run: Number(row["run"]),
     taskRef: Number(row["task_ref"]),
     requestedBy: String(row["requested_by"]),
-    requestedVia: String(row["requested_via"]) as "cli" | "web",
+    requestedVia: String(row["requested_via"]) as StopVia,
     requestedAt: String(row["requested_at"]),
     settledAt: row["settled_at"] === null || row["settled_at"] === undefined ? null : String(row["settled_at"]),
     settlement: row["settlement"] === null || row["settlement"] === undefined ? null : (String(row["settlement"]) as StopSettlement),
     resumedAt: row["resumed_at"] === null || row["resumed_at"] === undefined ? null : String(row["resumed_at"]),
     resumedBy: row["resumed_by"] === null || row["resumed_by"] === undefined ? null : String(row["resumed_by"]),
-    resumedVia: row["resumed_via"] === null || row["resumed_via"] === undefined ? null : (String(row["resumed_via"]) as "cli" | "web"),
+    resumedVia: row["resumed_via"] === null || row["resumed_via"] === undefined ? null : (String(row["resumed_via"]) as StopVia),
   };
 }
 
@@ -21835,6 +22146,54 @@ function readTelegramBinding(row: Record<string, unknown>): TelegramBinding {
     pairedBy: String(row["paired_by"]),
     revokedAt: row["revoked_at"] === null ? null : String(row["revoked_at"]),
     revokedBy: row["revoked_by"] === null ? null : String(row["revoked_by"]),
+  };
+}
+
+function readTelegramConversation(row: Record<string, unknown>): TelegramConversation {
+  const text = (key: string): string | null => (row[key] === null || row[key] === undefined ? null : String(row[key]));
+  const int = (key: string): number | null => (row[key] === null || row[key] === undefined ? null : Number(row[key]));
+  return {
+    id: Number(row["id"]),
+    binding: Number(row["binding"]),
+    botId: String(row["bot_id"]),
+    chatId: String(row["chat_id"]),
+    userId: String(row["user_id"]),
+    approver: String(row["approver"]),
+    approverGeneration: Number(row["approver_generation"]),
+    updateId: Number(row["update_id"]),
+    messageId: String(row["message_id"]),
+    replyTo: text("reply_to"),
+    request: String(row["request"]),
+    text: String(row["text"]),
+    context: text("context"),
+    taskId: text("task_id"),
+    sourceRun: int("source_run"),
+    state: String(row["state"]) as TelegramConversation["state"],
+    claimOwner: text("claim_owner"),
+    claimExpiresAt: text("claim_expires_at"),
+    attempts: Number(row["attempts"]),
+    nextAttemptAt: text("next_attempt_at"),
+    session: int("session"),
+    turn: int("turn"),
+    outcome: text("outcome"),
+    replyMessageId: text("reply_message_id"),
+    createdAt: String(row["created_at"]),
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
+  };
+}
+
+function readTelegramProposalAction(row: Record<string, unknown>): TelegramProposalAction {
+  return {
+    token: String(row["token"]),
+    binding: Number(row["binding"]),
+    proposal: Number(row["proposal"]),
+    phase: String(row["phase"]) as TelegramProposalAction["phase"],
+    chatId: String(row["chat_id"]),
+    messageId: row["message_id"] === null ? null : String(row["message_id"]),
+    createdAt: String(row["created_at"]),
+    expiresAt: row["expires_at"] === null ? null : String(row["expires_at"]),
+    consumedAt: row["consumed_at"] === null ? null : String(row["consumed_at"]),
   };
 }
 

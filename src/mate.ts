@@ -70,6 +70,15 @@ export type MateTurnInput = {
   clock?: () => Date;
   /** Where evidence lives — get_task reads a scout's report from here. */
   evidenceRoot?: string;
+  /**
+   * A channel's own standing, re-proved where the approver's is: before
+   * admission, after every provider wait, and before any tool runs. The
+   * paired Telegram chat uses it to prove the binding, its generation and
+   * the enrolled ceiling are still what the turn opened under — account
+   * generation alone cannot see an unpairing or a project removed from
+   * enrollment. A refusal ends the turn with nothing kept.
+   */
+  revalidate?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
 };
 
 export type MateRefusal =
@@ -88,7 +97,8 @@ export type MateRefusal =
   | "session-ended"
   | "over-budget"
   | "invalid-request"
-  | "request-changed";
+  | "request-changed"
+  | "channel";
 
 export type MateFailure = "provider-error" | "timeout" | "malformed-reply" | "secret-refused" | "latched" | "revoked" | "superseded";
 
@@ -115,6 +125,7 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
   "over-budget": "the weekly chat spend ceiling would be exceeded",
   "invalid-request": "This message could not be identified. Reload the conversation before sending it.",
   "request-changed": "That send was already received with different text or task context. Reload the conversation before sending a new message.",
+  channel: "this conversation's connection changed — reconnect it before sending again",
 };
 
 const READ_TOOLS = new Set(["recap", "list_repos", "list_tasks", "get_task", "get_result", "get_controls", "get_agents", "get_project_knowledge", "list_decisions", "get_decision", "queue"]);
@@ -187,6 +198,8 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   const digest = createHash("sha256").update(JSON.stringify([thread.id, message, input.context ?? null])).digest("hex");
   const receipt = request === undefined ? null : store.mateRequestReceipt(session.id, request);
   if (receipt !== null) return receipt.digest === digest ? { ok: true, replayed: true, turn: receipt.turn } : refuse("request-changed");
+  // The channel's standing, proved before anything is admitted or sent.
+  if (input.revalidate !== undefined && !(await input.revalidate()).ok) return refuse("channel");
 
   let now = clock();
   store.sweepStaleMateTurns(now);
@@ -376,6 +389,14 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     const liveSession = store.getMateSession(session.id);
     if (!standing.ok || liveSession === null || liveSession.endedAt !== null) {
       return fail("revoked", "your standing or this session ended while the model was answering — nothing it proposed was kept", false);
+    }
+    // The channel too (finding 5's companion): a pairing revoked or a
+    // project unenrolled while the model answered ends the turn before any
+    // tool runs as the paired approver. The row is re-read after the wait.
+    if (input.revalidate !== undefined) {
+      const channel = await input.revalidate();
+      if (!stillOurs()) return { ok: false, turn: turnId, failed: "superseded", message: "this turn was ended while the model was answering", unknownSpend: false };
+      if (!channel.ok) return fail("revoked", `this conversation's connection changed while the model was answering (${channel.reason}) — nothing it proposed was kept`, false);
     }
 
     if (answer.calls.length === 0) {

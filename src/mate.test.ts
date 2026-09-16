@@ -772,4 +772,29 @@ describe("the mate's turn", () => {
     expect(recap).toMatchObject({ ok: true, body: { waitsOnYou: { decisions: [{ decision: 1, task: "in-1" }] }, repos: [{ repo: "r1", queued: 3 }, { repo: "r2", queued: 1 }] } });
     expect(JSON.stringify(executeMateTool(ctx, "get_task", { task: "in-3" }))).not.toContain("PATH");
   });
+
+  test("a channel's own revalidation runs before admission and after the wait: refused before, failed as revoked after — nothing proposed is kept", async () => {
+    const live = session();
+    const t = thread();
+    // Before admission: a typed refusal, no turn, no row.
+    const closed = await turn("hello", scripted([text("hi")]).fetcher, { session: live, thread: t, revalidate: async () => ({ ok: false, reason: "this chat is no longer paired" }) });
+    expect(closed).toMatchObject({ ok: false, refused: "channel", message: MATE_REFUSAL_COPY.channel });
+    expect(store.listMateMessages(t.id, 10)).toEqual([]);
+    expect(store.raw().prepare("SELECT COUNT(*) AS n FROM mate_turn").get()?.["n"]).toBe(0);
+    // After the provider wait: the model proposed something; the channel changed meanwhile; the tool never runs.
+    let channelOk = true;
+    const script = scripted([
+      answer([call("propose_hold", { task: "in-1", reason: "x" })]),
+      text("never reached"),
+    ]);
+    const outcome = await turn("hello", script.fetcher, {
+      session: live, thread: t,
+      revalidate: async () => { const ok = channelOk; channelOk = false; return ok ? { ok: true } : { ok: false, reason: "the connected projects changed" }; },
+    });
+    expect(outcome).toMatchObject({ ok: false, failed: "revoked", message: expect.stringContaining("the connected projects changed") });
+    expect(script.bodies).toHaveLength(1);
+    expect(store.getMateTurn((outcome as { turn: number }).turn)).toMatchObject({ state: "failed", failureReason: "revoked" });
+    expect(store.listMateProposals(t.id)).toEqual([]);
+    expect(store.activeHolds(store.refFor("built-in", "in-1").id, clock())).toEqual([]);
+  });
 });
