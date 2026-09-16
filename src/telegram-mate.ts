@@ -197,7 +197,7 @@ export function replyContextFor(taskId: string, run: number | null): string {
 /** A step the phone cannot take itself: said once; the button (or its absence) says where. */
 const HANDOFF = "This step finishes in Standing Orders.";
 /** No trusted https origin is configured: one honest line, no localhost, no promise. */
-export const NO_PHONE_LINK = "No phone link: this console has no HTTPS address set (standing-orders webhook set console-url https://…), so open Standing Orders on the computer.";
+export const NO_PHONE_LINK = "Phone access isn't configured. Open Standing Orders on your computer.";
 /** An origin exists but the card's task is not one this phone may reach now: said as that, never as missing setup. */
 export const NO_TASK_LINK = "No phone link: this task is outside your connected projects now, so open Standing Orders on the computer.";
 

@@ -172,7 +172,8 @@ function isLocalIpv4(address: string): boolean {
  * they carry.
  */
 function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  // A DNS root dot changes the spelling, not the destination (localhost.).
+  const host = hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost") || host === "::1" || host === "::" || isLocalIpv4(host)) return true;
   const embedded = /^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
   if (embedded === null) return false;

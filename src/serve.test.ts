@@ -307,8 +307,9 @@ describe("the web decision view", () => {
     expect(response.headers.get("set-cookie")).toBeNull();
   });
 
-  test("a phone's deep link to an exact task or result survives sign-in: the unauthenticated GET, a failed attempt and the successful one all keep the same-site destination, and opening it acts on nothing", async () => {
-    const destination = `/chat?task=t-1&result=${store.runsFor(taskRef)[0]!.id}&tab=checks`;
+  test.each(["chat", "result"])("a phone's deep link to an exact %s survives sign-in: the unauthenticated GET, a failed attempt and the successful one all keep the same-site destination, and opening it acts on nothing", async kind => {
+    const run = store.runsFor(taskRef)[0]!.id;
+    const destination = kind === "chat" ? `/chat?task=t-1&result=${run}&tab=checks` : `/r/${run}?tab=checks`;
     const anonymous = await fetch(url(destination), { redirect: "manual" });
     expect(anonymous.status).toBe(303);
     expect(anonymous.headers.get("location")).toBe(`/login?return=${encodeURIComponent(destination)}`);

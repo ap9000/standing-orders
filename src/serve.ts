@@ -10157,6 +10157,7 @@ const STYLE = `
   .result-files { margin: .4rem 0 .6rem; }
   .result-label { display: block; margin: .5rem 0 .25rem; font: 600 .6875rem/1.3 var(--font-mono); color: var(--muted-foreground); letter-spacing: .06em; text-transform: uppercase; }
   .result-verdict { align-items: center; }
+  .result-verdict > .meta { min-width: 0; overflow-wrap: anywhere; }
   .result-request { margin-top: 1.1rem; padding-top: .9rem; border-top: 1px solid var(--border); }
   .result-request h3 { margin: 0 0 .5rem; font-size: .8rem; letter-spacing: .02em; text-transform: uppercase; color: var(--muted-foreground); }
   .result-request .diff-comment-form { margin: .5rem 0 0; padding: 0; border: 0; background: none; box-shadow: none; }
@@ -15745,7 +15746,7 @@ function safeReturn(raw: string | null | undefined): string {
  * button can name. Nothing here is a second redirect framework: one
  * same-site path, or "/".
  */
-const LOGIN_RETURN_PAGES = /^\/(t\/[^/]+|chat|work|board|projects|routines|recipes|fleet|settings(\/[a-z-]+)?|mode)$/;
+const LOGIN_RETURN_PAGES = /^\/(t\/[^/]+|r\/[1-9]\d*|chat|work|board|projects|routines|recipes|fleet|settings(\/[a-z-]+)?|mode)$/;
 function loginReturn(raw: string | null | undefined): string {
   const safe = safeReturn(raw);
   if (safe === "/") return "/";

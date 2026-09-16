@@ -183,3 +183,70 @@ The bot remains unpaired and no console-url is set on the live plane:
 fixtures prove the implementation, not a physical phone, Telegram or
 OS-reboot trial. Root inspects a desktop and phone-width journey on the
 accepted candidate before claiming phone readiness.
+
+### Follow-up: finish the phone-link checks
+
+Independent inspection of candidate `473344ca7b1840e616c3ab1abfe8dfc850b8129f`
+found that `https://localhost.` and `https://app.localhost.` still qualified
+as phone origins. The DNS root dot does not change the destination. The
+prepared correction removes that dot for the existing localhost check and
+adds both spellings to the existing test, retaining normal private Tailscale
+origins. No DNS requests or additional URL framework are introduced.
+
+Missing setup now says: "Phone access isn't configured. Open Standing Orders
+on your computer." Configuration belongs here, not in every Telegram card:
+`standing-orders webhook set console-url https://your-console.example`.
+When the same process serves the console, this must match its `--public-url`.
+The origin must actually be reachable from the phone; accepted syntax alone
+does not verify the connection. Private Tailscale access still requires the
+operator's one-time account approval and a real phone trial.
+
+The actual browser pass on prepared patch `2d6f567` reproduced two more small
+gaps: the allowlist dropped `/r/1?tab=checks` at sign-in, and an unbroken path
+inside `.result-verdict > .meta` widened a 390px phone document to 511px.
+The correction admits only the existing numeric result-page route and lets
+that flex child shrink and wrap. The existing sign-in test now exercises both
+chat result links and direct result pages. No new route, consent change or
+responsive-layout redesign is needed. The ordinary desktop and phone
+feedback flows already created same-family revisions with the exact notes;
+repeat the affected login and overflow checks on the corrected build.
+
+Root verified the corrected `77bc096` runtime in the actual browser: a direct
+`/r/1?tab=checks` login landed on that exact page and selected tab. The long
+failure state at 390x844 measured document width 390 (before: 511), with no
+elements extending beyond the viewport. Desktop 1280x720 and phone feedback
+created revisions in the same task family; expanded terms retained the exact
+feedback. These are synthetic fixtures, not live Telegram or a physical phone.
+The unchanged fixture script is `scripts/ui-polish-fixture.mjs`.
+
+Operator-captured images are available at
+`/tmp/standing-orders-phone-audit-HfW9cY/desktop-result.png`,
+`/tmp/standing-orders-phone-audit-HfW9cY/phone-before-overflow.png`, and
+`/tmp/standing-orders-phone-audit-HfW9cY/phone-after-overflow.png`.
+The final image covers the corrected code above. It may be included as clearly
+labelled synthetic browser evidence if the rendering code remains unchanged;
+do not claim a new capture or a physical-phone trial. If rendering changes,
+ask root for a fresh capture rather than inventing evidence. Detailed failure
+diagnostics remain wordy; no unrelated result-screen redesign is in this patch.
+
+Focused checks: typecheck passed; webhooks and Telegram mate suites passed
+56 tests; the affected sign-in and redirect cases passed 25 tests (the other
+309 serve cases were not selected in that focused run). No test was removed
+or given a skip. The unchanged full command belongs to the native final gate.
+
+### Revision receipt: prepared corrections applied unchanged
+
+The three prepared commits (`2d6f567`, `77bc096`, `598ce59`) were applied
+on top of `473344c` without modification, so the rendering, origin and
+sign-in code above is exactly what root inspected. `evidence/phone-handoff-390.png`
+is that operator capture (`phone-after-overflow.png`, 390x844) re-encoded
+as PNG because the original file carried JPEG data under a `.png` name. It is
+synthetic fixture evidence from the corrected build, not a new capture and
+not a physical phone or live Telegram trial.
+
+Focused checks rerun on this candidate: typecheck passed; webhooks and
+Telegram mate suites passed 56 tests; the serve cases named sign-in, login,
+redirect or return passed 40 (the other 294 were filtered by name, not
+skipped in source); the serve revision and feedback cases passed 26. No test
+was removed or given a skip. The unchanged full command belongs to the
+native final gate.
