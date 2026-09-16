@@ -1,0 +1,6 @@
+### Result
+{"approval":1,"revision":"revise-payout-rounding-from-1-annotation-on-build-1","width":1440,"content":1440}
+### Ran Playwright code
+```js
+await (async page => {const approval=await page.getByRole("heading",{name:"Needs your approval",exact:true}).count();const facts=await page.evaluate(()=>({revision:new URL(location.href).searchParams.get("revision"),width:innerWidth,content:document.documentElement.scrollWidth}));if(!approval||!facts.revision||facts.content>facts.width)throw Error(JSON.stringify({approval,...facts}));await page.screenshot({path:"/Users/alekseypelletier/Documents/standing-orders-telegram-progress/output/telegram-progress/desktop-revision.png"});return {approval,...facts};})(page);
+```
