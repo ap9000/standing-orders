@@ -34,6 +34,9 @@ const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: str
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
+// Lifecycle progress facts (task-notifications.test.ts) are settled before
+// each pass here: this suite drives the transport with hand-enqueued rows.
+const quietLifecycle = (store: Store, now: Date) => store.resolveEpisodes("life", now);
 const BOT = "777000";
 const CHAT = 4242;
 const USER = 31337;
@@ -62,8 +65,10 @@ describe("destination-bound authorized outbox", () => {
   const enqueue = (key: string, ref: number, body = key) => store.enqueueNotification({
     dedupeKey: key, kind: "report-ready", subject: key, body, source: { taskRef: ref },
   }, now);
-  const pass = (transport: TelegramTransport, extra: Partial<Parameters<typeof bridgePass>[1]> = {}) =>
-    bridgePass(store, { botId: BOT, transport, clock: () => now, readProjects: async () => projects, ...extra });
+  const pass = (transport: TelegramTransport, extra: Partial<Parameters<typeof bridgePass>[1]> = {}) => {
+    quietLifecycle(store, now);
+    return bridgePass(store, { botId: BOT, transport, clock: () => now, readProjects: async () => projects, ...extra });
+  };
   const sends = (script: ReturnType<typeof scriptedTransport>) => script.calls.filter(call => call.method === "sendMessage");
   const receipts = () => store.telegramDeliveries(store.liveTelegramBinding(BOT)!);
 
@@ -130,7 +135,8 @@ describe("destination-bound authorized outbox", () => {
     // Enrolling the other project releases its rows on the next retry pass,
     // in one digest and in ID order; the legacy row still waits, never guessed.
     projects.push(OTHER); now = later(63_000);
-    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 2, digests: 1, problems: ["notification 1: Notification has no trusted project provenance"] } });
+    // The two filing facts hold ids 1 and 2; the legacy row is 3.
+    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 2, digests: 1, problems: ["notification 3: Notification has no trusted project provenance"] } });
     expect(sends(script)).toHaveLength(2);
     const second = String(sends(script)[1]!.params["text"]);
     expect(second).toContain("digest — 2 routine fact(s)");
@@ -252,7 +258,7 @@ describe("destination-bound authorized outbox", () => {
     expect(sends(script).map(call => call.params["text"])).toEqual(["project / a · first\n\nfirst", "project / a · second\n\nsecond"]);
     enqueue("after-limit", a);
     await pass(async method => method === "sendMessage" ? { ok: false, description: "offline" } : { ok: true, result: [] });
-    expect(store.handle.prepare("SELECT next_attempt_at FROM notification_delivery WHERE notification = 3").get()?.["next_attempt_at"]).toBe(later(46_000).toISOString());
+    expect(store.handle.prepare("SELECT next_attempt_at FROM notification_delivery WHERE notification = (SELECT id FROM notification WHERE dedupe_key = 'after-limit')").get()?.["next_attempt_at"]).toBe(later(46_000).toISOString());
   });
 
   test("the HTTP adapter preserves retry_after without a live request; unconfirmed success stays pending", async () => {
@@ -292,6 +298,7 @@ describe("destination-bound authorized outbox", () => {
 
   test("restart recovers expired claims; same-owner stale generations and replaced destinations cannot settle", async () => {
     enqueue("ready", task("a", REPO));
+    quietLifecycle(store, now);
     const oldBinding = store.liveTelegramBinding(BOT)!;
     const [old] = store.claimTelegramDeliveries(oldBinding, "owner", 1_000, now);
     now = later(1_001);
@@ -425,6 +432,7 @@ describe("the telegram bridge", () => {
       { source: { run }, dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" },
       T0,
     );
+    quietLifecycle(store, T0);
     return id;
   };
 
@@ -471,6 +479,7 @@ describe("the telegram bridge", () => {
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     store.placeTask(taskRef, REPO);
+    quietLifecycle(store, T0);
   });
 
   afterEach(() => store.close());
@@ -825,6 +834,7 @@ describe("the follower — on the wire until told to stop", () => {
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     store.placeTask(taskRef, REPO);
+    quietLifecycle(store, T0);
   });
 
   afterEach(() => store.close());
@@ -885,6 +895,7 @@ describe("the follower — on the wire until told to stop", () => {
       { source: { run }, dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" },
       T0,
     );
+    quietLifecycle(store, T0);
     return id;
   };
 
@@ -989,6 +1000,7 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     store.placeTask(taskRef, REPO);
+    quietLifecycle(store, T0);
   });
   afterEach(() => store.close());
 
@@ -1006,6 +1018,7 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
     store.enqueueNotification(
       { source: { run }, dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked", body: "q" }, T0,
     );
+    quietLifecycle(store, T0);
     return id;
   };
 
@@ -1148,6 +1161,7 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
       T0,
     );
     store.enqueueNotification({ source: { run }, dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" }, T0);
+    quietLifecycle(store, T0);
     return id;
   };
 
@@ -1161,6 +1175,7 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     store.placeTask(taskRef, REPO);
+    quietLifecycle(store, T0);
   });
 
   afterEach(() => store.close());

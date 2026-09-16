@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
-import { SCHEMA_VERSION, databasePath, openStore, BUILT_IN, type Capability, type Store } from "./store.js";
+import { SCHEMA_VERSION, databasePath, isLifecycleNotification, openStore, BUILT_IN, type Capability, type Store } from "./store.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 import { canonicalProfileJson, profileDigestOf } from "./scope.js";
@@ -38,14 +38,17 @@ test("notification provenance comes from trusted records and a duplicate cannot 
     const taskRef = store.refFor(BUILT_IN, "a").id;
     store.placeTask(taskRef, "/project/a");
     const run = store.startRun({ taskRef, leaseId: "a", runner: "b", branch: "a", worktree: "/a", ...bareLegacy("build"), now: T0 });
+    // The filing and start facts are the task's own lifecycle rows; this
+    // test reads the hand-enqueued rows around them.
+    const rows = () => store.listNotifications().filter(one => !isLifecycleNotification(one));
     expect(store.enqueueNotification({ source: { run }, dedupeKey: "event", kind: "ready", subject: "pretends to be b", body: "b", link: "/t/b" }, T0)).toBe(true);
-    expect(store.listNotifications()[0]).toMatchObject({ scope: "task", taskRef, taskId: "a", project: "/project/a", run });
+    expect(rows()[0]).toMatchObject({ scope: "task", taskRef, taskId: "a", project: "/project/a", run });
     expect(store.enqueueNotification({ source: { installation: true }, dedupeKey: "event", kind: "ready", subject: "new", body: "new" }, T0)).toBe(false);
-    expect(store.listNotifications()[0]).toMatchObject({ scope: "task", project: "/project/a", run });
+    expect(rows()[0]).toMatchObject({ scope: "task", project: "/project/a", run });
     for (const [key, source] of [["missing-run", { run: 999 }], ["missing-task", { taskRef: 999 }]] as const) {
       store.enqueueNotification({ source, dedupeKey: key, kind: "task", subject: "a", body: "a", link: "/t/a" }, T0);
     }
-    expect(store.listNotifications().slice(1).map(row => row.scope)).toEqual(["unknown", "unknown"]);
+    expect(rows().slice(1).map(row => row.scope)).toEqual(["unknown", "unknown"]);
   } finally { store.close(); }
 });
 

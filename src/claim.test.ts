@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { openStore, type Store } from "./store.js";
+import { isLifecycleNotification, openStore, type Store } from "./store.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1027,7 +1027,8 @@ describe("sealing a park", () => {
     expect(sealed).toMatchObject({ ok: false, reason: "fenced" });
     expect(store.listDecisions("all")).toHaveLength(0);
     expect(store.activeHolds(task, later(9e8))).toHaveLength(0);
-    expect(store.listNotifications("pending")).toHaveLength(0);
+    // The attempt's own start fact stands; no page was created.
+    expect(store.listNotifications("pending").filter(one => !isLifecycleNotification(one))).toHaveLength(0);
     // The run records the refusal it was.
     expect(store.getRun(runId)).toMatchObject({ outcome: "refused", reason: "fenced" });
     // And runner-b's live claim was never touched.
@@ -1136,7 +1137,7 @@ describe("sealing a park", () => {
     expect(store.getScope("t-1")).toMatchObject({ goal: "the work", approvedBy: "alex" });
     expect(store.refForId(task)?.plan).toBeNull();
     expect(store.latestPlanArtifact(task)).toBeNull();
-    expect(store.listNotifications("pending")).toHaveLength(0);
+    expect(store.listNotifications("pending").filter(one => !isLifecycleNotification(one))).toHaveLength(0);
     expect(currentClaim(store, task, later(121_000))?.leaseId).toBe("lease-b");
   });
 
@@ -1734,7 +1735,7 @@ describe("sealing a plan revision", () => {
     expect(sealed).toMatchObject({ ok: false, reason: "fenced" });
     expect(store.listPlanRevisions(task)).toHaveLength(0);
     expect(store.activeHolds(task, later(9e8))).toHaveLength(0);
-    expect(store.listNotifications("pending")).toHaveLength(0);
+    expect(store.listNotifications("pending").filter(one => !isLifecycleNotification(one))).toHaveLength(0);
     // The run records the refusal it was, and runner-b's claim is untouched.
     expect(store.getRun(runId)).toMatchObject({ outcome: "refused", reason: "fenced" });
     expect(currentClaim(store, task, later(121_000))?.leaseId).toBe("lease-b");

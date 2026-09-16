@@ -166,7 +166,7 @@ import { dirname } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, listGithubRepos, isLargeRepo, type ListOutcome } from "./onboard.js";
-import { verifiedAuthor } from "./store.js";
+import { isLifecycleNotification, verifiedAuthor } from "./store.js";
 import { updateRepos, addRepos } from "./repos.js";
 import { run as execRun } from "./exec.js";
 
@@ -1647,7 +1647,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           incidents: store.openIncidents(project),
           stranded: store.strandedTasks(project),
           gaps: project === null ? null : computeGaps(store, project, now),
-          outboxPending: store.listNotifications("pending").length,
+          outboxPending: store.listNotifications("pending").filter(row => !isLifecycleNotification(row)).length,
           settings: options.telegramTokenFile !== undefined,
           building: store.liveClaims(project, now),
           runners: store.listRunners(),
@@ -1878,7 +1878,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           heldSessions: new Map(store.openHeldSessions().reduce((by, one) => by.set(one.runner, (by.get(one.runner) ?? 0) + 1), new Map<string, number>())),
           worktrees: store.listWorktrees().filter(one => project === null || sameRepo(one.repo, project)),
           episode: project === null ? null : store.latestWatchEpisode(project),
-          outboxPending: store.listNotifications("pending").length,
+          outboxPending: store.listNotifications("pending").filter(row => !isLifecycleNotification(row)).length,
           // External work at a glance (arc 3 finding 24): every dispatch
           // grant with its blocked state, plus any open sync episode — the
           // page a sync-failed push deep-links to now shows the fact.

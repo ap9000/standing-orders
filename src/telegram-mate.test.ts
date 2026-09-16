@@ -133,8 +133,12 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "alex", by: "alex", ttlMs: PAIRING_TTL_MS }, now);
     expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: BOT, chatId: String(CHAT), userId: String(USER), updateId: 1 }, now).ok).toBe(true);
   };
-  const pass = (extra: Partial<Parameters<typeof bridgePass>[1]> = {}) =>
-    bridgePass(store, { botId: BOT, transport: script.transport, clock: () => now, deliver: false, readProjects, conversation: { evidenceRoot, subscriptionRunner: runner, phoneOrigin: () => origin }, ...extra });
+  const pass = (extra: Partial<Parameters<typeof bridgePass>[1]> = {}) => {
+    // Lifecycle progress facts have their own suite (task-notifications.test.ts);
+    // this one drives the conversation, so they are settled before each pass.
+    store.resolveEpisodes("life", now);
+    return bridgePass(store, { botId: BOT, transport: script.transport, clock: () => now, deliver: false, readProjects, conversation: { evidenceRoot, subscriptionRunner: runner, phoneOrigin: () => origin }, ...extra });
+  };
   /** The url row of the last edit or send carrying a keyboard: label and href, or [] when none rides it. */
   const urlButtons = (call: { params: Record<string, unknown> } | undefined) =>
     ((call?.params["reply_markup"] as { inline_keyboard?: { text: string; url?: string }[][] } | undefined)?.inline_keyboard ?? []).flat().filter(one => one.url !== undefined).map(one => [one.text, one.url]);

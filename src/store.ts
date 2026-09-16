@@ -2,6 +2,7 @@ import { verificationEvidence } from "./verification-evidence.js";
 import { LEARNING_SCHEMA, queueLearning } from "./project-learning.js";
 import { KNOWLEDGE_SCHEMA } from "./project-knowledge.js";
 import { validateTaskText } from "./task-text.js";
+import { chatControlHref, chatResultHref } from "./chat-controls.js";
 /**
  * The database: a small task store, and the operational overlay beside it.
  *
@@ -573,6 +574,84 @@ export function parseCapabilityKey(
 /** Supplied by the producer, never inferred from display text or links. */
 export type NotificationSource = { run: number } | { taskRef: number } | { project: string } | { installation: true };
 type NotificationInput = { dedupeKey: string; kind: string; subject: string; body: string; pushClass?: "decision" | "pick" | "merge" | "attention"; link?: string; source?: NotificationSource };
+
+/**
+ * Task lifecycle updates (Telegram task updates, 2026-09-16): the CLOSED
+ * vocabulary of routine progress facts the shared mutations record beside
+ * the change that made them true. None carries a push class — they are
+ * digest-eligible progress, never a page — and every one is project-bound
+ * through the task it names. A decision, incident, gap, stall, publication
+ * or merge page keeps its own producer; nothing here repeats one.
+ */
+export const LIFECYCLE_KINDS = [
+  "task-filed",
+  "scope-approved",
+  "approval-withdrawn",
+  "task-held",
+  "task-released",
+  "task-queued",
+  "task-requeued",
+  "task-cancelled",
+  "run-started",
+  "run-phase",
+  "run-finished",
+  "run-stopping",
+  "run-stopped",
+  "run-resumed",
+  "review-requested",
+  "review-finished",
+] as const;
+export type LifecycleKind = (typeof LIFECYCLE_KINDS)[number];
+/** Every lifecycle dedupe key starts here: `life:<kind>:<identity>:<ordinal>`. */
+export const LIFECYCLE_KEY_PREFIX = "life:";
+/** A progress fact, told apart by its durable key — never by display text. */
+export function isLifecycleNotification(row: Pick<Notification, "dedupeKey">): boolean {
+  return row.dedupeKey.startsWith(LIFECYCLE_KEY_PREFIX);
+}
+
+/** Display words for a lifecycle fact: one line, control-free, bounded, with
+ * paths and long hex hidden the way the phone scrub hides them. The inputs
+ * are already validated task text or identifiers; this is the belt. */
+function lifecycleWords(value: string, cap: number): string {
+  const text = value
+    .replace(/(?:[A-Za-z]:[\\/]|\\\\)[^\s"'<>]+/g, "[path]")
+    .replace(/(^|[\s"'`(<[=:,])\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+/g, "$1[path]")
+    .replace(/\b[0-9a-f]{32,}\b/gi, "[digest]")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length <= cap ? text : `${text.slice(0, cap - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
+}
+
+/** The phase words a phone reads: what the machine is doing to the attempt now. */
+const LIFECYCLE_PHASE_WORDS: Record<RunPhase, { subject: string; body: string }> = {
+  "agent-running": { subject: "agent working", body: "The agent is working in its own checkout. Nothing is finished yet." },
+  "validating-handoff": { subject: "checking the handoff", body: "The agent finished its turn; what it handed back is being checked." },
+  "capturing-evidence": { subject: "capturing evidence", body: "The diff, checks and proof are being captured." },
+  "committing": { subject: "committing", body: "The work is being committed on the task branch." },
+  "verifying-proof": { subject: "verifying the proof", body: "The proof is being checked against the approved acceptance criteria." },
+  "correcting-proof": { subject: "correcting the proof", body: "The proof did not match the sealed result; a bounded correction turn is running." },
+};
+
+/** What an independent review concluded, in the words the saved result shows. */
+const LIFECYCLE_REVIEW_WORDS: Record<"verified" | "attested" | "short" | "refuted" | "none", { subject: string; body: string }> = {
+  verified: { subject: "checks verified", body: "Every acceptance check was verified against the saved result." },
+  refuted: { subject: "evidence conflicts with the result", body: "The reviewer found evidence that contradicts the saved result. It is not accepted as done." },
+  attested: { subject: "agent-reported evidence only", body: "The result rests on agent-reported evidence that was not independently verified." },
+  short: { subject: "required evidence is missing", body: "Required evidence is missing from the saved result." },
+  none: { subject: "comments only", body: "The reviewer left comments; no acceptance judgement was recorded." },
+};
+
+/** Why a task still waits after one hold lifts — the other owner, in words. */
+const LIFECYCLE_HOLD_WORDS: Record<HoldOwner, string> = {
+  operator: "an operator's hold",
+  decision: "an unanswered question",
+  incident: "an unresolved incident",
+  backoff: "its retry backoff",
+  contest: "a tournament",
+  revision: "a plan revision awaiting approval",
+  stop: "a stopped attempt that has not been resumed",
+};
 
 /** A fact that wants a person, durably. */
 export type Notification = {
@@ -6840,6 +6919,7 @@ export class Store {
     admittedFrom: readonly TaskState[] | null,
   ): { changed: boolean } {
     const filter = admittedFrom === null ? "" : ` AND state IN (${admittedFrom.map(() => "?").join(",")})`;
+    const prior = this.db.prepare("SELECT state FROM task WHERE id = ?").get(taskId);
     const { changes } = this.db
       .prepare(`UPDATE task SET state = 'cancelled', updated_at = ? WHERE id = ?${filter}`)
       .run(now.toISOString(), taskId, ...(admittedFrom ?? []));
@@ -6861,6 +6941,25 @@ export class Store {
       this.db
         .prepare("INSERT INTO coordinator_event (cid, kind, task_id, detail, created_at) VALUES (?, 'dismissed', ?, ?, ?)")
         .run(String(ref["coordinator_cid"]), taskId, detail, now.toISOString());
+    }
+    // The cancellation fact (Telegram task updates) rides the one floor
+    // every road lands on, beside the audit row — never a separate write,
+    // never inferred from the state verb's words. The unfiltered state verb
+    // rewrites 'cancelled' over 'cancelled'; that is the same state.
+    if (ref !== undefined && prior?.["state"] !== "cancelled") {
+      this.noteLifecycle(
+        {
+          taskRef: Number(ref["id"]), kind: "task-cancelled", identity: `t${Number(ref["id"])}`,
+          subject: "Cancelled",
+          body: reason.kind === "operator"
+            ? `${reason.text === null || reason.text.trim() === "" ? "Cancelled by an operator." : `Cancelled by an operator: ${lifecycleWords(reason.text, 120)}`} Nothing more runs for it.`
+            : reason.code === "mirror-latched"
+              ? "The tracker closed it. Nothing more runs for it."
+              : "The tracker closed it while it was being built, so the finished work was not accepted.",
+          link: chatControlHref("task", taskId),
+        },
+        now,
+      );
     }
     return { changed: true };
   }
@@ -6895,10 +6994,30 @@ export class Store {
             this.bumpWake();
             return { ok: true as const };
           }
+          const prior = this.db.prepare("SELECT state FROM task WHERE id = ?").get(id);
           const { changes } = this.db
             .prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?")
             .run(state, now.toISOString(), id);
           if (Number(changes) === 0) return { ok: false as const, reason: "unknown-task" as const };
+          // The return-to-queue fact (Telegram task updates): a running
+          // task its worker released unfinished, or a closed one reopened
+          // by the state verb. Marking done or failed by hand rides the
+          // run that concluded it, and 'running' is the attempt's own
+          // start fact — neither is repeated here.
+          if (state === "queued" && prior !== undefined && prior["state"] !== "queued") {
+            const ref = this.lookupRef(id);
+            if (ref !== null) {
+              this.noteLifecycle(
+                {
+                  taskRef: ref.id, kind: "task-queued", identity: `t${ref.id}`,
+                  subject: "Back in the queue",
+                  body: prior["state"] === "running" ? "Its worker released it without finishing; another attempt can start." : "Reopened for another attempt.",
+                  link: chatControlHref("task", id),
+                },
+                now,
+              );
+            }
+          }
           // A finished task's pending steering settles superseded in the
           // SAME transaction (arc 1): shown as what it is, never a note
           // silently waiting for a build that can no longer happen.
@@ -7533,6 +7652,9 @@ export class Store {
     },
     now: Date,
   ): void {
+    const prior = this.db
+      .prepare("SELECT task_ref, reason, until FROM hold WHERE owner_kind = ? AND owner_id = ?")
+      .get(hold.ownerKind, hold.ownerId);
     this.db
       .prepare(
         `INSERT INTO hold (task_ref, owner_kind, owner_id, reason, until, held_at)
@@ -7550,23 +7672,60 @@ export class Store {
         hold.until === null ? null : hold.until.toISOString(),
         now.toISOString(),
       );
+    // Only the OPERATOR'S pause speaks here (Telegram task updates): a
+    // decision, incident, backoff, contest, revision or stop hold arrives
+    // beside its own page or its own stop fact, and repeating those would
+    // teach a phone to skim. A repeat of the same pause is the same state.
+    if (hold.ownerKind !== "operator") return;
+    const until = hold.until === null ? null : hold.until.toISOString();
+    const same = prior !== undefined && Number(prior["task_ref"]) === hold.taskRef && String(prior["reason"]) === hold.reason && (prior["until"] ?? null) === until;
+    if (same) return;
+    const taskId = this.externalIdFor(hold.taskRef);
+    if (taskId === null) return;
+    this.noteLifecycle(
+      {
+        taskRef: hold.taskRef, kind: "task-held", identity: `t${hold.taskRef}`,
+        subject: until === null ? "Paused" : `Paused until ${until.slice(0, 16).replace("T", " ")} UTC`,
+        body: "The next attempt waits until the hold is released. An attempt already running is not stopped by this.",
+        link: chatControlHref("recovery", taskId),
+      },
+      now,
+    );
   }
 
   /**
    * The CLI's unhold lifts only the operator's own hold. A task still held by
    * an open decision stays held — the way out of that hold is answering it.
    */
-  unhold(taskRef: number, mutation: Mutation = {}): boolean {
+  unhold(taskRef: number, mutation: Mutation = {}, now?: Date): boolean {
     return this.once(
       mutation,
       "unhold",
-      () => {
+      () => this.transact(() => {
         const { changes } = this.db
           .prepare("DELETE FROM hold WHERE task_ref = ? AND owner_kind = 'operator'")
           .run(taskRef);
-        if (Number(changes) > 0) this.bumpWake();
-        return Number(changes) > 0;
-      },
+        if (Number(changes) === 0) return false;
+        this.bumpWake();
+        // The release fact (Telegram task updates) says what is true NOW:
+        // free to run, or still held by another owner — named, so a phone
+        // never reads "released" as "running next".
+        const at = now ?? mutation.at ?? new Date();
+        const taskId = this.externalIdFor(taskRef);
+        if (taskId !== null) {
+          const others = this.activeHolds(taskRef, at).map(one => LIFECYCLE_HOLD_WORDS[one.ownerKind]);
+          this.noteLifecycle(
+            {
+              taskRef, kind: "task-released", identity: `t${taskRef}`,
+              subject: "Hold released",
+              body: others.length === 0 ? "The next attempt can start." : `It still waits on ${[...new Set(others)].join(" and ")}.`,
+              link: chatControlHref(others.length === 0 ? "task" : "recovery", taskId),
+            },
+            at,
+          );
+        }
+        return true;
+      }),
       lifted => lifted,
     );
   }
@@ -7843,6 +8002,10 @@ export class Store {
       this.db
         .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ?")
         .run(now.toISOString(), localTaskId);
+      this.noteLifecycle(
+        { taskRef, kind: "task-queued", identity: `t${taskRef}`, subject: "Back in the queue", body: "The tracker item is open again; another attempt can start.", link: chatControlHref("task", localTaskId) },
+        now,
+      );
       this.bumpWake();
       return { ok: true as const };
     });
@@ -8473,6 +8636,23 @@ export class Store {
             this.db
               .prepare("UPDATE notification SET resolved_at = ? WHERE dedupe_key LIKE ? AND resolved_at IS NULL")
               .run(now.toISOString(), `stale-approval:${Number(ref["id"])}:%`);
+            // The approval fact (Telegram task updates): a NEW yes on these
+            // exact bytes. Re-sealing an approval that already stands on
+            // the same digest is the same state and says nothing.
+            const alreadyOn = working["approved_at"] == null ? null : working["approved_digest"];
+            if (alreadyOn !== working["digest"]) {
+              this.noteLifecycle(
+                {
+                  taskRef: Number(ref["id"]), kind: "scope-approved", identity: `t${Number(ref["id"])}`,
+                  subject: "Scope approved",
+                  body: basis === undefined
+                    ? `Approved by ${lifecycleWords(by, 40)}. A connected worker can take it next.`
+                    : "Approved automatically under the operating mode. A connected worker can take it next.",
+                  link: chatControlHref("task", taskId),
+                },
+                now,
+              );
+            }
           }
         }
         return changed.changes > 0;
@@ -8662,18 +8842,12 @@ export class Store {
    * grant/mode intents REBIND to the new digest and return to pending.
    * `firing` is never touched by either arm. */
   private reconcileIntentsForMode(repo: string, newMode: { digest: string; publication: "notify" | "automerge" } | null, now: Date): void {
-    void now;
     // MODE-DERIVED SCOPE APPROVALS demote here too (Codex people round 1,
     // finding 2 — R-REVOKE's "next gate" made durable): an approval sealed
     // under a mode signature that no longer stands falls back to the human
     // ceremony. Only UNDISPATCHED work demotes — the task still queued with
     // no live claim; running and finished work keeps its history untouched.
-    this.db
-      .prepare(
-        `UPDATE task_scope
-            SET approved_at = NULL, approved_by = NULL, approved_digest = NULL,
-                approved_profile_json = NULL, approval_basis = 'password', mode_digest = NULL
-          WHERE approval_basis = 'mode' AND approved_at IS NOT NULL
+    const demotable = `WHERE approval_basis = 'mode' AND approved_at IS NOT NULL
             AND (? IS NULL OR mode_digest <> ?)
             AND EXISTS (SELECT 1 FROM task_ref JOIN task ON task.id = task_ref.external_id
                          WHERE task_ref.backend = 'built-in'
@@ -8682,15 +8856,37 @@ export class Store {
             AND NOT EXISTS (SELECT 1 FROM claim JOIN task_ref tr ON tr.id = claim.task_ref
                              WHERE tr.backend = 'built-in'
                                AND tr.external_id = task_scope.task_id AND tr.repo = ?
-                               AND claim.released_at IS NULL AND claim.expires_at > ?)`,
+                               AND claim.released_at IS NULL AND claim.expires_at > ?)`;
+    const demotableArgs = [
+      newMode === null ? null : newMode.digest,
+      newMode === null ? null : newMode.digest,
+      repo,
+      repo,
+      now.toISOString(),
+    ];
+    // Read the exact rows first, in this transaction: each demoted task
+    // tells its project's phones the yes it ran on has ended (Telegram
+    // task updates) — the same rows the UPDATE below touches, no more.
+    const demoted = this.db
+      .prepare(`SELECT task_id FROM task_scope ${demotable}`)
+      .all(...demotableArgs)
+      .map(row => String(row["task_id"]));
+    this.db
+      .prepare(
+        `UPDATE task_scope
+            SET approved_at = NULL, approved_by = NULL, approved_digest = NULL,
+                approved_profile_json = NULL, approval_basis = 'password', mode_digest = NULL
+          ${demotable}`,
       )
-      .run(
-        newMode === null ? null : newMode.digest,
-        newMode === null ? null : newMode.digest,
-        repo,
-        repo,
-        now.toISOString(),
+      .run(...demotableArgs);
+    for (const taskId of demoted) {
+      const ref = this.lookupRef(taskId);
+      if (ref === null) continue;
+      this.noteLifecycle(
+        { taskRef: ref.id, kind: "approval-withdrawn", identity: `t${ref.id}`, subject: "Approval needs renewing", body: "The automatic approval it ran under has ended. Approve it again before it runs.", link: chatControlHref("approval", taskId) },
+        now,
       );
+    }
     const repoIntents = `publication IN (
                 SELECT publication.id FROM publication
                   JOIN run ON run.id = publication.run
@@ -11294,6 +11490,20 @@ export class Store {
         )
         .run(runId, by, basis === undefined ? "human" : "mode", basis === undefined ? null : basis.digest, now.toISOString(), routeDigest, automatic ? "automatic" : "operator", runId);
       if (Number(inserted.changes) === 0) return { ok: false as const, reason: "already-requested" as const };
+      // The review-requested fact (Telegram task updates): the saved result
+      // is what it was; an independent pass is queued, not run.
+      const reviewedTask = this.externalIdFor(run.taskRef);
+      if (reviewedTask !== null) {
+        this.noteLifecycle(
+          {
+            taskRef: run.taskRef, run: runId, kind: "review-requested", identity: `r${runId}`,
+            subject: "Independent review requested",
+            body: `${automatic ? "Queued automatically" : `Requested by ${lifecycleWords(by, 40)}`} for attempt #${runId}'s saved result. A connected reviewer runs it next.`,
+            link: chatResultHref(reviewedTask, runId, "checks"),
+          },
+          now,
+        );
+      }
       this.bumpWake();
       return { ok: true as const, id: Number(inserted.lastInsertRowid), attempt };
     });
@@ -12571,6 +12781,15 @@ export class Store {
         .run(stamp, taskId);
       // The stall's page is answered by the act itself.
       this.resolveEpisode(`stalled:${taskRef}`, now);
+      this.noteLifecycle(
+        {
+          taskRef, kind: "task-requeued", identity: `t${taskRef}`,
+          subject: "Requeued",
+          body: `${incidents.length > 0 ? "Its incident is resolved and its" : "Its"} failure streak is cleared; a worker can take it again.`,
+          link: chatControlHref("task", taskId),
+        },
+        now,
+      );
       this.bumpWake();
       return { ok: true as const, resolvedIncidents: incidents.length };
     });
@@ -12725,7 +12944,7 @@ export class Store {
       }
       // Placement happens BEFORE the scope exists, so the immutability guard
       // in placeTask never fires here — atomic create, place, then scope.
-      if (spec.repo !== undefined && spec.repo !== "") this.placeTask(ref.id, spec.repo);
+      if (spec.repo !== undefined && spec.repo !== "") this.placeTask(ref.id, spec.repo, {}, now);
       if (spec.permissionMode !== undefined) {
         this.db.prepare("UPDATE task_ref SET permission_mode = ? WHERE id = ?").run(spec.permissionMode, ref.id);
       }
@@ -12903,18 +13122,18 @@ export class Store {
     taskRef: number,
     repo: string,
     mutation: Mutation = {},
+    now?: Date,
   ): boolean | { ok: false; reason: "scoped" } {
     return this.once(mutation, "placeTask", () => {
       return this.transact(() => {
         const external = this.db
-          .prepare("SELECT external_id FROM task_ref WHERE id = ?")
+          .prepare("SELECT external_id, repo FROM task_ref WHERE id = ?")
           .get(taskRef);
+        const already = external === undefined || external["repo"] === null ? null : String(external["repo"]);
         if (external !== undefined) {
           const scoped = this.db
             .prepare("SELECT 1 AS hit FROM task_scope WHERE task_id = ?")
             .get(String(external["external_id"]));
-          const current = this.db.prepare("SELECT repo FROM task_ref WHERE id = ?").get(taskRef);
-          const already = current?.["repo"] === null ? null : String(current?.["repo"]);
           if (scoped !== undefined && already !== repo) {
             return { ok: false as const, reason: "scoped" as const };
           }
@@ -12922,6 +13141,20 @@ export class Store {
         const { changes } = this.db
           .prepare("UPDATE task_ref SET repo = ? WHERE id = ?")
           .run(repo, taskRef);
+        // Filing speaks once the project is known (Telegram task updates):
+        // the FIRST placement is the moment a task becomes deliverable to
+        // that project's phones, whichever door filed it — console form,
+        // CLI add, a proposal, a revision, a routine firing, an external
+        // mirror. A same-repo repeat changes nothing and says nothing.
+        if (Number(changes) > 0 && external !== undefined && already === null) {
+          const taskId = String(external["external_id"]);
+          const task = this.db.prepare("SELECT title FROM task WHERE id = ?").get(taskId);
+          const title = task === undefined ? taskId : String(task["title"]);
+          this.noteLifecycle(
+            { taskRef, kind: "task-filed", identity: `t${taskRef}`, subject: `New task: ${lifecycleWords(title, 80)}`, body: "Filed and waiting in the queue.", link: chatControlHref("task", taskId) },
+            now ?? mutation.at ?? new Date(),
+          );
+        }
         return Number(changes) > 0;
       });
     });
@@ -15134,6 +15367,98 @@ export class Store {
     );
   }
 
+  // ---- lifecycle updates ---------------------------------------------------
+
+  /**
+   * One project-bound lifecycle fact (Telegram task updates, 2026-09-16),
+   * recorded by the mutation that made it true and inside that mutation's
+   * own transaction — a rollback takes the fact with it. Only a PLACED task
+   * speaks: an unplaced one has no project to deliver to, and a row with no
+   * trusted project provenance would only sit in the outbox refusing. The
+   * key is `life:<kind>:<identity>:<ordinal>`: the ordinal is the count of
+   * earlier facts under the same head, read in this same transaction, so a
+   * real recurrence (held, released, held again — even under one clock
+   * value) is a new row, while each caller's own same-state guard keeps a
+   * repeat from reaching here at all. No new table, no event bus, no clock
+   * in the identity. Never a push class: progress is digest-eligible.
+   */
+  private noteLifecycle(
+    fact: { taskRef: number; run?: number | null; kind: LifecycleKind; identity: string; subject: string; body: string; link: string | null },
+    now: Date,
+  ): boolean {
+    const ref = this.db.prepare("SELECT repo FROM task_ref WHERE id = ?").get(fact.taskRef);
+    if (ref === undefined || ref["repo"] === null || ref["repo"] === undefined) return false;
+    const head = `${LIFECYCLE_KEY_PREFIX}${fact.kind}:${fact.identity}:`;
+    const earlier = this.db
+      .prepare("SELECT COUNT(*) AS n FROM notification WHERE substr(dedupe_key, 1, ?) = ?")
+      .get(head.length, head);
+    const ordinal = Number(earlier?.["n"] ?? 0) + 1;
+    return this.enqueueNotification(
+      {
+        dedupeKey: `${head}${ordinal}`,
+        kind: fact.kind,
+        subject: fact.subject,
+        body: fact.body,
+        ...(fact.link === null ? {} : { link: fact.link }),
+        source: fact.run === undefined || fact.run === null ? { taskRef: fact.taskRef } : { run: fact.run },
+      },
+      now,
+    );
+  }
+
+  /**
+   * The ending of an OPEN run, in words that keep the distinctions a phone
+   * needs: a built attempt is a saved result, not a reviewed or published
+   * one; a finished review names its verdict; a stopped attempt is stopped,
+   * not failed. Failures, refusals, parks, plans and reports already page
+   * through their own producers (build-failed, stalled, commit-failure,
+   * malformed-*, plan-ready, report-ready, fenced, external-closed) and are
+   * not repeated here. Contest lanes and repair/correction children are the
+   * attempt's own and say nothing on their own.
+   */
+  private noteRunEnding(
+    id: number,
+    prior: Record<string, unknown>,
+    result: { outcome: string; reason?: string; committed?: boolean },
+    now: Date,
+  ): void {
+    if (prior["contestant"] !== null && prior["contestant"] !== undefined) return;
+    const taskRef = Number(prior["task_ref"]);
+    const taskId = this.externalIdFor(taskRef);
+    if (taskId === null) return;
+    const role = String(prior["role"]);
+    const stopped = result.outcome === "failed" && result.reason === "interrupted" && this.stopOf(id) !== null;
+    if (role === "builder") {
+      if (stopped) {
+        this.noteLifecycle({ taskRef, run: id, kind: "run-stopped", identity: `r${id}`, subject: `Attempt #${id} stopped`, body: "Its work is preserved. Resume this attempt from the task page when ready.", link: chatControlHref("recovery", taskId) }, now);
+      } else if (result.outcome === "built") {
+        this.noteLifecycle({
+          taskRef, run: id, kind: "run-finished", identity: `r${id}`,
+          subject: `Attempt #${id} built`,
+          body: result.committed === false ? "It finished without a commit; the handoff explains why." : "The result is saved locally. It is not yet independently reviewed or published.",
+          link: chatResultHref(taskId, id, "changes"),
+        }, now);
+      } else if (result.outcome === "no-change") {
+        this.noteLifecycle({ taskRef, run: id, kind: "run-finished", identity: `r${id}`, subject: `Attempt #${id} finished with no changes`, body: "Nothing needed to change; the handoff explains why.", link: chatResultHref(taskId, id) }, now);
+      }
+      return;
+    }
+    if (role === "reviewer" && prior["review_attempt"] != null && prior["parent_run"] != null) {
+      const parent = Number(prior["parent_run"]);
+      const attempt = Number(prior["review_attempt"]);
+      const link = chatResultHref(taskId, parent, "checks");
+      if (stopped) {
+        this.noteLifecycle({ taskRef, run: id, kind: "run-stopped", identity: `r${id}`, subject: `Independent review attempt ${attempt} stopped`, body: "The saved result is unchanged.", link }, now);
+      } else if (result.outcome === "no-change") {
+        const verdict = this.proofVerdictFor(parent)?.verdict ?? "none";
+        const words = LIFECYCLE_REVIEW_WORDS[verdict];
+        this.noteLifecycle({ taskRef, run: id, kind: "review-finished", identity: `r${id}`, subject: `Independent review finished: ${words.subject}`, body: words.body, link }, now);
+      } else {
+        this.noteLifecycle({ taskRef, run: id, kind: "review-finished", identity: `r${id}`, subject: `Independent review attempt ${attempt} did not finish`, body: "The saved result is unchanged. Another review needs an explicit request.", link }, now);
+      }
+    }
+  }
+
   // ---- the outbox ---------------------------------------------------------
 
   /** True if this is a new fact; false if the episode already knows.
@@ -15978,6 +16303,23 @@ export class Store {
         .run(id, run.now.toISOString(), parkedTail.chainCycle, parkedTail.id);
       if (Number(moved.changes) === 0) refuse(`run #${parkedTail.id}'s cycle is not open with it as the parked tail — nothing resumes its custody`);
     }
+    // The start fact (Telegram task updates), after every proof above so a
+    // refused admission says nothing: one per ATTEMPT — a builder, planner
+    // or scout head, or a root reviewer. A repair turn and a correction
+    // child are the attempt's own; a contest lane is the tournament's; a
+    // planner correction continues its own run.
+    if (road.road !== "repair" && road.road !== "correction" && contestant === null && !(role === "planner" && parent !== null)) {
+      const agent = lifecycleWords(`${provider ?? "claude"}${model === null ? "" : ` · ${model}`}`, 60);
+      const words =
+        role === "reviewer"
+          ? { subject: `Independent review started (attempt ${reviewAttempt ?? 1})`, body: `Reviewing the saved result of attempt #${run.parentRun}. Running on ${agent}.`, link: chatResultHref(taskId, run.parentRun as number, "checks") }
+          : role === "planner"
+            ? { subject: `Planning started (run #${id})`, body: `Drafting the scope and plan on ${agent}.`, link: chatControlHref("planning", taskId) }
+            : role === "scout"
+              ? { subject: `Scouting started (run #${id})`, body: `A read-only look on ${agent}; what comes back is a report.`, link: chatControlHref("task", taskId) }
+              : { subject: road.road === "recovered" ? `Attempt #${id} resumed from its preserved draft` : `Attempt #${id} started`, body: `Building on ${agent}.`, link: chatControlHref("task", taskId) };
+      this.noteLifecycle({ taskRef: run.taskRef, run: id, kind: "run-started", identity: `r${id}`, ...words }, run.now);
+    }
     return id;
   }
 
@@ -16331,6 +16673,14 @@ export class Store {
       stopSettlement?: StopSettlement;
     },
   ): void {
+    this.transact(() => {
+    // Read before the write (Telegram task updates): only the OPEN → closed
+    // transition is an ending. A later call that only restates the reason
+    // (a report's "task external-closed" suffix, a re-dispose) is the same
+    // ending and says nothing again.
+    const prior = this.db
+      .prepare("SELECT task_ref, role, parent_run, contestant, review_attempt, outcome FROM run WHERE id = ?")
+      .get(id);
     this.db
       .prepare("UPDATE run SET outcome = ?, reason = ?, committed = ?, finished_at = ? WHERE id = ?")
       .run(
@@ -16371,6 +16721,8 @@ export class Store {
         )
         .run(id);
     }
+    if (prior !== undefined && prior["outcome"] === null) this.noteRunEnding(id, prior, result, result.now);
+    });
   }
 
   /** Every run still open UNDER A LIVE LEASE, oldest first, with its task's
@@ -16481,11 +16833,23 @@ export class Store {
    * Bounded writes by construction: the vocabulary has four values and the
    * state machine passes each boundary once.
    */
-  setRunPhase(id: number, phase: RunPhase): void {
+  setRunPhase(id: number, phase: RunPhase, now: Date = new Date()): void {
     if (!RUN_PHASES.includes(phase)) {
       throw new Error(`"${phase}" is not a phase this machine has — the vocabulary is closed`);
     }
-    this.db.prepare("UPDATE run SET phase = ? WHERE id = ? AND outcome IS NULL").run(phase, id);
+    this.transact(() => {
+      const prior = this.db.prepare("SELECT task_ref, phase, outcome FROM run WHERE id = ?").get(id);
+      this.db.prepare("UPDATE run SET phase = ? WHERE id = ? AND outcome IS NULL").run(phase, id);
+      // The phase fact (Telegram task updates): a boundary the OPEN run
+      // actually crossed. A closed run's leftover phase is history and a
+      // same-phase repeat is the same state — neither speaks.
+      if (prior === undefined || prior["outcome"] !== null || prior["phase"] === phase) return;
+      const taskRef = Number(prior["task_ref"]);
+      const taskId = this.externalIdFor(taskRef);
+      if (taskId === null) return;
+      const words = LIFECYCLE_PHASE_WORDS[phase];
+      this.noteLifecycle({ taskRef, run: id, kind: "run-phase", identity: `r${id}`, subject: `Attempt #${id}: ${words.subject}`, body: words.body, link: chatControlHref("task", taskId) }, now);
+    });
   }
 
   /** The accepted head and the validated conclusion, once known. */
@@ -18258,6 +18622,28 @@ export class Store {
 
       const binding = this.liveTelegramBinding(attempt.botId);
       if (binding === null) throw new Error("the binding vanished inside its own transaction");
+      // A bot's FIRST pairing starts from now (Telegram task updates): every
+      // ROUTINE fact already in the outbox is history for this destination —
+      // settled here, in the pairing's own transaction, with a receipt that
+      // says it was skipped, never sent as a backlog to a phone that just
+      // arrived. An open decision or an attention-class fact still wants a
+      // person and stays pending. A re-pairing after a revocation keeps the
+      // older promise instead: what no phone ever received still waits for
+      // whenever pairing happens. Existing destinations are untouched.
+      const priorPairing = this.db
+        .prepare("SELECT 1 AS hit FROM telegram_binding WHERE bot_id = ? AND id <> ? LIMIT 1")
+        .get(attempt.botId, binding.id);
+      if (priorPairing === undefined) {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO notification_delivery (notification, destination, delivered_at, receipt)
+               SELECT id, ?, ?, 'skipped:before-pairing' FROM notification
+                WHERE resolved_at IS NULL
+                  AND dedupe_key NOT LIKE 'decision:%'
+                  AND (push_class IS NULL OR push_class <> 'attention')`,
+          )
+          .run(this.telegramDestination(binding), stamp);
+      }
       return { ok: true as const, binding, replay: false };
     });
   }
@@ -20777,6 +21163,18 @@ export class Store {
         );
       }
       this.addRunNote(args.runId, args.by, `Stop requested. The attempt's own processes are being stopped; its work stays preserved and the task stays paused until this exact attempt is resumed.`, now);
+      // The stop fact (Telegram task updates): stopping is not pausing —
+      // the live processes end, and the pause it OWNS keeps the task until
+      // this exact attempt is resumed. A stopped review changes no result.
+      const stoppedTask = this.externalIdFor(run.taskRef);
+      if (stoppedTask !== null) {
+        this.noteLifecycle(
+          run.role === "reviewer"
+            ? { taskRef: run.taskRef, run: run.id, kind: "run-stopping", identity: `r${run.id}`, subject: `Stopping review #${run.id}`, body: "The review is being stopped. The saved result is unchanged.", link: chatControlHref("recovery", stoppedTask) }
+            : { taskRef: run.taskRef, run: run.id, kind: "run-stopping", identity: `r${run.id}`, subject: `Stopping attempt #${run.id}`, body: "Its processes are being stopped and its work is preserved. The task stays paused until this attempt is resumed.", link: chatControlHref("recovery", stoppedTask) },
+          now,
+        );
+      }
       this.bumpWake();
       return { ok: true as const, stop: this.stopOf(args.runId) as RunStop, repeated: false };
     });
@@ -20968,6 +21366,13 @@ export class Store {
       // Exactly this stop's hold — by owner, never by task.
       this.releaseOwnedHold("stop", String(args.runId));
       this.addRunNote(args.runId, args.by, "Resumed. The next pass takes a fresh claim, re-proves the signed scope, and inherits this attempt's preserved draft with fresh proof.", now);
+      const resumedTask = this.externalIdFor(args.taskRef);
+      if (resumedTask !== null) {
+        this.noteLifecycle(
+          { taskRef: args.taskRef, run: args.runId, kind: "run-resumed", identity: `r${args.runId}`, subject: `Attempt #${args.runId} resumed`, body: "The next pass takes a fresh claim and continues from the preserved work.", link: chatControlHref("task", resumedTask) },
+          now,
+        );
+      }
       this.bumpWake();
       return { ok: true as const, stop: this.stopOf(args.runId) as RunStop };
     });

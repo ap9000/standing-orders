@@ -22,7 +22,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
-import type { Store, Decision, Notification, TelegramBinding, TelegramDelivery } from "./store.js";
+import { isLifecycleNotification, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
 import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import {
@@ -254,7 +254,7 @@ export async function bridgePass(
 
   try {
     if (options.deliver !== false) {
-      await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver);
+      await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin);
     }
     await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report, 0, undefined, options.readProjects, options.conversation);
     if (options.conversation !== undefined && options.readProjects !== undefined) {
@@ -396,7 +396,7 @@ export async function followBridge(
       const startedAt = Date.now();
       const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
       if (options.deliver !== false) {
-        await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver);
+        await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin);
       }
       await drainUpdates(
         store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal, options.readProjects, options.conversation,
@@ -460,16 +460,29 @@ async function processConversations(
 // ---- outbound --------------------------------------------------------------
 
 type SendResult = { ok: true; messageId: string | null } | { ok: false; error: string; retryAfter?: number };
-type OutboundSender = (text: string, keyboard?: { text: string; callback_data: string }[][], messageRows?: readonly TelegramDelivery[]) => Promise<SendResult>;
+type OutboundSender = (text: string, keyboard?: InlineButton[][], messageRows?: readonly TelegramDelivery[]) => Promise<SendResult>;
+
+/** The one button a plain fact may carry: its machine-minted console path
+ * under the trusted origin read now — the same road `/task` uses. The label
+ * names where the path goes; nothing in it comes from the fact's text. */
+function factLinkLabel(path: string): string {
+  if (/^\/chat\?task=[^&]+&result=/.test(path)) return "Review result";
+  if (/^\/(?:chat\?task=|t\/)/.test(path)) return "Open task";
+  if (/^\/d\//.test(path)) return "Open decision";
+  return "Open console";
+}
 
 async function deliverOutbox(
   store: Store, botId: string, transport: TelegramTransport, owner: string,
   clock: () => Date, report: BridgeReport, readProjects?: TelegramReadProjects,
-  canDeliver?: () => boolean,
+  canDeliver?: () => boolean, phoneOrigin?: () => string | null,
 ): Promise<void> {
   const binding = store.liveTelegramBinding(botId);
   if (binding === null) {
-    if (store.listNotifications("pending").length > 0) report.problems.push("outbox rows are pending but no chat is paired — `standing-orders bridge telegram pair`");
+    // Routine progress facts are not a problem to fix: a first pairing
+    // starts from now and settles them as history. Anything else pending
+    // is named, once per pass, as before.
+    if (store.listNotifications("pending").some(row => !isLifecycleNotification(row))) report.problems.push("outbox rows are pending but no chat is paired — `standing-orders bridge telegram pair`");
     return;
   }
   const digest = store.telegramDigest();
@@ -546,7 +559,7 @@ async function deliverOutbox(
     const batched = digest.everyMs !== null && !isUrgent(rows[0]!);
     const outcome = batched
       ? await deliverDigest(botId, binding, sender, rows, digest.lastSentAt, clock)
-      : await deliverOne(store, botId, binding, sender, rows[0]!, clock);
+      : await deliverOne(store, botId, binding, sender, rows[0]!, clock, phoneOrigin);
     const finalProblem = outcome.ok ? (await readAccess()) ?? fence() : null;
     const settled = finalProblem === null ? outcome : { ok: false as const, error: finalProblem };
     const finalized = store.transact(() => {
@@ -621,6 +634,7 @@ async function deliverOne(
   sender: OutboundSender,
   notification: TelegramDelivery,
   clock: () => Date,
+  phoneOrigin?: () => string | null,
 ): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> {
   const decisionId = /^decision:(\d+)$/.exec(notification.dedupeKey);
   const decision = decisionId === null ? null : store.getDecision(Number(decisionId[1]));
@@ -631,11 +645,19 @@ async function deliverOne(
 
   if (decision === null || decision.state === "answered") {
     // A plain fact, or a decision settled before the bridge got to it: the
-    // text is the message, and there is nothing to press.
+    // text is the message. Its one next-action button — the fact's
+    // machine-minted link under the trusted origin read now, never a token
+    // and never persisted — rides the LAST part only, exactly as `/task`'s
+    // does; with no trusted origin the words stand alone.
     const parts = split(`${notificationIdentity(notification)}${notification.subject}\n\n${notification.body}`);
+    let button: InlineButton[] | null = null;
+    if (notification.link !== null) {
+      try { button = phoneLinkButton(phoneOrigin?.() ?? null, { label: factLinkLabel(notification.link), path: notification.link }); }
+      catch { button = null; }
+    }
     let last: string | null = null;
-    for (const part of parts) {
-      const sent = await sender(part);
+    for (const [index, part] of parts.entries()) {
+      const sent = await sender(part, index === parts.length - 1 && button !== null ? [button] : undefined);
       if (!sent.ok) return { ok: false, error: sent.error };
       last = sent.messageId;
     }
@@ -715,7 +737,7 @@ async function send(
   transport: TelegramTransport,
   chatId: string,
   text: string,
-  keyboard?: { text: string; callback_data: string }[][],
+  keyboard?: InlineButton[][],
 ): Promise<SendResult> {
   // No parse_mode and no entities, ever: agent text is text. Link previews
   // off: a URL in a recap must not become a fetch.

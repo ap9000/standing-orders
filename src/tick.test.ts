@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
 import { run as exec } from "./exec.js";
-import { openStore } from "./store.js";
+import { isLifecycleNotification, openStore } from "./store.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 import { HeldSessionCoordinator } from "./held.js";
@@ -1325,8 +1325,10 @@ describe("the outbox", () => {
     await runWith(["tick", "--runner", "builder-1", "--token", token, "--repo", repo, "--pool", join(base, "pool"), "--json"]);
 
     await run(["outbox", "list", "--json"]);
-    expect(payload().notifications).toHaveLength(1);
-    expect(payload().notifications[0]).toMatchObject({
+    // The task's own progress facts (filed, approved, started, phases) sit beside the one page.
+    const pages = (payload().notifications as { dedupeKey: string }[]).filter(one => !one.dedupeKey.startsWith("life:"));
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toMatchObject({
       kind: "build-failed",
       subject: "t-1: attempt failed (unknown), retry 1/3",
     });
@@ -1565,8 +1567,8 @@ describe("the park, end to end — a judgement call survives the night", () => {
       expect(holds[0]).toMatchObject({ ownerKind: "decision" });
       // The run record is canonical: parked, not built, not failed.
       expect(store.getRun(1)).toMatchObject({ outcome: "parked", reason: "decision:1", role: "builder" });
-      // Exactly one page, episode-keyed to the decision.
-      const pending = store.listNotifications("pending");
+      // Exactly one page, episode-keyed to the decision (beside the task's own progress facts).
+      const pending = store.listNotifications("pending").filter(one => !isLifecycleNotification(one));
       expect(pending.map(notification => notification.dedupeKey)).toEqual(["decision:1"]);
     } finally {
       store.close();
@@ -1642,7 +1644,7 @@ describe("the park, end to end — a judgement call survives the night", () => {
       const holds = store.activeHolds(store.refFor("built-in", "t-1").id, new Date(T0.getTime() + 9e8));
       expect(holds[0]).toMatchObject({ ownerKind: "incident" });
       expect(store.getRun(1)).toMatchObject({ outcome: "failed", reason: "malformed-decision" });
-      expect(store.listNotifications("pending").map(notification => notification.dedupeKey)).toEqual([
+      expect(store.listNotifications("pending").filter(one => !isLifecycleNotification(one)).map(notification => notification.dedupeKey)).toEqual([
         "malformed:1",
       ]);
       // The malformed payload is preserved for a person to read.
@@ -2002,10 +2004,12 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     );
     expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "parked" }]);
 
-    // The bridge sends it; the keyboard's buttons are opaque tokens.
+    // The bridge sends it — behind the attempt's own progress facts, in
+    // order; the keyboard's buttons are opaque tokens.
     code = await run(["bridge", "telegram", "--json"]);
     expect(code).toBe(EXIT.ok);
-    expect(payload().report).toMatchObject({ sent: 1 });
+    expect(payload().report).toMatchObject({ problems: [] });
+    expect(payload().report.sent).toBeGreaterThanOrEqual(1);
     const keyboarded = script.calls.filter(
       call => call.method === "sendMessage" && call.params["reply_markup"] !== undefined,
     );
