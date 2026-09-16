@@ -720,6 +720,15 @@ export type AdjudicateResult = { verdict: ProofVerdict; reasons: string[]; matri
  * `manual-review` kind, which is never machine-verifiable by design — the
  * row still needs a human's eyes even though nothing failed. */
 export type CriterionMatrixState = "pass" | "missing" | "failed" | "manual-review";
+
+/** Human sign-off is owed, with no other recorded evidence failure. This is
+ * presentation only; it never changes a verdict or grants acceptance. */
+export function manualReviewOnly(proof: { verdict: string; reasons: readonly string[]; matrix?: readonly CriterionMatrixRow[] } | null): boolean {
+  return proof?.verdict === "short" && (proof.matrix === undefined || (proof.matrix.some(row => row.state === "manual-review")
+    && proof.matrix.every(row => row.state === "pass" || row.state === "manual-review")))
+    && proof.reasons.length > 0
+    && proof.reasons.every(reason => /^criterion "[^"]+" requires manual-review evidence — an operator must accept it before this can verify$/.test(reason));
+}
 export type CriterionMatrixRow = {
   id: string;
   statement: string;

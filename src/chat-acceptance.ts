@@ -1,0 +1,108 @@
+/** Read-only acceptance evidence for every chat surface. The saved verdict,
+ * human acceptance and current file health remain separate facts. Reading or
+ * sending this packet never accepts a result or authorizes another action. */
+import type { Store } from "./store.js";
+import type { VerifiedApprover } from "./principal.js";
+import { readVerifiedArtifact, readVerifiedProofForRun, scanForSecrets } from "./evidence.js";
+import { verificationEvidence } from "./verification-evidence.js";
+import { manualReviewOnly, type CriterionMatrixRow } from "./proof.js";
+
+export const ACCEPTANCE_PAGE_SIZE = 3;
+
+export function acceptanceStatus(proof: { verdict: string; reasons: readonly string[]; matrix: readonly CriterionMatrixRow[] } | null, accepted: boolean): string {
+  if (accepted) return manualReviewOnly(proof) ? "Accepted after human review" : "Accepted with an exception";
+  if (manualReviewOnly(proof)) return "Awaiting human review";
+  return proof === null ? "No verification recorded" : ({ verified: "Checks verified", attested: "Agent-reported evidence", short: "Evidence needs attention", refuted: "Checks or evidence conflict" }[proof.verdict] ?? "Evidence needs attention");
+}
+
+export function readAcceptanceEvidence(store: Store, who: VerifiedApprover, root: string | undefined, task: string, runId?: number, offset = 0) {
+  const ref = store.lookupRef(task);
+  if (ref?.repo == null || !who.repos.includes(ref.repo)) return { ok: false as const, message: "That task is not in your projects." };
+  const family = store.taskFamilyOf(task, who.repos, false);
+  if (family === null || family.problem !== null) return { ok: false as const, message: "This task's revision history needs repair." };
+  if (runId === undefined && family.current.id !== task) return { ok: false as const, message: "A newer revision is current. Choose the exact result before requesting its evidence." };
+  const run = runId === undefined ? store.runsFor(ref.id).find(one => one.finishedAt !== null && ["builder", "repair", "scout"].includes(one.role)) : store.getRun(runId);
+  if (run == null || run.taskRef !== ref.id || run.finishedAt === null || run.outcome === null || !["builder", "repair", "scout"].includes(run.role)) return { ok: false as const, message: "Choose a finished result belonging to that task." };
+  const recorded = store.proofVerdictFor(run.id);
+  const acceptance = store.proofAcceptance(run.id);
+  const matrix = recorded?.matrix ?? [];
+  if (!Number.isSafeInteger(offset) || offset < 0 || (offset > 0 && offset >= matrix.length)) return { ok: false as const, message: "Choose a criterion offset from this result's evidence." };
+  const artifacts = store.artifactsFor(run.id);
+  const problems: string[] = [];
+  const notices: string[] = [];
+  if (root === undefined) problems.push("This chat cannot read the saved evidence files.");
+  for (const artifact of artifacts.filter(one => ["proof", "terminal-diff", "diff-stat", "check-log", "review-context", "report", "handoff", "screenshot"].includes(one.kind))) {
+    if (root === undefined) break;
+    const read = readVerifiedArtifact(root, artifact);
+    if (!read.ok || artifact.captureStatus === "failed") problems.push(`Saved ${artifact.kind} evidence #${artifact.id} is unavailable or changed.`);
+    if (artifact.truncated) notices.push(`Saved ${artifact.kind} evidence #${artifact.id} was shortened; omitted content is unavailable.`);
+    if (artifact.redacted) notices.push(`Sensitive content was removed from ${artifact.kind} evidence #${artifact.id}; it cannot support a claim.`);
+  }
+  const proof = root === undefined ? null : readVerifiedProofForRun(store, root, run.id);
+  if (proof === null) problems.push("No readable saved proof is available.");
+  else if (!proof.ok) problems.push("The saved proof is unavailable or cannot be read.");
+  const verification = root === undefined ? null : verificationEvidence(store, root, run.id);
+  let gate: Record<string, unknown> = { status: "No machine verification receipt available" };
+  if (verification !== null && !verification.ok) { problems.push(verification.problem); gate = { status: "Verification evidence unavailable" }; }
+  else if (verification?.ok && verification.bytes !== null) {
+    const receipt = JSON.parse(verification.bytes);
+    gate = { status: receipt.result.ran ? (receipt.result.exitCode === 0 ? "Passed" : "Failed") : "Did not run", exitCode: receipt.result.exitCode ?? null, command: "The approved project verification command", logShortened: receipt.log.truncated };
+  }
+  // These are summaries for conversation, not substitute approval terms.
+  // Full statements, caveats and references remain on the authenticated screen.
+  const brief = (text: string | null | undefined, cap = 600) => {
+    if (text == null) return null;
+    if (scanForSecrets(text).length > 0 || /\b\d{5,}:[A-Za-z0-9_-]{20,}\b/.test(text)) return "[Sensitive text hidden; inspect the original evidence in Standing Orders]";
+    const clean = text.replace(/(?:[A-Za-z]:[\\/]|\\\\)[^\s"'<>]+/g, "[path]").replace(/(^|[\s"'`(<[=:,])\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+/g, "$1[path]");
+    return clean.length <= cap ? clean : `${clean.slice(0, cap)}… [shortened; open the result for the full text]`;
+  };
+  const page = matrix.slice(offset, offset + ACCEPTANCE_PAGE_SIZE);
+  return { ok: true as const, body: {
+    task, run: run.id, title: store.getTask(task)?.title ?? task, currentExecution: family.current.id,
+    isCurrent: family.current.id === task && store.runsFor(ref.id).find(one => one.finishedAt !== null && ["builder", "repair", "scout"].includes(one.role))?.id === run.id,
+    status: acceptanceStatus(recorded, acceptance !== null), recordedVerdict: recorded?.verdict ?? null,
+    accepted: acceptance !== null, acceptance: acceptance === null ? null : { at: acceptance.acceptedAt, note: brief(acceptance.note) },
+    reasons: (recorded?.reasons ?? []).map(one => brief(one)), gate,
+    criteriaTotal: matrix.length, nextCriterionOffset: offset + page.length < matrix.length ? offset + page.length : null,
+    criteria: page.map(row => ({ id: row.id, requirement: brief(row.statement), state: row.state === "manual-review" ? "Human review required" : row.state,
+      details: row.detail.map(one => brief(one)), requiredEvidence: row.requiredEvidence,
+      reviewer: row.review == null ? null : { judgement: row.review.judgement, note: brief(row.review.note) },
+      evidence: row.answered.map(one => ({ kind: one.kind, reference: brief(one.ref) })),
+      coverageGaps: row.coverage?.gaps.map(one => brief(one)) ?? [],
+    })),
+    caveats: proof?.ok ? proof.proof.caveats.map(one => brief(one)) : [],
+    problems, notices,
+    nextStep: acceptance !== null ? "Acceptance is already recorded. No further acceptance is needed for this result." : "Inspect the evidence, then use the signed-in acceptance screen. Opening a link or requesting images accepts nothing.",
+    disclosure: "Conversation summary only. Review the complete requirements, risks and acceptance terms on the result screen before accepting.",
+  } };
+}
+
+/** Deterministic outbox text uses the same verified reader as conversational
+ * requests. Every criterion is included; long values disclose shortening. */
+export function acceptanceEvidenceText(store: Store, who: VerifiedApprover, root: string | undefined, task: string, run: number) {
+  const first = readAcceptanceEvidence(store, who, root, task, run);
+  if (!first.ok) return first;
+  const packet = first.body;
+  const criteria = [...packet.criteria];
+  let offset = packet.nextCriterionOffset;
+  while (offset !== null) {
+    const page = readAcceptanceEvidence(store, who, root, task, run, offset);
+    if (!page.ok) return page;
+    criteria.push(...page.body.criteria);
+    offset = page.body.nextCriterionOffset;
+  }
+  const lines = [
+    `Result #${run} · ${packet.status}`,
+    `Project checks: ${String(packet.gate["status"])}${packet.gate["logShortened"] === true ? " (saved log shortened)" : ""}`,
+    ...criteria.map(row => [
+      `${row.id}: ${row.requirement} — ${row.state === "pass" ? "passed" : row.state}`,
+      row.reviewer === null ? "No independent judgement recorded." : `Reviewer ${row.reviewer.judgement === "upholds" ? "supports this finding" : row.reviewer.judgement === "contradicts" ? "disputes this finding" : "could not confirm this finding"}: ${row.reviewer.note ?? "No note saved."}`,
+      ...row.coverageGaps.map(gap => `Coverage gap: ${gap}`),
+    ].join("\n")),
+    ...packet.caveats.map(caveat => `Limitation: ${caveat}`),
+    ...packet.problems.map(problem => `Evidence problem: ${problem}`),
+    ...packet.notices,
+    packet.disclosure,
+  ];
+  return { ok: true as const, text: lines.join("\n\n"), isCurrent: packet.isCurrent, accepted: packet.accepted };
+}

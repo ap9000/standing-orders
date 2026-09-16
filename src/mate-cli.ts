@@ -99,7 +99,7 @@ export function proposalLines(proposals: readonly MateProposal[], repos: readonl
       : one.kind === "review"
       ? `${t("operation") === "revise" ? "request a revision" : "save feedback"} for ${t("taskTitle") || t("task")}: ${t("note")}${Array.isArray(payload["notes"]) && payload["notes"].length > 0 ? ` (saved notes: ${payload["notes"].join(", ")})` : ""}`
       : one.kind === "control"
-      ? (isChatControl(payload["control"]) ? `${CHAT_CONTROLS[payload["control"]].label}: ${chatControlHref(payload["control"], t("task"))} (open in the console)` : "control unavailable")
+      ? (isChatControl(payload["control"]) ? `${CHAT_CONTROLS[payload["control"]].label}: ${chatControlHref(payload["control"], t("task"), payload["run"])} (open in the console)` : "control unavailable")
       : one.kind === "steer" ? `guide ${t("task")}'s next attempt: ${t("note")}`
       : one.kind === "agents" ? `change agents for ${t("task")}: ${t("role")} ${t("provider")} ${t("model")} ${t("risk")}`
       : one.kind === "repair" ? `${t("operation")} dependency ${t("blocker")} for ${t("task")}`
@@ -286,7 +286,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   say("say something, or: proposals · confirm N · dismiss N · open N · end · quit");
   const openTask = (proposal: MateProposal): void => {
     if (proposal.kind === "control" && isChatControl(proposal.payload["control"])) {
-      say(`Open in the console: ${chatControlHref(proposal.payload["control"], String(proposal.payload["task"] ?? ""))}`);
+      say(`Open in the console: ${chatControlHref(proposal.payload["control"], String(proposal.payload["task"] ?? ""), proposal.payload["run"])}`);
       return;
     }
     const taskId = typeof proposal.payload["task"] === "string" ? (proposal.payload["task"] as string) : null;

@@ -10747,6 +10747,10 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(reviewPriorityOf(facts({ proofVerdict: "refuted", proofAccepted: true }))).toMatchObject({ band: 1, reasons: ["conflicting evidence — accepted with exception"] });
     expect(reviewPriorityOf(facts({ proofVerdict: "short" }))).toMatchObject({ band: 0, reasons: ["missing evidence"] });
     expect(reviewPriorityOf(facts({ proofVerdict: "short", proofAccepted: true }))).toMatchObject({ band: 1 });
+    const manualOnly = facts({ proofVerdict: "short", proofReasons: ['criterion "c1" requires manual-review evidence — an operator must accept it before this can verify'], proofMatrix: [row("c1", "Inspect phone layout", "manual-review")] });
+    expect(reviewPriorityOf(manualOnly)).toEqual({ band: 1, label: "review", reasons: ["human review needed"] });
+    expect(reviewPriorityOf({ ...manualOnly, proofAccepted: true }).reasons).toEqual(["accepted after human review"]);
+    expect(reviewPriorityOf({ ...manualOnly, proofReasons: [...manualOnly.proofReasons!, "no proof was written"] }).reasons).toContain("missing evidence");
     expect(reviewPriorityOf(facts({ proofMatrix: [row("c2", "x", "pass", [{ kind: "check", ref: "npm test" }], [], { judgement: "contradicts", note: "no", author: "reviewer:codex" })] }))).toMatchObject({ band: 0, reasons: ["reviewer raised a concern with c2"] });
     expect(reviewPriorityOf(facts({ proofMatrix: [row("c1", "x", "failed"), row("c3", "y", "missing")] }))).toMatchObject({ band: 0, reasons: ["missing or failed evidence for c1, c3"] });
     expect(reviewPriorityOf(facts({ ciFailing: true }))).toMatchObject({ band: 0, reasons: ["CI failing on its pull request — observed, not inferred"] });
@@ -11203,7 +11207,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(before).toContain('data-next-action="accept-proof"');
     // Package 3: the act opens the Checks view of the shared result panel —
     // a real link the server honours, switched in place by the script.
-    expect(before).toContain('href="/review?result=t-act&amp;tab=checks#result" data-open-evidence>Review evidence</a>');
+    expect(before).toContain(`href="/review?result=t-act&amp;run=${run}&amp;tab=checks#result" data-open-evidence>Review evidence</a>`);
     expect(before).toContain("tab.click()");
     expect(before).toContain('data-result-tab="checks"');
     expect(before).toContain('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;');
@@ -11249,7 +11253,15 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(after).toContain('data-next-action="accept-proof"');
 
     // Accept from the cockpit — the existing act, recorded under the session's name.
-    const accepted = await post(cookie, "/t/t-act/accept-proof", { csrf, note: "read it myself" });
+    // A message or form for a different run never accepts the current build.
+    const staleLink = await fetch(url(`/review?result=t-act&run=${run + 1}&tab=checks`), { headers: { cookie } });
+    expect(staleLink.status).toBe(409);
+    expect(await staleLink.text()).toContain("Result changed");
+    expect((await fetch(url(`/review?result=t-act&run=${run}&tab=checks`), { headers: { cookie } })).status).toBe(200);
+    expect((await post(cookie, "/t/t-act/accept-proof", { csrf, run: String(run + 1), note: "wrong result" })).status).toBe(409);
+    expect((await post(cookie, "/t/t-act/accept-proof", { csrf, note: "missing result" })).status).toBe(409);
+    expect(store.proofAcceptance(run)).toBeNull();
+    const accepted = await post(cookie, "/t/t-act/accept-proof", { csrf, run: String(run), note: "read it myself" });
     expect(accepted.status).toBe(303);
     expect(store.proofAcceptance(run)?.approver).toBe("alex");
     const done = await (await fetch(url("/review?result=t-act"), { headers: { cookie } })).text();

@@ -11,7 +11,8 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isLifecycleNotification, LIFECYCLE_KEY_PREFIX, openStore, type Notification, type Store } from "./store.js";
@@ -46,7 +47,7 @@ function scriptedTransport() {
   const transport: TelegramTransport = async (method, params) => {
     calls.push({ method, params });
     if (method === "getUpdates") return { ok: true, result: [] };
-    if (method === "sendMessage") {
+    if (method === "sendMessage" || method === "sendDocument") {
       if (failNext !== null) {
         const answer = failNext;
         failNext = null;
@@ -90,7 +91,7 @@ describe("lifecycle producers: the shared mutations record each fact once, atomi
     // never carries free text.
     for (const row of life()) {
       const id = encodeURIComponent(row.taskId ?? "");
-      expect(row.link).toMatch(new RegExp(`^(?:/chat\\?task=${id}(?:&result=\\d+(?:&tab=(?:checks|changes))?|#task-chat-action)?|/t/${id})$`));
+      expect(row.link).toMatch(new RegExp(`^(?:/chat\\?task=${id}(?:&result=\\d+(?:&tab=(?:checks|changes))?|#task-chat-action)?|/t/${id}|/review\\?result=${id}&run=\\d+&tab=checks)$`));
     }
     store.close();
   });
@@ -313,6 +314,78 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(addApprover(store, "alex", now).ok).toBe(true);
   });
   afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  /** A built result whose independent review ends with only human review owed: two saved screenshots, one upheld manual-review criterion. */
+  const humanReviewResult = () => {
+    const ref = placed("alpha-1", ALPHA, "Make status replies clear");
+    const run = store.startRun({ taskRef: ref, leaseId: "l-a", runner: RUNNER, branch: "so/alpha-1", worktree: "/pool/alpha-1", ...bareLegacy("build"), now });
+    store.finishRun(run, { outcome: "built", committed: true, now });
+    store.setTaskState("alpha-1", "done", now);
+    mkdirSync(join(dir, String(run)));
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(200, 7)]);
+    const shots = ["phone.png", "desktop.png"].map(name => {
+      writeFileSync(join(dir, String(run), name), png);
+      return store.saveArtifact({ run, kind: "screenshot", key: `${run}/${name}`, bytesOriginal: png.length, bytesStored: png.length, truncated: false, sha256: createHash("sha256").update(png).digest("hex"), capture: "saved screenshot" }, now);
+    });
+    store.saveArtifact({ run, kind: "terminal-diff", key: `${run}/diff.patch`, bytesOriginal: 12, bytesStored: 12, truncated: false, sha256: "a".repeat(64), capture: "git diff (exit 0)", captureStatus: "ok" }, now);
+    store.saveProofVerdict(run, "attested", [], now);
+    const asked = store.requestReview(run, "alex", now);
+    if (!asked.ok) throw new Error(asked.reason);
+    const reviewer = store.startRun({ taskRef: ref, leaseId: "l-r", runner: RUNNER, role: "reviewer", parentRun: run, request: asked.id, ...bareLegacy("review"), now });
+    const why = 'criterion "c1" requires manual-review evidence — an operator must accept it before this can verify';
+    store.saveProofVerdict(run, "short", [why], now, [{ id: "c1", statement: "Inspect phone and desktop", requiredEvidence: ["manual-review"], state: "manual-review", detail: [why], answered: [{ kind: "manual-review", ref: "Saved screenshots" }], review: { judgement: "upholds", note: "The layout matches", author: "reviewer:claude" } }]);
+    store.finishRun(reviewer, { outcome: "no-change", reason: "reviewed", now });
+    return { run, shots };
+  };
+
+  test.each(["immediate", "digest"] as const)("%s: human acceptance automatically sends a review summary, separately receipted screenshots and a final secure link; retries preserve ordering", async mode => {
+    pair();
+    if (mode === "digest") { store.setTelegramDigest(60_000, "alex", now); store.markTelegramDigestSent(now); }
+    const { run, shots } = humanReviewResult();
+    const script = scriptedTransport();
+    let documentAttempts = 0;
+    const baseTransport = script.transport;
+    script.transport = async (method, params, signal, upload) => {
+      if (method === "sendDocument" && ++documentAttempts === 2) return { ok: false, description: "retry", parameters: { retry_after: 1 } };
+      return baseTransport(method, params, signal, upload);
+    };
+    expect((await pass(script)).ok).toBe(true);
+    expect(script.texts().join("\n")).toContain("human review needed");
+    expect(script.texts().join("\n")).toContain("The layout matches");
+    expect(script.texts().join("\n")).toContain("Saved screenshots and the acceptance summary follow.");
+    expect(script.texts().join("\n")).not.toContain("required evidence is missing");
+    expect(script.calls.filter(one => one.method === "sendDocument")).toHaveLength(1);
+    expect(script.calls.flatMap(script.buttons).some(button => button.text === "Review for acceptance")).toBe(false);
+    now = later(2000);
+    store.close(); store = openStore(file);
+    expect((await pass(script)).ok).toBe(true);
+    expect(script.calls.filter(one => one.method === "sendDocument")).toHaveLength(2);
+    expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Review for acceptance", url: `${ORIGIN}/review?result=alpha-1&run=${run}&tab=checks` }]);
+    expect(receipts().filter(one => one.kind === "acceptance-evidence").every(one => one.deliveredAt !== null)).toBe(true);
+    expect(script.texts().at(-1)).toContain("Project checks: No machine verification receipt available");
+    expect(script.texts().at(-1)).toContain("Evidence problem: No readable saved proof is available.");
+    expect(script.texts().at(-1)).toContain("Reviewer supports this finding: The layout matches");
+    expect(store.proofAcceptance(run)).toBeNull();
+    expect(shots).toHaveLength(2);
+  });
+
+  test("acceptance recorded before delivery: no screenshot is uploaded, the skipped rows never read as delivered, and the final message carries no acceptance link", async () => {
+    pair();
+    const { run } = humanReviewResult();
+    store.acceptProof(run, "alex", "Inspected both viewports in the console.", now);
+    const script = scriptedTransport();
+    const report = await pass(script);
+    expect(report).toMatchObject({ ok: true, report: { problems: [] } });
+    expect(script.calls.filter(one => one.method === "sendDocument")).toHaveLength(0);
+    expect(receipts().filter(one => one.kind === "acceptance-evidence").map(one => [one.receipt, one.deliveredAt, one.attempts])).toEqual([["skipped:already-accepted", null, 1], ["skipped:already-accepted", null, 1]]);
+    expect(script.texts().at(-1)).toContain("Acceptance recorded");
+    expect(script.calls.flatMap(script.buttons).some(button => button.text === "Review for acceptance")).toBe(false);
+    expect(report.ok && report.report.sent).toBe(script.sends().length);
+    // Settled rows: a later pass resends nothing.
+    const before = script.calls.length;
+    expect((await pass(script)).ok).toBe(true);
+    expect(script.calls.slice(before).map(one => one.method)).toEqual(["getUpdates"]);
+  });
 
   test("a pairing starts from now: history is settled as skipped, open decisions still page, and the rows that follow arrive in order with one trusted button", async () => {
     // Before anyone pairs: a task filed, built and reviewed is history.

@@ -1,3 +1,4 @@
+import { manualReviewOnly } from "./proof.js";
 /** Read-only phone views over the same dispatch and proof records as chat.
  * No provider calls, repository access, new workflow state, or inferred success. */
 import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
@@ -161,10 +162,12 @@ export function phoneTaskView(store: Store, repos: readonly string[], id: string
     if (result !== undefined) {
       const proof = store.proofVerdictFor(result.id);
       link = taskLinkFor(id, d, { run: result.id, verdict: proof !== null });
+      const accepted = store.proofAcceptance(result.id) !== null;
       const proofWords = { verified: "Checks verified at completion", attested: "Agent-reported evidence, not independently verified checks", short: "Required evidence is missing", refuted: "Evidence conflicts with the approved result" };
-      lines.push(`Recorded evidence: ${proof === null ? "No completion proof recorded" : proofWords[proof.verdict]}.`);
+      lines.push(`Recorded evidence: ${proof === null ? "No completion proof recorded" : manualReviewOnly(proof) ? accepted ? "Accepted after human review; the machine verdict remains unchanged" : "Human review required by the signed requirements; no recorded evidence failure" : proofWords[proof.verdict]}.`);
+      if (manualReviewOnly(proof) && !accepted) lines.push('Reply “Send acceptance evidence” for the checks, reviewer findings and screenshots.');
       if (proof !== null && proof.matrix.length > 0) lines.push(`Acceptance checks: ${proof.matrix.filter(row => row.state === "pass").length}/${proof.matrix.length} satisfied in the recorded evidence.`);
-      if (store.proofAcceptance(result.id) !== null) lines.push("An operator accepted this result; that does not upgrade its evidence.");
+      if (accepted && !manualReviewOnly(proof)) lines.push("An operator accepted this result; that does not upgrade its evidence.");
       const publication = store.publicationForRun(result.id);
       const delivery = publication?.remoteState === "MERGED" ? "Merge observed on GitHub" : publication?.remoteState === "CLOSED" ? "Pull request closed, not merged" : publication?.state === "opened" ? `Pull request #${publication.prNumber ?? "?"} opened; not recorded as merged` : publication?.state === "pushed" ? "Branch pushed; pull request not yet recorded" : publication?.state === "intended" ? "Publication queued; not yet confirmed" : publication?.state === "failed" ? "Publication failed; the local result is preserved" : result.role === "scout" ? "Report saved locally" : "Result saved locally; no publication recorded";
       lines.push(`Delivery: ${delivery}.`);

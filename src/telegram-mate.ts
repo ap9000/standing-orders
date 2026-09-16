@@ -218,8 +218,8 @@ function approvalState(store: Store, taskId: string): "none" | "waiting" | "appr
   return scope.approvedDigest != null && scope.approvedDigest === scope.digest ? "approved" : "waiting";
 }
 
-function controlLink(control: ChatControl, taskId: string): PhoneLink {
-  return { label: CHAT_CONTROLS[control].label, path: chatControlHref(control, taskId) };
+function controlLink(control: ChatControl, taskId: string, run?: unknown): PhoneLink {
+  return { label: CHAT_CONTROLS[control].label, path: chatControlHref(control, taskId, run) };
 }
 
 /**
@@ -245,7 +245,7 @@ export function proposalLink(store: Store, proposal: MateProposal, repos: readon
     const control = payload["control"];
     if (!isChatControl(control)) return null;
     if ("href" in CHAT_CONTROLS[control]) return controlLink(control, task);
-    return task !== "" && taskInCeiling(store, task, repos) ? controlLink(control, task) : null;
+    return task !== "" && taskInCeiling(store, task, repos) ? controlLink(control, task, payload["run"]) : null;
   }
   return null;
 }
@@ -430,6 +430,7 @@ export const TELEGRAM_ACTION_PARITY: Record<string, { support: ParitySupport; ho
   get_result: { support: "direct", how: "Read during a turn; the phone card shows the verification verdict, never a local link.", gap: "Secure remote evidence links are not delivered to the phone; a result's screenshots travel through get_result_images." },
   get_result_images: { support: "direct", how: "Read during a turn; every verified original PNG/JPEG the turn selected (at most 8 per reply, the rest by offset or image id) is sent as a document with a short safe caption after the reply, re-verified before each upload, and a reply to an image binds that exact task and run.", gap: "An image whose record or bytes fail verification, or one Telegram refuses, is named in the chat rather than sent, through the same durable retried part; the operator opens the exact result in the console. Fixture proof only, no physical-phone rendering." },
   get_controls: { support: "direct", how: "Read during a turn.", gap: null },
+  get_acceptance_evidence: { support: "direct", how: "Shared read-only acceptance packet: exact result, criterion states, gate, reviewer findings, caveats and recorded human acceptance. Screenshot files use get_result_images; acceptance uses the signed-in console.", gap: "Human acceptance still requires the secure console screen." },
   show_control: { support: "handoff", how: "The card names the control and the task, with one url button to that exact console control when a trusted https console-url is configured; the button opens the signed-in console and acts on nothing.", gap: "Incomplete phone action: the control itself runs in the console, after sign-in." },
   propose_task: { support: "direct", how: "Card with Confirm/Dismiss through confirmMateProposal (filed as a mate proposal, via telegram). The confirmed card links Review & start for the filed task while its scope waits; under a signed automatic mode it says the scope is approved and links the task.", gap: "Under manual approval the password step happens in the console, reached from the card's button." },
   propose_scope: { support: "direct", how: "Confirm rewrites the scope through the shared door; the confirmed card links Review & start for the exact task.", gap: "Approving the rewritten scope needs the password, in the console." },

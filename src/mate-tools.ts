@@ -1,3 +1,4 @@
+import { readAcceptanceEvidence } from "./chat-acceptance.js";
 import { taskControlOf } from "./task-control.js";
 import { validateScopeText, validateTaskText, TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
 import { conversationKnowledge } from "./project-knowledge.js";
@@ -270,7 +271,7 @@ export function recapOver(store: Store, repos: readonly string[], now: Date, sin
       failed: mine(tasks).filter(one => one.state === "failed").length,
       // v39: a finished task whose proof is short or refuted reads as
       // waiting on you too — the same split the inbox and board make.
-      needsVerification: mine(tasks).filter(one => one.state === "done" && (one.proofVerdict === "short" || one.proofVerdict === "refuted")).length,
+      needsVerification: mine(tasks).filter(one => one.state === "done" && !one.proofAccepted && (one.proofVerdict === "short" || one.proofVerdict === "refuted")).length,
     };
   });
   return {
@@ -431,7 +432,7 @@ export const MATE_TOOLS: MateTool[] = [
   {
     name: "show_control",
     description: "Show a fixed button to an existing control. The operator completes it there. Never ask for secrets in chat.",
-    inputSchema: schema({ control: { type: "string", enum: Object.keys(CHAT_CONTROLS) }, task: TASK_ARG }, ["control"]),
+    inputSchema: schema({ control: { type: "string", enum: Object.keys(CHAT_CONTROLS) }, task: TASK_ARG, run: { type: "integer", minimum: 1 } }, ["control"]),
     handle: (ctx, args) => {
       const control = args["control"];
       if (!isChatControl(control)) return { ok: false, message: "Choose an available control." };
@@ -439,13 +440,19 @@ export const MATE_TOOLS: MateTool[] = [
       const task = taskIdOf(args);
       if (task !== null && admittedRef(ctx, task) === null) return notFound();
       if ("target" in entry && (task === null || admittedRef(ctx, task) === null)) return notFound();
-      const id = ctx.draft("control", { control, task: task ?? "", taskTitle: task === null ? "" : ctx.store.getTask(task)?.title ?? task });
+      const run = args["run"];
+      if (control === "acceptance" && run === undefined) return { ok: false, message: "Read get_acceptance_evidence and specify its exact run before opening acceptance." };
+      if (run !== undefined) {
+        const result = Number.isSafeInteger(run) && Number(run) > 0 ? ctx.store.getRun(Number(run)) : null;
+        if (task === null || result === null || result.taskRef !== ctx.store.lookupRef(task)?.id || result.finishedAt === null || !["builder", "repair", "scout"].includes(result.role) || (control !== "result" && control !== "acceptance")) return { ok: false, message: "Choose a finished result belonging to that task." };
+      }
+      const id = ctx.draft("control", { control, task: task ?? "", taskTitle: task === null ? "" : ctx.store.getTask(task)?.title ?? task, ...(run === undefined ? {} : { run }) });
       return id === null ? tooMany() : { ok: true, body: { card: id, label: entry.label, action: "open existing control; nothing changed" } };
     },
   },
   {
     name: "get_result",
-    description: "Read a finished result and feedback for an exact execution/run. Use currentExecution from get_task unless viewing an older result. Page feedback with nextFeedbackOffset.",
+    description: "Read an exact execution/run and its feedback. Use get_task currentExecution; page nextFeedbackOffset.",
     inputSchema: schema({ task: TASK_ARG, run: { type: "integer", minimum: 1 }, feedback_offset: { type: "integer", minimum: 0 } }, ["task"]),
     handle: (ctx, args) => {
       const task = taskIdOf(args);
@@ -468,12 +475,24 @@ export const MATE_TOOLS: MateTool[] = [
         nextFeedbackOffset: Number(offset) + page.length < snapshot.notes.length ? Number(offset) + page.length : null,
         changes: snippet.slice(0, 1000), changesShortened: snippet.length > 1000,
         verification: ctx.store.proofVerdictFor(snapshot.run)?.verdict ?? "not verified",
+        accepted: ctx.store.proofAcceptance(snapshot.run) !== null,
+        evidenceTool: "get_acceptance_evidence",
         canRevise: snapshot.execution === snapshot.task } };
     },
   },
   {
+    name: "get_acceptance_evidence",
+    description: "Read requirements, checks, review and human acceptance for an exact result. Page nextCriterionOffset. Reading accepts nothing.",
+    inputSchema: schema({ task: TASK_ARG, run: { type: "integer", minimum: 1 }, offset: { type: "integer", minimum: 0 } }, ["task"]),
+    handle: (ctx, args) => {
+      const task = taskIdOf(args);
+      if (task === null || (args["run"] !== undefined && (!Number.isSafeInteger(args["run"]) || Number(args["run"]) < 1))) return { ok: false, message: "Choose a task and valid result number." };
+      return readAcceptanceEvidence(ctx.store, ctx.who, ctx.evidenceRoot, task, args["run"] as number | undefined, args["offset"] as number | undefined);
+    },
+  },
+  {
     name: "get_result_images",
-    description: "Select the saved screenshots of one exact finished result (task, and run from get_task or get_result). Lists every image with its position; at most 8 are sent per reply: the first page, a later page via offset (nextImageOffset), or exact ids via images. On Telegram each selected verified image is sent as a file after your reply: say they follow, never that they were delivered, and say how many remain. Elsewhere only the result identity and image count are shown; the operator opens the result to view them. Never invent images.",
+    description: "Select verified screenshots for an exact task/run. At most 8 per reply; page with nextImageOffset or select listed image ids. Telegram sends selected files after the reply: say they follow, never delivered, and name how many remain. Other surfaces show identity/count only. Never invent images.",
     inputSchema: schema({
       task: TASK_ARG, run: { type: "integer", minimum: 1 },
       offset: { type: "integer", minimum: 0 },
@@ -602,7 +621,7 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "get_task",
-    description: "Task state, dispatch, currentExecution, version history, scope standing, dependencies, holds, queue, attempts, decisions and scout report. Read before task actions. No scope text or absolute paths.",
+    description: "Read before actions: state, dispatch, currentExecution, history, scope standing, dependencies, holds, queue, attempts and decisions.",
     inputSchema: schema({ task: TASK_ARG }, ["task"]),
     handle: (ctx, args) => {
       const taskId = taskIdOf(args);

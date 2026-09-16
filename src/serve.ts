@@ -83,7 +83,7 @@ import { TEMPLATES, templateByName } from "./templates.js";
 import { starterRecipes, savedRecipes, findRecipe, importRecipe, exportRecipe, createWorkflowPreview, workflowPreview, launchWorkflow, saveWorkflowRecipe, RecipeError, prepareRecipeRun } from "./recipes.js";
 import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtml, recipeScript, RECIPE_CSS, recipeDefinitionPreviewHtml, recipeRunHtml, recipeAnswersFromForm } from "./recipe-ui.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
-import { dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
+import { manualReviewOnly, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
   WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, workCounts, compareWorkRows, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
@@ -1555,7 +1555,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // and every row is re-proved against the ceiling before ranking.
       const rows = familiesInView(project, { states: ["done"], limit: REVIEW_QUEUE_CAP }).flatMap(family => {
           const row = completedRowFor(family.current.id, project);
-          return row === null ? [] : [{ ...row, title: family.root.title, ciFailing: ciFailingFor(row.runId, row.prNumber) }];
+          return row === null ? [] : [{ ...row, proofReasons: row.runId === null ? [] : store.proofVerdictFor(row.runId)?.reasons ?? [], title: family.root.title, ciFailing: ciFailingFor(row.runId, row.prNumber) }];
         });
       const ranked = rankReviewQueue(rows);
       const wanted = url.searchParams.get("result");
@@ -1568,10 +1568,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       // ceiling — so an old receipt never reads as unfinished or foreign.
       // The ranked queue itself stays bounded and says so.
       const beyond = wantedId === null || inQueue !== null ? null : completedRowFor(wantedId, project);
-      const beyondRow = beyond === null ? null : { ...beyond, ciFailing: ciFailingFor(beyond.runId, beyond.prNumber) };
+      const beyondRow = beyond === null ? null : { ...beyond, proofReasons: beyond.runId === null ? [] : store.proofVerdictFor(beyond.runId)?.reasons ?? [], ciFailing: ciFailingFor(beyond.runId, beyond.prNumber) };
       const chosen = inQueue ?? (beyondRow === null ? null : { ...beyondRow, priority: reviewPriorityOf(beyondRow) });
       const selectedRow = wantedId === null ? ranked[0] ?? null : chosen;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
+      const expectedRun = url.searchParams.get("run");
+      if (expectedRun !== null && (!/^[1-9]\d*$/.test(expectedRun) || selectedRow?.runId !== Number(expectedRun))) {
+        return sendScreen(response, 409, screen("Result changed", '<h1>Result changed</h1><p>This acceptance link no longer matches the current result. Review the current task before accepting.</p><a class="button-link" href="/review">Review results</a>', { chrome: chromeFor(project, "runs") }));
+      }
       const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who, now);
       return sendScreen(
         response,
@@ -7245,6 +7249,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         const latest = store.runsFor(ref.id).find(runIsTaskResult);
         if (latest === undefined) {
           return taskScreen(response, who, taskId, "this task has no finished attempt to accept", 404);
+        }
+        const family = store.taskFamilyOf(taskId, admissionList(), false);
+        if (Number(body.get("run")) !== latest.id || family?.current.id !== taskId || family.problem !== null) {
+          return taskScreen(response, who, taskId, "This result changed. Review the current result before accepting.", 409);
         }
         const rawNote = (body.get("note") ?? "").trim();
         let note: string | null = null;
@@ -13764,7 +13772,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
       const title = text("taskTitle");
       return `<article class="card proposal proposal-control" data-card-kind="control">` +
         (title === "" ? "" : `<div class="proposal-body"><h3>${escape(title)}</h3></div>`) +
-        `<footer class="proposal-actions"><a class="button-link" href="${escape(chatControlHref(control, task))}" aria-label="${escape(title === "" ? label : `${label}: ${title}`)}">${escape(label)}</a></footer></article>`;
+        `<footer class="proposal-actions"><a class="button-link" href="${escape(chatControlHref(control, task, payload["run"]))}" aria-label="${escape(title === "" ? label : `${label}: ${title}`)}">${escape(label)}</a></footer></article>`;
     }
     what = `<h3>${escape(label)}</h3>${text("taskTitle") === "" ? "" : `<p>${escape(text("taskTitle"))}</p>`}`;
   } else if (view.kind === "review") {
@@ -13886,7 +13894,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   if (view.state === "pending" && !inert) {
     acts =
       view.kind === "control"
-        ? (isChatControl(payload["control"]) ? `<a class="button-link" href="${escape(chatControlHref(payload["control"], task))}">${escape(CHAT_CONTROLS[payload["control"]].label)}</a>` : `<p>Control unavailable.</p>`)
+        ? (isChatControl(payload["control"]) ? `<a class="button-link" href="${escape(chatControlHref(payload["control"], task, payload["run"]))}">${escape(CHAT_CONTROLS[payload["control"]].label)}</a>` : `<p>Control unavailable.</p>`)
         : view.kind === "cancel"
         ? `<p class="meta">cancelling is armed on the task itself — <a href="${taskHref(task)}">open ${escape(task)}</a></p>` +
           `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button type="submit" class="quiet">dismiss</button></form>`
@@ -16786,16 +16794,17 @@ function taskBody(data: {
       // Acceptance changes the CLASS (problem → ok) and the words, never
       // the underlying token: the surfaces still agree on what happened.
       const accepted = proof.proofAccepted;
+      const humanReview = manualReviewOnly({ verdict: proof.proofVerdict ?? "", reasons: proof.proofReasons, matrix: proof.proofMatrix });
       // Accepting contradictory or incomplete evidence is an explicit,
       // recorded exception—not the ordinary amber approval ceremony.
       const acceptForm =
         accepted || data.csrf === ""
           ? ""
-          : `<details class="proof-exception"><summary>Accept with exception</summary>` +
+          : `<details class="proof-exception"><summary>${humanReview ? "Accept result" : "Accept with exception"}</summary>` +
             `<form method="post" action="${taskHref(task.id)}/accept-proof" class="proof-exception-form">` +
-              `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-              `<input type="text" name="note" maxlength="500" placeholder="Why is this safe to accept?" aria-label="exception reason" required>` +
-              `<button type="submit">Accept with exception</button></form></details>`;
+              `<input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="run" value="${proof.runId}">` +
+              `<input type="text" name="note" maxlength="500" placeholder="${humanReview ? "What did you verify?" : "Why is this safe to accept?"}" aria-label="${humanReview ? "review note" : "exception reason"}" required>` +
+              `<button type="submit">${humanReview ? "Accept result" : "Accept with exception"}</button></form></details>`;
       // v40: the machine's own pre-fold verdict, restated when a review
       // moved it — "the machine attested it; reviewer:codex contradicted
       // c2" — never pretending the machine always disagreed.
@@ -17804,6 +17813,7 @@ const REVIEW_RETURN = /^\/review\?result=[A-Za-z0-9._~%-]{1,200}$/;
 export type ReviewPriority = { band: 0 | 1 | 2; label: "needs action" | "review" | "no flags"; reasons: string[] };
 
 export type ReviewQueueFacts = {
+  proofReasons?: readonly string[];
   runId: number | null;
   outcome: string | null;
   proofVerdict: ProofVerdict | null;
@@ -17830,8 +17840,11 @@ export function reviewPriorityOf(row: ReviewQueueFacts): ReviewPriority {
   const contradicted = ids(one => one.review?.judgement === "contradicts");
   const broken = ids(one => one.state === "failed" || one.state === "missing");
   const manual = ids(one => one.state === "manual-review");
+  const humanReview = manualReviewOnly({ verdict: row.proofVerdict ?? "", reasons: row.proofReasons ?? [], matrix: row.proofMatrix });
   if (row.proofVerdict === "refuted") {
     raise(row.proofAccepted ? 1 : 0, row.proofAccepted ? "conflicting evidence — accepted with exception" : "conflicting evidence");
+  } else if (humanReview) {
+    raise(1, row.proofAccepted ? "accepted after human review" : "human review needed");
   } else if (row.proofVerdict === "short") {
     raise(row.proofAccepted ? 1 : 0, row.proofAccepted ? "missing evidence — accepted with exception" : "missing evidence");
   }
@@ -17839,7 +17852,7 @@ export function reviewPriorityOf(row: ReviewQueueFacts): ReviewPriority {
   if (broken !== "") raise(row.proofAccepted ? 1 : 0, `missing or failed evidence for ${broken}`);
   if (row.ciFailing) raise(0, "CI failing on its pull request — observed, not inferred");
   if (row.publicationState === "failed") raise(1, "publication failed — the branch never reached its remote");
-  if (manual !== "" && !row.proofAccepted) raise(1, `manual review needed for ${manual}`);
+  if (manual !== "" && !row.proofAccepted && !humanReview) raise(1, `manual review needed for ${manual}`);
   if (row.proofVerdict === null && row.outcome !== "no-change") raise(1, "no verification result");
   return { band, label: PRIORITY_LABELS[band], reasons };
 }
@@ -18258,12 +18271,13 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
   // chat's result view render — Summary / Changes / Checks with Request
   // changes beside it. The cockpit adds its own acts under Checks: the
   // v50 review-retry panel and the accept-with-exception form.
+  const humanReview = manualReviewOnly(proof === null ? null : { ...proof, verdict: proof?.verdict ?? "", reasons: proof?.reasons ?? [], matrix: proof?.matrix ?? [] });
   const extraChecks =
     reviewRetryPanel(view.taskId, run.id, view.reviewRetry, { csrf, canAct: canRetryReview, returnTo: reviewHref(view.taskId) }) +
     ((proof?.verdict === "short" || proof?.verdict === "refuted") && proof?.accepted === null && csrf !== ""
-      ? `<details class="cockpit-accept"><summary>Accept with an exception</summary><p class="meta">Use this only if you verified the result another way. The reason becomes part of the record.</p>` +
-        `<form method="post" action="${taskHref(view.taskId)}/accept-proof" class="cockpit-accept-form"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
-        `<input type="text" name="note" maxlength="500" placeholder="Why is this safe to accept?" aria-label="exception reason" required><button type="submit">Accept with exception</button></form></details>`
+      ? `<details class="cockpit-accept"><summary>${humanReview ? "Accept result" : "Accept with an exception"}</summary><p class="meta">${humanReview ? "Record what you verified for this result. Acceptance does not merge or deploy it." : "Use this only if you verified the result another way. The reason becomes part of the record."}</p>` +
+        `<form method="post" action="${taskHref(view.taskId)}/accept-proof" class="cockpit-accept-form"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${run.id}">` +
+        `<input type="text" name="note" maxlength="500" placeholder="${humanReview ? "What did you verify?" : "Why is this safe to accept?"}" aria-label="${humanReview ? "review note" : "exception reason"}" required><button type="submit">${humanReview ? "Accept result" : "Accept with exception"}</button></form></details>`
       : "");
   const here = reviewHref(view.taskId);
   parts.push(
@@ -18275,7 +18289,7 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
         user,
         noted,
         requestToken: randomBytes(16).toString("hex"),
-        hrefFor: one => (one === "summary" ? here : `${here}&tab=${one}`),
+        hrefFor: one => `${here}&run=${run.id}${one === "summary" ? "" : `&tab=${one}`}`,
         returnTo: here,
         back: null,
         extraChecks,
@@ -18314,8 +18328,8 @@ function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boole
     return card(
       "accept-proof",
       "Review before accepting",
-      verificationExplanation(verdict, detail.proof?.reasons ?? []),
-      `<a class="button-link" href="${escape(`${reviewHref(view.taskId)}&tab=checks#result`)}" data-open-evidence>Review evidence</a>`,
+      manualReviewOnly(detail.proof === null ? null : { ...detail.proof, verdict: detail.proof.verdict ?? "" }) ? "Inspect the saved screenshots and requirements." : verificationExplanation(verdict, detail.proof?.reasons ?? []),
+      `<a class="button-link" href="${escape(`${reviewHref(view.taskId)}&run=${run.id}&tab=checks#result`)}" data-open-evidence>Review evidence</a>`,
     );
   }
   if (view.contest !== null && view.contest.state === "pick-wait") {
@@ -19384,6 +19398,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const facts = receipt.facts;
   const status = receiptStatusOf(receipt);
   const stored = receiptStatusOf(receipt, null);
+  const humanReview = manualReviewOnly(proof === null ? null : { ...proof, verdict: proof.verdict ?? "" });
   const runId = run.id;
   const shots = proof?.screenshots ?? [];
   const shown = shots.filter(one => one.problem === null);
@@ -19401,7 +19416,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   // The visible status already says verification is needed. Only omit the
   // generic repeat; failed checks, specific reasons and damaged evidence stay.
   const missingVerdictNamed = o.headStatus !== false && status.token === "verification-needed" && receipt.verdict === null && receipt.reasons.length === 0;
-  if (!missingVerdictNamed && stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, receipt.reasons));
+  if (!humanReview && !missingVerdictNamed && stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, receipt.reasons));
   attention.push(...facts.evidenceProblems);
   if (detail.outsideTouches.length > 0) attention.push(`${detail.outsideTouches.length} changed file${detail.outsideTouches.length === 1 ? "" : "s"} outside the approved paths: ${detail.outsideTouches.join(", ")}.`);
   attention.push(...receipt.caveats);
@@ -19562,11 +19577,11 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     if (proof.verdict !== null) {
       // The same status line the panel leads with (one status per surface,
       // workspace package 1), beside the machine verdict's own explanation.
-      checkParts.push(`<p class="row result-verdict" data-proof-verdict="${escape(dispatchStatusToken(proof.verdict))}"><span class="meta">At completion: ${escape(verificationExplanation(proof.verdict, proof.reasons))}</span></p>`);
+      checkParts.push(`<p class="row result-verdict" data-proof-verdict="${escape(dispatchStatusToken(proof.verdict))}"><span class="meta">At completion: ${escape(humanReview ? "Human review required for the requirements below." : verificationExplanation(proof.verdict, proof.reasons))}</span></p>`);
     } else if (run.outcome !== "no-change") {
       checkParts.push(`<p class="meta" data-proof-verdict="none">No verification result is available for this build.</p>`);
     }
-    if (proof.accepted !== null) checkParts.push(`<p class="meta">Accepted with an exception by <span class="mono">${escape(proof.accepted.by)}</span> · ${escape(when(proof.accepted.at))}${proof.accepted.note === null ? "" : ` — ${escape(proof.accepted.note)}`}</p>`);
+    if (proof.accepted !== null) checkParts.push(`<p class="meta">${humanReview ? "Accepted after human review" : "Accepted with an exception"} by <span class="mono">${escape(proof.accepted.by)}</span> · ${escape(when(proof.accepted.at))}${proof.accepted.note === null ? "" : ` — ${escape(proof.accepted.note)}`}</p>`);
     if (proof.matrix.length === 0) {
       checkParts.push(detail.signedCriteria > 0 ? `<p class="meta">The approved scope has ${detail.signedCriteria} requirement${detail.signedCriteria === 1 ? "" : "s"}, but this build has no requirement-by-requirement verification.</p>` : `<p class="meta">This scope signed no acceptance checks.</p>`);
     } else {

@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { openStore, type Artifact, type Store } from "./store.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { verifyApproverStanding, type VerifiedApprover } from "./principal.js";
+import { readAcceptanceEvidence } from "./chat-acceptance.js";
+import type { CriterionMatrixRow } from "./proof.js";
 import { readChatResult } from "./chat-review.js";
 import { createResultRevision } from "./result-actions.js";
 import { revisionSourceOf } from "./result-review.js";
@@ -81,6 +83,52 @@ describe("shared result image selection", () => {
     }, T0);
   };
   const diff = (run: number, id: string): number => artifact(run, "terminal-diff", "terminal-diff.patch", Buffer.from(`diff --git a/${id} b/${id}\n+x\n`, "utf8"));
+
+  test("acceptance evidence distinguishes human sign-off from missing files, preserves acceptance, pages criteria and never crosses result or project identity", () => {
+    const ref = task("alpha", repos.a);
+    const run = finished("alpha", ref, "l-alpha");
+    diff(run, "alpha");
+    const reason = (id: string) => `criterion "${id}" requires manual-review evidence — an operator must accept it before this can verify`;
+    const rows: CriterionMatrixRow[] = Array.from({ length: 4 }, (_, index) => ({
+      id: `c${index + 1}`, statement: `Inspect the layout ${index + 1}`, requiredEvidence: ["manual-review"],
+      state: "manual-review", detail: [reason(`c${index + 1}`)], answered: [{ kind: "manual-review", ref: "Inspected the saved screenshots" }],
+      review: { judgement: "upholds", note: "The saved capture shows the expected layout", author: "reviewer:claude" },
+    }));
+    const proof = { version: 1, criteria: rows.map(row => ({ id: row.id, statement: row.statement, verdict: "met", how: "Inspected the captures", evidence: row.answered })), checks: [], changed: ["alpha"], screenshots: [], caveats: ["Physical Telegram rendering was not tested."] };
+    artifact(run, "proof", "proof.json", Buffer.from(JSON.stringify(proof)));
+    store.saveProofVerdict(run, "short", rows.map(row => reason(row.id)), T0, rows);
+    const me = who([repos.a]);
+    const ctx = { store, who: me, now: T0, evidenceRoot, step: 1, readDecisions: new Map<number, number>(), draft: () => null };
+    expect(executeMateTool(ctx, "get_acceptance_evidence", { task: "alpha", run })).toMatchObject({ ok: true, body: {
+      status: "Awaiting human review", accepted: false, run, criteriaTotal: 4, nextCriterionOffset: 3, problems: [],
+      criteria: [{ id: "c1", state: "Human review required", reviewer: { judgement: "upholds" } }, { id: "c2" }, { id: "c3" }],
+      caveats: ["Physical Telegram rendering was not tested."],
+    } });
+    expect(readAcceptanceEvidence(store, me, evidenceRoot, "alpha", run, 3)).toMatchObject({ ok: true, body: { criteria: [{ id: "c4" }], nextCriterionOffset: null } });
+    expect(readAcceptanceEvidence(store, me, evidenceRoot, "alpha", run, 4).ok).toBe(false);
+    expect(readAcceptanceEvidence(store, who([repos.b]), evidenceRoot, "alpha", run).ok).toBe(false);
+    const foreign = finished("beta", task("beta", repos.b), "l-beta");
+    expect(readAcceptanceEvidence(store, who([repos.a, repos.b]), evidenceRoot, "alpha", foreign).ok).toBe(false);
+    expect(executeMateTool(ctx, "recap", {})).toMatchObject({ ok: true, body: { repos: [{ needsVerification: 1 }] } });
+    store.acceptProof(run, "alex", "Inspected both viewports; physical device gap acknowledged.", T0);
+    expect(readAcceptanceEvidence(store, me, evidenceRoot, "alpha", run)).toMatchObject({ ok: true, body: { status: "Accepted after human review", recordedVerdict: "short", accepted: true } });
+    expect(executeMateTool(ctx, "recap", {})).toMatchObject({ ok: true, body: { repos: [{ needsVerification: 0 }] } });
+    writeFileSync(join(evidenceRoot, String(run), "proof.json"), "changed");
+    expect(readAcceptanceEvidence(store, me, evidenceRoot, "alpha", run)).toMatchObject({ ok: true, body: { accepted: true, problems: expect.arrayContaining([expect.stringContaining("proof")]), caveats: [] } });
+    expect(store.proofVerdictFor(run)?.verdict).toBe("short");
+  });
+
+  test("acceptance controls require the exact task's finished run and only draft navigation", () => {
+    const run = finished("alpha", task("alpha", repos.a), "l-alpha");
+    const other = finished("beta", task("beta", repos.b), "l-beta");
+    const drafts: unknown[] = [];
+    const ctx = { store, who: who([repos.a, repos.b]), now: T0, evidenceRoot, step: 1, readDecisions: new Map<number, number>(), draft: (kind: string, payload: unknown) => { drafts.push({ kind, payload }); return 1; } };
+    expect(executeMateTool(ctx, "show_control", { control: "acceptance", task: "alpha" }).ok).toBe(false);
+    expect(executeMateTool(ctx, "show_control", { control: "acceptance", task: "alpha", run: other }).ok).toBe(false);
+    expect(executeMateTool(ctx, "show_control", { control: "acceptance", task: "alpha", run }).ok).toBe(true);
+    expect(drafts).toEqual([{ kind: "control", payload: { control: "acceptance", task: "alpha", taskTitle: "Work alpha", run } }]);
+    expect(store.proofAcceptance(run)).toBeNull();
+  });
 
   test("selects the verified images of the exact result across both admitted projects, never the excluded one, and never another task's artifact", () => {
     const alpha = task("alpha", repos.a);

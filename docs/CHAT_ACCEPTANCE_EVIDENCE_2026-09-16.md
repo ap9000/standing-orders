@@ -27,3 +27,12 @@ Reuse these checks for unchanged code. Run typecheck and affected regressions on
 `npm run typecheck && npm test -- --run --reporter=dot --no-file-parallelism && npm run build`
 
 Never delete tests, add skips, weaken approval/evidence checks or raise spend limits. The shared prompt was compressed to keep the existing direct API budget regressions passing, without changing their limits. Cite the supplied actual viewport evidence in the native proof. The required review is independent; do not accept your own result or install it.
+
+## Corrections made while applying the patch
+
+Typecheck and the six affected suites reproduced the operator's figures (165 tests) before any change. Reading the transport found two truthfulness slips, corrected within scope:
+
+- A screenshot row skipped at delivery (acceptance already recorded, or a newer result current) was finalized as delivered and counted in the pass report. It now settles with its `skipped:` receipt and no `delivered_at`, exactly like the pairing skip, and is not counted as sent. Regression: `task-notifications.test.ts` "acceptance recorded before delivery".
+- The review-finished fact promised that screenshots "follow in Telegram" even when acceptance was already recorded (nothing follows) and on the shell and webhook outboxes, which carry the same row. The sentence is now conditional and names no transport.
+
+After the corrections: typecheck clean; the six affected suites pass (166 tests); `telegram.test.ts` (48) and the two focused server tests pass. The full command remains for the native gate.
