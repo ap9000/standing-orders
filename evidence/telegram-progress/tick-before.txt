@@ -1,0 +1,46 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Documents/standing-orders-telegram-progress
+
+(node:22939) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+------------------------------------------xx----------
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/tick.test.ts > the bridge, end to end — a tap on a phone resumes the night > token → pair → park → send → tap → the next tick builds
+AssertionError: expected 1 to be +0 // Object.is equality
+
+- Expected
++ Received
+
+- 0
++ 1
+
+ ❯ src/tick.test.ts:2048:18
+    2046|     // order; the keyboard's buttons are opaque tokens.
+    2047|     code = await run(["bridge", "telegram", "--json"]);
+    2048|     expect(code).toBe(EXIT.ok);
+       |                  ^
+    2049|     expect(payload().report).toMatchObject({ problems: [] });
+    2050|     expect(payload().report.sent).toBeGreaterThanOrEqual(1);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/tick.test.ts > the bridge, end to end — a tap on a phone resumes the night > --follow applies a waiting tap without a second invocation
+TypeError: Cannot read properties of undefined (reading 'callback_data')
+ ❯ src/tick.test.ts:2144:55
+    2142|     const closed = buttons.find(button => button.text.includes("Fail c…
+    2143|     const before = openStore(db);
+    2144|     const placedOn = before.getTelegramAction(closed!.callback_data)?.…
+       |                                                       ^
+    2145|     before.close();
+    2146|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 52 skipped (54)
+   Start at  14:08:43
+   Duration  2.71s (transform 1.39s, setup 10ms, import 1.62s, tests 963ms, environment 0ms)
+

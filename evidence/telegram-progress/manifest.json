@@ -6,7 +6,8 @@
     "src/store.ts": "f542071a2ee16fb5d0d69a14b11173a469f4a0a2ff9b45592a6dfbb3662b1e4f",
     "src/telegram.ts": "400f9c80a7bf9128052dc5c2e80ea8a14e82f8ac3e8edf0175bffecca510e592",
     "src/telegram-progress.ts": "353ba451ca57ccf2066d992ca64111033edf739b91e99e3947c7444a0eaf0d7d",
-    "src/task-notifications.test.ts": "d0149dbb57b2a3d0f493e3e325b3e4b94894c591ec788b236f6687c55d110c86"
+    "src/task-notifications.test.ts": "d0149dbb57b2a3d0f493e3e325b3e4b94894c591ec788b236f6687c55d110c86",
+    "src/tick.test.ts": "b5f8b8629cf59f5b9c3447a4f0ef7e5edde74bfa284b6297b4f74ed0b639ceba"
   },
   "capturedAt": "2026-09-16T20:51:54.463203+00:00",
   "artifacts": [
@@ -30,7 +31,7 @@
     },
     {
       "path": "evidence/telegram-progress/desktop-feedback.png",
-      "sha256": "e245d5acb02260c18dd0002fb22a8341e12a3c105e4d57e77d1a67b1b838feed",
+      "sha256": "327c31d7a6f178ae71f11475dadfc7034e6e316a2965d678c9f1e24c791718ea",
       "kind": "screenshot",
       "synthetic": true
     },
@@ -48,7 +49,7 @@
     },
     {
       "path": "evidence/telegram-progress/desktop-revision.png",
-      "sha256": "4a45547e8f6d9ba3bfc5c34cd0f9e85801f1120de951f98ada5ef39d221362fb",
+      "sha256": "0b11493c63bfd985666963ea80883af7c423fa560bf55377b7d49118fc9c4117",
       "kind": "screenshot",
       "synthetic": true
     },
@@ -112,5 +113,7 @@
     "Desktop 1440x900 and phone 390x844 inspected; no physical iPhone/Safari verification.",
     "Unchanged console UI from verified base used for both result-to-feedback-to-unapproved-revision journeys.",
     "No production Telegram messages sent during preparation."
-  ]
+  ],
+  "preparedCorrection": "4089f9e6757df5dc1c45f04437f556804893383d",
+  "correctedAt": "2026-09-16T21:14:41.854620+00:00"
 }

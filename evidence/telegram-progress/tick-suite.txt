@@ -1,0 +1,28 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Documents/standing-orders-telegram-progress
+
+(node:72669) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···········································watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·watch: pass 1 did work (2026-09-16T21:10:15.831Z)
+watch: pass 2 did work (2026-09-16T21:10:16.175Z)
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·watch: pass 1 did work (2026-09-16T21:10:20.634Z)
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+watch: reconciliation failed — simulated unavailable recovery store; new work is paused until a recovery pass succeeds
+·watch: reconciliation recovered — new work may resume
+watch: pass 1 did work (2026-09-16T21:10:21.449Z)
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+watch: reconciliation failed — simulated unavailable recovery store; new work is paused until a recovery pass succeeds
+····watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·watch: pass 1 did work (2026-09-16T21:10:25.813Z)
+·Recovered 1 claim(s) from the previous watch (inc-dead…) before dispatching anything.
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·watch: pass 1 did work (2026-09-16T21:10:28.766Z)
+·
+
+ Test Files  1 passed (1)
+      Tests  54 passed (54)
+   Start at  14:09:51
+   Duration  40.64s (transform 1.43s, setup 12ms, import 1.67s, tests 38.85s, environment 0ms)
+
