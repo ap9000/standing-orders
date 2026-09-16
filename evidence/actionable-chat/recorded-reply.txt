@@ -1,0 +1,9 @@
+Standing Orders: nothing running, three held chat integrations queued, at least 19 finished tasks still need checking, 7 older incidents; task list is truncated, so more may exist.
+
+1. Let safe updates distinguish old task processes from reused IDs: the approved check failed against its build, so the result is unverified. Open the result to correct the evidence or record an explicit acceptance.
+
+2. Finish PID-reuse update repair with complete review evidence: review finished but required evidence is missing. Open the result to see exactly which criteria still need verification.
+
+3. Recover abandoned run records without disturbing successors: review could not finish because the evidence was stale. Open the result; if evidence is current, retry the review (two explicit retries remain).
+
+More on request.
