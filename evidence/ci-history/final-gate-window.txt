@@ -1,0 +1,50 @@
+# Final gate window (2026-09-16, ci-history-for-telegram-20260916-fix-1)
+
+## Why the source run did not pass the native gate
+
+Sealed receipt for run 1715 (head 7c7b605a0c8ced91c4cfbbd019f77d44a9a1c9af, base cb5c67a):
+  command id 3: npm run typecheck && npm test -- --run --reporter=dot --no-file-parallelism && npm run build
+  timeoutMs 600000, approved 2026-09-11
+  result: ran=false attemptFailed=true failure="spawn-failed"
+  check-log line 2: "- Project check · attempt 1: (exit 124 · timed out)"
+  no failing test in the log; recent gates on the same serial suite: 1704 exit 0 (~510 s), 1706 ~572 s, 1709 exit 124, 1712 exit 0, 1715 exit 124.
+
+## Operator decision (decision 7, raise-timeout)
+
+Verification grant 4 approves the SAME full command for 900 s with the same setup-recovery binding; the 600 s terms are restored after this one recovery. No code, test, command or agent setting changes. The builder does not run the full suite; the native gate runs it once for this candidate.
+
+## GitHub checks at this head (read-only, gh pr checks 9)
+
+run 35158288446, head 7c7b605, mergeable
+  Windows Job Object containment                    pass  56s
+  linux native containment · delegated cgroup v2    pass  15s
+  node 22 · macos-latest                            pass  5m31s
+  node 22 · ubuntu-latest                           pass  3m32s
+  node 24 · macos-latest                            pass  5m46s
+  node 24 · ubuntu-latest                           pass  5m26s
+  windows baseline · node 22                        pass  2m6s
+  windows baseline · node 24                        pass  2m6s
+
+## Implementation checks re-run in this attempt (candidate unchanged)
+
+$ ruby -ryaml -e '... only the test job checkout sets fetch-depth: 0 ...'
+test: {"fetch-depth"=>0}
+linux-native-containment: nil
+windows-baseline: nil
+native-windows: nil
+ok
+exit=0
+
+$ node scripts/delivery-manifest-check.mjs
+delivery-manifest-check: docs/TELEGRAM_DELIVERY_CANDIDATE_2026-09-15.json lists all 23 src/ paths changed in ba101e6..8217f55; every sha256 matches 8217f55 bytes and sourceDigest recomputes
+exit=0
+
+$ npx vitest run src/provider.test.ts -t 'historical Telegram delivery manifest'
+      Tests  1 passed | 57 skipped (58)
+exit=0
+
+$ npm run typecheck
+exit=0
+
+$ git diff --quiet cb5c67a -- src test scripts package.json package-lock.json vitest.config.ts tsconfig.json tsconfig.build.json
+exit=0   (application code, tests, scripts and test commands identical to the base)
