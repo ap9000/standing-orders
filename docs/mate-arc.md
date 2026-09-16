@@ -139,6 +139,11 @@ Codex read commit 749d328 against this spec and found 3 critical, 8 high,
    their basenames, path-shaped text, hex digests of 32+ digits, and
    account names are replaced in titles, questions, labels, reasons, and
    the data document alike. (finding 9)
+   Display-label update (2026-09-16): `list_repos` also provides the bounded
+   name of each admitted project so phone users do not have to interpret
+   `r1` codes. This is a deliberate metadata-only exception: unsafe,
+   credential-shaped, account-identifying or overlong names use `Project N`.
+   Paths and basenames in arbitrary tool text remain scrubbed.
 10. **CAS material is complete**: `propose_next` and `propose_reserve` read
     revision and position in one transaction and carry both; `propose_hold`
     carries the operator's existing hold id (`sawHold`) so a stale card

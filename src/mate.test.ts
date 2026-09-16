@@ -124,7 +124,7 @@ describe("the mate's turn", () => {
     });
 
   test("the intake contract treats one outcome as enough and asks only material questions", () => {
-    expect(MATE_CONTRACT_VERSION).toBe(13);
+    expect(MATE_CONTRACT_VERSION).toBe(14);
     expect(MATE_CONTRACT).toContain("call get_result_images for that exact execution and run");
     expect(MATE_CONTRACT).toContain("say they follow, never that they were delivered");
     expect(MATE_CONTRACT).toContain("call it again with that offset or with the image ids it listed");
@@ -258,7 +258,7 @@ describe("the mate's turn", () => {
     expect(script.bodies[0]).toContain('get_project_knowledge');expect(script.bodies[0]).not.toContain('save_project_knowledge');
   });
 
-  test("canary: nothing sent to the provider names a path, an approver, a digest, or a consequence — free text included", async () => {
+  test("canary: only admitted project display metadata names basenames; paths, accounts and free text stay scrubbed", async () => {
     store.hold(store.refFor("built-in", "in-3").id, `blocked on ${OTHER} per alex`, null, T0);
     const script = scripted([
       answer([call("recap"), call("list_repos"), call("list_decisions"), call("queue", { repo: "r1" })]),
@@ -266,11 +266,15 @@ describe("the mate's turn", () => {
       text("done looking"),
     ]);
     const outcome = await turn("look at everything", script.fetcher);
-    expect(outcome).toMatchObject({ ok: true, proposals: 2 });
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ ok: true, proposals: 2 });
     const sent = script.bodies.join("\n");
-    for (const canary of [INSIDE, OTHER, OUTSIDE, "PATH-CANARY", "alex", "RECAP-CANARY", "CONSEQUENCE-CANARY", "confidential acquisition", who.ceilingDigest, "d".repeat(64)]) {
+    for (const canary of [INSIDE, OTHER, OUTSIDE, "alex", "RECAP-CANARY", "CONSEQUENCE-CANARY", "confidential acquisition", who.ceilingDigest, "d".repeat(64)]) {
       expect(sent).not.toContain(canary);
     }
+    // A basename may appear only in the exact list_repos display metadata,
+    // never by exempting a title, hold reason or arbitrary tool string.
+    const withoutLabels = sent.replaceAll('\\"name\\":\\"inside-PATH-CANARY\\"', '').replaceAll('\\"name\\":\\"other-PATH-CANARY\\"', '');
+    expect(withoutLabels).not.toContain("PATH-CANARY");
     expect(sent).not.toMatch(/[0-9a-f]{32}/);
     // The redactions are visible where the text was — the title and the hold reason.
     expect(sent).toContain("[path]");
@@ -279,6 +283,20 @@ describe("the mate's turn", () => {
     // The task outside the ceiling is unreachable even by id.
     const outside = executeMateTool({ store, who, now: clock(), draft: () => null, step: 1, readDecisions: new Map() }, "get_task", { task: "out-1" });
     expect(outside).toMatchObject({ ok: false, message: expect.stringContaining("not-found") });
+  });
+
+  test("project lookup gives names without exposing paths, sensitive labels or unadmitted projects", () => {
+    const projects = ["/private/standing-orders", "C:\\private\\job-scraper", "/private/alex", "/private/" + "a".repeat(64), "/private/<script>bad</script>", "/private/" + "AKIA" + "ABCDEFGHIJKLMNOP", "/private/" + "x".repeat(81)];
+    const admitted = principal("alex", projects);
+    const ctx = { store, who: admitted, now: clock(), draft: () => null, step: 1, readDecisions: new Map<number, number>() };
+    const result = executeMateTool(ctx, "list_repos", {});
+    expect(result).toEqual({ ok: true, body: { repos: [
+      { repo: "r1", name: "standing-orders" }, { repo: "r2", name: "job-scraper" },
+      ...[3, 4, 5, 6, 7].map(index => ({ repo: `r${index}`, name: `Project ${index}` })),
+    ] } });
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(JSON.stringify(result)).not.toContain(OUTSIDE);
+    expect(executeMateTool(ctx, "list_tasks", { repo: "r8" })).toMatchObject({ ok: false });
   });
 
   test("redactForMate scrubs paths, basenames, digests, and names but leaves relative paths and ids", () => {

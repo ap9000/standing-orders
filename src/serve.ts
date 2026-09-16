@@ -13351,7 +13351,7 @@ function renderChatText(text: string): string {
   for (const line of lines) {
     const heading = /^(?:#{1,3}\s+)(.+)$/.exec(line);
     const bullet = /^\s*[-*]\s+(.+)$/.exec(line);
-    const numbered = /^\s*\d+[.)]\s+(.+)$/.exec(line);
+    const numbered = /^\s*(\d{1,9})[.)]\s+(.+)$/.exec(line);
     if (heading !== null) {
       flushParagraph(); closeList();
       out.push(`<h3>${inline(heading[1] ?? "")}</h3>`);
@@ -13359,7 +13359,9 @@ function renderChatText(text: string): string {
       flushParagraph();
       const wanted = bullet !== null ? "ul" : "ol";
       if (list !== wanted) { closeList(); out.push(`<${wanted}>`); list = wanted; }
-      out.push(`<li>${inline((bullet ?? numbered)?.[1] ?? "")}</li>`);
+      // Model replies often separate steps with blank lines. Each remains
+      // its stated number even when that blank line starts another <ol>.
+      out.push(`<li${numbered === null ? "" : ` value="${Number(numbered[1])}"`}>${inline(bullet?.[1] ?? numbered?.[2] ?? "")}</li>`);
     } else if (line.trim() === "") {
       flushParagraph(); closeList();
     } else {
@@ -13756,6 +13758,14 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   } else if (view.kind === "control") {
     const control = payload["control"];
     const label = isChatControl(control) ? CHAT_CONTROLS[control].label : "Control unavailable";
+    // Navigation does not wait for approval. Give it a destination and one
+    // link, not a proposal header that falsely reads as unfinished work.
+    if (isChatControl(control) && view.state === "pending" && !inert) {
+      const title = text("taskTitle");
+      return `<article class="card proposal proposal-control" data-card-kind="control">` +
+        (title === "" ? "" : `<div class="proposal-body"><h3>${escape(title)}</h3></div>`) +
+        `<footer class="proposal-actions"><a class="button-link" href="${escape(chatControlHref(control, task))}" aria-label="${escape(title === "" ? label : `${label}: ${title}`)}">${escape(label)}</a></footer></article>`;
+    }
     what = `<h3>${escape(label)}</h3>${text("taskTitle") === "" ? "" : `<p>${escape(text("taskTitle"))}</p>`}`;
   } else if (view.kind === "review") {
     const snapshot = payload["snapshot"] as import("./chat-review.js").ReviewSnapshot | undefined;

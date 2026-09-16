@@ -8874,6 +8874,42 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toContain('action="/chat/mate/end"');
   });
 
+  test("navigation cards offer one labelled link without implying a pending approval", async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    script.push(
+      () => answer([
+        { type: "tool_use", id: "open-a", name: "show_control", input: { control: "result", task: "a" } },
+        { type: "tool_use", id: "hold-b", name: "propose_hold", input: { task: "b", reason: "Wait for the operator's review." } },
+      ]),
+      () => answer([{ type: "text", text: "Review task a. The pause for task b still needs your confirmation." }]),
+    );
+    expect((await post(cookie, "/chat", { csrf, message: "Show task a and propose pausing b" })).status).toBe(303);
+    await settle();
+    const html = await page(cookie);
+    const card = /<article[^>]*data-card-kind="control"[^>]*>([\s\S]*?)<\/article>/.exec(html)?.[1];
+    expect(card).toBeDefined();
+    expect(card).toContain('<h3>task a</h3>');
+    expect(card).toContain('href="/chat?task=a" aria-label="Review result: task a"');
+    expect(card?.match(/<a /g)).toHaveLength(1);
+    expect(card).not.toMatch(/pending|proposed by|Open control|<form/);
+    const hold = /<article[^>]*data-card-kind="hold"[^>]*>([\s\S]*?)<\/article>/.exec(html)?.[1];
+    expect(hold).toContain("pending");
+    expect(hold).toContain("/confirm");
+    expect(store.activeHold(store.refFor("built-in", "b").id, clockNow)).toBeNull();
+  });
+
+  test("blank lines do not reset the numbers of recommended chat actions", async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    script.push(() => answer([{ type: "text", text: "1. Inspect the result.\n\n2. Read the checks.\n\n3. Review <script>unsafe</script> as text." }]));
+    expect((await post(cookie, "/chat", { csrf, message: "Give me three next steps" })).status).toBe(303);
+    await settle();
+    const html = await page(cookie);
+    expect(html).toContain('<ol><li value="1">Inspect the result.</li></ol>');
+    expect(html).toContain('<ol><li value="2">Read the checks.</li></ol>');
+    expect(html).toContain('<ol><li value="3">Review &lt;script&gt;unsafe&lt;/script&gt; as text.</li></ol>');
+    expect(html).not.toContain('<script>unsafe</script>');
+  });
+
   test("browser send receipts survive repeated POSTs without duplicating a completed turn", async () => {
     const cookie = await login(); const csrf = await mint(cookie);
     const html = await page(cookie);
