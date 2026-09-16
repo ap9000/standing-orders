@@ -9,7 +9,7 @@
 import { describe, test, expect } from "vitest";
 import { adapterFor, auditOf, validateSpec, reportsCost, inspectionOf, MODEL_ID, OPENROUTER_ENV_KEY, PROVIDER_IDS, MONEY_CAPABILITIES, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { runStreamJsonl } from "./exec.js";
-import { REVIEW_OUTPUT_LIMITS, REVIEW_NOTE_CODE_POINTS } from "./structured-output.js";
+import { REVIEW_OUTPUT_LIMITS } from "./structured-output.js";
 import { parseReview } from "./reviewer.js";
 import { evidenceRequest, isEvidenceOnlyReply } from "./review-evidence.js";
 
@@ -148,10 +148,19 @@ describe("argv dialects", () => {
     for (const field of ["comments", "criteria"] as const) {
       const shape = properties[field] as { maxItems: number; items: { properties: { note: { minLength: number; maxLength: number } } } };
       expect(shape.maxItems).toBe(REVIEW_OUTPUT_LIMITS[field]);
-      expect(shape.items.properties.note).toEqual({ type: "string", minLength: 1, maxLength: REVIEW_NOTE_CODE_POINTS });
-      const note = "😀".repeat(shape.items.properties.note.maxLength);
-      expect(note.length).toBe(REVIEW_OUTPUT_LIMITS.note);
-      expect(parseReview(JSON.stringify({ version: 1, comments: [{ path: "src/file.ts", note }], criteria: [{ id: "c1", judgement: "cannot-tell", note }] }), new Set(["src/file.ts"]), new Set(["c1"])).ok).toBe(true);
+      expect(shape.items.properties.note).toEqual({ type: "string", minLength: 1, maxLength: REVIEW_OUTPUT_LIMITS.note });
+      // Run1656: Claude exhausted StructuredOutput retries on a 251-character
+      // ASCII note which our own 500-unit parser accepts. The provider shape
+      // must not reject native-valid notes before our correction flow sees them.
+      for (const note of ["a".repeat(251), "a".repeat(500), "😀".repeat(250)]) {
+        expect([...note].length).toBeLessThanOrEqual(shape.items.properties.note.maxLength);
+        expect(parseReview(JSON.stringify({ version: 1, comments: [{ path: "src/file.ts", note }], criteria: [{ id: "c1", judgement: "cannot-tell", note }] }), new Set(["src/file.ts"]), new Set(["c1"])).ok).toBe(true);
+      }
+      // Transport is a permissive shape, never the semantic authority. No
+      // native limit is raised and no text or judgement is silently clipped.
+      const astralOverflow = "😀".repeat(251);
+      expect([...astralOverflow].length).toBeLessThanOrEqual(shape.items.properties.note.maxLength);
+      expect(parseReview(JSON.stringify({ version: 1, comments: [{ path: "src/file.ts", note: astralOverflow }], criteria: [{ id: "c1", judgement: "contradicts", note: astralOverflow }] }), new Set(["src/file.ts"]), new Set(["c1"])).ok).toBe(false);
     }
 
     // No other phase, and no other provider, gets the flag — a formatting

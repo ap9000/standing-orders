@@ -1,9 +1,16 @@
 {
   "baseHead": "ba101e694cd94907a493c0ae3a5efa666477e977",
   "baseNote": "docs-only input commit on accepted evidence runtime 64e81727133c7a791a38c6cec9ee7bba02419415; integrates 87551dafc9c1d4e457bcd62d4f36988340b5dfb3 and 3102879d2c38d6ef925f26c3e5c9e30110aaf3b8",
-  "sourceDigest": "77cf98cb0245f5cc8aa648c1396d09b9ec8488dffa64ce2dc6ff118780821df6",
+  "sourceHead": "8217f5579d02c4feed7dcdcc24c8e01ff8d35a71",
+  "sourceNote": "historical delivery snapshot of the accepted candidate 8217f5579d02c4feed7dcdcc24c8e01ff8d35a71 (native gate passed, Fable review 1658 upheld); regenerated on 2026-09-16 from the exact Git diff baseHead..sourceHead under src/ after the hand-typed list omitted src/claim.ts. It does not describe any later commit or the current tree.",
+  "sourceDigest": "80ba1b57c26f8375013dfac7cdd3165ab2dc7125a739757dd7df48b088cca2ad",
   "algorithm": "SHA-256 of sorted path + NUL + fileHash + LF entries",
+  "check": "node scripts/delivery-manifest-check.mjs",
   "files": [
+    {
+      "path": "src/claim.ts",
+      "sha256": "7f00bac70974cba18eafd9e9712a241d8c237e86e0943b5a5f1bff3064b7e3aa"
+    },
     {
       "path": "src/contest.ts",
       "sha256": "03b3f298ea3b436c85b938d16a5e0eeebfbf2a835c85f3431e8c2d2fa08394cb"

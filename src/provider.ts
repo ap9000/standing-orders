@@ -22,7 +22,7 @@
 import { type ExecResult, type RunOptions } from "./exec.js";
 import { runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl } from "./exec.js";
 import { scanForSecrets } from "./evidence.js";
-import { REVIEW_OUTPUT_LIMITS, REVIEW_NOTE_CODE_POINTS } from "./structured-output.js";
+import { REVIEW_OUTPUT_LIMITS } from "./structured-output.js";
 
 export type ProviderId = "claude" | "codex" | "openrouter" | "gemini";
 export const PROVIDER_IDS: readonly ProviderId[] = ["claude", "codex", "openrouter", "gemini"];
@@ -279,7 +279,10 @@ const CLAUDE_REVIEW_JSON_SCHEMA = {
         properties: {
           path: { type: "string", minLength: 1, maxLength: REVIEW_OUTPUT_LIMITS.path },
           line: { type: ["integer", "null"], minimum: 1 },
-          note: { type: "string", minLength: 1, maxLength: REVIEW_NOTE_CODE_POINTS },
+          // Transport must admit every note the native parser accepts. JSON
+          // Schema counts code points; parseReview enforces UTF-16 units and
+          // owns same-session correction when astral text exceeds that limit.
+          note: { type: "string", minLength: 1, maxLength: REVIEW_OUTPUT_LIMITS.note },
           severity: { type: "string", enum: ["note", "question", "problem"] },
         },
         required: ["path", "note"],
@@ -294,7 +297,7 @@ const CLAUDE_REVIEW_JSON_SCHEMA = {
         properties: {
           id: { type: "string", minLength: 1, maxLength: 40 },
           judgement: { type: "string", enum: ["upholds", "contradicts", "cannot-tell"] },
-          note: { type: "string", minLength: 1, maxLength: REVIEW_NOTE_CODE_POINTS },
+          note: { type: "string", minLength: 1, maxLength: REVIEW_OUTPUT_LIMITS.note },
         },
         required: ["id", "judgement", "note"],
         additionalProperties: false,

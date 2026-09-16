@@ -124,11 +124,25 @@ notification rows stay `unknown` and a v61 file missing its delivery history
 fails closed.
 
 The [candidate manifest](TELEGRAM_DELIVERY_CANDIDATE_2026-09-15.json)
-records every source/test path this integration changed and its SHA-256.
-Source digest: `77cf98cb0245f5cc8aa648c1396d09b9ec8488dffa64ce2dc6ff118780821df6`. Its aggregate is SHA-256
+is a historical delivery snapshot of the accepted candidate, `sourceHead`
+`8217f5579d02c4feed7dcdcc24c8e01ff8d35a71`. It records every source/test path
+in the exact Git diff `ba101e6..8217f55` under `src/` (23 paths) with the
+SHA-256 of that path's bytes at `8217f55`.
+Source digest: `80ba1b57c26f8375013dfac7cdd3165ab2dc7125a739757dd7df48b088cca2ad`. Its aggregate is SHA-256
 of sorted `path + NUL + fileHash + LF` entries. Documentation and protocol files
 are excluded from that aggregate; the base plus these file bytes identifies
-the tested implementation without moving HEAD.
+the tested implementation without moving HEAD. The manifest does not describe
+any later commit or the current tree.
+
+Correction 2026-09-16: the original hand-typed list held 22 paths and its
+digest `77cf98cb0245f5cc8aa648c1396d09b9ec8488dffa64ce2dc6ff118780821df6`
+omitted `src/claim.ts`, whose stamped producers the table below already
+cited. The machine-sealed review inventory for that candidate always
+contained all 25 delivery paths, so no evidence changed; only this document
+and the manifest did. The 22 original hashes are unchanged. Running
+`node scripts/delivery-manifest-check.mjs` reads Git objects only and refuses
+the manifest when its path list differs from that diff, when any hash differs
+from the `8217f55` bytes, or when the digest does not recompute.
 
 ### Criteria mapped to code and executable regressions
 
