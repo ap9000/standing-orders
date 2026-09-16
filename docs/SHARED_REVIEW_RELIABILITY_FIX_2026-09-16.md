@@ -27,7 +27,12 @@ dependency, new task/reviewer loop, or manual refresh action.
 
 Safety boundaries: changes to actual checks, exit codes, screenshots, caveats,
 criterion meaning/verdicts, code, scope, route or custody are not bookkeeping
-corrections. Do not upgrade failed/unchecked work. Do not weaken final exact-path
+corrections. Do not upgrade failed/unchecked work: the submitted criterion
+id/verdict pairs are frozen exactly (comment 397) — no not-met or not-checked
+answer becomes pending-verification, no extra negative criterion is dropped,
+none is added; statement and reference corrections against the exact rubric
+stay allowed. Re-read and verify the sealed diff-stat after the correction and
+after the final gate; never adjudicate cached facts once the artifact differs. Do not weaken final exact-path
 or evidence checks or silently normalize arbitrary overclaims. Only permit a
 correction whose result is independently established by the exact sealed input;
 keep unexplained or unprovable contradictions visible. Missing/tampered stat,

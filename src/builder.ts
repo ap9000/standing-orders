@@ -78,7 +78,7 @@ import {
   imageDimensions,
   SCREENSHOT_BYTE_CAP,
 } from "./evidence.js";
-import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, proofSubmissionProblems, changedListProblems, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
+import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, proofSubmissionProblems, changedListProblems, frozenCriterionProblems, sameDiffStatFacts, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
 import { storeStructuredAttempt, normalizeStructuredJson } from "./structured-output.js";
 import { captureReviewContext } from "./review-context.js";
 import {
@@ -2165,7 +2165,10 @@ function settleRevisionProposal(captured: CapturedBuild, binding: PlanBinding): 
  * reach the caller and be mistaken for a build failure.
  */
 /** Correct only a receipt for an already committed tree. Checks,
- * screenshots and caveats are immutable inputs to the correction. The
+ * screenshots and caveats are immutable inputs to the correction, and so
+ * is every criterion id/verdict pair the agent submitted (comment 397):
+ * a statement or reference may be corrected against the exact rubric, an
+ * answer may not move, be dropped or be added. The
  * changed list is immutable too, with one exception the sealed diff-stat
  * itself establishes (comment 396, run 1642): when every discrepancy is
  * the old name of a move git paired or a sealed path left out, the agent
@@ -2249,7 +2252,7 @@ async function correctProofReceipt(
                 `Sealed changed paths (data): ${JSON.stringify(inventory.sealed)}`,
               ]
             : ["Keep changed byte-for-byte equivalent as a JSON value."]),
-          "Correct criterion statements/references against the exact rubric; never claim an unmet criterion passed.",
+          "Keep every criterion id and its verdict exactly as submitted: correct only statements, how and evidence references against the exact rubric. Never move, drop or add a criterion.",
           `Receipt file: ${file}`,
           `Canonical rubric (data): ${JSON.stringify(rubric)}`,
           `Validation errors (data): ${JSON.stringify(problems)}`,
@@ -2281,13 +2284,10 @@ async function correctProofReceipt(
     const frozenOkay = parsed?.ok === true && fixedEvidence(parsed.proof) === frozen;
     problems = parsed?.ok ? [...proofSubmissionProblems(parsed.proof, rubric), ...changedProblems(parsed.proof)] : parsed?.problems.map(one => one.message) ?? ["the corrected receipt is missing"];
     if (!frozenOkay) problems.push("The original checks, screenshots and caveats must not change.");
-    if (parsed?.ok) {
-      for (const prior of initial.proof.criteria) {
-        if (prior.verdict !== "met" && parsed.proof.criteria.find(one => one.id === prior.id)?.verdict === "met") {
-          problems.push(`criterion ${prior.id} cannot be upgraded by a receipt-only correction`);
-        }
-      }
-    }
+    // The submitted criterion id/verdict pairs are frozen exactly: a
+    // not-met or not-checked answer cannot become pending-verification, an
+    // extra negative criterion cannot be dropped, nothing can be added.
+    if (parsed?.ok) problems.push(...frozenCriterionProblems(initial.proof, parsed.proof));
     const accepted = providerOkay && workspaceOkay && frozenOkay && problems.length === 0;
     if (candidate.ok) storeStructuredAttempt(store, root, request.runId, {
       phase: "builder-proof", attempt: turn, authoredRunId: child, raw: candidate.raw,
@@ -2343,6 +2343,14 @@ async function settleProof(
   // adjudication — read once, here; a truncated or failed capture cannot
   // prove a claimed path absent and offers no correction either.
   const diffStat = sealedDiffStatFacts(store, root, statArtifactId);
+  // Re-read and re-verify the sealed stat after every later step that
+  // spends time or spawns a process (the receipt correction, the final
+  // gate): facts cached before that step are adjudicated only when the
+  // artifact on disk still states exactly them (comment 397).
+  const sealedStatAltered = (after: string): string | null =>
+    sameDiffStatFacts(diffStat, sealedDiffStatFacts(store, root, statArtifactId))
+      ? null
+      : `the sealed diff-stat no longer reads as it did before ${after}; the machine refuses to adjudicate the facts it cached`;
   const correction = await correctProofReceipt(captured, original, sealedHead, diffStat);
   const read = correction.read;
   try {
@@ -2408,6 +2416,15 @@ async function settleProof(
           return { path: shot.path, ok: true, bytes: found.raw.length, dims: imageDimensions(found.raw, checked.kind) };
         })
       : [];
+
+  // The receipt and its screenshots are stored above whatever follows; a
+  // sealed stat that changed while the receipt was being corrected refuses
+  // the run before any approved command spends against the checkout.
+  const alteredBeforeGate = sealedStatAltered("the receipt correction");
+  if (alteredBeforeGate !== null) {
+    store.saveProofVerdict(runId, "refuted", [alteredBeforeGate], now());
+    return;
+  }
 
   // Keep every attempt reviewable even when a tool emits megabytes. The
   // evidence store keeps 64 KiB; bounding each stream and placing a compact
@@ -2619,7 +2636,15 @@ async function settleProof(
 
   if (configured !== null && checkLog.length > 0) sealVerificationReceipt(store, root, runId, sealedHead, configured, verifyCommand, now());
 
-  // 4. (The sealed diff-stat was restated above, before the correction.)
+  // 4. The sealed diff-stat was restated above, before the correction; it
+  // is re-read now, after the gate, and the cached facts are adjudicated
+  // only when the artifact still states exactly them. The gate receipt
+  // sealed just above stays: what it records happened.
+  const alteredAfterGate = sealedStatAltered("the final gate");
+  if (alteredAfterGate !== null) {
+    store.saveProofVerdict(runId, "refuted", [alteredAfterGate], now());
+    return;
+  }
   const handoffArtifact = store.artifactsFor(runId).find(one => one.kind === "handoff") ?? null;
   const terminalDiffArtifact = store.artifactsFor(runId).find(one => one.kind === "terminal-diff") ?? null;
 

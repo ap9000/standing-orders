@@ -175,10 +175,15 @@ Main was still `917bc5b` when this plan was prepared.
   are sealed; checks, screenshots and caveats cannot be rewritten, the
   changed list may only become exactly the sealed diff's paths when the
   sealed stat itself explains the difference (a paired rename's old name, an
-  omitted path — never a path the diff never had), and
-  an unmet answer cannot be upgraded by receipt correction. Checkout/custody
-  changes reject the correction, including after a thrown transport. The
-  commit is kept and the project check runs once afterwards. Missing or
+  omitted path — never a path the diff never had), and every submitted
+  criterion id/verdict pair is frozen: a correction may restate a signed
+  statement or repair a reference, never move an answer (not-met or
+  not-checked to pending-verification included), drop an extra negative
+  criterion or add one. Checkout/custody changes reject the correction,
+  including after a thrown transport. The commit is kept and the project
+  check runs once afterwards; the sealed diff-stat is re-read and re-verified
+  after the correction and after that check, and facts cached before either
+  are never adjudicated once the artifact reads differently. Missing or
   unparseable receipts without a recoverable evidence inventory still require
   verification; this does not promise arbitrary evidence reconstruction.
   Lease renewal now continues through commit and verification. Public dispatch

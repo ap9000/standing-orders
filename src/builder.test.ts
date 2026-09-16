@@ -2982,6 +2982,232 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     expect(store.runsFor(taskRef).filter(one => one.role === "repair").every(one => one.finishedAt !== null)).toBe(true);
   });
 
+  describe("a receipt-only correction freezes every submitted criterion id/verdict pair (comment 397, run 1648)", () => {
+    const criterion = { id: "c1", statement: "the guard exists", evidence: ["check", "changed-path"] as ("check" | "changed-path")[] };
+    const answer = (id: string, verdict: string, statement: string) => ({
+      id, statement, verdict, how: "checked",
+      evidence: id === "c1" ? [{ kind: "check", ref: "npm test" }, { kind: "changed-path", ref: "src/index.ts" }] : [],
+    });
+    const metProof = { ...structuredClone(soundProof), criteria: [answer("c1", "met", criterion.statement)] };
+    /** Submitted with the presentation suffix pasted into the signed
+     * statement (the one defect a correction may repair) and an extra
+     * negative answer the agent volunteered — a finding, not a defect. */
+    const submittedWith = (verdict: "not-met" | "not-checked") => ({
+      ...structuredClone(soundProof),
+      criteria: [answer("c1", verdict, `${criterion.statement} (requires evidence: check, changed-path)`), answer("x1", "not-met", "an extra finding")],
+    });
+    type Behavior = "statement-only" | "not-met-to-pending" | "not-checked-to-pending" | "drop-extra-negative" | "add-extra";
+    const corrected = (behavior: Behavior, submitted: ReturnType<typeof submittedWith>) => {
+      const fixed = structuredClone(submitted);
+      fixed.criteria[0]!.statement = criterion.statement;
+      if (behavior === "not-met-to-pending" || behavior === "not-checked-to-pending") fixed.criteria[0]!.verdict = "pending-verification";
+      if (behavior === "drop-extra-negative") fixed.criteria = [fixed.criteria[0]!];
+      if (behavior === "add-extra") fixed.criteria.push(answer("x2", "met", "another finding"));
+      return fixed;
+    };
+    const freezeMessage: Record<Exclude<Behavior, "statement-only">, string> = {
+      "not-met-to-pending": "criterion c1 was submitted as not-met; a receipt-only correction cannot change it to pending-verification",
+      "not-checked-to-pending": "criterion c1 was submitted as not-checked; a receipt-only correction cannot change it to pending-verification",
+      "drop-extra-negative": "criterion x1 (not-met) was dropped; every submitted criterion and its verdict are frozen by a receipt-only correction",
+      "add-extra": "criterion x2 was added; a receipt-only correction answers exactly the submitted criteria",
+    };
+    /** The build turn, then the same session's correction turns, each
+     * writing `fixed` back as the receipt. */
+    const correctingAgent = (submitted: unknown, fixed: unknown, afterWrite: (cwd: string) => void = () => {}) => {
+      const prompts: string[] = [];
+      let calls = 0;
+      const agent: Runner = async (file, args, options) => {
+        calls++;
+        if (calls === 1) {
+          await agentWithProof(submitted)(file, args, options);
+          return { ...OK, stdout: JSON.stringify({ result: "built", session_id: "proof-session" }) };
+        }
+        expect(args).toContain("--resume");
+        const prompt = args[args.indexOf("-p") + 1]!;
+        prompts.push(prompt);
+        const name = /STANDING-ORDERS-PROOF-[0-9a-f]{16}\.json/.exec(prompt)![0];
+        writeSync2(join2(options!.cwd!, name), JSON.stringify(fixed));
+        afterWrite(options!.cwd!);
+        return { ...OK, stdout: JSON.stringify({ result: "receipt", session_id: "proof-session" }) };
+      };
+      return { agent, prompts, calls: () => calls };
+    };
+    const arrange = () => {
+      propose(store, { taskId: "t-1", goal: "add a guard", acceptance: [criterion], now: T0 });
+      expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
+      claimIt();
+      store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 5_000, approvedBy: "alex" }, T0);
+    };
+    const storedProof = (run: number) => {
+      const proof = store.artifactsFor(run).find(one => one.kind === "proof");
+      expect(proof).toBeDefined();
+      const read = readVerifiedArtifact(join2(wt, ".evidence"), proof!);
+      if (!read.ok) throw new Error(read.problem);
+      return JSON.parse(read.content.toString("utf8")) as { criteria: { id: string; verdict: string; statement: string }[] };
+    };
+    const pairsOf = (run: number) => storedProof(run).criteria.map(one => [one.id, one.verdict]);
+    /** The bounded budget spent, every turn refused by the frozen pair's
+     * name, the original receipt stored and refuted for its own defect. */
+    const expectFrozen = (run: number, ref: number, correcting: ReturnType<typeof correctingAgent>, behavior: Exclude<Behavior, "statement-only">, pairs: string[][]) => {
+      expect(correcting.calls()).toBe(3);
+      expect(correcting.prompts[0]).toContain("Keep every criterion id and its verdict exactly as submitted");
+      expect(correcting.prompts[1]).toContain(freezeMessage[behavior]);
+      const verdict = store.proofVerdictFor(run);
+      expect(verdict).toMatchObject({ verdict: "refuted" });
+      expect(verdict?.reasons[0]).toContain("was signed as");
+      expect(pairsOf(run)).toEqual(pairs);
+      expect(store.runsFor(ref).filter(one => one.role === "repair").map(one => one.reason)).toEqual(["proof-correction-rejected", "proof-correction-rejected"]);
+    };
+
+    test.each<Exclude<Behavior, "statement-only">>(["not-met-to-pending", "not-checked-to-pending", "drop-extra-negative", "add-extra"])("%s is refused: the answers stay as submitted and the gate still runs once", async behavior => {
+      arrange();
+      const submittedVerdict = behavior === "not-checked-to-pending" ? "not-checked" : "not-met";
+      const submitted = submittedWith(submittedVerdict);
+      const correcting = correctingAgent(submitted, corrected(behavior, submitted));
+      let checks = 0;
+      const req = request({ leaseId: "test-lease", agent: correcting.agent, verify: (async () => { checks++; return { ...OK }; }) as Runner });
+      expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+      expect(checks).toBe(1);
+      expectFrozen(req.runId as number, taskRef, correcting, behavior, [["c1", submittedVerdict], ["x1", "not-met"]]);
+    });
+
+    test("a statement-only correction that keeps every pair is accepted: the not-met answer and the extra finding survive into the stored receipt", async () => {
+      arrange();
+      const submitted = submittedWith("not-met");
+      const correcting = correctingAgent(submitted, corrected("statement-only", submitted));
+      const req = request({ leaseId: "test-lease", agent: correcting.agent, verify: (async () => ({ ...OK })) as Runner });
+      expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+      expect(correcting.calls()).toBe(2);
+      const verdict = store.proofVerdictFor(req.runId as number);
+      expect(verdict).toMatchObject({ verdict: "short" });
+      expect(verdict?.reasons).toContain('criterion "the guard exists" is not met');
+      expect(pairsOf(req.runId as number)).toEqual([["c1", "not-met"], ["x1", "not-met"]]);
+      expect(storedProof(req.runId as number).criteria[0]?.statement).toBe(criterion.statement);
+      expect(store.runsFor(taskRef).filter(one => one.role === "repair").map(one => one.reason)).toEqual(["proof-corrected"]);
+    });
+
+    test("a resumed attempt is frozen the same way, against the cumulative stat pinned to the first base (run 1461)", async () => {
+      arrange();
+      let currentHead = "orig-sha";
+      const commitHeads = ["mid-sha", "final-sha"];
+      let commitIndex = 0;
+      const statefulGit: Runner = async (_file, args) => {
+        if (args.includes("symbolic-ref")) return symref(args);
+        if (args[0] === "commit") {
+          currentHead = commitHeads[commitIndex++] as string;
+          return { ...OK };
+        }
+        if (args.includes("rev-parse")) return args.includes("--abbrev-ref") ? { ...OK, stdout: "feat/a\n" } : { ...OK, stdout: `${currentHead}\n` };
+        if (args.includes("--numstat")) return { ...OK, stdout: "1\t0\tsrc/index.ts\0" };
+        if (args.includes("status")) return { ...OK, stdout: " M src/index.ts\n" };
+        if (args.includes("diff")) return { ...OK, stdout: "diff --git a/src/index.ts b/src/index.ts\n+guard\n" };
+        return { ...OK };
+      };
+      const verify: Runner = async () => ({ ...OK });
+      const first = request({ leaseId: "test-lease", git: statefulGit, verify, agent: agentWithProof(metProof) });
+      expect(await build(store, first)).toMatchObject({ ok: true, committed: true });
+      expect(store.proofVerdictFor(first.runId as number)).toMatchObject({ verdict: "verified" });
+
+      const submitted = submittedWith("not-met");
+      const correcting = correctingAgent(submitted, corrected("not-met-to-pending", submitted));
+      const second = request({ leaseId: "test-lease", git: statefulGit, verify, agent: correcting.agent });
+      expect(await build(store, second)).toMatchObject({ ok: true, committed: true });
+      expect(store.getRun(second.runId as number)?.baseRevision).toBe("mid-sha");
+      expectFrozen(second.runId as number, taskRef, correcting, "not-met-to-pending", [["c1", "not-met"], ["x1", "not-met"]]);
+      const stat = store.artifactsFor(second.runId as number).find(one => one.kind === "diff-stat")!;
+      const read = readVerifiedArtifact(join2(wt, ".evidence"), stat);
+      expect(read.ok && JSON.parse(read.content.toString("utf8"))).toMatchObject({ base: "orig-sha", head: "final-sha" });
+    });
+
+    test("a revision task is frozen the same way: the sealed brief rides the build and a dropped extra finding is refused", async () => {
+      arrange();
+      const verify: Runner = async () => ({ ...OK });
+      const source = request({ leaseId: "test-lease", verify, agent: agentWithProof(metProof) });
+      expect(await build(store, source)).toMatchObject({ ok: true, committed: true });
+      expect(store.proofVerdictFor(source.runId as number)).toMatchObject({ verdict: "verified" });
+      const sourceRun = store.getRun(source.runId as number)!;
+      const evidenceRoot = join2(wt, ".evidence");
+      const briefBytes = Buffer.from(JSON.stringify({ schema: 1, sourceTask: "t-1", sourceRun: sourceRun.id, sourceScopeDigest: store.getScope("t-1")!.digest, head: sourceRun.headRevision, comments: [] }), "utf8");
+      const key = writeEvidenceFile(evidenceRoot, sourceRun.id, "revision-brief.json", briefBytes);
+      const sealed = store.sealRevision({
+        source: { task: "t-1", run: sourceRun.id, scopeDigest: store.getScope("t-1")!.digest },
+        brief: { evidenceRoot, key, bytes: briefBytes.length, sha256: sha("sha256").update(briefBytes).digest("hex"), capture: "machine-authored revision brief (exit 0)" },
+        child: { id: "t-1-rev", title: "Revise the guard", repair: "apply the comments" },
+        commentIds: null,
+      }, T0);
+      if (!sealed.ok) throw new Error(sealed.detail);
+      const childRef = store.refFor("built-in", sealed.id).id;
+      expect(store.refForId(childRef)?.revisionBriefArtifact).not.toBeNull();
+      expect(approve(store, sealed.id, "alex", T0, store.getScope(sealed.id)!.digest, approverToken).ok).toBe(true);
+      const revisionWorktree = freshWorktree();
+      store.saveWorktree({
+        path: revisionWorktree, repo: REPO, branch: "feat/a", runner: "builder-1", taskRef: childRef,
+        createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: true,
+      });
+      expect(acquire(store, childRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "rev-lease" }).ok).toBe(true);
+      const submitted = submittedWith("not-met");
+      const correcting = correctingAgent(submitted, corrected("drop-extra-negative", submitted));
+      const req = {
+        taskId: sealed.id, taskRef: childRef, runner: "builder-1", worktree: revisionWorktree, evidenceRoot, branch: "feat/a", now: T0, git, verify,
+        leaseId: "rev-lease", agent: correcting.agent,
+        runId: store.startRun({ taskRef: childRef, leaseId: "rev-lease", runner: "builder-1", branch: "feat/a", worktree: revisionWorktree, now: T0, ...presented(store, childRef, "builder") }),
+      };
+      expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+      expectFrozen(req.runId, childRef, correcting, "drop-extra-negative", [["c1", "not-met"], ["x1", "not-met"]]);
+      // The source run's own receipt and verdict are untouched by the revision.
+      expect(store.proofVerdictFor(source.runId as number)).toMatchObject({ verdict: "verified" });
+      expect(pairsOf(source.runId as number)).toEqual([["c1", "met"]]);
+    });
+
+    describe("the sealed diff-stat is re-read after the correction and after the final gate; cached facts are never adjudicated once altered", () => {
+      const statFileOf = (run: number) => join2(wt, ".evidence", store.artifactsFor(run).find(one => one.kind === "diff-stat")!.key);
+
+      test("altered while the receipt was being corrected: refuted by name before any gate spend, the accepted correction stays in the record", async () => {
+        arrange();
+        let run = 0;
+        const submitted = submittedWith("not-met");
+        const correcting = correctingAgent(submitted, corrected("statement-only", submitted), () => {
+          writeSync2(statFileOf(run), JSON.stringify({ schema: 1, base: "x", head: "y", files: [{ path: "src/index.ts", additions: 1, deletions: 0 }], filesTruncated: false }));
+        });
+        let checks = 0;
+        const req = request({ leaseId: "test-lease", agent: correcting.agent, verify: (async () => { checks++; return { ...OK }; }) as Runner });
+        run = req.runId as number;
+        expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+        expect(correcting.calls()).toBe(2);
+        expect(checks).toBe(0);
+        expect(store.proofVerdictFor(run)).toMatchObject({
+          verdict: "refuted",
+          reasons: ["the sealed diff-stat no longer reads as it did before the receipt correction; the machine refuses to adjudicate the facts it cached"],
+        });
+        expect(store.runsFor(taskRef).filter(one => one.role === "repair").map(one => one.reason)).toEqual(["proof-corrected"]);
+        expect(storedProof(run).criteria[0]?.statement).toBe(criterion.statement);
+        expect(store.artifactsFor(run).some(isVerificationReceipt)).toBe(false);
+      });
+
+      test("altered during the final gate: refuted by name after exactly one check, and the gate receipt it sealed stays", async () => {
+        arrange();
+        let run = 0;
+        let checks = 0;
+        const verify: Runner = async () => {
+          checks++;
+          writeSync2(statFileOf(run), "tampered");
+          return { ...OK };
+        };
+        const req = request({ leaseId: "test-lease", agent: agentWithProof(metProof), verify });
+        run = req.runId as number;
+        expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+        expect(agentCalls).toHaveLength(1);
+        expect(checks).toBe(1);
+        expect(store.proofVerdictFor(run)).toMatchObject({
+          verdict: "refuted",
+          reasons: ["the sealed diff-stat no longer reads as it did before the final gate; the machine refuses to adjudicate the facts it cached"],
+        });
+        expect(store.artifactsFor(run).some(isVerificationReceipt)).toBe(true);
+        expect(store.artifactsFor(run).some(one => one.kind === "check-log")).toBe(true);
+      });
+    });
+  });
+
   /** A bounded log still has to preserve the result of every authorized
    * spawn. Assert the compact index directly: unlike attempt bodies, it
    * cannot be crowded out by a noisy command's output. */

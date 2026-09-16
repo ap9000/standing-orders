@@ -181,6 +181,32 @@ in `src/builder.test.ts`; the correction reads whatever that capture sealed.
 No validation was loosened, no sealed receipt or verdict edited, no schema or
 new framework added.
 
+Revision after build 1648 (comment 397): the shared correction guard froze
+only upgrades to `met`, so a same-session correction could still move a
+not-met or not-checked answer to pending-verification or drop an extra
+negative criterion. `frozenCriterionProblems` (`src/proof.ts`) now freezes
+the exact submitted id/verdict pairs: a statement or evidence reference may
+be corrected against the exact rubric, an answer may not move in either
+direction, be dropped or be added, and every broken pair is refused by name
+in the same bounded turn budget. The builder brief says so. Settlement reads
+the sealed diff-stat once before the correction and re-reads and re-verifies
+it (`sameDiffStatFacts`) after the correction and again after the final
+gate; a reading that differs refuses the run by name and the cached facts are
+never adjudicated — before the gate no approved command is spent, after it
+the sealed gate receipt stays as the record of what ran. Focused regressions
+in existing suites: `src/proof.test.ts` (each frozen pair, reordering,
+dropped signed and extra criteria, added criteria; stat readings that agree
+or differ) and `src/builder.test.ts` (an ordinary build refusing not-met and
+not-checked to pending-verification, a dropped extra negative and an added
+criterion with the gate still run once; a statement-only correction accepted
+with both negative answers intact; the same refusal on a resumed second
+attempt against the cumulative stat pinned to the first base and on a real
+sealed revision task whose source verdict stays untouched; a stat altered
+during the correction refusing before any gate spend, and one altered during
+the gate refusing after exactly one check with its receipt sealed). Fable,
+the original audits, exact approvals and first-review evidence are unchanged;
+no new framework, schema or refresh action.
+
 Validation on the uncommitted revision based on
 `bc4d26b7633c4e6fd57e6ca8fc7190e1df5d6584`: `npm run typecheck` passed and the
 focused builder, proof, proof-contract, evidence and review-context suites

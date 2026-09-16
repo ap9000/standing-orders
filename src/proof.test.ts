@@ -18,6 +18,8 @@ import {
   type AdjudicateInput,
   type AdjudicateResult,
   changedListProblems,
+  frozenCriterionProblems,
+  sameDiffStatFacts,
   type CriterionMatrixRow,
   type CriterionJudgement,
 } from "./proof.js";
@@ -417,6 +419,67 @@ describe("adjudicate", () => {
         ["truncated", { captured: true, truncated: true, paths: new Set(["src/x.ts"]) }],
       ])("a %s stat proves nothing either way: no problems, no correction", (_label, stat) => {
         expect(changedListProblems(["src/x.ts", "scripts/smoke.mjs"], stat)).toEqual({ problems: [], recoverable: false, sealed: null });
+      });
+    });
+
+    describe("frozenCriterionProblems: a receipt-only correction freezes every submitted id/verdict pair (comment 397, run 1648)", () => {
+      const answer = (id: string, verdict: string, statement = `criterion ${id}`) => ({ id, statement, verdict, how: "checked", evidence: [] });
+      const proofOf = (criteria: ReturnType<typeof answer>[]) => {
+        const parsed = parseProof(JSON.stringify({ ...sound, criteria }));
+        if (!parsed.ok) throw new Error(parsed.problems.map(one => one.message).join("; "));
+        return parsed.proof;
+      };
+      const submitted = proofOf([answer("c1", "not-met", "the guard exists (requires evidence: check)"), answer("c2", "not-checked"), answer("x1", "not-met")]);
+
+      test("a statement or reference correction that keeps every pair is clean", () => {
+        expect(frozenCriterionProblems(submitted, proofOf([answer("c1", "not-met", "the guard exists"), answer("c2", "not-checked"), answer("x1", "not-met")]))).toEqual([]);
+        // Order is not a pair: the same answers, reordered, still hold.
+        expect(frozenCriterionProblems(submitted, proofOf([answer("x1", "not-met"), answer("c2", "not-checked"), answer("c1", "not-met")]))).toEqual([]);
+      });
+
+      test.each([
+        ["not-met", "pending-verification"],
+        ["not-checked", "pending-verification"],
+        ["not-met", "met"],
+        ["not-checked", "met"],
+        ["met", "not-met"],
+      ])("an answer submitted as %s cannot become %s", (before, after) => {
+        const one = proofOf([answer("c1", before)]);
+        expect(frozenCriterionProblems(one, proofOf([answer("c1", after)]))).toEqual([
+          `criterion c1 was submitted as ${before}; a receipt-only correction cannot change it to ${after}`,
+        ]);
+      });
+
+      test("a dropped extra negative criterion, a dropped signed one and an added one are each named", () => {
+        expect(frozenCriterionProblems(submitted, proofOf([answer("c1", "not-met"), answer("c2", "not-checked")]))).toEqual([
+          "criterion x1 (not-met) was dropped; every submitted criterion and its verdict are frozen by a receipt-only correction",
+        ]);
+        expect(frozenCriterionProblems(submitted, proofOf([answer("c2", "not-checked"), answer("x1", "not-met"), answer("x2", "met")]))).toEqual([
+          "criterion c1 (not-met) was dropped; every submitted criterion and its verdict are frozen by a receipt-only correction",
+          "criterion x2 was added; a receipt-only correction answers exactly the submitted criteria",
+        ]);
+      });
+    });
+
+    describe("sameDiffStatFacts: the settlement re-reads the sealed stat after the correction and after the gate", () => {
+      const facts = { captured: true, truncated: false, paths: new Set(["src/x.ts", "src/fixtures/smoke.mjs"]), renames: new Map([["scripts/smoke.mjs", "src/fixtures/smoke.mjs"]]) };
+
+      test("the same facts in any order agree; a missing or uncaptured pair agrees only with itself", () => {
+        expect(sameDiffStatFacts(facts, { ...facts, paths: new Set(["src/fixtures/smoke.mjs", "src/x.ts"]) })).toBe(true);
+        expect(sameDiffStatFacts(null, null)).toBe(true);
+        expect(sameDiffStatFacts({ captured: false, truncated: false, paths: new Set() }, { captured: false, truncated: false, paths: new Set() })).toBe(true);
+        expect(sameDiffStatFacts(facts, null)).toBe(false);
+        expect(sameDiffStatFacts(null, facts)).toBe(false);
+      });
+
+      test.each([
+        ["lost capture", { captured: false, truncated: false, paths: new Set<string>() }],
+        ["truncated", { ...facts, truncated: true }],
+        ["a path gone", { ...facts, paths: new Set(["src/x.ts"]) }],
+        ["a path added", { ...facts, paths: new Set([...facts.paths, "src/other.ts"]) }],
+        ["rename provenance gone", { captured: true, truncated: false, paths: facts.paths }],
+      ])("a re-read that %s is a different reading", (_label, reread) => {
+        expect(sameDiffStatFacts(facts, reread)).toBe(false);
       });
     });
   });

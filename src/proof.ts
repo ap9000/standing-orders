@@ -614,6 +614,47 @@ export function changedListProblems(changed: readonly string[], stat: DiffStatFa
   return { problems, recoverable: problems.length > 0 && !unexplained, sealed };
 }
 
+/** What a receipt-only correction may never touch: the exact criterion
+ * id/verdict pairs the agent submitted (comment 397, run 1648). A
+ * correction restates a signed statement or repairs an evidence reference
+ * against the exact rubric; it cannot move an answer (not-met or
+ * not-checked becoming pending-verification, or any other change of
+ * word), drop a criterion — an extra negative answer is a finding, not a
+ * formatting defect — or add one. One line per frozen pair broken. */
+export function frozenCriterionProblems(submitted: ParsedProof, corrected: ParsedProof): string[] {
+  const problems: string[] = [];
+  const after = new Map(corrected.criteria.map(one => [one.id, one.verdict] as const));
+  for (const prior of submitted.criteria) {
+    const verdict = after.get(prior.id);
+    if (verdict === undefined) {
+      problems.push(`criterion ${prior.id} (${prior.verdict}) was dropped; every submitted criterion and its verdict are frozen by a receipt-only correction`);
+    } else if (verdict !== prior.verdict) {
+      problems.push(`criterion ${prior.id} was submitted as ${prior.verdict}; a receipt-only correction cannot change it to ${verdict}`);
+    }
+  }
+  const before = new Set(submitted.criteria.map(one => one.id));
+  for (const one of corrected.criteria) {
+    if (!before.has(one.id)) problems.push(`criterion ${one.id} was added; a receipt-only correction answers exactly the submitted criteria`);
+  }
+  return problems;
+}
+
+/** Whether two readings of the sealed diff-stat state the same facts:
+ * the same capture standing, the same paths and the same rename
+ * provenance. Settlement reads the stat once before the receipt
+ * correction and re-reads it after that correction and after the final
+ * gate; a reading that differs is never adjudicated from the cached one. */
+export function sameDiffStatFacts(a: DiffStatFacts | null, b: DiffStatFacts | null): boolean {
+  if (a === null || b === null) return a === b;
+  const restate = (one: DiffStatFacts) => JSON.stringify({
+    captured: one.captured,
+    truncated: one.truncated,
+    paths: [...one.paths].sort(),
+    renames: [...(one.renames ?? [])].sort(),
+  });
+  return restate(a) === restate(b);
+}
+
 /** The plane's own re-run of the repository's approved verification
  * command, when one is configured. `ran: false` covers both "none
  * configured" and "configured but the run could not attempt it" — the
