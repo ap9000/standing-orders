@@ -16,7 +16,8 @@
  */
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import type { ChatConfig, DirectChatProviderId, MateProposalKind, MateSession, MateThread, Store, SubscriptionChatProviderId } from "./store.js";
+import type { ChatConfig, DirectChatProviderId, MateProposalKind, MateSession, MateThread, MateTurnEvidence, Store, SubscriptionChatProviderId } from "./store.js";
+import { RESULT_IMAGES_PER_TURN_CAP } from "./chat-evidence.js";
 import type { VerifiedApprover } from "./principal.js";
 import { isVerifiedApprover, reproveApprover } from "./principal.js";
 import {
@@ -70,6 +71,8 @@ export type MateTurnInput = {
   clock?: () => Date;
   /** Where evidence lives — get_task reads a scout's report from here. */
   evidenceRoot?: string;
+  /** How this surface delivers the images a turn selects: Telegram sends them as documents after the reply; absent means identity only. */
+  mediaDelivery?: "documents";
   /**
    * A channel's own standing, re-proved where the approver's is: before
    * admission, before every provider dispatch, after every provider wait,
@@ -129,7 +132,7 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
   channel: "this conversation's connection changed — reconnect it before sending again",
 };
 
-const READ_TOOLS = new Set(["recap", "list_repos", "list_tasks", "get_task", "get_result", "get_controls", "get_agents", "get_project_knowledge", "list_decisions", "get_decision", "queue"]);
+const READ_TOOLS = new Set(["recap", "list_repos", "list_tasks", "get_task", "get_result", "get_result_images", "get_controls", "get_agents", "get_project_knowledge", "list_decisions", "get_decision", "queue"]);
 
 /** The last messages of the thread as provider-neutral history, newest kept first until the byte cap. */
 export function historyFor(store: Store, thread: number): MateHistoryMessage[] {
@@ -269,6 +272,9 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     proposals++;
     return store.draftMateProposal({ thread: thread.id, turn: turnId, kind, payload, ceilingDigest: who.ceilingDigest }, clock());
   };
+  /** The screenshots a tool selected, kept under THIS turn: a failed turn deletes them with its drafts; a channel plans sends only from an answered turn. */
+  const selectEvidence = (rows: readonly Omit<MateTurnEvidence, "turn" | "ordinal" | "createdAt">[]): number =>
+    store.recordMateTurnEvidence(turnId, rows, RESULT_IMAGES_PER_TURN_CAP, clock());
 
   /** The turn ends failed: its drafts are deleted, its cost settled — the whole reservation when any of it is unknown. */
   const fail = (failed: MateFailure, message: string, unknownSpend: boolean): MateTurnOutcome => {
@@ -418,7 +424,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
         const changed = guard(input.revalidate === undefined ? { ok: true } : await input.revalidate());
         if (changed !== null) return changed;
       }
-      const outcome = executeMateTool({ store, who, now: clock(), draft, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }) }, call.name, call.args, view);
+      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       history.push({ role: "tool", callId: call.id, name: call.name, result: capped(outcome.ok ? outcome.body : { ok: false, message: outcome.message }) });
     }

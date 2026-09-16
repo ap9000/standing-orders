@@ -296,6 +296,63 @@ describe("destination-bound authorized outbox", () => {
     } finally { fetch.mockRestore(); }
   });
 
+  test("the HTTP adapter sends a verified image as one multipart document — original bytes, safe name and type, short caption, boundary left to fetch — and keeps JSON calls, redaction, retry_after, abort and uncertainty exactly as they were", async () => {
+    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(300, 42)]);
+    const seen: { url: string; init: RequestInit }[] = [];
+    const answers: Array<() => Promise<Response>> = [
+      async () => new Response(JSON.stringify({ ok: true, result: { message_id: 41, document: { file_id: "x" } } })),
+      async () => new Response(JSON.stringify({ ok: false, description: "Bad Request: file is too big for fixture-token", parameters: { retry_after: 3 } }), { status: 400 }),
+      async () => { throw new Error("socket hang up fixture-token"); },
+      async () => new Response("not-json"),
+      async () => new Response(JSON.stringify({ ok: true, result: { message_id: 42 } })),
+    ];
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      seen.push({ url: String(url), init: init as RequestInit });
+      if ((init as RequestInit | undefined)?.signal?.aborted) throw new DOMException("aborted", "AbortError");
+      return answers.shift()!();
+    });
+    try {
+      const transport = createTransport("fixture-token");
+      const upload = { field: "document" as const, fileName: "alpha-result-3-9.png", contentType: "image/png" as const, bytes };
+      const params = { chat_id: "4242", caption: "alpha · result #3 · screenshot 1 of 1", reply_parameters: { message_id: 7 } };
+      expect(await transport("sendDocument", params, undefined, upload)).toEqual({ ok: true, result: { message_id: 41, document: { file_id: "x" } } });
+      const sent = seen[0]!;
+      expect(sent.url).toBe("https://api.telegram.org/botfixture-token/sendDocument");
+      // No content-type of ours: fetch mints the multipart boundary from the FormData body.
+      expect(sent.init.headers).toBeUndefined();
+      const form = sent.init.body as FormData;
+      expect(form).toBeInstanceOf(FormData);
+      expect([...form.keys()]).toEqual(["chat_id", "caption", "reply_parameters", "document"]);
+      expect(form.get("chat_id")).toBe("4242");
+      expect(form.get("caption")).toBe("alpha · result #3 · screenshot 1 of 1");
+      expect(form.get("reply_parameters")).toBe(JSON.stringify({ message_id: 7 }));
+      const file = form.get("document") as File;
+      expect(file).toBeInstanceOf(File);
+      expect([file.name, file.type, file.size]).toEqual(["alpha-result-3-9.png", "image/png", bytes.length]);
+      expect(Buffer.from(await file.arrayBuffer()).equals(bytes)).toBe(true);
+      // The request as it would leave: a multipart boundary of fetch's choosing, the file part under its name, the exact bytes inside — never a path, never a URL for Telegram to fetch.
+      const request = new Request(sent.url, sent.init);
+      expect(request.headers.get("content-type")).toMatch(/^multipart\/form-data; boundary=/);
+      const raw = Buffer.from(await request.arrayBuffer());
+      expect(raw.includes(bytes)).toBe(true);
+      expect(raw.toString("latin1")).toContain('name="document"; filename="alpha-result-3-9.png"');
+      expect(raw.toString("latin1")).not.toMatch(/file_id|https?:\/\/|\/Users|\/tmp/);
+      // Telegram's rejection of a document is definite, scrubbed of the token, and keeps retry_after; a lost, malformed or aborted answer is uncertain.
+      expect(await transport("sendDocument", params, undefined, upload)).toEqual({ ok: false, result: undefined, description: "Bad Request: file is too big for …oken", parameters: { retry_after: 3 } });
+      const lost = await transport("sendDocument", params, undefined, upload);
+      expect(lost).toMatchObject({ ok: false, uncertain: true });
+      expect(lost.description).not.toContain("fixture-token");
+      expect(await transport("sendDocument", params, undefined, upload)).toMatchObject({ ok: false, uncertain: true });
+      const controller = new AbortController();
+      controller.abort();
+      expect(await transport("sendDocument", params, controller.signal, upload)).toMatchObject({ ok: false, uncertain: true });
+      // The JSON road is byte for byte what it was: the header, the serialized body, no form.
+      expect(await transport("sendMessage", { chat_id: "4242", text: "hi" })).toEqual({ ok: true, result: { message_id: 42 } });
+      expect(seen.at(-1)!.init.headers).toEqual({ "content-type": "application/json" });
+      expect(seen.at(-1)!.init.body).toBe(JSON.stringify({ chat_id: "4242", text: "hi" }));
+    } finally { fetch.mockRestore(); }
+  });
+
   test("restart recovers expired claims; same-owner stale generations and replaced destinations cannot settle", async () => {
     enqueue("ready", task("a", REPO));
     quietLifecycle(store, now);

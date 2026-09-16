@@ -131,10 +131,21 @@ export type TelegramTransport = (
   method: string,
   params: Record<string, unknown>,
   signal?: AbortSignal,
+  /** v64: one verified file to send as multipart — the ONLY way bytes leave. Absent, the call is JSON exactly as before. */
+  upload?: TelegramUpload,
 ) => Promise<{ ok: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number }; uncertain?: boolean }>;
 
+/**
+ * The one typed shape a file takes onto the wire: bytes the caller already
+ * verified, under a name and type the caller chose from the verified
+ * kind. There is no path, no URL and no `file_id` form here on purpose —
+ * Telegram never fetches anything for us, and nothing on this machine is
+ * uploaded by name.
+ */
+export type TelegramUpload = { field: "document"; fileName: string; contentType: "image/png" | "image/jpeg"; bytes: Buffer };
+
 export function createTransport(token: string, timeoutMs = 30_000): TelegramTransport {
-  return async (method, params, signal) => {
+  return async (method, params, signal, upload) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onAbort = () => controller.abort();
@@ -143,12 +154,14 @@ export function createTransport(token: string, timeoutMs = 30_000): TelegramTran
       else signal.addEventListener("abort", onAbort, { once: true });
     }
     try {
-      const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(params),
-        signal: controller.signal,
-      });
+      // A JSON call stays byte for byte what it was. A multipart call lets
+      // fetch mint the boundary and the content-type: scalars ride as
+      // fields, objects (reply_parameters, reply_markup) as their JSON, and
+      // the verified bytes as one Blob under the file name given.
+      const request: RequestInit = upload === undefined
+        ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params), signal: controller.signal }
+        : { method: "POST", body: multipartOf(params, upload), signal: controller.signal };
+      const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, request);
       const body = (await response.json()) as { ok?: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number } } | null;
       // A missing or malformed acknowledgement does not prove a send failed.
       // Only Telegram's explicit rejection is a definite failed delivery.
@@ -173,6 +186,17 @@ export function createTransport(token: string, timeoutMs = 30_000): TelegramTran
       signal?.removeEventListener("abort", onAbort);
     }
   };
+}
+
+/** The multipart body: every param a field (objects as JSON), the file last. Exported for the adapter's own test only. */
+export function multipartOf(params: Record<string, unknown>, upload: TelegramUpload): FormData {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null) continue;
+    form.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
+  }
+  form.append(upload.field, new Blob([new Uint8Array(upload.bytes)], { type: upload.contentType }), upload.fileName);
+  return form;
 }
 
 // ---- pairing ---------------------------------------------------------------

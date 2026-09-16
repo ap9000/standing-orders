@@ -25,7 +25,7 @@ export const PHONE_HELP = [
   "/task <id> — status, evidence, and the next step for one task",
   "/help — these commands",
   "",
-  "The slash commands only read status. To answer an agent's question, tap its decision buttons; reply to that decision message to attach a note. Reply to a result message to ask for changes to that exact result.",
+  "The slash commands only read status. To answer an agent's question, tap its decision buttons; reply to that decision message to attach a note. Reply to a result message to ask for changes to that exact result, or ask for its screenshots to receive the saved images as files.",
   "",
   "Password approvals, cancelling and publishing happen in the Standing Orders console. A button that opens the console only takes you there — sign in, and nothing changes until you act. The computer and bridge must be awake and connected to reply.",
 ].join("\n");

@@ -55,7 +55,7 @@ describe("v63 Telegram durable replies", () => {
     old.close();
   };
 
-  test.each([62, -62, 61, -61])("v%s upgrades to v63 keeping every conversation row and token, adds the empty parts table, and reopens idempotently", version => {
+  test.each([62, -62, 61, -61])("v%s upgrades through v63 to the current schema keeping every conversation row and token, adds the empty parts table, and reopens idempotently", version => {
     dir = mkdtempSync(join(tmpdir(), "so-v63-"));
     const file = join(dir, "orders.db");
     store = openStore(file);
@@ -66,8 +66,8 @@ describe("v63 Telegram durable replies", () => {
     const fromV62 = Math.abs(version) === 62;
 
     store = openStore(file);
-    expect(SCHEMA_VERSION).toBe(63);
-    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(63);
+    expect(SCHEMA_VERSION).toBe(64);
+    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(64);
     expect(store.handle.prepare("SELECT * FROM telegram_conversation ORDER BY id").all()).toEqual(fromV62 ? before.conversation : []);
     expect(store.handle.prepare("SELECT * FROM telegram_proposal_action ORDER BY token").all()).toEqual(fromV62 ? before.actions : []);
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM telegram_conversation_part").get()?.["n"]).toBe(0);
@@ -94,7 +94,7 @@ describe("v63 Telegram durable replies", () => {
     }
     const after = store.handle.prepare("SELECT * FROM telegram_conversation ORDER BY id").all();
     store.close(); store = openStore(file);
-    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(63);
+    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(64);
     expect(store.handle.prepare("SELECT * FROM telegram_conversation ORDER BY id").all()).toEqual(after);
   });
 

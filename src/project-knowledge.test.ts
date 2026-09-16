@@ -98,7 +98,7 @@ describe('project knowledge',()=>{
   });
   test('v58 upgrade adds knowledge without losing learning and refuses missing v59 history',()=>{
     store.handle.exec('DROP TABLE project_knowledge; DROP TABLE knowledge_change; DROP TABLE knowledge_snapshot; UPDATE schema_version SET version=58');store.close();store=openStore(db);
-    expect(view().revision).toBe(0);expect(store.handle.prepare('SELECT version FROM schema_version').get()?.['version']).toBe(63);
+    expect(view().revision).toBe(0);expect(store.handle.prepare('SELECT version FROM schema_version').get()?.['version']).toBe(64);
     store.handle.exec('DROP TABLE knowledge_snapshot');store.close();expect(()=>openStore(db)).toThrow(/knowledge history is missing/);store=openStore(':memory:');
   });
   test('HTTP editor protects CSRF and project access, keeps failed drafts, saves and restores',async()=>{

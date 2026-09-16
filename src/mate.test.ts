@@ -124,7 +124,9 @@ describe("the mate's turn", () => {
     });
 
   test("the intake contract treats one outcome as enough and asks only material questions", () => {
-    expect(MATE_CONTRACT_VERSION).toBe(11);
+    expect(MATE_CONTRACT_VERSION).toBe(12);
+    expect(MATE_CONTRACT).toContain("call get_result_images for that exact execution and run");
+    expect(MATE_CONTRACT).toContain("say they follow, never that they were delivered");
     expect(MATE_CONTRACT).toContain("read get_agents and answer in its words");
     expect(MATE_CONTRACT).toContain("never an agent that is not listed");
     expect(MATE_CONTRACT).toContain("a plain-language outcome is enough to draft a task");

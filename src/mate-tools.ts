@@ -2,6 +2,7 @@ import { taskControlOf } from "./task-control.js";
 import { validateScopeText, validateTaskText, TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
 import { conversationKnowledge } from "./project-knowledge.js";
 import { readChatResult, reviewInputProblem, type ReviewSnapshot } from "./chat-review.js";
+import { selectResultImages } from "./chat-evidence.js";
 import { CHAT_CONTROLS, isChatControl } from "./chat-controls.js";
 import { LIMITS } from "./decision.js";
 import { CHAT_TASK_ACTIONS, chatTaskRun, chatTaskStamp, isChatTaskAction } from "./chat-task-actions.js";
@@ -17,7 +18,7 @@ import { CHAT_TASK_ACTIONS, chatTaskRun, chatTaskStamp, isChatTaskAction } from 
  * richer DTOs.
  */
 import { Buffer } from "node:buffer";
-import type { Store, MateProposalKind } from "./store.js";
+import type { Store, MateProposalKind, MateTurnEvidence } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
 import type { MateToolSchema } from "./converse.js";
 import { hasDisguisedText, hasForbiddenControls } from "./decision.js";
@@ -43,6 +44,10 @@ export type MateToolContext = {
   readResults?: Map<number, { step: number; snapshot: ReviewSnapshot }>;
   /** Where evidence lives, when the surface knows — a scout's report reads from here. */
   evidenceRoot?: string;
+  /** Records the screenshots this turn selected, under the turn, for a channel that delivers files; returns how many are recorded. Absent: nothing durable is kept. */
+  selectEvidence?: (rows: readonly Omit<MateTurnEvidence, "turn" | "ordinal" | "createdAt">[]) => number;
+  /** How this surface delivers selected images: Telegram sends them as documents after the reply; every other surface shows identity only. */
+  mediaDelivery?: "documents";
 };
 
 export type MateToolResult = { ok: true; body: unknown } | { ok: false; message: string };
@@ -452,6 +457,31 @@ export const MATE_TOOLS: MateTool[] = [
         changes: snippet.slice(0, 1000), changesShortened: snippet.length > 1000,
         verification: ctx.store.proofVerdictFor(snapshot.run)?.verdict ?? "not verified",
         canRevise: snapshot.execution === snapshot.task } };
+    },
+  },
+  {
+    name: "get_result_images",
+    description: "Select the saved screenshots of one exact finished result (task, and run from get_task or get_result). On Telegram each verified image is sent as a file after your reply: say they follow, never that they were delivered. Elsewhere only the result identity and image count are shown; the operator opens the result to view them. Never invent images.",
+    inputSchema: schema({ task: TASK_ARG, run: { type: "integer", minimum: 1 } }, ["task"]),
+    handle: (ctx, args) => {
+      const task = taskIdOf(args);
+      if (task === null || (args["run"] !== undefined && (!Number.isSafeInteger(args["run"]) || Number(args["run"]) < 1))) return { ok: false, message: "Choose a task and valid result number." };
+      const selected = selectResultImages(ctx.store, ctx.who, ctx.evidenceRoot, task, args["run"] as number | undefined);
+      if (!selected.ok) return selected;
+      const { selection } = selected;
+      const ref = ctx.store.lookupRef(task);
+      if (ref === null) return { ok: false, message: "That task is not in your projects." };
+      const recorded = ctx.selectEvidence?.(selection.images.map(one => ({ taskId: task, taskRef: ref.id, run: selection.run, artifact: one.artifact, sha256: one.sha256, format: one.format, bytes: one.bytes, caption: one.caption }))) ?? 0;
+      const delivery = ctx.mediaDelivery === "documents"
+        ? recorded === 0 ? "No image files will be sent." : `${recorded} image file(s) will be sent to this chat after your reply. Say they follow; do not say they were delivered.`
+        : "This surface does not send image files. Name the result so the operator can open it.";
+      return { ok: true, body: {
+        task: selection.task, root: selection.root, currentExecution: selection.currentExecution, isCurrent: selection.currentExecution === selection.task,
+        run: selection.run, title: selection.title, report: selection.report,
+        imageCount: selection.images.length, images: selection.images.map(one => ({ id: one.artifact, format: one.format, bytes: one.bytes, caption: one.caption })),
+        unavailable: selection.unavailable.map(one => ({ id: one.artifact, problem: one.problem })),
+        delivery,
+      } };
     },
   },
   {

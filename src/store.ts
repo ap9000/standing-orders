@@ -96,7 +96,11 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // and admits 'telegram' as a stop's audit source; readers below v62 refuse it.
 // v63 adds the durable outbound parts of a Telegram conversation (the reply
 // and its cards, persisted before any send); readers below v63 refuse it.
-export const SCHEMA_VERSION = 63;
+// v64 adds typed media identity to those parts (an image part names the exact
+// task, run, artifact and recorded hash of one verified screenshot) and the
+// screenshots one answered mate turn selected for an exact result; readers
+// below v64 refuse it.
+export const SCHEMA_VERSION = 64;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -1212,11 +1216,12 @@ export type TelegramConversation = {
   finishedAt: string | null;
 };
 
-/** One outbound part of a conversation — a slice of the reply or one proposal card — durable before it is sent (v63). */
+/** One outbound part of a conversation — a slice of the reply, one proposal card, or (v64) one verified result screenshot — durable before it is sent (v63). */
 export type TelegramConversationPart = {
   conversation: number;
   ordinal: number;
-  kind: "reply" | "card";
+  kind: "reply" | "card" | "image";
+  /** The reply slice, the card, or an image part's short caption. */
   text: string;
   /** The operator's message the first reply part answers. */
   replyTo: string | null;
@@ -1224,10 +1229,15 @@ export type TelegramConversationPart = {
   proposal: number | null;
   /** The inline keyboard exactly as sent; its callback data are the card's opaque tokens, minted with the part. */
   keyboard: { text: string; callback_data: string }[][] | null;
-  /** `dropped`: a card whose proposal was resolved elsewhere before it went out — moot, never a lost message. */
+  /** `dropped`: a card whose proposal was resolved elsewhere before it went out, or an image whose artifact could not be verified — moot or refused, never a lost message. */
   state: "pending" | "sent" | "dropped";
   /** Telegram's confirmed message id — the only thing that makes a part sent. */
   messageId: string | null;
+  /** v64, image parts only: the exact task and run the image belongs to, the artifact row and the hash its record carried when planned. */
+  taskId: string | null;
+  run: number | null;
+  artifact: number | null;
+  sha256: string | null;
   attempts: number;
   /** Sends whose answer was lost: a later attempt may have duplicated the part. */
   uncertain: number;
@@ -1235,6 +1245,27 @@ export type TelegramConversationPart = {
   lastError: string | null;
   createdAt: string;
   sentAt: string | null;
+};
+
+/** What one outbound part is planned from: a reply slice, a card with its minted keyboard, or an image by typed identity. */
+export type TelegramConversationPartPlan =
+  | { kind: "reply"; text: string; replyTo?: string | null }
+  | { kind: "card"; text: string; proposal: number; keyboard: TelegramConversationPart["keyboard"] }
+  | { kind: "image"; text: string; taskId: string; run: number; artifact: number; sha256: string };
+
+/** One verified screenshot a mate turn selected for an exact result (v64): trusted identities only, never bytes or paths. */
+export type MateTurnEvidence = {
+  turn: number;
+  ordinal: number;
+  taskId: string;
+  taskRef: number;
+  run: number;
+  artifact: number;
+  sha256: string;
+  format: "png" | "jpeg";
+  bytes: number;
+  caption: string;
+  createdAt: string;
 };
 
 /** What one opaque proposal-card token means (v62). */
@@ -2811,10 +2842,17 @@ CREATE INDEX IF NOT EXISTS telegram_proposal_action_by_proposal ON telegram_prop
 -- so a resend carries the same tokens. A part whose network answer was
 -- lost is counted as uncertain: a resend may duplicate it, and the row
 -- says so instead of claiming an exactly-once Telegram cannot provide.
+-- v64: an 'image' part is one verified screenshot of one exact result,
+-- named by typed columns — task, run, artifact and the hash its record
+-- carried when the part was planned — never by JSON inside text or a
+-- keyboard, and never by bytes: every send re-reads the artifact from the
+-- evidence root and re-verifies it against these columns first. Its text
+-- is the short caption. A confirmed image message binds replies to that
+-- exact task and run, exactly as an outbox fact's message does.
 CREATE TABLE IF NOT EXISTS telegram_conversation_part (
   conversation    INTEGER NOT NULL REFERENCES telegram_conversation(id) ON DELETE CASCADE,
   ordinal         INTEGER NOT NULL,
-  kind            TEXT NOT NULL CHECK (kind IN ('reply','card')),
+  kind            TEXT NOT NULL CHECK (kind IN ('reply','card','image')),
   text            TEXT NOT NULL,
   reply_to        TEXT,
   proposal        INTEGER REFERENCES mate_proposal(id) ON DELETE SET NULL,
@@ -2827,9 +2865,37 @@ CREATE TABLE IF NOT EXISTS telegram_conversation_part (
   last_error      TEXT,
   created_at      TEXT NOT NULL,
   sent_at         TEXT,
+  task_id         TEXT,
+  source_run      INTEGER REFERENCES run(id),
+  artifact        INTEGER,
+  sha256          TEXT,
   PRIMARY KEY (conversation, ordinal),
   CHECK ((state = 'sent') = (message_id IS NOT NULL)),
-  CHECK ((state = 'sent') = (sent_at IS NOT NULL))
+  CHECK ((state = 'sent') = (sent_at IS NOT NULL)),
+  CHECK ((kind = 'image') = (task_id IS NOT NULL AND source_run IS NOT NULL AND artifact IS NOT NULL AND sha256 IS NOT NULL))
+);
+
+-- v64: the screenshots one mate turn selected for an exact result, kept
+-- under the turn so a channel that delivers files (Telegram) plans them
+-- from the completed turn after a crash without another model call. Only
+-- trusted identities ride here — the task, its run, the artifact row and
+-- the hash that row carried — never bytes, paths or model prose. A failed
+-- turn's rows are deleted with its drafts; a channel sends nothing from a
+-- turn that did not answer, and re-verifies every artifact before upload.
+CREATE TABLE IF NOT EXISTS mate_turn_evidence (
+  turn       INTEGER NOT NULL REFERENCES mate_turn(id) ON DELETE CASCADE,
+  ordinal    INTEGER NOT NULL,
+  task_id    TEXT NOT NULL,
+  task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  run        INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  artifact   INTEGER NOT NULL REFERENCES artifact(id) ON DELETE CASCADE,
+  sha256     TEXT NOT NULL,
+  format     TEXT NOT NULL CHECK (format IN ('png','jpeg')),
+  bytes      INTEGER NOT NULL,
+  caption    TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (turn, ordinal),
+  UNIQUE (turn, artifact)
 );
 
 -- The bridge's poll lease and cursor, per bot. One live poller at a time;
@@ -3806,6 +3872,9 @@ function initializeStore(db: Database, file: string): Store {
   }
   if (preflight !== null && Math.abs(preflight) >= 63) {
     if (!tableExists(db, "telegram_conversation_part")) throw new Error(`${file}: Telegram reply history is missing; refusing to recreate it`);
+  }
+  if (preflight !== null && Math.abs(preflight) >= 64) {
+    if (!tableExists(db, "mate_turn_evidence") || !hasColumn(db, "telegram_conversation_part", "artifact")) throw new Error(`${file}: Telegram image history is missing; refusing to recreate it`);
   }
   if (preflight !== null && preflight > 0 && preflight < SCHEMA_VERSION) {
     const stamped = db.prepare("UPDATE schema_version SET version = ? WHERE version = ?").run(-preflight, preflight);
@@ -4941,6 +5010,13 @@ function migrate(db: Database, origin: number | null): void {
   // whole, and an unknown shape refuses rather than being guessed.
   rebuildRunStopForV62(db);
 
+  // v64 (result screenshots on demand): telegram_conversation_part admits
+  // 'image' and carries typed media identity through the same exact-
+  // recognizer copy/rename; every v63 reply and card row, its message id,
+  // attempts and uncertain count is carried whole. mate_turn_evidence is a
+  // wholly new table and arrives through the fresh SCHEMA's IF NOT EXISTS.
+  rebuildTelegramConversationPartForV64(db);
+
   // v53 (OS containment and login recovery): four additive, nullable
   // columns on run_process. A legacy witness has NULL in all four, which
   // every reader treats as "unknown boot, observed containment" — the
@@ -5396,6 +5472,59 @@ const RUN_STOP_V52_DDL = (name: string): string => `CREATE TABLE ${name} (
 )`;
 const RUN_STOP_V62_DDL = (name: string): string =>
   RUN_STOP_V52_DDL(name).replace("requested_via IN ('cli','web')", "requested_via IN ('cli','web','telegram')").replace("resumed_via IN ('cli','web')", "resumed_via IN ('cli','web','telegram')");
+
+const TELEGRAM_CONVERSATION_PART_V63_DDL = (name: string): string => `CREATE TABLE ${name} (
+  conversation    INTEGER NOT NULL REFERENCES telegram_conversation(id) ON DELETE CASCADE,
+  ordinal         INTEGER NOT NULL,
+  kind            TEXT NOT NULL CHECK (kind IN ('reply','card')),
+  text            TEXT NOT NULL,
+  reply_to        TEXT,
+  proposal        INTEGER REFERENCES mate_proposal(id) ON DELETE SET NULL,
+  keyboard_json   TEXT,
+  state           TEXT NOT NULL CHECK (state IN ('pending','sent','dropped')),
+  message_id      TEXT,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  uncertain       INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_error      TEXT,
+  created_at      TEXT NOT NULL,
+  sent_at         TEXT,
+  PRIMARY KEY (conversation, ordinal),
+  CHECK ((state = 'sent') = (message_id IS NOT NULL)),
+  CHECK ((state = 'sent') = (sent_at IS NOT NULL))
+)`;
+const TELEGRAM_CONVERSATION_PART_V64_DDL = (name: string): string => `CREATE TABLE ${name} (
+  conversation    INTEGER NOT NULL REFERENCES telegram_conversation(id) ON DELETE CASCADE,
+  ordinal         INTEGER NOT NULL,
+  kind            TEXT NOT NULL CHECK (kind IN ('reply','card','image')),
+  text            TEXT NOT NULL,
+  reply_to        TEXT,
+  proposal        INTEGER REFERENCES mate_proposal(id) ON DELETE SET NULL,
+  keyboard_json   TEXT,
+  state           TEXT NOT NULL CHECK (state IN ('pending','sent','dropped')),
+  message_id      TEXT,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  uncertain       INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_error      TEXT,
+  created_at      TEXT NOT NULL,
+  sent_at         TEXT,
+  task_id         TEXT,
+  source_run      INTEGER REFERENCES run(id),
+  artifact        INTEGER,
+  sha256          TEXT,
+  PRIMARY KEY (conversation, ordinal),
+  CHECK ((state = 'sent') = (message_id IS NOT NULL)),
+  CHECK ((state = 'sent') = (sent_at IS NOT NULL)),
+  CHECK ((kind = 'image') = (task_id IS NOT NULL AND source_run IS NOT NULL AND artifact IS NOT NULL AND sha256 IS NOT NULL))
+)`;
+/** The v63 columns, in order: what an upgrade copies, and what a wind-back keeps. */
+export const TELEGRAM_CONVERSATION_PART_V63_COLUMNS = ["conversation", "ordinal", "kind", "text", "reply_to", "proposal", "keyboard_json", "state", "message_id", "attempts", "uncertain", "next_attempt_at", "last_error", "created_at", "sent_at"] as const;
+
+/** v64: image parts join the outbound conversation parts with typed media identity. Every v63 row, receipt, attempt and uncertain count is carried whole. */
+export function rebuildTelegramConversationPartForV64(db: Database): void {
+  rebuildExact(db, "telegram_conversation_part", TELEGRAM_CONVERSATION_PART_V63_DDL, TELEGRAM_CONVERSATION_PART_V64_DDL, TELEGRAM_CONVERSATION_PART_V63_COLUMNS);
+}
 
 /** v62: the stop audit admits 'telegram'. Rows, ids and settlements are carried whole. */
 export function rebuildRunStopForV62(db: Database): void {
@@ -19631,6 +19760,61 @@ export class Store {
     return Number(inserted.lastInsertRowid);
   }
 
+  // ---- the screenshots a turn selected (v64) ------------------------------------
+
+  /**
+   * Record the screenshots one turn selected for an exact result, under the
+   * turn, so a channel that delivers files can plan them from the completed
+   * turn without another model call. Identities only — the caller proved
+   * access and read the artifact rows; the channel re-verifies every one
+   * before upload. A turn holds at most `cap` images; the same artifact is
+   * recorded once. Returns how many of THESE rows are recorded after the call.
+   */
+  recordMateTurnEvidence(turn: number, rows: readonly Omit<MateTurnEvidence, "turn" | "ordinal" | "createdAt">[], cap: number, now: Date): number {
+    return this.transact(() => {
+      const live = this.db.prepare("SELECT 1 AS hit FROM mate_turn WHERE id = ? AND state = 'running'").get(turn);
+      if (live === undefined) return 0;
+      let ordinal = Number(this.db.prepare("SELECT COUNT(*) AS n FROM mate_turn_evidence WHERE turn = ?").get(turn)?.["n"] ?? 0);
+      let recorded = 0;
+      for (const row of rows) {
+        const seen = this.db.prepare("SELECT 1 AS hit FROM mate_turn_evidence WHERE turn = ? AND artifact = ?").get(turn, row.artifact);
+        if (seen !== undefined) { recorded++; continue; }
+        if (ordinal >= cap) continue;
+        this.db
+          .prepare(
+            `INSERT INTO mate_turn_evidence (turn, ordinal, task_id, task_ref, run, artifact, sha256, format, bytes, caption, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(turn, ordinal, row.taskId, row.taskRef, row.run, row.artifact, row.sha256, row.format, row.bytes, row.caption, now.toISOString());
+        ordinal++;
+        recorded++;
+      }
+      return recorded;
+    });
+  }
+
+  /** The screenshots a turn selected, in selection order — meaningful only for a turn that ANSWERED (a failed turn's rows are deleted). */
+  listMateTurnEvidence(turn: number): MateTurnEvidence[] {
+    return this.db.prepare("SELECT * FROM mate_turn_evidence WHERE turn = ? ORDER BY ordinal").all(turn).map(row => ({
+      turn: Number(row["turn"]),
+      ordinal: Number(row["ordinal"]),
+      taskId: String(row["task_id"]),
+      taskRef: Number(row["task_ref"]),
+      run: Number(row["run"]),
+      artifact: Number(row["artifact"]),
+      sha256: String(row["sha256"]),
+      format: String(row["format"]) as MateTurnEvidence["format"],
+      bytes: Number(row["bytes"]),
+      caption: String(row["caption"]),
+      createdAt: String(row["created_at"]),
+    }));
+  }
+
+  /** A failed turn's selection is DELETED with its drafts: nothing a failed turn selected is ever sent. */
+  discardMateTurnEvidence(turn: number): number {
+    return Number(this.db.prepare("DELETE FROM mate_turn_evidence WHERE turn = ?").run(turn).changes);
+  }
+
   /** Drafts become confirmable only under a turn that ANSWERED (review finding 12). */
   promoteMateProposals(turn: number): number {
     const changed = this.db
@@ -19806,6 +19990,7 @@ export class Store {
         }
       } else {
         this.discardMateProposals(id);
+        this.discardMateTurnEvidence(id);
       }
       return true;
     });
@@ -19824,6 +20009,7 @@ export class Store {
           .run(reason, Number(row["reserved"]), now.toISOString(), id);
         this.db.prepare("UPDATE mate_session SET spent_microusd = spent_microusd + ? WHERE id = ?").run(Number(row["reserved"]), Number(row["session"]));
         this.discardMateProposals(id);
+        this.discardMateTurnEvidence(id);
       }
       return rows.length;
     });
@@ -19853,6 +20039,7 @@ export class Store {
           .run(spent, now.toISOString(), id);
         this.db.prepare("UPDATE mate_session SET spent_microusd = spent_microusd + ? WHERE id = ?").run(spent, Number(row["session"]));
         this.discardMateProposals(id);
+        this.discardMateTurnEvidence(id);
       }
       return rows.length;
     });
@@ -21697,7 +21884,7 @@ export class Store {
     id: number,
     owner: string,
     turn: { session: number; turn: number },
-    parts: readonly { kind: TelegramConversationPart["kind"]; text: string; replyTo?: string | null; proposal?: number | null; keyboard?: TelegramConversationPart["keyboard"] }[],
+    parts: readonly TelegramConversationPartPlan[],
     now: Date,
   ): boolean {
     return this.transact(() => {
@@ -21710,11 +21897,16 @@ export class Store {
       if (Number(existing?.["n"] ?? 0) > 0) return false;
       this.db.prepare("UPDATE telegram_conversation SET session = ?, turn = ? WHERE id = ?").run(turn.session, turn.turn, id);
       const insert = this.db.prepare(
-        `INSERT INTO telegram_conversation_part (conversation, ordinal, kind, text, reply_to, proposal, keyboard_json, state, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+        `INSERT INTO telegram_conversation_part (conversation, ordinal, kind, text, reply_to, proposal, keyboard_json, state, created_at, task_id, source_run, artifact, sha256)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
       );
       parts.forEach((part, ordinal) => {
-        insert.run(id, ordinal, part.kind, part.text, part.replyTo ?? null, part.proposal ?? null, part.keyboard == null ? null : JSON.stringify(part.keyboard), stamp);
+        const image = part.kind === "image" ? part : null;
+        insert.run(
+          id, ordinal, part.kind, part.text, part.kind === "reply" ? part.replyTo ?? null : null, part.kind === "card" ? part.proposal : null,
+          part.kind === "card" && part.keyboard != null ? JSON.stringify(part.keyboard) : null, stamp,
+          image?.taskId ?? null, image?.run ?? null, image?.artifact ?? null, image?.sha256 ?? null,
+        );
       });
       return true;
     });
@@ -21781,9 +21973,10 @@ export class Store {
   }
 
   /** The exact task/run bindings of one outbound message this bot sent: a
-   * plain fact names one, a digest part may name several, a reply names none. */
+   * plain fact names one, a digest part may name several, a reply names none,
+   * and (v64) a confirmed result image names its exact task and run. */
   telegramMessageBindings(binding: TelegramBinding, messageId: string): { taskId: string | null; taskRef: number | null; run: number | null; project: string | null }[] {
-    return this.db
+    const facts = this.db
       .prepare(
         `SELECT DISTINCT task_id, task_ref, source_run, project FROM telegram_outbound_message
           WHERE binding = ? AND chat_id = ? AND message_id = ? ORDER BY notification`,
@@ -21795,6 +21988,20 @@ export class Store {
         run: row["source_run"] === null ? null : Number(row["source_run"]),
         project: row["project"] === null ? null : String(row["project"]),
       }));
+    const images = this.db
+      .prepare(
+        `SELECT DISTINCT p.task_id, p.source_run FROM telegram_conversation_part p
+          JOIN telegram_conversation c ON c.id = p.conversation
+          WHERE c.binding = ? AND c.chat_id = ? AND p.message_id = ? AND p.kind = 'image' AND p.state = 'sent'
+          ORDER BY p.conversation, p.ordinal`,
+      )
+      .all(binding.id, binding.chatId, messageId)
+      .map(row => {
+        const taskId = String(row["task_id"]);
+        const ref = this.lookupRef(taskId);
+        return { taskId, taskRef: ref?.id ?? null, run: Number(row["source_run"]), project: ref?.repo ?? null };
+      });
+    return [...facts, ...images.filter(one => !facts.some(fact => fact.taskId === one.taskId && fact.run === one.run))];
   }
 
   // ---- proposal-card tokens (v62) ---------------------------------------------
@@ -22870,6 +23077,10 @@ function readTelegramConversationPart(row: Record<string, unknown>): TelegramCon
     keyboard: row["keyboard_json"] === null || row["keyboard_json"] === undefined ? null : JSON.parse(String(row["keyboard_json"])) as TelegramConversationPart["keyboard"],
     state: String(row["state"]) as TelegramConversationPart["state"],
     messageId: text("message_id"),
+    taskId: text("task_id"),
+    run: row["source_run"] === null || row["source_run"] === undefined ? null : Number(row["source_run"]),
+    artifact: row["artifact"] === null || row["artifact"] === undefined ? null : Number(row["artifact"]),
+    sha256: text("sha256"),
     attempts: Number(row["attempts"]),
     uncertain: Number(row["uncertain"]),
     nextAttemptAt: text("next_attempt_at"),

@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store, type TelegramBinding } from "./store.js";
 import { addApprover, approve, propose } from "./scope.js";
-import { bridgePass, createTransport, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport } from "./telegram.js";
+import { bridgePass, createTransport, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport, type TelegramUpload } from "./telegram.js";
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
 import { subscriptionCredentialKey } from "./converse.js";
 import { confirmMateProposal } from "./mate-doors.js";
@@ -47,7 +47,7 @@ type Answer = { text: string; calls?: Call[]; before?: () => void | Promise<void
 type SendFault = "throw" | "no-id" | { ok: false; description?: string; parameters?: { retry_after?: number } } | null;
 
 function scriptedTransport() {
-  const calls: { method: string; params: Record<string, unknown>; messageId: number | null }[] = [];
+  const calls: { method: string; params: Record<string, unknown>; messageId: number | null; upload?: TelegramUpload }[] = [];
   const updates: unknown[][] = [];
   let nextMessageId = 100;
   const script = {
@@ -55,28 +55,30 @@ function scriptedTransport() {
     fault: null as ((params: Record<string, unknown>, attempt: number) => SendFault) | null,
   };
   const attempts = () => calls.filter(call => call.method.startsWith("sendMessage"));
-  const transport: TelegramTransport = async (method, params) => {
+  const transport: TelegramTransport = async (method, params, _signal, upload) => {
     if (method === "getUpdates") {
       calls.push({ method, params, messageId: null });
       const offset = Number(params["offset"] ?? 0);
       return { ok: true, result: (updates.shift() ?? []).filter(update => Number((update as { update_id: number }).update_id) >= offset) };
     }
-    if (method === "sendMessage") {
-      const fault = script.fault === null ? null : script.fault(params, attempts().length);
+    if (method === "sendMessage" || method === "sendDocument") {
+      // A document is the multipart road: recorded with the exact upload the adapter would serialize, faulted by the same script.
+      const fault = script.fault === null ? null : script.fault(params, calls.filter(call => call.method.startsWith(method)).length);
       if (fault !== null) {
-        calls.push({ method: "sendMessage:failed", params, messageId: null });
+        calls.push({ method: `${method}:failed`, params, messageId: null, ...(upload === undefined ? {} : { upload }) });
         if (fault === "throw") throw new Error("socket hang up");
         if (fault === "no-id") return { ok: true, result: {} };
         return fault;
       }
       const messageId = nextMessageId++;
-      calls.push({ method, params, messageId });
+      calls.push({ method, params, messageId, ...(upload === undefined ? {} : { upload }) });
       return { ok: true, result: { message_id: messageId } };
     }
     calls.push({ method, params, messageId: null });
     return { ok: true, result: true };
   };
   const sends = () => calls.filter(call => call.method === "sendMessage");
+  const documents = () => calls.filter(call => call.method === "sendDocument");
   const texts = () => sends().map(call => String(call.params["text"]));
   const edits = () => calls.filter(call => call.method === "editMessageText").map(call => String(call.params["text"]));
   const acks = () => calls.filter(call => call.method === "answerCallbackQuery").map(call => String(call.params["text"] ?? ""));
@@ -92,7 +94,7 @@ function scriptedTransport() {
     };
     return { messageId: sent.messageId as number, text: String(sent.params["text"]), rows, button };
   };
-  return { transport, calls, updates, sends, attempts, texts, edits, acks, card, set fault(value: typeof script.fault) { script.fault = value; } };
+  return { transport, calls, updates, sends, documents, attempts, texts, edits, acks, card, set fault(value: typeof script.fault) { script.fault = value; } };
 }
 
 const textUpdate = (id: number, text: string, extra: Record<string, unknown> = {}) => ({
@@ -1176,6 +1178,255 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       script.updates.push([textUpdate(nextUpdate++, `/task ${filed}`)]);
       expect(await pass()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
       expect(urlButtons(script.sends().at(-1))).toEqual([["Open task", `https://console.example/chat?task=${encodeURIComponent(filed)}`]]);
+    });
+  });
+
+  describe("result screenshots on demand: the same saved evidence, sent as files", () => {
+    const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(200, 7)]);
+    const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(150, 3)]);
+    /** One saved screenshot record of a result, exactly as the builder stores a verified capture (or a flawed one). */
+    const shot = (run: number, name: string, bytes: Buffer, record: { captureStatus?: "ok" | "failed"; truncated?: boolean; redacted?: boolean; bytesStored?: number } = {}) => {
+      writeFileSync(join(evidenceRoot, String(run), name), bytes);
+      return store.saveArtifact({
+        run, kind: "screenshot", key: `${run}/${name}`, bytesOriginal: bytes.length, bytesStored: record.bytesStored ?? bytes.length, truncated: record.truncated ?? false,
+        sha256: createHash("sha256").update(bytes).digest("hex"), capture: "agent-claimed screenshot (validated)",
+        ...(record.redacted === undefined ? {} : { redacted: record.redacted }), ...(record.captureStatus === undefined ? {} : { captureStatus: record.captureStatus }),
+      }, now);
+    };
+    const row = () => store.listTelegramConversations(BOT).at(-1)!;
+    const parts = () => store.listTelegramConversationParts(row().id);
+    const turns = () => Number(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()?.["n"]);
+    const later = (ms: number) => { now = new Date(now.getTime() + ms); };
+    /** The most recent result the model saw from one tool, across every harness request so far. */
+    const toolResult = (name: string): unknown => {
+      for (let index = requests.length - 1; index >= 0; index--) {
+        const found = [...requests[index]!.history].reverse().find(one => one.role === "tool" && one.name === name);
+        if (found !== undefined) return JSON.parse((found as { result: string }).result);
+      }
+      throw new Error(`no ${name} result was shown to the model`);
+    };
+    const askForImages = (run: number | undefined, reply: string, extra: Record<string, unknown> = {}) => {
+      answers.push(
+        { text: "Selecting the screenshots.", calls: [{ id: "i1", name: "get_result_images", args: { task: "payout", ...(run === undefined ? {} : { run }) } }] },
+        { text: reply },
+      );
+      script.updates.push([textUpdate(nextUpdate++, "Show me the screenshots from that result.", extra)]);
+    };
+
+    test("asked for a result's screenshots: the shared tool selects that exact result's verified images, Telegram sends each original as a document after the reply, a reply to an image revises that exact run, and a newer revision is said, never switched to", async () => {
+      origin = "https://console.example";
+      const { run } = seedSource("payout");
+      const first = shot(run, "screenshot-home.png", PNG);
+      const second = shot(run, "screenshot-form.jpg", JPEG);
+      askForImages(run, `Two screenshots from result #${run} of payout follow.`);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, chatAnswered: 1, problems: [] } });
+      // What the model was told: identity and count, and that the files FOLLOW — nothing was delivered when it answered.
+      expect(toolResult("get_result_images")).toMatchObject({ task: "payout", root: "payout", currentExecution: "payout", isCurrent: true, run, imageCount: 2, unavailable: [], report: false, delivery: "2 image file(s) will be sent to this chat after your reply. Say they follow; do not say they were delivered." });
+      // Durable before any send, typed: the reply, then one image part per screenshot by identity — never bytes, never a path.
+      expect(parts().map(one => [one.kind, one.state, one.text, one.taskId, one.run, one.artifact, one.sha256])).toEqual([
+        ["reply", "sent", `Two screenshots from result #${run} of payout follow.`, null, null, null, null],
+        ["image", "sent", `payout · result #${run} · screenshot 1 of 2`, "payout", run, first, createHash("sha256").update(PNG).digest("hex")],
+        ["image", "sent", `payout · result #${run} · screenshot 2 of 2`, "payout", run, second, createHash("sha256").update(JPEG).digest("hex")],
+      ]);
+      // The wire: the reply as text, then one multipart document per image — the original bytes, a name from identity, the sniffed type, the short caption.
+      expect(script.texts()).toEqual([`Two screenshots from result #${run} of payout follow.`]);
+      const documents = script.documents();
+      expect(documents.map(one => [one.params["chat_id"], one.params["caption"], one.upload?.field, one.upload?.fileName, one.upload?.contentType])).toEqual([
+        [String(CHAT), `payout · result #${run} · screenshot 1 of 2`, "document", `payout-result-${run}-${first}.png`, "image/png"],
+        [String(CHAT), `payout · result #${run} · screenshot 2 of 2`, "document", `payout-result-${run}-${second}.jpg`, "image/jpeg"],
+      ]);
+      expect(documents[0]!.upload!.bytes.equals(PNG)).toBe(true);
+      expect(documents[1]!.upload!.bytes.equals(JPEG)).toBe(true);
+      for (const call of documents) expect(JSON.stringify(call.params)).not.toMatch(/\/pool|evidence|orders\.db|[0-9a-f]{32}|Guard the payout/);
+      expect(row()).toMatchObject({ state: "done", outcome: "answered", replyMessageId: "100" });
+      expect(requests).toHaveLength(2);
+      expect(turns()).toBe(1);
+      // Each confirmed image binds to the exact task and run — the same routing an outbox result message carries.
+      const imageMessage = documents[0]!.messageId as number;
+      expect(store.telegramMessageBindings(binding(), String(imageMessage))).toEqual([{ taskId: "payout", taskRef: store.lookupRef("payout")!.id, run, project: repo }]);
+      // Replying to the image: the turn is pinned to that result, and the existing revise flow creates the same-family revision, audited as telegram.
+      answers.push(
+        { text: "Reading the result.", calls: [{ id: "r1", name: "get_result", args: { task: "payout", run } }] },
+        { text: "Proposing the change.", calls: [{ id: "r2", name: "propose_review", args: { run, operation: "revise", note: "Fix the spacing on the form." } }] },
+        { text: "I proposed a revision of payout with your feedback. Confirm it to create the revision." },
+      );
+      script.updates.push([textUpdate(nextUpdate++, "Fix the spacing on the form.", { reply_to_message: { message_id: imageMessage } })]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, chatAnswered: 1, problems: [] } });
+      expect(row()).toMatchObject({ replyTo: String(imageMessage), taskId: "payout", sourceRun: run, state: "done" });
+      expect((requests[2]!.history.filter(one => one.role === "operator").at(-1) as { text: string }).text).toContain(`replying to result #${run} from execution payout`);
+      const card = script.card();
+      expect(card.text).toContain(`Request changes to result #${run} of Guard the payout path (payout)`);
+      expect(card.text).toContain("| Fix the spacing on the form.");
+      expect(await tapPass(card.button(/^Confirm$/), card.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
+      const proposal = store.listMateProposals(store.liveMateThreadFor("alex")!.id, ["confirmed"])[0]!;
+      expect(proposal).toMatchObject({ kind: "review", state: "confirmed" });
+      expect(proposal.outcome).toMatchObject({ ok: true, via: "telegram" });
+      const child = (proposal.outcome as { taskId: string }).taskId;
+      expect(store.taskFamilyOf("payout", [repo], false)!.versions.map(one => one.id)).toEqual(["payout", child]);
+      expect(store.revisionSourceOf(store.lookupRef(child)!.id)).toMatchObject({ sourceRun: run, sourceTask: "payout" });
+      expect(store.allDiffComments(run).map(one => [one.author, one.note, one.consumedBy])).toEqual([["alex", "Fix the spacing on the form.", child]]);
+      expect(store.getScope(child)?.approvedDigest ?? null).toBeNull();
+      expect(urlButtons(lastEdit())).toEqual([["Review & start", `https://console.example/chat?task=${encodeURIComponent(child)}#task-chat-action`]]);
+      // The image message keeps its identity after the revision. Asked again with no run, the newer revision is said and nothing is switched; nothing is sent.
+      askForImages(undefined, "A newer revision of payout is current. Which result do you want: this version or the newer one?", { reply_to_message: { message_id: imageMessage } });
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(toolResult("get_result_images")).toEqual({ ok: false, message: "A newer revision of this task is current. Say which result you mean before images are selected: this version or the newer one." });
+      expect(script.documents()).toHaveLength(2);
+      // By exact run the older result still travels, captioned as the older version; a revise against it is refused by the existing stale-result rule, and no second revision exists.
+      askForImages(run, "Two screenshots from the older result follow.");
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(toolResult("get_result_images")).toMatchObject({ run, currentExecution: child, isCurrent: false, imageCount: 2 });
+      expect(script.documents().slice(2).map(one => one.params["caption"])).toEqual([`payout · result #${run} · screenshot 1 of 2 · older version`, `payout · result #${run} · screenshot 2 of 2 · older version`]);
+      const older = script.documents()[2]!.messageId as number;
+      expect(store.telegramMessageBindings(binding(), String(older))).toEqual([{ taskId: "payout", taskRef: store.lookupRef("payout")!.id, run, project: repo }]);
+      answers.push(
+        { text: "Reading.", calls: [{ id: "r3", name: "get_result", args: { task: "payout", run } }] },
+        { text: "Trying.", calls: [{ id: "r4", name: "propose_review", args: { run, operation: "revise", note: "Also tighten the header." } }] },
+        { text: "A newer revision of payout is current. Review that version before requesting changes." },
+      );
+      script.updates.push([textUpdate(nextUpdate++, "Also tighten the header.", { reply_to_message: { message_id: older } })]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(toolResult("propose_review")).toEqual({ ok: false, message: "A newer revision is current. Read that version before requesting changes." });
+      expect(store.taskFamilyOf("payout", [repo], false)!.versions).toHaveLength(2);
+      expect(store.listMateProposals(store.liveMateThreadFor("alex")!.id, ["pending"])).toEqual([]);
+      // Ordinary history, as the console and CLI read it: the operator's asks and the assistant's words, and never an image described that was not selected.
+      expect(store.listMateMessages(store.liveMateThreadFor("alex")!.id, 20).filter(one => one.role === "assistant").map(one => one.text)).toEqual([
+        `Two screenshots from result #${run} of payout follow.`,
+        "I proposed a revision of payout with your feedback. Confirm it to create the revision.",
+        "A newer revision of payout is current. Which result do you want: this version or the newer one?",
+        "Two screenshots from the older result follow.",
+        "A newer revision of payout is current. Review that version before requesting changes.",
+      ]);
+    });
+
+    test("a lost answer on a document: the confirmed reply is not resent, the image resumes from its typed identity after a restart with no model call, and its bytes are read and verified again — a file changed meanwhile is refused visibly with the exact result to open, never sent", async () => {
+      origin = "https://console.example";
+      const { run } = seedSource("payout");
+      shot(run, "screenshot-home.png", PNG);
+      shot(run, "screenshot-form.jpg", JPEG);
+      script.fault = params => params["caption"] === undefined ? null : "throw";
+      askForImages(run, "Two screenshots follow.");
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, problems: [expect.stringContaining("is waiting to be sent: Telegram transport failed; delivery may be uncertain")] } });
+      expect(parts().map(one => [one.kind, one.state, one.attempts, one.uncertain])).toEqual([["reply", "sent", 1, 0], ["image", "pending", 1, 1], ["image", "pending", 0, 0]]);
+      expect(row()).toMatchObject({ state: "queued", outcome: "delivering", replyMessageId: "100" });
+      expect(script.documents()).toHaveLength(0);
+      // The first file changes on disk while the part waits. Restart, retry: the bytes are read again and refused; the second image goes out untouched.
+      writeFileSync(join(evidenceRoot, String(run), "screenshot-home.png"), Buffer.concat([PNG, Buffer.from([1])]));
+      script.fault = null;
+      store.close(); store = openStore(file);
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [expect.stringContaining("was not sent: the saved file is missing or changed")] } });
+      expect(parts().map(one => [one.kind, one.state, one.messageId, one.attempts, one.uncertain, one.lastError])).toEqual([
+        ["reply", "sent", "100", 1, 0, null],
+        ["image", "dropped", null, 1, 1, "the saved file is missing or changed"],
+        ["image", "sent", "102", 1, 0, null],
+      ]);
+      expect(script.texts()).toEqual(["Two screenshots follow.", `payout · result #${run} · screenshot 1 of 2 was not sent: the saved file is missing or changed. Open the result to view it.`]);
+      expect(urlButtons(script.sends().at(-1))).toEqual([["Review result", `https://console.example/chat?task=payout&result=${run}`]]);
+      expect(script.documents()).toHaveLength(1);
+      expect(script.documents()[0]!.upload!.bytes.equals(JPEG)).toBe(true);
+      expect(row()).toMatchObject({ state: "done", outcome: "replayed" });
+      expect(requests).toHaveLength(2);
+      expect(turns()).toBe(1);
+      // The dropped image never binds a reply; the sent one does.
+      expect(store.telegramMessageBindings(binding(), "101")).toEqual([]);
+      expect(store.telegramMessageBindings(binding(), "102")).toEqual([{ taskId: "payout", taskRef: store.lookupRef("payout")!.id, run, project: repo }]);
+    });
+
+    test("Telegram's own refusal of a document is definite and retried on the existing schedule, retry_after pauses the bot, and an acknowledgement without a message id stays pending and uncertain — with no model call anywhere", async () => {
+      const { run } = seedSource("payout");
+      shot(run, "screenshot-home.png", PNG);
+      shot(run, "screenshot-form.jpg", JPEG);
+      let attempt = 0;
+      script.fault = params => params["caption"] === undefined ? null
+        : ++attempt === 1 ? { ok: false, description: "Bad Request: file is too big" }
+        : attempt === 2 ? { ok: false, description: "Too Many Requests", parameters: { retry_after: 7 } }
+        : attempt === 3 ? "no-id" : null;
+      askForImages(run, "Two screenshots follow.");
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("is waiting to be sent: Bad Request: file is too big")] } });
+      expect(parts()[1]).toMatchObject({ kind: "image", state: "pending", attempts: 1, uncertain: 0, lastError: "Bad Request: file is too big", nextAttemptAt: new Date(now.getTime() + PART_RETRY_MS[0]).toISOString() });
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("Too Many Requests (retry after 7s)")] } });
+      expect(store.telegramRetryAt(BOT)).toBe(new Date(now.getTime() + 7_000).toISOString());
+      expect(parts()[1]).toMatchObject({ state: "pending", attempts: 2, uncertain: 0 });
+      later(PART_RETRY_MS[1]);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("Telegram returned no confirmed message identity")] } });
+      expect(parts()[1]).toMatchObject({ state: "pending", attempts: 3, uncertain: 1, messageId: null });
+      later(PART_RETRY_MS[2]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(parts().map(one => [one.kind, one.state, one.attempts, one.uncertain])).toEqual([["reply", "sent", 1, 0], ["image", "sent", 4, 1], ["image", "sent", 1, 0]]);
+      expect(script.documents()).toHaveLength(2);
+      expect(script.texts()).toEqual(["Two screenshots follow."]);
+      expect(requests).toHaveLength(2);
+      expect(turns()).toBe(1);
+    });
+
+    test("access revoked while an image waits: the registry is read again after the await and nothing is uploaded under a changed ceiling; a result moved out of the phone's projects is refused at the upload itself", async () => {
+      const { run } = seedSource("payout");
+      shot(run, "screenshot-home.png", PNG);
+      script.fault = params => params["caption"] === undefined ? null : "throw";
+      askForImages(run, "One screenshot follows.");
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1 } });
+      expect(parts().map(one => [one.kind, one.state])).toEqual([["reply", "sent"], ["image", "pending"]]);
+      script.fault = null;
+      projects = [];
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1, problems: [expect.stringContaining("was not sent: the connected projects changed")] } });
+      expect(script.documents()).toHaveLength(0);
+      expect(parts()[1]).toMatchObject({ kind: "image", state: "pending", messageId: null });
+      expect(row()).toMatchObject({ state: "failed", outcome: "unsent:the connected projects changed" });
+      expect(script.texts().at(-1)).toMatch(/^The connected projects changed, so the assistant's reply was not sent\. Nothing was changed\./);
+      // The ceiling unchanged, the task's recorded project changed under it between the plan and the upload (the door refuses to move a scoped task, so the row is moved directly): the per-image proof refuses it in words, with no link to a project this phone cannot reach.
+      projects = [repo];
+      script.fault = params => params["caption"] === undefined ? null : "throw";
+      askForImages(run, "One screenshot follows.");
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1 } });
+      const elsewhere = join(dir, "elsewhere"); mkdirSync(elsewhere);
+      expect(store.placeTask(store.lookupRef("payout")!.id, elsewhere)).toEqual({ ok: false, reason: "scoped" });
+      store.handle.prepare("UPDATE task_ref SET repo = ? WHERE id = ?").run(elsewhere, store.lookupRef("payout")!.id);
+      script.fault = null;
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [expect.stringContaining("was not sent: the result is outside your connected projects now")] } });
+      expect(script.documents()).toHaveLength(0);
+      expect(parts()[1]).toMatchObject({ kind: "image", state: "dropped", lastError: "the result is outside your connected projects now" });
+      expect(script.texts().at(-1)).toBe(`payout · result #${run} · screenshot 1 of 1 was not sent: the result is outside your connected projects now. Open the result to view it.`);
+      expect(urlButtons(script.sends().at(-1))).toEqual([]);
+      expect(script.texts().at(-1)).not.toContain("elsewhere");
+    });
+
+    test("a turn that selected images and then failed sends nothing: its selection is deleted with its drafts; unusable records are named to the model and never travel", async () => {
+      const { run } = seedSource("payout");
+      const good = shot(run, "screenshot-home.png", PNG);
+      const failed = shot(run, "screenshot-failed.png", PNG, { captureStatus: "failed" });
+      const shortened = shot(run, "screenshot-cut.png", PNG, { truncated: true });
+      const redacted = shot(run, "screenshot-redacted.png", PNG, { redacted: true });
+      const oversized = shot(run, "screenshot-huge.png", PNG, { bytesStored: 5 * 1024 * 1024 + 1 });
+      const wrongKind = shot(run, "screenshot-text.png", Buffer.from("just words", "utf8"));
+      answers.push(
+        { text: "Selecting.", calls: [{ id: "i1", name: "get_result_images", args: { task: "payout", run } }] },
+        { text: "", before: () => { throw new Error("harness died"); } },
+      );
+      script.updates.push([textUpdate(nextUpdate++, "Show me the screenshots from that result.")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, chatRefused: 1 } });
+      expect(row()).toMatchObject({ state: "failed", outcome: "failed:provider-error" });
+      expect(Number(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn_evidence").get()?.["n"])).toBe(0);
+      expect(parts()).toEqual([]);
+      expect(script.documents()).toHaveLength(0);
+      expect(script.texts().at(-1)).toMatch(/^The assistant's reply did not complete: /);
+      // The same ask, answered: the model is told which records cannot travel and why; only the verified image is sent.
+      askForImages(run, "One screenshot follows; five saved captures could not be verified.");
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(toolResult("get_result_images")).toMatchObject({
+        imageCount: 1, images: [{ id: good, format: "png", caption: `payout · result #${run} · screenshot 1 of 1` }],
+        unavailable: [
+          { id: failed, problem: "the capture failed" }, { id: shortened, problem: "the saved file was shortened" }, { id: redacted, problem: "sensitive text was hidden from the saved file" },
+          { id: oversized, problem: "the saved file is too large to send" }, { id: wrongKind, problem: "the saved file is not a PNG or JPEG" },
+        ],
+        delivery: "1 image file(s) will be sent to this chat after your reply. Say they follow; do not say they were delivered.",
+      });
+      expect(script.documents().map(one => [one.params["caption"], one.upload?.fileName])).toEqual([[`payout · result #${run} · screenshot 1 of 1`, `payout-result-${run}-${good}.png`]]);
+      expect(parts().map(one => [one.kind, one.state])).toEqual([["reply", "sent"], ["image", "sent"]]);
+      expect(turns()).toBe(2);
     });
   });
 

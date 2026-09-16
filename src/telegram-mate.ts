@@ -29,9 +29,10 @@ import { canonicalProject } from "./project.js";
 import type { ChatConfig, MateProposal, MateSession, MateThread, Store, SubscriptionChatProviderId, TelegramBinding, TelegramConversation } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { phoneText, projectLabel } from "./telegram-status.js";
-import { CHAT_CONTROLS, chatControlHref, isChatControl, type ChatControl } from "./chat-controls.js";
+import { CHAT_CONTROLS, chatControlHref, chatResultHref, isChatControl, type ChatControl } from "./chat-controls.js";
 import { CHAT_TASK_ACTIONS, isChatTaskAction } from "./chat-task-actions.js";
-import type { TelegramTransport } from "./telegram.js";
+import { resultImageFileName, verifyResultImage } from "./chat-evidence.js";
+import type { TelegramTransport, TelegramUpload } from "./telegram.js";
 
 /** How long one claimed turn may go without a heartbeat before another poller may take it over. */
 export const CONVERSATION_CLAIM_MS = 2 * 60_000;
@@ -426,7 +427,8 @@ export const TELEGRAM_ACTION_PARITY: Record<string, { support: ParitySupport; ho
   list_decisions: { support: "direct", how: "Read during a turn.", gap: null },
   get_decision: { support: "direct", how: "Read during a turn.", gap: null },
   queue: { support: "direct", how: "Read during a turn.", gap: null },
-  get_result: { support: "direct", how: "Read during a turn; the phone card shows the verification verdict, never a local link.", gap: "Screenshots and secure remote evidence links are not delivered to the phone yet." },
+  get_result: { support: "direct", how: "Read during a turn; the phone card shows the verification verdict, never a local link.", gap: "Secure remote evidence links are not delivered to the phone; a result's screenshots travel through get_result_images." },
+  get_result_images: { support: "direct", how: "Read during a turn; every verified original PNG/JPEG the turn selected is sent as a document with a short caption after the reply, re-verified before each upload, and a reply to an image binds that exact task and run.", gap: "An image whose record or bytes fail verification, or one Telegram refuses, is named in the chat rather than sent; the operator opens the exact result in the console. Fixture proof only, no physical-phone rendering." },
   get_controls: { support: "direct", how: "Read during a turn.", gap: null },
   show_control: { support: "handoff", how: "The card names the control and the task, with one url button to that exact console control when a trusted https console-url is configured; the button opens the signed-in console and acts on nothing.", gap: "Incomplete phone action: the control itself runs in the console, after sign-in." },
   propose_task: { support: "direct", how: "Card with Confirm/Dismiss through confirmMateProposal (filed as a mate proposal, via telegram). The confirmed card links Review & start for the filed task while its scope waits; under a signed automatic mode it says the scope is approved and links the task.", gap: "Under manual approval the password step happens in the console, reached from the card's button." },
@@ -741,10 +743,13 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
     return null;
   };
   /** A notice that carries no project data — "this changed, nothing happened" — sent once, best effort, under the pairing fence alone. */
-  const notify = async (text: string): Promise<void> => {
+  const notify = async (text: string, keyboard?: Keyboard): Promise<void> => {
     if (pairingProblem() !== null || !held()) return;
     try {
-      const answer = await transport("sendMessage", { chat_id: chatId, text, link_preview_options: { is_disabled: true }, reply_parameters: { message_id: Number(row.messageId) } });
+      const answer = await transport("sendMessage", {
+        chat_id: chatId, text, link_preview_options: { is_disabled: true }, reply_parameters: { message_id: Number(row.messageId) },
+        ...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }),
+      });
       if (!answer.ok) report.problems.push(`telegram chat notice for update ${row.updateId} could not be sent: ${answer.description ?? "sendMessage failed"}`);
     } catch {
       report.problems.push(`telegram chat notice for update ${row.updateId} could not be sent: Telegram transport failed`);
@@ -795,25 +800,58 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
         return;
       }
       if (!held()) return;
-      // A card's link is minted NOW, from the persisted proposal and the
-      // origin configured at this moment: a retry after the setting changed
-      // or went away carries the current truth, never a stored URL.
       const repos = telegramConversationRepos(store, binding.approver, read ?? []);
-      const proposal = part.kind === "card" && part.proposal !== null ? store.getMateProposal(part.proposal) : null;
-      const origin = proposal === null ? null : options.phoneOrigin?.() ?? null;
-      const wanted = proposal === null ? null : proposalLink(store, proposal, repos);
-      const keyboard = keyboardWith(part.keyboard, phoneLinkButton(origin, wanted));
-      const text = proposal !== null && part.keyboard === null ? handoffCardText(part.text, linkNote(origin, wanted)) : part.text;
       const backoff = new Date(clock().getTime() + PART_RETRY_MS[Math.min(part.attempts, PART_RETRY_MS.length - 1)]!);
-      let answer: Awaited<ReturnType<Transport>>;
-      try {
-        answer = await transport("sendMessage", {
+      let send: () => ReturnType<Transport>;
+      let method: "sendMessage" | "sendDocument";
+      if (part.kind === "image") {
+        // The image, re-proved NOW — after the registry await, under the
+        // held claim, immediately before the upload, on every attempt: the
+        // task still in this phone's projects, the run still its own, the
+        // artifact row still the one planned from, the bytes read again and
+        // still a bounded PNG/JPEG. Anything less is refused in plain words
+        // and never sent; the exact result is one button away when a
+        // trusted origin can carry it. The original bytes travel untouched.
+        const image = part.taskId === null || part.run === null || part.artifact === null || part.sha256 === null
+          ? { ok: false as const, problem: "the saved file's record changed" }
+          : verifyResultImage(store, options.evidenceRoot, repos, { taskId: part.taskId, run: part.run, artifact: part.artifact, sha256: part.sha256 });
+        if (!image.ok) {
+          if (!store.dropTelegramConversationPart(row.id, part.ordinal, owner, image.problem, now)) return;
+          report.problems.push(`telegram chat image for update ${row.updateId} was not sent: ${image.problem}`);
+          const link = part.taskId !== null && part.run !== null && taskInCeiling(store, part.taskId, repos) ? { label: "Review result", path: chatResultHref(part.taskId, part.run) } : null;
+          const button = phoneLinkButton(options.phoneOrigin?.() ?? null, link);
+          await notify(`${part.text} was not sent: ${image.problem}. Open the result to view it.`, button === null ? undefined : [button]);
+          continue;
+        }
+        const upload: TelegramUpload = {
+          field: "document",
+          fileName: resultImageFileName(part.taskId as string, part.run as number, part.artifact as number, image.format),
+          contentType: image.format === "png" ? "image/png" : "image/jpeg",
+          bytes: image.bytes,
+        };
+        method = "sendDocument";
+        send = () => transport("sendDocument", { chat_id: chatId, caption: part.text }, undefined, upload);
+      } else {
+        // A card's link is minted NOW, from the persisted proposal and the
+        // origin configured at this moment: a retry after the setting changed
+        // or went away carries the current truth, never a stored URL.
+        const proposal = part.kind === "card" && part.proposal !== null ? store.getMateProposal(part.proposal) : null;
+        const origin = proposal === null ? null : options.phoneOrigin?.() ?? null;
+        const wanted = proposal === null ? null : proposalLink(store, proposal, repos);
+        const keyboard = keyboardWith(part.keyboard, phoneLinkButton(origin, wanted));
+        const text = proposal !== null && part.keyboard === null ? handoffCardText(part.text, linkNote(origin, wanted)) : part.text;
+        method = "sendMessage";
+        send = () => transport("sendMessage", {
           chat_id: chatId,
           text,
           link_preview_options: { is_disabled: true },
           ...(part.replyTo === null ? {} : { reply_parameters: { message_id: Number(part.replyTo) } }),
           ...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }),
         });
+      }
+      let answer: Awaited<ReturnType<Transport>>;
+      try {
+        answer = await send();
       } catch {
         // The answer was lost: Telegram may or may not have the message. Said so, retried, counted.
         const error = "Telegram transport failed; delivery may be uncertain";
@@ -824,7 +862,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
         const retry = answer.parameters?.retry_after;
         const retryAfter = typeof retry === "number" && Number.isFinite(retry) && retry > 0 ? Math.ceil(retry) : null;
         const uncertain = answer.uncertain === true;
-        const error = `${answer.description ?? "sendMessage failed"}${uncertain ? "; delivery may be uncertain" : ""}${retryAfter === null ? "" : ` (retry after ${retryAfter}s)`}`;
+        const error = `${answer.description ?? `${method} failed`}${uncertain ? "; delivery may be uncertain" : ""}${retryAfter === null ? "" : ` (retry after ${retryAfter}s)`}`;
         let until = backoff;
         if (retryAfter !== null) {
           const paused = new Date(clock().getTime() + retryAfter * 1_000);
@@ -848,12 +886,15 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
     if (finish({ state: "done", outcome: outcomeWord })) report.answered++;
   };
 
-  /** The reply and one card per pending proposal, persisted with the cards' tokens in ONE transaction before any send. */
+  /** The reply, one image per screenshot the ANSWERED turn selected (typed identity only — bytes are read and re-verified at send time), and one card per pending proposal, persisted with the cards' tokens in ONE transaction before any send. */
   const plan = (session: number, turn: number, reply: string, proposals: readonly MateProposal[], repos: readonly string[]): boolean => {
     try {
       return store.transact(() => {
         const now = clock();
         const parts: Parameters<Store["planTelegramConversationParts"]>[3][number][] = splitParts(reply).map((text, index) => ({ kind: "reply", text, replyTo: index === 0 ? row.messageId : null }));
+        // Only a turn that answered may have its selection sent: a failed or revoked turn's rows were deleted with its drafts, and the state is read again here.
+        const selected = store.getMateTurn(turn)?.state === "answered" ? store.listMateTurnEvidence(turn) : [];
+        for (const image of selected) parts.push({ kind: "image", text: image.caption, taskId: image.taskId, run: image.run, artifact: image.artifact, sha256: image.sha256 });
         for (const proposal of proposals) {
           const preview = proposalPreview(store, proposal, repos);
           const keyboard = preview.buttons ? mintCardTokens(store, binding, proposal.id, now).keyboard : null;
@@ -939,7 +980,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
       store, who, session, thread, config, key: null, message: row.text, requestId: row.request,
       ...(row.context === null ? {} : { context: row.context }),
       ...(options.subscriptionRunner === undefined ? {} : { subscriptionRunner: options.subscriptionRunner }),
-      clock, evidenceRoot: options.evidenceRoot, revalidate,
+      clock, evidenceRoot: options.evidenceRoot, revalidate, mediaDelivery: "documents",
     });
   } finally {
     clearInterval(heartbeat);
