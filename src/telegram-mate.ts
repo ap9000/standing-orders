@@ -31,6 +31,7 @@ import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { phoneText, projectLabel } from "./telegram-status.js";
 import { CHAT_CONTROLS, isChatControl } from "./chat-controls.js";
 import { CHAT_TASK_ACTIONS, isChatTaskAction } from "./chat-task-actions.js";
+import type { TelegramTransport } from "./telegram.js";
 
 /** How long one claimed turn may go without a heartbeat before another poller may take it over. */
 export const CONVERSATION_CLAIM_MS = 2 * 60_000;
@@ -53,11 +54,7 @@ export type TelegramConversationOptions = {
 };
 
 /** One Bot API call, the shape telegram.ts injects. */
-export type Transport = (
-  method: string,
-  params: Record<string, unknown>,
-  signal?: AbortSignal,
-) => Promise<{ ok: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number } }>;
+export type Transport = TelegramTransport;
 
 // ---- the ceiling and the principal --------------------------------------------
 
@@ -684,14 +681,15 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
       if (!answer.ok) {
         const retry = answer.parameters?.retry_after;
         const retryAfter = typeof retry === "number" && Number.isFinite(retry) && retry > 0 ? Math.ceil(retry) : null;
-        const error = `${answer.description ?? "sendMessage failed"}${retryAfter === null ? "" : ` (retry after ${retryAfter}s)`}`;
+        const uncertain = answer.uncertain === true;
+        const error = `${answer.description ?? "sendMessage failed"}${uncertain ? "; delivery may be uncertain" : ""}${retryAfter === null ? "" : ` (retry after ${retryAfter}s)`}`;
         let until = backoff;
         if (retryAfter !== null) {
           const paused = new Date(clock().getTime() + retryAfter * 1_000);
           store.deferTelegram(botId, paused.toISOString());
           if (paused > until) until = paused;
         }
-        if (store.settleTelegramConversationPart(row.id, part.ordinal, owner, { ok: false, error, uncertain: false, retryAt: until.toISOString() }, clock())) defer(until, error);
+        if (store.settleTelegramConversationPart(row.id, part.ordinal, owner, { ok: false, error, uncertain, retryAt: until.toISOString() }, clock())) defer(until, error);
         return;
       }
       const id = (answer.result as { message_id?: number } | undefined)?.message_id;

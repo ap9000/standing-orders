@@ -129,7 +129,7 @@ export type TelegramTransport = (
   method: string,
   params: Record<string, unknown>,
   signal?: AbortSignal,
-) => Promise<{ ok: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number } }>;
+) => Promise<{ ok: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number }; uncertain?: boolean }>;
 
 export function createTransport(token: string, timeoutMs = 30_000): TelegramTransport {
   return async (method, params, signal) => {
@@ -147,18 +147,24 @@ export function createTransport(token: string, timeoutMs = 30_000): TelegramTran
         body: JSON.stringify(params),
         signal: controller.signal,
       });
-      const body = (await response.json()) as { ok?: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number } };
+      const body = (await response.json()) as { ok?: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number } } | null;
+      // A missing or malformed acknowledgement does not prove a send failed.
+      // Only Telegram's explicit rejection is a definite failed delivery.
+      if (body === null || typeof body !== "object" || Array.isArray(body) || typeof body.ok !== "boolean" || (body.ok && !response.ok)) {
+        return { ok: false, description: "Telegram returned an invalid acknowledgement", uncertain: true };
+      }
       return {
         ok: body.ok === true,
         result: body.result,
         ...(body.parameters === undefined ? {} : { parameters: body.parameters }),
         // Whatever Telegram said, the token must not be in what we keep.
-        ...(body.description === undefined ? {} : { description: scrub(body.description, token) }),
+        ...(typeof body.description !== "string" ? {} : { description: scrub(body.description, token) }),
       };
     } catch (error) {
       return {
         ok: false,
         description: scrub(error instanceof Error ? error.message : String(error), token),
+        uncertain: true,
       };
     } finally {
       clearTimeout(timer);

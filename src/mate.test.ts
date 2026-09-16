@@ -784,17 +784,65 @@ describe("the mate's turn", () => {
     // After the provider wait: the model proposed something; the channel changed meanwhile; the tool never runs.
     let channelOk = true;
     const script = scripted([
-      answer([call("propose_hold", { task: "in-1", reason: "x" })]),
+      () => { channelOk = false; return answer([call("propose_hold", { task: "in-1", reason: "x" })]); },
       text("never reached"),
     ]);
     const outcome = await turn("hello", script.fetcher, {
       session: live, thread: t,
-      revalidate: async () => { const ok = channelOk; channelOk = false; return ok ? { ok: true } : { ok: false, reason: "the connected projects changed" }; },
+      revalidate: async () => channelOk ? { ok: true } : { ok: false, reason: "the connected projects changed" },
     });
     expect(outcome).toMatchObject({ ok: false, failed: "revoked", message: expect.stringContaining("the connected projects changed") });
     expect(script.bodies).toHaveLength(1);
     expect(store.getMateTurn((outcome as { turn: number }).turn)).toMatchObject({ state: "failed", failureReason: "revoked" });
     expect(store.listMateProposals(t.id)).toEqual([]);
     expect(store.activeHolds(store.refFor("built-in", "in-1").id, clock())).toEqual([]);
+  });
+
+  test.each(["api", "subscription"] as const)("%s rechecks channel access before the next provider gets tool context", async route => {
+    let calls = 0;
+    let checksAfterFirst = 0;
+    const fetched = scripted([
+      () => { calls++; return answer([call("list_tasks", { repo: "r1" })]); },
+      () => { calls++; return text("must not receive context"); },
+    ]);
+    const subscription = route === "subscription";
+    const outcome = await turn("read the tasks then summarize", fetched.fetcher, {
+      ...(subscription ? {
+        config: { ...CONFIG, provider: "codex-subscription" as const }, key: null,
+        session: session(0, "alex", subscriptionCredentialKey("codex-subscription")),
+        subscriptionRunner: async () => {
+          calls++;
+          return { ok: true as const, answer: { text: "Reading.", calls: [{ id: `read-${calls}`, name: "list_tasks", args: { repo: "r1" } }], tokensIn: 1, tokensOut: 1, reportedCostMicrousd: null } };
+        },
+      } : {}),
+      revalidate: async () => {
+        if (calls > 0 && ++checksAfterFirst > 1) return { ok: false, reason: "project removed before the next dispatch" };
+        return { ok: true };
+      },
+    });
+    expect(outcome).toMatchObject({ ok: false, failed: "revoked", message: expect.stringContaining("project removed") });
+    expect(calls).toBe(1);
+    expect(store.raw().prepare("SELECT COUNT(*) AS n FROM chat_turn").get()?.["n"]).toBe(1);
+  });
+
+  test.each(["account", "session"] as const)("rechecks %s authority after an awaited channel lookup, before sending anything", async changed => {
+    const live = session();
+    const t = thread();
+    let checks = 0;
+    const script = scripted([text("must not run")]);
+    const outcome = await turn("hello", script.fetcher, {
+      session: live, thread: t,
+      revalidate: async () => {
+        await Promise.resolve();
+        if (++checks === 2) {
+          if (changed === "account") store.revokeAccount("alex", "root", clock());
+          else store.endMateSession(live.id, "alex", clock());
+        }
+        return { ok: true };
+      },
+    });
+    expect(outcome.ok).toBe(false);
+    expect(script.bodies).toEqual([]);
+    expect(store.raw().prepare("SELECT COUNT(*) AS n FROM chat_turn").get()?.["n"]).toBe(0);
   });
 });

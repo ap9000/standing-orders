@@ -72,7 +72,8 @@ export type MateTurnInput = {
   evidenceRoot?: string;
   /**
    * A channel's own standing, re-proved where the approver's is: before
-   * admission, after every provider wait, and before any tool runs. The
+   * admission, before every provider dispatch, after every provider wait,
+   * and before any tool runs. The
    * paired Telegram chat uses it to prove the binding, its generation and
    * the enrolled ceiling are still what the turn opened under — account
    * generation alone cannot see an unpairing or a project removed from
@@ -280,11 +281,26 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     const row = store.getMateTurn(turnId);
     return row !== null && row.state === "running" && row.generation === started.generation;
   };
+  // The channel lookup can await external state. Re-read all local authority
+  // AFTER it resolves, immediately before sending context or using a tool.
+  const guard = (channel: { ok: true } | { ok: false; reason: string }): MateTurnOutcome | null => {
+    if (!stillOurs()) return { ok: false, turn: turnId, failed: "superseded", message: "this turn was ended before its next action", unknownSpend: false };
+    if (!channel.ok) return fail("revoked", `this conversation's connection changed (${channel.reason}) — nothing it proposed was kept`, false);
+    const standing = reproveApprover(store, who);
+    const liveSession = store.getMateSession(session.id);
+    const liveThread = store.getMateThread(thread.id);
+    if (!standing.ok || liveSession === null || liveSession.endedAt !== null || liveThread === null || liveThread.closedAt !== null) {
+      return fail("revoked", "your standing or this conversation ended — nothing it proposed was kept", false);
+    }
+    return null;
+  };
 
   let reply: string | null = null;
   let stoppedAtCap = false;
   let lastText = "";
   while (steps < MATE_MAX_STEPS) {
+    const blocked = guard(input.revalidate === undefined ? { ok: true } : await input.revalidate());
+    if (blocked !== null) return blocked;
     now = clock();
     const remainingMs = TURN_WALL_CLOCK_MS - (now.getTime() - turnStartedAt);
     if (remainingMs <= 0) return fail("timeout", "the turn ran out of time before the model finished", false);
@@ -384,20 +400,8 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     // After the wait (finding 5): the row may have been failed under us by
     // a revocation or the sweep — then nothing the model said runs; and the
     // approver must still stand before any tool runs as them.
-    if (!stillOurs()) return { ok: false, turn: turnId, failed: "superseded", message: "this turn was ended while the model was answering", unknownSpend: false };
-    const standing = reproveApprover(store, who);
-    const liveSession = store.getMateSession(session.id);
-    if (!standing.ok || liveSession === null || liveSession.endedAt !== null) {
-      return fail("revoked", "your standing or this session ended while the model was answering — nothing it proposed was kept", false);
-    }
-    // The channel too (finding 5's companion): a pairing revoked or a
-    // project unenrolled while the model answered ends the turn before any
-    // tool runs as the paired approver. The row is re-read after the wait.
-    if (input.revalidate !== undefined) {
-      const channel = await input.revalidate();
-      if (!stillOurs()) return { ok: false, turn: turnId, failed: "superseded", message: "this turn was ended while the model was answering", unknownSpend: false };
-      if (!channel.ok) return fail("revoked", `this conversation's connection changed while the model was answering (${channel.reason}) — nothing it proposed was kept`, false);
-    }
+    const changed = guard(input.revalidate === undefined ? { ok: true } : await input.revalidate());
+    if (changed !== null) return changed;
 
     if (answer.calls.length === 0) {
       if (answer.text.trim() === "") return fail("malformed-reply", "the model answered with nothing", false);
@@ -409,7 +413,11 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
       if (!isMateTool(call.name)) return fail("malformed-reply", "the model called a tool that does not exist", false);
     }
     history.push({ role: "assistant", text: answer.text, calls: answer.calls });
-    for (const call of answer.calls) {
+    for (const [index, call] of answer.calls.entries()) {
+      if (index > 0) {
+        const changed = guard(input.revalidate === undefined ? { ok: true } : await input.revalidate());
+        if (changed !== null) return changed;
+      }
       const outcome = executeMateTool({ store, who, now: clock(), draft, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       history.push({ role: "tool", callId: call.id, name: call.name, result: capped(outcome.ok ? outcome.body : { ok: false, message: outcome.message }) });

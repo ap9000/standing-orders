@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store, type TelegramBinding } from "./store.js";
 import { addApprover, approve, propose } from "./scope.js";
-import { bridgePass, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport } from "./telegram.js";
+import { bridgePass, createTransport, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport } from "./telegram.js";
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
 import { subscriptionCredentialKey } from "./converse.js";
 import { confirmMateProposal } from "./mate-doors.js";
@@ -517,6 +517,35 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     const parts = () => store.listTelegramConversationParts(row().id);
     const turns = () => Number(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()?.["n"]);
     const later = (ms: number) => { now = new Date(now.getTime() + ms); };
+
+    test.each(["network", "abort", "invalid-json", "invalid-envelope"] as const)("the real HTTP adapter preserves %s uncertainty through retry, without another model turn", async fault => {
+      draft();
+      script.updates.push([textUpdate(2, "add a payout limit")]);
+      let loseReply = true;
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+        const method = String(url).split("/").at(-1)!;
+        const params = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (method === "sendMessage" && loseReply) {
+          loseReply = false;
+          if (fault === "network") throw new Error("socket hang up");
+          if (fault === "abort") throw new DOMException("response lost", "AbortError");
+          return new Response(fault === "invalid-json" ? "not-json" : JSON.stringify({ result: {} }));
+        }
+        return new Response(JSON.stringify(await script.transport(method, params)));
+      });
+      const transport = createTransport("fixture-token");
+      expect(await pass({ transport })).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("delivery may be uncertain")] } });
+      expect(row().state).toBe("queued");
+      expect(parts()[0]).toMatchObject({ state: "pending", attempts: 1, uncertain: 1, messageId: null });
+      expect(requests).toHaveLength(2);
+      store.close(); store = openStore(file);
+      later(PART_RETRY_MS[0]);
+      expect(await pass({ transport })).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(row().state).toBe("done");
+      expect(parts()[0]).toMatchObject({ state: "sent", attempts: 2, uncertain: 1 });
+      expect(requests).toHaveLength(2);
+      expect(turns()).toBe(1);
+    });
 
     test("a lost network answer: the reply and card were persisted first, the send is counted uncertain, and the retry needs no model call", async () => {
       draft();

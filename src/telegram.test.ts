@@ -266,6 +266,30 @@ describe("destination-bound authorized outbox", () => {
     expect(receipts()[0]).toMatchObject({ deliveredAt: null, lastError: "Telegram returned no confirmed message identity" });
   });
 
+  test("the HTTP adapter marks lost, aborted and malformed acknowledgements uncertain; a Bot API rejection stays definite", async () => {
+    const transport = createTransport("fixture-token");
+    const answers: Array<() => Promise<Response>> = [
+      async () => { throw new Error("socket hang up fixture-token"); },
+      async () => { throw new DOMException("response lost", "AbortError"); },
+      async () => new Response("not-json"),
+      async () => new Response(JSON.stringify({ result: {} })),
+      async () => new Response(JSON.stringify(null)),
+      async () => new Response(JSON.stringify({ ok: true, result: {} }), { status: 502 }),
+    ];
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(() => answers.shift()!());
+    try {
+      for (let left = 6; left > 0; left--) {
+        const answer = await transport("sendMessage", {});
+        expect(answer).toMatchObject({ ok: false, uncertain: true });
+        expect(answer.description).not.toContain("fixture-token");
+      }
+      fetch.mockResolvedValue(new Response(JSON.stringify({ ok: false, description: "Bad Request: chat not found" }), { status: 400 }));
+      expect(await transport("sendMessage", {})).toEqual({ ok: false, result: undefined, description: "Bad Request: chat not found" });
+      fetch.mockResolvedValue(new Response(JSON.stringify({ ok: true, result: { message_id: 9 } })));
+      expect(await transport("sendMessage", {})).toEqual({ ok: true, result: { message_id: 9 } });
+    } finally { fetch.mockRestore(); }
+  });
+
   test("restart recovers expired claims; same-owner stale generations and replaced destinations cannot settle", async () => {
     enqueue("ready", task("a", REPO));
     const oldBinding = store.liveTelegramBinding(BOT)!;

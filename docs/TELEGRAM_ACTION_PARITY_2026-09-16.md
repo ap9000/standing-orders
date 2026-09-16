@@ -56,8 +56,10 @@ that waits for the operator's bot configuration and pairing.
 
 - Pairing is proved before any model call: private chat, immutable sender,
   bot, binding row and generation, approver role, and the enrolled ceiling.
-  The engine re-proves the channel after every provider wait and before any
-  tool runs; the bridge re-proves it before every outgoing part.
+  The engine re-proves the channel before every provider dispatch, after
+  every provider wait and before every tool runs, re-reading account,
+  session, thread and turn state after each awaited lookup; the bridge
+  re-proves it before every outgoing part.
 - Ordinary text is persisted before the poll cursor moves. The session a
   turn will run in is bound to the row before the first dispatch, and the
   engine's request receipt is derived from bot, binding and update, so a
@@ -66,7 +68,8 @@ that waits for the operator's bot configuration and pairing.
   again.
 - The reply and every card are persisted as parts before any send
   (schema v63). A part is sent only when Telegram confirmed a message id;
-  a lost answer is counted uncertain and retried; Telegram's retry_after
+  a lost, aborted or malformed acknowledgement from the real HTTP adapter
+  is counted uncertain and retried; Telegram's retry_after
   pauses every send bot-wide, the outbox included; a restart resumes from
   the first unsent part with no model call. A row is done only when every
   part is sent or moot.

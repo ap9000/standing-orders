@@ -101,8 +101,10 @@ fixes are untouched. What changed, by gap:
    receipt means no dispatch happened, and only then is a fresh session
    resolved. The inbound row still precedes acknowledgement; claims renew
    as before.
-3. **Revalidation.** The engine's hook is unchanged (before admission,
-   after every provider wait and before any tool); the bridge now re-proves
+3. **Revalidation.** The engine's hook runs before admission, before every
+   provider dispatch, after every provider wait and before every tool, with
+   local authority re-read after each awaited lookup (see
+   `TELEGRAM_DISPATCH_REPAIR_2026-09-16.md`); the bridge now re-proves
    pairing and ceiling before every outgoing part after the registry read,
    and a tap's principal is minted against the ceiling read for that
    update. Tests cover unpair and unenroll between two model steps.

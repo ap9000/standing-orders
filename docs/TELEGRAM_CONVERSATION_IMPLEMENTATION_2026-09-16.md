@@ -126,8 +126,10 @@ does now, and where each piece lives:
   belongs to a different ceiling or provider. A direct-API configuration is
   never spent from the phone.
 - **Channel standing, re-proved.** `MateTurnInput.revalidate` runs before
-  admission, after every provider wait and before any tool runs; the bridge
-  runs the same check before every outgoing part. An unpairing, a rotated
+  admission, before every provider dispatch, after every provider wait and
+  before every tool runs, and account, session, thread and turn state are
+  re-read after each awaited lookup; the bridge runs the same check before
+  every outgoing part. An unpairing, a rotated
   generation, a downgraded role or a changed enrollment mid-turn ends the
   turn with its drafts discarded; a still-paired chat is told, in words
   that carry no project data, that nothing happened.
@@ -182,7 +184,8 @@ The three reproduced gaps and where each fix lives; the full record is in
   claim, the live pairing and the session's ceiling digest; only a
   confirmed message id marks it sent. Telegram's `retry_after` pauses
   every send bot-wide through the outbox's own `telegram_retry` row; a
-  lost network answer or an ok without an id is counted `uncertain` and
+  lost, aborted or malformed acknowledgement from the real HTTP adapter,
+  or an ok without an id, is counted `uncertain` and
   retried with bounded backoff (a resend may duplicate — said, never
   hidden); a restart resumes from the first unsent part with no model
   call, proposal, task or revision. A row is `done` only when every part
@@ -194,8 +197,10 @@ The three reproduced gaps and where each fix lives; the full record is in
   ending and replacing the session recovers the original turn (answered
   → its reply is sent; running past its deadline or superseded → the
   phone is told the attempt did not complete) and never dispatches anew.
-- **Revalidation.** Unchanged in the engine (before admission, after
-  every provider wait, before any tool) and now on every outgoing part
+- **Revalidation.** In the engine before admission, before every provider
+  dispatch, after every provider wait and before every tool (the dispatch
+  and per-tool checks were added by `TELEGRAM_DISPATCH_REPAIR_2026-09-16.md`),
+  and on every outgoing part
   after the registry read; a tap's principal is minted against the
   ceiling read for that update. A change between two model steps stops
   the turn before the second step's tools run.
