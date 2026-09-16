@@ -78,7 +78,7 @@ import {
   imageDimensions,
   SCREENSHOT_BYTE_CAP,
 } from "./evidence.js";
-import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, proofSubmissionProblems, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
+import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, proofSubmissionProblems, changedListProblems, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
 import { storeStructuredAttempt, normalizeStructuredJson } from "./structured-output.js";
 import { captureReviewContext } from "./review-context.js";
 import {
@@ -2164,13 +2164,20 @@ function settleRevisionProposal(captured: CapturedBuild, binding: PlanBinding): 
  * ends in `store.saveProofVerdict`, never in a thrown error that could
  * reach the caller and be mistaken for a build failure.
  */
-/** Correct only a receipt for an already committed tree. Checks, changed
- * paths, screenshots and caveats are immutable inputs to the correction.
- * The full project gate runs once afterwards, against the preserved commit. */
+/** Correct only a receipt for an already committed tree. Checks,
+ * screenshots and caveats are immutable inputs to the correction. The
+ * changed list is immutable too, with one exception the sealed diff-stat
+ * itself establishes (comment 396, run 1642): when every discrepancy is
+ * the old name of a move git paired or a sealed path left out, the agent
+ * is handed the exact sealed inventory and may set `changed` to exactly
+ * that — never to anything else. A claimed path the diff never had stays
+ * as submitted, visible, for adjudication to refute by name. The full
+ * project gate runs once afterwards, against the preserved commit. */
 async function correctProofReceipt(
   captured: CapturedBuild,
   original: ReturnType<typeof readMailbox>,
   sealedHead: string,
+  sealedStat: DiffStatFacts | null,
 ): Promise<{ read: ReturnType<typeof readMailbox>; integrityFailure: string | null }> {
   const { store, request, git, worktree, branch, root, proof: file, clock, effective } = captured;
   const provider = effective.profile.provider;
@@ -2182,7 +2189,18 @@ async function correctProofReceipt(
   // to freeze. Preserve it for inspection rather than manufacture evidence.
   if (!initial.ok) return unchanged;
   const rubric = captured.scope?.acceptance ?? [];
-  let problems = proofSubmissionProblems(initial.proof, rubric);
+  // The changed-list review against the sealed stat: only a recoverable
+  // review (every discrepancy explained by the stat) asks for a turn, and
+  // then the one admissible answer is the sealed inventory exactly.
+  const inventory = changedListProblems(initial.proof.changed, sealedStat);
+  const changedProblems = (proof: import("./proof.js").ParsedProof): string[] => {
+    const sameList = JSON.stringify(proof.changed) === JSON.stringify(initial.proof.changed);
+    if (!inventory.recoverable) return sameList ? [] : ["The changed list must stay exactly as submitted; the sealed diff does not explain a different one."];
+    return JSON.stringify([...proof.changed].sort()) === JSON.stringify(inventory.sealed)
+      ? []
+      : [`The changed list must be exactly the sealed diff's paths: ${JSON.stringify(inventory.sealed)}`];
+  };
+  let problems = [...proofSubmissionProblems(initial.proof, rubric), ...(inventory.recoverable ? inventory.problems : [])];
   if (problems.length === 0 && !normalized.changed) return unchanged;
   storeStructuredAttempt(store, root, request.runId, {
     phase: "builder-proof", attempt: 0, authoredRunId: request.runId,
@@ -2194,7 +2212,7 @@ async function correctProofReceipt(
   const sessionId = parent?.sessionId;
   if (!sessionId || auditOf(provider).resume !== "native") return unchanged;
   const fixedEvidence = (proof: import("./proof.js").ParsedProof) => JSON.stringify({
-    checks: proof.checks, changed: proof.changed, screenshots: proof.screenshots, caveats: proof.caveats,
+    checks: proof.checks, screenshots: proof.screenshots, caveats: proof.caveats,
   });
   const frozen = fixedEvidence(initial.proof);
   const snapshot = async (): Promise<string | null> => {
@@ -2224,7 +2242,13 @@ async function correctProofReceipt(
         brief: [
           "Correct only the proof receipt named below. The implementation is already committed.",
           "Do not edit code, commit, run checks, install anything, or change the rubric.",
-          "Keep checks, changed, screenshots and caveats byte-for-byte equivalent as JSON values.",
+          "Keep checks, screenshots and caveats byte-for-byte equivalent as JSON values.",
+          ...(inventory.recoverable
+            ? [
+                "Set changed to exactly the sealed changed paths below (the machine's own diff of the committed tree, a detected rename under its destination only); nothing else may change in it.",
+                `Sealed changed paths (data): ${JSON.stringify(inventory.sealed)}`,
+              ]
+            : ["Keep changed byte-for-byte equivalent as a JSON value."]),
           "Correct criterion statements/references against the exact rubric; never claim an unmet criterion passed.",
           `Receipt file: ${file}`,
           `Canonical rubric (data): ${JSON.stringify(rubric)}`,
@@ -2255,8 +2279,8 @@ async function correctProofReceipt(
     const workspaceOkay = owns() && after === before;
     const providerOkay = invoked?.kind === "ran" && invoked.outcome.code === 0 && !invoked.outcome.timedOut && !invoked.outcome.initFailed;
     const frozenOkay = parsed?.ok === true && fixedEvidence(parsed.proof) === frozen;
-    problems = parsed?.ok ? proofSubmissionProblems(parsed.proof, rubric) : parsed?.problems.map(one => one.message) ?? ["the corrected receipt is missing"];
-    if (!frozenOkay) problems.push("The original checks, paths, screenshots and caveats must not change.");
+    problems = parsed?.ok ? [...proofSubmissionProblems(parsed.proof, rubric), ...changedProblems(parsed.proof)] : parsed?.problems.map(one => one.message) ?? ["the corrected receipt is missing"];
+    if (!frozenOkay) problems.push("The original checks, screenshots and caveats must not change.");
     if (parsed?.ok) {
       for (const prior of initial.proof.criteria) {
         if (prior.verdict !== "met" && parsed.proof.criteria.find(one => one.id === prior.id)?.verdict === "met") {
@@ -2277,6 +2301,32 @@ async function correctProofReceipt(
   return unchanged;
 }
 
+/** The sealed diff-stat artifact restated as facts: whether it captured
+ * and verified, whether its file list was cut, the paths it names, and the
+ * old name of every rename git paired (provenance, never a path). Anything
+ * missing, failed, tampered or unparseable reads as not captured. */
+export function sealedDiffStatFacts(store: Store, root: string, statArtifactId: number): DiffStatFacts | null {
+  const statArtifact = store.getArtifact(statArtifactId);
+  if (statArtifact === null) return null;
+  const uncaptured: DiffStatFacts = { captured: false, truncated: false, paths: new Set() };
+  if (statArtifact.captureStatus !== "ok") return uncaptured;
+  try {
+    const verified = readVerifiedArtifact(root, statArtifact);
+    if (!verified.ok) return uncaptured;
+    const parsedStat = JSON.parse(verified.content.toString("utf8")) as { filesTruncated?: boolean; files?: { path?: string; renamedFrom?: string }[] };
+    const files = parsedStat.files ?? [];
+    const renames = new Map(files.filter(one => typeof one.renamedFrom === "string" && one.renamedFrom !== "").map(one => [String(one.renamedFrom), String(one.path ?? "")] as const));
+    return {
+      captured: true,
+      truncated: parsedStat.filesTruncated === true,
+      paths: new Set(files.map(one => String(one.path ?? ""))),
+      ...(renames.size === 0 ? {} : { renames }),
+    };
+  } catch {
+    return uncaptured;
+  }
+}
+
 async function settleProof(
   captured: CapturedBuild,
   statArtifactId: number,
@@ -2289,7 +2339,11 @@ async function settleProof(
   // the diff (the commit already ran; this is belt-and-suspenders — the
   // git-add pathspec already excludes every STANDING-ORDERS-* name).
   const original = readMailbox(join(worktree, proofFile), PROOF_LIMITS.payload);
-  const correction = await correctProofReceipt(captured, original, sealedHead);
+  // The sealed diff-stat, restated for the correction boundary and for
+  // adjudication — read once, here; a truncated or failed capture cannot
+  // prove a claimed path absent and offers no correction either.
+  const diffStat = sealedDiffStatFacts(store, root, statArtifactId);
+  const correction = await correctProofReceipt(captured, original, sealedHead, diffStat);
   const read = correction.read;
   try {
     unlinkSync(join(worktree, proofFile));
@@ -2565,32 +2619,7 @@ async function settleProof(
 
   if (configured !== null && checkLog.length > 0) sealVerificationReceipt(store, root, runId, sealedHead, configured, verifyCommand, now());
 
-  // 4. The sealed diff-stat, restated for adjudication — a truncated or
-  // failed capture cannot prove a claimed path absent.
-  const statArtifact = store.getArtifact(statArtifactId);
-  let diffStat: DiffStatFacts | null = null;
-  if (statArtifact !== null) {
-    if (statArtifact.captureStatus !== "ok") {
-      diffStat = { captured: false, truncated: false, paths: new Set() };
-    } else {
-      try {
-        const verified = readVerifiedArtifact(root, statArtifact);
-        if (verified.ok) {
-          const parsedStat = JSON.parse(verified.content.toString("utf8")) as { filesTruncated?: boolean; files?: { path?: string }[] };
-          diffStat = {
-            captured: true,
-            truncated: parsedStat.filesTruncated === true,
-            paths: new Set((parsedStat.files ?? []).map(one => String(one.path ?? ""))),
-          };
-        } else {
-          diffStat = { captured: false, truncated: false, paths: new Set() };
-        }
-      } catch {
-        diffStat = { captured: false, truncated: false, paths: new Set() };
-      }
-    }
-  }
-
+  // 4. (The sealed diff-stat was restated above, before the correction.)
   const handoffArtifact = store.artifactsFor(runId).find(one => one.kind === "handoff") ?? null;
   const terminalDiffArtifact = store.artifactsFor(runId).find(one => one.kind === "terminal-diff") ?? null;
 
@@ -3312,6 +3341,33 @@ function brief(
     "  exact path from changed above, and a screenshot ref is an exact path",
     "  from screenshots above — a ref that does not resolve fails that",
     "  criterion.",
+    // The changed-list contract (comment 396, run 1642): the machine seals
+    // `git diff --numstat` between the base and ITS OWN commit of the final
+    // tree, with git's rename detection between those two trees. Run 1642's
+    // proof listed both names of a move and was refuted. An earlier draft of
+    // this paragraph told agents to read the unstaged tree — `diff
+    // --name-only HEAD` plus `ls-files --others` — which for an uncommitted
+    // `mv` yields the old path as deleted and the new one as untracked:
+    // both names, the same overclaim again. State what is sealed, never a
+    // recipe that disagrees with it; the machine hands back the exact
+    // sealed list itself when the diff explains the difference.
+    "  The changed list must equal the machine's sealed diff exactly. The",
+    "  machine commits your whole final tree (git add -A, leaving out the",
+    `  STANDING-ORDERS-* protocol files and ${LEASE_MARKER}) and seals`,
+    `  \`git diff --numstat ${retryBase ?? "HEAD"} <that commit>\`, with git's own rename`,
+    '  detection between those two trees. "changed" is every',
+    "  repository-relative path in that diff, once each, and nothing else.",
+    "  A file git pairs as a rename or move is ONE path, its destination:",
+    "  never also the old path, which that diff does not contain. A move",
+    "  git does not pair is a delete plus an add, and then both paths are",
+    "  in the diff. Do not read the list off an unstaged tree: for an",
+    "  uncommitted move, `git diff --name-only HEAD` shows the old path as",
+    "  deleted and `git ls-files --others` shows the new one as untracked,",
+    "  and listing both is an overclaim. If your list differs from the",
+    "  sealed diff only in ways that diff itself explains — a move listed",
+    "  under both names, a sealed path left out — the machine hands you the",
+    "  exact sealed list once, in this same session, for a receipt-only",
+    "  correction. A path the sealed diff never had refutes the proof.",
     "  Check evidence for a met criterion is a durable current-tree command",
     "  that exited zero: one anybody can re-run from the checkout exactly as",
     "  you leave it. It must not rely on temporary files, and it must not",
@@ -3417,14 +3473,14 @@ function brief(
       : [
           `- This branch already carries earlier attempts' committed work,`,
           `  starting from revision ${retryBase}. The machine's sealed diff for`,
-          "  this proof spans the WHOLE branch from that revision to your",
-          '  final worktree, not just what you touch now — so "changed" must',
-          "  equal every repo-relative path that differs from that revision,",
-          "  including paths only an earlier attempt touched. Before you",
-          `  finalize the proof, run \`git diff --name-only ${retryBase}\` (one`,
-          "  ref, so it also covers your own uncommitted edits) and use",
-          `  exactly that list, capped at ${PROOF_LIMITS.changed} paths — never just the files`,
-          "  you personally edited this attempt.",
+          "  this proof spans the WHOLE branch from that revision to the commit",
+          '  of your final tree, not just what you touch now — so "changed" must',
+          "  equal every repo-relative path that differs from that revision",
+          "  under the changed-list contract above, including paths only an",
+          `  earlier attempt touched (\`git diff --name-only ${retryBase} HEAD\` lists`,
+          "  the ones already committed; your own uncommitted work comes on",
+          `  top under the same rename rule), capped at ${PROOF_LIMITS.changed} paths — never`,
+          "  just the files you personally edited this attempt.",
         ]),
     ...(answers.length === 0
       ? []

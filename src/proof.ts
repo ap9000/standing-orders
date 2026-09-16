@@ -566,7 +566,53 @@ export type DiffStatFacts = {
   captured: boolean;
   truncated: boolean;
   paths: ReadonlySet<string>;
+  /** Old name → destination for every entry git paired as a rename or
+   * move. The old name is provenance the stat keeps; it is never one of
+   * `paths`. Absent on a stat that recorded no renames. */
+  renames?: ReadonlyMap<string, string>;
 };
+
+/** How a proof's `changed` list compares with the sealed diff-stat, read
+ * before the first review so the same session can correct a receipt the
+ * sealed facts themselves explain (the Goose FinalOutputTool pattern: a
+ * precise error plus the exact expected value, never a silent rewrite).
+ *
+ * `problems` names every discrepancy, one line per path. `recoverable` is
+ * true only when the stat is complete and EVERY discrepancy is one the
+ * sealed input establishes on its own: the old name of a rename git
+ * paired (the diff holds its destination once), or a sealed path the
+ * list left out. Then `sealed` is the one admissible correction — the
+ * complete sealed inventory, sorted — and nothing else is. A claimed path
+ * the diff never had is an unexplained contradiction: reported, never
+ * recoverable, so adjudication refutes it by name. An unavailable or
+ * truncated stat proves nothing either way: no problems, not recoverable. */
+export type ChangedListReview = {
+  problems: string[];
+  recoverable: boolean;
+  sealed: string[] | null;
+};
+
+export function changedListProblems(changed: readonly string[], stat: DiffStatFacts | null): ChangedListReview {
+  if (stat === null || !stat.captured || stat.truncated) return { problems: [], recoverable: false, sealed: null };
+  const claimed = new Set(changed);
+  const problems: string[] = [];
+  let unexplained = false;
+  for (const path of changed) {
+    if (stat.paths.has(path)) continue;
+    const destination = stat.renames?.get(path);
+    if (destination !== undefined && stat.paths.has(destination)) {
+      problems.push(`changed lists ${JSON.stringify(path)}, the old name of a move the sealed diff records once as ${JSON.stringify(destination)} — list the destination only`);
+    } else {
+      unexplained = true;
+      problems.push(`changed lists ${JSON.stringify(path)}, which the sealed diff does not contain`);
+    }
+  }
+  for (const path of stat.paths) {
+    if (!claimed.has(path)) problems.push(`changed omits ${JSON.stringify(path)}, which the sealed diff contains`);
+  }
+  const sealed = [...stat.paths].sort();
+  return { problems, recoverable: problems.length > 0 && !unexplained, sealed };
+}
 
 /** The plane's own re-run of the repository's approved verification
  * command, when one is configured. `ran: false` covers both "none

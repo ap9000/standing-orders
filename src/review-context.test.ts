@@ -29,7 +29,7 @@ import { run as exec } from "./exec.js";
 import { budgetedStatJson, captureTerminalDiff, parseNumstat, readVerifiedArtifact, redactSecretLines, scanForSecrets, storeEvidence, writeEvidenceFile } from "./evidence.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { register } from "./runner.js";
-import { adjudicate, coverageWords, foldReview, matrixWords, semanticCoverage, type CriterionMatrixRow } from "./proof.js";
+import { adjudicate, changedListProblems, coverageWords, foldReview, matrixWords, semanticCoverage, type CriterionMatrixRow } from "./proof.js";
 import {
   captureReviewContext,
   citesSuppliedProvenance,
@@ -46,7 +46,7 @@ import {
 } from "./review-context.js";
 import { parseReview, reviewPass, REVIEW_CONTEXT_NAME, REVIEW_PATCH_NAME, REVIEW_RUBRIC_NAME, REVIEW_PROOF_NAME } from "./reviewer.js";
 import { evidenceRange, evidenceRequest, isEvidenceOnlyReply, REVIEW_READ_LIMITS } from "./review-evidence.js";
-import type { Runner } from "./builder.js";
+import { sealedDiffStatFacts, type Runner } from "./builder.js";
 
 const T0 = new Date("2026-09-11T12:00:00.000Z");
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
@@ -958,6 +958,64 @@ describe("inherited review context (v51)", () => {
       expect(parseReviewContext(JSON.stringify(legacy))).toMatchObject({ ok: true, inventory: { schema: 1 } });
       expect(parseReviewContext(JSON.stringify({ ...inventory, schema: 2, limits: LEGACY_REVIEW_CONTEXT_LIMITS }))).toMatchObject({ ok: true, inventory: { schema: 2 } });
     });
+  });
+
+  test("real Git: the sealed stat of a revision pairs a moved file once under its destination, and only the diff-explained lists are handed back for correction (comment 396, run 1642)", async () => {
+    // Run 1642 moved scripts/claude-review-schema-smoke.mjs to src/fixtures/
+    // and its proof listed both names. This is git's own rename detection on
+    // a real repository, sealed by the same capture the builder runs, read
+    // by the same restatement the correction boundary and adjudication
+    // share — an ordinary edit, a delete, an add and an unpaired rewrite
+    // ride along so the whole inventory is exercised, not just the rename.
+    const smoke = Array.from({ length: 40 }, (_, i) => `console.log("smoke line ${i}");
+`).join("");
+    const f = await seed({ baseFiles: { "scripts/smoke.mjs": smoke, "src/gone.ts": "export const gone = 1;\n", "src/rewrite.ts": "export const before = 'a';\n" } });
+    // The move happens as an agent's `mv` would: old path gone, new path
+    // written; pairing is git's own between the two committed trees.
+    git(f.repo, "rm", "-q", "scripts/smoke.mjs", "src/gone.ts", "src/rewrite.ts");
+    const head = commitFiles(f.repo, {
+      "src/fixtures/smoke.mjs": smoke + "export {};\n",
+      "src/report.ts": REPORT_TS_V2 + "// moved the smoke script\n",
+      "src/new.ts": "export const fresh = true;\n",
+      "src/rewritten.ts": Array.from({ length: 30 }, (_, i) => `export const rewritten${i} = ${i};\n`).join(""),
+    }, "move the smoke script");
+    // A later attempt on the signed source task, sealed from the revision
+    // commit exactly as the builder seals an ordinary build.
+    const run = f.store.startRun({ taskRef: f.sourceTaskRef, leaseId: "move", runner: "builder-1", branch: "move", worktree: f.repo, provider: "claude", model: "sonnet", now: T0, ...presented(f.store, f.sourceTaskRef) });
+    f.store.stampRun(run, { scopeDigest: f.store.getScope("feat")!.digest, baseRevision: f.shas.revision });
+    f.store.recordOutcomeFacts(run, { headRevision: head });
+    f.store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+    const sealed = await captureTerminalDiff(f.store, exec, f.repo, f.shas.revision, head, f.evidenceRoot, run, T0);
+
+    const facts = sealedDiffStatFacts(f.store, f.evidenceRoot, sealed.statId);
+    expect(facts).not.toBeNull();
+    expect(facts).toMatchObject({ captured: true, truncated: false });
+    // Git paired the move: one destination path, the old name as provenance.
+    // The rewrite fell under the similarity floor: a delete plus an add.
+    expect([...facts!.paths].sort()).toEqual(["src/fixtures/smoke.mjs", "src/gone.ts", "src/new.ts", "src/report.ts", "src/rewrite.ts", "src/rewritten.ts"]);
+    expect([...facts!.renames!]).toEqual([["scripts/smoke.mjs", "src/fixtures/smoke.mjs"]]);
+    expect(git(f.repo, "diff", "--name-only", f.shas.revision, head).split("\n").sort()).toEqual([...facts!.paths].sort());
+
+    const exact = [...facts!.paths].sort();
+    // Run 1642's list: both names. Explained by the stat, so recoverable —
+    // and the only admissible correction is the exact sealed inventory.
+    expect(changedListProblems([...exact, "scripts/smoke.mjs"], facts)).toEqual({
+      problems: ['changed lists "scripts/smoke.mjs", the old name of a move the sealed diff records once as "src/fixtures/smoke.mjs" — list the destination only'],
+      recoverable: true,
+      sealed: exact,
+    });
+    // The unstaged recipe's other failure mode on a resumed branch: a path
+    // an earlier commit touched, left out.
+    expect(changedListProblems(exact.filter(one => one !== "src/report.ts"), facts)).toMatchObject({ recoverable: true, problems: ['changed omits "src/report.ts", which the sealed diff contains'] });
+    // The exact inventory has nothing to correct, and a path the diff never
+    // had is never explained away — adjudication refutes it by name.
+    expect(changedListProblems(exact, facts)).toMatchObject({ problems: [], recoverable: false });
+    expect(changedListProblems([...exact, "src/other.ts"], facts)).toMatchObject({ recoverable: false });
+    // A tampered sealed stat reads as not captured: nothing to hand back.
+    const stat = f.store.getArtifact(sealed.statId)!;
+    writeFileSync(join(f.evidenceRoot, stat.key), JSON.stringify({ schema: 1, files: [{ path: "src/fixtures/smoke.mjs" }], filesTruncated: false }));
+    expect(sealedDiffStatFacts(f.store, f.evidenceRoot, sealed.statId)).toMatchObject({ captured: false });
+    expect(changedListProblems(exact, sealedDiffStatFacts(f.store, f.evidenceRoot, sealed.statId))).toEqual({ problems: [], recoverable: false, sealed: null });
   });
 
   test.each(["complete files", "partial CSS patches"])("a second revision retains grandparent %s and every intervening change", async variant => {

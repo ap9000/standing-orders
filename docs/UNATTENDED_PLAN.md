@@ -172,7 +172,10 @@ Main was still `917bc5b` when this plan was prepared.
   full rubric and shares submission validation with final adjudication.
   Parseable receipt defects can use at most two same-session repairs through
   the existing signed repair admission. The original reply and each correction
-  are sealed; checks, paths, screenshots and caveats cannot be rewritten, and
+  are sealed; checks, screenshots and caveats cannot be rewritten, the
+  changed list may only become exactly the sealed diff's paths when the
+  sealed stat itself explains the difference (a paired rename's old name, an
+  omitted path — never a path the diff never had), and
   an unmet answer cannot be upgraded by receipt correction. Checkout/custody
   changes reject the correction, including after a thrown transport. The
   commit is kept and the project check runs once afterwards. Missing or

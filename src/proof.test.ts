@@ -17,9 +17,11 @@ import {
   PROOF_LIMITS,
   type AdjudicateInput,
   type AdjudicateResult,
+  changedListProblems,
   type CriterionMatrixRow,
   type CriterionJudgement,
 } from "./proof.js";
+import { parseNumstat } from "./evidence.js";
 
 const sound = {
   version: 1,
@@ -325,6 +327,98 @@ describe("adjudicate", () => {
   test("rule 4 does not fire when the stat failed to capture", () => {
     const result = adjudicate({ ...base, diffStat: { captured: false, truncated: false, paths: new Set() } });
     expect(result.verdict).not.toBe("refuted");
+  });
+
+  describe("rule 4 on a detected rename: the sealed diff names the destination only (comment 396, run 1642)", () => {
+    // Run 1642 moved scripts/claude-review-schema-smoke.mjs to src/fixtures/
+    // and its proof listed both names. The sealed stat comes from `git diff
+    // --numstat -z` with rename detection: one entry, old and new path as
+    // the following tokens, and settlement reads only `path` — exactly as
+    // the builder restates the stat for adjudication.
+    const NUL = "\u0000";
+    const stat = parseNumstat(`1${"\t"}0${"\t"}src/x.ts${NUL}5${"\t"}2${"\t"}${NUL}scripts/smoke.mjs${NUL}src/fixtures/smoke.mjs${NUL}`, "base", "head");
+    const sealed = { captured: true, truncated: false, paths: new Set(stat.files.map(one => one.path)) };
+    const criterion = { id: "c1", statement: "The button opens the settings panel.", evidence: ["changed-path"] as ("changed-path")[] };
+    const claiming = (changed: string[]) =>
+      parse({
+        ...sound,
+        criteria: [{ ...sound.criteria[0], evidence: [{ kind: "changed-path", ref: "src/fixtures/smoke.mjs" }] }],
+        changed,
+      });
+
+    test("the stat itself keeps the old name as provenance, never as a second path", () => {
+      expect(stat.files).toEqual([
+        { path: "src/x.ts", additions: 1, deletions: 0 },
+        { path: "src/fixtures/smoke.mjs", additions: 5, deletions: 2, renamedFrom: "scripts/smoke.mjs" },
+      ]);
+      expect([...sealed.paths]).toEqual(["src/x.ts", "src/fixtures/smoke.mjs"]);
+    });
+
+    test("listing both names overclaims the old one: refuted, and the reason names it", () => {
+      const result = adjudicate({ ...base, diffStat: sealed, proofParse: claiming(["src/x.ts", "scripts/smoke.mjs", "src/fixtures/smoke.mjs"]), approvedCriteria: [criterion] });
+      expect(result.verdict).toBe("refuted");
+      expect(result.reasons).toEqual(["claimed changed path not in the sealed diff: scripts/smoke.mjs"]);
+    });
+
+    test("listing only the old name is an overclaim AND an omission — the overclaim rules first", () => {
+      const result = adjudicate({ ...base, diffStat: sealed, proofParse: claiming(["src/x.ts", "scripts/smoke.mjs"]), approvedCriteria: [criterion] });
+      expect(result.verdict).toBe("refuted");
+      expect(result.reasons).toEqual(["claimed changed path not in the sealed diff: scripts/smoke.mjs"]);
+    });
+
+    test("the destination alone equals the sealed diff: the changed-path row passes", () => {
+      const result = adjudicate({ ...base, diffStat: sealed, proofParse: claiming(["src/x.ts", "src/fixtures/smoke.mjs"]), approvedCriteria: [criterion] });
+      expect(result.verdict).toBe("attested");
+      expect(result.matrix).toMatchObject([{ id: "c1", state: "pass", detail: [] }]);
+    });
+
+    describe("changedListProblems: the pre-review correction boundary's review of the list against the sealed stat", () => {
+      // The builder reads this BEFORE the first review and, when every
+      // discrepancy is one the sealed stat explains, hands the exact sealed
+      // inventory back to the same session as a receipt-only correction.
+      // Adjudication above is unchanged: it still judges whatever list the
+      // receipt finally carries.
+      const withRenames = { ...sealed, renames: new Map([["scripts/smoke.mjs", "src/fixtures/smoke.mjs"]]) };
+
+      test("the old name of a paired rename is explained: recoverable, and the one admissible answer is the sealed list", () => {
+        expect(changedListProblems(["src/x.ts", "scripts/smoke.mjs", "src/fixtures/smoke.mjs"], withRenames)).toEqual({
+          problems: ['changed lists "scripts/smoke.mjs", the old name of a move the sealed diff records once as "src/fixtures/smoke.mjs" — list the destination only'],
+          recoverable: true,
+          sealed: ["src/fixtures/smoke.mjs", "src/x.ts"],
+        });
+      });
+
+      test("a sealed path the list left out is explained too", () => {
+        expect(changedListProblems(["src/fixtures/smoke.mjs"], withRenames)).toEqual({
+          problems: ['changed omits "src/x.ts", which the sealed diff contains'],
+          recoverable: true,
+          sealed: ["src/fixtures/smoke.mjs", "src/x.ts"],
+        });
+      });
+
+      test("a path the sealed diff never had is an unexplained contradiction: reported, never recoverable", () => {
+        const review = changedListProblems(["src/x.ts", "src/fixtures/smoke.mjs", "src/other.ts"], withRenames);
+        expect(review).toMatchObject({ recoverable: false, problems: ['changed lists "src/other.ts", which the sealed diff does not contain'] });
+        // Beside a rename's old name it still poisons the whole review.
+        expect(changedListProblems(["scripts/smoke.mjs", "src/fixtures/smoke.mjs", "src/x.ts", "src/other.ts"], withRenames).recoverable).toBe(false);
+      });
+
+      test("without rename provenance the old name is just a path the diff never had", () => {
+        expect(changedListProblems(["src/x.ts", "scripts/smoke.mjs", "src/fixtures/smoke.mjs"], sealed)).toMatchObject({ recoverable: false });
+      });
+
+      test("an exact list has nothing to correct", () => {
+        expect(changedListProblems(["src/fixtures/smoke.mjs", "src/x.ts"], withRenames)).toEqual({ problems: [], recoverable: false, sealed: ["src/fixtures/smoke.mjs", "src/x.ts"] });
+      });
+
+      test.each([
+        ["missing", null],
+        ["uncaptured", { captured: false, truncated: false, paths: new Set<string>() }],
+        ["truncated", { captured: true, truncated: true, paths: new Set(["src/x.ts"]) }],
+      ])("a %s stat proves nothing either way: no problems, no correction", (_label, stat) => {
+        expect(changedListProblems(["src/x.ts", "scripts/smoke.mjs"], stat)).toEqual({ problems: [], recoverable: false, sealed: null });
+      });
+    });
   });
 
   test("altering a signed criterion remains refuted when verification could not run", () => {

@@ -128,6 +128,65 @@ predicate. The real-model smoke script moved from `scripts/` to
 within the approved `src` and `docs` paths; its behavior and its stored
 certificate are unchanged.
 
+Revision after build 1642 (comment 396) and the shared reliability steering:
+build 1642 passed its tests and every review criterion, but its proof listed
+both names of the smoke-script move (`scripts/claude-review-schema-smoke.mjs`
+and `src/fixtures/claude-review-schema-smoke.mjs`). The machine seals the
+diff-stat with `git diff --numstat -z` between the pinned base and its own
+commit of the final tree, with git's rename detection, so a paired move is one
+entry under its destination and the old name is a path the sealed diff never
+had; `adjudicate` refuted the proof as an overclaim. That rule is correct and
+unchanged. Prompt-only guidance is brittle (an earlier draft's unstaged
+`diff --name-only HEAD` plus `ls-files --others` recipe reproduces the bug for
+an uncommitted `mv`), so the fix is shared and machine-owned, in the existing
+pre-review receipt-correction boundary rather than a new framework:
+
+- The changed-list contract is stated in the builder brief: `changed` equals
+  the sealed diff exactly — every path in `git diff --numstat <base> <commit>`
+  once each and nothing else; a move git pairs is one path, its destination; a
+  move git does not pair is a delete plus an add. The brief names the unstaged
+  recipe as the trap and no longer offers a staging recipe of its own.
+- `changedListProblems` (`src/proof.ts`) reviews a submitted `changed` against
+  the sealed stat, whose rename provenance `sealedDiffStatFacts`
+  (`src/builder.ts`) restates alongside its paths. A discrepancy the sealed
+  input itself establishes — the old name of a paired rename, or a sealed path
+  left out — is recoverable; a path the diff never had is an unexplained
+  contradiction and never is. A missing, failed, tampered or truncated stat
+  proves nothing either way and offers no correction.
+- `correctProofReceipt` reads the sealed stat before the first review. For a
+  recoverable list it resumes the same session with the precise error and the
+  exact sealed inventory (the Goose FinalOutputTool shape) and accepts only a
+  receipt whose `changed` is exactly that list; checks, screenshots and caveats
+  stay byte-for-byte frozen, verdicts cannot be upgraded, and the committed
+  checkout and custody are re-proved. An unexplained path is never handed back:
+  no turn is spent, the list stays as submitted, and adjudication refutes it by
+  name. The original submission and every correction attempt remain in the
+  structured-output audit artifacts; the repair budget is the existing bounded
+  one; the approved project check still runs exactly once afterwards.
+
+Focused regressions in existing suites: `src/proof.test.ts` (the helper's
+rename, omission, unexplained, exact and missing/uncaptured/truncated cases;
+rule 4 on a parsed rename numstat), `src/builder.test.ts` (the brief carries
+the contract on a first attempt and names the pinned base on a retry; a real
+build whose sealed stat holds a rename — both names handed back and corrected
+to the destination with one commit and one check, an omitted sealed path
+handed back, four rejected corrections that leave the original refuted by
+name, an unexplained path never handed back, a failed stat capture reading
+short with no turn) and `src/review-context.test.ts` (real Git: a moved file,
+an edit, a delete, an add and an unpaired rewrite sealed by
+`captureTerminalDiff`, restated with the rename as provenance, and only the
+diff-explained lists recoverable; a tampered stat reads as not captured).
+Resumed-branch sealing from the pinned base is the existing run-1461 coverage
+in `src/builder.test.ts`; the correction reads whatever that capture sealed.
+No validation was loosened, no sealed receipt or verdict edited, no schema or
+new framework added.
+
+Validation on the uncommitted revision based on
+`bc4d26b7633c4e6fd57e6ca8fc7190e1df5d6584`: `npm run typecheck` passed and the
+focused builder, proof, proof-contract, evidence and review-context suites
+passed. The native full gate and the Opus review remain Standing Orders' to run
+once for the sealed candidate.
+
 Validation on the uncommitted candidate based on
 `924fd00731649f88e7450c75776c31474a150e81`:
 

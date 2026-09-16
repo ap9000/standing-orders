@@ -583,6 +583,15 @@ describe("the builder's gates", () => {
     expect(secondPrompt).toContain("orig-sha");
     expect(secondPrompt).not.toContain("mid-sha");
     expect(secondPrompt).toContain("git diff --name-only orig-sha");
+    // The changed-list contract seals from the SAME pinned base on a retry,
+    // never the first-attempt HEAD shorthand; the retry paragraph defers to
+    // that contract instead of carrying its own unstaged recipe (comment 396).
+    expect(secondPrompt).toContain("`git diff --numstat orig-sha <that commit>`");
+    expect(secondPrompt).not.toContain("git diff --numstat HEAD");
+    expect(secondPrompt).toContain("under the changed-list contract above");
+    expect(secondPrompt).toContain("`git diff --name-only orig-sha HEAD` lists");
+    expect(secondPrompt).not.toContain("one ref, so it also covers your own uncommitted edits");
+    expect(firstPrompt).toContain("`git diff --numstat HEAD <that commit>`");
   });
 
   test("the phase vocabulary is closed, and a finished run's phase is history", () => {
@@ -909,6 +918,44 @@ describe("what the builder tells the agent", () => {
     // And the exit preflight names the same rule beside the caveat rules.
     expect(prompt).toContain("an exact entry in checks, changed, or screenshots; confirm no");
     expect(prompt).toContain("criterion marked met cites a check that exited nonzero; confirm every");
+  });
+
+  test("the brief states the changed-list contract: exactly the sealed diff's paths, a detected rename under its destination only, otherwise a delete plus an add (comment 396, run 1642)", async () => {
+    // Run 1642 moved scripts/claude-review-schema-smoke.mjs to src/fixtures/
+    // and its proof listed BOTH names. The sealed stat is `git diff
+    // --numstat` between the base and the machine's own commit, with rename
+    // detection, so the move was one destination entry and the old name was
+    // an overclaim — refuted, on a run whose tests and review criteria all
+    // passed. The brief must say exactly what the machine seals, on a first
+    // attempt (base HEAD), and must NOT hand out the unstaged recipe
+    // (`diff --name-only HEAD` + `ls-files --others`) that yields both names
+    // for an uncommitted `mv` — the steering's own repro.
+    await build1();
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("The changed list must equal the machine's sealed diff exactly");
+    expect(prompt).toContain("machine commits your whole final tree (git add -A, leaving out the");
+    expect(prompt).toContain("STANDING-ORDERS-* protocol files and .standing-orders-lease) and seals");
+    expect(prompt).toContain("`git diff --numstat HEAD <that commit>`, with git's own rename");
+    expect(prompt).toContain('"changed" is every');
+    expect(prompt).toContain("repository-relative path in that diff, once each, and nothing else");
+    expect(prompt).toContain("A file git pairs as a rename or move is ONE path, its destination:");
+    expect(prompt).toContain("never also the old path, which that diff does not contain");
+    expect(prompt).toContain("git does not pair is a delete plus an add, and then both paths are");
+    // The unstaged trap is named as a trap, never offered as the recipe.
+    expect(prompt).toContain("Do not read the list off an unstaged tree");
+    expect(prompt).toContain("`git diff --name-only HEAD` shows the old path as");
+    expect(prompt).toContain("`git ls-files --others` shows the new one as untracked");
+    expect(prompt).not.toContain("plus every new file you created");
+    expect(prompt).not.toContain("`git ls-files --others --exclude-standard`");
+    expect(prompt).not.toContain("Only a move that rewrites most of a file");
+    // No brittle staging recipe: the machine owns the sealed list and hands
+    // it back once, in the same session, when the diff itself explains the
+    // difference — an unexplained path still refutes.
+    expect(prompt).not.toContain("stage that pair");
+    expect(prompt).toContain("If your list differs from the");
+    expect(prompt).toContain("under both names, a sealed path left out — the machine hands you the");
+    expect(prompt).toContain("exact sealed list once, in this same session, for a receipt-only");
+    expect(prompt).toContain("correction. A path the sealed diff never had refutes the proof.");
   });
 
   test("the brief states EVERY proof and handoff cap the parsers hold the files to, and tells the agent to preflight each protocol file before it exits (raw authority repair)", async () => {
@@ -3502,7 +3549,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     expect(log).not.toContain("Project check · retry after setup");
   });
 
-  test("a claimed changed path absent from the sealed diff: refuted", async () => {
+  test("a claimed changed path absent from the sealed diff: refuted, and never handed back for correction", async () => {
     claimIt();
     approveScope();
     const req = request({ agent: agentWithProof({ ...soundProof, changed: ["src/other.ts"] }) });
@@ -3513,6 +3560,185 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     const verdict = store.proofVerdictFor(req.runId as number);
     expect(verdict).toMatchObject({ verdict: "refuted" });
     expect(verdict?.reasons[0]).toContain("src/other.ts");
+    // The sealed diff does not explain a path it never had: no correction
+    // turn is spent on it, and the contradiction stays visible as submitted.
+    expect(agentCalls).toHaveLength(1);
+  });
+
+  test("a failed diff-stat capture offers no changed-list correction: no turn, the verdict is short", async () => {
+    claimIt();
+    approveScope();
+    const noStat: Runner = async (file, args, options) => {
+      if (args.includes("--numstat")) return { ...OK, code: 128, stderr: "fatal: bad object" };
+      return git(file, args, options);
+    };
+    const req = request({ git: noStat, agent: agentWithProof({ ...soundProof, changed: ["src/index.ts", "src/old.ts"] }) });
+
+    expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+    expect(agentCalls).toHaveLength(1);
+    const verdict = store.proofVerdictFor(req.runId as number);
+    expect(verdict).toMatchObject({ verdict: "short" });
+    expect(verdict?.reasons[0]).toContain("the sealed diff is unavailable or truncated");
+  });
+
+  describe("a rename in the sealed diff is one destination path (comment 396, run 1642)", () => {
+    // Run 1642 moved scripts/claude-review-schema-smoke.mjs to src/fixtures/
+    // and its proof listed both names. `git diff --numstat -z` with rename
+    // detection seals the move as ONE entry — "adds\tdels\t" followed by the
+    // old and new paths — and the settlement reads only the destination, so
+    // the old name is a path the sealed diff never had.
+    const renameGit: Runner = async (file, args, options) => {
+      if (args.includes("--numstat")) return { ...OK, stdout: "5\t2\t\0scripts/smoke.mjs\0src/fixtures/smoke.mjs\0" };
+      if (args.includes("status")) return { ...OK, stdout: "R  scripts/smoke.mjs -> src/fixtures/smoke.mjs\n" };
+      return git(file, args, options);
+    };
+    const criterion = { id: "c1", statement: "the smoke script lives under src/fixtures", evidence: ["changed-path"] as ("changed-path")[] };
+    const proofClaiming = (changed: string[], ref: string) => ({
+      ...soundProof,
+      criteria: [{ ...criterion, verdict: "met", how: "moved it", evidence: [{ kind: "changed-path", ref }] }],
+      changed,
+    });
+    const arrange = () => {
+      propose(store, { taskId: "t-1", goal: "move the smoke script", acceptance: [criterion], now: T0 });
+      expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
+      claimIt();
+      store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 5_000, approvedBy: "alex" }, T0);
+    };
+    const verify: Runner = async () => ({ ...OK });
+
+    test("listing both the old and the new name overclaims the old one: refuted, naming it", async () => {
+      arrange();
+      const req = request({ git: renameGit, verify, agent: agentWithProof(proofClaiming(["scripts/smoke.mjs", "src/fixtures/smoke.mjs"], "src/fixtures/smoke.mjs")) });
+      expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+      const verdict = store.proofVerdictFor(req.runId as number);
+      expect(verdict).toMatchObject({ verdict: "refuted" });
+      expect(verdict?.reasons[0]).toBe("claimed changed path not in the sealed diff: scripts/smoke.mjs");
+    });
+
+    test("the destination alone matches the sealed diff exactly: verified", async () => {
+      arrange();
+      const req = request({ git: renameGit, verify, agent: agentWithProof(proofClaiming(["src/fixtures/smoke.mjs"], "src/fixtures/smoke.mjs")) });
+      expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+      const verdict = store.proofVerdictFor(req.runId as number);
+      expect(verdict).toMatchObject({ verdict: "verified" });
+      expect(verdict?.matrix.find(row => row.id === "c1")).toMatchObject({ state: "pass" });
+      // The sealed stat itself records the move truthfully — destination
+      // path, old name kept as provenance, never as a second path.
+      const stat = store.artifactsFor(req.runId as number).find(one => one.kind === "diff-stat");
+      expect(stat).toBeDefined();
+      const read = readVerifiedArtifact(join2(wt, ".evidence"), stat!);
+      expect(read.ok).toBe(true);
+      if (read.ok) expect(JSON.parse(read.content.toString("utf8")).files).toEqual([{ path: "src/fixtures/smoke.mjs", additions: 5, deletions: 2, renamedFrom: "scripts/smoke.mjs" }]);
+      // Nothing to correct: the one agent turn is the build itself.
+      expect(agentCalls).toHaveLength(1);
+    });
+
+    /** The same session's receipt-only correction, handed the exact sealed
+     * list; `reply` decides what it writes back as `changed`. */
+    const correctingAgent = (submitted: unknown, reply: (sealed: string[]) => string[] | null) => {
+      const prompts: string[] = [];
+      let calls = 0;
+      const agent: Runner = async (file, args, options) => {
+        calls++;
+        if (calls === 1) {
+          // The build turn: handoff and proof written, a session id spoken —
+          // the same session the correction resumes.
+          await agentWithProof(submitted)(file, args, options);
+          return { ...OK, stdout: JSON.stringify({ result: "built", session_id: "proof-session" }) };
+        }
+        expect(args).toContain("--resume");
+        const prompt = args[args.indexOf("-p") + 1]!;
+        prompts.push(prompt);
+        const sealed = JSON.parse(/Sealed changed paths \(data\): (\[.*?\])\n/.exec(prompt)?.[1] ?? "null") as string[] | null;
+        const name = /STANDING-ORDERS-PROOF-[0-9a-f]{16}\.json/.exec(prompt)![0];
+        const changed = sealed === null ? null : reply(sealed);
+        if (changed !== null) writeSync2(join2(options!.cwd!, name), JSON.stringify({ ...(submitted as object), changed }));
+        return { ...OK, stdout: JSON.stringify({ result: "receipt", session_id: "proof-session" }) };
+      };
+      return { agent, prompts, calls: () => calls };
+    };
+    const attemptsOf = (run: number) => store.artifactsFor(run).filter(one => one.kind === "structured-output" && !isVerificationReceipt(one));
+
+    test("both names, then the same session is handed the exact sealed list and corrects the receipt: one commit, one check, verified", async () => {
+      arrange();
+      let commits = 0;
+      let checks = 0;
+      const submitted = proofClaiming(["scripts/smoke.mjs", "src/fixtures/smoke.mjs"], "src/fixtures/smoke.mjs");
+      const correcting = correctingAgent(submitted, sealed => sealed);
+      const req = request({
+        leaseId: "test-lease",
+        agent: correcting.agent,
+        git: (async (file, args, options) => { if (args.includes("commit")) commits++; return renameGit(file, args, options); }) as Runner,
+        verify: (async () => { checks++; return { ...OK }; }) as Runner,
+      });
+      expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+      expect(correcting.calls()).toBe(2);
+      expect(commits).toBe(1);
+      expect(checks).toBe(1);
+      // Goose FinalOutputTool shape: the precise error AND the expected value.
+      const prompt = correcting.prompts[0]!;
+      expect(prompt).toContain("already committed");
+      expect(prompt).toContain('changed lists \\"scripts/smoke.mjs\\", the old name of a move the sealed diff records once as \\"src/fixtures/smoke.mjs\\" — list the destination only');
+      expect(prompt).toContain('Sealed changed paths (data): ["src/fixtures/smoke.mjs"]');
+      expect(prompt).toContain("Keep checks, screenshots and caveats byte-for-byte equivalent");
+      const verdict = store.proofVerdictFor(req.runId as number);
+      expect(verdict).toMatchObject({ verdict: "verified" });
+      expect(verdict?.matrix.find(row => row.id === "c1")).toMatchObject({ state: "pass" });
+      // Both the original submission and the correction stay in the audit
+      // record; the stored proof is the corrected one.
+      const attempts = attemptsOf(req.runId as number);
+      expect(attempts.map(one => one.key.replace(/^.*builder-proof-response-/, ""))).toEqual(["0.txt", "1.txt"]);
+      const original = readVerifiedArtifact(join2(wt, ".evidence"), attempts[0]!);
+      expect(original.ok && JSON.parse(original.content.toString("utf8")).changed).toEqual(["scripts/smoke.mjs", "src/fixtures/smoke.mjs"]);
+      const proof = store.artifactsFor(req.runId as number).find(one => one.kind === "proof")!;
+      const stored = readVerifiedArtifact(join2(wt, ".evidence"), proof);
+      expect(stored.ok && JSON.parse(stored.content.toString("utf8")).changed).toEqual(["src/fixtures/smoke.mjs"]);
+      expect(store.runsFor(taskRef).filter(one => one.role === "repair").map(one => one.reason)).toEqual(["proof-corrected"]);
+    });
+
+    test("a sealed path the list left out is handed back the same way: the corrected inventory verifies", async () => {
+      arrange();
+      const twoFiles: Runner = async (file, args, options) => {
+        if (args.includes("--numstat")) return { ...OK, stdout: "5\t2\t\0scripts/smoke.mjs\0src/fixtures/smoke.mjs\0" + "1\t0\tsrc/index.ts\0" };
+        return renameGit(file, args, options);
+      };
+      const correcting = correctingAgent(proofClaiming(["src/fixtures/smoke.mjs"], "src/fixtures/smoke.mjs"), sealed => sealed);
+      const req = request({ leaseId: "test-lease", agent: correcting.agent, git: twoFiles, verify });
+      expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+      expect(correcting.calls()).toBe(2);
+      expect(correcting.prompts[0]).toContain('changed omits \\"src/index.ts\\", which the sealed diff contains');
+      expect(correcting.prompts[0]).toContain('Sealed changed paths (data): ["src/fixtures/smoke.mjs","src/index.ts"]');
+      expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "verified" });
+    });
+
+    test.each<[string, (sealed: string[]) => string[] | null]>([
+      ["keeps both names", sealed => ["scripts/smoke.mjs", ...sealed]],
+      ["answers with the old name only", () => ["scripts/smoke.mjs"]],
+      ["invents a third path", sealed => [...sealed, "src/extra.ts"]],
+      ["writes nothing", () => null],
+    ])("a correction that %s is rejected: the original receipt stands and is refuted by name", async (_label, reply) => {
+      arrange();
+      const correcting = correctingAgent(proofClaiming(["scripts/smoke.mjs", "src/fixtures/smoke.mjs"], "src/fixtures/smoke.mjs"), reply);
+      const req = request({ leaseId: "test-lease", agent: correcting.agent, git: renameGit, verify });
+      expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+      // Bounded: the same session gets the repair budget and no more.
+      expect(correcting.calls()).toBe(3);
+      expect(correcting.prompts[1]).toContain("The changed list must be exactly the sealed diff's paths: [\\\"src/fixtures/smoke.mjs\\\"]");
+      const verdict = store.proofVerdictFor(req.runId as number);
+      expect(verdict).toMatchObject({ verdict: "refuted" });
+      expect(verdict?.reasons[0]).toBe("claimed changed path not in the sealed diff: scripts/smoke.mjs");
+      expect(store.runsFor(taskRef).filter(one => one.role === "repair").every(one => one.reason === "proof-correction-rejected")).toBe(true);
+    });
+
+    test("an unexplained path beside the rename's old name: nothing is handed back, both are refuted by name", async () => {
+      arrange();
+      const req = request({ git: renameGit, verify, agent: agentWithProof(proofClaiming(["scripts/smoke.mjs", "src/fixtures/smoke.mjs", "src/other.ts"], "src/fixtures/smoke.mjs")) });
+      expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+      expect(agentCalls).toHaveLength(1);
+      const verdict = store.proofVerdictFor(req.runId as number);
+      expect(verdict).toMatchObject({ verdict: "refuted" });
+      expect(verdict?.reasons[0]).toBe("claimed changed paths not in the sealed diff: scripts/smoke.mjs, src/other.ts");
+    });
   });
 });
 
