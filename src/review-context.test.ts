@@ -1,6 +1,7 @@
-import { runOperate } from "./operate.js";
-import { executeMateTool } from "./mate-tools.js";
-import { applyChatTaskAction } from "./chat-task-actions.js";
+import { runOperate, EXIT, OPERATE_HELP, OPERATE_BOOLEAN_FLAGS, OPERATE_VALUE_FLAGS, TASK_ACTIONS } from "./operate.js";
+import { executeMateTool, MATE_TOOLS } from "./mate-tools.js";
+import { applyChatTaskAction, CHAT_TASK_ACTIONS } from "./chat-task-actions.js";
+import { CHAT_CONTROLS } from "./chat-controls.js";
 import { createDecisionServer } from "./serve.js";
 import { verificationEvidence, REVIEW_GATE_NAME, sealVerificationReceipt } from "./verification-evidence.js";
 import { verifyApproverByPassword } from "./principal.js";
@@ -348,21 +349,77 @@ describe("inherited review context (v51)", () => {
     expect(other.admitReview(asked.id, spec, T0)).toMatchObject({ ok: false, reason: "gone" });
   });
 
-  test("retired refresh: CLI, shared chat and result have no manual refresh controls", async () => {
-    const f = await firstReady();
-    const lines: string[] = [];
-    expect(await runOperate("task", ["review", String(f.sourceRun), "--refresh", "--as", "alex", "--token", f.approverToken, "--json"], line => lines.push(line), { databaseFile: f.databaseFile, now: T0 })).not.toBe(0);
-    expect(executeMateTool({ store: f.store, who: f.who, now: T0, evidenceRoot: f.evidenceRoot, draft: () => { throw new Error("No refresh card may be created"); } }, "propose_task_action", { task: "feat", operation: "refresh_review", run: f.sourceRun }).ok).toBe(false);
+  test("retired refresh: after one successful first review, CLI, shared chat, result, task, cockpit and work pages expose no manual Refresh review action and the review stays final", async () => {
+    // Deployed schema 60 on a reviewed run: exactly one root reviewer, no
+    // open request. Every surface below is the real one (operate.ts, the
+    // mate tools, the decision server), not a grep over source text.
+    const f = await firstReady(); expect(f.ask().ok).toBe(true);
+    let calls = 0;
+    const reports = await f.pass(async () => { calls++; return { ...OK, stdout: spoken(firstVerdict()) }; });
+    expect(calls).toBe(1); expect(reports[0]).toMatchObject({ outcome: "reviewed" });
+    const reviewers = () => f.store.runsFor(f.sourceTaskRef).filter(r => r.role === "reviewer");
+    expect(reviewers()).toHaveLength(1);
+    expect(f.store.openReviewRequests()).toEqual([]);
+    const NO_REFRESH = /Refresh review|refresh review|refresh-review|refresh_review|data-refresh-state|evidence-refresh/i;
+
+    // CLI: no refresh verb, flag or help entry; the one review door refuses a second successful review.
+    expect(TASK_ACTIONS.filter(one => /refresh/.test(one))).toEqual([]);
+    expect([...OPERATE_VALUE_FLAGS, ...OPERATE_BOOLEAN_FLAGS].filter(one => /refresh/.test(one))).toEqual([]);
+    expect(OPERATE_HELP).not.toMatch(NO_REFRESH);
+    const cli = async (...args: string[]) => {
+      const lines: string[] = [];
+      const code = await runOperate("task", [...args, "--as", "alex", "--token", f.approverToken, "--json"], line => lines.push(line), { databaseFile: f.databaseFile, now: T0 });
+      return { code, envelope: JSON.parse(lines.join("\n")) as { ok: boolean; reason?: string; error?: string; detail?: string } };
+    };
+    const flagged = await cli("review", String(f.sourceRun), "--refresh");
+    expect(flagged.code).toBe(EXIT.usage); expect(JSON.stringify(flagged.envelope)).toContain("unknown option --refresh");
+    const verb = await cli("refresh-review", String(f.sourceRun));
+    expect(verb.code).toBe(EXIT.usage); expect(verb.envelope.ok).toBe(false);
+    const again = await cli("review", String(f.sourceRun));
+    expect(again.code).toBe(EXIT.refused); expect(again.envelope).toMatchObject({ ok: false, reason: "already-reviewed" });
+    expect(JSON.stringify(again.envelope)).toContain("a successful review is never retried");
+
+    // Chat: no refresh action, control or proposal; the confirmed-action path refuses an unknown operation.
+    expect(Object.keys(CHAT_TASK_ACTIONS).filter(one => /refresh/.test(one))).toEqual([]);
+    expect(Object.keys(CHAT_CONTROLS).filter(one => /refresh/.test(one))).toEqual([]);
+    expect(JSON.stringify(MATE_TOOLS.map(one => ({ name: one.name, description: one.description, inputSchema: one.inputSchema })))).not.toMatch(NO_REFRESH);
+    const ctx = { store: f.store, who: f.who, now: T0, evidenceRoot: f.evidenceRoot, draft: () => { throw new Error("No refresh card may be created"); } };
+    expect(JSON.stringify(executeMateTool(ctx, "get_controls", {}))).not.toMatch(NO_REFRESH);
+    expect(executeMateTool(ctx, "propose_task_action", { task: "feat", operation: "refresh_review", run: f.sourceRun }).ok).toBe(false);
+    expect(executeMateTool(ctx, "show_control", { control: "refresh_review", task: "feat" }).ok).toBe(false);
+    expect(applyChatTaskAction(f.store, f.who, { task: "feat", operation: "refresh_review", run: f.sourceRun, stamp: "x" }, T0, true)).toMatchObject({ ok: false });
+
+    // Web: the result, task, chat result view, review cockpit and work pages carry no refresh control; no route serves one.
+    f.store.setTaskState("feat", "done", T0);
     const server = createDecisionServer({ store: f.store, evidenceRoot: f.evidenceRoot, repo: f.repo, clock: () => T0 });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     try {
       const base = `http://127.0.0.1:${(server.address() as {port:number}).port}`;
       const login = await fetch(base + "/login", { method: "POST", redirect: "manual", body: new URLSearchParams({ name: "alex", token: f.approverToken }) });
       const cookie = login.headers.getSetCookie().map(c => c.split(";")[0]).join("; ");
-      const html = await (await fetch(base + `/r/${f.sourceRun}`, { headers: { cookie } })).text();
-      expect(html).not.toMatch(/Refresh review|data-refresh-state|refresh_review/);
-      expect(f.store.openReviewRequests()).toHaveLength(0);
+      const page = async (path: string) => { const response = await fetch(base + path, { headers: { cookie } }); return { status: response.status, html: await response.text() }; };
+      const pages = { result: await page(`/r/${f.sourceRun}`), task: await page("/t/feat"), chat: await page(`/chat?task=feat&result=${f.sourceRun}`), cockpit: await page("/review?result=feat"), work: await page("/work") };
+      for (const [name, one] of Object.entries(pages)) {
+        expect(one.status, name).toBe(200);
+        expect(one.html, name).not.toMatch(NO_REFRESH);
+        expect(one.html, name).not.toContain("/retry-review");
+      }
+      expect(pages.chat.html).toContain(`data-result-run="${f.sourceRun}"`);
+      for (const html of [pages.task.html, pages.cockpit.html]) {
+        expect(html).toContain('data-review-state="succeeded" data-review-attempts="1" data-review-cap="3" data-review-remaining="0"');
+        expect(html).toContain('<button type="button" class="review-retry-button" disabled aria-disabled="true">Reviewed</button>');
+      }
+      const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(pages.task.html)?.[1] ?? "";
+      expect(csrf).not.toBe("");
+      const post = (path: string, fields: Record<string, string>) => fetch(base + path, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, ...fields }), redirect: "manual" });
+      expect((await post("/t/feat/refresh-review", { run: String(f.sourceRun) })).status).toBe(404);
+      expect((await post(`/r/${f.sourceRun}/refresh`, {})).status).toBe(404);
+      const retried = await post("/t/feat/retry-review", { run: String(f.sourceRun) });
+      expect(retried.status).toBe(409); expect(await retried.text()).toContain("a successful review is never retried");
     } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+    expect(f.ask()).toMatchObject({ ok: false, reason: "already-reviewed" });
+    expect(reviewers()).toHaveLength(1); expect(f.store.openReviewRequests()).toEqual([]);
+    expect(f.store.criterionReviewsFor(f.sourceRun)).toHaveLength(4);
   });
 
   test.each(["head", "scope", "route", "gate", "proof", "approval", "failed-capture", "context", "missing-log"] as const)("first-review preflight: %s drift refuses without a provider", async change => {

@@ -476,13 +476,25 @@ describe("schema v50: bounded review retries upgrade a v49 database without rewr
 
 
 describe("schema 60 compatibility without manual refresh", () => {
-  test("fresh and reopened v60 preserves every historical review row and receipt", () => {
+  test("fresh and reopened v60 preserves every historical review row and receipt, and no schema-62 refresh object exists", () => {
     const root = mkdtempSync(join(tmpdir(), "refresh-migration-")), file = join(root, "test.db");
     try {
       let store = openStore(file); seed(store, join(root, "evidence"));
       expect(SCHEMA_VERSION).toBe(60);
       expect(store.raw().prepare("PRAGMA table_info(run)").all().some(row => row["name"] === "review_refresh")).toBe(false);
       expect(store.raw().prepare("PRAGMA table_info(review_request)").all().some(row => row["name"] === "refresh_json")).toBe(false);
+      // The retired schema-62 draft (a refresh request ledger, a second
+      // successful review per source) left no table, column, index or
+      // trigger behind: the whole live schema is scanned, and v50's
+      // one-successful-root-review backstop is still the deployed shape.
+      const objects = store.raw().prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name").all() as { type: string; name: string; tbl_name: string; sql: string | null }[];
+      const obsolete = /refresh|second_review|second_successful|review_evidence_request|evidence_refresh/i;
+      expect(objects.filter(one => obsolete.test(one.name) || obsolete.test(one.sql ?? ""))).toEqual([]);
+      for (const table of ["run", "review_request", "criterion_review", "artifact", "proof_verdict"]) {
+        expect((store.raw().prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).filter(column => obsolete.test(column.name))).toEqual([]);
+      }
+      expect(objects.find(one => one.name === "one_successful_root_review_per_source")?.sql).toContain("WHERE role = 'reviewer' AND review_attempt IS NOT NULL AND outcome = 'no-change'");
+      expect(objects.find(one => one.name === "one_review_per_source")).toBeUndefined();
       const tables = ["run", "review_request", "criterion_review", "diff_comment", "artifact", "proof_verdict"];
       const before = tables.map(t => store.raw().prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());
       store.close(); store = openStore(file);

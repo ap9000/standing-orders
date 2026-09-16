@@ -15,7 +15,11 @@
  * same session answers an evidence read request and then a review, and
  * whether every reply passes the machine's own parsers.
  *
- *   npm run build && node scripts/claude-review-schema-smoke.mjs --model claude-opus-5 --out smoke.json
+ *   npm run build && node src/fixtures/claude-review-schema-smoke.mjs --model claude-opus-5 --out smoke.json
+ *
+ * It lives beside the other disposable fixtures under src/fixtures (the
+ * approved paths for this work); like first-review-ui.mjs it imports the
+ * built dist and is never compiled or collected by vitest.
  *
  * Everything is isolated: the model runs in an empty temporary directory
  * with no tool but Read, no MCP server, no permission prompts, and a
@@ -32,13 +36,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 function usage() {
   return [
     "Claude review startup smoke (real model, synthetic patch)",
     "",
-    "  node scripts/claude-review-schema-smoke.mjs --model claude-opus-5 [--out result.json]",
+    "  node src/fixtures/claude-review-schema-smoke.mjs --model claude-opus-5 [--out result.json]",
     "",
     "Options:",
     "  --model <id>          exact claude model id to run (required)",

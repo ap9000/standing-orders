@@ -92,7 +92,7 @@ comments or a signed criterion. Isolation flags and the same-session read loop
 are unchanged. Focused regressions: `src/provider.test.ts` (flat schema, no
 combinators, mixed/incomplete replies), `src/reviewer.test.ts` (parser
 refusal) and `src/review-context.test.ts` (read envelope exactness).
-`scripts/claude-review-schema-smoke.mjs` drives the real `claude` CLI
+`src/fixtures/claude-review-schema-smoke.mjs` drives the real `claude` CLI
 through dist's own review adapter in an empty temporary directory; its
 2026-09-15 certificate against `claude-opus-5` is stored at
 `docs/assessments/evidence/review-evidence-refresh/claude-review-schema-smoke-2026-09-15.json`:
@@ -101,6 +101,32 @@ session returned a parseable review, and one session returned an exact
 evidence-only request and then, resumed with the served range, a parseable
 review. No refresh UI, no schema change; the builder ran the focused suites
 and typecheck only, not the full gate.
+
+Revision after build 1641 (comment 389): c4 now has executable proof in the
+existing suites instead of source-grep claims. `src/review-context.test.ts`
+("retired refresh: after one successful first review, CLI, shared chat,
+result, task, cockpit and work pages expose no manual Refresh review action
+and the review stays final") completes a real first review on the schema-60
+fixture and then, on that reviewed run, proves: the CLI has no refresh verb,
+flag or help entry (`--refresh` is an unknown option, `task refresh-review`
+is unknown, `task review` refuses with `already-reviewed`); chat has no
+refresh action, control or tool wording and refuses a `refresh_review`
+proposal, control or confirmed action; the `/r/<run>`, `/t/<task>`,
+`/chat?task=&result=`, `/review?result=` and `/work` pages carry no refresh
+control while the task and cockpit show the reviewed state with the disabled
+"Reviewed" control; `POST /t/<task>/refresh-review` and `/r/<run>/refresh` are
+404; `POST /t/<task>/retry-review` refuses because a successful review is
+never retried; one reviewer run, no open request and all four judgements
+remain. `src/migration-v50-review-retries.test.ts` ("fresh and reopened v60
+preserves every historical review row and receipt, and no schema-62 refresh
+object exists") scans the whole live `sqlite_master` and the review tables
+for any refresh or second-review table, column, index or trigger, keeps
+`SCHEMA_VERSION` 60 across reopen, and checks v50's
+`one_successful_root_review_per_source` index still carries its exact
+predicate. The real-model smoke script moved from `scripts/` to
+`src/fixtures/claude-review-schema-smoke.mjs` so every changed path stays
+within the approved `src` and `docs` paths; its behavior and its stored
+certificate are unchanged.
 
 Validation on the uncommitted candidate based on
 `924fd00731649f88e7450c75776c31474a150e81`:
