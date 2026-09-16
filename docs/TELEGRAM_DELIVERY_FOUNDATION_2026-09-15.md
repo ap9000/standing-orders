@@ -142,7 +142,9 @@ contained all 25 delivery paths, so no evidence changed; only this document
 and the manifest did. The 22 original hashes are unchanged. Running
 `node scripts/delivery-manifest-check.mjs` reads Git objects only and refuses
 the manifest when its path list differs from that diff, when any hash differs
-from the `8217f55` bytes, or when the digest does not recompute.
+from the `8217f55` bytes, or when the digest does not recompute. The native
+test gate runs that check from `src/provider.test.ts`, so an incomplete
+manifest fails the suite.
 
 ### Criteria mapped to code and executable regressions
 
