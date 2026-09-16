@@ -137,26 +137,39 @@ function codexOutput(stdout: string): { text: string | null; tokensIn: number; t
   let text: string | null = null;
   let tokensIn = 0;
   let tokensOut = 0;
+  let completed = 0;
+  let invalid = false;
   for (const line of stdout.split("\n")) {
     if (line.trim() === "") continue;
     let event: Record<string, unknown>;
-    try { event = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+    try { event = JSON.parse(line) as Record<string, unknown>; } catch { invalid = true; continue; }
+    if (event === null || typeof event !== "object" || Array.isArray(event)) { invalid = true; continue; }
+    if (event["type"] === "turn.failed") invalid = true;
     if (event["type"] === "item.completed") {
       const item = event["item"] as Record<string, unknown> | undefined;
-      if (item?.["type"] === "agent_message" && typeof item["text"] === "string") text = item["text"];
+      if (item?.["type"] === "agent_message" && typeof item["text"] === "string") {
+        if (completed !== 0) invalid = true;
+        text = item["text"];
+      }
     } else if (event["type"] === "turn.completed") {
+      completed += 1;
       const usage = event["usage"] as Record<string, unknown> | undefined;
       if (typeof usage?.["input_tokens"] === "number" && tokenCount(usage["input_tokens"])) tokensIn = usage["input_tokens"];
       if (typeof usage?.["output_tokens"] === "number" && tokenCount(usage["output_tokens"])) tokensOut = usage["output_tokens"];
     }
   }
-  return { text, tokensIn, tokensOut };
+  // A partial answer is not authority to run host tools. Process exit zero
+  // alone is insufficient; the harness must finish this one turn successfully.
+  return { text: !invalid && completed === 1 ? text : null, tokensIn, tokensOut };
 }
 
 function claudeOutput(stdout: string): { text: string | null; tokensIn: number; tokensOut: number } {
   const parsed = strictJsonParse(Buffer.from(stdout, "utf8"), RESPONSE_CAP_BYTES, 12);
   if (!parsed.ok || typeof parsed.value !== "object" || parsed.value === null || Array.isArray(parsed.value)) return { text: null, tokensIn: 0, tokensOut: 0 };
   const body = parsed.value as Record<string, unknown>;
+  if (body["type"] !== "result" || body["subtype"] !== "success" || body["is_error"] !== false) {
+    return { text: null, tokensIn: 0, tokensOut: 0 };
+  }
   const usage = body["usage"] as Record<string, unknown> | undefined;
   const tokensIn = typeof usage?.["input_tokens"] === "number" && tokenCount(usage["input_tokens"]) ? usage["input_tokens"] : 0;
   const tokensOut = typeof usage?.["output_tokens"] === "number" && tokenCount(usage["output_tokens"]) ? usage["output_tokens"] : 0;
@@ -188,12 +201,12 @@ export async function performSubscriptionMateRequest(
         "-c", "features.multi_agent=false", "-c", "features.skill_mcp_dependency_install=false",
         "-c", "apps._default.enabled=false",
         ...(request.model === "default" ? [] : ["--model", request.model]),
-        prompt,
+        "-",
       ];
     } else {
       command = "claude";
       args = [
-        "-p", prompt, "--output-format", "json", "--json-schema", JSON.stringify(schema),
+        "-p", "--output-format", "json", "--json-schema", JSON.stringify(schema),
         "--safe-mode", "--no-session-persistence", "--tools", "", "--permission-mode", "dontAsk",
         "--permission-prompts", "none", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
         ...(request.model === "default" ? [] : ["--model", request.model]),
@@ -201,6 +214,7 @@ export async function performSubscriptionMateRequest(
     }
     const result = await runner(command, args, {
       cwd: dir,
+      stdin: prompt,
       timeoutMs: request.timeoutMs,
       maxBuffer: RESPONSE_CAP_BYTES,
       omitEnv: ALL_CREDENTIAL_ENV,

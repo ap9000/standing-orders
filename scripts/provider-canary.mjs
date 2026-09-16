@@ -28,8 +28,10 @@ function usage() {
     "  npm run certify:provider -- --provider codex --model gpt-5.6-sol",
     "",
     "Options:",
-    "  --provider claude|codex   subscription CLI to exercise",
+    "  --provider claude|codex|gemini|openrouter   CLI transport to exercise",
     "  --model <model>           exact model sealed into plan and build",
+    "  --review-provider <p>     optional different reviewer (claude|codex|openrouter)",
+    "  --review-model <model>    required with --review-provider",
     "  --output <file>           write the final JSON certificate",
     "  --review                  require an independent review of the result",
     "  --auto-approve            sign an unchanged-plan policy; require automatic review",
@@ -39,7 +41,7 @@ function usage() {
 }
 
 function parseArgs(argv) {
-  const result = { provider: null, model: null, output: null, keep: false, review: false, autoApprove: false, json: false, help: false };
+  const result = { provider: null, model: null, reviewProvider: null, reviewModel: null, output: null, keep: false, review: false, autoApprove: false, json: false, help: false };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === "--keep") result.keep = true;
@@ -47,19 +49,24 @@ function parseArgs(argv) {
     else if (arg === "--auto-approve") { result.autoApprove = true; result.review = true; }
     else if (arg === "--json") result.json = true;
     else if (arg === "--help" || arg === "-h") result.help = true;
-    else if (arg === "--provider" || arg === "--model" || arg === "--output") {
+    else if (["--provider", "--model", "--output", "--review-provider", "--review-model"].includes(arg)) {
       const value = argv[++index];
       if (value === undefined || value.startsWith("--")) throw new Error(`${arg} needs a value`);
-      result[arg.slice(2)] = value;
+      result[arg === "--review-provider" ? "reviewProvider" : arg === "--review-model" ? "reviewModel" : arg.slice(2)] = value;
     } else throw new Error(`unknown option ${arg}`);
   }
   if (result.help) return result;
-  if (result.provider !== "claude" && result.provider !== "codex") {
-    throw new Error("--provider is claude or codex");
+  if (!["claude", "codex", "gemini", "openrouter"].includes(result.provider)) {
+    throw new Error("--provider is claude, codex, gemini or openrouter");
   }
   if (typeof result.model !== "string" || result.model.trim() === "") {
     throw new Error("--model is required because task approvals seal exact routing");
   }
+  if ((result.reviewProvider === null) !== (result.reviewModel === null)) throw new Error("--review-provider and --review-model must be supplied together");
+  if (result.reviewProvider !== null) result.review = true;
+  result.reviewProvider ??= result.provider;
+  result.reviewModel ??= result.model;
+  if (result.review && !["claude", "codex", "openrouter"].includes(result.reviewProvider)) throw new Error("Gemini review is unsupported; select --review-provider claude|codex|openrouter and --review-model");
   return result;
 }
 
@@ -197,11 +204,13 @@ async function main() {
     const runnerToken = registered.token;
     if (typeof runnerToken !== "string" || runnerToken === "") throw new Error("runner registration returned no token");
 
-    for (const phase of ["plan", "build", "repair", "review"]) {
-      await cli(`route ${phase} to ${options.provider}`, [
+    for (const phase of ["plan", "build", "repair", ...(options.review ? ["review"] : [])]) {
+      const provider = phase === "review" ? options.reviewProvider : options.provider;
+      const model = phase === "review" ? options.reviewModel : options.model;
+      await cli(`route ${phase} to ${provider}`, [
         "config", "set", phase,
-        "--provider", options.provider,
-        "--model", options.model,
+        "--provider", provider,
+        "--model", model,
         "--as", "canary", "--token", password,
       ]);
     }
@@ -301,10 +310,10 @@ async function main() {
       }
       final = await cli("read the reviewed result", ["task", "show", TASK_ID]);
       if (final.proofVerdict !== "verified") throw new Error(`review left proof ${final.proofVerdict}: ${JSON.stringify(final.proofReasons ?? [])}`);
-      if (!final.runs?.some(one => one.role === "reviewer" && one.outcome === "no-change" && one.provider === options.provider && one.model === options.model)) {
+      if (!final.runs?.some(one => one.role === "reviewer" && one.outcome === "no-change" && one.provider === options.reviewProvider && one.model === options.reviewModel)) {
         throw new Error("no completed reviewer run proved the requested provider and model");
       }
-      assertReviewedCriteria(final.proofMatrix, afterPlan.scope.acceptance.map(one => one.id), options.provider, options.model);
+      assertReviewedCriteria(final.proofMatrix, afterPlan.scope.acceptance.map(one => one.id), options.reviewProvider, options.reviewModel);
       if (final.dispatch?.code !== "complete" || final.review?.state !== "succeeded") throw new Error("review did not reach verified completion");
     }
 
@@ -323,6 +332,8 @@ async function main() {
       passed: true,
       provider: options.provider,
       model: options.model,
+      reviewProvider: options.review ? options.reviewProvider : null,
+      reviewModel: options.review ? options.reviewModel : null,
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
       durationSeconds: Math.round((Date.now() - startedAt.getTime()) / 1000),
@@ -367,6 +378,8 @@ async function main() {
       passed: false,
       provider: options.provider,
       model: options.model,
+      reviewProvider: options.review ? options.reviewProvider : null,
+      reviewModel: options.review ? options.reviewModel : null,
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
       durationSeconds: Math.round((Date.now() - startedAt.getTime()) / 1000),

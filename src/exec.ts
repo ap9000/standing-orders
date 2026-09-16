@@ -43,7 +43,7 @@ export const CONTAINMENT_REFUSED_CODE = 126;
 
 export type RunOptions = ProcessTreeObserver & {
   cwd?: string;
-  /** Complete UTF-8 prompt for the Codex JSONL transport; closed after delivery. */
+  /** UTF-8 input for JSONL or buffered process-group transports; closed after delivery. */
   stdin?: string;
   /**
    * Absolute wall-clock ceiling. Keep this for bounded commands and repair
@@ -605,6 +605,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
       runBufferedGroup(file, args, {
         timeoutMs,
         maxBuffer,
+        ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
         ...(cwd === undefined ? {} : { cwd }),
         ...(childEnv === undefined ? {} : { childEnv }),
         ...(options.onSpawn === undefined ? {} : { onSpawn: options.onSpawn }),
@@ -657,7 +658,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
 function runBufferedGroup(
   file: string,
   args: readonly string[],
-  bag: ProcessTreeObserver & { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"] },
+  bag: ProcessTreeObserver & { cwd?: string; stdin?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"] },
 ): Promise<SpawnAttempt> {
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
@@ -667,7 +668,7 @@ function runBufferedGroup(
       const spawned = spawnContained(
         file,
         args,
-        { cwd: bag.cwd, env: bag.childEnv, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" },
+        { cwd: bag.cwd, env: bag.childEnv, stdio: [bag.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"], detached: process.platform !== "win32" },
         bag.owner ?? "buffered",
         { beforeSpawn: bag.beforeSpawn, onSpawn: bag.onSpawn, onContainer: bag.onContainer, onContainerEmpty: bag.onContainerEmpty, onUnknown: bag.onUnknown },
       );
@@ -692,6 +693,7 @@ function runBufferedGroup(
     let stderr = "";
     let timedOut = false;
     let overflowed = false;
+    let inputFailed = false;
     let notFound = false;
     let attachFailure: string | null = null;
     void attached.then(outcome => { if (!outcome.ok) attachFailure = outcome.detail; });
@@ -727,7 +729,7 @@ function runBufferedGroup(
       void settlement.then(empty => {
         resolve({
           result: {
-            code: notFound ? NOT_FOUND_CODE : overflowed ? OVERFLOW_CODE : timedOut ? TIMEOUT_CODE : attachFailure !== null || empty === false ? CONTAINMENT_REFUSED_CODE : (code ?? 1),
+            code: notFound ? NOT_FOUND_CODE : overflowed ? OVERFLOW_CODE : timedOut ? TIMEOUT_CODE : inputFailed ? 1 : attachFailure !== null || empty === false ? CONTAINMENT_REFUSED_CODE : (code ?? 1),
             stdout,
             stderr: empty === false ? `${stderr}\nNative process containment could not prove all descendants exited.`.trim() : attachFailure !== null && stderr === "" ? attachFailure : stderr,
             // Overflow also killed the child; it is not a timeout and must not read as one.
@@ -746,6 +748,14 @@ function runBufferedGroup(
       finish(null);
     });
     child.on("close", code => finish(code));
+    if (bag.stdin !== undefined && child.stdin !== null) {
+      child.stdin.on("error", () => {
+        inputFailed = true;
+        stderr = "prompt input failed: the provider closed its input before delivery completed";
+        killGroup(child);
+      });
+      child.stdin.end(bag.stdin, "utf8");
+    }
   });
 }
 

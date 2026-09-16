@@ -913,3 +913,17 @@ describe("the historical Telegram delivery manifest", () => {
     console.log(result);
   });
 });
+
+test("provider certification refuses unsupported reviewers and incomplete mixed routes before dispatch", () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  for (const [args, message] of [
+    [["--provider", "gemini", "--model", "gemini-test", "--review"], "Gemini review is unsupported"],
+    [["--provider", "claude", "--model", "test", "--review-provider", "codex"], "must be supplied together"],
+  ] as const) {
+    const check = spawnSync(process.execPath, ["scripts/provider-canary.mjs", ...args], { cwd: root, encoding: "utf8", timeout: 10_000 });
+    expect(check.error).toBeUndefined();
+    expect(check.status).toBe(2);
+    expect(check.stderr).toContain(message);
+    expect(check.stdout).toBe("");
+  }
+});
