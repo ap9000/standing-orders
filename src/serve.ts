@@ -1032,6 +1032,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const needsProject =
       who.via === "cookie" && project === null && !unscopedMode &&
       url.pathname !== "/" && url.pathname !== "/work" &&
+      url.pathname !== "/menu" &&
       url.pathname !== "/recipes" &&
       !/^\/t\/[^/]+$/.test(url.pathname) &&
       !/^\/r\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(url.pathname) &&
@@ -2086,7 +2087,6 @@ export function createDecisionServer(options: ServeOptions): Server {
         `</div>`;
       return page(response, 200, shell("menu", [
         `<h1>tools and settings</h1>`,
-        `<p class="hint">Chat, Work, and Projects are the tabs below. Everything else lives here.</p>`,
         section("work tools", workToolRows(chrome.projectScoped)),
         section("settings", settingsRows(chrome.projectScoped, chrome.settings)),
       ].join("\n"), { chrome }));

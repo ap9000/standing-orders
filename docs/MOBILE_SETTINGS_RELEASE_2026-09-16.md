@@ -59,3 +59,15 @@ credentials, GitHub, main, global packages, or installed runtime. Do not
 touch the dirty operator checkout. The operator will use the accepted final
 candidate for a guarded backup, compatibility rehearsal, idle process stop,
 deployment, normal browser checks, and matching UI/worker build verification.
+
+## Final validation (builder, 2026-09-16)
+
+Applied `git cherry-pick --no-commit 729e7d1` on b3002a9; the diff is the
+expected two files and needed no correction. `npm run typecheck` exited 0 and
+the three focused navigation tests passed (3 passed, 332 skipped). Negative
+control reproduced: with only the `/menu` guard exemption removed, the new
+regression fails with `expected 303 to be 200`; restored afterward. Both
+committed screenshots were re-read as valid PNGs (390x844 and 1440x900) and
+match the patched menu: All projects selected, no subtitle, Settings row
+visible. No physical-phone or live HTTPS check is claimed. The unchanged full
+verification command is left to the final machine gate.

@@ -12937,6 +12937,33 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     for (const path of ["/fleet", "/system", "/caps", "/workbench", "/chat"]) expect((await fetch(url(path), { headers: { cookie: member } })).status, path).toBe(403);
   });
 
+  test("the mobile menu reaches settings from All projects without changing the selected project or bypassing project and login guards", async () => {
+    const cookie = await login();
+    const get = (path: string) => fetch(url(path), { headers: { cookie }, redirect: "manual" });
+    const home = await page(cookie, "/work");
+    expect(home).toContain('<a class="mobile-more" href="/menu"');
+
+    const menu = await get("/menu");
+    expect(menu.status).toBe(200);
+    expect(menu.headers.get("location")).toBeNull();
+    expect(await menu.text()).toContain('<a class="menu-row" href="/settings">');
+    expect((await get("/settings")).status).toBe(200);
+    // Opening the menu must not silently select a project. Project-bound
+    // pages still require a selection, including after returning from Settings.
+    const tasks = await get("/tasks");
+    expect(tasks.status).toBe(303);
+    expect(tasks.headers.get("location")).toBe("/projects");
+    await selectProject(cookie, alpha);
+    expect((await get("/menu")).status).toBe(200);
+    expect((await get("/tasks")).status).toBe(200);
+    await selectProject(cookie, "");
+    expect((await get("/menu")).status).toBe(200);
+
+    const anonymous = await fetch(url("/menu"), { redirect: "manual" });
+    expect(anonymous.status).toBe(303);
+    expect(anonymous.headers.get("location")).toContain("/login");
+  });
+
   test("same task counts: an older live sibling counts once; released, expired and superseded claims do not look live", async () => {
     const original = finished("family-root", "One family", alpha, null);
     const older = seedTask("older-sibling", "Older", alpha);
