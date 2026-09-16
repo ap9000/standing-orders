@@ -16,6 +16,7 @@ import { runStreamJsonl } from "./exec.js";
 import { REVIEW_OUTPUT_LIMITS } from "./structured-output.js";
 import { parseReview } from "./reviewer.js";
 import { evidenceRequest, isEvidenceOnlyReply } from "./review-evidence.js";
+import { parseLearning } from "./project-learning.js";
 
 const ASK = {
   phase: "build" as const,
@@ -147,25 +148,45 @@ describe("argv dialects", () => {
     expect(parseReview(JSON.stringify({ version: 1 }), new Set(["src/file.ts"]), new Set(["c1"]))).toMatchObject({ ok: false, problems: [{ reason: "comments must be an array" }] });
     expect(properties).toHaveProperty("comments");
     expect(properties).toHaveProperty("criteria");
-    expect(properties["learning"]).toMatchObject({type:"array",maxItems:2,items:{additionalProperties:false}});
-    expect(properties["learningAssessment"]).toMatchObject({type:"object",required:["decision","reason"],additionalProperties:false,properties:{decision:{enum:["propose","none"]},reason:{minLength:1,maxLength:125}}});
+    expect(properties["learning"]).toEqual({});
+    expect(properties["learningAssessment"]).toEqual({});
     for (const field of ["comments", "criteria"] as const) {
-      const shape = properties[field] as { maxItems: number; items: { properties: { note: { minLength: number; maxLength: number } } } };
+      const shape = properties[field] as { maxItems: number; items: { properties: { note: { type: string } } } };
       expect(shape.maxItems).toBe(REVIEW_OUTPUT_LIMITS[field]);
-      expect(shape.items.properties.note).toEqual({ type: "string", minLength: 1, maxLength: REVIEW_OUTPUT_LIMITS.note });
+      expect(shape.items.properties.note).toEqual({ type: "string" });
       // Run1656: Claude exhausted StructuredOutput retries on a 251-character
       // ASCII note which our own 500-unit parser accepts. The provider shape
       // must not reject native-valid notes before our correction flow sees them.
       for (const note of ["a".repeat(251), "a".repeat(500), "😀".repeat(250)]) {
-        expect([...note].length).toBeLessThanOrEqual(shape.items.properties.note.maxLength);
         expect(parseReview(JSON.stringify({ version: 1, comments: [{ path: "src/file.ts", note }], criteria: [{ id: "c1", judgement: "cannot-tell", note }] }), new Set(["src/file.ts"]), new Set(["c1"])).ok).toBe(true);
       }
       // Transport is a permissive shape, never the semantic authority. No
       // native limit is raised and no text or judgement is silently clipped.
       const astralOverflow = "😀".repeat(251);
-      expect([...astralOverflow].length).toBeLessThanOrEqual(shape.items.properties.note.maxLength);
       expect(parseReview(JSON.stringify({ version: 1, comments: [{ path: "src/file.ts", note: astralOverflow }], criteria: [{ id: "c1", judgement: "contradicts", note: astralOverflow }] }), new Set(["src/file.ts"]), new Set(["c1"])).ok).toBe(false);
     }
+
+    // Text limits are not duplicated in the transport (UTF-16 native notes,
+    // UTF-8 learning bytes, and code-point schema lengths are not equivalent).
+    const visit = (value: unknown): void => {
+      if (!value || typeof value !== "object") return;
+      for (const [key, child] of Object.entries(value)) {
+        if (key === "maxLength" || key === "minLength") throw Error(`duplicated text bound: ${key}`);
+        visit(child);
+      }
+    };
+    for (const field of ["comments", "criteria", "learning", "learningAssessment"]) visit(properties[field]);
+    const learning = (observation: string) => [{ kind: "project", observation, action: "a".repeat(500), paths: ["src/" + "p".repeat(293) + ".ts"], phases: ["review"], evidence: [{ artifactId: 1, sha256: "a".repeat(64), excerpt: "e".repeat(300) }] }];
+    for (const observation of ["a".repeat(126), "a".repeat(500), "😀".repeat(125)]) {
+      expect(parseLearning(learning(observation))[0]?.observation).toBe(observation);
+    }
+    for (const observation of ["a".repeat(501), "😀".repeat(126)]) {
+      expect(() => parseLearning(learning(observation))).toThrow();
+      // Invalid optional advice is handled by the learning ledger, not by
+      // altering or rejecting the core contradiction.
+      expect(parseReview(JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "contradicts", note: "Evidence fails." }], learning: learning(observation) }), new Set(), new Set(["c1"]))).toMatchObject({ ok: true, criteria: [{ judgement: "contradicts" }] });
+    }
+    expect(parseReview(JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "a".repeat(501) }] }), new Set(), new Set(["c1"])).ok).toBe(false);
 
     // No other phase, and no other provider, gets the flag — a formatting
     // floor for the one phase and the one provider run 1467 actually hit.

@@ -249,27 +249,12 @@ const CLAUDE_REVIEW_ISOLATION_ARGV: readonly string[] = [
 const CLAUDE_REVIEW_JSON_SCHEMA = {
   type: "object",
   properties: {
-    learningAssessment: {
-      type: "object", properties: {
-        decision: { type: "string", enum: ["propose", "none"] },
-        reason: { type: "string", minLength: 1, maxLength: 125 },
-      }, required: ["decision", "reason"], additionalProperties: false,
-    },
-    learning: {
-      type: "array", maxItems: 2, items: {
-        type: "object", properties: {
-          kind: { type: "string", enum: ["project", "system"] },
-          observation: { type: "string", minLength: 1, maxLength: 125 },
-          action: { type: "string", minLength: 1, maxLength: 125 },
-          paths: { type: "array", minItems: 1, maxItems: 5, items: { type: "string", minLength: 1, maxLength: 75 } },
-          phases: { type: "array", minItems: 1, maxItems: 3, items: { type: "string", enum: ["plan", "build", "review"] } },
-          evidence: { type: "array", minItems: 1, maxItems: 3, items: {
-            type: "object", properties: { artifactId: { type: "integer", minimum: 1 }, sha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, excerpt: { type: "string", minLength: 1, maxLength: 75 } },
-            required: ["artifactId", "sha256", "excerpt"], additionalProperties: false,
-          } },
-        }, required: ["kind", "observation", "action", "paths", "phases", "evidence"], additionalProperties: false,
-      },
-    },
+    // Optional advice is not a review gate. project-learning validates its
+    // shape, UTF-8 byte limits, secrets and provenance after core ingestion,
+    // recording invalid advice without changing the review. Duplicating that
+    // contract here made a 126-character observation kill a valid review.
+    learningAssessment: {},
+    learning: {},
     version: { type: "integer", enum: [1] },
     comments: {
       type: "array",
@@ -277,12 +262,11 @@ const CLAUDE_REVIEW_JSON_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          path: { type: "string", minLength: 1, maxLength: REVIEW_OUTPUT_LIMITS.path },
+          path: { type: "string" },
           line: { type: ["integer", "null"], minimum: 1 },
-          // Transport must admit every note the native parser accepts. JSON
-          // Schema counts code points; parseReview enforces UTF-16 units and
-          // owns same-session correction when astral text exceeds that limit.
-          note: { type: "string", minLength: 1, maxLength: REVIEW_OUTPUT_LIMITS.note },
+          // Text limits belong to parseReview and its bounded same-session
+          // correction, not a second provider retry loop counting code points.
+          note: { type: "string" },
           severity: { type: "string", enum: ["note", "question", "problem"] },
         },
         required: ["path", "note"],
@@ -295,9 +279,9 @@ const CLAUDE_REVIEW_JSON_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          id: { type: "string", minLength: 1, maxLength: 40 },
+          id: { type: "string" },
           judgement: { type: "string", enum: ["upholds", "contradicts", "cannot-tell"] },
-          note: { type: "string", minLength: 1, maxLength: REVIEW_OUTPUT_LIMITS.note },
+          note: { type: "string" },
         },
         required: ["id", "judgement", "note"],
         additionalProperties: false,
