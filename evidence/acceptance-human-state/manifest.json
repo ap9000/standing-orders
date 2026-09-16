@@ -1,0 +1,62 @@
+{
+  "preparedPatch": "93afd7dca9c93493e4fa6777e50d527bfdae29a2",
+  "base": "9ea3e21061c37756d028ad87ae73b8e2ece4d077",
+  "parentRun": 1702,
+  "synthetic": true,
+  "sourceHashes": {
+    "src/serve.ts": "8696fab12dbe5e7f503d760cb2794404a195a4db6a5f2a8c3918dc36f3eb6c23",
+    "src/serve.test.ts": "870257adebdec7551122f4062b240bd1031cf24b32ab03bb70bc10a327dfc113"
+  },
+  "artifacts": [
+    {
+      "path": "evidence/acceptance-human-state/desktop-human-pending.png",
+      "sha256": "cb650a5deb6c72597af998eab8317e5a0c46600fd9bfc5f5b80f814647022a05",
+      "caption": "Synthetic acceptance-state fixture: desktop human pending",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "path": "evidence/acceptance-human-state/phone-human-pending.png",
+      "sha256": "69dfeb32064373c99ddae4d78b674d8d96e72354571edb429e1e043b2d04b314",
+      "caption": "Synthetic acceptance-state fixture: phone human pending",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "path": "evidence/acceptance-human-state/desktop-human-accepted.png",
+      "sha256": "50c84c561600abb4ecd926f851e05797ca254b8f5785d0b1aef787230e2f1c43",
+      "caption": "Synthetic acceptance-state fixture: desktop human accepted",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "path": "evidence/acceptance-human-state/phone-human-accepted.png",
+      "sha256": "3f0d64b904943a688a3c85b42796747b01e1514a719a0f86909075714d091fb5",
+      "caption": "Synthetic acceptance-state fixture: phone human accepted",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    }
+  ],
+  "observations": {
+    "reproducedBefore": "Accepted result still displayed Needs human review and Inspect the saved evidence before accepting this result.",
+    "after": {
+      "acceptanceRecordsShown": 1,
+      "label": "Human review",
+      "savedMatrixState": "manual-review",
+      "acceptButtons": 0,
+      "pendingInstructions": 0,
+      "phoneWidth": 390,
+      "phonePageWidth": 379
+    },
+    "validation": "Build and two existing focused tests passed. Actual isolated browser acceptance POST, then exact-result GET, asserted saved acceptance, unchanged manual-review machine state, no accept button or repeated instruction, and no phone overflow. Pending/accepted desktop and phone captures inspected. Prior unchanged evidence, feedback and revision journeys remain in the parent run.",
+    "limitations": "Synthetic Chromium viewport checks; no physical iPhone/Safari test."
+  }
+}
