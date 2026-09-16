@@ -7956,7 +7956,13 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const cookie = await login();
     const html = await (await fetch(url("/t/t-review?version=t-review"), { headers: { cookie } })).text();
     expect(html).toContain('data-review-judgement="contradicts"');
-    expect(html).toContain("reviewer: contradicted");
+    expect(html).toContain("Reviewer found a problem");
+    const reviewWindow = new Window();
+    reviewWindow.document.body.innerHTML = html;
+    const concern = reviewWindow.document.querySelector('.requirement-warning[data-review-judgement="contradicts"]');
+    expect(concern?.textContent).toContain("never wired in");
+    expect(concern?.closest(".requirement-evidence")).toBeNull();
+    await reviewWindow.happyDOM.close();
     expect(html).toContain("An independent review found conflicting evidence");
     expect(html).toContain("Automatic recovery");
     expect(html).toContain(trigger.draftTaskId);
@@ -8011,9 +8017,9 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const expectCoverage = (html: string): void => {
       expect(html).toContain('data-context-coverage="context"');
       expect(html).toContain('data-context-coverage="gap"');
-      expect(html).toContain("context gap");
+      expect(html).toContain("Review context is missing");
       expect(html).toContain("src/guard.ts: 70000 bytes exceeds the 49152-byte item limit");
-      expect(html).toContain("semantic coverage: 1/2 upheld by an independent reviewer — required under strict quality — NOT satisfied (cannot-tell never counts: c2)");
+      expect(html).toContain("Independent review confirmed 1 of 2 requirements. Required review is incomplete.");
     };
     // The task page: the machine verdict stays verified; the coverage line
     // sits beside it and says the required review is NOT satisfied.
@@ -8023,6 +8029,15 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(task).toContain('data-coverage-policy="strict"');
     expectCoverage(task);
     expect(task).toContain('data-review-judgement="cannot-tell"');
+    const contextWindow = new Window();
+    contextWindow.document.body.innerHTML = task;
+    const incomplete = contextWindow.document.querySelector('.requirement[data-criterion-id="c2"]');
+    expect(incomplete?.querySelector('[data-matrix-state="pass"]')?.textContent).toBe("Evidence checks passed");
+    const gap = incomplete?.querySelector('[data-context-coverage="gap"]');
+    expect(gap?.textContent).toContain("src/guard.ts: 70000 bytes");
+    expect(gap?.closest(".requirement-evidence")).toBeNull();
+    expect(incomplete?.querySelector('[data-review-judgement="cannot-tell"]')?.closest(".requirement-evidence")).toBeNull();
+    await contextWindow.happyDOM.close();
     // The run page: the same projection under the evidence bundle.
     const runPage = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
     expect(runPage).toContain('data-semantic-coverage="unsatisfied"');
@@ -8043,8 +8058,8 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     store.raw().prepare("UPDATE run SET quality_mode = 'default' WHERE id = ?").run(run);
     const relaxed = await (await fetch(url("/t/t-ctx"), { headers: { cookie } })).text();
     expect(relaxed).toContain('data-coverage-policy="default"');
-    expect(relaxed).toContain("optional under default quality — 1/2 upheld, cannot-tell: c2");
-    expect(relaxed).toContain("context gap c2: src/guard.ts");
+    expect(relaxed).toContain("Independent review confirmed 1 of 2 requirements. Independent review is optional for this scope.");
+    expect(relaxed).toContain("src/guard.ts: 70000 bytes");
   });
 
   test("the inbox surfaces a completed task with an unaccepted short or refuted verdict, and drops it once accepted", async () => {
@@ -10747,6 +10762,10 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(reviewPriorityOf(facts({ proofVerdict: "refuted", proofAccepted: true }))).toMatchObject({ band: 1, reasons: ["conflicting evidence — accepted with exception"] });
     expect(reviewPriorityOf(facts({ proofVerdict: "short" }))).toMatchObject({ band: 0, reasons: ["missing evidence"] });
     expect(reviewPriorityOf(facts({ proofVerdict: "short", proofAccepted: true }))).toMatchObject({ band: 1 });
+    const manualOnly = facts({ proofVerdict: "short", proofReasons: ['criterion "c1" requires manual-review evidence — an operator must accept it before this can verify'], proofMatrix: [row("c1", "Inspect phone layout", "manual-review")] });
+    expect(reviewPriorityOf(manualOnly)).toEqual({ band: 1, label: "review", reasons: ["human review needed"] });
+    expect(reviewPriorityOf({ ...manualOnly, proofAccepted: true }).reasons).toEqual(["accepted after human review"]);
+    expect(reviewPriorityOf({ ...manualOnly, proofReasons: [...manualOnly.proofReasons!, "no proof was written"] }).reasons).toContain("missing evidence");
     expect(reviewPriorityOf(facts({ proofMatrix: [row("c2", "x", "pass", [{ kind: "check", ref: "npm test" }], [], { judgement: "contradicts", note: "no", author: "reviewer:codex" })] }))).toMatchObject({ band: 0, reasons: ["reviewer raised a concern with c2"] });
     expect(reviewPriorityOf(facts({ proofMatrix: [row("c1", "x", "failed"), row("c3", "y", "missing")] }))).toMatchObject({ band: 0, reasons: ["missing or failed evidence for c1, c3"] });
     expect(reviewPriorityOf(facts({ ciFailing: true }))).toMatchObject({ band: 0, reasons: ["CI failing on its pull request — observed, not inferred"] });
@@ -11072,7 +11091,23 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     for (const [id, state] of [["c1", "pass"], ["c2", "failed"], ["c3", "manual-review"]] as const) {
       expect(html).toMatch(new RegExp(`data-matrix-state="${state}"[^]*?<code>${id}</code>`));
     }
-    expect(html).toContain("[answered: check: npm test, <a href=\"#" + diffFileAnchor("src/payout/guard.ts") + "\">changed-path: src/payout/guard.ts</a>]");
+    // Technical citations are available on demand; exact terms and
+    // failures stay visible without opening anything.
+    const matrixWindow = new Window();
+    matrixWindow.document.body.innerHTML = html;
+    const requirements = matrixWindow.document.querySelectorAll(".criterion-matrix .requirement");
+    expect(requirements).toHaveLength(3);
+    const passed = requirements[0]!;
+    expect(passed.querySelector(".requirement-statement")?.textContent).toBe("The guard is covered by tests");
+    expect(passed.querySelector(".requirement-statement")?.closest("details")).toBeNull();
+    expect(passed.querySelector(".requirement-evidence")?.hasAttribute("open")).toBe(false);
+    expect(passed.querySelector("summary")?.textContent).toBe("View evidence");
+    expect(passed.querySelector(".requirement-evidence")?.textContent).toContain("npm test");
+    expect(passed.querySelector(".requirement-evidence a")?.getAttribute("href")).toBe("#" + diffFileAnchor("src/payout/guard.ts"));
+    expect(requirements[1]!.querySelector(".requirement-issues")?.textContent).toContain("the screenshot did not validate");
+    expect(requirements[1]!.querySelector(".requirement-issues")?.closest("details")).toBeNull();
+    expect(html).not.toContain("[answered:");
+    await matrixWindow.happyDOM.close();
     expect(html).toContain("the screenshot did not validate");
     // The citation's anchor lands on that file's section of the sealed diff.
     expect(html).toContain(`<details class="diff-file" open id="${diffFileAnchor("src/payout/guard.ts")}">`);
@@ -11164,7 +11199,16 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(html).toContain("(exit 0) — 12 passed");
     expect(html).toContain('data-cockpit-source="reviewer"');
     expect(html).toContain('data-review-judgement="contradicts"');
-    expect(html).toContain("reviewer:codex: the guard is a TODO");
+    // The reviewer's concern stays in the open, with the requirement, and
+    // names its author under View evidence (clear acceptance 2026-09-16).
+    const reviewWindow = new Window();
+    reviewWindow.document.body.innerHTML = html;
+    const concern = reviewWindow.document.querySelector('.requirement[data-criterion-id="c1"] .requirement-warning[data-review-judgement="contradicts"]');
+    expect(concern?.textContent).toContain("Reviewer found a problem");
+    expect(concern?.textContent).toContain("the guard is a TODO");
+    expect(concern?.closest("details")).toBeNull();
+    expect(reviewWindow.document.querySelector('.requirement[data-criterion-id="c1"] .requirement-evidence')?.textContent).toContain("reviewer:codex");
+    await reviewWindow.happyDOM.close();
     expect(html).toContain('<span class="badge badge-failed">problem</span> <span class="mono">x:1</span> this is not a lock');
     expect(html).toContain('data-cockpit-source="screenshots"');
     expect(html).toMatch(new RegExp(`<img src="/r/${rich}/evidence/\\d+" alt="x after the change">`));
@@ -11203,7 +11247,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(before).toContain('data-next-action="accept-proof"');
     // Package 3: the act opens the Checks view of the shared result panel —
     // a real link the server honours, switched in place by the script.
-    expect(before).toContain('href="/review?result=t-act&amp;tab=checks#result" data-open-evidence>Review evidence</a>');
+    expect(before).toContain(`href="/review?result=t-act&amp;run=${run}&amp;tab=checks#result" data-open-evidence>Review evidence</a>`);
     expect(before).toContain("tab.click()");
     expect(before).toContain('data-result-tab="checks"');
     expect(before).toContain('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;');
@@ -11249,7 +11293,15 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(after).toContain('data-next-action="accept-proof"');
 
     // Accept from the cockpit — the existing act, recorded under the session's name.
-    const accepted = await post(cookie, "/t/t-act/accept-proof", { csrf, note: "read it myself" });
+    // A message or form for a different run never accepts the current build.
+    const staleLink = await fetch(url(`/review?result=t-act&run=${run + 1}&tab=checks`), { headers: { cookie } });
+    expect(staleLink.status).toBe(409);
+    expect(await staleLink.text()).toContain("Result changed");
+    expect((await fetch(url(`/review?result=t-act&run=${run}&tab=checks`), { headers: { cookie } })).status).toBe(200);
+    expect((await post(cookie, "/t/t-act/accept-proof", { csrf, run: String(run + 1), note: "wrong result" })).status).toBe(409);
+    expect((await post(cookie, "/t/t-act/accept-proof", { csrf, note: "missing result" })).status).toBe(409);
+    expect(store.proofAcceptance(run)).toBeNull();
+    const accepted = await post(cookie, "/t/t-act/accept-proof", { csrf, run: String(run), note: "read it myself" });
     expect(accepted.status).toBe(303);
     expect(store.proofAcceptance(run)?.approver).toBe("alex");
     const done = await (await fetch(url("/review?result=t-act"), { headers: { cookie } })).text();

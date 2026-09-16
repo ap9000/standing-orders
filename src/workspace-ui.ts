@@ -18,7 +18,7 @@
  */
 
 import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
-import type { ProofVerdict } from "./proof.js";
+import { manualReviewOnly, type ProofVerdict } from "./proof.js";
 import type { ReviewRetryState, TaskState } from "./store.js";
 import type { TaskControlView } from "./task-control.js";
 
@@ -277,6 +277,10 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
   }
   const published = publicationStatusOf(publication);
   const withPublication = (detail: string): string => (published === null ? detail : `${detail} ${published.detail}`);
+  const humanReview = manualReviewOnly({ verdict: result.verdict ?? "", reasons: result.reasons });
+  if (result.accepted && humanReview) {
+    return { token: "accepted-exception", label: "Accepted after human review", detail: withPublication("Human acceptance is recorded for this result. The machine verdict remains unchanged."), tone: "done", action: { label: "Review acceptance", kind: "open-review" } };
+  }
   if (result.accepted) {
     return {
       token: "accepted-exception",
@@ -310,6 +314,9 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       tone: "problem",
       action: { label: "Review the evidence", kind: "open-review" },
     };
+  }
+  if (result.verdict === "short" && humanReview) {
+    return { token: "verification-needed", label: "Ready for your review", detail: withPublication("The remaining requirements need human review. Inspect the evidence and record your decision."), tone: "attention", action: { label: "Review for acceptance", kind: "open-review" } };
   }
   if (result.verdict === "short") {
     return {

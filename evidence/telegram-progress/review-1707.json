@@ -1,0 +1,278 @@
+{
+  "criteria": [
+    {
+      "id": 228,
+      "reviewerRun": 1707,
+      "sourceRun": 1706,
+      "criterionId": "c1",
+      "judgement": "contradicts",
+      "note": "Code (store.telegramProgressRun/telegramProgressMessage, telegram.ts updateProgress/editProgress) and the focused regressions implement one edited message per builder result with reply bindings resolving to that result. But the approved check gate exited 1: tick.test.ts bridge end-to-end `bridge telegram --json` returned a problem instead of ok on the modified outbox path, so the required check evidence fails.",
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "scopeDigest": "cbf86b361cf405b7665d13768a0ffd85",
+      "headSha": "60aef1b4696bd0c5f13e420c38ae909f7258adb4",
+      "proof": {
+        "artifact": 1230,
+        "sha256": "0ff6ab4c5f3edb1c970430b42f19ac5933836f64a4571cecbe5daa25c50d6799"
+      },
+      "checkLog": {
+        "artifact": 1235,
+        "sha256": "1c10daab90e05a0395d5cdbad1688f17af8038f194feb043d2977306aa113fdb"
+      },
+      "screenshots": [
+        {
+          "artifact": 1231,
+          "sha256": "f750ccfe442faa81c817577b39c569c778816b540a57098bbc7122f7b12bd216",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/phone-failure.png (validated png)"
+        },
+        {
+          "artifact": 1232,
+          "sha256": "f1634f448a36d8ffff3e0c2fe5a6fe0699f72bf22fbedb966c909c2750b479b5",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/desktop-complete.png (validated png)"
+        },
+        {
+          "artifact": 1233,
+          "sha256": "ae5c246a90110ffd9a6d99940b7b43de405a7d497e46f4205ef6416c7ff91c53",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/phone-revision.png (validated png)"
+        },
+        {
+          "artifact": 1234,
+          "sha256": "4a45547e8f6d9ba3bfc5c34cd0f9e85801f1120de951f98ada5ef39d221362fb",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/desktop-revision.png (validated png)"
+        }
+      ],
+      "context": {
+        "artifact": 1237,
+        "sha256": "0c66045f56896f738eeb029ffe5fda69e1f306a11c354080376b2363e4f5a8e0"
+      }
+    },
+    {
+      "id": 229,
+      "reviewerRun": 1707,
+      "sourceRun": 1706,
+      "criterionId": "c2",
+      "judgement": "upholds",
+      "note": "src/telegram-progress.ts prints Checks passed/total from saved rows (pending/not recorded otherwise), one status and one remaining line, review optional/not requested/queued/running/✓/stopped/incomplete, acceptance and publication lines; screenshots 1231/1232 show these; task-notifications.test.ts (7 card regressions) was not among the failing files in the full run.",
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "scopeDigest": "cbf86b361cf405b7665d13768a0ffd85",
+      "headSha": "60aef1b4696bd0c5f13e420c38ae909f7258adb4",
+      "proof": {
+        "artifact": 1230,
+        "sha256": "0ff6ab4c5f3edb1c970430b42f19ac5933836f64a4571cecbe5daa25c50d6799"
+      },
+      "checkLog": {
+        "artifact": 1235,
+        "sha256": "1c10daab90e05a0395d5cdbad1688f17af8038f194feb043d2977306aa113fdb"
+      },
+      "screenshots": [
+        {
+          "artifact": 1231,
+          "sha256": "f750ccfe442faa81c817577b39c569c778816b540a57098bbc7122f7b12bd216",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/phone-failure.png (validated png)"
+        },
+        {
+          "artifact": 1232,
+          "sha256": "f1634f448a36d8ffff3e0c2fe5a6fe0699f72bf22fbedb966c909c2750b479b5",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/desktop-complete.png (validated png)"
+        },
+        {
+          "artifact": 1233,
+          "sha256": "ae5c246a90110ffd9a6d99940b7b43de405a7d497e46f4205ef6416c7ff91c53",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/phone-revision.png (validated png)"
+        },
+        {
+          "artifact": 1234,
+          "sha256": "4a45547e8f6d9ba3bfc5c34cd0f9e85801f1120de951f98ada5ef39d221362fb",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/desktop-revision.png (validated png)"
+        }
+      ],
+      "context": {
+        "artifact": 1237,
+        "sha256": "0c66045f56896f738eeb029ffe5fda69e1f306a11c354080376b2363e4f5a8e0"
+      }
+    },
+    {
+      "id": 230,
+      "reviewerRun": 1707,
+      "sourceRun": 1706,
+      "criterionId": "c3",
+      "judgement": "contradicts",
+      "note": "Access fences and retries are re-checked around edits and digest mode never edits, but the approved gate failed tick.test.ts '--follow applies a waiting tap' (decision 'Fail c…' button missing) and 'park → send → tap' (bridge exit 1), so the decisions journey is not shown intact. Screenshots 1233/1234 show Needs your approval; 1234 does not visibly show a feedback-derived revision.",
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "scopeDigest": "cbf86b361cf405b7665d13768a0ffd85",
+      "headSha": "60aef1b4696bd0c5f13e420c38ae909f7258adb4",
+      "proof": {
+        "artifact": 1230,
+        "sha256": "0ff6ab4c5f3edb1c970430b42f19ac5933836f64a4571cecbe5daa25c50d6799"
+      },
+      "checkLog": {
+        "artifact": 1235,
+        "sha256": "1c10daab90e05a0395d5cdbad1688f17af8038f194feb043d2977306aa113fdb"
+      },
+      "screenshots": [
+        {
+          "artifact": 1231,
+          "sha256": "f750ccfe442faa81c817577b39c569c778816b540a57098bbc7122f7b12bd216",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/phone-failure.png (validated png)"
+        },
+        {
+          "artifact": 1232,
+          "sha256": "f1634f448a36d8ffff3e0c2fe5a6fe0699f72bf22fbedb966c909c2750b479b5",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/desktop-complete.png (validated png)"
+        },
+        {
+          "artifact": 1233,
+          "sha256": "ae5c246a90110ffd9a6d99940b7b43de405a7d497e46f4205ef6416c7ff91c53",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/phone-revision.png (validated png)"
+        },
+        {
+          "artifact": 1234,
+          "sha256": "4a45547e8f6d9ba3bfc5c34cd0f9e85801f1120de951f98ada5ef39d221362fb",
+          "path": "agent-claimed screenshot at evidence/telegram-progress/desktop-revision.png (validated png)"
+        }
+      ],
+      "context": {
+        "artifact": 1237,
+        "sha256": "0c66045f56896f738eeb029ffe5fda69e1f306a11c354080376b2363e4f5a8e0"
+      }
+    }
+  ],
+  "comments": [
+    {
+      "id": 564,
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "run": 1706,
+      "path": "src/telegram.ts",
+      "line": 868,
+      "note": "Approved gate (REVIEW-VERIFICATION exit 1) failed 2 tests in src/tick.test.ts 'the bridge, end to end': `bridge telegram --json` returned 1 instead of EXIT.ok, and the waiting-tap test found no 'Fail c…' decision button. Both sit on the outbox path this diff reroutes through editMessageText; root cause (test double vs. real regression) cannot be settled from sealed files.",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "supersededBy": null,
+      "consumedBy": null,
+      "sourceKey": null,
+      "reviewerRun": 1707,
+      "severity": "problem"
+    },
+    {
+      "id": 565,
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "run": 1706,
+      "path": "src/telegram.ts",
+      "line": 646,
+      "note": "Proof's check list ran only the focused suite (26/26) and typecheck; the full approved command was not run before submission, so the tick.test.ts bridge failures went unnoticed. Proof verdicts were honestly marked pending-verification.",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "supersededBy": null,
+      "consumedBy": null,
+      "sourceKey": null,
+      "reviewerRun": 1707,
+      "severity": "problem"
+    },
+    {
+      "id": 566,
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "run": 1706,
+      "path": "src/telegram.ts",
+      "line": 646,
+      "note": "updateProgress(true) return value is discarded for non-progress rows (failure/decision alerts): an access-fence or edit error on the refresh is swallowed and the row proceeds to deliverOne. Acceptable since deliverOne fences itself, but the stale card silently stays.",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "supersededBy": null,
+      "consumedBy": null,
+      "sourceKey": null,
+      "reviewerRun": 1707,
+      "severity": "note"
+    },
+    {
+      "id": 567,
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "run": 1706,
+      "path": "src/telegram.ts",
+      "line": 619,
+      "note": "progressRun is null when batched (digest cadence), so digest mode never edits; regression 'a mixed digest is never repainted' covers this. Good for c3 digest cadence.",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "supersededBy": null,
+      "consumedBy": null,
+      "sourceKey": null,
+      "reviewerRun": 1707,
+      "severity": "note"
+    },
+    {
+      "id": 568,
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "run": 1706,
+      "path": "src/store.ts",
+      "line": 22020,
+      "note": "telegramMessageBindings now maps a reviewer row's run to the builder result via telegramProgressRun, so replies to the shared message resolve to the builder result; regression asserts bindings for message 100 equal the builder run.",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "supersededBy": null,
+      "consumedBy": null,
+      "sourceKey": null,
+      "reviewerRun": 1707,
+      "severity": "note"
+    },
+    {
+      "id": 569,
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "run": 1706,
+      "path": "src/telegram-progress.ts",
+      "line": 21,
+      "note": "Checks shown as passed/total from saved matrix rows, 'pending' when none and 'not recorded' when proof is null; no percentage or ETA. Status/remaining distinguish optional vs required review, stopped, evidence gaps, human acceptance and publication states.",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "supersededBy": null,
+      "consumedBy": null,
+      "sourceKey": null,
+      "reviewerRun": 1707,
+      "severity": "note"
+    },
+    {
+      "id": 570,
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "run": 1706,
+      "path": "src/telegram-progress.ts",
+      "line": 73,
+      "note": "Card starts with the readable task title (phoneText, 88 chars) then 'project · Attempt #n'; screenshots 1231/1232 show this layout with Checks 1/2 / 2/2, Review optional / ✓ and 'Saved locally · Not published'.",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "supersededBy": null,
+      "consumedBy": null,
+      "sourceKey": null,
+      "reviewerRun": 1707,
+      "severity": "note"
+    },
+    {
+      "id": 571,
+      "artifact": 1226,
+      "artifactSha": "50e96436272e616bc88c80ab33c0b54721195a61609a83fc0281340acf6a7a66",
+      "run": 1706,
+      "path": "src/task-notifications.test.ts",
+      "line": null,
+      "note": "Desktop journey screenshot (1234) shows task 'Make acceptance review clearer…' with a 'Legacy request' brief at Needs your approval; nothing in the image ties it to feedback from a Telegram result link, unlike the phone shot whose brief says 'apply the feedback recorded on build #2'. Caption is not verifiable from the image alone.",
+      "author": "reviewer:claude·opus",
+      "createdAt": "2026-09-16T21:08:53.000Z",
+      "supersededBy": null,
+      "consumedBy": null,
+      "sourceKey": null,
+      "reviewerRun": 1707,
+      "severity": "question"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Documents/standing-orders-clear-acceptance
+
+(node:77896) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------·-·-----------------------------------------------
+
+ Test Files  1 passed (1)
+      Tests  2 passed | 335 skipped (337)
+   Start at  12:55:32
+   Duration  2.10s (transform 1.30s, setup 11ms, import 1.73s, tests 234ms, environment 0ms)
+

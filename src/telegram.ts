@@ -19,10 +19,14 @@
  * are one command.
  */
 
+import { acceptanceEvidenceText } from "./chat-acceptance.js";
+import { verifyApproverStanding } from "./principal.js";
+import { resultImageFileName, resultTaskLabel, verifyResultImage } from "./chat-evidence.js";
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
-import { isLifecycleNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
+import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
+import { telegramProgressCard } from "./telegram-progress.js";
 import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import {
@@ -278,7 +282,7 @@ export async function bridgePass(
 
   try {
     if (options.deliver !== false) {
-      await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin);
+      await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin, options.conversation?.evidenceRoot);
     }
     await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report, 0, undefined, options.readProjects, options.conversation);
     if (options.conversation !== undefined && options.readProjects !== undefined) {
@@ -420,7 +424,7 @@ export async function followBridge(
       const startedAt = Date.now();
       const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
       if (options.deliver !== false) {
-        await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin);
+        await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin, options.conversation?.evidenceRoot);
       }
       await drainUpdates(
         store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal, options.readProjects, options.conversation,
@@ -490,6 +494,7 @@ type OutboundSender = (text: string, keyboard?: InlineButton[][], messageRows?: 
  * under the trusted origin read now — the same road `/task` uses. The label
  * names where the path goes; nothing in it comes from the fact's text. */
 function factLinkLabel(path: string): string {
+  if (/^\/review\?result=[^&]+&run=\d+&tab=checks$/.test(path)) return "Review for acceptance";
   if (/^\/chat\?task=[^&]+&result=/.test(path)) return "Review result";
   if (/^\/(?:chat\?task=|t\/)/.test(path)) return "Open task";
   if (/^\/d\//.test(path)) return "Open decision";
@@ -499,7 +504,7 @@ function factLinkLabel(path: string): string {
 async function deliverOutbox(
   store: Store, botId: string, transport: TelegramTransport, owner: string,
   clock: () => Date, report: BridgeReport, readProjects?: TelegramReadProjects,
-  canDeliver?: () => boolean, phoneOrigin?: () => string | null,
+  canDeliver?: () => boolean, phoneOrigin?: () => string | null, evidenceRoot?: string,
 ): Promise<void> {
   const binding = store.liveTelegramBinding(botId);
   if (binding === null) {
@@ -580,12 +585,74 @@ async function deliverOutbox(
       const after = (await readAccess()) ?? fence();
       return after === null ? sent : { ok: false, error: after };
     };
+    const imageSender = async (row: TelegramDelivery): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> => {
+      const problem = (await readAccess()) ?? fence();
+      if (problem !== null) return { ok: false, error: problem };
+      const match = /^life:acceptance-evidence:r(\d+)-a(\d+)-([a-f0-9]{64}):\d+$/.exec(row.dedupeKey);
+      if (match === null || row.taskId === null || row.run === null || store.getRun(Number(match[1]))?.parentRun !== row.run) return { ok: false, error: "Screenshot notification does not match its recorded review" };
+      const family = store.taskFamilyOf(row.taskId, projects, false);
+      const current = family?.current.id === row.taskId && store.runsFor(row.taskRef!).find(one => one.finishedAt !== null && ["builder", "repair", "scout"].includes(one.role))?.id === row.run;
+      const skip = store.proofAcceptance(row.run) !== null ? "Acceptance is already recorded; no further acceptance is needed." : !current ? "A newer result is current. Request its evidence before accepting." : null;
+      const verified = evidenceRoot === undefined ? { ok: false as const, problem: "the bridge cannot read evidence files" } : verifyResultImage(store, evidenceRoot, telegramConversationRepos(store, binding.approver, projects), { taskId: row.taskId, run: row.run, artifact: Number(match[2]), sha256: match[3]! });
+      if (skip !== null) return { ok: true, receipt: store.proofAcceptance(row.run) !== null ? "skipped:already-accepted" : "skipped:newer-result" };
+      if (!verified.ok) {
+        const sent = await sender(`A screenshot for result #${row.run} could not be sent: ${verified.problem}. Inspect the result before accepting.`);
+        return sent.ok ? { ok: true, receipt: receiptFor(botId, binding.chatId, sent.messageId) } : sent;
+      }
+      // No await between the access fence, file validation and upload.
+      let answer: Awaited<ReturnType<TelegramTransport>>;
+      try { answer = await transport("sendDocument", { chat_id: binding.chatId, caption: `${resultTaskLabel(row.taskId)} · result #${row.run} · screenshot for acceptance` }, undefined, {
+        field: "document", bytes: verified.bytes, contentType: verified.format === "png" ? "image/png" : "image/jpeg", fileName: resultImageFileName(row.taskId, row.run, Number(match[2]), verified.format),
+      });
+      } catch { return { ok: false, error: "Screenshot delivery is unconfirmed; retry may duplicate it" }; }
+      const messageId = (answer.result as { message_id?: number } | undefined)?.message_id;
+      if (!answer.ok || !Number.isSafeInteger(messageId)) {
+        if (answer.parameters?.retry_after !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + answer.parameters.retry_after * 1000).toISOString());
+        return { ok: false, error: answer.uncertain || (answer.ok && messageId == null) ? "Screenshot delivery is unconfirmed; retry may duplicate it" : "Telegram did not accept the screenshot" };
+      }
+      store.recordTelegramMessage(row, binding, String(messageId), clock());
+      const after = (await readAccess()) ?? fence();
+      return after === null ? { ok: true, receipt: receiptFor(botId, binding.chatId, String(messageId)) } : { ok: false, error: after };
+    };
     const batched = digest.everyMs !== null && !isUrgent(rows[0]!);
-    const outcome = batched
+    const row = rows[0]!;
+    const progressRun = batched ? null : store.telegramProgressRun(row);
+    const progress = progressRun !== null && isTelegramProgressNotification(row);
+    const updateProgress = async (onlyExisting: boolean): Promise<SendResult | null> => {
+      if (progressRun === null || row.taskId === null || row.project === null) return null;
+      const problem = (await readAccess()) ?? fence();
+      if (problem !== null) return { ok: false, error: problem };
+      const messageId = store.telegramProgressMessage(binding, progressRun);
+      if (messageId === null && onlyExisting) return null;
+      const card = telegramProgressCard(store, store.getRun(progressRun.id)!, row.taskId, row.project);
+      let button: InlineButton[] | null = null;
+      try { button = phoneLinkButton(phoneOrigin?.() ?? null, card.link); } catch { /* No trusted origin. */ }
+      const keyboard = button === null ? [] : [button];
+      if (messageId === null) return sender(card.text, keyboard);
+      const edited = await editProgress(transport, binding.chatId, messageId, card.text, keyboard);
+      if (!edited.ok) {
+        if (edited.retryAfter !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + edited.retryAfter * 1000).toISOString());
+        // Only Telegram's definitive missing/uneditable response permits a
+        // replacement. Timeouts, rate limits and uncertain edits retry in place.
+        if (!onlyExisting && edited.replace) return sender(card.text, keyboard);
+        return edited;
+      }
+      if (!onlyExisting) store.recordTelegramMessage(row, binding, messageId, clock());
+      const after = (await readAccess()) ?? fence();
+      return after === null ? edited : { ok: false, error: after };
+    };
+    // A failure or decision still gets its own alert. Refresh an existing
+    // card first so it does not keep saying the build is running.
+    if (!progress && progressRun !== null) await updateProgress(true);
+    const updated = progress ? await updateProgress(false) : null;
+    const outcome = updated !== null ? updated.ok ? { ok: true as const, receipt: receiptFor(botId, binding.chatId, updated.messageId) } : updated
+      : rows[0]!.kind === "acceptance-evidence" ? await imageSender(rows[0]!) : batched
       ? await deliverDigest(botId, binding, sender, rows, digest.lastSentAt, clock)
-      : await deliverOne(store, botId, binding, sender, rows[0]!, clock, phoneOrigin);
+      : await deliverOne(store, botId, binding, sender, rows[0]!, clock, phoneOrigin, evidenceRoot, projects);
     const finalProblem = outcome.ok ? (await readAccess()) ?? fence() : null;
     const settled = finalProblem === null ? outcome : { ok: false as const, error: finalProblem };
+    // A skipped screenshot settles its row but nothing reached the phone.
+    const skipped = settled.ok && settled.receipt !== null && settled.receipt.startsWith("skipped:");
     const finalized = store.transact(() => {
       let count = 0;
       for (const row of rows) {
@@ -595,7 +662,7 @@ async function deliverOutbox(
       if (batched && count === rows.length) store.markTelegramDigestSent(clock());
       return count;
     });
-    report.sent += finalized;
+    if (!skipped) report.sent += finalized;
     if (batched && finalized === rows.length) report.digests = (report.digests ?? 0) + 1;
     if (!settled.ok) report.problems.push(`${batched ? `digest of ${rows.length} notification(s)` : `notification ${rows[0]!.id}`}: ${settled.error}`);
     else if (finalized !== rows.length) report.problems.push("Telegram delivery claim expired before acknowledgement; retry may duplicate a message");
@@ -604,7 +671,7 @@ async function deliverOutbox(
 
 /** What pages singly whatever the cadence: a decision, or an attention-class fact. */
 function isUrgent(notification: Notification): boolean {
-  return /^decision:\d+$/.test(notification.dedupeKey) || notification.pushClass === "attention";
+  return /^decision:\d+$/.test(notification.dedupeKey) || notification.pushClass === "attention" || notification.kind === "acceptance-evidence" || notification.kind === "acceptance-ready";
 }
 
 /** The digest text: a header with the count and the window, then one
@@ -659,6 +726,8 @@ async function deliverOne(
   notification: TelegramDelivery,
   clock: () => Date,
   phoneOrigin?: () => string | null,
+  evidenceRoot?: string,
+  projects: readonly string[] = [],
 ): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> {
   const decisionId = /^decision:(\d+)$/.exec(notification.dedupeKey);
   const decision = decisionId === null ? null : store.getDecision(Number(decisionId[1]));
@@ -673,9 +742,20 @@ async function deliverOne(
     // machine-minted link under the trusted origin read now, never a token
     // and never persisted — rides the LAST part only, exactly as `/task`'s
     // does; with no trusted origin the words stand alone.
-    const parts = split(`${notificationIdentity(notification)}${notification.subject}\n\n${notification.body}`);
+    const alreadyAccepted = notification.kind === "acceptance-ready" && notification.run !== null && store.proofAcceptance(notification.run) !== null;
+    let body = alreadyAccepted ? "This result already has recorded human acceptance. No further acceptance is needed." : notification.body;
+    let current = true;
+    if (notification.kind === "acceptance-ready" && !alreadyAccepted && notification.taskId !== null && notification.run !== null) {
+      const principal = verifyApproverStanding(store, binding.approver, binding.approverGeneration, telegramConversationRepos(store, binding.approver, projects));
+      if (!principal.ok) return { ok: false, error: "Current acceptance evidence access could not be verified" };
+      const packet = acceptanceEvidenceText(store, principal.who, evidenceRoot, notification.taskId, notification.run);
+      if (!packet.ok) { body = `Acceptance evidence unavailable: ${packet.message}`; current = false; }
+      else if (!packet.isCurrent) { body = "A newer result is current. Request its evidence before accepting."; current = false; }
+      else body = `${packet.text}\n\n${notification.body}`;
+    }
+    const parts = split(`${notificationIdentity(notification)}${alreadyAccepted ? "Acceptance recorded" : notification.subject}\n\n${body}`);
     let button: InlineButton[] | null = null;
-    if (notification.link !== null) {
+    if (notification.link !== null && !alreadyAccepted && current) {
       try { button = phoneLinkButton(phoneOrigin?.() ?? null, { label: factLinkLabel(notification.link), path: notification.link }); }
       catch { button = null; }
     }
@@ -780,6 +860,25 @@ async function send(
   }
   const messageId = (answer.result as { message_id?: number } | undefined)?.message_id;
   return { ok: true, messageId: Number.isSafeInteger(messageId) && messageId! > 0 ? String(messageId) : null };
+}
+
+async function editProgress(transport: TelegramTransport, chatId: string, messageId: string, text: string, keyboard: InlineButton[][]): Promise<SendResult & { replace?: boolean }> {
+  let answer: Awaited<ReturnType<TelegramTransport>>;
+  try {
+    answer = await transport("editMessageText", { chat_id: chatId, message_id: Number(messageId), text,
+      link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard: keyboard } });
+  } catch { return { ok: false, error: "Telegram progress update is unconfirmed; it will retry in place" }; }
+  // The retry may be repainting the same bytes after an acknowledgement was
+  // lost. Telegram's explicit unchanged response confirms this target state.
+  if (!answer.ok && !answer.uncertain && /^Bad Request: message is not modified\b/i.test(answer.description ?? "")) return { ok: true, messageId };
+  if (!answer.ok) {
+    const retry = answer.parameters?.retry_after;
+    return { ok: false, error: answer.description ?? "Telegram progress update failed",
+      ...(typeof retry === "number" && Number.isFinite(retry) && retry > 0 ? { retryAfter: Math.ceil(retry) } : {}),
+      replace: !answer.uncertain && /^Bad Request: message (?:to edit not found|can't be edited)$/i.test(answer.description ?? "") };
+  }
+  const confirmed = (answer.result as { message_id?: number } | undefined)?.message_id;
+  return String(confirmed) === messageId ? { ok: true, messageId } : { ok: false, error: "Telegram did not confirm the progress message identity" };
 }
 
 function receiptFor(botId: string, chatId: string, messageId: string | null): string {

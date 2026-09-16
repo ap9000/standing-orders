@@ -1,0 +1,7 @@
+$ ruby -ryaml -e 'd=YAML.load_file(".github/workflows/ci.yml")["jobs"];c=->(j){d[j]["steps"].find{|s|s["uses"].to_s.start_with?("actions/checkout@")}["with"]};d.each{|j,_|puts "#{j}: #{c[j].inspect}"};abort "bad" unless c["test"]=={"fetch-depth"=>0}&&(d.keys-["test"]).all?{|j|!c[j]};puts "ok"'
+test: {"fetch-depth"=>0}
+linux-native-containment: nil
+windows-baseline: nil
+native-windows: nil
+ok
+exit=0

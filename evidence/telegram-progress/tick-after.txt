@@ -1,0 +1,12 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Documents/standing-orders-telegram-progress
+
+(node:37371) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+------------------------------------------··----------
+
+ Test Files  1 passed (1)
+      Tests  2 passed | 52 skipped (54)
+   Start at  14:09:04
+   Duration  4.77s (transform 1.43s, setup 12ms, import 1.67s, tests 2.98s, environment 0ms)
+

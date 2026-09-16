@@ -44,7 +44,7 @@ import { currentBootId, provenDeadByBootChange } from "./boot-identity.js";
 import { containerEmptiness } from "./container-state.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
-import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
+import { foldReview, manualReviewOnly, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
 import { approvalOf, digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, scopeAuthorityOf, routeParityProblem, parseAcceptanceCriteria, exactAcceptance, exactStringList, exactSafeIntegerOrNull, exactKeys, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, exactPinOf, routeOfTask, agentChoicesFor } from "./agentconfig.js";
 import {
@@ -324,6 +324,7 @@ export type ChatSnapshot = {
      * task with no finished attempt, or one whose scope signed no rubric. */
     proofVerdict: "verified" | "attested" | "short" | "refuted" | null;
     proofMatrix: CriterionMatrixRow[];
+    proofAccepted?: boolean;
     /** Read surfaces may attach the shared scheduler diagnosis after this
      * bounded snapshot is read. The store itself remains dependency-free. */
     dispatch?: import("./dispatch.js").DispatchDiagnosis | null;
@@ -605,6 +606,8 @@ export const LIFECYCLE_KINDS = [
   "run-resumed",
   "review-requested",
   "review-finished",
+  "acceptance-evidence",
+  "acceptance-ready",
 ] as const;
 export type LifecycleKind = (typeof LIFECYCLE_KINDS)[number];
 /** Every lifecycle dedupe key starts here: `life:<kind>:<identity>:<ordinal>`. */
@@ -612,6 +615,12 @@ export const LIFECYCLE_KEY_PREFIX = "life:";
 /** A progress fact, told apart by its durable key — never by display text. */
 export function isLifecycleNotification(row: Pick<Notification, "dedupeKey">): boolean {
   return row.dedupeKey.startsWith(LIFECYCLE_KEY_PREFIX);
+}
+
+/** Only routine attempt progress can replace an earlier progress message. */
+export function isTelegramProgressNotification(row: Pick<Notification, "dedupeKey" | "kind" | "pushClass">): boolean {
+  return isLifecycleNotification(row) && row.pushClass === null &&
+    ["run-started", "run-phase", "run-finished", "review-requested", "review-finished", "run-stopping", "run-stopped", "run-resumed"].includes(row.kind);
 }
 
 /** Display words for a lifecycle fact: one line, control-free, bounded, with
@@ -14746,7 +14755,7 @@ export class Store {
         const ref = this.lookupRef(current.id)!;
         const run = this.runsFor(ref.id).find(one => one.finishedAt !== null && (one.role === "builder" || one.role === "scout"));
         const proof = current.state === "done" && run !== undefined ? this.proofVerdictFor(run.id) : null;
-        return { family, current, ref, proof };
+        return { family, current, ref, proof, accepted: run !== undefined && this.proofAcceptance(run.id) !== null };
       });
       const decisionRows = this.db
         .prepare(
@@ -14794,10 +14803,10 @@ export class Store {
       const optionLabelsOf = (raw: unknown): string[] => optionsOf(raw).map(one => one.label);
       return {
         repos: [...admittedRepos],
-        tasks: taskRows.slice(0, 60).map(({ family, current, ref, proof }) => ({
+        tasks: taskRows.slice(0, 60).map(({ family, current, ref, proof, accepted }) => ({
           repoIndex: indexOf(current.repo), id: current.id, rootId: family.root.id,
           title: family.root.title, state: current.state, ageHours: hours(current.updatedAt),
-          strikes: ref.strikes, proofVerdict: proof?.verdict ?? null, proofMatrix: proof?.matrix ?? [],
+          strikes: ref.strikes, proofVerdict: proof?.verdict ?? null, proofMatrix: proof?.matrix ?? [], proofAccepted: accepted,
           historyProblem: family.problem, otherActive: family.otherActive.map(one => one.id),
         })),
         tasksSaturated: taskRows.length > 60,
@@ -15532,7 +15541,7 @@ export class Store {
    * in the identity. Never a push class: progress is digest-eligible.
    */
   private noteLifecycle(
-    fact: { taskRef: number; run?: number | null; kind: LifecycleKind; identity: string; subject: string; body: string; link: string | null },
+    fact: { taskRef: number; run?: number | null; kind: LifecycleKind; identity: string; subject: string; body: string; link: string | null; attention?: boolean },
     now: Date,
   ): boolean {
     const ref = this.db.prepare("SELECT repo FROM task_ref WHERE id = ?").get(fact.taskRef);
@@ -15548,6 +15557,7 @@ export class Store {
         kind: fact.kind,
         subject: fact.subject,
         body: fact.body,
+        ...(fact.attention ? { pushClass: "attention" as const } : {}),
         ...(fact.link === null ? {} : { link: fact.link }),
         source: fact.run === undefined || fact.run === null ? { taskRef: fact.taskRef } : { run: fact.run },
       },
@@ -15599,9 +15609,31 @@ export class Store {
       if (stopped) {
         this.noteLifecycle({ taskRef, run: id, kind: "run-stopped", identity: `r${id}`, subject: `Independent review attempt ${attempt} stopped`, body: "The saved result is unchanged.", link }, now);
       } else if (result.outcome === "no-change") {
-        const verdict = this.proofVerdictFor(parent)?.verdict ?? "none";
-        const words = LIFECYCLE_REVIEW_WORDS[verdict];
-        this.noteLifecycle({ taskRef, run: id, kind: "review-finished", identity: `r${id}`, subject: `Independent review finished: ${words.subject}`, body: words.body, link }, now);
+        const proof = this.proofVerdictFor(parent);
+        const verdict = proof?.verdict ?? "none";
+        const accepted = this.proofAcceptance(parent) !== null;
+        const human = manualReviewOnly(proof);
+        const requirements = human ? proof!.matrix.filter(row => row.state === "manual-review").map(row => `${row.id}: ${lifecycleWords(row.statement, 220)}${row.review == null ? " · No independent judgement recorded" : ` · Reviewer ${row.review.judgement === "upholds" ? "supports this finding" : row.review.judgement === "contradicts" ? "disputes this finding" : "could not confirm this finding"}. ${lifecycleWords(row.review.note, 250)}`}`) : [];
+        // Each screenshot is its own existing outbox row: a failed upload
+        // retries that row, never an already-confirmed earlier image. The
+        // key binds the saved bytes; the sender re-proves them at upload.
+        const images = human && !accepted ? this.artifactsFor(parent).filter(one => one.kind === "screenshot") : [];
+        const words = human ? {
+          subject: accepted ? "human acceptance recorded" : "human review needed",
+          body: `${accepted ? "This result already has recorded human acceptance." : "The remaining requirements need your review; the recorded checks did not fail."}\n${requirements.join("\n")}${accepted ? "" : images.length === 0 ? "\nThe acceptance summary follows." : "\nSaved screenshots and the acceptance summary follow."}`,
+        } : LIFECYCLE_REVIEW_WORDS[verdict];
+        this.noteLifecycle({ taskRef, run: id, kind: "review-finished", identity: `r${id}`, subject: `Independent review finished: ${words.subject}`, body: words.body, link, attention: human && !accepted }, now);
+        if (human && !accepted) {
+          for (const image of images.slice(0, 8)) {
+            this.noteLifecycle({ taskRef, run: parent, kind: "acceptance-evidence", identity: `r${id}-a${image.id}-${image.sha256}`,
+              subject: "Saved screenshot for review", body: "Open the result to inspect this saved screenshot.", link: chatResultHref(taskId, parent) }, now);
+          }
+          const remaining = Math.max(0, images.length - 8);
+          this.noteLifecycle({ taskRef, run: parent, kind: "acceptance-ready", identity: `r${id}`,
+            subject: "Review for acceptance",
+            body: `${images.length === 0 ? "No screenshots were saved for this result. " : ""}${remaining > 0 ? `${remaining} more screenshots remain; ask for the remaining images. ` : ""}Review the full requirements, checks, reviewer findings and limitations before recording your decision. Opening this link accepts nothing.`,
+            link: chatControlHref("acceptance", taskId, parent) }, now);
+        }
       } else {
         this.noteLifecycle({ taskRef, run: id, kind: "review-finished", identity: `r${id}`, subject: `Independent review attempt ${attempt} did not finish`, body: "The saved result is unchanged. Another review needs an explicit request.", link }, now);
       }
@@ -21985,7 +22017,7 @@ export class Store {
       .map(row => ({
         taskId: row["task_id"] === null ? null : String(row["task_id"]),
         taskRef: row["task_ref"] === null ? null : Number(row["task_ref"]),
-        run: row["source_run"] === null ? null : Number(row["source_run"]),
+        run: row["source_run"] === null ? null : (this.telegramProgressRun({ taskRef: row["task_ref"] === null ? null : Number(row["task_ref"]), run: Number(row["source_run"]) })?.id ?? Number(row["source_run"])),
         project: row["project"] === null ? null : String(row["project"]),
       }));
     const images = this.db
@@ -22001,7 +22033,7 @@ export class Store {
         const ref = this.lookupRef(taskId);
         return { taskId, taskRef: ref?.id ?? null, run: Number(row["source_run"]), project: ref?.repo ?? null };
       });
-    return [...facts, ...images.filter(one => !facts.some(fact => fact.taskId === one.taskId && fact.run === one.run))];
+    return [...facts, ...images].filter((one, index, all) => all.findIndex(fact => fact.taskId === one.taskId && fact.taskRef === one.taskRef && fact.run === one.run && fact.project === one.project) === index);
   }
 
   // ---- proposal-card tokens (v62) ---------------------------------------------
@@ -22056,6 +22088,33 @@ export class Store {
     return `telegram:${binding.botId}:${binding.chatId}:${binding.id}:${binding.approverGeneration}`;
   }
 
+  /** A progress card belongs to one builder result, including its root review.
+   * Do not combine planners, correction children, or separate build attempts. */
+  telegramProgressRun(row: Pick<Notification, "taskRef" | "run">): Run | null {
+    const source = row.run === null ? null : this.getRun(row.run);
+    const result = source?.role === "reviewer" && source.reviewAttempt != null && source.parentRun !== null
+      ? this.getRun(source.parentRun) : source;
+    return result?.role === "builder" && result.contestant === null && result.taskRef === row.taskRef && source?.taskRef === row.taskRef ? result : null;
+  }
+
+  /** Reuse a confirmed message in this exact destination. A mixed digest,
+   * decision, image, or message naming another attempt is never editable. The
+   * outbound history survives a restart even if the final receipt was lost. */
+  telegramProgressMessage(binding: TelegramBinding, result: Run): string | null {
+    const messages = this.db.prepare(`SELECT DISTINCT message_id FROM telegram_outbound_message
+      WHERE destination = ? AND task_ref = ? ORDER BY CAST(message_id AS INTEGER) DESC`)
+      .all(this.telegramDestination(binding), result.taskRef);
+    for (const message of messages) {
+      const rows = this.db.prepare(`SELECT n.* FROM telegram_outbound_message m JOIN notification n ON n.id = m.notification
+        WHERE m.destination = ? AND m.message_id = ?`).all(this.telegramDestination(binding), String(message["message_id"]));
+      if (rows.length > 0 && rows.every(raw => {
+        const row = readNotification(raw);
+        return isTelegramProgressNotification(row) && this.telegramProgressRun(row)?.id === result.id;
+      })) return String(message["message_id"]);
+    }
+    return null;
+  }
+
   /** The existing outbox, with a separate receipt for this exact pairing. */
   claimTelegramDeliveries(binding: TelegramBinding, owner: string, ttlMs: number, now: Date, only: "all" | "urgent" = "all"): TelegramDelivery[] {
     return this.transact(() => {
@@ -22068,10 +22127,10 @@ export class Store {
         WHERE n.resolved_at IS NULL AND ${TELEGRAM_UNSETTLED}
           AND (d.claim_owner IS NULL OR d.claim_expires_at <= ?)
           AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?)
-          AND (? = 'all' OR d.attempts > 0 OR n.dedupe_key LIKE 'decision:%' OR n.push_class = 'attention'
+          AND (? = 'all' OR d.attempts > 0 OR n.dedupe_key LIKE 'decision:%' OR n.push_class = 'attention' OR n.kind IN ('acceptance-evidence', 'acceptance-ready')
             OR EXISTS (SELECT 1 FROM notification urgent
               WHERE urgent.task_ref = n.task_ref AND urgent.id > n.id AND urgent.resolved_at IS NULL
-                AND (urgent.dedupe_key LIKE 'decision:%' OR urgent.push_class = 'attention')))
+                AND (urgent.dedupe_key LIKE 'decision:%' OR urgent.push_class = 'attention' OR urgent.kind IN ('acceptance-evidence', 'acceptance-ready'))))
         ORDER BY n.id`).all(destination, now.toISOString(), now.toISOString(), only);
       return rows.map(row => {
         this.db.prepare(`UPDATE notification_delivery SET claim_owner = ?, claim_expires_at = ?,
@@ -22144,10 +22203,14 @@ export class Store {
     return this.transact(() => {
       if (!this.telegramClaimHeld(row, owner, now) || row.destination !== this.telegramDestination(binding)) return false;
       if (outcome.ok && (this.liveTelegramBinding(binding.botId)?.id !== binding.id || this.accountOf(binding.approver)?.role !== "approver")) return false;
+      // A `skipped:` receipt settles the row without a delivery: nothing
+      // reached the phone, so delivered_at stays empty exactly as it does
+      // for the pairing skip (TELEGRAM_UNSETTLED treats both as settled).
+      const skipped = outcome.ok && outcome.receipt !== null && outcome.receipt.startsWith("skipped:");
       this.db.prepare(`UPDATE notification_delivery SET attempts = attempts + 1, last_attempt_at = ?,
         delivered_at = ?, receipt = ?, last_error = ?, next_attempt_at = ?, claim_owner = NULL, claim_expires_at = NULL
         WHERE notification = ? AND destination = ? AND claim_owner = ? AND claim_generation = ?`)
-        .run(now.toISOString(), outcome.ok ? now.toISOString() : null, outcome.ok ? outcome.receipt : null,
+        .run(now.toISOString(), outcome.ok && !skipped ? now.toISOString() : null, outcome.ok ? outcome.receipt : null,
           outcome.ok ? null : outcome.error, outcome.ok ? null : outcome.retryAt ?? new Date(now.getTime() + 1_000).toISOString(),
           row.id, row.destination, owner, row.claimGeneration);
       return true;

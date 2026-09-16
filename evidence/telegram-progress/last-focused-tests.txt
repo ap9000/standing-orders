@@ -1,0 +1,16 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Documents/standing-orders-telegram-progress
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+························(node:62188) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··
+
+ Test Files  1 passed (1)
+      Tests  26 passed (26)
+   Start at  13:49:13
+   Duration  3.52s (transform 703ms, setup 14ms, import 816ms, tests 1.95s, environment 0ms)
+

@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "preparedPatch": "2acaf853e6b07060081c547e23a24faf37fdcc84",
+  "verifiedBase": "9fcdbc08e8a39ee3028972544625b7da725cf0db",
+  "sourceSha256": {
+    "src/store.ts": "f542071a2ee16fb5d0d69a14b11173a469f4a0a2ff9b45592a6dfbb3662b1e4f",
+    "src/telegram.ts": "400f9c80a7bf9128052dc5c2e80ea8a14e82f8ac3e8edf0175bffecca510e592",
+    "src/telegram-progress.ts": "353ba451ca57ccf2066d992ca64111033edf739b91e99e3947c7444a0eaf0d7d",
+    "src/task-notifications.test.ts": "d0149dbb57b2a3d0f493e3e325b3e4b94894c591ec788b236f6687c55d110c86",
+    "src/tick.test.ts": "b5f8b8629cf59f5b9c3447a4f0ef7e5edde74bfa284b6297b4f74ed0b639ceba"
+  },
+  "capturedAt": "2026-09-16T20:51:54.463203+00:00",
+  "artifacts": [
+    {
+      "path": "evidence/telegram-progress/desktop-complete.png",
+      "sha256": "f1634f448a36d8ffff3e0c2fe5a6fe0699f72bf22fbedb966c909c2750b479b5",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/desktop-empty.png",
+      "sha256": "b81c7a3a0fd44d631109b01ed3ae4b0d8aab09bf819e9d5fba0b5469ad7f4df9",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/desktop-failure.png",
+      "sha256": "cec33cab593bc79ac27093265a37598444f778a0052dd899ab5e014c290b226e",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/desktop-feedback.png",
+      "sha256": "154c294989da91db63da95363574b71d3d66313d266eed54a67a2de0c5e5fbc5",
+      "kind": "screenshot",
+      "synthetic": true,
+      "recapturedAt": "2026-09-16T21:44:00Z",
+      "recaptureReason": "review 1710: the first capture overlapped two frames mid view-transition; retaken from the same synthetic fixture after every document animation finished and the saved feedback was visible"
+    },
+    {
+      "path": "evidence/telegram-progress/desktop-long.png",
+      "sha256": "5d768c2e7a1dde93863b3196614565e26e1e36f41c214e2af23cda23306a6d27",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/desktop-reviewing.png",
+      "sha256": "dd01d93630e99411d00987122e2603aae976cb5ed389d462ee5409436356c346",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/desktop-revision.png",
+      "sha256": "0b11493c63bfd985666963ea80883af7c423fa560bf55377b7d49118fc9c4117",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/desktop-stopped.png",
+      "sha256": "5a2077deb5d35afae218a72577dbb30ea83e3a8c52dc2e80f956df11d391e87b",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/phone-complete.png",
+      "sha256": "679b38e16a43df0f15b54fe785ac0c88b96e9fca5930889c66c1f4b6d3d46506",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/phone-empty.png",
+      "sha256": "893479fcf2a1f086fc9157b35c32980112f45428c63d04c7630e56c4275d7672",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/phone-failure.png",
+      "sha256": "f750ccfe442faa81c817577b39c569c778816b540a57098bbc7122f7b12bd216",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/phone-feedback.png",
+      "sha256": "e1ee1f2a9f78f50dd61e4654a5c897c125094175641c48b82409e47bd114345b",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/phone-long.png",
+      "sha256": "9ed2e67570dad42af13b86b22793994772863127c713d7b81e97b22121123d61",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/phone-reviewing.png",
+      "sha256": "54dd281cad9c45635a74a37ad3860963586b679323554cc0f94162a85a1c7ddd",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/phone-revision.png",
+      "sha256": "ae5c246a90110ffd9a6d99940b7b43de405a7d497e46f4205ef6416c7ff91c53",
+      "kind": "screenshot",
+      "synthetic": true
+    },
+    {
+      "path": "evidence/telegram-progress/phone-stopped.png",
+      "sha256": "d993e5dfd092e1b4c2dce930618e92593c672139c2dc45744ae0e7e91447e251",
+      "kind": "screenshot",
+      "synthetic": true
+    }
+  ],
+  "limits": [
+    "Synthetic browser previews of exact outgoing text; not native Telegram screenshots.",
+    "Desktop 1440x900 and phone 390x844 inspected; no physical iPhone/Safari verification.",
+    "Unchanged console UI from verified base used for both result-to-feedback-to-unapproved-revision journeys.",
+    "No production Telegram messages sent during preparation."
+  ],
+  "preparedCorrection": "4089f9e6757df5dc1c45f04437f556804893383d",
+  "correctedAt": "2026-09-16T21:14:41.854620+00:00"
+}

@@ -1,0 +1,121 @@
+{
+  "failedChecks": {
+    "text": "Escape quotes in the CSV writer\nportfolio-console · Attempt #2\n\nEvidence needs attention\nBuild ✓ · Checks 1/2 · Review optional\nOpen the checks to see what needs fixing.\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=csv-quoting&result=2&tab=checks"
+    }
+  },
+  "mismatched": {
+    "text": "Make the date-range filter inclusive\nportfolio-console · Attempt #3\n\nEvidence needs attention\nBuild ✓ · Checks 1/2 · Review optional\nOpen the checks to see what needs fixing.\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=range-filter&result=3&tab=checks"
+    }
+  },
+  "missingProof": {
+    "text": "Add per-currency subtotal rows\nportfolio-console · Attempt #4\n\nEvidence needs attention\nBuild ✓ · Checks 0/2 · Review optional\nOpen the checks to see what needs fixing.\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=subtotal-rows&result=4&tab=checks"
+    }
+  },
+  "attested": {
+    "text": "Emit a UTF-8 BOM for Excel exports\nportfolio-console · Attempt #5\n\nEvidence needs attention\nBuild ✓ · Checks 1/2 · Review optional\nOpen the checks to see what needs fixing.\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=excel-bom&result=5&tab=checks"
+    }
+  },
+  "accepted": {
+    "text": "Keep the export button keyboard reachable\nportfolio-console · Attempt #6\n\nEvidence needs attention\nBuild ✓ · Checks 0/2 · Review optional\nOpen the checks to see what needs fixing.\nAccepted with an exception\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=export-button&result=6&tab=checks"
+    }
+  },
+  "published": {
+    "text": "Round settlement totals at cent precision\nportfolio-console · Attempt #7\n\nEvidence needs attention\nBuild ✓ · Checks 1/2 · Review optional\nOpen the checks to see what needs fixing.\nPull request open · Not merged",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=settlement-rounding&result=7&tab=checks"
+    }
+  },
+  "merged": {
+    "text": "Handle DST boundaries in the range filter\nportfolio-console · Attempt #8\n\nEvidence needs attention\nBuild ✓ · Checks 1/2 · Review optional\nOpen the checks to see what needs fixing.\nMerged · Installation not confirmed here",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=timezone-boundaries&result=8&tab=checks"
+    }
+  },
+  "running": {
+    "text": "Prove the date range at a DST boundary\nportfolio-console · Attempt #9\n\nBuilding\nBuild running · Checks pending · Review optional",
+    "link": {
+      "label": "Open task",
+      "path": "/chat?task=csv-range-tests"
+    }
+  },
+  "paused": {
+    "text": "Round-trip the CSV through three parsers\nportfolio-console · Attempt #10\n\nStopped\nBuild stopped · Checks pending · Review optional\nOpen the task to see what must happen next.",
+    "link": {
+      "label": "Open task",
+      "path": "/chat?task=csv-parser-matrix"
+    }
+  },
+  "pendingReview": {
+    "text": "Add a header row to the CSV export\nportfolio-console · Attempt #11\n\nEvidence needs attention\nBuild ✓ · Checks 1/2 · Review queued\nOpen the checks to see what needs fixing.\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=csv-header-row&result=11&tab=checks"
+    }
+  },
+  "reviewing": {
+    "text": "Render empty cells as empty strings\nportfolio-console · Attempt #12\n\nIndependent review running\nBuild ✓ · Checks 2/2 · Review running\nThen: review the result.\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=csv-null-cells&result=12&tab=checks"
+    }
+  },
+  "reviewFailed": {
+    "text": "Stream files over ten thousand rows\nportfolio-console · Attempt #14\n\nEvidence needs attention\nBuild ✓ · Checks 1/2 · Review stopped\nOpen the checks to see what needs fixing.\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=csv-large-file&result=14&tab=checks"
+    }
+  },
+  "damaged": {
+    "text": "Sum the CSV footer from rounded rows\nportfolio-console · Attempt #17\n\nEvidence needs attention\nBuild ✓ · Checks 1/2 · Review optional\nOpen the checks to see what needs fixing.\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=csv-footer&result=17&tab=checks"
+    }
+  },
+  "corruptLog": {
+    "text": "Log the export timings\nportfolio-console · Attempt #18\n\nEvidence needs attention\nBuild ✓ · Checks 1/2 · Review optional\nOpen the checks to see what needs fixing.\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=csv-timings&result=18&tab=checks"
+    }
+  },
+  "ready": {
+    "text": "Fix payout rounding (synthetic)\nportfolio-console · Attempt #1\n\nReady for your review\nBuild ✓ · Checks 2/2 · Review optional\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=payout-rounding&result=1&tab=checks"
+    }
+  },
+  "complete": {
+    "text": "Render empty cells as empty strings\nportfolio-console · Attempt #12\n\nReady for your review\nBuild ✓ · Checks 2/2 · Review ✓\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=csv-null-cells&result=12&tab=checks"
+    }
+  },
+  "long": {
+    "text": "Make acceptance review clearer across desktop and phone with evidence, readable requir…\nportfolio-console · Attempt #1\n\nReady for your review\nBuild ✓ · Checks 2/2 · Review optional\nSaved locally · Not published",
+    "link": {
+      "label": "Review result",
+      "path": "/chat?task=payout-rounding&result=1&tab=checks"
+    }
+  }
+}

@@ -1214,6 +1214,27 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       script.updates.push([textUpdate(nextUpdate++, "Show me the screenshots from that result.", extra)]);
     };
 
+    test("an acceptance evidence request sends the exact result's screenshots and one secure acceptance link without accepting", async () => {
+      origin = "https://console.example";
+      const { run } = seedSource("payout");
+      shot(run, "phone.png", PNG);
+      shot(run, "desktop.jpg", JPEG);
+      const detail = 'criterion "c1" requires manual-review evidence — an operator must accept it before this can verify';
+      store.saveProofVerdict(run, "short", [detail], now, [{ id: "c1", statement: "Inspect the phone layout", requiredEvidence: ["manual-review"], state: "manual-review", detail: [detail], answered: [{ kind: "manual-review", ref: "Inspect the saved captures" }], review: { judgement: "upholds", note: "Both viewports match", author: "reviewer:claude" } }]);
+      answers.push(
+        { text: "Reading the acceptance evidence.", calls: [{ id: "a1", name: "get_acceptance_evidence", args: { task: "payout", run } }] },
+        { text: "Attaching the captures.", calls: [{ id: "a2", name: "get_result_images", args: { task: "payout", run } }, { id: "a3", name: "show_control", args: { control: "acceptance", task: "payout", run } }] },
+        { text: "The layout needs your review. The reviewer upheld it. Two saved screenshots follow. Open Review for acceptance to inspect the full terms and record your decision." },
+      );
+      script.updates.push([textUpdate(nextUpdate++, "Send the evidence for acceptance")]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(toolResult("get_acceptance_evidence")).toMatchObject({ status: "Awaiting human review", run, accepted: false, criteria: [{ requirement: "Inspect the phone layout", reviewer: { judgement: "upholds" } }] });
+      expect(script.documents()).toHaveLength(2);
+      expect(urlButtons(script.sends().at(-1))).toEqual([["Review for acceptance", `https://console.example/review?result=payout&run=${run}&tab=checks`]]);
+      expect(store.proofAcceptance(run)).toBeNull();
+      expect(store.getTask("payout")?.state).toBe("done");
+    });
+
     test("asked for a result's screenshots: the shared tool selects that exact result's verified images, Telegram sends each original as a document after the reply, a reply to an image revises that exact run, and a newer revision is said, never switched to", async () => {
       origin = "https://console.example";
       const { run } = seedSource("payout");

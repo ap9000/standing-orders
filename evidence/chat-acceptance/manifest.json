@@ -1,0 +1,57 @@
+{
+  "synthetic": true,
+  "preparedPatch": "1a280e8807d324aef2f5f1dfc1e6a901aa5d38b5",
+  "base": "e69c46ba84323083d0cdb422abeba0c6e801b3e6",
+  "viewports": [
+    {
+      "width": 1440,
+      "height": 900
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "desktop-acceptance.png",
+      "sha256": "2421c1a4aef246e79f8018536eb498555d26003d1e0c695dfdc08c3de8020bba"
+    },
+    {
+      "file": "desktop-feedback.png",
+      "sha256": "f649c0cb46b051969be9394c954e270bc47e4405893594e40c68ebc7caa4d5c4"
+    },
+    {
+      "file": "desktop-revision.png",
+      "sha256": "5e0b381f8ff3628028c0679cdd524c7f096fe683df7614d6b82d79328c330883"
+    },
+    {
+      "file": "desktop-stale-link.png",
+      "sha256": "ac4d8ff84e8dd39ba85d3d2853e39ecb93b36fbd42bdba60fe2c1c0bcc14e606"
+    },
+    {
+      "file": "phone-acceptance.png",
+      "sha256": "9b63bb24aae701fe3fc6d84d9ef5165560320c86f8c4b974ae73d501b518c5a6"
+    },
+    {
+      "file": "phone-accepted.png",
+      "sha256": "8ba342bbb5c0388a7fbca4b6b5738988bf6e746f4916d69f1dac6cd7fe9f5323"
+    },
+    {
+      "file": "phone-feedback.png",
+      "sha256": "b4558673eccfb81929984d1128f8ea580516b4e55e9ce334e6ed9e75f9662c80"
+    },
+    {
+      "file": "phone-revision.png",
+      "sha256": "6c8566c751cd3fc64bbb4c49bda197a1cfd3af9bb7b19b01ef4b96f894fd09d3"
+    },
+    {
+      "file": "phone-stale-link.png",
+      "sha256": "3b2e9f9fcf8044b485ca6f0a73b75689301581c5b83c8064dd5afdced1b0d7f0"
+    },
+    {
+      "file": "phone-empty.png",
+      "sha256": "692e5c75b72fff936efd8bdc7f6e210741ddc2bac165b6fc9f68db00f0678acd"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ export const CHAT_CONTROLS = {
   recovery: { label: "Review recovery options", target: "task" },
   cancel: { label: "Cancel task", target: "task" },
   result: { label: "Review result", target: "task" },
+  acceptance: { label: "Review for acceptance", target: "task" },
   publish: { label: "Review publication", target: "task" },
   projects: { label: "Manage projects", href: "/projects" },
   routines: { label: "Manage routines", href: "/routines" },
@@ -31,9 +32,11 @@ export type ChatResultTab = "summary" | "checks" | "changes";
 export function chatResultHref(task: string, run: number, tab: ChatResultTab = "summary"): string {
   return `/chat?task=${encodeURIComponent(task)}&result=${run}${tab === "summary" ? "" : `&tab=${tab}`}`;
 }
-export function chatControlHref(control: ChatControl, task: string): string {
+export function chatControlHref(control: ChatControl, task: string, run?: unknown): string {
   const entry = CHAT_CONTROLS[control];
   if ("href" in entry) return entry.href;
+  if (control === "acceptance") return `/review?result=${encodeURIComponent(task)}&run=${Number.isSafeInteger(run) && Number(run) > 0 ? run : 0}&tab=checks`;
+  if (control === "result" && Number.isSafeInteger(run) && Number(run) > 0) return chatResultHref(task, Number(run));
   const base = "/chat?task=" + encodeURIComponent(task);
   // Task details owns cancel, retry, publication and other dedicated ceremonies.
   if (control === "cancel" || control === "recovery" || control === "publish") return "/t/" + encodeURIComponent(task);

@@ -83,7 +83,7 @@ import { TEMPLATES, templateByName } from "./templates.js";
 import { starterRecipes, savedRecipes, findRecipe, importRecipe, exportRecipe, createWorkflowPreview, workflowPreview, launchWorkflow, saveWorkflowRecipe, RecipeError, prepareRecipeRun } from "./recipes.js";
 import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtml, recipeScript, RECIPE_CSS, recipeDefinitionPreviewHtml, recipeRunHtml, recipeAnswersFromForm } from "./recipe-ui.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
-import { dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
+import { manualReviewOnly, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
   WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, workCounts, compareWorkRows, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
@@ -1555,7 +1555,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // and every row is re-proved against the ceiling before ranking.
       const rows = familiesInView(project, { states: ["done"], limit: REVIEW_QUEUE_CAP }).flatMap(family => {
           const row = completedRowFor(family.current.id, project);
-          return row === null ? [] : [{ ...row, title: family.root.title, ciFailing: ciFailingFor(row.runId, row.prNumber) }];
+          return row === null ? [] : [{ ...row, proofReasons: row.runId === null ? [] : store.proofVerdictFor(row.runId)?.reasons ?? [], title: family.root.title, ciFailing: ciFailingFor(row.runId, row.prNumber) }];
         });
       const ranked = rankReviewQueue(rows);
       const wanted = url.searchParams.get("result");
@@ -1568,10 +1568,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       // ceiling — so an old receipt never reads as unfinished or foreign.
       // The ranked queue itself stays bounded and says so.
       const beyond = wantedId === null || inQueue !== null ? null : completedRowFor(wantedId, project);
-      const beyondRow = beyond === null ? null : { ...beyond, ciFailing: ciFailingFor(beyond.runId, beyond.prNumber) };
+      const beyondRow = beyond === null ? null : { ...beyond, proofReasons: beyond.runId === null ? [] : store.proofVerdictFor(beyond.runId)?.reasons ?? [], ciFailing: ciFailingFor(beyond.runId, beyond.prNumber) };
       const chosen = inQueue ?? (beyondRow === null ? null : { ...beyondRow, priority: reviewPriorityOf(beyondRow) });
       const selectedRow = wantedId === null ? ranked[0] ?? null : chosen;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
+      const expectedRun = url.searchParams.get("run");
+      if (expectedRun !== null && (!/^[1-9]\d*$/.test(expectedRun) || selectedRow?.runId !== Number(expectedRun))) {
+        return sendScreen(response, 409, screen("Result changed", '<h1>Result changed</h1><p>This acceptance link no longer matches the current result. Review the current task before accepting.</p><a class="button-link" href="/review">Review results</a>', { chrome: chromeFor(project, "runs") }));
+      }
       const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who, now);
       return sendScreen(
         response,
@@ -7246,6 +7250,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (latest === undefined) {
           return taskScreen(response, who, taskId, "this task has no finished attempt to accept", 404);
         }
+        const family = store.taskFamilyOf(taskId, admissionList(), false);
+        if (Number(body.get("run")) !== latest.id || family?.current.id !== taskId || family.problem !== null) {
+          return taskScreen(response, who, taskId, "This result changed. Review the current result before accepting.", 409);
+        }
         const rawNote = (body.get("note") ?? "").trim();
         let note: string | null = null;
         if (rawNote !== "") {
@@ -8193,20 +8201,6 @@ function reviewRetryPanel(
   );
 }
 
-/** v40: the independent reviewer's own judgement on one criterion — a
- * SECOND badge beside the machine's own matrixStateBadge, never a
- * replacement for it, so a render can say "the machine attested it;
- * reviewer:codex contradicted c2" instead of pretending the machine
- * always disagreed. Reuses the matrix's own three badge colors (done /
- * failed / manual-review) rather than inventing a fourth vocabulary —
- * `contradicts` reads exactly as alarming as `failed` already does. */
-function reviewJudgementBadge(review: CriterionMatrixRow["review"]): string {
-  if (review === null) return "";
-  const cls = review.judgement === "upholds" ? "badge-done" : review.judgement === "contradicts" ? "badge-failed" : "badge-manual-review";
-  const word = review.judgement === "upholds" ? "upheld" : review.judgement === "contradicts" ? "contradicted" : "uncertain";
-  return ` <span class="badge ${cls}" data-review-judgement="${escape(review.judgement)}" title="${escape(review.author)}: ${escape(review.note)}">reviewer: ${escape(word)}</span>`;
-}
-
 /** A one-line summary of the matrix for list rows too dense for the full
  * table (done, builds, board, inbox) — "2/3 criteria", plus a worst-state
  * badge so trouble is visible without opening the row. `[]` renders
@@ -8248,54 +8242,63 @@ function evidenceLinksFor(artifacts: readonly Artifact[]): EvidenceLinkMap {
   return map;
 }
 
-/** The shared criterion-to-evidence matrix — one table, rendered
- * identically everywhere a build's result appears (v39). `[]` renders
- * nothing: a grandfathered run's result card is unchanged. `compact`
- * drops the per-row detail line, for surfaces that only have room for a
- * summary (board, inbox, chat, builds list). Each row also names the
- * proof's OWN answered evidence refs, not only the required kinds (review
- * finding) — linked to the underlying artifact when `runId`/`links` are
- * given and a link resolves; plain text otherwise. */
+/** Read the approved requirement first; inspect its saved evidence on demand.
+ * Machine results, reviewer judgements and missing context remain separate.
+ * Warnings stay outside the disclosure, including on compact surfaces. */
 function criterionMatrixHtml(
   matrix: readonly CriterionMatrixRow[],
   options: { compact?: boolean; runId?: number; links?: EvidenceLinkMap; fileAnchors?: ReadonlyMap<string, string> } = {},
 ): string {
   if (matrix.length === 0) return "";
-  const compact = options.compact === true;
-  const answeredHtml = (row: CriterionMatrixRow): string => {
-    const answered = row.answered ?? [];
-    if (answered.length === 0) return "";
-    const items = answered.map((a: CriterionEvidenceRef) => {
-      const text = `${escape(a.kind)}: ${escape(a.ref)}`;
-      // The review cockpit (Priority 5): a changed-path citation whose
-      // file is in the parsed sealed patch links to THAT file's section on
-      // the same page; every other ref keeps its artifact link.
-      const anchor = a.kind === "changed-path" ? options.fileAnchors?.get(a.ref) : undefined;
-      if (anchor !== undefined) return `<a href="#${anchor}">${text}</a>`;
-      const artifactId = options.links?.get(`${a.kind}:${a.ref}`) ?? (a.kind === "changed-path" ? options.links?.get("changed-path:*") : undefined);
-      return artifactId !== undefined && options.runId !== undefined
-        ? `<a href="/r/${options.runId}/evidence/${artifactId}">${text}</a>`
-        : text;
-    });
-    return ` <span class="meta">[answered: ${items.join(", ")}]</span>`;
+  const kinds: Record<CriterionEvidenceRef["kind"], string> = {
+    check: "Checks", "changed-path": "Changed files", screenshot: "Screenshots", "manual-review": "Human review",
   };
-  return (
-    `<div class="result-section criterion-matrix"><strong>acceptance</strong><ul>` +
-    matrix
-      .map(
-        row =>
-          `<li>${matrixStateBadge(row.state)}${reviewJudgementBadge(row.review)}${coverageBadge(row.coverage)} <code>${escape(row.id)}</code> ${escape(row.statement)}` +
-          ` <span class="meta">[requires: ${row.requiredEvidence.map(escape).join(", ")}]</span>` +
-          answeredHtml(row) +
-          (compact || row.detail.length === 0 ? "" : `<br><span class="meta">${row.detail.map(escape).join("; ")}</span>`) +
-          // A context GAP is never folded into the compact view: the words
-          // that say what is missing are the point (v51).
-          (row.coverage === undefined || (compact && row.coverage.state !== "gap") ? "" : `<br><span class="meta" data-context-coverage="${escape(row.coverage.state)}">context: ${escape(coverageStateWords(row.coverage))}</span>`) +
-          `</li>`,
-      )
-      .join("") +
-    `</ul></div>`
-  );
+  const evidenceLink = (a: CriterionEvidenceRef): string => {
+    const text = `<code>${escape(a.ref)}</code>`;
+    const anchor = a.kind === "changed-path" ? options.fileAnchors?.get(a.ref) : undefined;
+    if (anchor !== undefined) return `<a href="#${escape(anchor)}">${text}</a>`;
+    const artifactId = options.links?.get(`${a.kind}:${a.ref}`) ?? (a.kind === "changed-path" ? options.links?.get("changed-path:*") : undefined);
+    return artifactId !== undefined && options.runId !== undefined
+      ? `<a href="/r/${options.runId}/evidence/${artifactId}">${text}</a>`
+      : text;
+  };
+  const rows = matrix.map((row, index) => {
+    const state = row.state;
+    const label = state === "pass" ? "Evidence checks passed" : state === "manual-review" ? "Human review" : state === "missing" ? "Evidence missing" : "Evidence failed";
+    const cls = state === "pass" ? "badge-done" : state === "manual-review" ? "badge-manual-review" : "badge-failed";
+    const warnings: string[] = [];
+    // Only replace the known boilerplate. Other recorded failure details
+    // remain verbatim, so concision cannot hide a different problem.
+    const detail = row.detail.filter(line => !(state === "manual-review" && /^criterion "[^"\n]+" requires manual-review evidence — an operator must accept it before this can verify$/.test(line)));
+    if (state !== "pass" && detail.length > 0) warnings.push(`<ul class="requirement-issues">${detail.map(line => `<li>${escape(line)}</li>`).join("")}</ul>`);
+    const review = row.review;
+    if (review !== null && review.judgement !== "upholds") {
+      warnings.push(`<div class="requirement-warning" data-review-judgement="${escape(review.judgement)}"><strong>${review.judgement === "contradicts" ? "Reviewer found a problem" : "Reviewer could not confirm this"}</strong><p>${escape(review.note)}</p></div>`);
+    }
+    const coverage = row.coverage;
+    if (coverage !== undefined && (coverage.state === "gap" || coverage.gaps.length > 0)) {
+      warnings.push(`<div class="requirement-warning" data-context-coverage="${escape(coverage.state)}"><strong>Review context is missing</strong>${coverage.gaps.length === 0 ? `<p>The saved context cannot support this requirement.</p>` : `<ul>${coverage.gaps.map(gap => `<li>${escape(gap)}</li>`).join("")}</ul>`}${coverage.priorSupport === "invalid" ? `<p>The earlier review no longer supports this requirement.</p>` : ""}</div>`);
+    }
+    const answered = row.answered ?? [];
+    const groups = Object.entries(kinds).flatMap(([kind, name]) => {
+      const refs = answered.filter(one => one.kind === kind);
+      return refs.length === 0 ? [] : [`<div class="requirement-evidence-group"><strong>${name} · ${refs.length}</strong><ul>${refs.map(ref => `<li>${evidenceLink(ref)}</li>`).join("")}</ul></div>`];
+    }).join("");
+    const reviewDetails = review === null ? "" : `<div class="requirement-evidence-group"><strong>Independent review</strong><p>${review.judgement === "upholds" ? `${escape(review.note)} ` : ""}<span class="meta">${escape(review.author)}</span></p></div>`;
+    return `<li class="requirement" data-criterion-id="${escape(row.id)}">` +
+      `<div class="requirement-heading"><span>Requirement ${index + 1}</span><span class="badge ${cls}" data-matrix-state="${escape(state)}">${label}</span></div>` +
+      `<p class="requirement-statement">${escape(row.statement)}</p>` +
+      (review?.judgement === "upholds" ? `<p class="requirement-review" data-review-judgement="upholds">Reviewer confirmed</p>` : "") +
+      warnings.join("") +
+      `<details class="requirement-evidence"><summary>View evidence</summary><div class="requirement-evidence-body">` +
+      `<p class="meta">Required: ${row.requiredEvidence.map(kind => kinds[kind]).join(", ") || "No evidence types specified"}</p>` +
+      (answered.length === 0 ? `<p class="meta">No evidence was submitted for this requirement.</p>` : groups) +
+      (state !== "pass" || detail.length === 0 ? "" : `<div class="requirement-evidence-group"><strong>Verification notes</strong><ul>${detail.map(line => `<li>${escape(line)}</li>`).join("")}</ul></div>`) +
+      reviewDetails +
+      (coverage === undefined ? "" : `<p class="meta"${coverage.state === "gap" ? "" : ` data-context-coverage="${escape(coverage.state)}"`}>Review context: ${escape(coverageStateWords(coverage))}</p>`) +
+      `<p class="meta">Requirement ID: <code>${escape(row.id)}</code></p></div></details></li>`;
+  }).join("");
+  return `<div class="result-section criterion-matrix"><strong>Requirements · ${matrix.length}</strong><ol class="requirement-list">${rows}</ol></div>`;
 }
 
 /** What the task and approval views show about a drafted plan's contract
@@ -8372,28 +8375,18 @@ function planContractHtml(view: PlanContractView | null, mode: "full" | "ceremon
   );
 }
 
-/** v51: where a reviewer's evidence for a criterion comes from — the
- * revision's own patch, sealed inherited context, or a named gap. Absent
- * on every run that captured no inventory, so nothing older changes. */
-function coverageBadge(coverage: CriterionMatrixRow["coverage"]): string {
-  if (coverage === undefined) return "";
-  const cls = coverage.state === "gap" ? "badge-failed" : coverage.state === "context" ? "badge-manual-review" : "badge";
-  const word = coverage.state === "gap" ? "context gap" : coverage.state === "context" ? "sealed context" : "in patch";
-  return ` <span class="badge ${cls}" data-context-coverage="${escape(coverage.state)}" title="${escape(coverageStateWords(coverage))}">${escape(word)}</span>`;
-}
-
-/** The semantic-coverage line (v51): what an independent reviewer settled,
- * under which policy, shown apart from the machine proof — the same
- * `coverageWords` the CLI prints. Empty for a run with no rubric. */
+/** One policy summary beneath the requirements. Per-requirement concerns
+ * are already visible in the matrix; do not repeat their full text here. */
 function semanticCoverageHtml(matrix: readonly CriterionMatrixRow[], qualityMode: "default" | "strict"): string {
   const coverage = semanticCoverage(matrix, qualityMode);
-  const lines = coverageWords(coverage);
-  if (lines.length === 0) return "";
-  return (
-    `<div class="result-section semantic-coverage" data-semantic-coverage="${coverage.satisfied === null ? "unsettled" : coverage.satisfied ? "satisfied" : "unsatisfied"}" data-coverage-policy="${coverage.policy}">` +
-    lines.map((line, index) => `<p class="meta"${index === 0 ? "" : ' data-context-gap=""'}>${escape(line)}</p>`).join("") +
-    `</div>`
-  );
+  if (coverage.total === 0) return "";
+  const outcome = coverage.satisfied === null
+    ? "No independent review is recorded."
+    : `Independent review confirmed ${coverage.upheld.length} of ${coverage.total} requirements.`;
+  const policy = coverage.required
+    ? coverage.satisfied ? "Required review is complete." : "Required review is incomplete."
+    : "Independent review is optional for this scope.";
+  return `<div class="result-section semantic-coverage" data-semantic-coverage="${coverage.satisfied === null ? "unsettled" : coverage.satisfied ? "satisfied" : "unsatisfied"}" data-coverage-policy="${coverage.policy}"><p class="${coverage.required && !coverage.satisfied ? "requirement-warning" : "meta"}">${outcome} ${policy}</p></div>`;
 }
 
 /** The exact path limits, one per line (UI polish 2026-09-13): a long
@@ -9303,7 +9296,7 @@ const STYLE = `
   .cockpit-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; margin: 0 0 .35rem; }
   .cockpit-next { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .85rem 0 1rem; padding: .85rem 1rem;
     border-color: var(--glass-border); background: color-mix(in srgb, var(--glass-strong) 88%, transparent); }
-  .cockpit-next > div { display: grid; gap: .2rem; min-width: 0; }
+  .cockpit-next > div { display: grid; gap: .2rem; min-width: 0; overflow-wrap: anywhere; }
   .cockpit-next .meta { font-size: .78rem; line-height: 1.45; }
   .cockpit-next form { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0; }
   .cockpit-next form input[type=text] { min-width: 9rem; margin: 0; }
@@ -9455,6 +9448,28 @@ const STYLE = `
   }
   .result-section ul { margin: .375rem 0 0; padding-left: 1.25rem; }
   .result-section li { margin: .25rem 0; }
+  .criterion-matrix .requirement-list { list-style: none; margin: .4rem 0 0; padding: 0; }
+  .criterion-matrix .requirement { margin: 0; padding: 1rem 0; border-bottom: 1px solid var(--border); min-width: 0; overflow-wrap: anywhere; }
+  .criterion-matrix .requirement:last-child { border-bottom: 0; }
+  .requirement-heading { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem .75rem; font-size: .75rem; color: var(--muted-foreground); }
+  .requirement-heading .badge { margin: 0; white-space: normal; }
+  .requirement-statement { margin: .5rem 0; line-height: 1.55; white-space: pre-wrap; }
+  .requirement-review { margin: .4rem 0; font-size: .78rem; color: var(--muted-foreground); }
+  .requirement-warning { margin: .65rem 0; padding: .6rem .75rem; border-left: 2px solid var(--warning); background: var(--warning-soft); font-size: .8125rem; }
+  .requirement-warning strong { font-size: .78rem; }
+  .requirement-warning p { margin: .3rem 0 0; }
+  .requirement-issues { font-size: .8125rem; }
+  .criterion-matrix .requirement-evidence { margin: .35rem 0 0; padding: 0; border: 0; border-radius: 0; background: none; }
+  .requirement-evidence > summary { display: flex; align-items: center; gap: .5rem; min-height: 44px; width: fit-content; padding: .35rem .1rem; cursor: pointer; list-style: none; font-size: .8125rem; }
+  .requirement-evidence > summary::-webkit-details-marker { display: none; }
+  .requirement-evidence > summary::after { content: "+"; color: var(--muted-foreground); }
+  .requirement-evidence[open] > summary::after { content: "−"; }
+  .requirement-evidence-body { padding: .25rem .75rem .65rem; border-left: 1px solid var(--border); }
+  .requirement-evidence-body p { margin: .35rem 0; }
+  .requirement-evidence-group { margin: .7rem 0; }
+  .requirement-evidence-group > strong { font-size: .75rem; color: var(--muted-foreground); }
+  .requirement-evidence-group code { white-space: normal; overflow-wrap: anywhere; font-size: .75rem; }
+  .requirement-evidence-group a { display: inline-block; padding: .4rem 0; }
   .question { font-size: 1.125rem; font-weight: 600; letter-spacing: -0.01em; margin: 1rem 0; white-space: pre-wrap; }
   .answered {
     border: 1px solid color-mix(in srgb, var(--success) 35%, transparent); background: var(--success-soft);
@@ -13764,7 +13779,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
       const title = text("taskTitle");
       return `<article class="card proposal proposal-control" data-card-kind="control">` +
         (title === "" ? "" : `<div class="proposal-body"><h3>${escape(title)}</h3></div>`) +
-        `<footer class="proposal-actions"><a class="button-link" href="${escape(chatControlHref(control, task))}" aria-label="${escape(title === "" ? label : `${label}: ${title}`)}">${escape(label)}</a></footer></article>`;
+        `<footer class="proposal-actions"><a class="button-link" href="${escape(chatControlHref(control, task, payload["run"]))}" aria-label="${escape(title === "" ? label : `${label}: ${title}`)}">${escape(label)}</a></footer></article>`;
     }
     what = `<h3>${escape(label)}</h3>${text("taskTitle") === "" ? "" : `<p>${escape(text("taskTitle"))}</p>`}`;
   } else if (view.kind === "review") {
@@ -13886,7 +13901,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   if (view.state === "pending" && !inert) {
     acts =
       view.kind === "control"
-        ? (isChatControl(payload["control"]) ? `<a class="button-link" href="${escape(chatControlHref(payload["control"], task))}">${escape(CHAT_CONTROLS[payload["control"]].label)}</a>` : `<p>Control unavailable.</p>`)
+        ? (isChatControl(payload["control"]) ? `<a class="button-link" href="${escape(chatControlHref(payload["control"], task, payload["run"]))}">${escape(CHAT_CONTROLS[payload["control"]].label)}</a>` : `<p>Control unavailable.</p>`)
         : view.kind === "cancel"
         ? `<p class="meta">cancelling is armed on the task itself — <a href="${taskHref(task)}">open ${escape(task)}</a></p>` +
           `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button type="submit" class="quiet">dismiss</button></form>`
@@ -16786,16 +16801,17 @@ function taskBody(data: {
       // Acceptance changes the CLASS (problem → ok) and the words, never
       // the underlying token: the surfaces still agree on what happened.
       const accepted = proof.proofAccepted;
+      const humanReview = manualReviewOnly({ verdict: proof.proofVerdict ?? "", reasons: proof.proofReasons, matrix: proof.proofMatrix });
       // Accepting contradictory or incomplete evidence is an explicit,
       // recorded exception—not the ordinary amber approval ceremony.
       const acceptForm =
         accepted || data.csrf === ""
           ? ""
-          : `<details class="proof-exception"><summary>Accept with exception</summary>` +
+          : `<details class="proof-exception"><summary>${humanReview ? "Accept result" : "Accept with exception"}</summary>` +
             `<form method="post" action="${taskHref(task.id)}/accept-proof" class="proof-exception-form">` +
-              `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-              `<input type="text" name="note" maxlength="500" placeholder="Why is this safe to accept?" aria-label="exception reason" required>` +
-              `<button type="submit">Accept with exception</button></form></details>`;
+              `<input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="run" value="${proof.runId}">` +
+              `<input type="text" name="note" maxlength="500" placeholder="${humanReview ? "What did you verify?" : "Why is this safe to accept?"}" aria-label="${humanReview ? "review note" : "exception reason"}" required>` +
+              `<button type="submit">${humanReview ? "Accept result" : "Accept with exception"}</button></form></details>`;
       // v40: the machine's own pre-fold verdict, restated when a review
       // moved it — "the machine attested it; reviewer:codex contradicted
       // c2" — never pretending the machine always disagreed.
@@ -17804,6 +17820,7 @@ const REVIEW_RETURN = /^\/review\?result=[A-Za-z0-9._~%-]{1,200}$/;
 export type ReviewPriority = { band: 0 | 1 | 2; label: "needs action" | "review" | "no flags"; reasons: string[] };
 
 export type ReviewQueueFacts = {
+  proofReasons?: readonly string[];
   runId: number | null;
   outcome: string | null;
   proofVerdict: ProofVerdict | null;
@@ -17830,8 +17847,11 @@ export function reviewPriorityOf(row: ReviewQueueFacts): ReviewPriority {
   const contradicted = ids(one => one.review?.judgement === "contradicts");
   const broken = ids(one => one.state === "failed" || one.state === "missing");
   const manual = ids(one => one.state === "manual-review");
+  const humanReview = manualReviewOnly({ verdict: row.proofVerdict ?? "", reasons: row.proofReasons ?? [], matrix: row.proofMatrix });
   if (row.proofVerdict === "refuted") {
     raise(row.proofAccepted ? 1 : 0, row.proofAccepted ? "conflicting evidence — accepted with exception" : "conflicting evidence");
+  } else if (humanReview) {
+    raise(1, row.proofAccepted ? "accepted after human review" : "human review needed");
   } else if (row.proofVerdict === "short") {
     raise(row.proofAccepted ? 1 : 0, row.proofAccepted ? "missing evidence — accepted with exception" : "missing evidence");
   }
@@ -17839,7 +17859,7 @@ export function reviewPriorityOf(row: ReviewQueueFacts): ReviewPriority {
   if (broken !== "") raise(row.proofAccepted ? 1 : 0, `missing or failed evidence for ${broken}`);
   if (row.ciFailing) raise(0, "CI failing on its pull request — observed, not inferred");
   if (row.publicationState === "failed") raise(1, "publication failed — the branch never reached its remote");
-  if (manual !== "" && !row.proofAccepted) raise(1, `manual review needed for ${manual}`);
+  if (manual !== "" && !row.proofAccepted && !humanReview) raise(1, `manual review needed for ${manual}`);
   if (row.proofVerdict === null && row.outcome !== "no-change") raise(1, "no verification result");
   return { band, label: PRIORITY_LABELS[band], reasons };
 }
@@ -18258,12 +18278,13 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
   // chat's result view render — Summary / Changes / Checks with Request
   // changes beside it. The cockpit adds its own acts under Checks: the
   // v50 review-retry panel and the accept-with-exception form.
+  const humanReview = manualReviewOnly(proof === null ? null : { ...proof, verdict: proof?.verdict ?? "", reasons: proof?.reasons ?? [], matrix: proof?.matrix ?? [] });
   const extraChecks =
     reviewRetryPanel(view.taskId, run.id, view.reviewRetry, { csrf, canAct: canRetryReview, returnTo: reviewHref(view.taskId) }) +
     ((proof?.verdict === "short" || proof?.verdict === "refuted") && proof?.accepted === null && csrf !== ""
-      ? `<details class="cockpit-accept"><summary>Accept with an exception</summary><p class="meta">Use this only if you verified the result another way. The reason becomes part of the record.</p>` +
-        `<form method="post" action="${taskHref(view.taskId)}/accept-proof" class="cockpit-accept-form"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
-        `<input type="text" name="note" maxlength="500" placeholder="Why is this safe to accept?" aria-label="exception reason" required><button type="submit">Accept with exception</button></form></details>`
+      ? `<details class="cockpit-accept"><summary>${humanReview ? "Accept result" : "Accept with an exception"}</summary><p class="meta">${humanReview ? "Record what you verified for this result. Acceptance does not merge or deploy it." : "Use this only if you verified the result another way. The reason becomes part of the record."}</p>` +
+        `<form method="post" action="${taskHref(view.taskId)}/accept-proof" class="cockpit-accept-form"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${run.id}">` +
+        `<input type="text" name="note" maxlength="500" placeholder="${humanReview ? "What did you verify?" : "Why is this safe to accept?"}" aria-label="${humanReview ? "review note" : "exception reason"}" required><button type="submit">${humanReview ? "Accept result" : "Accept with exception"}</button></form></details>`
       : "");
   const here = reviewHref(view.taskId);
   parts.push(
@@ -18275,7 +18296,7 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
         user,
         noted,
         requestToken: randomBytes(16).toString("hex"),
-        hrefFor: one => (one === "summary" ? here : `${here}&tab=${one}`),
+        hrefFor: one => `${here}&run=${run.id}${one === "summary" ? "" : `&tab=${one}`}`,
         returnTo: here,
         back: null,
         extraChecks,
@@ -18314,8 +18335,8 @@ function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boole
     return card(
       "accept-proof",
       "Review before accepting",
-      verificationExplanation(verdict, detail.proof?.reasons ?? []),
-      `<a class="button-link" href="${escape(`${reviewHref(view.taskId)}&tab=checks#result`)}" data-open-evidence>Review evidence</a>`,
+      manualReviewOnly(detail.proof === null ? null : { ...detail.proof, verdict: detail.proof.verdict ?? "" }) ? "Inspect the saved screenshots and requirements." : verificationExplanation(verdict, detail.proof?.reasons ?? []),
+      `<a class="button-link" href="${escape(`${reviewHref(view.taskId)}&run=${run.id}&tab=checks#result`)}" data-open-evidence>Review evidence</a>`,
     );
   }
   if (view.contest !== null && view.contest.state === "pick-wait") {
@@ -19384,6 +19405,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const facts = receipt.facts;
   const status = receiptStatusOf(receipt);
   const stored = receiptStatusOf(receipt, null);
+  const humanReview = manualReviewOnly(proof === null ? null : { ...proof, verdict: proof.verdict ?? "" });
   const runId = run.id;
   const shots = proof?.screenshots ?? [];
   const shown = shots.filter(one => one.problem === null);
@@ -19401,7 +19423,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   // The visible status already says verification is needed. Only omit the
   // generic repeat; failed checks, specific reasons and damaged evidence stay.
   const missingVerdictNamed = o.headStatus !== false && status.token === "verification-needed" && receipt.verdict === null && receipt.reasons.length === 0;
-  if (!missingVerdictNamed && stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, receipt.reasons));
+  if (!humanReview && !missingVerdictNamed && stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, receipt.reasons));
   attention.push(...facts.evidenceProblems);
   if (detail.outsideTouches.length > 0) attention.push(`${detail.outsideTouches.length} changed file${detail.outsideTouches.length === 1 ? "" : "s"} outside the approved paths: ${detail.outsideTouches.join(", ")}.`);
   attention.push(...receipt.caveats);
@@ -19562,24 +19584,22 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     if (proof.verdict !== null) {
       // The same status line the panel leads with (one status per surface,
       // workspace package 1), beside the machine verdict's own explanation.
-      checkParts.push(`<p class="row result-verdict" data-proof-verdict="${escape(dispatchStatusToken(proof.verdict))}"><span class="meta">At completion: ${escape(verificationExplanation(proof.verdict, proof.reasons))}</span></p>`);
+      checkParts.push(`<p class="row result-verdict" data-proof-verdict="${escape(dispatchStatusToken(proof.verdict))}"><span class="meta">At completion: ${escape(humanReview ? "Human review required for the requirements below." : verificationExplanation(proof.verdict, proof.reasons))}</span></p>`);
     } else if (run.outcome !== "no-change") {
       checkParts.push(`<p class="meta" data-proof-verdict="none">No verification result is available for this build.</p>`);
     }
-    if (proof.accepted !== null) checkParts.push(`<p class="meta">Accepted with an exception by <span class="mono">${escape(proof.accepted.by)}</span> · ${escape(when(proof.accepted.at))}${proof.accepted.note === null ? "" : ` — ${escape(proof.accepted.note)}`}</p>`);
+    if (proof.accepted !== null) checkParts.push(`<p class="meta">${humanReview ? "Accepted after human review" : "Accepted with an exception"} by <span class="mono">${escape(proof.accepted.by)}</span> · ${escape(when(proof.accepted.at))}${proof.accepted.note === null ? "" : ` — ${escape(proof.accepted.note)}`}</p>`);
     if (proof.matrix.length === 0) {
       checkParts.push(detail.signedCriteria > 0 ? `<p class="meta">The approved scope has ${detail.signedCriteria} requirement${detail.signedCriteria === 1 ? "" : "s"}, but this build has no requirement-by-requirement verification.</p>` : `<p class="meta">This scope signed no acceptance checks.</p>`);
     } else {
-      checkParts.push(`<div class="result-matrix"><strong class="result-label">${proof.matrix.length} requirement${proof.matrix.length === 1 ? "" : "s"}</strong>${criterionMatrixHtml(proof.matrix, { runId, links: proof.matrixLinks, fileAnchors: detail.fileAnchors })}</div>`);
+      checkParts.push(criterionMatrixHtml(proof.matrix, { runId, links: proof.matrixLinks, fileAnchors: detail.fileAnchors }));
     }
     checkParts.push(semanticCoverageHtml(proof.matrix, proof.qualityMode));
     if (proof.machineVerdict !== null && proof.machineVerdict !== proof.verdict) checkParts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
     checkParts.push(repairChainHtml(proof.repairChain));
-    const judgements = proof.matrix.filter(one => one.review !== null);
-    if (judgements.length > 0 || detail.reviewerFindings.length > 0) {
+    if (detail.reviewerFindings.length > 0) {
       checkParts.push(
         `<div class="result-section" data-cockpit-source="reviewer"><strong>independent review</strong><ul>` +
-          judgements.map(one => `<li>${reviewJudgementBadge(one.review)} <code>${escape(one.id)}</code> <span class="meta">${escape(one.review?.author ?? "")}: ${escape(one.review?.note ?? "")}</span></li>`).join("") +
           reviewerNotes +
           `</ul></div>`,
       );

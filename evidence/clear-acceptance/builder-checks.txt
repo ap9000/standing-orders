@@ -1,0 +1,13 @@
+# Builder rerun after repairing the stale 'evidence is labeled by source' assertion (src/serve.ts unchanged).
+
+ RUN  v4.1.10 /Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-clear-acceptance-review-20260916-7e07d50c
+
+(node:49442) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+-----------------------------------------------------------------------·---------------------------------------------------------------------------------------------------------------------------------------------------··------------------------------------------------------------------···-----------------------------------------------
+
+ Test Files  1 passed (1)
+      Tests  6 passed | 331 skipped (337)
+   Start at  12:46:51
+   Duration  4.13s (transform 2.28s, setup 20ms, import 3.01s, tests 935ms, environment 0ms)
+
