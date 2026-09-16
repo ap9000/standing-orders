@@ -1,0 +1,16 @@
+{
+  "synthetic": true,
+  "preparedPatch": "1a280e8807d324aef2f5f1dfc1e6a901aa5d38b5",
+  "base": "e69c46ba84323083d0cdb422abeba0c6e801b3e6",
+  "viewports": [
+    {
+      "width": 1440,
+      "height": 900
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "artifacts": []
+}
