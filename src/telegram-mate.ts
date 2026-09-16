@@ -31,7 +31,7 @@ import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { phoneText, projectLabel } from "./telegram-status.js";
 import { CHAT_CONTROLS, chatControlHref, chatResultHref, isChatControl, type ChatControl } from "./chat-controls.js";
 import { CHAT_TASK_ACTIONS, isChatTaskAction } from "./chat-task-actions.js";
-import { resultImageFileName, verifyResultImage } from "./chat-evidence.js";
+import { resultImageFileName, safeResultImageCaption, verifyResultImage } from "./chat-evidence.js";
 import type { TelegramTransport, TelegramUpload } from "./telegram.js";
 
 /** How long one claimed turn may go without a heartbeat before another poller may take it over. */
@@ -428,7 +428,7 @@ export const TELEGRAM_ACTION_PARITY: Record<string, { support: ParitySupport; ho
   get_decision: { support: "direct", how: "Read during a turn.", gap: null },
   queue: { support: "direct", how: "Read during a turn.", gap: null },
   get_result: { support: "direct", how: "Read during a turn; the phone card shows the verification verdict, never a local link.", gap: "Secure remote evidence links are not delivered to the phone; a result's screenshots travel through get_result_images." },
-  get_result_images: { support: "direct", how: "Read during a turn; every verified original PNG/JPEG the turn selected is sent as a document with a short caption after the reply, re-verified before each upload, and a reply to an image binds that exact task and run.", gap: "An image whose record or bytes fail verification, or one Telegram refuses, is named in the chat rather than sent; the operator opens the exact result in the console. Fixture proof only, no physical-phone rendering." },
+  get_result_images: { support: "direct", how: "Read during a turn; every verified original PNG/JPEG the turn selected (at most 8 per reply, the rest by offset or image id) is sent as a document with a short safe caption after the reply, re-verified before each upload, and a reply to an image binds that exact task and run.", gap: "An image whose record or bytes fail verification, or one Telegram refuses, is named in the chat rather than sent, through the same durable retried part; the operator opens the exact result in the console. Fixture proof only, no physical-phone rendering." },
   get_controls: { support: "direct", how: "Read during a turn.", gap: null },
   show_control: { support: "handoff", how: "The card names the control and the task, with one url button to that exact console control when a trusted https console-url is configured; the button opens the signed-in console and acts on nothing.", gap: "Incomplete phone action: the control itself runs in the console, after sign-in." },
   propose_task: { support: "direct", how: "Card with Confirm/Dismiss through confirmMateProposal (filed as a mate proposal, via telegram). The confirmed card links Review & start for the filed task while its scope waits; under a signed automatic mode it says the scope is approved and links the task.", gap: "Under manual approval the password step happens in the console, reached from the card's button." },
@@ -804,6 +804,8 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
       const backoff = new Date(clock().getTime() + PART_RETRY_MS[Math.min(part.attempts, PART_RETRY_MS.length - 1)]!);
       let send: () => ReturnType<Transport>;
       let method: "sendMessage" | "sendDocument";
+      /** What Telegram's confirmed message id makes of the part: sent (the reply, a card, an image), or dropped (an image whose refusal notice is now confirmed). */
+      let confirm: (messageId: string) => boolean = messageId => store.settleTelegramConversationPart(row.id, part.ordinal, owner, { ok: true, messageId }, clock());
       if (part.kind === "image") {
         // The image, re-proved NOW — after the registry await, under the
         // held claim, immediately before the upload, on every attempt: the
@@ -815,22 +817,41 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
         const image = part.taskId === null || part.run === null || part.artifact === null || part.sha256 === null
           ? { ok: false as const, problem: "the saved file's record changed" }
           : verifyResultImage(store, options.evidenceRoot, repos, { taskId: part.taskId, run: part.run, artifact: part.artifact, sha256: part.sha256 });
+        // The caption as persisted, checked again on every attempt: a row
+        // that carries a credential-shaped task id is rebuilt from its typed
+        // identity before a word of it reaches Telegram.
+        const caption = safeResultImageCaption(part.text, part.taskId ?? "", part.run ?? 0);
         if (!image.ok) {
-          if (!store.dropTelegramConversationPart(row.id, part.ordinal, owner, image.problem, now)) return;
+          // The refusal is the part's own message now: it rides the same
+          // pending row, retry schedule and uncertain count as the upload
+          // it replaces, and the part is dropped only once Telegram confirms
+          // the notice. A lost or failed notice is retried after a restart
+          // like any part; the image is re-verified first each time, so a
+          // file repaired meanwhile is sent and one still wrong is refused
+          // again. The row is never done while the notice is unconfirmed.
           report.problems.push(`telegram chat image for update ${row.updateId} was not sent: ${image.problem}`);
           const link = part.taskId !== null && part.run !== null && taskInCeiling(store, part.taskId, repos) ? { label: "Review result", path: chatResultHref(part.taskId, part.run) } : null;
           const button = phoneLinkButton(options.phoneOrigin?.() ?? null, link);
-          await notify(`${part.text} was not sent: ${image.problem}. Open the result to view it.`, button === null ? undefined : [button]);
-          continue;
+          const problem = image.problem;
+          method = "sendMessage";
+          send = () => transport("sendMessage", {
+            chat_id: chatId,
+            text: phoneText(`${caption} was not sent: ${problem}. Open the result to view it.`, 1_000),
+            link_preview_options: { is_disabled: true },
+            reply_parameters: { message_id: Number(row.messageId) },
+            ...(button === null ? {} : { reply_markup: { inline_keyboard: [button] } }),
+          });
+          confirm = () => store.dropTelegramConversationPart(row.id, part.ordinal, owner, problem, clock());
+        } else {
+          const upload: TelegramUpload = {
+            field: "document",
+            fileName: resultImageFileName(part.taskId as string, part.run as number, part.artifact as number, image.format),
+            contentType: image.format === "png" ? "image/png" : "image/jpeg",
+            bytes: image.bytes,
+          };
+          method = "sendDocument";
+          send = () => transport("sendDocument", { chat_id: chatId, caption }, undefined, upload);
         }
-        const upload: TelegramUpload = {
-          field: "document",
-          fileName: resultImageFileName(part.taskId as string, part.run as number, part.artifact as number, image.format),
-          contentType: image.format === "png" ? "image/png" : "image/jpeg",
-          bytes: image.bytes,
-        };
-        method = "sendDocument";
-        send = () => transport("sendDocument", { chat_id: chatId, caption: part.text }, undefined, upload);
       } else {
         // A card's link is minted NOW, from the persisted proposal and the
         // origin configured at this moment: a retry after the setting changed
@@ -879,7 +900,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
         return;
       }
       const messageId = String(id);
-      if (!store.settleTelegramConversationPart(row.id, part.ordinal, owner, { ok: true, messageId }, clock())) return;
+      if (!confirm(messageId)) return;
       // Placement names the persisted callback tokens only; a url row is not a token.
       if (part.keyboard !== null) store.placeTelegramProposalActions(part.keyboard.flat().map(one => one.callback_data), messageId);
     }

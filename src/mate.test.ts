@@ -124,9 +124,10 @@ describe("the mate's turn", () => {
     });
 
   test("the intake contract treats one outcome as enough and asks only material questions", () => {
-    expect(MATE_CONTRACT_VERSION).toBe(12);
+    expect(MATE_CONTRACT_VERSION).toBe(13);
     expect(MATE_CONTRACT).toContain("call get_result_images for that exact execution and run");
     expect(MATE_CONTRACT).toContain("say they follow, never that they were delivered");
+    expect(MATE_CONTRACT).toContain("call it again with that offset or with the image ids it listed");
     expect(MATE_CONTRACT).toContain("read get_agents and answer in its words");
     expect(MATE_CONTRACT).toContain("never an agent that is not listed");
     expect(MATE_CONTRACT).toContain("a plain-language outcome is enough to draft a task");
@@ -626,7 +627,8 @@ describe("the mate's turn", () => {
       or({ content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "list_tasks", arguments: JSON.stringify({ repo: "r1" }) } }] }),
       or({ content: "two tasks are queued in r1" }),
     ]);
-    const live = session(5_000_000, "alex", credentialKeyOf("openrouter-api", "or-key"));
+    // The worst-case reservation grows with the tool contract; this ceiling only has to admit one priced turn.
+    const live = session(6_000_000, "alex", credentialKeyOf("openrouter-api", "or-key"));
     const outcome = await turn("what is queued?", script.fetcher, { session: live, config: { ...CONFIG, provider: "openrouter-api", model: "openai/gpt-5" }, key: "or-key" });
     expect(outcome).toMatchObject({ ok: true, steps: 2, activity: "read 1 · proposed 0 · 2 steps" });
     if (!outcome.ok) throw new Error("unreachable");

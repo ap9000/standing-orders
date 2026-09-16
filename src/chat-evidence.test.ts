@@ -19,7 +19,7 @@ import { revisionSourceOf } from "./result-review.js";
 import { SCREENSHOT_BYTE_CAP } from "./evidence.js";
 import { subscriptionCredentialKey } from "./converse.js";
 import { executeMateTool } from "./mate-tools.js";
-import { RESULT_IMAGES_PER_TURN_CAP, resultImageCaption, selectResultImages, verifyResultImage } from "./chat-evidence.js";
+import { RESULT_IMAGES_PER_TURN_CAP, resultImageCaption, resultImageFileName, resultTaskLabel, safeResultImageCaption, selectResultImages, verifyResultImage } from "./chat-evidence.js";
 
 const T0 = new Date("2026-09-16T09:00:00.000Z");
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(120, 7)]);
@@ -221,21 +221,28 @@ describe("shared result image selection", () => {
 
     const phone = executeMateTool({ ...base, selectEvidence, mediaDelivery: "documents" }, "get_result_images", { task: "alpha", run });
     expect(phone).toMatchObject({ ok: true, body: {
-      task: "alpha", root: "alpha", currentExecution: "alpha", isCurrent: true, run, title: "Work alpha", report: false,
-      imageCount: RESULT_IMAGES_PER_TURN_CAP + 1,
+      task: "alpha", label: "alpha", root: "alpha", currentExecution: "alpha", isCurrent: true, run, title: "Work alpha", report: false,
+      imageCount: RESULT_IMAGES_PER_TURN_CAP + 1, selected: shots.slice(0, RESULT_IMAGES_PER_TURN_CAP), selectedCount: RESULT_IMAGES_PER_TURN_CAP, sendCount: RESULT_IMAGES_PER_TURN_CAP, nextImageOffset: RESULT_IMAGES_PER_TURN_CAP,
       unavailable: [{ problem: "the capture failed" }],
-      delivery: `${RESULT_IMAGES_PER_TURN_CAP} image file(s) will be sent to this chat after your reply. Say they follow; do not say they were delivered.`,
+      delivery: `${RESULT_IMAGES_PER_TURN_CAP} of ${RESULT_IMAGES_PER_TURN_CAP + 1} image file(s) (screenshots 1–${RESULT_IMAGES_PER_TURN_CAP}) will be sent to this chat after your reply. Say they follow; do not say they were delivered. 1 more remain: ask again with offset ${RESULT_IMAGES_PER_TURN_CAP} or by image id.`,
     } });
-    const body = (phone as { body: { images: { id: number; caption: string }[] } }).body;
-    expect(body.images.map(one => one.id)).toEqual(shots);
+    const body = (phone as { body: { images: { id: number; position: number; caption: string; selected: boolean }[] } }).body;
+    // Every image is listed with its position, and the listing says which ones this ask selected.
+    expect(body.images.map(one => [one.id, one.position, one.selected])).toEqual(shots.map((id, index) => [id, index + 1, index < RESULT_IMAGES_PER_TURN_CAP]));
     expect(body.images[0]!.caption).toBe(`alpha · result #${run} · screenshot 1 of ${RESULT_IMAGES_PER_TURN_CAP + 1}`);
     // Bounded: the cap holds, in selection order; a second read of the same result adds nothing twice.
     expect(store.listMateTurnEvidence(opened.id).map(one => [one.ordinal, one.artifact, one.taskId, one.run, one.format])).toEqual(shots.slice(0, RESULT_IMAGES_PER_TURN_CAP).map((id, index) => [index, id, "alpha", run, "png"]));
     expect(executeMateTool({ ...base, selectEvidence, mediaDelivery: "documents" }, "get_result_images", { task: "alpha", run })).toMatchObject({ ok: true });
     expect(store.listMateTurnEvidence(opened.id)).toHaveLength(RESULT_IMAGES_PER_TURN_CAP);
+    // The next page asked for in the SAME turn is honest: the turn's cap is reached, nothing more rides this reply.
+    expect(executeMateTool({ ...base, selectEvidence, mediaDelivery: "documents" }, "get_result_images", { task: "alpha", run, offset: RESULT_IMAGES_PER_TURN_CAP })).toMatchObject({ ok: true, body: {
+      selected: [shots[RESULT_IMAGES_PER_TURN_CAP]], selectedCount: 1, sendCount: 0, nextImageOffset: null,
+      delivery: `No more image files can be sent with this reply: its limit of ${RESULT_IMAGES_PER_TURN_CAP} is reached. Ask again for the rest.`,
+    } });
+    expect(store.listMateTurnEvidence(opened.id)).toHaveLength(RESULT_IMAGES_PER_TURN_CAP);
     // The console and the CLI: the same selection and identity, and an honest word that nothing is downloaded from here.
     const console_ = executeMateTool({ ...base, selectEvidence }, "get_result_images", { task: "alpha", run });
-    expect(console_).toMatchObject({ ok: true, body: { run, imageCount: RESULT_IMAGES_PER_TURN_CAP + 1, delivery: "This surface does not send image files. Name the result so the operator can open it." } });
+    expect(console_).toMatchObject({ ok: true, body: { run, imageCount: RESULT_IMAGES_PER_TURN_CAP + 1, sendCount: 0, delivery: "This surface does not send image files. Name the result so the operator can open it." } });
     expect(executeMateTool(base, "get_result_images", { task: "alpha" })).toMatchObject({ ok: true, body: { run, delivery: "This surface does not send image files. Name the result so the operator can open it." } });
     expect(executeMateTool(base, "get_result_images", { task: "nope" })).toEqual({ ok: false, message: "That task is not in your projects." });
     expect(executeMateTool(base, "get_result_images", { task: "alpha", run: 0 })).toEqual({ ok: false, message: "Choose a task and valid result number." });
@@ -243,5 +250,102 @@ describe("shared result image selection", () => {
     expect(store.finalizeMateTurn(opened.id, started.generation, { state: "failed", settledMicrousd: 0, tokensIn: 1, tokensOut: 1, failureReason: "provider-error" }, T0)).toBe(true);
     expect(store.listMateTurnEvidence(opened.id)).toEqual([]);
     expect(selectEvidence([{ taskId: "alpha", taskRef: alpha, run, artifact: shots[0]!, sha256: "a".repeat(64), format: "png", bytes: 1, caption: "x" }])).toBe(0);
+  });
+
+  test("the remaining and specific images of a result are one more ask away: a later turn selects the next page by offset or exact ids, bounded, in evidence order, and never an id outside this result (review 508)", () => {
+    const alpha = task("alpha", repos.a);
+    const run = finished("alpha", alpha, "l-alpha");
+    diff(run, "alpha");
+    const shots = Array.from({ length: RESULT_IMAGES_PER_TURN_CAP + 1 }, (_, index) => artifact(run, "screenshot", `screenshot-${index}.png`, Buffer.concat([PNG, Buffer.from([index])])));
+    const beta = task("beta", repos.b);
+    const betaRun = finished("beta", beta, "l-beta");
+    const betaShot = artifact(betaRun, "screenshot", "screenshot-b.png", PNG);
+    const me = who([repos.a, repos.b]);
+    const credentialKey = subscriptionCredentialKey("claude-subscription");
+    const session = store.mintMateSession({ approver: "alex", approverGeneration: me.generation, credentialKey, ceilingMicrousd: 0, ceilingDigest: me.ceilingDigest, termsDigest: "t".repeat(64) }, T0);
+    const thread = store.openMateThread("alex", me.ceilingDigest, T0).thread;
+    const base = { store, who: me, now: T0, evidenceRoot, step: 1, readDecisions: new Map<number, number>(), draft: () => null, mediaDelivery: "documents" as const };
+    /** One independent turn: what the tool answered and what it recorded for delivery. */
+    const ask = (args: Record<string, unknown>) => {
+      const opened = store.openMateTurn({ approver: "alex", session, thread: thread.id, credentialKey, reservedMicrousd: 0, dailyTurns: 50, weeklyCeilingMicrousd: 0, deadlineMs: 60_000 }, T0);
+      if (!opened.ok) throw new Error(opened.reason);
+      const started = store.startMateTurn(opened.id, T0);
+      if (!started.ok) throw new Error("start");
+      const answer = executeMateTool({ ...base, selectEvidence: rows => store.recordMateTurnEvidence(opened.id, rows, RESULT_IMAGES_PER_TURN_CAP, T0) }, "get_result_images", args);
+      const recorded = store.listMateTurnEvidence(opened.id).map(one => one.artifact);
+      store.finalizeMateTurn(opened.id, started.generation, { state: "answered", settledMicrousd: 0, tokensIn: 1, tokensOut: 1 }, T0);
+      return { answer, recorded };
+    };
+    // Two identical asks select the same first page — deterministic — and each says exactly what remains and how to ask for it.
+    const first = ask({ task: "alpha", run });
+    const again = ask({ task: "alpha", run });
+    expect(first.recorded).toEqual(shots.slice(0, RESULT_IMAGES_PER_TURN_CAP));
+    expect(again.recorded).toEqual(first.recorded);
+    expect(first.answer).toMatchObject({ ok: true, body: { selectedCount: RESULT_IMAGES_PER_TURN_CAP, sendCount: RESULT_IMAGES_PER_TURN_CAP, nextImageOffset: RESULT_IMAGES_PER_TURN_CAP, imageCount: RESULT_IMAGES_PER_TURN_CAP + 1 } });
+    // The rest, by offset: the ninth image alone, with no continuation left.
+    const rest = ask({ task: "alpha", run, offset: RESULT_IMAGES_PER_TURN_CAP });
+    expect(rest.recorded).toEqual([shots[RESULT_IMAGES_PER_TURN_CAP]]);
+    expect(rest.answer).toMatchObject({ ok: true, body: {
+      selected: [shots[RESULT_IMAGES_PER_TURN_CAP]], selectedCount: 1, sendCount: 1, nextImageOffset: null, imageCount: RESULT_IMAGES_PER_TURN_CAP + 1,
+      delivery: `1 of ${RESULT_IMAGES_PER_TURN_CAP + 1} image file(s) (screenshot ${RESULT_IMAGES_PER_TURN_CAP + 1}) will be sent to this chat after your reply. Say they follow; do not say they were delivered.`,
+    } });
+    expect([...first.recorded, ...rest.recorded]).toEqual(shots);
+    // Specific images by id: in evidence order whatever order they were named in; the positions are the result's, not the page's.
+    const chosen = ask({ task: "alpha", run, images: [shots[8], shots[2]] });
+    expect(chosen.recorded).toEqual([shots[2], shots[8]]);
+    expect(chosen.answer).toMatchObject({ ok: true, body: {
+      selected: [shots[2], shots[8]], selectedCount: 2, sendCount: 2, nextImageOffset: null,
+      delivery: `2 of ${RESULT_IMAGES_PER_TURN_CAP + 1} image file(s) (screenshots 3–9) will be sent to this chat after your reply. Say they follow; do not say they were delivered.`,
+    } });
+    expect((chosen.answer as { body: { images: { id: number; selected: boolean }[] } }).body.images.filter(one => one.selected).map(one => one.id)).toEqual([shots[2], shots[8]]);
+    // A middle page: its positions and its continuation.
+    expect(ask({ task: "alpha", run, offset: 3 }).answer).toMatchObject({ ok: true, body: { selected: shots.slice(3, 3 + RESULT_IMAGES_PER_TURN_CAP), selectedCount: 6, nextImageOffset: null } });
+    // Never another task's image, a fabricated id, both roads at once, too many, a repeat, or an offset past the end.
+    expect(ask({ task: "alpha", run, images: [betaShot] }).answer).toEqual({ ok: false, message: "Choose image ids from this result's list of deliverable images." });
+    expect(ask({ task: "alpha", run, images: [shots[0], 9_999] }).answer).toEqual({ ok: false, message: "Choose image ids from this result's list of deliverable images." });
+    expect(ask({ task: "alpha", run, images: [shots[0]], offset: 1 }).answer).toEqual({ ok: false, message: "Choose image ids or an offset, not both." });
+    expect(ask({ task: "alpha", run, images: shots }).answer).toEqual({ ok: false, message: `Choose at most ${RESULT_IMAGES_PER_TURN_CAP} images per request.` });
+    expect(ask({ task: "alpha", run, images: [shots[0], shots[0]] }).answer).toEqual({ ok: false, message: "Each image id once." });
+    expect(ask({ task: "alpha", run, images: [] }).answer).toEqual({ ok: false, message: "Choose at least one image id from this result's list." });
+    expect(ask({ task: "alpha", run, images: ["x"] }).answer).toEqual({ ok: false, message: "Choose valid image ids." });
+    expect(ask({ task: "alpha", run, offset: RESULT_IMAGES_PER_TURN_CAP + 1 }).answer).toEqual({ ok: false, message: `Choose an image offset below ${RESULT_IMAGES_PER_TURN_CAP + 1}.` });
+    expect(ask({ task: "alpha", run, offset: -1 }).answer).toEqual({ ok: false, message: "Choose a valid image offset." });
+    expect(ask({ task: "beta", run: betaRun, offset: 0 }).answer).toMatchObject({ ok: true, body: { selected: [betaShot], nextImageOffset: null, delivery: "1 image file(s) will be sent to this chat after your reply. Say they follow; do not say they were delivered." } });
+    // The same roads read from the shared selection directly, for every surface.
+    expect(selectResultImages(store, me, evidenceRoot, "alpha", run, { offset: RESULT_IMAGES_PER_TURN_CAP })).toMatchObject({ ok: true, selection: { selected: [expect.objectContaining({ artifact: shots[RESULT_IMAGES_PER_TURN_CAP], ordinal: RESULT_IMAGES_PER_TURN_CAP + 1, total: RESULT_IMAGES_PER_TURN_CAP + 1 })], nextOffset: null } });
+    expect(selectResultImages(store, me, evidenceRoot, "alpha", run, { images: [betaShot] })).toEqual({ ok: false, message: "Choose image ids from this result's list of deliverable images." });
+  });
+
+  test("a credential-shaped task id never reaches a caption or file name: the display label is opaque and stable while the exact identity stays bound, and a persisted caption is checked again before it is sent (review 507)", () => {
+    // A valid task id by every rule at the tool boundary — and the shape of an AWS access key.
+    const tokenShaped = "AKIAABCDEFGHIJKLMNOP";
+    const ref = task(tokenShaped, repos.a);
+    const run = finished(tokenShaped, ref, "l-token");
+    diff(run, tokenShaped);
+    const shot = artifact(run, "screenshot", "screenshot-home.png", PNG);
+    const me = who([repos.a]);
+    const label = resultTaskLabel(tokenShaped);
+    expect(label).toMatch(/^task-[0-9a-f]{12}$/);
+    expect(label).toBe(resultTaskLabel(tokenShaped));
+    expect(resultTaskLabel("alpha")).toBe("alpha");
+    expect(resultTaskLabel("12345:ABCDEFGHIJKLMNOPQRSTUV")).toMatch(/^task-[0-9a-f]{12}$/);
+    expect(resultTaskLabel("xoxb-1234567890-abcdefghijk")).toMatch(/^task-[0-9a-f]{12}$/);
+    expect(resultTaskLabel("has space")).toMatch(/^task-[0-9a-f]{12}$/);
+    expect(resultImageCaption(tokenShaped, run, 1, 1, true)).toBe(`${label} · result #${run} · screenshot 1 of 1`);
+    expect(resultImageFileName(tokenShaped, run, shot, "png")).toBe(`${label}-result-${run}-${shot}.png`);
+    const selected = selectResultImages(store, me, evidenceRoot, tokenShaped, run);
+    if (!selected.ok) throw new Error(selected.message);
+    // The exact identity is kept where it binds; only the words shown carry the label.
+    expect(selected.selection).toMatchObject({ task: tokenShaped, label, run, images: [{ artifact: shot, caption: `${label} · result #${run} · screenshot 1 of 1`, fileName: `${label}-result-${run}-${shot}.png` }] });
+    expect(JSON.stringify([selected.selection.images, selected.selection.label])).not.toContain(tokenShaped);
+    const tool = executeMateTool({ store, who: me, now: T0, evidenceRoot, step: 1, readDecisions: new Map<number, number>(), draft: () => null, mediaDelivery: "documents", selectEvidence: () => 1 }, "get_result_images", { task: tokenShaped, run });
+    expect(tool).toMatchObject({ ok: true, body: { task: tokenShaped, label, images: [{ id: shot, caption: `${label} · result #${run} · screenshot 1 of 1` }] } });
+    // A caption persisted before this rule, or edited by hand, is rebuilt from the typed identity at send time; a clean one is sent as it is.
+    expect(safeResultImageCaption(`${tokenShaped} · result #${run} · screenshot 1 of 1`, tokenShaped, run)).toBe(`${label} · result #${run} · screenshot`);
+    expect(safeResultImageCaption(`alpha · result #${run} · screenshot 1 of 1`, "alpha", run)).toBe(`alpha · result #${run} · screenshot 1 of 1`);
+    expect(safeResultImageCaption("bot 123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ here", "alpha", run)).toBe(`alpha · result #${run} · screenshot`);
+    expect(safeResultImageCaption("line\u0000break", "alpha", run)).toBe(`alpha · result #${run} · screenshot`);
+    expect(safeResultImageCaption("x".repeat(1_025), "alpha", run)).toBe(`alpha · result #${run} · screenshot`);
+    expect(safeResultImageCaption("", "alpha", run)).toBe(`alpha · result #${run} · screenshot`);
   });
 });

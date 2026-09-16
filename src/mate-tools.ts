@@ -2,7 +2,7 @@ import { taskControlOf } from "./task-control.js";
 import { validateScopeText, validateTaskText, TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
 import { conversationKnowledge } from "./project-knowledge.js";
 import { readChatResult, reviewInputProblem, type ReviewSnapshot } from "./chat-review.js";
-import { selectResultImages } from "./chat-evidence.js";
+import { RESULT_IMAGES_PER_TURN_CAP, selectResultImages, type ResultImagePick } from "./chat-evidence.js";
 import { CHAT_CONTROLS, isChatControl } from "./chat-controls.js";
 import { LIMITS } from "./decision.js";
 import { CHAT_TASK_ACTIONS, chatTaskRun, chatTaskStamp, isChatTaskAction } from "./chat-task-actions.js";
@@ -461,24 +461,44 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "get_result_images",
-    description: "Select the saved screenshots of one exact finished result (task, and run from get_task or get_result). On Telegram each verified image is sent as a file after your reply: say they follow, never that they were delivered. Elsewhere only the result identity and image count are shown; the operator opens the result to view them. Never invent images.",
-    inputSchema: schema({ task: TASK_ARG, run: { type: "integer", minimum: 1 } }, ["task"]),
+    description: "Select the saved screenshots of one exact finished result (task, and run from get_task or get_result). Lists every image with its position; at most 8 are sent per reply: the first page, a later page via offset (nextImageOffset), or exact ids via images. On Telegram each selected verified image is sent as a file after your reply: say they follow, never that they were delivered, and say how many remain. Elsewhere only the result identity and image count are shown; the operator opens the result to view them. Never invent images.",
+    inputSchema: schema({
+      task: TASK_ARG, run: { type: "integer", minimum: 1 },
+      offset: { type: "integer", minimum: 0 },
+      images: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: RESULT_IMAGES_PER_TURN_CAP },
+    }, ["task"]),
     handle: (ctx, args) => {
       const task = taskIdOf(args);
       if (task === null || (args["run"] !== undefined && (!Number.isSafeInteger(args["run"]) || Number(args["run"]) < 1))) return { ok: false, message: "Choose a task and valid result number." };
-      const selected = selectResultImages(ctx.store, ctx.who, ctx.evidenceRoot, task, args["run"] as number | undefined);
+      if (args["offset"] !== undefined && (!Number.isSafeInteger(args["offset"]) || Number(args["offset"]) < 0)) return { ok: false, message: "Choose a valid image offset." };
+      const ids = args["images"];
+      if (ids !== undefined && (!Array.isArray(ids) || ids.some(one => !Number.isSafeInteger(one) || Number(one) < 1))) return { ok: false, message: "Choose valid image ids." };
+      const pick: ResultImagePick = { ...(args["offset"] === undefined ? {} : { offset: Number(args["offset"]) }), ...(ids === undefined ? {} : { images: (ids as number[]).map(Number) }) };
+      const selected = selectResultImages(ctx.store, ctx.who, ctx.evidenceRoot, task, args["run"] as number | undefined, pick);
       if (!selected.ok) return selected;
       const { selection } = selected;
       const ref = ctx.store.lookupRef(task);
       if (ref === null) return { ok: false, message: "That task is not in your projects." };
-      const recorded = ctx.selectEvidence?.(selection.images.map(one => ({ taskId: task, taskRef: ref.id, run: selection.run, artifact: one.artifact, sha256: one.sha256, format: one.format, bytes: one.bytes, caption: one.caption }))) ?? 0;
-      const delivery = ctx.mediaDelivery === "documents"
-        ? recorded === 0 ? "No image files will be sent." : `${recorded} image file(s) will be sent to this chat after your reply. Say they follow; do not say they were delivered.`
-        : "This surface does not send image files. Name the result so the operator can open it.";
+      // Only what THIS ask selected is recorded under the turn; the turn's own cap still holds across asks.
+      const recorded = ctx.selectEvidence?.(selection.selected.map(one => ({ taskId: task, taskRef: ref.id, run: selection.run, artifact: one.artifact, sha256: one.sha256, format: one.format, bytes: one.bytes, caption: one.caption }))) ?? 0;
+      const chosen = new Set(selection.selected.map(one => one.artifact));
+      const total = selection.images.length;
+      const remaining = selection.nextOffset === null ? 0 : total - selection.nextOffset;
+      const positions = selection.selected.length === 0 ? "" : selection.selected.length === 1 ? `screenshot ${selection.selected[0]!.ordinal}` : `screenshots ${selection.selected[0]!.ordinal}–${selection.selected.at(-1)!.ordinal}`;
+      const more = remaining === 0 ? "" : ` ${remaining} more remain: ask again with offset ${selection.nextOffset} or by image id.`;
+      const delivery = ctx.mediaDelivery !== "documents"
+        ? "This surface does not send image files. Name the result so the operator can open it."
+        : recorded === 0
+          ? selection.selected.length === 0 ? "No image files will be sent." : `No more image files can be sent with this reply: its limit of ${RESULT_IMAGES_PER_TURN_CAP} is reached. Ask again for the rest.`
+          : recorded === total
+            ? `${recorded} image file(s) will be sent to this chat after your reply. Say they follow; do not say they were delivered.`
+            : `${recorded} of ${total} image file(s) (${positions}) will be sent to this chat after your reply. Say they follow; do not say they were delivered.${more}`;
       return { ok: true, body: {
-        task: selection.task, root: selection.root, currentExecution: selection.currentExecution, isCurrent: selection.currentExecution === selection.task,
+        task: selection.task, label: selection.label, root: selection.root, currentExecution: selection.currentExecution, isCurrent: selection.currentExecution === selection.task,
         run: selection.run, title: selection.title, report: selection.report,
-        imageCount: selection.images.length, images: selection.images.map(one => ({ id: one.artifact, format: one.format, bytes: one.bytes, caption: one.caption })),
+        imageCount: total, images: selection.images.map(one => ({ id: one.artifact, position: one.ordinal, format: one.format, bytes: one.bytes, caption: one.caption, selected: chosen.has(one.artifact) })),
+        selected: selection.selected.map(one => one.artifact), selectedCount: selection.selected.length, sendCount: ctx.mediaDelivery === "documents" ? recorded : 0,
+        nextImageOffset: selection.nextOffset,
         unavailable: selection.unavailable.map(one => ({ id: one.artifact, problem: one.problem })),
         delivery,
       } };

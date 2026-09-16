@@ -139,7 +139,8 @@ is claimed to have reached a Telegram client.
   metadata only (task, root, currentExecution, run, artifact ids, format,
   bytes, caption, unavailable reasons) plus one `delivery` line the model
   repeats: on Telegram "N image file(s) will be sent … say they follow";
-  elsewhere "This surface does not send image files". The mate contract
+  elsewhere "This surface does not send image files". The revision below
+  adds paging (`offset`, `images`) and the safe display label. The mate contract
   (v12) tells the model to say the files follow, never that they were
   delivered, and to ask which result when a newer revision is current.
 - **Durable selection under the turn** — `mate_turn_evidence` (v64). The
@@ -242,5 +243,95 @@ database was migrated in this build.
   remains the place to view images there.
 - Automatic lifecycle screenshot fan-out stays out of scope; lifecycle
   updates keep their existing exact-result links.
-- A dropped image's notice is best-effort (like every other channel
-  notice); the dropped part and its reason are durable in the row.
+- A dropped image's notice was best-effort in this build; the revision
+  below makes it durable.
+
+## Revision record (2026-09-16, builder, from three annotations on 3ce4847)
+
+Built on `3ce4847`. Fixture evidence only, as before: no bot token,
+pairing, private HTTPS, live database or phone. No schema change: v64
+stays as it is, and no row or receipt is rewritten.
+
+### 507 — safe display identity in captions and file names
+
+- `resultTaskLabel` (`src/chat-evidence.ts`) is the only task text a
+  caption or upload name carries. A plain id is itself. An id that is
+  credential-shaped (the secret scanner's patterns or a bot token's
+  shape), holds control or space characters, or exceeds an id's length
+  shows as `task-<12 hex of its sha256>`: stable, opaque, never the id.
+  The exact id stays in the typed part columns, `mate_turn_evidence`,
+  the message bindings and the **Review result** link, so replies and
+  revisions still pin the exact task and run.
+- `resultImageCaption` and `resultImageFileName` apply the label
+  themselves, so every caller — the selection, the tool body, the part
+  plan — is covered, and a direct call with a token-shaped id yields no
+  token (the operator's `identity-caption.mjs` fixture prints
+  `captionIncludesSensitiveShape: false`, `fileNameIncludesSensitiveShape:
+  false` on this candidate).
+- Persisted captions are protected at send and retry time too:
+  `safeResultImageCaption` re-checks the part's `text` on every attempt
+  and rebuilds it from the typed identity (`<label> · result #N ·
+  screenshot`) when it would show a credential, a control character, or
+  exceed Telegram's caption ceiling. The rebuilt words are what the
+  document and the refusal notice carry; the part row is not rewritten.
+- Note: a live turn cannot plan such a caption today anyway — the engine
+  refuses a context that carries a credential-shaped id (`secret-in-
+  context`) — so the send-time check guards rows planned before this
+  rule or edited by hand. Regressions: `chat-evidence.test.ts` (label,
+  caption, file name, tool body, rebuild rules) and `telegram-mate.test.ts`
+  ("a credential-shaped caption never reaches Telegram").
+
+### 508 — the remaining and specific images are one more ask away
+
+- `get_result_images` lists every deliverable image with its `position`
+  and a `selected` flag, and takes `offset` (a later page) or `images`
+  (exact ids from the listing), never both. At most 8 are selected per
+  ask (`RESULT_IMAGES_PER_TURN_CAP`, unchanged); `selected`,
+  `selectedCount`, `sendCount` and `nextImageOffset` say exactly what
+  this ask delivers and where the rest begins. The delivery line says it
+  in words: "8 of 9 image file(s) (screenshots 1–8) will be sent … 1
+  more remain: ask again with offset 8 or by image id." A second page
+  asked for in the same turn, once the turn's cap is reached, is answered
+  "No more image files can be sent with this reply … Ask again for the
+  rest." rather than counted.
+- Exact identity and permissions are unchanged: ids are matched only
+  against this result's own deliverable images (another task's id, a
+  fabricated id, a repeat, more than 8, or an offset past the end is
+  refused in words); access, run ownership and per-upload verification
+  are the same roads as before. Two identical asks select the same first
+  page — deterministic — and the operator's `image-pagination.mjs`
+  fixture, which repeats the same ask twice, now shows the continuation
+  key (`nextImageOffset`) both times; the ninth image travels when the
+  ask names `offset: 8` or its id (regression in `chat-evidence.test.ts`).
+- The mate contract (v13) tells the model to say how many remain and to
+  call again with that offset or those ids when asked for the rest.
+
+### 509 — a refused image's notice is durable
+
+- The refusal is now the image part's own message. When the send-time
+  proof refuses an image, the bridge sends the notice through the same
+  road as any part — the same pending row, retry schedule, `retry_after`
+  handling and uncertain count — and the part is dropped (with the
+  reason as its `last_error`) only once Telegram confirms the notice. A
+  failed or lost notice leaves the part pending with the notice's error;
+  the row stays `queued`/`delivering`, never `done`, and a restart retries
+  it with no model call. Confirmed parts are skipped as before; the image
+  is verified again before every attempt, so invalid bytes are never
+  uploaded and a file repaired meanwhile is sent instead of the notice.
+- The notice carries the safe caption and the plain reason through
+  `phoneText`, under the same registry re-read, pairing/ceiling re-proof
+  and held claim as an upload. The operator's `lost-refusal-notice.mjs`
+  fixture (lost upload answer, changed file, failed notice, restart)
+  prints `refusalEventuallyDelivered: true`, `modelCalls: 2` on this
+  candidate. Regression: `telegram-mate.test.ts` ("a refused image's
+  notice is durable").
+
+### Checks run by the builder for this revision
+
+- `npm run typecheck` — exit 0.
+- `npx vitest run src/chat-evidence.test.ts src/telegram-mate.test.ts src/mate.test.ts src/telegram.test.ts src/telegram-status.test.ts src/migration-v64-telegram-images.test.ts src/mate-doors.test.ts --reporter=dot` — all pass.
+- The unchanged full gate is left to the final machine gate, once.
+- The OpenRouter tool-loop fixture in `mate.test.ts` mints its session at
+  6,000,000 µ$ (was 5,000,000): the worst-case reservation grows with the
+  tool contract's bytes and had reached that fixture's ceiling; nothing
+  about the reservation rule changed.

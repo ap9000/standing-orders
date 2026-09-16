@@ -23,6 +23,7 @@ import { confirmMateProposal } from "./mate-doors.js";
 import { MATE_TOOL_SCHEMAS, executeMateTool } from "./mate-tools.js";
 import { runMateCli } from "./mate-cli.js";
 import { readChatResult } from "./chat-review.js";
+import { resultTaskLabel } from "./chat-evidence.js";
 import { chatTaskStamp } from "./chat-task-actions.js";
 import { register } from "./runner.js";
 import { acquire } from "./claim.js";
@@ -1427,6 +1428,108 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(script.documents().map(one => [one.params["caption"], one.upload?.fileName])).toEqual([[`payout · result #${run} · screenshot 1 of 1`, `payout-result-${run}-${good}.png`]]);
       expect(parts().map(one => [one.kind, one.state])).toEqual([["reply", "sent"], ["image", "sent"]]);
       expect(turns()).toBe(2);
+    });
+
+    test("a refused image's notice is durable: it rides the image's own pending part, a failed or lost notice is retried after a restart with no model call and no confirmed part resent, the row is not done until Telegram confirms it, and the part is dropped only then (review 509)", async () => {
+      origin = "https://console.example";
+      const { run } = seedSource("payout");
+      shot(run, "screenshot-home.png", PNG);
+      script.fault = params => params["caption"] === undefined ? null : "throw";
+      askForImages(run, "One screenshot follows.");
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, problems: [expect.stringContaining("is waiting to be sent: Telegram transport failed; delivery may be uncertain")] } });
+      expect(parts().map(one => [one.kind, one.state, one.attempts, one.uncertain])).toEqual([["reply", "sent", 1, 0], ["image", "pending", 1, 1]]);
+      // The file changes on disk; the retry refuses it, and Telegram refuses the notice: the part stays pending with the notice's error, the row stays queued — nothing is done.
+      writeFileSync(join(evidenceRoot, String(run), "screenshot-home.png"), Buffer.concat([PNG, Buffer.from([1])]));
+      store.close(); store = openStore(file);
+      script.fault = params => String(params["text"] ?? "").includes("was not sent") ? { ok: false, description: "temporary network failure" } : null;
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [
+        expect.stringContaining("was not sent: the saved file is missing or changed"),
+        expect.stringContaining("is waiting to be sent: temporary network failure"),
+      ] } });
+      expect(parts()[1]).toMatchObject({ kind: "image", state: "pending", messageId: null, attempts: 2, uncertain: 1, lastError: "temporary network failure", nextAttemptAt: new Date(now.getTime() + PART_RETRY_MS[1]).toISOString() });
+      expect(row()).toMatchObject({ state: "queued", outcome: "delivering" });
+      expect(script.documents()).toHaveLength(0);
+      expect(script.texts()).toEqual(["One screenshot follows."]);
+      // A lost answer on the notice: uncertain, retried — the notice may have arrived, and the row says so instead of claiming otherwise.
+      script.fault = params => String(params["text"] ?? "").includes("was not sent") ? "throw" : null;
+      later(PART_RETRY_MS[1]);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("was not sent: the saved file is missing or changed"), expect.stringContaining("is waiting to be sent: Telegram transport failed; delivery may be uncertain")] } });
+      expect(parts()[1]).toMatchObject({ state: "pending", attempts: 3, uncertain: 2 });
+      expect(row()).toMatchObject({ state: "queued", outcome: "delivering" });
+      // Restart with a healthy transport: the image is verified again (still wrong), the notice goes out with the exact result to open, and only now is the part dropped and the row done. The reply was never resent; the model was never called again.
+      store.close(); store = openStore(file);
+      script.fault = null;
+      later(PART_RETRY_MS[2]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [expect.stringContaining("was not sent: the saved file is missing or changed")] } });
+      expect(parts().map(one => [one.kind, one.state, one.messageId, one.attempts, one.uncertain, one.lastError])).toEqual([
+        ["reply", "sent", "100", 1, 0, null],
+        ["image", "dropped", null, 3, 2, "the saved file is missing or changed"],
+      ]);
+      expect(script.texts()).toEqual(["One screenshot follows.", `payout · result #${run} · screenshot 1 of 1 was not sent: the saved file is missing or changed. Open the result to view it.`]);
+      expect(script.sends().at(-1)!.params["reply_parameters"]).toEqual({ message_id: Number(row().messageId) });
+      expect(urlButtons(script.sends().at(-1))).toEqual([["Review result", `https://console.example/chat?task=payout&result=${run}`]]);
+      expect(script.documents()).toHaveLength(0);
+      expect(row()).toMatchObject({ state: "done", outcome: "replayed" });
+      expect(requests).toHaveLength(2);
+      expect(turns()).toBe(1);
+      // A notice is not an image message: replying to it binds nothing.
+      expect(store.telegramMessageBindings(binding(), String(script.sends().at(-1)!.messageId))).toEqual([]);
+      // A file repaired before the notice is confirmed is sent after all: verified again on that attempt, never the invalid bytes.
+      shot(run, "screenshot-form.jpg", JPEG);
+      script.fault = params => params["caption"] === undefined ? null : "throw";
+      askForImages(run, "Two screenshots follow.");
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1 } });
+      writeFileSync(join(evidenceRoot, String(run), "screenshot-form.jpg"), Buffer.concat([JPEG, Buffer.from([1])]));
+      script.fault = params => String(params["text"] ?? "").includes("was not sent") ? { ok: false, description: "temporary network failure" } : null;
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("was not sent: the saved file is missing or changed"), expect.stringContaining("is waiting to be sent: temporary network failure")] } });
+      expect(row()).toMatchObject({ state: "queued", outcome: "delivering" });
+      expect(parts().map(one => [one.kind, one.state, one.lastError])).toEqual([["reply", "sent", null], ["image", "pending", "temporary network failure"]]);
+      writeFileSync(join(evidenceRoot, String(run), "screenshot-form.jpg"), JPEG);
+      script.fault = null;
+      later(PART_RETRY_MS[1]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
+      expect(parts().map(one => [one.kind, one.state, one.lastError])).toEqual([["reply", "sent", null], ["image", "sent", null]]);
+      expect(script.documents()).toHaveLength(1);
+      expect(script.documents()[0]!.upload!.bytes.equals(JPEG)).toBe(true);
+      expect(turns()).toBe(2);
+    });
+
+    test("a credential-shaped caption never reaches Telegram: a persisted caption is checked again before every send and retry and rebuilt from the part's typed identity, for the document and for a refusal notice alike, while the part, the bindings and the link keep the exact identity (review 507)", async () => {
+      origin = "https://console.example";
+      const { run } = seedSource("payout");
+      shot(run, "screenshot-home.png", PNG);
+      const second = shot(run, "screenshot-form.jpg", JPEG);
+      // The shape of an AWS access key. A live turn never plans such a caption (the selection labels a credential-shaped id opaquely, and the engine refuses a context that carries one), so the road here is the persisted row: planned before this rule, or edited by hand.
+      const tokenShaped = "AKIAABCDEFGHIJKLMNOP";
+      expect(resultTaskLabel(tokenShaped)).toMatch(/^task-[0-9a-f]{12}$/);
+      script.fault = params => params["caption"] === undefined ? null : "throw";
+      askForImages(run, "Two screenshots follow.");
+      expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1 } });
+      expect(parts().map(one => [one.kind, one.state, one.text])).toEqual([
+        ["reply", "sent", "Two screenshots follow."],
+        ["image", "pending", `payout · result #${run} · screenshot 1 of 2`],
+        ["image", "pending", `payout · result #${run} · screenshot 2 of 2`],
+      ]);
+      store.handle.prepare("UPDATE telegram_conversation_part SET text = ? WHERE conversation = ? AND ordinal = 1").run(`${tokenShaped} · result #${run} · screenshot 1 of 2`, row().id);
+      store.handle.prepare("UPDATE telegram_conversation_part SET text = ? WHERE conversation = ? AND ordinal = 2").run(`${tokenShaped} · result #${run} · screenshot 2 of 2`, row().id);
+      // The first file also changes on disk: its refusal notice is rebuilt as well. Restart and retry.
+      writeFileSync(join(evidenceRoot, String(run), "screenshot-home.png"), Buffer.concat([PNG, Buffer.from([1])]));
+      store.close(); store = openStore(file);
+      script.fault = null;
+      later(PART_RETRY_MS[0]);
+      expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [expect.stringContaining("was not sent: the saved file is missing or changed")] } });
+      expect(script.texts().at(-1)).toBe(`payout · result #${run} · screenshot was not sent: the saved file is missing or changed. Open the result to view it.`);
+      expect(script.documents().map(one => [one.params["caption"], one.upload?.fileName])).toEqual([[`payout · result #${run} · screenshot`, `payout-result-${run}-${second}.jpg`]]);
+      for (const call of script.calls) expect(JSON.stringify([call.params, call.upload?.fileName ?? ""])).not.toContain(tokenShaped);
+      expect(script.documents()[0]!.upload!.bytes.equals(JPEG)).toBe(true);
+      expect(parts().map(one => [one.kind, one.state, one.taskId, one.run])).toEqual([["reply", "sent", null, null], ["image", "dropped", "payout", run], ["image", "sent", "payout", run]]);
+      // The exact identity still binds a reply to the image, and the console link still names the exact task.
+      expect(store.telegramMessageBindings(binding(), String(script.documents()[0]!.messageId))).toEqual([{ taskId: "payout", taskRef: store.lookupRef("payout")!.id, run, project: repo }]);
+      expect(urlButtons(script.sends().at(-1))).toEqual([["Review result", `https://console.example/chat?task=payout&result=${run}`]]);
+      expect(requests).toHaveLength(2);
+      expect(turns()).toBe(1);
     });
   });
 

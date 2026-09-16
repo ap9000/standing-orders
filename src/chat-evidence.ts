@@ -16,12 +16,16 @@
  * re-proves access and re-reads the bytes with `verifyResultImage`
  * immediately before every upload, including retries.
  */
-import { readVerifiedArtifact, SCREENSHOT_BYTE_CAP, validateScreenshotBytes } from "./evidence.js";
+import { createHash } from "node:crypto";
+import { readVerifiedArtifact, scanForSecrets, SCREENSHOT_BYTE_CAP, validateScreenshotBytes } from "./evidence.js";
 import type { Artifact, Run, Store } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
 
-/** How many images one turn may select for delivery; more is a flood, not an answer. */
+/** How many images one turn may select for delivery; more is a flood, not an answer. The rest are one more ask away, by offset or by id. */
 export const RESULT_IMAGES_PER_TURN_CAP = 8;
+
+/** Which of a result's images one ask selects: a page from an offset, or exact image ids from an earlier listing. Absent: the first page. */
+export type ResultImagePick = { offset?: number; images?: readonly number[] };
 
 export type ResultImage = {
   artifact: number;
@@ -39,12 +43,19 @@ export type ResultImage = {
 
 export type ResultImageSelection = {
   task: string;
+  /** The task as a caption or file name shows it: the id when it is plain, a stable opaque label when it is credential-shaped. */
+  label: string;
   root: string;
   currentExecution: string;
   run: number;
   role: Run["role"];
   title: string;
+  /** Every deliverable image of the result, in evidence order, each with its position. */
   images: ResultImage[];
+  /** The images THIS ask selects for delivery: at most the per-turn cap, in evidence order. */
+  selected: ResultImage[];
+  /** Where the next page starts when the selection stopped short of the last image; null when nothing remains after it. */
+  nextOffset: number | null;
   /** Screenshot records that exist but cannot be delivered, each with its plain reason. */
   unavailable: { artifact: number; problem: string }[];
   /** The run delivered a report (a scout): images are not the point of this result. */
@@ -78,14 +89,76 @@ function readScreenshot(evidenceRoot: string, artifact: Artifact): { ok: true; b
 /** Telegram's own caption ceiling for a document (Bot API sendDocument, checked 2026-09-16). Ours are far shorter by construction. */
 export const RESULT_IMAGE_CAPTION_MAX_CHARS = 1_024;
 
-/** The caption: the task, the exact result and the position — identity a person can read, nothing a person or a model typed. */
-export function resultImageCaption(task: string, run: number, ordinal: number, total: number, current: boolean): string {
-  return `${task} · result #${run} · screenshot ${ordinal} of ${total}${current ? "" : " · older version"}`.slice(0, RESULT_IMAGE_CAPTION_MAX_CHARS);
+/** The longest task label a caption or file name carries. A task id is at most 64 characters at every tool boundary. */
+const RESULT_TASK_LABEL_MAX_CHARS = 64;
+
+/** A bot token's shape, the one credential the secret scanner does not know. */
+const BOT_TOKEN_SHAPE = /\b\d{5,}:[A-Za-z0-9_-]{20,}\b/;
+
+/**
+ * Is this text safe to show a third-party transport as identity? Nothing
+ * credential-shaped, nothing that steers a terminal or a renderer, nothing
+ * longer than an id may be. A caption or file name shows only what passes.
+ */
+export function displayIdentityProblem(text: string): string | null {
+  if (text.length === 0 || text.length > RESULT_TASK_LABEL_MAX_CHARS) return "too long";
+  if (scanForSecrets(text).length > 0 || BOT_TOKEN_SHAPE.test(text)) return "credential-shaped";
+  if (/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\s]/.test(text)) return "control or space characters";
+  return null;
 }
 
-/** The upload name: task, result and artifact identity — derivable from the typed part alone, never a path. */
+/**
+ * The task as a caption or file name may show it. A plain id is itself,
+ * with any character a file name cannot hold replaced. A credential-shaped
+ * id (a task filed under a token-like name, on purpose or by accident) is
+ * never repeated to Telegram: it shows as a stable opaque label instead,
+ * while the exact id stays in the typed part, the bindings and the link.
+ */
+export function resultTaskLabel(taskId: string): string {
+  if (displayIdentityProblem(taskId) !== null) return `task-${createHash("sha256").update(taskId).digest("hex").slice(0, 12)}`;
+  return taskId.replace(/[^A-Za-z0-9._-]/g, "-");
+}
+
+/** The caption: the task's display label, the exact result and the position — identity a person can read, nothing a person or a model typed. */
+export function resultImageCaption(task: string, run: number, ordinal: number, total: number, current: boolean): string {
+  return `${resultTaskLabel(task)} · result #${run} · screenshot ${ordinal} of ${total}${current ? "" : " · older version"}`.slice(0, RESULT_IMAGE_CAPTION_MAX_CHARS);
+}
+
+/** The upload name: task label, result and artifact identity — derivable from the typed part alone, never a path. */
 export function resultImageFileName(task: string, run: number, artifact: number, format: "png" | "jpeg"): string {
-  return `${task}-result-${run}-${artifact}.${format === "png" ? "png" : "jpg"}`;
+  return `${resultTaskLabel(task)}-result-${run}-${artifact}.${format === "png" ? "png" : "jpg"}`;
+}
+
+/**
+ * A persisted caption, checked again at send and retry time: a row planned
+ * before this rule, or one edited by hand, may carry the raw task id. A
+ * caption that would show a credential, a control character or more than
+ * Telegram's ceiling is rebuilt from the part's typed identity instead —
+ * the exact task and run stay bound; only the words on the wire change.
+ */
+export function safeResultImageCaption(text: string, taskId: string, run: number): string {
+  const safe = text.length > 0 && text.length <= RESULT_IMAGE_CAPTION_MAX_CHARS
+    && scanForSecrets(text).length === 0 && !BOT_TOKEN_SHAPE.test(text)
+    && !/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/.test(text);
+  return safe ? text : `${resultTaskLabel(taskId)} · result #${run} · screenshot`;
+}
+
+/** The page or the exact ids one ask selects from a result's images; a refusal names what to choose instead. */
+export function pickResultImages(images: readonly ResultImage[], pick: ResultImagePick | undefined, cap: number): { ok: true; selected: ResultImage[]; nextOffset: number | null } | Problem {
+  if (pick?.images !== undefined) {
+    if (pick.offset !== undefined) return { ok: false, message: "Choose image ids or an offset, not both." };
+    if (pick.images.length === 0) return { ok: false, message: "Choose at least one image id from this result's list." };
+    if (pick.images.length > cap) return { ok: false, message: `Choose at most ${cap} images per request.` };
+    const wanted = new Set(pick.images);
+    if (wanted.size !== pick.images.length) return { ok: false, message: "Each image id once." };
+    const known = new Set(images.map(one => one.artifact));
+    if ([...wanted].some(id => !known.has(id))) return { ok: false, message: "Choose image ids from this result's list of deliverable images." };
+    return { ok: true, selected: images.filter(one => wanted.has(one.artifact)), nextOffset: null };
+  }
+  const offset = pick?.offset ?? 0;
+  if (offset > 0 && offset >= images.length) return { ok: false, message: images.length === 0 ? "This result has no deliverable images." : `Choose an image offset below ${images.length}.` };
+  const selected = images.slice(offset, offset + cap);
+  return { ok: true, selected, nextOffset: offset + selected.length < images.length ? offset + selected.length : null };
 }
 
 /**
@@ -93,9 +166,12 @@ export function resultImageFileName(task: string, run: number, artifact: number,
  * finished result of THAT execution — and only while it is the current
  * version: a newer revision is said, never switched to. A run must belong
  * to the task and have finished; a role that delivers no images (a
- * reviewer, a planner) is not a result at all.
+ * reviewer, a planner) is not a result at all. Every deliverable image is
+ * listed with its position; `selected` is the page (or the exact ids) this
+ * ask delivers, at most the per-turn cap, and `nextOffset` says where the
+ * rest begins so the remaining images are one more ask away, never lost.
  */
-export function selectResultImages(store: Store, who: VerifiedApprover, evidenceRoot: string | undefined, task: string, run?: number):
+export function selectResultImages(store: Store, who: VerifiedApprover, evidenceRoot: string | undefined, task: string, run?: number, pick?: ResultImagePick):
   { ok: true; selection: ResultImageSelection } | Problem {
   const ref = store.lookupRef(task);
   if (ref?.repo == null || !who.repos.includes(ref.repo)) return { ok: false, message: "That task is not in your projects." };
@@ -128,9 +204,11 @@ export function selectResultImages(store: Store, who: VerifiedApprover, evidence
       fileName: resultImageFileName(task, found.id, one.artifact.id, one.format),
     });
   });
+  const picked = pickResultImages(images, pick, RESULT_IMAGES_PER_TURN_CAP);
+  if (!picked.ok) return picked;
   return { ok: true, selection: {
-    task, root: family.root.id, currentExecution: family.current.id, run: found.id, role: found.role,
-    title: store.getTask(task)?.title ?? task, images, unavailable, report: artifacts.some(one => one.kind === "report"),
+    task, label: resultTaskLabel(task), root: family.root.id, currentExecution: family.current.id, run: found.id, role: found.role,
+    title: store.getTask(task)?.title ?? task, images, selected: picked.selected, nextOffset: picked.nextOffset, unavailable, report: artifacts.some(one => one.kind === "report"),
   } };
 }
 
