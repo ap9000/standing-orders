@@ -101,6 +101,18 @@ describe('quiet learning', () => {
     store.close();store=openStore(db);recoverLearning(store,evidence,repo,now);
     expect(view().events.filter(e=>e.action==='assessment')).toEqual([first]);
   });
+  test('overlong optional text is observable without failing the core review',()=>{
+    const valid=capture(0,(c: LearningCandidate)=>[{...c,observation:'a'.repeat(126)}],{decision:'propose',reason:'a'.repeat(500)});
+    const longReason=capture(1,[],{decision:'none',reason:'a'.repeat(501)});
+    const longObservation=capture(2,(c: LearningCandidate)=>[{...c,observation:'😀'.repeat(126)}],{decision:'propose',reason:'Keep native UTF-8 limits.'});
+    const events=view().events.filter(e=>e.action==='assessment');
+    expect(events.find(e=>e.run===valid.reviewer)).toMatchObject({after:'propose'});
+    for(const c of [longReason,longObservation]) {
+      expect(events.find(e=>e.run===c.reviewer)).toMatchObject({after:'invalid'});
+      expect(view().lessons.some(l=>l.source===c.source)).toBe(false);
+    }
+    for(const c of [valid,longReason,longObservation])expect(store.getRun(c.reviewer)?.outcome).toBe('no-change');
+  });
   test('strict core parser stays strict; invalid optional learning and absent learning do not alter it',()=>{
     for(const learning of [undefined,null,{},['invalid']]) expect(parseReview(JSON.stringify({version:1,comments:[],learning}),new Set())).toMatchObject({ok:true,comments:[],criteria:[]});
     expect(parseReview(JSON.stringify({version:1,comments:[],learning:[]}),new Set(),new Set(['c1']))).toMatchObject({ok:false});

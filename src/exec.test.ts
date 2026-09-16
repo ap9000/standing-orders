@@ -1,5 +1,6 @@
 import { describe, test, expect } from "vitest";
 import { realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import {
   run, runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl, terminateLiveProviders, NOT_FOUND_CODE,
@@ -12,6 +13,18 @@ import { adapterFor } from "./provider.js";
 const NODE = process.execPath;
 
 describe("run", () => {
+  test("buffered group delivers large Unicode stdin completely and closes input", async () => {
+    const input = "Unicode ✓ 😀\n".repeat(32_768);
+    const result = await run(NODE, ["-e", "const h=require('node:crypto').createHash('sha256');process.stdin.on('data',x=>h.update(x));process.stdin.on('end',()=>console.log(h.digest('hex')));"], { processGroup: true, stdin: input, timeoutMs: 10_000 });
+    expect(result.code).toBe(0);
+    expect(result.stdout.trim()).toBe(createHash("sha256").update(input).digest("hex"));
+  });
+  test("buffered group refuses a closed stdin even when the child intends to exit zero", async () => {
+    const result = await run(NODE, ["-e", "require('node:fs').closeSync(0);setTimeout(()=>process.exit(0),100);"], { processGroup: true, stdin: "x".repeat(2_000_000), timeoutMs: 10_000 });
+    expect(result.code).not.toBe(0);
+    expect(result.timedOut).toBe(false);
+    expect(result.stderr).toContain("prompt input failed");
+  });
   test.each([run, runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl])("a late spawn fence creates no subprocess (%#)", async transport => {
     let spawned = false;
     const result = await transport(NODE, ["-e", "console.log('must not run')"], {

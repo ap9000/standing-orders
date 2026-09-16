@@ -21,6 +21,27 @@ const request = (provider: SubscriptionMateRequest["provider"]): SubscriptionMat
 });
 
 describe("subscription chat's isolated harness adapter", () => {
+  test.each(["claude-subscription", "codex-subscription"] as const)("%s rejects failed or incomplete turns even with a valid tool proposal", async provider => {
+    const answer = { text: "Synthetic proposal", calls: [{ id: "c1", name: "recap", argumentsJson: "{}" }] };
+    const message = { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(answer) } };
+    const cases = provider === "claude-subscription"
+      ? [
+          { type: "result", subtype: "error_max_turns", is_error: true, structured_output: answer },
+          { type: "result", subtype: "success", is_error: true, structured_output: answer },
+          { structured_output: answer },
+        ].map(value => JSON.stringify(value))
+      : [
+          [message, { type: "turn.failed", error: { message: "Synthetic network failure" } }],
+          [message],
+          [message, { type: "turn.completed" }, { type: "turn.failed" }],
+          [null, message, { type: "turn.completed" }],
+        ].map(events => events.map(value => JSON.stringify(value)).join("\n"));
+    for (const stdout of cases) {
+      const result = await performSubscriptionMateRequest(request(provider), async () => ({ code: 0, stdout, stderr: "", timedOut: false, notFound: false }));
+      expect(result).toMatchObject({ ok: false, problem: "malformed-reply" });
+    }
+  });
+
   test("the prompt gives the harness no ambient-state authority", () => {
     const prompt = composeSubscriptionMatePrompt(request("codex-subscription"));
     expect(prompt).toContain("Do not use any harness tools or inspect the computer");
@@ -45,6 +66,9 @@ describe("subscription chat's isolated harness adapter", () => {
     let seen: { file: string; args: readonly string[]; cwd: string; omitEnv: readonly string[]; timeoutMs: number | undefined } | null = null;
     const result = await performSubscriptionMateRequest(request("codex-subscription"), async (file, args, options) => {
       seen = { file, args, cwd: options?.cwd ?? "", omitEnv: options?.omitEnv ?? [], timeoutMs: options?.timeoutMs };
+      expect(options?.stdin).toContain("SYSTEM-CANARY");
+      expect(args).not.toContain(options?.stdin);
+      expect(args.at(-1)).toBe("-");
       const answer = JSON.stringify({ text: "All quiet.", calls: [] });
       return {
         code: 0,
@@ -72,9 +96,11 @@ describe("subscription chat's isolated harness adapter", () => {
     let seen: { args: readonly string[]; cwd: string } | null = null;
     const result = await performSubscriptionMateRequest(request("claude-subscription"), async (_file, args, options) => {
       seen = { args, cwd: options?.cwd ?? "" };
+      expect(options?.stdin).toContain("SYSTEM-CANARY");
+      expect(args).not.toContain(options?.stdin);
       return {
         code: 0,
-        stdout: JSON.stringify({ structured_output: { text: "Ready.", calls: [] }, usage: { input_tokens: 8, output_tokens: 2 } }),
+        stdout: JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: { text: "Ready.", calls: [] }, usage: { input_tokens: 8, output_tokens: 2 } }),
         stderr: "",
         timedOut: false,
         notFound: false,
