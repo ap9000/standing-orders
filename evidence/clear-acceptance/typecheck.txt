@@ -1,0 +1,4 @@
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+

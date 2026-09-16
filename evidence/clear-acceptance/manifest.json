@@ -1,0 +1,173 @@
+{
+  "preparedPatch": "ed0fb4554290cdba6e509abb67388cfd0106ed31",
+  "verifiedBase": "f34957c1cfa0997c5b503c8e40cff05a88c62a6d",
+  "synthetic": true,
+  "sourceHashes": {
+    "src/serve.ts": "083d46b4ea3a6315481199f36bf6759002fc6c9497238ffa0d6234f1aea0085b",
+    "src/serve.test.ts": "2a751190df1228926ce351cc1165bfb8d39c585199c71010838549e2ce899cfd"
+  },
+  "artifacts": [
+    {
+      "path": "evidence/clear-acceptance/desktop-before.png",
+      "sha256": "8115dfdb0115a6ff1cfaa74607a91bfdec35ceca2d13db9334230e9b0019d63d",
+      "caption": "Synthetic acceptance-review fixture: desktop before",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/phone-before-dark.png",
+      "sha256": "d085ecc2f01ae185c9aede64b62f2e0bcfe26e432740088355fd0beee7961df4",
+      "caption": "Synthetic acceptance-review fixture: phone before dark",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/desktop-after-dark.png",
+      "sha256": "17883a44b6fb27405825b11ce2894b87274ee3baf1e800eb3845a18982bdcbaa",
+      "caption": "Synthetic acceptance-review fixture: desktop after dark",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/phone-after.png",
+      "sha256": "9bf347ac4679ccf524314995fa2dc25612b8e3ae884989ef1791226bd5b3d61e",
+      "caption": "Synthetic acceptance-review fixture: phone after",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/desktop-evidence.png",
+      "sha256": "d10871f14b263b8dcbba355925120b31cd25362484bd7188a2e3ca4909a83a4c",
+      "caption": "Synthetic acceptance-review fixture: desktop evidence",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/phone-evidence.png",
+      "sha256": "244f81b54094bebce517326405c957dec1179d5404e85f02f7fcfb173e6b7297",
+      "caption": "Synthetic acceptance-review fixture: phone evidence",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/desktop-feedback.png",
+      "sha256": "0c31c6dc56b286d07efb88fc44c421183cfaad75a5e44ed81f417bbe53a36aae",
+      "caption": "Synthetic acceptance-review fixture: desktop feedback",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/phone-feedback.png",
+      "sha256": "29a0165b3f0c2014dd8b2153ede11ff786dbccb5859752ff16e183d9a651038b",
+      "caption": "Synthetic acceptance-review fixture: phone feedback",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/desktop-revision.png",
+      "sha256": "97d995239093efff25082d3300bb323fbfffcb0648386bd88929761dae00851a",
+      "caption": "Synthetic acceptance-review fixture: desktop revision",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/phone-revision.png",
+      "sha256": "fa563db9a45d1fb9ad7df97fefcf2ed2c26fd0581e71f1beaadbb44ff19d3a3e",
+      "caption": "Synthetic acceptance-review fixture: phone revision",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/desktop-failure.png",
+      "sha256": "0aa7f5af1696da85e0c3b56a1fc709933fb29fe4d1a4202977c0bfbe76c21c25",
+      "caption": "Synthetic acceptance-review fixture: desktop failure",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/phone-failure.png",
+      "sha256": "0521e5f5f0601049fe0cf0ca89b975a4e71dfc6bd3d1d5a9626e524cd3fe6b5f",
+      "caption": "Synthetic acceptance-review fixture: phone failure",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/desktop-empty.png",
+      "sha256": "004eb507a29eb397889053cde0ff899072cc6f7b6131edf97bf63dd5815b8459",
+      "caption": "Synthetic acceptance-review fixture: desktop empty",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "path": "evidence/clear-acceptance/phone-empty.png",
+      "sha256": "477c24e52f90de81cccc184225f8f3740415f430a24fbde0927e04d03c7aa110",
+      "caption": "Synthetic acceptance-review fixture: phone empty",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    }
+  ],
+  "checks": {
+    "typecheck": "passed",
+    "build": "passed",
+    "focused": "5 existing serve tests passed; other tests not selected",
+    "command": "npx vitest run src/serve.test.ts -t 'v40: the criterion matrix|semantic coverage and context gaps|intent to diff:|evidence:|actions: only applicable' --reporter=dot"
+  },
+  "observations": {
+    "desktop": {
+      "width": 1440,
+      "pageWidth": 1429,
+      "evidenceTapHeights": [
+        44,
+        44,
+        44
+      ]
+    },
+    "phone": {
+      "width": 390,
+      "pageWidthCollapsed": 379,
+      "pageWidthExpanded": 379,
+      "evidenceTapHeights": [
+        44,
+        44,
+        44
+      ]
+    },
+    "longFailurePath": {
+      "beforePageWidth": 502,
+      "afterPageWidth": 379,
+      "viewport": 390,
+      "fullPathPreserved": true
+    },
+    "journeys": "Both desktop and phone inspected changes, entered realistic feedback, and created a revision showing Needs your approval. The evidence link downloaded the sealed fixture diff. Enter/Space toggle evidence and show keyboard focus.",
+    "limitations": "Chromium viewport checks, not physical iPhone/Safari. Dense terms copied from run 1699 into isolated fixture state; concern and human-review combinations are synthetic, not fresh judgements on that live result.",
+    "reuse": "After the final scoped long-path CSS repair, only affected desktop/phone failure views were rebuilt and recaptured. Other unchanged presentation and journey evidence is reused from this same agent session."
+  }
+}

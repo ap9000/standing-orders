@@ -1,0 +1,16 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Documents/standing-orders-clear-acceptance
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+(node:39170) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+-----------------------------------------------------------------------·---------------------------------------------------------------------------------------------------------------------------------------------------··------------------------------------------------------------------·-·-----------------------------------------------
+
+ Test Files  1 passed (1)
+      Tests  5 passed | 332 skipped (337)
+   Start at  12:32:17
+   Duration  2.98s (transform 1.35s, setup 11ms, import 1.74s, tests 456ms, environment 0ms)
+
