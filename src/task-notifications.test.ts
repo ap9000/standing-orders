@@ -390,6 +390,27 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM telegram_outbound_message WHERE task_id = 'alpha-1'").get()?.["n"]).toBe(3);
   });
 
+  test("an earlier shell or webhook receipt cannot hide a failed Telegram delivery", async () => {
+    pair();
+    placed("alpha-1", ALPHA, "Guard the payout path");
+    const notification = store.listNotifications()[0]!;
+    store.recordDelivery(notification.id, { ok: true, receipt: "shell:fixture" }, now);
+    const script = scriptedTransport();
+    script.fail({ ok: false, description: "offline" });
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 0 } });
+    expect(receipts()[0]).toMatchObject({ deliveredAt: null, lastError: "offline" });
+    expect(store.pendingForAttention().map(row => row.id)).toEqual([notification.id]);
+
+    store.close();
+    store = openStore(file);
+    expect(store.pendingForAttention().map(row => row.id)).toEqual([notification.id]);
+    now = later(2_000);
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 1, problems: [] } });
+    expect(store.pendingForAttention()).toEqual([]);
+    // Neither the failure nor its recovery rewrites the other channel's receipt.
+    expect(store.listNotifications("all")[0]).toMatchObject({ deliveredAt: T0.toISOString(), receipt: "shell:fixture" });
+  });
+
   test("a hold's button opens the task's details page under the trusted origin, where the release control lives", async () => {
     pair();
     const a1 = placed("alpha-1", ALPHA, "Guard the payout path");

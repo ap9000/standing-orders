@@ -22093,21 +22093,28 @@ export class Store {
    */
   pendingForAttention(): Notification[] {
     const holds = Object.values(TELEGRAM_HOLD_REASONS);
-    const troubled = new Set(
-      this.db
-        .prepare(
-          `SELECT d.notification AS id FROM notification_delivery d
+    // A successful shell/webhook receipt does not settle a different
+    // destination's failure. Select that union before applying the global
+    // pending filter, and exclude resolved facts from both arms.
+    return this.db
+      .prepare(
+        `WITH troubled AS (
+           SELECT d.notification AS id FROM notification_delivery d
             JOIN telegram_binding b ON d.destination = 'telegram:' || b.bot_id || ':' || b.chat_id || ':' || b.id || ':' || b.approver_generation
             JOIN approver a ON a.name = b.approver AND a.generation = b.approver_generation
            WHERE b.revoked_at IS NULL AND a.revoked_at IS NULL
              AND ${TELEGRAM_UNSETTLED}
              AND d.attempts > 0 AND d.last_error IS NOT NULL
-             AND d.last_error NOT IN (${holds.map(() => "?").join(", ")})`,
-        )
-        .all(...holds)
-        .map(row => Number(row["id"])),
-    );
-    return this.listNotifications("pending").filter(row => !isLifecycleNotification(row) || troubled.has(row.id));
+             AND d.last_error NOT IN (${holds.map(() => "?").join(", ")})
+         )
+         SELECT n.* FROM notification n
+          WHERE n.resolved_at IS NULL
+            AND ((n.delivered_at IS NULL AND substr(n.dedupe_key, 1, ${LIFECYCLE_KEY_PREFIX.length}) <> '${LIFECYCLE_KEY_PREFIX}')
+              OR n.id IN (SELECT id FROM troubled))
+          ORDER BY n.id`,
+      )
+      .all(...holds)
+      .map(readNotification);
   }
 
   // ---- web push (arc 3) ----------------------------------------------------
