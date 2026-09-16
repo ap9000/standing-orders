@@ -31,9 +31,11 @@
     },
     {
       "path": "evidence/telegram-progress/desktop-feedback.png",
-      "sha256": "327c31d7a6f178ae71f11475dadfc7034e6e316a2965d678c9f1e24c791718ea",
+      "sha256": "154c294989da91db63da95363574b71d3d66313d266eed54a67a2de0c5e5fbc5",
       "kind": "screenshot",
-      "synthetic": true
+      "synthetic": true,
+      "recapturedAt": "2026-09-16T21:44:00Z",
+      "recaptureReason": "review 1710: the first capture overlapped two frames mid view-transition; retaken from the same synthetic fixture after every document animation finished and the saved feedback was visible"
     },
     {
       "path": "evidence/telegram-progress/desktop-long.png",
