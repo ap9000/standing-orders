@@ -9,3 +9,13 @@ Reproduce with a temporary shallow Git clone of the supplied base (using `file:/
 Record concise before/after command evidence under `evidence/ci-history/` and describe the fix here. Typecheck and the existing focused manifest test are sufficient during implementation. The unchanged approved full command belongs to the native final machine gate once for this candidate; submit pending verification instead of running that full suite in the builder or independent reviewer. Do not add an agent time limit, change or waive the 600-second verification limit, or delete tests. No new UI evidence is needed: the application is unchanged.
 
 The input branch starts at the exact verified PR head above; preserve it. The operator will publish the verified descendant to PR #9, observe GitHub's fresh checks, merge the exact passing head, and reconcile publication status. The builder must not push, merge, install, change publication grants, send Telegram messages or modify the live database.
+
+## Fix applied (2026-09-16)
+
+`.github/workflows/ci.yml`: the `test` job's `actions/checkout@v5` step now sets `with: { fetch-depth: 0 }`, with a comment naming the reason (`src/provider.test.ts` runs `scripts/delivery-manifest-check.mjs`, which reads `ba101e6..8217f55` from Git). Nothing else in the workflow changed: `linux-native-containment`, `windows-baseline` and `native-windows` keep the default depth-1 checkout because their focused test lists never run the manifest test. No product code, test, test command, dependency, timeout, permission or provider setting was touched.
+
+### Reproduction and proof
+
+A temporary `git clone --depth 1 --single-branch` of this branch over `file://` (outside the worktree and database) has one commit and neither `ba101e69…` nor `8217f557…`. The unchanged `node scripts/delivery-manifest-check.mjs` fails there with `fatal: bad object ba101e694cd94907a493c0ae3a5efa666477e977` (exit 1), the same failure GitHub run 35156979897 reported. After `git fetch --unshallow` (605 commits, both objects present) the same script prints `lists all 23 src/ paths changed in ba101e6..8217f55; every sha256 matches 8217f55 bytes and sourceDigest recomputes` (exit 0). Full transcript: `evidence/ci-history/shallow-clone-repro.txt`.
+
+Implementation checks: `npm run typecheck` (exit 0), the existing focused manifest test `npx vitest run src/provider.test.ts -t "historical Telegram delivery manifest"` (1 passed), and a YAML parse confirming only the `test` job checkout carries `fetch-depth: 0` — see `evidence/ci-history/`. The existing manifest test remains the regression; no configuration-assertion test was added. The unchanged approved full command runs once at the native final gate for this candidate.

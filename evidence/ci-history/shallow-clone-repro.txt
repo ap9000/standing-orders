@@ -1,0 +1,83 @@
+# Reproduction of the shallow-checkout failure, 2026-09-16
+# Source: file://<worktree> branch standing-orders/ci-history-for-telegram-20260916 at cb5c67a8bbc37338297400e4199d400d4305f185 (PR 9 head fe3a97e404fb1207ad31c83ef74a40d70ade573e is its parent)
+# Clone lives under a mktemp directory outside the worktree and database.
+
+$ git clone --quiet --depth 1 --single-branch --branch standing-orders/ci-history-for-telegram-20260916 file://$WORKTREE $TMP/shallow
+$ git rev-list --count HEAD
+1
+$ test -f .git/shallow && echo shallow
+shallow
+$ git cat-file -t ba101e694cd94907a493c0ae3a5efa666477e977
+fatal: git cat-file: could not get object info
+exit=128
+$ git cat-file -t 8217f5579d02c4feed7dcdcc24c8e01ff8d35a71
+fatal: git cat-file: could not get object info
+exit=128
+
+## BEFORE: unchanged checker in the depth-1 clone (expected: fail, base object missing)
+$ node scripts/delivery-manifest-check.mjs
+node:internal/errors:983
+  const err = new Error(message);
+              ^
+
+Error: Command failed: git diff --name-only -z ba101e694cd94907a493c0ae3a5efa666477e977 8217f5579d02c4feed7dcdcc24c8e01ff8d35a71 -- src/
+fatal: bad object ba101e694cd94907a493c0ae3a5efa666477e977
+
+    at genericNodeError (node:internal/errors:983:15)
+    at wrappedFn (node:internal/errors:537:14)
+    at checkExecSyncError (node:child_process:916:11)
+    at execFileSync (node:child_process:952:15)
+    at gitBytes (file://$TMP/shallow/scripts/delivery-manifest-check.mjs:31:31)
+    at file://$TMP/shallow/scripts/delivery-manifest-check.mjs:45:17
+    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)
+    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:665:26)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5) {
+  status: 128,
+  signal: null,
+  output: [
+    null,
+    Buffer(0) [Uint8Array] [],
+    Buffer(59) [Uint8Array] [
+      102,  97, 116,  97, 108,  58,  32, 98,  97, 100,  32,
+      111,  98, 106, 101,  99, 116,  32, 98,  97,  49,  48,
+       49, 101,  54,  57,  52,  99, 100, 57,  52,  57,  48,
+       55,  97,  52,  57,  51,  99,  48, 97, 101,  51,  97,
+       53, 101, 102,  97,  54,  54,  54, 52,  55,  55, 101,
+       57,  55,  55,  10
+    ]
+  ],
+  pid: 39234,
+  stdout: Buffer(0) [Uint8Array] [],
+  stderr: Buffer(59) [Uint8Array] [
+    102,  97, 116,  97, 108,  58,  32, 98,  97, 100,  32,
+    111,  98, 106, 101,  99, 116,  32, 98,  97,  49,  48,
+     49, 101,  54,  57,  52,  99, 100, 57,  52,  57,  48,
+     55,  97,  52,  57,  51,  99,  48, 97, 101,  51,  97,
+     53, 101, 102,  97,  54,  54,  54, 52,  55,  55, 101,
+     57,  55,  55,  10
+  ]
+}
+
+Node.js v22.22.0
+exit=1
+
+$ git fetch --quiet --unshallow
+exit=0
+$ git rev-list --count HEAD
+605
+$ test -f .git/shallow || echo not-shallow
+not-shallow
+$ git cat-file -t ba101e694cd94907a493c0ae3a5efa666477e977
+commit
+exit=0
+$ git cat-file -t 8217f5579d02c4feed7dcdcc24c8e01ff8d35a71
+commit
+exit=0
+
+## AFTER: same unchanged checker after fetching history (expected: all 23 paths, hashes and digest pass)
+$ node scripts/delivery-manifest-check.mjs
+delivery-manifest-check: docs/TELEGRAM_DELIVERY_CANDIDATE_2026-09-15.json lists all 23 src/ paths changed in ba101e6..8217f55; every sha256 matches 8217f55 bytes and sourceDigest recomputes
+exit=0
+
+$ git -C $TMP/shallow diff --quiet HEAD -- scripts/delivery-manifest-check.mjs docs/TELEGRAM_DELIVERY_CANDIDATE_2026-09-15.json src/provider.test.ts && echo checker-manifest-test-unchanged
+checker-manifest-test-unchanged

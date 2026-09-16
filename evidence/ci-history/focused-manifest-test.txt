@@ -1,0 +1,15 @@
+$ npx vitest run src/provider.test.ts -t 'historical Telegram delivery manifest'
+
+ RUN  v4.1.10 /Users/alekseypelletier/.config/standing-orders/worktrees/standing-orders/standing-orders-ci-history-for-telegram-20260916-d2f1d560
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 57 skipped (58)
+   Start at  15:26:16
+   Duration  1.99s (transform 727ms, setup 14ms, import 847ms, tests 346ms, environment 0ms)
+
+exit=0
