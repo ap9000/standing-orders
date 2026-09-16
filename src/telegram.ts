@@ -22,7 +22,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
-import { isLifecycleNotification, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
+import { isLifecycleNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
 import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import {
@@ -507,7 +507,7 @@ async function deliverOutbox(
     };
     const channelProblem = (): string | null => {
       try {
-        if (canDeliver !== undefined && !canDeliver()) return "Telegram delivery is disabled";
+        if (canDeliver !== undefined && !canDeliver()) return TELEGRAM_HOLD_REASONS.disabled;
       } catch { return "Current Telegram delivery access could not be read"; }
       return null;
     };

@@ -83,7 +83,17 @@ describe("lifecycle producers: the shared mutations record each fact once, atomi
     register(store, { name: RUNNER, host: "test", capacity: 4, repos: [ALPHA, BETA, EXCLUDED], now, newToken: () => TOKEN });
     for (const phase of ["build", "plan", "review"]) store.setPhaseConfig("installation", phase, "claude", "sonnet", "test", now);
   });
-  afterEach(() => store.close());
+  afterEach(() => {
+    // Every fact's link is a machine-minted console control for ITS OWN task
+    // (chat-controls.ts): the task lens, its details page, or one exact saved
+    // result — so the phone's one button always opens an existing page and
+    // never carries free text.
+    for (const row of life()) {
+      const id = encodeURIComponent(row.taskId ?? "");
+      expect(row.link).toMatch(new RegExp(`^(?:/chat\\?task=${id}(?:&result=\\d+(?:&tab=(?:checks|changes))?|#task-chat-action)?|/t/${id})$`));
+    }
+    store.close();
+  });
 
   test("filing speaks once the project is known, through every filing door that places", () => {
     store.createTask({ id: "bare", title: "An unplaced idea" }, now);
@@ -140,10 +150,25 @@ describe("lifecycle producers: the shared mutations record each fact once, atomi
     expect(life().filter(row => row.kind === "task-released")).toHaveLength(2);
   });
 
+  test.each(["hold", "holdOwned"] as const)("%s rolls back its own mutation when recording the fact fails", method => {
+    const ref = placed("alpha-1", ALPHA);
+    const before = keys();
+    store.handle.exec(`CREATE TEMP TRIGGER fail_hold_notification
+      BEFORE INSERT ON notification WHEN NEW.kind = 'task-held'
+      BEGIN SELECT RAISE(ABORT, 'notification write failed'); END`);
+    const pause = () => method === "hold"
+      ? store.hold(ref, "waiting", null, now)
+      : store.holdOwned({ taskRef: ref, ownerKind: "operator", ownerId: String(ref), reason: "waiting", until: null }, now);
+    // Deliberately no outer transaction: callers need not supply atomicity.
+    expect(pause).toThrow("notification write failed");
+    expect(store.activeHolds(ref, now)).toEqual([]);
+    expect(keys()).toEqual(before);
+  });
+
   test("cancellation, requeue and return-to-queue ride their floors; a repeat of the same state and a rolled-back change record nothing", () => {
     const ref = placed("alpha-1", ALPHA);
     expect(store.cancelTask("alpha-1", now, "not needed this sprint")).toMatchObject({ ok: true });
-    expect(life().at(-1)).toMatchObject({ kind: "task-cancelled", subject: "Cancelled", body: "Cancelled by an operator: not needed this sprint Nothing more runs for it.", link: "/chat?task=alpha-1" });
+    expect(life().at(-1)).toMatchObject({ kind: "task-cancelled", subject: "Cancelled", body: "Cancelled by an operator: not needed this sprint. Nothing more runs for it.", link: "/chat?task=alpha-1" });
     // The unfiltered state verb rewrites the same state; the floor's audit answer is unchanged and no second fact lands.
     expect(store.applyCancellation("alpha-1", { kind: "operator", text: null }, now, null)).toEqual({ changed: true });
     expect(store.setTaskState("alpha-1", "cancelled", now)).toEqual({ ok: true });
@@ -152,6 +177,13 @@ describe("lifecycle producers: the shared mutations record each fact once, atomi
     placed("beta-1", BETA);
     expect(store.applyCancellation("beta-1", { kind: "machine", code: "mirror-latched" }, now, ["queued"])).toEqual({ changed: true });
     expect(life().at(-1)).toMatchObject({ kind: "task-cancelled", project: BETA, body: "The tracker closed it. Nothing more runs for it." });
+    // A reason that already closes its sentence gets no second full stop; a long one ends in its ellipsis.
+    placed("beta-2", BETA);
+    expect(store.cancelTask("beta-2", now, "Superseded by beta-3.")).toMatchObject({ ok: true });
+    expect(life().at(-1)?.body).toBe("Cancelled by an operator: Superseded by beta-3. Nothing more runs for it.");
+    placed("beta-3", BETA);
+    expect(store.cancelTask("beta-3", now, "w".repeat(130))).toMatchObject({ ok: true });
+    expect(life().at(-1)?.body).toBe(`Cancelled by an operator: ${"w".repeat(119)}… Nothing more runs for it.`);
     // Requeue after a stall; a running task released unfinished; a same-state write.
     placed("alpha-2", ALPHA);
     expect(store.setTaskState("alpha-2", "failed", now)).toEqual({ ok: true });
@@ -291,11 +323,17 @@ describe("lifecycle facts through the Telegram transport", () => {
     store.enqueueNotification({ source: { run: oldRun }, dedupeKey: "decision:1", kind: "decision", subject: "old-1 parked a decision", body: "fixture", pushClass: "decision", link: "/d/1" }, now);
     expect(store.listNotifications("pending")).toHaveLength(4);
     pair();
-    expect(receipts().map(row => [row.kind, row.receipt])).toEqual([
-      ["task-filed", "skipped:before-pairing"],
-      ["run-started", "skipped:before-pairing"],
-      ["run-finished", "skipped:before-pairing"],
+    // Skipped history is an explicit receipt, never a delivery: no delivered
+    // timestamp, no attempt, and (below) it does not fence what follows.
+    expect(receipts().map(row => [row.kind, row.receipt, row.deliveredAt, row.attempts, row.lastError])).toEqual([
+      ["task-filed", "skipped:before-pairing", null, 0, null],
+      ["run-started", "skipped:before-pairing", null, 0, null],
+      ["run-finished", "skipped:before-pairing", null, 0, null],
     ]);
+    // What the console and brief count as "pending delivery": the open
+    // decision wants a person; skipped history and routine progress do not.
+    expect(store.pendingForAttention().map(row => row.dedupeKey)).toEqual(["decision:1"]);
+    expect(store.countRoutinePending()).toBe(0);
     now = later(1_000);
     const a1 = placed("alpha-1", ALPHA, "Guard the payout path");
     placed("beta-1", BETA, "Rotate the API keys");
@@ -314,6 +352,8 @@ describe("lifecycle facts through the Telegram transport", () => {
       [["Open task", `${ORIGIN}/chat?task=beta-1`]],
     ]);
     expect(script.texts().join("\n")).not.toMatch(/Private work|excluded|\/projects\//);
+    // The excluded project's update is held by policy, not failing on the wire: no delivery trouble to report.
+    expect(store.pendingForAttention().filter(isLifecycleNotification)).toEqual([]);
 
     // A failed send fences that task's later facts until it goes; a restart carries on in order.
     now = later(2_000);
@@ -326,6 +366,9 @@ describe("lifecycle facts through the Telegram transport", () => {
       ["run-started", "offline"],
       ["run-phase", "Earlier task notification is still undelivered"],
     ]);
+    // A send the wire refused is delivery trouble the console and brief count
+    // (not hidden as quiet progress); the row fenced behind it is not counted twice.
+    expect(store.pendingForAttention().filter(isLifecycleNotification).map(row => row.kind)).toEqual(["run-started"]);
     store.close();
     store = openStore(file);
     now = later(4_000);
@@ -335,14 +378,52 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(store.telegramRetryAt(BOT)).toBe(later(34_000).toISOString());
     now = later(10_000);
     expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 0 } });
+    expect(store.pendingForAttention().filter(isLifecycleNotification).map(row => row.kind)).toEqual(["run-started"]);
     now = later(35_000);
     expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 2 } });
+    expect(store.pendingForAttention().filter(isLifecycleNotification)).toEqual([]);
     expect(script.texts().slice(-2)).toEqual([
       `alpha / alpha-1 · Attempt #${run} started\n\nBuilding on claude.`,
       `alpha / alpha-1 · Attempt #${run}: agent working\n\nThe agent is working in its own checkout. Nothing is finished yet.`,
     ]);
     expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Open task", url: `${ORIGIN}/chat?task=alpha-1` }]);
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM telegram_outbound_message WHERE task_id = 'alpha-1'").get()?.["n"]).toBe(3);
+  });
+
+  test("a hold's button opens the task's details page under the trusted origin, where the release control lives", async () => {
+    pair();
+    const a1 = placed("alpha-1", ALPHA, "Guard the payout path");
+    store.hold(a1, "waiting on the vendor sandbox", null, now);
+    const script = scriptedTransport();
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 2, problems: [] } });
+    expect(script.texts().at(-1)).toBe("alpha / alpha-1 · Paused\n\nThe next attempt waits until the hold is released. An attempt already running is not stopped by this.");
+    expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Open task", url: `${ORIGIN}/t/alpha-1` }]);
+  });
+
+  test.each(["single", "digest"] as const)("%s delivery hides sensitive lifecycle text before shortening it", async mode => {
+    pair();
+    if (mode === "digest") store.setTelegramDigest(60_000, "alex", now);
+    // Synthetic, non-functional credential shapes; never a real token.
+    const tokenShape = "ghp_" + "Z".repeat(36);
+    const botShape = "123456:" + "Y".repeat(32);
+    placed("short-secret", ALPHA, `Rotate ${tokenShape}`);
+    placed("long-secret", BETA, `${"x".repeat(74)} ${tokenShape}`);
+    placed("bot-secret", ALPHA, `Rotate ${botShape}`);
+    expect(store.cancelTask("short-secret", now, `Obsolete ${tokenShape}`)).toMatchObject({ ok: true });
+    now = later(61_000);
+    const script = scriptedTransport();
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 4, problems: [] } });
+    const text = script.texts().join("\n");
+    expect(text).not.toContain(tokenShape);
+    expect(text).not.toContain("ghp_");
+    expect(text).not.toContain(botShape);
+    expect(text).not.toContain("123456:");
+    expect(text.match(/\[sensitive text hidden\]/g)).toHaveLength(4);
+    expect(text).toContain("alpha / short-secret");
+    expect(text).toContain("beta / long-secret");
+    if (mode === "single") {
+      expect(script.buttons(script.sends()[0]!)).toEqual([{ text: "Open task", url: `${ORIGIN}/chat?task=short-secret` }]);
+    }
   });
 
   test("urgent and digest stay intact: routine progress waits for the window, an attention fact pages singly and flushes its task's earlier facts first; no trusted origin means no button", async () => {

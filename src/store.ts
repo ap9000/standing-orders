@@ -3,6 +3,7 @@ import { LEARNING_SCHEMA, queueLearning } from "./project-learning.js";
 import { KNOWLEDGE_SCHEMA } from "./project-knowledge.js";
 import { validateTaskText } from "./task-text.js";
 import { chatControlHref, chatResultHref } from "./chat-controls.js";
+import { scanForSecrets } from "./evidence.js";
 /**
  * The database: a small task store, and the operational overlay beside it.
  *
@@ -613,6 +614,9 @@ export function isLifecycleNotification(row: Pick<Notification, "dedupeKey">): b
  * paths and long hex hidden the way the phone scrub hides them. The inputs
  * are already validated task text or identifiers; this is the belt. */
 function lifecycleWords(value: string, cap: number): string {
+  // Scan the original value: shortening a credential first can make it
+  // unrecognizable to the detector while still leaking part of it.
+  if (scanForSecrets(value).length > 0 || /\b\d{5,}:[A-Za-z0-9_-]{20,}\b/.test(value)) return "[sensitive text hidden]";
   const text = value
     .replace(/(?:[A-Za-z]:[\\/]|\\\\)[^\s"'<>]+/g, "[path]")
     .replace(/(^|[\s"'`(<[=:,])\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+/g, "$1[path]")
@@ -632,6 +636,15 @@ const LIFECYCLE_PHASE_WORDS: Record<RunPhase, { subject: string; body: string }>
   "verifying-proof": { subject: "verifying the proof", body: "The proof is being checked against the approved acceptance criteria." },
   "correcting-proof": { subject: "correcting the proof", body: "The proof did not match the sealed result; a bounded correction turn is running." },
 };
+
+/** An operator's cancellation as one closed sentence: the reason, if any,
+ * scrubbed like every phone string and ended with a full stop unless it
+ * already ends one (a shortened reason ends in an ellipsis). */
+function cancellationWords(reason: string | null): string {
+  if (reason === null || reason.trim() === "") return "Cancelled by an operator.";
+  const words = lifecycleWords(reason, 120);
+  return `Cancelled by an operator: ${words}${/[.!?…]$/.test(words) ? "" : "."}`;
+}
 
 /** What an independent review concluded, in the words the saved result shows. */
 const LIFECYCLE_REVIEW_WORDS: Record<"verified" | "attested" | "short" | "refuted" | "none", { subject: string; body: string }> = {
@@ -6952,7 +6965,7 @@ export class Store {
           taskRef: Number(ref["id"]), kind: "task-cancelled", identity: `t${Number(ref["id"])}`,
           subject: "Cancelled",
           body: reason.kind === "operator"
-            ? `${reason.text === null || reason.text.trim() === "" ? "Cancelled by an operator." : `Cancelled by an operator: ${lifecycleWords(reason.text, 120)}`} Nothing more runs for it.`
+            ? `${cancellationWords(reason.text)} Nothing more runs for it.`
             : reason.code === "mirror-latched"
               ? "The tracker closed it. Nothing more runs for it."
               : "The tracker closed it while it was being built, so the finished work was not accepted.",
@@ -7650,6 +7663,13 @@ export class Store {
       reason: string;
       until: Date | null;
     },
+    now: Date,
+  ): void {
+    this.transact(() => this.holdOwnedLocked(hold, now));
+  }
+
+  private holdOwnedLocked(
+    hold: { taskRef: number; ownerKind: HoldOwner; ownerId: string; reason: string; until: Date | null },
     now: Date,
   ): void {
     const prior = this.db
@@ -18626,23 +18646,26 @@ export class Store {
       // ROUTINE fact already in the outbox is history for this destination —
       // settled here, in the pairing's own transaction, with a receipt that
       // says it was skipped, never sent as a backlog to a phone that just
-      // arrived. An open decision or an attention-class fact still wants a
-      // person and stays pending. A re-pairing after a revocation keeps the
-      // older promise instead: what no phone ever received still waits for
-      // whenever pairing happens. Existing destinations are untouched.
+      // arrived. The skip is explicit: no delivered_at, no attempt, only the
+      // `skipped:` receipt — a message no phone received is never reported
+      // as delivered (see TELEGRAM_UNSETTLED). An open decision or an
+      // attention-class fact still wants a person and stays pending. A
+      // re-pairing after a revocation keeps the older promise instead: what
+      // no phone ever received still waits for whenever pairing happens.
+      // Existing destinations are untouched.
       const priorPairing = this.db
         .prepare("SELECT 1 AS hit FROM telegram_binding WHERE bot_id = ? AND id <> ? LIMIT 1")
         .get(attempt.botId, binding.id);
       if (priorPairing === undefined) {
         this.db
           .prepare(
-            `INSERT OR IGNORE INTO notification_delivery (notification, destination, delivered_at, receipt)
-               SELECT id, ?, ?, 'skipped:before-pairing' FROM notification
+            `INSERT OR IGNORE INTO notification_delivery (notification, destination, receipt)
+               SELECT id, ?, '${TELEGRAM_SKIPPED_RECEIPT}' FROM notification
                 WHERE resolved_at IS NULL
                   AND dedupe_key NOT LIKE 'decision:%'
                   AND (push_class IS NULL OR push_class <> 'attention')`,
           )
-          .run(this.telegramDestination(binding), stamp);
+          .run(this.telegramDestination(binding));
       }
       return { ok: true as const, binding, replay: false };
     });
@@ -21835,7 +21858,7 @@ export class Store {
       if (this.telegramRetryAt(binding.botId) > now.toISOString()) return [];
       const rows = this.db.prepare(`SELECT n.*, d.claim_generation FROM notification n
         JOIN notification_delivery d ON d.notification = n.id AND d.destination = ?
-        WHERE n.resolved_at IS NULL AND d.delivered_at IS NULL
+        WHERE n.resolved_at IS NULL AND ${TELEGRAM_UNSETTLED}
           AND (d.claim_owner IS NULL OR d.claim_expires_at <= ?)
           AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?)
           AND (? = 'all' OR d.attempts > 0 OR n.dedupe_key LIKE 'decision:%' OR n.push_class = 'attention'
@@ -21865,29 +21888,30 @@ export class Store {
   telegramDeliveryProblem(row: TelegramDelivery, binding: TelegramBinding, owner: string, projects: readonly string[], now: Date, batch: readonly number[] = [row.id]): string | null {
     const live = this.liveTelegramBinding(binding.botId);
     if (live?.id !== binding.id || live.approverGeneration !== binding.approverGeneration ||
-        this.accountOf(binding.approver)?.role !== "approver") return "Telegram pairing or actor authorization changed";
-    if (row.destination !== this.telegramDestination(live)) return "Telegram destination changed";
-    if (!this.telegramClaimHeld(row, owner, now)) return "Telegram delivery claim expired or changed";
-    if (this.telegramRetryAt(binding.botId) > now.toISOString()) return "Telegram rate limit is still active";
+        this.accountOf(binding.approver)?.role !== "approver") return TELEGRAM_HOLD_REASONS.authority;
+    if (row.destination !== this.telegramDestination(live)) return TELEGRAM_HOLD_REASONS.destination;
+    if (!this.telegramClaimHeld(row, owner, now)) return TELEGRAM_HOLD_REASONS.claim;
+    if (this.telegramRetryAt(binding.botId) > now.toISOString()) return TELEGRAM_HOLD_REASONS.rateLimit;
     const current = this.db.prepare("SELECT * FROM notification WHERE id = ?").get(row.id);
-    if (current === undefined || current["resolved_at"] !== null) return "Notification no longer needs delivery";
-    if (row.scope === "unknown") return "Notification has no trusted project provenance";
+    if (current === undefined || current["resolved_at"] !== null) return TELEGRAM_HOLD_REASONS.resolved;
+    if (row.scope === "unknown") return TELEGRAM_HOLD_REASONS.provenance;
     if (row.scope === "installation") {
-      if (!this.isInstanceOperator(binding.approver)) return "Installation notification requires instance access";
+      if (!this.isInstanceOperator(binding.approver)) return TELEGRAM_HOLD_REASONS.installation;
     } else {
-      if (row.project === null || !projects.includes(row.project) || !this.accountCanAccess(binding.approver, row.project)) return "Notification project is not currently authorized and enrolled";
+      if (row.project === null || !projects.includes(row.project) || !this.accountCanAccess(binding.approver, row.project)) return TELEGRAM_HOLD_REASONS.project;
       if (row.scope === "task") {
         const ref = this.db.prepare("SELECT repo, external_id FROM task_ref WHERE id = ?").get(row.taskRef);
         if (ref === undefined || ref["repo"] !== row.project || ref["external_id"] !== row.taskId ||
-            (row.run !== null && this.getRun(row.run)?.taskRef !== row.taskRef)) return "Notification task provenance changed";
+            (row.run !== null && this.getRun(row.run)?.taskRef !== row.taskRef)) return TELEGRAM_HOLD_REASONS.task;
       }
     }
     if (row.taskRef !== null) {
+      // Skipped history never fences what follows it: it is settled.
       const earlier = this.db.prepare(`SELECT n.id FROM notification n
         LEFT JOIN notification_delivery d ON d.notification = n.id AND d.destination = ?
-        WHERE n.task_ref = ? AND n.id < ? AND n.resolved_at IS NULL AND d.delivered_at IS NULL`)
+        WHERE n.task_ref = ? AND n.id < ? AND n.resolved_at IS NULL AND ${TELEGRAM_UNSETTLED}`)
         .all(row.destination, row.taskRef, row.id);
-      if (earlier.some(one => !batch.includes(Number(one["id"])))) return "Earlier task notification is still undelivered";
+      if (earlier.some(one => !batch.includes(Number(one["id"])))) return TELEGRAM_HOLD_REASONS.order;
     }
     return null;
   }
@@ -22035,7 +22059,9 @@ export class Store {
     });
   }
 
-  /** Routine rows waiting for the next digest: pending, and not urgent. */
+  /** Routine rows waiting for the next digest: pending, and not urgent.
+   * A row the live pairing delivered, or skipped as pre-pairing history,
+   * is settled and not waiting. */
   countRoutinePending(): number {
     const row = this.db
       .prepare(
@@ -22044,12 +22070,44 @@ export class Store {
             AND NOT EXISTS (SELECT 1 FROM notification_delivery d
               JOIN telegram_binding b ON d.destination = 'telegram:' || b.bot_id || ':' || b.chat_id || ':' || b.id || ':' || b.approver_generation
               JOIN approver a ON a.name = b.approver AND a.generation = b.approver_generation
-              WHERE d.notification = notification.id AND d.delivered_at IS NOT NULL
+              WHERE d.notification = notification.id AND NOT (${TELEGRAM_UNSETTLED})
                 AND b.revoked_at IS NULL AND a.revoked_at IS NULL)
             AND NOT (dedupe_key LIKE 'decision:%' OR COALESCE(push_class, '') = 'attention')`,
       )
       .get();
     return Number(row?.["n"] ?? 0);
+  }
+
+  /**
+   * What the console and the morning brief count as "pending delivery":
+   * every non-lifecycle row still pending in the shared outbox (the legacy
+   * meaning, unchanged), plus a routine lifecycle row only once the LIVE
+   * Telegram pairing actually tried to send it and the wire refused —
+   * "offline", a rate-limit answer, no confirmed message identity. Routine
+   * progress waiting for its digest window, for a pairing, or behind one
+   * of the store's own holds (TELEGRAM_HOLD_REASONS: an excluded project,
+   * changed provenance, the per-task order fence) is delivery, not
+   * trouble, and never pads the number; a failed send is trouble and must
+   * not hide behind quiet progress. Skipped pre-pairing history is never
+   * counted. The bridge's own pass report still names every held row.
+   */
+  pendingForAttention(): Notification[] {
+    const holds = Object.values(TELEGRAM_HOLD_REASONS);
+    const troubled = new Set(
+      this.db
+        .prepare(
+          `SELECT d.notification AS id FROM notification_delivery d
+            JOIN telegram_binding b ON d.destination = 'telegram:' || b.bot_id || ':' || b.chat_id || ':' || b.id || ':' || b.approver_generation
+            JOIN approver a ON a.name = b.approver AND a.generation = b.approver_generation
+           WHERE b.revoked_at IS NULL AND a.revoked_at IS NULL
+             AND ${TELEGRAM_UNSETTLED}
+             AND d.attempts > 0 AND d.last_error IS NOT NULL
+             AND d.last_error NOT IN (${holds.map(() => "?").join(", ")})`,
+        )
+        .all(...holds)
+        .map(row => Number(row["id"])),
+    );
+    return this.listNotifications("pending").filter(row => !isLifecycleNotification(row) || troubled.has(row.id));
   }
 
   // ---- web push (arc 3) ----------------------------------------------------
@@ -22543,6 +22601,39 @@ function readHold(row: Record<string, unknown>): Hold {
     heldAt: String(row["held_at"]),
   };
 }
+
+/** The receipt a bot's first pairing writes over pre-pairing history: an
+ * explicit skip, with no delivered timestamp and no attempt, so suppressed
+ * history is never reported as a send that happened. */
+export const TELEGRAM_SKIPPED_RECEIPT = "skipped:before-pairing";
+
+/** A destination receipt (`d` = notification_delivery) that still owes a
+ * send: not delivered, and not explicitly skipped as pre-pairing history.
+ * Every reader of Telegram receipts that means "undelivered" uses this, so
+ * a skip settles the row without ever pretending to be a delivery. */
+const TELEGRAM_UNSETTLED = "d.delivered_at IS NULL AND (d.receipt IS NULL OR d.receipt NOT LIKE 'skipped:%')";
+
+/**
+ * Why the store itself holds a Telegram delivery back: authority,
+ * provenance, ordering, a switched-off channel, or a wait it imposed. A
+ * row held for one of these is waiting on policy, not failing on the wire.
+ * Every other error recorded on a receipt came from an actual send, and
+ * THAT is delivery trouble (`pendingForAttention`). One table, so the
+ * fences and the tally can never disagree about the words.
+ */
+export const TELEGRAM_HOLD_REASONS = Object.freeze({
+  authority: "Telegram pairing or actor authorization changed",
+  destination: "Telegram destination changed",
+  claim: "Telegram delivery claim expired or changed",
+  rateLimit: "Telegram rate limit is still active",
+  resolved: "Notification no longer needs delivery",
+  provenance: "Notification has no trusted project provenance",
+  installation: "Installation notification requires instance access",
+  project: "Notification project is not currently authorized and enrolled",
+  task: "Notification task provenance changed",
+  order: "Earlier task notification is still undelivered",
+  disabled: "Telegram delivery is disabled",
+});
 
 function readNotification(row: Record<string, unknown>): Notification {
   return {

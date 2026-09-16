@@ -160,16 +160,26 @@ unchanged and exercised by the new suite with real producers. Added: a bot's
 FIRST pairing settles every routine row already in the outbox for that
 destination with the receipt `skipped:before-pairing`, in the pairing's own
 transaction, so a phone that just arrived never receives months of history;
-an open decision or an attention-class fact still pages. A re-pairing after a
-revocation keeps the older promise (what no phone ever received still waits),
-which an existing test enshrines.
+an open decision or an attention-class fact still pages. The skip is explicit
+and never a delivery: the receipt carries no `delivered_at`, no attempt and no
+error, every reader that means "undelivered" treats a `skipped:` receipt as
+settled, and skipped history never fences the facts that follow it (revised
+2026-09-16, see `TELEGRAM_LIFECYCLE_REPAIR_2026-09-16.md`). A re-pairing
+after a revocation keeps the older promise (what no phone ever received still
+waits), which an existing test enshrines.
 
-Two tallies changed meaning slightly so progress never reads as attention:
-the morning brief's and the console's `outboxPending` count rows that want a
-person (lifecycle rows excluded), and the unpaired bridge names "outbox rows
-are pending but no chat is paired" only when such a row is pending — a first
-pairing settles routine rows as history anyway. `bridge status` and
-`outbox list` still show the raw outbox.
+Two tallies changed meaning slightly so progress never reads as attention,
+without hiding trouble: the morning brief's and the console's `outboxPending`
+(`pendingForAttention` in `src/store.ts`) count rows that want a person plus
+any task update the live pairing actually tried to send and the wire refused
+("offline", a rate-limit answer, no confirmed message id). Routine progress
+waiting for its digest window or a pairing, skipped history, and rows the
+store itself holds back (an excluded project, changed provenance, the
+per-task order fence — `TELEGRAM_HOLD_REASONS`) never pad the number; the
+bridge's pass report still names every held row. The unpaired bridge names
+"outbox rows are pending but no chat is paired" only when a non-lifecycle row
+is pending — a first pairing settles routine rows as history anyway.
+`bridge status` and `outbox list` still show the raw outbox.
 
 Webhook mirrors (Slack/Discord) share this outbox and will carry the same
 routine rows when Telegram is not paired; nothing about those integrations
@@ -205,7 +215,7 @@ alpha / alpha-1 · alpha-1 stalled after 3 straight failures   (existing attenti
 ```
 
 Rows before the first pairing (`old-1` filed, started, built) were settled as
-`skipped:before-pairing` and never sent.
+`skipped:before-pairing` and never sent: receipt only, no delivered timestamp.
 
 ### Verification run for this candidate
 

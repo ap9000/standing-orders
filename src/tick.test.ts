@@ -27,6 +27,7 @@ import { WorktreePool } from "./worktree.js";
 import { canonicalProfileJson, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import type { Runner } from "./builder.js";
 import { REVIEW_CONTEXT_NAME, REVIEW_PROOF_NAME } from "./reviewer.js";
+import { bridgePass, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -1836,6 +1837,43 @@ describe("decide, end to end — the morning answers and the machine hears it", 
     await run(["brief", "--repo", repo, "--local", "--json"]);
     expect(payload().decide).toEqual([]);
     // The outbox no longer pages about it either: resolved, receipts kept.
+    expect(payload().outboxPending).toBe(0);
+  });
+
+  test("the brief counts a task update the phone failed to receive, and never quiet progress", async () => {
+    await setup();
+    // Filing and approving t-1 recorded routine lifecycle facts: progress, not attention.
+    await run(["brief", "--repo", repo, "--local", "--json"]);
+    expect(payload().outboxPending).toBe(0);
+
+    const at = new Date("2026-08-11T00:00:00.000Z");
+    const store = openStore(db);
+    try {
+      const code = mintPairingCode();
+      store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "alex", by: "alex", ttlMs: PAIRING_TTL_MS }, at);
+      expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: "777000", chatId: "4242", userId: "31337", updateId: 1 }, at).ok).toBe(true);
+      // The pairing starts from now (earlier facts are skipped history); a hold recorded after it is a real update.
+      store.hold(store.refFor("built-in", "t-1").id, "waiting on the vendor", null, new Date(at.getTime() + 1_000));
+      const answer = { current: { ok: false, description: "offline" } as { ok: boolean; description?: string; result?: unknown } };
+      const transport: TelegramTransport = async method => method === "getUpdates" ? { ok: true, result: [] } : answer.current as never;
+      const pass = () => bridgePass(store, { botId: "777000", transport, clock: () => new Date(at.getTime() + 2_000), readProjects: async () => [repo] });
+      expect(await pass()).toMatchObject({ ok: true, report: { sent: 0, problems: [expect.stringMatching(/: offline$/)] } });
+    } finally {
+      store.close();
+    }
+    // The wire refused the hold's message: that is delivery trouble, and the brief says so.
+    await run(["brief", "--repo", repo, "--local", "--json"]);
+    expect(payload().outboxPending).toBe(1);
+
+    const again = openStore(db);
+    try {
+      const transport: TelegramTransport = async method => method === "getUpdates" ? { ok: true, result: [] } : { ok: true, result: { message_id: 100 } };
+      expect(await bridgePass(again, { botId: "777000", transport, clock: () => new Date(at.getTime() + 5_000), readProjects: async () => [repo] })).toMatchObject({ ok: true, report: { sent: 1, problems: [] } });
+    } finally {
+      again.close();
+    }
+    // Delivered: nothing is owed, and no success line is added for it.
+    await run(["brief", "--repo", repo, "--local", "--json"]);
     expect(payload().outboxPending).toBe(0);
   });
 

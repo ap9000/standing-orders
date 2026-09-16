@@ -16,7 +16,7 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openStore, type Store } from "./store.js";
+import { isLifecycleNotification, openStore, type Store } from "./store.js";
 import { storeEvidence } from "./evidence.js";
 import { register, recoverDead, DEFAULT_LIVENESS_MS } from "./runner.js";
 import { acquire } from "./claim.js";
@@ -2426,6 +2426,19 @@ describe("the reviewer role in the store", () => {
       const saved = store.criterionReviewsFor(builtRun);
       expect(saved).toHaveLength(1);
       expect(saved[0]).toMatchObject({ criterionId: "c1", judgement: "contradicts", author: "reviewer:claude·sonnet" });
+      // The phone's facts ride the REAL ingestion order (reviewPass →
+      // ingestReview: fold, then the root's finishRun), so the review's
+      // ending names the folded verdict, not the pre-review one, and links
+      // this exact saved result's checks. Nothing here was enqueued by hand.
+      const life = store.listNotifications("all").filter(isLifecycleNotification);
+      expect(life.slice(-4).map(row => [row.kind, row.subject])).toEqual([
+        ["review-requested", "Independent review requested"],
+        ["run-started", "Independent review started (attempt 1)"],
+        ["review-finished", "Independent review finished: evidence conflicts with the result"],
+        // The refuted fold's own consequence, filed by the same ingestion, follows the ending it explains.
+        ["task-filed", "New task: repair t-1: 1 criterion unmet"],
+      ]);
+      expect(life.at(-2)).toMatchObject({ project: REPO, taskId: "t-1", link: `/chat?task=t-1&result=${builtRun}&tab=checks`, body: "The reviewer found evidence that contradicts the saved result. It is not accepted as done." });
     });
 
     test("cannot-tell changes nothing: the verdict stays short, and the judgement is recorded", async () => {

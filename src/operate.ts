@@ -37,7 +37,6 @@ import {
   parseCapabilityKey,
   verifiedAuthor,
   contestantProfileOf,
-  isLifecycleNotification,
   REVIEW_ROOT_ATTEMPTS,
   type Capability,
   type ReviewRetryState,
@@ -4470,8 +4469,10 @@ async function briefCommand(
 
   const gaps = computeGaps(store, repo, clock());
   // What still wants a person: routine progress facts (Telegram task
-  // updates) are delivery, not attention, and never pad this tally.
-  const pending = store.listNotifications("pending").filter(row => !isLifecycleNotification(row));
+  // updates) are delivery, not attention, and never pad this tally — but a
+  // task update the live pairing tried and failed to send is trouble, and
+  // is counted rather than hidden behind quiet progress.
+  const pending = store.pendingForAttention();
 
   // Deadlines are swept wherever decisions are shown, so "overdue" is a fact
   // the brief computes rather than one it hopes somebody else computed.
