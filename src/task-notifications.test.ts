@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { isLifecycleNotification, LIFECYCLE_KEY_PREFIX, openStore, type Notification, type Store } from "./store.js";
 import { addApprover } from "./scope.js";
 import { register } from "./runner.js";
+import { telegramProgressCard } from "./telegram-progress.js";
 import { acquire } from "./claim.js";
 import { bridgePass, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
 
@@ -47,13 +48,13 @@ function scriptedTransport() {
   const transport: TelegramTransport = async (method, params) => {
     calls.push({ method, params });
     if (method === "getUpdates") return { ok: true, result: [] };
-    if (method === "sendMessage" || method === "sendDocument") {
+    if (method === "sendMessage" || method === "sendDocument" || method === "editMessageText") {
       if (failNext !== null) {
         const answer = failNext;
         failNext = null;
         return answer;
       }
-      return { ok: true, result: { message_id: nextMessageId++ } };
+      return { ok: true, result: { message_id: method === "editMessageText" ? params["message_id"] : nextMessageId++ } };
     }
     return { ok: true, result: true };
   };
@@ -338,6 +339,177 @@ describe("lifecycle facts through the Telegram transport", () => {
     return { run, shots };
   };
 
+  const progressAttempt = () => {
+    pair();
+    const ref = placed("clear-acceptance", ALPHA, "Make acceptance easier to review");
+    store.resolveEpisodes("life", now);
+    const run = store.startRun({ taskRef: ref, leaseId: "l-progress", runner: RUNNER, branch: "so/clear-acceptance", worktree: "/pool/clear-acceptance", ...bareLegacy("build"), now });
+    return { ref, run };
+  };
+
+  test("build, checks and independent review update one message; replies still identify the saved builder result after a restart", async () => {
+    const { ref, run } = progressAttempt();
+    const script = scriptedTransport();
+    await pass(script);
+    store.setRunPhase(run, "validating-handoff", now);
+    await pass(script);
+    store.finishRun(run, { outcome: "built", committed: true, now });
+    store.saveArtifact({ run, kind: "terminal-diff", key: `${run}/diff.patch`, bytesOriginal: 12, bytesStored: 12, truncated: false, sha256: "a".repeat(64), capture: "git diff (exit 0)", captureStatus: "ok" }, now);
+    const matrix = [{ id: "c1", statement: "The result is readable", requiredEvidence: ["check"], state: "pass", detail: [], answered: [], review: null }];
+    store.saveProofVerdict(run, "attested", [], now, matrix as never);
+    await pass(script);
+    const request = store.requestReview(run, "alex", now);
+    if (!request.ok) throw Error(request.reason);
+    await pass(script);
+    store.close(); store = openStore(file);
+    const reviewer = store.startRun({ taskRef: ref, leaseId: "l-review", runner: RUNNER, role: "reviewer", parentRun: run, request: request.id, ...bareLegacy("review"), now });
+    await pass(script);
+    store.saveProofVerdict(run, "verified", [], now, matrix as never);
+    store.finishRun(reviewer, { outcome: "no-change", reason: "reviewed", now });
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 1, problems: [] } });
+    expect(script.sends()).toHaveLength(1);
+    const edits = script.calls.filter(call => call.method === "editMessageText");
+    expect(edits).toHaveLength(5);
+    expect(new Set(edits.map(call => call.params["message_id"]))).toEqual(new Set([100]));
+    expect(edits.at(-1)?.params["text"]).toContain("Build ✓ · Checks 1/1 · Review ✓");
+    expect(edits.at(-1)?.params["text"]).toContain("Ready for your review");
+    expect(edits.at(-1)?.params["text"]).toContain("Saved locally · Not published");
+    expect(script.buttons(edits.at(-1)!)).toEqual([{ text: "Review result", url: `${ORIGIN}/chat?task=clear-acceptance&result=${run}&tab=checks` }]);
+    expect(store.telegramMessageBindings(store.liveTelegramBinding(BOT)!, "100")).toEqual([{ taskId: "clear-acceptance", taskRef: ref, run, project: ALPHA }]);
+    expect(receipts().filter(one => one.run !== null).every(one => one.deliveredAt !== null)).toBe(true);
+    expect(store.proofAcceptance(run)).toBeNull();
+    const before = script.calls.length;
+    await pass(script);
+    expect(script.calls.slice(before).map(call => call.method)).toEqual(["getUpdates"]);
+  });
+
+  test("progress edits recheck enrollment, retain their identity after an uncertain reply and a restart, and accept Telegram's unchanged confirmation", async () => {
+    const { run } = progressAttempt();
+    const script = scriptedTransport();
+    await pass(script);
+    store.setRunPhase(run, "capturing-evidence", now);
+    projects = [];
+    await pass(script);
+    expect(script.calls.filter(call => call.method === "editMessageText")).toHaveLength(0);
+    projects = [ALPHA]; now = later(2000);
+    const baseTransport = script.transport;
+    script.transport = async (method, params) => method === "editMessageText" ? { ok: false, uncertain: true, description: "connection lost" } : baseTransport(method, params);
+    await pass(script);
+    expect(receipts().at(-1)).toMatchObject({ deliveredAt: null, lastError: "connection lost" });
+    store.close(); store = openStore(file); now = later(4000);
+    script.transport = async (method, params) => method === "editMessageText" ? { ok: false, description: "Bad Request: message is not modified: specified new message content is exactly the same" } : baseTransport(method, params);
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 1, problems: [] } });
+    expect(script.sends()).toHaveLength(1);
+    expect(receipts().at(-1)?.receipt).toBe(`telegram:${BOT}:${CHAT}:100`);
+  });
+
+  test("a deleted progress message gets one confirmed replacement; a new attempt and a replacement pairing get their own message", async () => {
+    const { ref, run } = progressAttempt();
+    const script = scriptedTransport();
+    await pass(script);
+    store.setRunPhase(run, "capturing-evidence", now);
+    script.fail({ ok: false, description: "Bad Request: message to edit not found" });
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 1, problems: [] } });
+    expect(script.sends()).toHaveLength(2);
+    store.setRunPhase(run, "committing", now);
+    await pass(script);
+    expect(script.calls.filter(call => call.method === "editMessageText").at(-1)?.params["message_id"]).toBe(101);
+    store.finishRun(run, { outcome: "failed", now });
+    store.startRun({ taskRef: ref, leaseId: "l-new", runner: RUNNER, branch: "so/new", worktree: "/pool/new", ...bareLegacy("build"), now });
+    await pass(script);
+    expect(script.sends()).toHaveLength(3);
+    store.unpairTelegram(BOT, "alex", now);
+    pair(CHAT + 1, 2);
+    const before = script.calls.length;
+    await pass(script);
+    expect(script.calls.slice(before).filter(call => call.method === "editMessageText").every(call => call.params["chat_id"] === String(CHAT + 1))).toBe(true);
+    expect(script.calls.slice(before).filter(call => call.method === "sendMessage").every(call => call.params["chat_id"] === String(CHAT + 1))).toBe(true);
+  });
+
+  test("an edit rate limit survives restart, and revoked pairing during an edit cannot acknowledge its row", async () => {
+    const { run } = progressAttempt();
+    const script = scriptedTransport();
+    await pass(script);
+    store.setRunPhase(run, "capturing-evidence", now);
+    script.fail({ ok: false, description: "Too Many Requests", parameters: { retry_after: 30 } });
+    await pass(script);
+    expect(store.telegramRetryAt(BOT)).toBe(later(30000).toISOString());
+    store.close(); store = openStore(file); now = later(2000);
+    const count = script.calls.length;
+    await pass(script);
+    expect(script.calls.slice(count).filter(call => call.method === "editMessageText")).toHaveLength(0);
+    now = later(31000);
+    const base = script.transport;
+    const binding = store.liveTelegramBinding(BOT)!;
+    script.transport = async (method, params) => {
+      const answer = await base(method, params);
+      if (method === "editMessageText") store.unpairTelegram(BOT, "alex", now);
+      return answer;
+    };
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 0 } });
+    expect(store.telegramDeliveries(binding).at(-1)).toMatchObject({ deliveredAt: null, lastError: "Telegram pairing or actor authorization changed" });
+    expect(script.sends()).toHaveLength(1);
+  });
+
+  test("a mixed digest is never repainted as a progress card, and a later failure still sends its alert", async () => {
+    const { ref, run } = progressAttempt();
+    store.setTelegramDigest(1000, "alex", now);
+    placed("another", BETA, "Keep the other project visible");
+    now = later(2000);
+    const script = scriptedTransport();
+    await pass(script);
+    expect(script.sends()).toHaveLength(1);
+    expect(store.telegramProgressMessage(store.liveTelegramBinding(BOT)!, store.getRun(run)!)).toBeNull();
+    store.setTelegramDigest(null, "alex", now);
+    store.setRunPhase(run, "capturing-evidence", now);
+    await pass(script);
+    expect(script.sends()).toHaveLength(2);
+    store.finishRun(run, { outcome: "failed", reason: "check failed", now });
+    store.enqueueNotification({ source: { run }, dedupeKey: `build-failed:${ref}`, kind: "build-failed", pushClass: "attention", subject: "Checks failed", body: "The expected error message did not appear.", link: `/chat?task=clear-acceptance&result=${run}` }, now);
+    await pass(script);
+    expect(script.sends()).toHaveLength(3);
+    expect(script.texts().at(-1)).toContain("The expected error message did not appear.");
+    expect(script.calls.filter(call => call.method === "editMessageText").at(-1)?.params["text"]).toContain("Build did not finish");
+  });
+
+  test("progress distinguishes required human acceptance, accepted results and evidence gaps without changing the verdict", () => {
+    const { run } = humanReviewResult();
+    const view = () => telegramProgressCard(store, store.getRun(run)!, "alpha-1", ALPHA).text;
+    expect(view()).toContain("Remaining: your acceptance.");
+    expect(view()).toContain("Checks 0/1");
+    store.acceptProof(run, "alex", "Inspected the saved screenshots.", now);
+    expect(view()).toContain("Human acceptance recorded");
+    expect(view()).not.toContain("Remaining: your acceptance.");
+    expect(store.proofVerdictFor(run)?.verdict).toBe("short");
+    const proof = store.proofVerdictFor(run)!;
+    proof.matrix[0]!.coverage = { state: "context", inherited: true, items: [], gaps: ["Missing inherited screenshot"], priorSupport: "none" };
+    store.saveProofVerdict(run, proof.verdict, proof.reasons, now, proof.matrix);
+    expect(view()).toContain("Evidence needs attention");
+    expect(view()).toContain("1 requirement has an evidence gap or reviewer concern.");
+    expect(view()).toContain("Human acceptance recorded");
+  });
+
+  test("progress does not invent an optional review blocker or mark required review complete without its judgements", () => {
+    const { ref, run } = progressAttempt();
+    store.finishRun(run, { outcome: "built", committed: true, now });
+    const view = (strict = false) => telegramProgressCard(store, { ...store.getRun(run)!, qualityMode: strict ? "strict" : "default" }, "clear-acceptance", ALPHA).text;
+    expect(view()).toContain("Checks not recorded");
+    expect(view()).not.toContain("Ready for your review");
+    const matrix = [{ id: "c1", statement: "Readable progress", requiredEvidence: ["check"], state: "pass", detail: [], answered: [], review: null }];
+    store.saveProofVerdict(run, "verified", [], now, matrix as never);
+    expect(view()).toContain("Ready for your review");
+    expect(view()).toContain("Review optional");
+    expect(view()).not.toContain("request independent review");
+    expect(view(true)).toContain("Open the result to request independent review.");
+    store.saveArtifact({ run, kind: "terminal-diff", key: `${run}/diff.patch`, bytesOriginal: 12, bytesStored: 12, truncated: false, sha256: "a".repeat(64), capture: "git diff (exit 0)", captureStatus: "ok" }, now);
+    const request = store.requestReview(run, "alex", now);
+    if (!request.ok) throw Error(request.reason);
+    const reviewer = store.startRun({ taskRef: ref, leaseId: "l-review", runner: RUNNER, role: "reviewer", parentRun: run, request: request.id, ...bareLegacy("review"), now });
+    store.finishRun(reviewer, { outcome: "no-change", reason: "comments only", now });
+    expect(view(true)).toContain("Independent review incomplete");
+    expect(view(true)).not.toContain("Ready for your review");
+  });
+
   test.each(["immediate", "digest"] as const)("%s: human acceptance automatically sends a review summary, separately receipted screenshots and a final secure link; retries preserve ordering", async mode => {
     pair();
     if (mode === "digest") { store.setTelegramDigest(60_000, "alex", now); store.markTelegramDigestSent(now); }
@@ -380,7 +552,10 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(receipts().filter(one => one.kind === "acceptance-evidence").map(one => [one.receipt, one.deliveredAt, one.attempts])).toEqual([["skipped:already-accepted", null, 1], ["skipped:already-accepted", null, 1]]);
     expect(script.texts().at(-1)).toContain("Acceptance recorded");
     expect(script.calls.flatMap(script.buttons).some(button => button.text === "Review for acceptance")).toBe(false);
-    expect(report.ok && report.report.sent).toBe(script.sends().length);
+    // Several recorded facts now share one progress message; the report
+    // still counts settled outbox rows, excluding skipped screenshots.
+    expect(report.ok && report.report.sent).toBe(receipts().filter(one => one.deliveredAt !== null).length);
+    expect(script.sends()).toHaveLength(4);
     // Settled rows: a later pass resends nothing.
     const before = script.calls.length;
     expect((await pass(script)).ok).toBe(true);
@@ -455,10 +630,11 @@ describe("lifecycle facts through the Telegram transport", () => {
     now = later(35_000);
     expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 2 } });
     expect(store.pendingForAttention().filter(isLifecycleNotification)).toEqual([]);
-    expect(script.texts().slice(-2)).toEqual([
-      `alpha / alpha-1 · Attempt #${run} started\n\nBuilding on claude.`,
-      `alpha / alpha-1 · Attempt #${run}: agent working\n\nThe agent is working in its own checkout. Nothing is finished yet.`,
-    ]);
+    expect(script.texts().at(-1)).toContain(`alpha · Attempt #${run}`);
+    expect(script.texts().at(-1)).toContain("Build running · Checks pending · Review optional");
+    const edits = script.calls.filter(call => call.method === "editMessageText");
+    expect(edits).toHaveLength(1);
+    expect(edits[0]?.params["text"]).toBe(script.texts().at(-1));
     expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Open task", url: `${ORIGIN}/chat?task=alpha-1` }]);
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM telegram_outbound_message WHERE task_id = 'alpha-1'").get()?.["n"]).toBe(3);
   });
@@ -581,13 +757,14 @@ describe("lifecycle facts through the Telegram transport", () => {
     store.finishRun(run, { outcome: "built", committed: true, now });
     // Every fact reaches the new destination once, in id order — including the one the old chat already had.
     expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 4, problems: [] } });
-    expect(script.texts().slice(-4)).toEqual([
+    expect(script.texts().slice(-3, -1)).toEqual([
       "alpha / alpha-1 · New task: Guard the payout path\n\nFiled and waiting in the queue.",
       "beta / beta-1 · New task: Rotate the API keys\n\nFiled and waiting in the queue.",
-      `alpha / alpha-1 · Attempt #${run} started\n\nBuilding on claude.`,
-      `alpha / alpha-1 · Attempt #${run} built\n\nThe result is saved locally. It is not yet independently reviewed or published.`,
     ]);
-    expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Review result", url: `${ORIGIN}/chat?task=alpha-1&result=${run}&tab=changes` }]);
-    expect(script.sends().slice(-4).every(send => String(send.params["chat_id"]) === String(CHAT + 1))).toBe(true);
+    expect(script.texts().at(-1)).toContain(`alpha · Attempt #${run}`);
+    expect(script.texts().at(-1)).toContain("Build ✓ · Checks not recorded · Review optional");
+    expect(script.calls.filter(call => call.method === "editMessageText")).toHaveLength(1);
+    expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Review result", url: `${ORIGIN}/chat?task=alpha-1&result=${run}&tab=checks` }]);
+    expect(script.calls.filter(call => ["sendMessage", "editMessageText"].includes(call.method)).slice(-4).every(send => String(send.params["chat_id"]) === String(CHAT + 1))).toBe(true);
   });
 });

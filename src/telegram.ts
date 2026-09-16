@@ -25,7 +25,8 @@ import { resultImageFileName, resultTaskLabel, verifyResultImage } from "./chat-
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
-import { isLifecycleNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
+import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
+import { telegramProgressCard } from "./telegram-progress.js";
 import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import {
@@ -614,7 +615,38 @@ async function deliverOutbox(
       return after === null ? { ok: true, receipt: receiptFor(botId, binding.chatId, String(messageId)) } : { ok: false, error: after };
     };
     const batched = digest.everyMs !== null && !isUrgent(rows[0]!);
-    const outcome = rows[0]!.kind === "acceptance-evidence" ? await imageSender(rows[0]!) : batched
+    const row = rows[0]!;
+    const progressRun = batched ? null : store.telegramProgressRun(row);
+    const progress = progressRun !== null && isTelegramProgressNotification(row);
+    const updateProgress = async (onlyExisting: boolean): Promise<SendResult | null> => {
+      if (progressRun === null || row.taskId === null || row.project === null) return null;
+      const problem = (await readAccess()) ?? fence();
+      if (problem !== null) return { ok: false, error: problem };
+      const messageId = store.telegramProgressMessage(binding, progressRun);
+      if (messageId === null && onlyExisting) return null;
+      const card = telegramProgressCard(store, store.getRun(progressRun.id)!, row.taskId, row.project);
+      let button: InlineButton[] | null = null;
+      try { button = phoneLinkButton(phoneOrigin?.() ?? null, card.link); } catch { /* No trusted origin. */ }
+      const keyboard = button === null ? [] : [button];
+      if (messageId === null) return sender(card.text, keyboard);
+      const edited = await editProgress(transport, binding.chatId, messageId, card.text, keyboard);
+      if (!edited.ok) {
+        if (edited.retryAfter !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + edited.retryAfter * 1000).toISOString());
+        // Only Telegram's definitive missing/uneditable response permits a
+        // replacement. Timeouts, rate limits and uncertain edits retry in place.
+        if (!onlyExisting && edited.replace) return sender(card.text, keyboard);
+        return edited;
+      }
+      if (!onlyExisting) store.recordTelegramMessage(row, binding, messageId, clock());
+      const after = (await readAccess()) ?? fence();
+      return after === null ? edited : { ok: false, error: after };
+    };
+    // A failure or decision still gets its own alert. Refresh an existing
+    // card first so it does not keep saying the build is running.
+    if (!progress && progressRun !== null) await updateProgress(true);
+    const updated = progress ? await updateProgress(false) : null;
+    const outcome = updated !== null ? updated.ok ? { ok: true as const, receipt: receiptFor(botId, binding.chatId, updated.messageId) } : updated
+      : rows[0]!.kind === "acceptance-evidence" ? await imageSender(rows[0]!) : batched
       ? await deliverDigest(botId, binding, sender, rows, digest.lastSentAt, clock)
       : await deliverOne(store, botId, binding, sender, rows[0]!, clock, phoneOrigin, evidenceRoot, projects);
     const finalProblem = outcome.ok ? (await readAccess()) ?? fence() : null;
@@ -828,6 +860,25 @@ async function send(
   }
   const messageId = (answer.result as { message_id?: number } | undefined)?.message_id;
   return { ok: true, messageId: Number.isSafeInteger(messageId) && messageId! > 0 ? String(messageId) : null };
+}
+
+async function editProgress(transport: TelegramTransport, chatId: string, messageId: string, text: string, keyboard: InlineButton[][]): Promise<SendResult & { replace?: boolean }> {
+  let answer: Awaited<ReturnType<TelegramTransport>>;
+  try {
+    answer = await transport("editMessageText", { chat_id: chatId, message_id: Number(messageId), text,
+      link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard: keyboard } });
+  } catch { return { ok: false, error: "Telegram progress update is unconfirmed; it will retry in place" }; }
+  // The retry may be repainting the same bytes after an acknowledgement was
+  // lost. Telegram's explicit unchanged response confirms this target state.
+  if (!answer.ok && !answer.uncertain && /^Bad Request: message is not modified\b/i.test(answer.description ?? "")) return { ok: true, messageId };
+  if (!answer.ok) {
+    const retry = answer.parameters?.retry_after;
+    return { ok: false, error: answer.description ?? "Telegram progress update failed",
+      ...(typeof retry === "number" && Number.isFinite(retry) && retry > 0 ? { retryAfter: Math.ceil(retry) } : {}),
+      replace: !answer.uncertain && /^Bad Request: message (?:to edit not found|can't be edited)$/i.test(answer.description ?? "") };
+  }
+  const confirmed = (answer.result as { message_id?: number } | undefined)?.message_id;
+  return String(confirmed) === messageId ? { ok: true, messageId } : { ok: false, error: "Telegram did not confirm the progress message identity" };
 }
 
 function receiptFor(botId: string, chatId: string, messageId: string | null): string {

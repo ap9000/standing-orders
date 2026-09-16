@@ -1959,6 +1959,9 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     if (method === "sendMessage") {
       return { ok: true, result: { message_id: script.nextMessageId++ } };
     }
+    if (method === "editMessageText") {
+      return { ok: true, result: { message_id: params["message_id"] } };
+    }
     return { ok: true, result: true };
   };
 
