@@ -5,7 +5,7 @@
  * chats, replayed updates, racing pollers — refused in silence.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,7 @@ import { openStore, type Store } from "./store.js";
 import { addApprover } from "./scope.js";
 import {
   bridgePass,
+  createTransport,
   followBridge,
   hashPairingCode,
   loadBotToken,
@@ -36,6 +37,283 @@ const later = (ms: number) => new Date(T0.getTime() + ms);
 const BOT = "777000";
 const CHAT = 4242;
 const USER = 31337;
+const REPO = "/test/project";
+const readProjects = async () => [REPO];
+
+describe("destination-bound authorized outbox", () => {
+  let store: Store;
+  let dir: string;
+  let file: string;
+  let now: Date;
+  let projects: string[];
+  const OTHER = "/test/other";
+  const pair = (chat = CHAT) => {
+    const code = mintPairingCode();
+    store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "alex", by: "alex", ttlMs: PAIRING_TTL_MS }, now);
+    expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: BOT, chatId: String(chat), userId: String(USER), updateId: chat }, now).ok).toBe(true);
+    return store.liveTelegramBinding(BOT)!;
+  };
+  const task = (id: string, repo: string) => {
+    store.createTask({ id, title: id }, now);
+    const ref = store.refFor("built-in", id).id;
+    store.placeTask(ref, repo);
+    return ref;
+  };
+  const enqueue = (key: string, ref: number, body = key) => store.enqueueNotification({
+    dedupeKey: key, kind: "report-ready", subject: key, body, source: { taskRef: ref },
+  }, now);
+  const pass = (transport: TelegramTransport, extra: Partial<Parameters<typeof bridgePass>[1]> = {}) =>
+    bridgePass(store, { botId: BOT, transport, clock: () => now, readProjects: async () => projects, ...extra });
+  const sends = (script: ReturnType<typeof scriptedTransport>) => script.calls.filter(call => call.method === "sendMessage");
+  const receipts = () => store.telegramDeliveries(store.liveTelegramBinding(BOT)!);
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "so-telegram-outbox-"));
+    file = join(dir, "orders.db");
+    now = T0;
+    projects = [REPO, OTHER];
+    store = openStore(file);
+    expect(addApprover(store, "alex", now).ok).toBe(true);
+    pair();
+  });
+  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  test("two projects carry trusted task identities; forged text and links cannot authorize legacy data", async () => {
+    const a = task("a", REPO), b = task("b", OTHER);
+    enqueue("a-ready", a); enqueue("b-ready", b);
+    store.enqueueNotification({ dedupeKey: "legacy", kind: "report-ready", subject: "a at project", body: "secret", link: "/t/a" }, now);
+    const script = scriptedTransport();
+    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 2 } });
+    expect(sends(script).map(call => call.params["text"])).toEqual(["project / a · a-ready\n\na-ready", "other / b · b-ready\n\nb-ready"]);
+    expect(receipts().at(-1)).toMatchObject({ scope: "unknown", deliveredAt: null, lastError: "Notification has no trusted project provenance" });
+    expect(store.handle.prepare("SELECT task_ref, task_id, project FROM telegram_outbound_message ORDER BY notification").all()).toEqual([
+      { task_ref: a, task_id: "a", project: REPO }, { task_ref: b, task_id: "b", project: OTHER },
+    ]);
+  });
+
+  test("a retry rechecks removed enrollment; a later update cannot overtake it", async () => {
+    const a = task("a", REPO);
+    enqueue("first", a); enqueue("second", a);
+    const script = scriptedTransport();
+    const broken: TelegramTransport = async (method, params) => method === "sendMessage" ? { ok: false, description: "offline" } : script.transport(method, params);
+    await pass(broken);
+    expect(receipts().map(row => row.lastError)).toEqual(["offline", "Earlier task notification is still undelivered"]);
+    projects = []; now = later(2_000);
+    await pass(script.transport);
+    expect(sends(script)).toHaveLength(0);
+    projects = [REPO]; now = later(4_000);
+    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 2 } });
+    expect(sends(script).map(call => String(call.params["text"]).split("\n")[0])).toEqual(["project / a · first", "project / a · second"]);
+  });
+
+  test("a mixed digest sends the eligible rows now; legacy and unenrolled rows wait with reasons, in task order", async () => {
+    const a = task("a", REPO), b = task("b", OTHER);
+    store.enqueueNotification({ dedupeKey: "legacy", kind: "report-ready", subject: "legacy", body: "legacy" }, now);
+    enqueue("b-first", b); enqueue("b-second", b); enqueue("a-ready", a);
+    store.setTelegramDigest(60_000, "alex", now); now = later(61_000); projects = [REPO];
+    const script = scriptedTransport();
+    const first = await pass(script.transport);
+    expect(first).toMatchObject({ ok: true, report: { sent: 1, digests: 1 } });
+    expect(first.ok && first.report.problems).toHaveLength(3);
+    expect(sends(script)).toHaveLength(1);
+    const digest = String(sends(script)[0]!.params["text"]);
+    expect(digest).toContain("digest — 1 routine fact(s)");
+    expect(digest).toContain("a-ready");
+    expect(digest).not.toMatch(/legacy|b-first|b-second/);
+    expect(receipts().map(row => [row.dedupeKey, row.deliveredAt !== null, row.lastError])).toEqual([
+      ["legacy", false, "Notification has no trusted project provenance"],
+      ["b-first", false, "Notification project is not currently authorized and enrolled"],
+      ["b-second", false, "Notification project is not currently authorized and enrolled"],
+      ["a-ready", true, null],
+    ]);
+    expect(store.telegramDigest().lastSentAt).toBe(now.toISOString());
+    // Enrolling the other project releases its rows on the next retry pass,
+    // in one digest and in ID order; the legacy row still waits, never guessed.
+    projects.push(OTHER); now = later(63_000);
+    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 2, digests: 1, problems: ["notification 1: Notification has no trusted project provenance"] } });
+    expect(sends(script)).toHaveLength(2);
+    const second = String(sends(script)[1]!.params["text"]);
+    expect(second).toContain("digest — 2 routine fact(s)");
+    expect(second.indexOf("b-first")).toBeLessThan(second.indexOf("b-second"));
+    expect(receipts().map(row => row.deliveredAt !== null)).toEqual([false, true, true, true]);
+    expect(store.countRoutinePending()).toBe(1);
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM telegram_outbound_message").get()?.["n"]).toBe(3);
+  });
+
+  // The root's three isolated digest cases (legacy only, unenrolled only,
+  // both), replayed here as a regression with a restart between passes: the
+  // valid update goes out once, every blocked row keeps its reason, and no
+  // blocked project content reaches the chat.
+  test.each(["legacy", "unauthorized", "both"])("%s digest isolation survives a restart: valid updates flow, blocked rows keep their reason, nothing private leaks", async kind => {
+    if (kind !== "unauthorized") store.enqueueNotification({ dedupeKey: "legacy", kind: "report-ready", subject: "legacy private task", body: "unknown authority" }, now);
+    if (kind !== "legacy") enqueue("outside", task("outside", OTHER), "not enrolled");
+    enqueue("valid", task("valid", REPO), "safe update");
+    store.setTelegramDigest(60_000, "alex", now); now = later(61_000); projects = [REPO];
+    const script = scriptedTransport();
+    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 1, digests: 1 } });
+    store.close(); store = openStore(file); now = later(63_000);
+    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 0 } });
+    const blocked = kind === "legacy" ? ["legacy"] : kind === "unauthorized" ? ["outside"] : ["legacy", "outside"];
+    const rows = receipts();
+    expect(rows.find(row => row.dedupeKey === "valid")?.deliveredAt).not.toBeNull();
+    for (const key of blocked) expect(rows.find(row => row.dedupeKey === key)).toMatchObject({ deliveredAt: null, lastError: key === "legacy" ? "Notification has no trusted project provenance" : "Notification project is not currently authorized and enrolled" });
+    expect(rows.filter(row => row.deliveredAt === null)).toHaveLength(blocked.length);
+    expect(sends(script)).toHaveLength(1);
+    const text = String(sends(script)[0]!.params["text"]);
+    expect(text).toContain("safe update");
+    expect(text).not.toMatch(/legacy private task|unknown authority|outside|not enrolled/);
+  });
+
+  test.each(["single", "digest"])("%s rechecks enrollment before each part after asynchronous sends", async mode => {
+    const a = task("a", REPO);
+    if (mode === "single") enqueue("long", a, "word 😀 ".repeat(1500));
+    else {
+      for (let i = 0; i < 30; i++) enqueue(`fact-${i}`, a, "x".repeat(200));
+      store.setTelegramDigest(1_000, "alex", now); now = later(2_000);
+    }
+    const script = scriptedTransport();
+    const transport: TelegramTransport = async (method, params) => {
+      const answer = await script.transport(method, params);
+      if (method === "sendMessage") projects = [];
+      return answer;
+    };
+    await pass(transport);
+    expect(sends(script)).toHaveLength(1);
+    expect(String(sends(script)[0]!.params["text"]).length).toBeLessThanOrEqual(3900);
+    expect(receipts().every(row => row.deliveredAt === null)).toBe(true);
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM telegram_outbound_message").get()?.["n"]).toBeGreaterThan(0);
+  });
+
+  test.each(["unpair", "replace", "revoke", "generation", "viewer", "disable"])("%s while a message is in flight cannot acknowledge or send its next part", async change => {
+    enqueue("long", task("a", REPO), "long ".repeat(2000));
+    const old = store.liveTelegramBinding(BOT)!;
+    let enabled = true;
+    const script = scriptedTransport();
+    const transport: TelegramTransport = async (method, params) => {
+      const answer = await script.transport(method, params);
+      if (method === "sendMessage") {
+        if (change === "disable") enabled = false;
+        else if (change === "viewer") store.handle.prepare("UPDATE approver SET role = 'viewer' WHERE name = 'alex'").run();
+        else if (change === "generation") store.handle.prepare("UPDATE approver SET generation = generation + 1 WHERE name = 'alex'").run();
+        else if (change === "revoke") store.handle.prepare("UPDATE approver SET revoked_at = ? WHERE name = 'alex'").run(now.toISOString());
+        else { store.unpairTelegram(BOT, "alex", now); if (change === "replace") pair(CHAT + 1); }
+      }
+      return answer;
+    };
+    expect(await pass(transport, { canDeliver: () => enabled })).toMatchObject({ ok: true, report: { sent: 0 } });
+    expect(sends(script)).toHaveLength(1);
+    expect(store.telegramDeliveries(old)[0]?.deliveredAt).toBeNull();
+    expect(store.handle.prepare("SELECT binding, chat_id FROM telegram_outbound_message").get()).toEqual({ binding: old.id, chat_id: String(CHAT) });
+    if (change === "replace") {
+      expect(store.telegramDeliveries(store.liveTelegramBinding(BOT)!)).toHaveLength(0);
+      now = later(2_000);
+      expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 1 } });
+      expect(sends(script).slice(1).every(call => call.params["chat_id"] === String(CHAT + 1))).toBe(true);
+    }
+  });
+
+  test("live config and pairing are checked after the asynchronous registry read", async () => {
+    enqueue("ready", task("a", REPO));
+    const script = scriptedTransport();
+    let enabled = true;
+    await pass(script.transport, { canDeliver: () => enabled, readProjects: async () => { enabled = false; return projects; } });
+    expect(sends(script)).toHaveLength(0);
+    now = later(2_000);
+    await pass(script.transport, { readProjects: async () => { store.unpairTelegram(BOT, "alex", now); return projects; } });
+    expect(sends(script)).toHaveLength(0);
+  });
+
+  test("a pairing revoked while the registry result returns is fenced immediately before transport", async () => {
+    enqueue("ready", task("a", REPO));
+    const script = scriptedTransport();
+    await pass(script.transport, { readProjects: async () => {
+      queueMicrotask(() => queueMicrotask(() => store.unpairTelegram(BOT, "alex", now)));
+      return projects;
+    } });
+    expect(sends(script)).toHaveLength(0);
+  });
+
+  test("retry_after survives restart, blocks all sends, then resumes in task order", async () => {
+    const a = task("a", REPO);
+    enqueue("first", a); enqueue("second", a);
+    const script = scriptedTransport();
+    let attempts = 0;
+    const limited: TelegramTransport = async (method, params) => {
+      if (method === "sendMessage") { attempts++; return { ok: false, description: "Too Many Requests", parameters: { retry_after: 45 } }; }
+      return script.transport(method, params);
+    };
+    await pass(limited);
+    expect(attempts).toBe(1);
+    store.close(); store = openStore(file);
+    now = later(44_999); await pass(script.transport);
+    expect(sends(script)).toHaveLength(0);
+    now = later(45_000);
+    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 2 } });
+    expect(sends(script).map(call => call.params["text"])).toEqual(["project / a · first\n\nfirst", "project / a · second\n\nsecond"]);
+    enqueue("after-limit", a);
+    await pass(async method => method === "sendMessage" ? { ok: false, description: "offline" } : { ok: true, result: [] });
+    expect(store.handle.prepare("SELECT next_attempt_at FROM notification_delivery WHERE notification = 3").get()?.["next_attempt_at"]).toBe(later(46_000).toISOString());
+  });
+
+  test("the HTTP adapter preserves retry_after without a live request; unconfirmed success stays pending", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ok: false, description: "limited", parameters: { retry_after: 7 } }), { status: 429 }));
+    try {
+      expect(await createTransport("fixture-token")("sendMessage", {})).toMatchObject({ ok: false, parameters: { retry_after: 7 } });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { fetch.mockRestore(); }
+    enqueue("unconfirmed", task("a", REPO));
+    expect(await pass(async method => ({ ok: true, result: method === "getUpdates" ? [] : {} }))).toMatchObject({ ok: true, report: { sent: 0 } });
+    expect(receipts()[0]).toMatchObject({ deliveredAt: null, lastError: "Telegram returned no confirmed message identity" });
+  });
+
+  test("restart recovers expired claims; same-owner stale generations and replaced destinations cannot settle", async () => {
+    enqueue("ready", task("a", REPO));
+    const oldBinding = store.liveTelegramBinding(BOT)!;
+    const [old] = store.claimTelegramDeliveries(oldBinding, "owner", 1_000, now);
+    now = later(1_001);
+    expect(store.finalizeTelegramDelivery(old!, oldBinding, "owner", { ok: true, receipt: "late" }, now)).toBe(false);
+    store.close(); store = openStore(file);
+    const [fresh] = store.claimTelegramDeliveries(oldBinding, "owner", 1_000, now);
+    expect(fresh!.claimGeneration).toBeGreaterThan(old!.claimGeneration);
+    expect(store.finalizeTelegramDelivery(old!, oldBinding, "owner", { ok: true, receipt: "stale" }, now)).toBe(false);
+    store.unpairTelegram(BOT, "alex", now); const replaced = pair();
+    const [replacement] = store.claimTelegramDeliveries(replaced, "owner", 1_000, now);
+    expect(store.finalizeTelegramDelivery(fresh!, oldBinding, "owner", { ok: true, receipt: "old" }, now)).toBe(false);
+    expect(store.finalizeTelegramDelivery(fresh!, replaced, "owner", { ok: false, error: "old retry" }, now)).toBe(false);
+    expect(store.finalizeTelegramDelivery(replacement!, replaced, "owner", { ok: true, receipt: "new" }, now)).toBe(true);
+    enqueue("after-restart", store.lookupRef("a")!.id);
+    store.claimTelegramDeliveries(replaced, "crashed", 1_000, now);
+    store.close(); store = openStore(file); now = later(2_002);
+    expect(await pass(scriptedTransport().transport)).toMatchObject({ ok: true, report: { sent: 1 } });
+  });
+
+  test("urgent updates flush earlier task facts in order even before the digest window", async () => {
+    const a = task("a", REPO);
+    enqueue("routine", a);
+    store.enqueueNotification({ source: { taskRef: a }, dedupeKey: "urgent", kind: "attention", pushClass: "attention", subject: "urgent", body: "help" }, now);
+    store.setTelegramDigest(60_000, "alex", now);
+    const script = scriptedTransport();
+    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 2 } });
+    expect(String(sends(script)[0]?.params["text"])).toContain("routine");
+    expect(String(sends(script)[1]?.params["text"])).toContain("urgent");
+  });
+
+  test("missing registry, changed task placement and mismatched decision provenance all fail closed", async () => {
+    const a = task("a", REPO), b = task("b", OTHER);
+    enqueue("ready", a);
+    const script = scriptedTransport();
+    await pass(script.transport, { readProjects: async () => { throw new Error("private registry details"); } });
+    expect(receipts()[0]?.lastError).toBe("Current Telegram delivery access could not be read");
+    now = later(2_000); store.placeTask(a, OTHER); await pass(script.transport);
+    expect(receipts()[0]?.lastError).toBe("Notification task provenance changed");
+    const run = store.startRun({ taskRef: b, leaseId: "b", runner: "b", branch: "b", worktree: "/b", ...bareLegacy("build"), now });
+    const decision = store.saveDecision({ run, urgency: "blocking", recap: "foreign", question: "secret", options: [{ id: "yes", label: "yes", consequence: "yes", reversible: true }], recommendation: "yes" }, now);
+    store.enqueueNotification({ source: { taskRef: task("c", REPO) }, dedupeKey: `decision:${decision}`, kind: "decision", subject: "c", body: "c" }, now);
+    now = later(4_000); await pass(script.transport);
+    expect(sends(script)).toHaveLength(0);
+    expect(receipts().at(-1)?.lastError).toBe("Decision does not match notification provenance");
+  });
+});
 
 /** A scripted Bot API: records everything, plays back queued updates. */
 function scriptedTransport() {
@@ -120,7 +398,7 @@ describe("the telegram bridge", () => {
       T0,
     );
     store.enqueueNotification(
-      { dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" },
+      { source: { run }, dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" },
       T0,
     );
     return id;
@@ -138,7 +416,7 @@ describe("the telegram bridge", () => {
       T0,
     );
     script.updates.push([privatePair(1, code)]);
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(1_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(1_000) });
     expect(passed).toMatchObject({ ok: true });
     return code;
   };
@@ -168,6 +446,7 @@ describe("the telegram bridge", () => {
     void approverToken;
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
+    store.placeTask(taskRef, REPO);
   });
 
   afterEach(() => store.close());
@@ -194,7 +473,7 @@ describe("the telegram bridge", () => {
       privatePair(1, mintPairingCode()), // wrong code
       privatePair(2, code, { chat: { id: CHAT, type: "group" } }), // group
     ]);
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(1_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(1_000) });
 
     expect(passed).toMatchObject({ ok: true, report: { paired: 0, ignored: 2 } });
     expect(store.liveTelegramBinding(BOT)).toBeNull();
@@ -203,7 +482,7 @@ describe("the telegram bridge", () => {
 
     // The real code from the private chat still works…
     script.updates.push([privatePair(3, code)]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(2_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(2_000) });
     expect(store.liveTelegramBinding(BOT)).not.toBeNull();
 
     // …and a second code cannot bind a second chat while the first lives.
@@ -213,7 +492,7 @@ describe("the telegram bridge", () => {
       later(2_000),
     );
     script.updates.push([privatePair(4, second, { chat: { id: 999, type: "private" }, from: { id: 999 } })]);
-    const third = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(3_000) });
+    const third = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(3_000) });
     expect(third).toMatchObject({ ok: true, report: { paired: 0 } });
     expect(store.liveTelegramBinding(BOT)?.chatId).toBe(String(CHAT));
   });
@@ -227,6 +506,7 @@ describe("the telegram bridge", () => {
     );
     script.updates.push([privatePair(1, code)]);
     const passed = await bridgePass(store, {
+      readProjects,
       botId: BOT,
       transport: script.transport,
       clock: () => later(PAIRING_TTL_MS + 1_000),
@@ -240,7 +520,7 @@ describe("the telegram bridge", () => {
     await pairChat(script);
     decisionWith(plainOptions, "closed");
 
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(5_000) });
     expect(passed).toMatchObject({ ok: true, report: { sent: 1 } });
 
     // Every safety-bearing word went out: recap, question, consequences.
@@ -266,7 +546,7 @@ describe("the telegram bridge", () => {
     }
 
     // Delivered with a receipt that names bot, chat, and message.
-    const [row] = store.listNotifications("all");
+    const [row] = store.telegramDeliveries(store.liveTelegramBinding(BOT)!);
     expect(row?.deliveredAt).not.toBeNull();
     expect(row?.receipt).toMatch(new RegExp(`^telegram:${BOT}:${CHAT}:\\d+$`));
   });
@@ -275,14 +555,14 @@ describe("the telegram bridge", () => {
     const script = scriptedTransport();
     await pairChat(script);
     const decisionId = decisionWith(plainOptions, "closed");
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(5_000) });
 
     const [openToken] = keyboardTokens(script);
     const action = store.getTelegramAction(openToken as string);
     expect(action?.optionId).toBe("open");
 
     script.updates.push([tap(10, openToken as string, placedOn(openToken as string))]);
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(10_000) });
     expect(passed).toMatchObject({ ok: true, report: { answered: 1 } });
 
     expect(store.getDecision(decisionId)).toMatchObject({
@@ -302,11 +582,11 @@ describe("the telegram bridge", () => {
     const script = scriptedTransport();
     await pairChat(script);
     const decisionId = decisionWith(plainOptions, "closed");
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(5_000) });
     const [token] = keyboardTokens(script);
 
     script.updates.push([tap(10, token as string, placedOn(token as string), { from: { id: 666 } })]);
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(10_000) });
 
     expect(passed).toMatchObject({ ok: true, report: { answered: 0, ignored: 1 } });
     expect(store.getDecision(decisionId)?.state).toBe("open");
@@ -318,10 +598,10 @@ describe("the telegram bridge", () => {
     const script = scriptedTransport();
     await pairChat(script);
     const decisionId = decisionWith(plainOptions, "closed");
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(5_000) });
 
     script.updates.push([tap(10, "f".repeat(32))]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(10_000) });
 
     expect(store.getDecision(decisionId)?.state).toBe("open");
     const ack = script.calls.find(call => call.method === "answerCallbackQuery");
@@ -338,14 +618,14 @@ describe("the telegram bridge", () => {
       ],
       "keep",
     );
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(5_000) });
     const dropToken = keyboardTokens(script).find(
       token => store.getTelegramAction(token)?.optionId === "drop",
     ) as string;
 
     // The arm: nothing answers yet.
     script.updates.push([tap(10, dropToken, placedOn(dropToken))]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(10_000) });
     expect(store.getDecision(decisionId)?.state).toBe("open");
 
     const challenge = keyboardTokens(script);
@@ -357,7 +637,7 @@ describe("the telegram bridge", () => {
 
     // The confirm answers — through the same one-time-token discipline.
     script.updates.push([tap(11, confirm, placedOn(confirm))]);
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(15_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(15_000) });
     expect(passed).toMatchObject({ ok: true, report: { answered: 1 } });
     expect(store.getDecision(decisionId)).toMatchObject({ state: "answered", choice: "drop" });
   });
@@ -372,19 +652,19 @@ describe("the telegram bridge", () => {
       ],
       "keep",
     );
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(5_000) });
     const dropToken = keyboardTokens(script).find(
       token => store.getTelegramAction(token)?.optionId === "drop",
     ) as string;
 
     script.updates.push([tap(10, dropToken, placedOn(dropToken))]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(10_000) });
     const challenge = keyboardTokens(script);
     const confirm = challenge.find(token => store.getTelegramAction(token)?.phase === "confirm") as string;
     const cancel = challenge.find(token => store.getTelegramAction(token)?.phase === "cancel") as string;
 
     script.updates.push([tap(11, cancel, placedOn(cancel))]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(12_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(12_000) });
     expect(store.getDecision(decisionId)?.state).toBe("open");
     // The restored keyboard carries fresh choose tokens.
     const restored = keyboardTokens(script);
@@ -393,7 +673,7 @@ describe("the telegram bridge", () => {
 
     // The dead confirm no longer answers anything.
     script.updates.push([tap(12, confirm, placedOn(confirm))]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(13_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(13_000) });
     expect(store.getDecision(decisionId)?.state).toBe("open");
   });
 
@@ -401,14 +681,14 @@ describe("the telegram bridge", () => {
     const script = scriptedTransport();
     await pairChat(script);
     decisionWith(plainOptions, "closed");
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(5_000) });
     const [token] = keyboardTokens(script);
 
     // The same update twice in one batch, then again next pass.
     script.updates.push([tap(10, token as string, placedOn(token as string)), tap(10, token as string, placedOn(token as string))]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(10_000) });
     script.updates.push([tap(10, token as string, placedOn(token as string))]);
-    const third = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(15_000) });
+    const third = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(15_000) });
 
     expect(third).toMatchObject({ ok: true, report: { answered: 0 } });
     // The next poll asks past the applied update — nothing is re-read.
@@ -423,6 +703,7 @@ describe("the telegram bridge", () => {
     expect(a).toMatchObject({ ok: true });
 
     const b = await bridgePass(store, {
+      readProjects,
       botId: BOT,
       transport: script.transport,
       clock: () => later(1_000),
@@ -432,6 +713,7 @@ describe("the telegram bridge", () => {
 
     // Expiry hands it over — at the next generation, so A's stale writes die.
     const c = await bridgePass(store, {
+      readProjects,
       botId: BOT,
       transport: script.transport,
       clock: () => later(120_000),
@@ -445,7 +727,7 @@ describe("the telegram bridge", () => {
     const script = scriptedTransport();
     await pairChat(script);
     const decisionId = decisionWith(plainOptions, "closed");
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(5_000) });
     const [token] = keyboardTokens(script);
 
     // The approver's credential rotates: everything derived dies with it.
@@ -457,7 +739,7 @@ describe("the telegram bridge", () => {
     expect(store.liveTelegramBinding(BOT)).toBeNull();
 
     script.updates.push([tap(10, token as string, placedOn(token as string))]);
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(10_000) });
     expect(passed).toMatchObject({ ok: true, report: { answered: 0, ignored: 1 } });
     expect(store.getDecision(decisionId)?.state).toBe("open");
   });
@@ -466,7 +748,7 @@ describe("the telegram bridge", () => {
     const script = scriptedTransport();
     decisionWith(plainOptions, "closed");
 
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(1_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(1_000) });
 
     expect(passed).toMatchObject({ ok: true, report: { sent: 0 } });
     if (!passed.ok) return;
@@ -518,6 +800,7 @@ describe("the follower — on the wire until told to stop", () => {
     if (!added.ok) throw new Error("bootstrap failed");
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
+    store.placeTask(taskRef, REPO);
   });
 
   afterEach(() => store.close());
@@ -543,7 +826,7 @@ describe("the follower — on the wire until told to stop", () => {
       T0,
     );
     script.updates.push([privatePair(1, code)]);
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(1_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(1_000) });
     expect(passed).toMatchObject({ ok: true, report: { paired: 1 } });
   };
 
@@ -575,7 +858,7 @@ describe("the follower — on the wire until told to stop", () => {
       T0,
     );
     store.enqueueNotification(
-      { dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" },
+      { source: { run }, dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" },
       T0,
     );
     return id;
@@ -588,6 +871,7 @@ describe("the follower — on the wire until told to stop", () => {
 
     const controller = new AbortController();
     const report = await followBridge(store, {
+      readProjects,
       botId: BOT,
       transport: script.transport,
       signal: controller.signal,
@@ -624,6 +908,7 @@ describe("the follower — on the wire until told to stop", () => {
     const controller = new AbortController();
     const sleeps: number[] = [];
     const report = await followBridge(store, {
+      readProjects,
       botId: BOT,
       transport: script.transport,
       signal: controller.signal,
@@ -649,6 +934,7 @@ describe("the follower — on the wire until told to stop", () => {
     const controller = new AbortController();
     const sleeps: number[] = [];
     const report = await followBridge(store, {
+      readProjects,
       botId: BOT,
       transport: failing,
       signal: controller.signal,
@@ -678,6 +964,7 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
     if (!added.ok) throw new Error("bootstrap failed");
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
+    store.placeTask(taskRef, REPO);
   });
   afterEach(() => store.close());
 
@@ -693,7 +980,7 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
       options, recommendation: options[0]?.id ?? "open",
     }, T0);
     store.enqueueNotification(
-      { dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked", body: "q" }, T0,
+      { source: { run }, dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked", body: "q" }, T0,
     );
     return id;
   };
@@ -704,7 +991,7 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
       { codeHash: hashPairingCode(code), approver: "alex", by: "alex", ttlMs: PAIRING_TTL_MS }, T0,
     );
     script.updates.push([privatePair(1, code)]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(1_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(1_000) });
   };
 
   const reply = (updateId: number, replyTo: number, text: string, over: Record<string, unknown> = {}) => ({
@@ -728,7 +1015,7 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
     ]);
     // Deliver: the keyboard message id is recorded for reply routing.
     script.updates.push([]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(2_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(2_000) });
     const keyboardCall = script.calls.filter(one => one.method === "sendMessage").pop();
     const keyboard = (keyboardCall?.params["reply_markup"] as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard;
     const chooseOpen = keyboard[0]?.[0]?.callback_data as string;
@@ -742,12 +1029,12 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
       { update_id: 10, message: { message_id: 9010, text: "cap the store at 10k", chat: { id: CHAT, type: "private" }, from: { id: USER } } },
       reply(11, keyboardMessageId, "forwarded thing", { forward_date: 123 }),
     ]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(3_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(3_000) });
     expect(store.liveNoteDraft(1, decisionId, later(3_000))).toBeNull();
 
     // A real reply drafts, and the bot echoes the EXACT captured text.
     script.updates.push([reply(12, keyboardMessageId, "use per-user but cap the store at 10k entries")]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(4_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(4_000) });
     const draft = store.liveNoteDraft(1, decisionId, later(4_000));
     expect(draft?.note).toBe("use per-user but cap the store at 10k entries");
     const echo = script.calls.filter(one => one.method === "sendMessage").pop();
@@ -755,7 +1042,7 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
 
     // The tap carries the note into the answer, atomically.
     script.updates.push([{ update_id: 13, callback_query: { id: "cb1", data: chooseOpen, from: { id: USER }, message: { message_id: keyboardMessageId, chat: { id: CHAT } } } }]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(5_000) });
     const settled = store.getDecision(decisionId);
     expect(settled?.state).toBe("answered");
     expect(settled?.choice).toBe("open");
@@ -771,7 +1058,7 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
       { id: "drop", label: "Drop the table", consequence: "gone forever", reversible: false },
     ]);
     script.updates.push([]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(2_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(2_000) });
     const keyboard = (script.calls.filter(one => one.method === "sendMessage").pop()?.params["reply_markup"] as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard;
     const chooseDrop = keyboard[1]?.[0]?.callback_data as string;
     const sends = script.calls.filter(one => one.method === "sendMessage").length;
@@ -779,9 +1066,9 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
 
     // Note, then arm: the challenge shows the note.
     script.updates.push([reply(20, keyboardMessageId, "only the staging table")]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(3_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(3_000) });
     script.updates.push([{ update_id: 21, callback_query: { id: "cb2", data: chooseDrop, from: { id: USER }, message: { message_id: keyboardMessageId, chat: { id: CHAT } } } }]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(4_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(4_000) });
     const armEdit = script.calls.filter(one => one.method === "editMessageText").pop();
     expect(String(armEdit?.params["text"])).toContain("| only the staging table");
     const confirmKeyboard = (armEdit?.params["reply_markup"] as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard;
@@ -789,9 +1076,9 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
 
     // A NEWER note lands while armed: the confirmation is stranded.
     script.updates.push([reply(22, keyboardMessageId, "actually all of them")]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(5_000) });
     script.updates.push([{ update_id: 23, callback_query: { id: "cb3", data: confirmToken, from: { id: USER }, message: { message_id: keyboardMessageId, chat: { id: CHAT } } } }]);
-    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(6_000) });
+    await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(6_000) });
     expect(store.getDecision(decisionId)?.state).toBe("open");
     const acks = script.calls.filter(one => one.method === "answerCallbackQuery");
     // The new note consumed the armed challenge, so the confirm tap finds
@@ -825,7 +1112,7 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
     store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "alex", by: "alex", ttlMs: PAIRING_TTL_MS }, T0);
     const pairing = scriptedTransport();
     pairing.updates.push([privatePair(1, code)]);
-    const passed = await bridgePass(store, { botId: BOT, transport: pairing.transport, clock: () => later(1_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: pairing.transport, clock: () => later(1_000) });
     expect(passed).toMatchObject({ ok: true, report: { paired: 1 } });
     void script;
   };
@@ -836,7 +1123,7 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
       { run, urgency: "blocking", recap: "r", question: "Open or closed?", options: [{ id: "open", label: "Open", consequence: "c", reversible: true }, { id: "closed", label: "Closed", consequence: "c", reversible: true }], recommendation: "open" },
       T0,
     );
-    store.enqueueNotification({ dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" }, T0);
+    store.enqueueNotification({ source: { run }, dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" }, T0);
     return id;
   };
 
@@ -849,6 +1136,7 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
     if (!added.ok) throw new Error("bootstrap failed");
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
+    store.placeTask(taskRef, REPO);
   });
 
   afterEach(() => store.close());
@@ -857,11 +1145,11 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
     const script = scripted();
     await pair(script);
     expect(store.telegramDigest().everyMs).toBeNull();
-    store.enqueueNotification({ dedupeKey: "merge:1", kind: "merge", subject: "t-1 merged", body: "PR #4 merged." }, T0);
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(2_000) });
+    store.enqueueNotification({ source: { project: REPO }, dedupeKey: "merge:1", kind: "merge", subject: "t-1 merged", body: "PR #4 merged." }, T0);
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(2_000) });
     expect(passed).toMatchObject({ ok: true, report: { sent: 1 } });
-    expect(texts(script).some(one => one.startsWith("t-1 merged"))).toBe(true);
-    expect(store.listNotifications("pending")).toHaveLength(0);
+    expect(texts(script).some(one => one.includes("t-1 merged"))).toBe(true);
+    expect(store.telegramDeliveries(store.liveTelegramBinding(BOT)!).filter(row => row.deliveredAt === null && row.resolvedAt === null)).toHaveLength(0);
   });
 
   test("with a cadence: routine facts are held unclaimed while a decision and an attention fact page singly; the window elapses and ONE digest carries the routine rows", async () => {
@@ -870,44 +1158,44 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
     store.setTelegramDigest(60 * 60_000, "alex", later(2_000));
     expect(store.telegramDigest()).toMatchObject({ everyMs: 3_600_000, setBy: "alex" });
 
-    store.enqueueNotification({ dedupeKey: "merge:1", kind: "merge", subject: "t-1 merged", body: "PR #4 merged.\nsecond line" }, later(3_000));
-    store.enqueueNotification({ dedupeKey: "report:1:1", kind: "report-ready", subject: "t-1: report ready", body: "The cookie races." }, later(3_000));
-    store.enqueueNotification({ dedupeKey: "stalled:1", kind: "attempts-exhausted", pushClass: "attention", link: "/r/1", subject: "t-1 stalled", body: "three failures" }, later(3_000));
+    store.enqueueNotification({ source: { project: REPO }, dedupeKey: "merge:1", kind: "merge", subject: "t-1 merged", body: "PR #4 merged.\nsecond line" }, later(3_000));
+    store.enqueueNotification({ source: { project: REPO }, dedupeKey: "report:1:1", kind: "report-ready", subject: "t-1: report ready", body: "The cookie races." }, later(3_000));
+    store.enqueueNotification({ source: { project: REPO }, dedupeKey: "stalled:1", kind: "attempts-exhausted", pushClass: "attention", link: "/r/1", subject: "t-1 stalled", body: "three failures" }, later(3_000));
     const decisionId = decision();
 
     // Inside the window: the decision and the attention fact go out; the
     // routine rows stay pending and UNCLAIMED.
-    const first = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    const first = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(10_000) });
     expect(first).toMatchObject({ ok: true, report: { sent: 2 } });
     const sent = texts(script);
-    expect(sent.some(one => one.startsWith("t-1 stalled"))).toBe(true);
+    expect(sent.some(one => one.includes("t-1 stalled"))).toBe(true);
     expect(sent.some(one => one.includes("Open or closed?"))).toBe(true);
     expect(sent.some(one => one.includes("t-1 merged"))).toBe(false);
     expect(store.countRoutinePending()).toBe(2);
-    expect(store.listNotifications("pending").map(one => one.dedupeKey).sort()).toEqual(["merge:1", "report:1:1"]);
+    expect(store.telegramDeliveries(store.liveTelegramBinding(BOT)!).filter(row => row.deliveredAt === null && row.resolvedAt === null).map(one => one.dedupeKey).sort()).toEqual(["merge:1", "report:1:1"]);
     expect(store.handle.prepare("SELECT claim_owner FROM notification WHERE dedupe_key = 'merge:1'").get()?.["claim_owner"]).toBeNull();
     void decisionId;
 
     // Still inside the window: nothing more goes out.
-    const second = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(30 * 60_000) });
+    const second = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(30 * 60_000) });
     expect(second).toMatchObject({ ok: true, report: { sent: 0 } });
 
     // The window elapses: one digest, both routine rows finalized with the
     // same receipt, the anchor moved.
     const before = script.calls.length;
-    const third = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(61 * 60_000) });
+    const third = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(61 * 60_000) });
     expect(third).toMatchObject({ ok: true, report: { sent: 2, digests: 1 } });
     const digestSends = script.calls.slice(before).filter(one => one.method === "sendMessage");
     expect(digestSends).toHaveLength(1);
     const digest = String(digestSends[0]?.params["text"]);
     expect(digest).toContain("digest — 2 routine fact(s)");
-    expect(digest).toContain("• t-1 merged");
+    expect(digest).toContain("• project · t-1 merged");
     expect(digest).toContain("    PR #4 merged.");
     expect(digest).not.toContain("second line");
-    expect(digest).toContain("• t-1: report ready");
+    expect(digest).toContain("• project · t-1: report ready");
     expect(digestSends[0]?.params["reply_markup"]).toBeUndefined();
-    expect(store.listNotifications("pending")).toHaveLength(0);
-    const receipts = store.listNotifications("all").filter(one => one.kind === "merge" || one.kind === "report-ready").map(one => one.receipt);
+    expect(store.telegramDeliveries(store.liveTelegramBinding(BOT)!).filter(row => row.deliveredAt === null && row.resolvedAt === null)).toHaveLength(0);
+    const receipts = store.telegramDeliveries(store.liveTelegramBinding(BOT)!).filter(one => one.kind === "merge" || one.kind === "report-ready").map(one => one.receipt);
     expect(new Set(receipts).size).toBe(1);
     expect(store.telegramDigest().lastSentAt).toBe(later(61 * 60_000).toISOString());
   });
@@ -916,30 +1204,30 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
     const script = scripted();
     await pair(script);
     store.setTelegramDigest(30 * 60_000, "alex", later(2_000));
-    store.enqueueNotification({ dedupeKey: "merge:1", kind: "merge", subject: "t-1 merged", body: "PR #4 merged." }, later(3_000));
+    store.enqueueNotification({ source: { project: REPO }, dedupeKey: "merge:1", kind: "merge", subject: "t-1 merged", body: "PR #4 merged." }, later(3_000));
     script.setFail(true);
-    const broken = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(31 * 60_000) });
+    const broken = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(31 * 60_000) });
     expect(broken).toMatchObject({ ok: true, report: { sent: 0 } });
     expect(broken.ok && broken.report.problems.some(one => one.includes("digest of 1"))).toBe(true);
-    expect(store.listNotifications("pending")).toHaveLength(1);
+    expect(store.telegramDeliveries(store.liveTelegramBinding(BOT)!).filter(row => row.deliveredAt === null && row.resolvedAt === null)).toHaveLength(1);
     expect(store.telegramDigest().lastSentAt).toBe(later(2_000).toISOString());
     script.setFail(false);
-    const mended = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(32 * 60_000) });
+    const mended = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(32 * 60_000) });
     expect(mended).toMatchObject({ ok: true, report: { sent: 1, digests: 1 } });
-    expect(store.listNotifications("pending")).toHaveLength(0);
+    expect(store.telegramDeliveries(store.liveTelegramBinding(BOT)!).filter(row => row.deliveredAt === null && row.resolvedAt === null)).toHaveLength(0);
   });
 
   test("a gap that blocks work and a failed publication are attention-class: they page singly under any cadence (v4 review, finding 6)", async () => {
     const script = scripted();
     await pair(script);
     store.setTelegramDigest(24 * 60 * 60_000, "alex", later(2_000));
-    store.enqueueNotification({ dedupeKey: "gap:/r:secret:X", kind: "gap", pushClass: "attention", link: "/caps", subject: "X blocks work in /r", body: "set it" }, later(3_000));
-    store.enqueueNotification({ dedupeKey: "publication:1:failed", kind: "publication-failed", pushClass: "attention", link: "/r/1", subject: "publication of run #1 gave up", body: "why" }, later(3_000));
-    store.enqueueNotification({ dedupeKey: "merge:9", kind: "merge", subject: "t-1 merged", body: "PR #9 merged." }, later(3_000));
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    store.enqueueNotification({ source: { project: REPO }, dedupeKey: "gap:/r:secret:X", kind: "gap", pushClass: "attention", link: "/caps", subject: "X blocks work in /r", body: "set it" }, later(3_000));
+    store.enqueueNotification({ source: { project: REPO }, dedupeKey: "publication:1:failed", kind: "publication-failed", pushClass: "attention", link: "/r/1", subject: "publication of run #1 gave up", body: "why" }, later(3_000));
+    store.enqueueNotification({ source: { project: REPO }, dedupeKey: "merge:9", kind: "merge", subject: "t-1 merged", body: "PR #9 merged." }, later(3_000));
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(10_000) });
     expect(passed).toMatchObject({ ok: true, report: { sent: 2 } });
-    expect(texts(script).some(one => one.startsWith("X blocks work"))).toBe(true);
-    expect(texts(script).some(one => one.startsWith("publication of run #1"))).toBe(true);
+    expect(texts(script).some(one => one.includes("X blocks work"))).toBe(true);
+    expect(texts(script).some(one => one.includes("publication of run #1"))).toBe(true);
     expect(texts(script).some(one => one.includes("t-1 merged"))).toBe(false);
     expect(store.countRoutinePending()).toBe(1);
   });
@@ -948,13 +1236,13 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
     const script = scripted();
     await pair(script);
     store.setTelegramDigest(60 * 60_000, "alex", later(2_000));
-    store.enqueueNotification({ dedupeKey: "gap:/r:secret:X", kind: "gap", subject: "X blocks work", body: "set it" }, later(3_000));
-    store.enqueueNotification({ dedupeKey: "merge:2", kind: "merge", subject: "t-1 merged", body: "PR #5 merged." }, later(3_000));
+    store.enqueueNotification({ source: { project: REPO }, dedupeKey: "gap:/r:secret:X", kind: "gap", subject: "X blocks work", body: "set it" }, later(3_000));
+    store.enqueueNotification({ source: { project: REPO }, dedupeKey: "merge:2", kind: "merge", subject: "t-1 merged", body: "PR #5 merged." }, later(3_000));
     store.handle.prepare("UPDATE notification SET resolved_at = ? WHERE dedupe_key = 'gap:/r:secret:X'").run(later(4_000).toISOString());
     store.setTelegramDigest(null, "alex", later(5_000));
-    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(6_000) });
+    const passed = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(6_000) });
     expect(passed).toMatchObject({ ok: true, report: { sent: 1 } });
     expect(texts(script).some(one => one.includes("X blocks work"))).toBe(false);
-    expect(texts(script).some(one => one.startsWith("t-1 merged"))).toBe(true);
+    expect(texts(script).some(one => one.includes("t-1 merged"))).toBe(true);
   });
 });

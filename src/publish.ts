@@ -412,6 +412,7 @@ export async function observeChecks(
         store.resolveCiEpisodes(publication.githubRepo, publication.prNumber as number, key, clock());
         store.enqueueNotification(
           {
+            source: { run: publication.run },
             dedupeKey: key,
             kind: "ci-failing",
             subject: `CI failing: ${taskId} (PR #${publication.prNumber})`,
@@ -445,6 +446,7 @@ function concede(
     store.failPublication(publication.id, clock());
     store.enqueueNotification(
       {
+        source: { run: publication.run },
         dedupeKey: `publication:${publication.id}:failed`,
         kind: "publication-failed",
         // A person is needed now (v4 review, finding 6): never a digest.
@@ -462,6 +464,7 @@ function concede(
 function enqueueOpened(store: Store, publication: Publication, url: string, clock: () => Date): void {
   store.enqueueNotification(
     {
+      source: { run: publication.run },
       dedupeKey: `publication:${publication.id}:opened`,
       kind: "publication-opened",
       subject: `PR ready: ${store.externalIdFor(publication.taskRef) ?? publication.head}`,
@@ -586,13 +589,13 @@ export async function sweepMerges(
   // 14/22/23): one open episode per publication nags, resolution closes it,
   // and a recurrence after repair pages again. Success and plain status
   // pages stay classless — a merged PR needs nobody.
-  const page = (key: string, subject: string, body: string): void => {
-    store.enqueueNotification({ dedupeKey: key, kind: "merge", subject, body }, clock());
+  const page = (publication: Publication, key: string, subject: string, body: string): void => {
+    store.enqueueNotification({ source: { run: publication.run }, dedupeKey: key, kind: "merge", subject, body }, clock());
   };
-  const pagePerson = (publicationId: number, suffix: string, subject: string, body: string): void => {
+  const pagePerson = (publication: Publication, suffix: string, subject: string, body: string): void => {
     store.enqueueEpisode(
-      `merge-attn:${publicationId}`,
-      { kind: "merge", subject, body, pushClass: "merge", link: "/review" },
+      `merge-attn:${publication.id}`,
+      { source: { run: publication.run }, kind: "merge", subject, body, pushClass: "merge", link: "/review" },
       suffix,
       clock(),
     );
@@ -617,7 +620,7 @@ export async function sweepMerges(
     if (blocker !== null) {
       report.skipped++;
       pagePerson(
-        publication.id, "blocked",
+        publication, "blocked",
         "PR #" + prNumber + " holds for a repair",
         "A CI repair (" + (blocker.taskId ?? "?") + ") is in flight. It merges nothing until you lift it: standing-orders publish unblock " + prNumber + ".",
       );
@@ -636,7 +639,7 @@ export async function sweepMerges(
     if (intent.state === "waiting-human") {
       report.skipped++;
       pagePerson(
-        publication.id, "waiting-human",
+        publication, "waiting-human",
         "PR #" + prNumber + " waits for your go-ahead",
         "Merges wait for you while this posture holds. When you want it merged: standing-orders publish merge " + prNumber + " --as <you> --token <t>. It still merges only when CI is seen green on the exact head.",
       );
@@ -666,7 +669,7 @@ export async function sweepMerges(
         } else {
           report.skipped++;
           pagePerson(
-            publication.id, "half-fired",
+            publication, "half-fired",
             "PR #" + prNumber + " may have half-merged",
             "A merge was issued and its owner went silent; the PR is still open on the same commit. Nothing retries by itself. If you want it fired again: standing-orders publish refire " + prNumber + " --as <you> --token <t>.",
           );
@@ -695,7 +698,7 @@ export async function sweepMerges(
       settle("refused", { error: queue.why });
       report.refused++;
       pagePerson(
-        publication.id, queue.why,
+        publication, queue.why,
         "PR #" + prNumber + " will not auto-merge",
         queue.why === "merge-queue"
           ? "The base branch requires a merge queue - out of this release's scope. Merge it on GitHub, or lift the queue and run: standing-orders publish rearm " + prNumber + "."
@@ -711,7 +714,7 @@ export async function sweepMerges(
         settle("refused", { error: "draft" });
         report.refused++;
         pagePerson(
-          publication.id, "draft",
+          publication, "draft",
           "PR #" + prNumber + " is a draft",
           "Drafts never merge themselves. Mark it ready on GitHub, then run: standing-orders publish rearm " + prNumber + ".",
         );
@@ -743,7 +746,7 @@ export async function sweepMerges(
       if (fired.outcome === "waiting-human") {
         report.skipped++;
         pagePerson(
-          publication.id, "waiting-human",
+          publication, "waiting-human",
           "PR #" + prNumber + " waits for your go-ahead",
           fired.why + " - when you want it merged: standing-orders publish merge " + prNumber + " --as <you> --token <t>.",
         );
@@ -772,6 +775,7 @@ export async function sweepMerges(
       report.merged++;
       store.resolveEpisodes(`merge-attn:${publication.id}`, clock());
       page(
+        publication,
         "merge:" + publication.id + ":merged",
         "merged: PR #" + prNumber,
         (publication.prUrl ?? grant.githubRepo) + " - " + method + " of " + headSha.slice(0, 12) + ", under the merge terms you approved.",
@@ -785,7 +789,7 @@ export async function sweepMerges(
       settle("refused", { error: "credential", countAttempt: true, from: "firing" });
       report.refused++;
       pagePerson(
-        publication.id, "credential",
+        publication, "credential",
         "PR #" + prNumber + ": gh is not signed in",
         "The merge acts as this machine's GitHub account, and it could not authenticate. Run gh auth login, then: standing-orders publish rearm " + prNumber + ".",
       );
@@ -804,7 +808,7 @@ export async function sweepMerges(
       settle("refused", { error: firstLine(merged.stderr) || "the merge was rejected", countAttempt: true, from: "firing" });
       report.refused++;
       pagePerson(
-        publication.id, "rejected",
+        publication, "rejected",
         "PR #" + prNumber + " would not merge",
         (firstLine(merged.stderr) || "GitHub rejected the merge") + " - likely branch protection, required reviews, or a conflict. Fix the cause, then run: standing-orders publish rearm " + prNumber + ".",
       );

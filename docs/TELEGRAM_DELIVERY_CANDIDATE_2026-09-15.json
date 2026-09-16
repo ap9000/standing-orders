@@ -1,0 +1,96 @@
+{
+  "baseHead": "ba101e694cd94907a493c0ae3a5efa666477e977",
+  "baseNote": "docs-only input commit on accepted evidence runtime 64e81727133c7a791a38c6cec9ee7bba02419415; integrates 87551dafc9c1d4e457bcd62d4f36988340b5dfb3 and 3102879d2c38d6ef925f26c3e5c9e30110aaf3b8",
+  "sourceDigest": "77cf98cb0245f5cc8aa648c1396d09b9ec8488dffa64ce2dc6ff118780821df6",
+  "algorithm": "SHA-256 of sorted path + NUL + fileHash + LF entries",
+  "files": [
+    {
+      "path": "src/contest.ts",
+      "sha256": "03b3f298ea3b436c85b938d16a5e0eeebfbf2a835c85f3431e8c2d2fa08394cb"
+    },
+    {
+      "path": "src/dispose.ts",
+      "sha256": "707a8873732495e54e0dc55f3bc66ac2ab593b44f3986819365d6ab58d844124"
+    },
+    {
+      "path": "src/evidence.ts",
+      "sha256": "829f32c78ff0da57a790e3c37de2ac40c5d0ccfad9b12e3d5fb2a37519016315"
+    },
+    {
+      "path": "src/held.ts",
+      "sha256": "a4b36d64b5974f18de3027d05ed5f20f9e5dda66892c9e58f8d889f1410ee10b"
+    },
+    {
+      "path": "src/migration-v50-review-retries.test.ts",
+      "sha256": "398480b6b603906a568c9ddbefd29d54b17c3b3f5761d78b9c2c3c4e4a7385bb"
+    },
+    {
+      "path": "src/migration-v53-process-custody.test.ts",
+      "sha256": "4c8c2a72ac8227ba17dbb3cbf2d83b2665dcfbe57806d39fe4151edaf0ee0e4b"
+    },
+    {
+      "path": "src/migration-v58-project-learning.test.ts",
+      "sha256": "139f38490634ea1ee8693914392dd993f52bdcf11e136b6d95ddf32ebbf97763"
+    },
+    {
+      "path": "src/migration-v61-telegram.test.ts",
+      "sha256": "cba16c812519da04f876853e9f38827f2dc8f5afe9d9e36f8ce9066c048d2b45"
+    },
+    {
+      "path": "src/operate.ts",
+      "sha256": "7f9a90a90059a89a7c5376a86691210488aca20ca7e62b8bd63ec10045ed1f64"
+    },
+    {
+      "path": "src/project-knowledge.test.ts",
+      "sha256": "0c6dbd37e3a7fa3ec1e6722fb14e47520bd68cd2a7d75f076db27f37f55861d7"
+    },
+    {
+      "path": "src/publish.ts",
+      "sha256": "2428e981945a78430291d6cbe53afe12322a32353d98530cddebecca7c97f460"
+    },
+    {
+      "path": "src/push.ts",
+      "sha256": "560d27a8f85da141108998dc86c19ac907bdb44c81d9f694651176bab5ecfb09"
+    },
+    {
+      "path": "src/pushstore.test.ts",
+      "sha256": "325c2038c551c461fc42e98eabb0d3e5005ef23a946bad9d8bd803a56ef0ec1d"
+    },
+    {
+      "path": "src/recipe-creator.test.ts",
+      "sha256": "e14c17b908d304bea36ec53fc8bd98b3b020048a46db13f139194cf0dfc718c0"
+    },
+    {
+      "path": "src/routine.ts",
+      "sha256": "404b0b1a6a77748c2edaf642aa703674c57416e7c3c3ef6c86a17b0e5de75430"
+    },
+    {
+      "path": "src/store.test.ts",
+      "sha256": "1490235ea82be4ad55919f7889f3da82fec936c5cd2cff0425e31e1333405af0"
+    },
+    {
+      "path": "src/store.ts",
+      "sha256": "07795e70f4004bde704506f50336ce794143cd511a8fa51ec4171058a0d85031"
+    },
+    {
+      "path": "src/task-control.test.ts",
+      "sha256": "fe74a841bbdb8a20eb17ae5adb32b4b5cda12e1ee2294dad393ebc69422130ca"
+    },
+    {
+      "path": "src/telegram-status.ts",
+      "sha256": "adc7c82afee4084b8a2e8dd54854fdba53e6c878ab4eaee3710745252813d53e"
+    },
+    {
+      "path": "src/telegram.test.ts",
+      "sha256": "45188a5cb27ce73e64718c08bd31378370262170b9d9e66735f61c1de9ad542a"
+    },
+    {
+      "path": "src/telegram.ts",
+      "sha256": "92bad19def1b68cae10f300355931cc1743b50f81322a6b8ccaf927685142895"
+    },
+    {
+      "path": "src/tick.test.ts",
+      "sha256": "95d0a8a37d7cbf7f280808d10aeb3096dc2bb2d475cc29d8139fa4aaa2c5fe45"
+    }
+  ]
+}

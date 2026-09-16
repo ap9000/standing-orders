@@ -22,8 +22,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
-import type { Store, Decision, Notification, TelegramBinding } from "./store.js";
-import { phoneCommand, phoneStatus, phoneTask, PHONE_HELP } from "./telegram-status.js";
+import type { Store, Decision, Notification, TelegramBinding, TelegramDelivery } from "./store.js";
+import { phoneCommand, phoneStatus, phoneTask, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
 
 /** Read the enrolled project list on demand. No callback means no task data,
  * never an implicit all-database ceiling. Shared by pass and embedded follower. */
@@ -118,7 +118,7 @@ export type TelegramTransport = (
   method: string,
   params: Record<string, unknown>,
   signal?: AbortSignal,
-) => Promise<{ ok: boolean; result?: unknown; description?: string }>;
+) => Promise<{ ok: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number } }>;
 
 export function createTransport(token: string, timeoutMs = 30_000): TelegramTransport {
   return async (method, params, signal) => {
@@ -136,10 +136,11 @@ export function createTransport(token: string, timeoutMs = 30_000): TelegramTran
         body: JSON.stringify(params),
         signal: controller.signal,
       });
-      const body = (await response.json()) as { ok?: boolean; result?: unknown; description?: string };
+      const body = (await response.json()) as { ok?: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number } };
       return {
         ok: body.ok === true,
         result: body.result,
+        ...(body.parameters === undefined ? {} : { parameters: body.parameters }),
         // Whatever Telegram said, the token must not be in what we keep.
         ...(body.description === undefined ? {} : { description: scrub(body.description, token) }),
       };
@@ -203,6 +204,8 @@ export async function bridgePass(
      * pages; taps and replies still land here. */
     deliver?: boolean;
     readProjects?: TelegramReadProjects;
+    /** Reload channel configuration before every outbound part. */
+    canDeliver?: () => boolean;
   },
 ): Promise<{ ok: true; report: BridgeReport } | { ok: false; reason: "bridge-busy"; message: string }> {
   const clock = options.clock ?? (() => new Date());
@@ -222,7 +225,7 @@ export async function bridgePass(
 
   try {
     if (options.deliver !== false) {
-      await deliverOutbox(store, botId, transport, owner, clock, report);
+      await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver);
     }
     await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report, 0, undefined, options.readProjects);
   } finally {
@@ -284,6 +287,8 @@ export async function followBridge(
     /** false: inbound only; another channel is primary. */
     deliver?: boolean;
     readProjects?: TelegramReadProjects;
+    /** Reload channel configuration before every outbound part. */
+    canDeliver?: () => boolean;
     pollSeconds?: number;
     /** One line per cycle that did something — the follower's narration hook. */
     onCycle?: (report: BridgeReport) => void;
@@ -326,7 +331,7 @@ export async function followBridge(
       const startedAt = Date.now();
       const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
       if (options.deliver !== false) {
-        await deliverOutbox(store, botId, transport, owner, clock, report);
+        await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver);
       }
       await drainUpdates(
         store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal, options.readProjects,
@@ -370,65 +375,109 @@ export async function followBridge(
 
 // ---- outbound --------------------------------------------------------------
 
+type SendResult = { ok: true; messageId: string | null } | { ok: false; error: string; retryAfter?: number };
+type OutboundSender = (text: string, keyboard?: { text: string; callback_data: string }[][], messageRows?: readonly TelegramDelivery[]) => Promise<SendResult>;
+
 async function deliverOutbox(
-  store: Store,
-  botId: string,
-  transport: TelegramTransport,
-  owner: string,
-  clock: () => Date,
-  report: BridgeReport,
+  store: Store, botId: string, transport: TelegramTransport, owner: string,
+  clock: () => Date, report: BridgeReport, readProjects?: TelegramReadProjects,
+  canDeliver?: () => boolean,
 ): Promise<void> {
   const binding = store.liveTelegramBinding(botId);
-  // Away mode (mate arc §10): with a cadence set, routine rows stay
-  // unclaimed until the window elapses; decisions and attention-class
-  // facts are claimed and paged every pass. The window is measured from
-  // the last digest actually sent — an empty window sends nothing and
-  // does not move the anchor.
-  const digest = store.telegramDigest();
-  const now = clock();
-  const digestDue =
-    digest.everyMs === null ||
-    digest.lastSentAt === null ||
-    now.getTime() >= new Date(digest.lastSentAt).getTime() + digest.everyMs;
-  const claimed = store.claimDeliveries(owner, DELIVERY_CLAIM_MS, now, digestDue ? "all" : "urgent");
-  if (claimed.length === 0) return;
   if (binding === null) {
-    // Nothing to send to. The rows stay pending (claims lapse), and the
-    // problem is said once rather than once per row.
-    for (const row of claimed) {
-      store.finalizeDelivery(row.id, owner, { ok: false, error: "no paired telegram chat" }, clock());
-    }
-    report.problems.push("outbox rows are pending but no chat is paired — `standing-orders bridge telegram pair`");
+    if (store.listNotifications("pending").length > 0) report.problems.push("outbox rows are pending but no chat is paired — `standing-orders bridge telegram pair`");
     return;
   }
+  const digest = store.telegramDigest();
+  const now = clock();
+  const digestDue = digest.everyMs === null || digest.lastSentAt === null || now.getTime() >= new Date(digest.lastSentAt).getTime() + digest.everyMs;
+  const claimed = store.claimTelegramDeliveries(binding, owner, DELIVERY_CLAIM_MS, now, digestDue ? "all" : "urgent");
 
-  const singly = digest.everyMs === null ? claimed : claimed.filter(row => isUrgent(row));
-  const batched = digest.everyMs === null ? [] : claimed.filter(row => !isUrgent(row));
-
-  for (const row of singly) {
-    const outcome = await deliverOne(store, botId, binding, transport, row, clock);
-    const finalized = store.finalizeDelivery(row.id, owner, outcome, clock());
-    if (outcome.ok && finalized) report.sent++;
-    if (!outcome.ok) report.problems.push(`notification ${row.id}: ${outcome.error}`);
+  // Preserve ID order, flushing earlier routine facts before an urgent task
+  // update. An earlier failed/retrying row also fences later rows for that task.
+  const groups: TelegramDelivery[][] = [];
+  for (const row of claimed) {
+    const last = groups[groups.length - 1];
+    if (digest.everyMs !== null && !isUrgent(row) && last !== undefined && !isUrgent(last[0]!)) last.push(row);
+    else groups.push([row]);
   }
+  for (const group of groups) {
+    let projects: readonly string[] = [];
+    const readAccess = async (): Promise<string | null> => {
+      try { projects = await readProjects?.() ?? []; }
+      catch { return "Current Telegram delivery access could not be read"; }
+      return null;
+    };
+    const channelProblem = (): string | null => {
+      try {
+        if (canDeliver !== undefined && !canDeliver()) return "Telegram delivery is disabled";
+      } catch { return "Current Telegram delivery access could not be read"; }
+      return null;
+    };
+    const retryAt = (): string => [store.telegramRetryAt(botId), new Date(clock().getTime() + 1_000).toISOString()].sort().at(-1)!;
 
-  if (batched.length === 0) return;
-  // One digest for every routine row this pass claimed: one receipt each,
-  // the anchor moved only when every part arrived. A transport failure
-  // finalizes them all failed and leaves the anchor alone — the next pass
-  // tries the whole digest again.
-  const outcome = await deliverDigest(botId, binding, transport, batched, digest.lastSentAt, clock);
-  if (outcome.ok) {
-    // Rows and anchor in ONE transaction (v4 review, finding 5). A claim
-    // that lapsed during a slow send is said, not swallowed: that row was
-    // sent here and will be sent again by whoever re-claimed it.
-    const done = store.finalizeDigest(batched.map(row => row.id), owner, outcome.receipt, clock());
-    report.sent += done.finalized;
-    report.digests = (report.digests ?? 0) + 1;
-    if (done.lapsed > 0) report.problems.push(`digest: ${done.lapsed} row(s) lost their claim mid-send and may be sent again`);
-  } else {
-    for (const row of batched) store.finalizeDelivery(row.id, owner, outcome, clock());
-    report.problems.push(`digest of ${batched.length} notification(s): ${outcome.error}`);
+    // Partition before anything is sent: a row without live authority is
+    // retained with its reason, and the rows that ARE eligible go out now
+    // rather than waiting on it. Walking in ID order with the eligible set
+    // as the batch keeps a task's later facts behind its blocked earlier one.
+    const rows: TelegramDelivery[] = [];
+    const blocked: { row: TelegramDelivery; error: string }[] = [];
+    const preflight = (await readAccess()) ?? channelProblem();
+    for (const row of group) {
+      const problem = preflight ?? store.telegramDeliveryProblem(row, binding, owner, projects, clock(), [...rows.map(one => one.id), row.id]);
+      if (problem === null) rows.push(row);
+      else blocked.push({ row, error: problem });
+    }
+    store.transact(() => {
+      for (const { row, error } of blocked) store.finalizeTelegramDelivery(row, binding, owner, { ok: false, error, retryAt: retryAt() }, clock());
+    });
+    for (const { row, error } of blocked) report.problems.push(`notification ${row.id}: ${error}`);
+    if (rows.length === 0) continue;
+
+    const ids = rows.map(row => row.id);
+    const fence = (): string | null => {
+      const channel = channelProblem();
+      if (channel !== null) return channel;
+      for (const row of rows) {
+        const problem = store.telegramDeliveryProblem(row, binding, owner, projects, clock(), ids);
+        if (problem !== null) return problem;
+      }
+      return null;
+    };
+    const sender: OutboundSender = async (text, keyboard, messageRows = rows) => {
+      // Finish every await before the synchronous fence and transport call.
+      const problem = (await readAccess()) ?? fence();
+      if (problem !== null) return { ok: false, error: problem };
+      const sent = await send(transport, binding.chatId, text, keyboard);
+      if (!sent.ok) {
+        if (sent.retryAfter !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + sent.retryAfter * 1_000).toISOString());
+        return sent;
+      }
+      if (sent.messageId === null) return { ok: false, error: "Telegram returned no confirmed message identity" };
+      for (const row of messageRows) store.recordTelegramMessage(row, binding, sent.messageId, clock());
+      // Keep the old message's history but never acknowledge a replaced pairing.
+      const after = (await readAccess()) ?? fence();
+      return after === null ? sent : { ok: false, error: after };
+    };
+    const batched = digest.everyMs !== null && !isUrgent(rows[0]!);
+    const outcome = batched
+      ? await deliverDigest(botId, binding, sender, rows, digest.lastSentAt, clock)
+      : await deliverOne(store, botId, binding, sender, rows[0]!, clock);
+    const finalProblem = outcome.ok ? (await readAccess()) ?? fence() : null;
+    const settled = finalProblem === null ? outcome : { ok: false as const, error: finalProblem };
+    const finalized = store.transact(() => {
+      let count = 0;
+      for (const row of rows) {
+        const result = settled.ok ? settled : { ...settled, retryAt: retryAt() };
+        if (store.finalizeTelegramDelivery(row, binding, owner, result, clock()) && settled.ok) count++;
+      }
+      if (batched && count === rows.length) store.markTelegramDigestSent(clock());
+      return count;
+    });
+    report.sent += finalized;
+    if (batched && finalized === rows.length) report.digests = (report.digests ?? 0) + 1;
+    if (!settled.ok) report.problems.push(`${batched ? `digest of ${rows.length} notification(s)` : `notification ${rows[0]!.id}`}: ${settled.error}`);
+    else if (finalized !== rows.length) report.problems.push("Telegram delivery claim expired before acknowledgement; retry may duplicate a message");
   }
 }
 
@@ -444,27 +493,39 @@ export function digestText(rows: readonly Notification[], since: string | null, 
   const window = since === null ? "" : ` since ${since.slice(0, 16).replace("T", " ")}`;
   const lines = [`digest — ${rows.length} routine fact(s)${window} (as of ${now.toISOString().slice(0, 16).replace("T", " ")})`, ""];
   for (const row of rows) {
-    lines.push(`• ${row.subject}`);
-    const first = row.body.split("\n").map(one => one.trim()).find(one => one !== "");
-    if (first !== undefined) lines.push(`    ${first.length > 200 ? `${first.slice(0, 200)}…` : first}`);
+    lines.push(digestEntry(row));
   }
   return lines.join("\n");
 }
 
+function digestEntry(row: Notification): string {
+  const first = row.body.split("\n").map(one => one.trim()).find(one => one !== "");
+  const body = first === undefined ? "" : `\n    ${first.length > 200 ? `${first.slice(0, 200).replace(/[\uD800-\uDBFF]$/, "")}…` : first}`;
+  return `• ${notificationIdentity(row)}${row.subject}${body}`;
+}
+
 async function deliverDigest(
-  botId: string,
-  binding: TelegramBinding,
-  transport: TelegramTransport,
-  rows: readonly Notification[],
-  since: string | null,
-  clock: () => Date,
+  botId: string, binding: TelegramBinding, sender: OutboundSender,
+  rows: readonly TelegramDelivery[], since: string | null, clock: () => Date,
 ): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> {
-  const parts = split(digestText(rows, since, clock()));
+  const text = digestText(rows, since, clock());
+  // Track the exact rows represented by each text part. A split row may bind
+  // several messages; a digest message may bind several rows.
+  let offset = text.indexOf("\n\n") + 2;
+  const spans = rows.map(row => {
+    const length = digestEntry(row).length;
+    const span = { row, start: offset, end: offset + length };
+    offset += length + 1;
+    return span;
+  });
   let last: string | null = null;
-  for (const part of parts) {
-    const sent = await send(transport, binding.chatId, part);
-    if (!sent.ok) return { ok: false, error: sent.error };
+  let at = 0;
+  for (const part of split(text)) {
+    const related = spans.filter(span => span.start < at + part.length && span.end > at).map(span => span.row);
+    const sent = await sender(part, undefined, related);
+    if (!sent.ok) return sent;
     last = sent.messageId;
+    at += part.length;
   }
   return { ok: true, receipt: receiptFor(botId, binding.chatId, last) };
 }
@@ -473,20 +534,24 @@ async function deliverOne(
   store: Store,
   botId: string,
   binding: TelegramBinding,
-  transport: TelegramTransport,
-  notification: Notification,
+  sender: OutboundSender,
+  notification: TelegramDelivery,
   clock: () => Date,
 ): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> {
   const decisionId = /^decision:(\d+)$/.exec(notification.dedupeKey);
   const decision = decisionId === null ? null : store.getDecision(Number(decisionId[1]));
 
+  if (decision !== null && (notification.taskRef === null || store.getRun(decision.run)?.taskRef !== notification.taskRef || (notification.run !== null && notification.run !== decision.run))) {
+    return { ok: false, error: "Decision does not match notification provenance" };
+  }
+
   if (decision === null || decision.state === "answered") {
     // A plain fact, or a decision settled before the bridge got to it: the
     // text is the message, and there is nothing to press.
-    const parts = split(`${notification.subject}\n\n${notification.body}`);
+    const parts = split(`${notificationIdentity(notification)}${notification.subject}\n\n${notification.body}`);
     let last: string | null = null;
     for (const part of parts) {
-      const sent = await send(transport, binding.chatId, part);
+      const sent = await sender(part);
       if (!sent.ok) return { ok: false, error: sent.error };
       last = sent.messageId;
     }
@@ -498,9 +563,8 @@ async function deliverOne(
   // many plain messages as they need — a button whose warning was truncated
   // away is a trap, so the keyboard rides the LAST part only, and only if
   // every earlier part arrived.
-  const taskId = taskOf(store, decision);
   const lines = [
-    `${taskId} parked a decision`,
+    `${notificationIdentity(notification)}Decision needed`,
     "",
     decision.recap,
     "",
@@ -515,7 +579,7 @@ async function deliverOne(
   const parts = split(lines.join("\n"));
 
   for (const part of parts.slice(0, -1)) {
-    const sent = await send(transport, binding.chatId, part);
+    const sent = await sender(part);
     if (!sent.ok) return { ok: false, error: sent.error };
     // Every part is a message somebody may REPLY to with a note: each id
     // routes to this decision, exactly (Codex free-text review, finding 1).
@@ -551,7 +615,7 @@ async function deliverOne(
     },
   ]);
   const last = parts[parts.length - 1] as string;
-  const sent = await send(transport, binding.chatId, last, keyboard);
+  const sent = await sender(last, keyboard);
   if (!sent.ok) return { ok: false, error: sent.error };
   if (sent.messageId !== null) {
     store.placeTelegramActions(
@@ -568,18 +632,24 @@ async function send(
   chatId: string,
   text: string,
   keyboard?: { text: string; callback_data: string }[][],
-): Promise<{ ok: true; messageId: string | null } | { ok: false; error: string }> {
+): Promise<SendResult> {
   // No parse_mode and no entities, ever: agent text is text. Link previews
   // off: a URL in a recap must not become a fetch.
-  const answer = await transport("sendMessage", {
-    chat_id: chatId,
-    text,
-    link_preview_options: { is_disabled: true },
-    ...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }),
-  });
-  if (!answer.ok) return { ok: false, error: answer.description ?? "sendMessage failed" };
+  let answer: Awaited<ReturnType<TelegramTransport>>;
+  try {
+    answer = await transport("sendMessage", {
+      chat_id: chatId,
+      text,
+      link_preview_options: { is_disabled: true },
+      ...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }),
+    });
+  } catch { return { ok: false, error: "Telegram transport failed; delivery may be uncertain" }; }
+  if (!answer.ok) {
+    const retry = answer.parameters?.retry_after;
+    return { ok: false, error: answer.description ?? "sendMessage failed", ...(typeof retry === "number" && Number.isFinite(retry) && retry > 0 ? { retryAfter: Math.ceil(retry) } : {}) };
+  }
   const messageId = (answer.result as { message_id?: number } | undefined)?.message_id;
-  return { ok: true, messageId: messageId === undefined ? null : String(messageId) };
+  return { ok: true, messageId: Number.isSafeInteger(messageId) && messageId! > 0 ? String(messageId) : null };
 }
 
 function receiptFor(botId: string, chatId: string, messageId: string | null): string {
@@ -589,8 +659,11 @@ function receiptFor(botId: string, chatId: string, messageId: string | null): st
 function split(text: string): string[] {
   if (text.length <= PART_CAP) return [text];
   const parts: string[] = [];
-  for (let at = 0; at < text.length; at += PART_CAP) {
-    parts.push(text.slice(at, at + PART_CAP));
+  for (let at = 0; at < text.length;) {
+    let end = Math.min(at + PART_CAP, text.length);
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end--;
+    parts.push(text.slice(at, end));
+    at = end;
   }
   return parts;
 }

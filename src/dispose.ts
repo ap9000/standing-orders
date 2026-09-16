@@ -284,6 +284,7 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
         store.finishRun(runId, { outcome: "failed", reason: "external-closed", committed: result.committed, now: clock() });
         store.enqueueNotification(
           {
+            source: { run: runId },
             dedupeKey: `run:${runId}:external-closed`,
             kind: "external-closed",
             subject: `${taskId}: the tracker closed this while it was being built`,
@@ -350,6 +351,7 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
       store.finishRun(runId, { outcome: "failed", reason: "fenced", committed: result.committed, now: clock() });
       store.enqueueNotification(
         {
+          source: { run: runId },
           dedupeKey: `run:${runId}:fenced`,
           kind: "build-fenced",
           subject: `${taskId}: completed, but the lease was gone`,
@@ -536,6 +538,7 @@ export function holdStaleApproval(store: Store, args: { taskRef: number; taskId:
   );
   store.enqueueNotification(
     {
+      source: { taskRef: args.taskRef },
       dedupeKey: `stale-approval:${args.taskRef}:${scope?.approvedDigest ?? "none"}`,
       kind: "stale-approval",
       pushClass: "attention",
@@ -649,7 +652,7 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   // branch spent it; nothing resets because a person annotated a draft.
   const lineage = store.repairLineageOf(ref.externalId);
   if (lineage.problem !== undefined) {
-    store.enqueueNotification({ dedupeKey: `repair-lineage:${sourceRunId}`, kind: "repair-lineage", subject: `${ref.externalId}: repair ancestry needs attention`, body: lineage.problem, link: `/t/${encodeURIComponent(ref.externalId)}` }, now);
+    store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `repair-lineage:${sourceRunId}`, kind: "repair-lineage", subject: `${ref.externalId}: repair ancestry needs attention`, body: lineage.problem, link: `/t/${encodeURIComponent(ref.externalId)}` }, now);
     return { kind: "stopped", reason: "repair-refused-integrity" };
   }
   const priorChain = lineage.continues;

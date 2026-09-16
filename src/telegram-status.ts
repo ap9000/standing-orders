@@ -2,7 +2,7 @@
  * No provider calls, repository access, new workflow state, or inferred success. */
 import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
 import { scanForSecrets } from "./evidence.js";
-import type { Store } from "./store.js";
+import type { Notification, Store } from "./store.js";
 
 export type PhoneCommand = { kind: "status" } | { kind: "help" } | { kind: "task"; id: string };
 
@@ -137,4 +137,10 @@ export function phoneTask(store: Store, repos: readonly string[], id: string, no
     lines.push("", `Next: ${nextStep(d)}`, "", "Read-only status. Evidence files and full actions are in the console.");
     return lines.join("\n");
   });
+}
+
+/** Concise display only: authorization uses the stored full project identity. */
+export function notificationIdentity(row: Pick<Notification, "project" | "taskId">): string {
+  if (row.project === null) return "";
+  return `${projectLabel(row.project)}${row.taskId === null ? "" : ` / ${plain(row.taskId, 64)}`} · `;
 }

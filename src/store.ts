@@ -88,8 +88,9 @@ import { LEDGER_SCHEMA, installLedgerTriggers, type LedgerEntry } from "./action
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 
-// v60 fences older readers before the new chat action cards are saved.
-export const SCHEMA_VERSION = 60;
+// v60 fenced older readers before the chat action cards; v61 adds notification
+// provenance and Telegram destination receipts, and readers below v61 refuse it.
+export const SCHEMA_VERSION = 61;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -565,6 +566,10 @@ export function parseCapabilityKey(
   return { kind: kind as Capability["kind"], name: key.slice(split + 1) };
 }
 
+/** Supplied by the producer, never inferred from display text or links. */
+export type NotificationSource = { run: number } | { taskRef: number } | { project: string } | { installation: true };
+type NotificationInput = { dedupeKey: string; kind: string; subject: string; body: string; pushClass?: "decision" | "pick" | "merge" | "attention"; link?: string; source?: NotificationSource };
+
 /** A fact that wants a person, durably. */
 export type Notification = {
   id: number;
@@ -588,7 +593,14 @@ export type Notification = {
    * are the audit trail of what was actually sent.
    */
   resolvedAt: string | null;
+  scope: "unknown" | "installation" | "project" | "task";
+  project: string | null;
+  taskRef: number | null;
+  taskId: string | null;
+  run: number | null;
 };
+
+export type TelegramDelivery = Notification & { destination: string; claimGeneration: number };
 
 /**
  * What one recovery walk over a gone runner's work settled (P0.1a): the run
@@ -2452,6 +2464,41 @@ CREATE TABLE IF NOT EXISTS telegram_binding (
 CREATE UNIQUE INDEX IF NOT EXISTS telegram_binding_live
   ON telegram_binding (bot_id) WHERE revoked_at IS NULL;
 
+-- v61: destination receipts around the existing outbox, independent of its
+-- legacy shell/webhook receipt and of push_delivery. No second scheduler.
+CREATE TABLE IF NOT EXISTS notification_delivery (
+  notification INTEGER NOT NULL REFERENCES notification(id) ON DELETE RESTRICT,
+  destination TEXT NOT NULL,
+  claim_owner TEXT,
+  claim_generation INTEGER NOT NULL DEFAULT 0,
+  claim_expires_at TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_attempt_at TEXT,
+  last_error TEXT,
+  delivered_at TEXT,
+  receipt TEXT,
+  PRIMARY KEY (notification, destination)
+);
+CREATE TABLE IF NOT EXISTS telegram_outbound_message (
+  binding INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE RESTRICT,
+  bot_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  notification INTEGER NOT NULL REFERENCES notification(id) ON DELETE RESTRICT,
+  destination TEXT NOT NULL,
+  project TEXT,
+  task_ref INTEGER REFERENCES task_ref(id),
+  task_id TEXT,
+  source_run INTEGER REFERENCES run(id),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (binding, chat_id, message_id, notification)
+);
+CREATE TABLE IF NOT EXISTS telegram_retry (
+  bot_id TEXT PRIMARY KEY,
+  next_attempt_at TEXT NOT NULL
+);
+
 -- One-time pairing codes, hashed like every other credential, consumed in
 -- one transaction with the binding they create.
 CREATE TABLE IF NOT EXISTS telegram_pairing (
@@ -3485,6 +3532,14 @@ function initializeStore(db: Database, file: string): Store {
   // or this open refuses — a second migrator that raced this one between
   // the preflight and here has already moved the row, and nothing alters a
   // file whose version it did not read.
+  if (preflight !== null && Math.abs(preflight) >= 61) {
+    for (const table of ["notification_delivery", "telegram_outbound_message", "telegram_retry"]) {
+      if (!tableExists(db, table)) throw new Error(`${file}: Telegram delivery history is missing; refusing to recreate receipts`);
+    }
+    for (const column of ["provenance_scope", "project", "task_ref", "task_id", "source_run"]) {
+      if (!hasColumn(db, "notification", column)) throw new Error(`${file}: notification provenance is missing; refusing to recreate authority`);
+    }
+  }
   if (preflight !== null && preflight > 0 && preflight < SCHEMA_VERSION) {
     const stamped = db.prepare("UPDATE schema_version SET version = ? WHERE version = ?").run(-preflight, preflight);
     if (Number(stamped.changes) !== 1) {
@@ -4604,6 +4659,14 @@ function migrate(db: Database, origin: number | null): void {
      )`,
     ["id", "task_ref", "owner_kind", "owner_id", "reason", "until", "held_at"],
   );
+
+  // v61: legacy rows remain unknown, including previously delivered rows.
+  // No text/link parsing can turn historical content into authorization.
+  addColumn(db, "notification", "provenance_scope", "TEXT NOT NULL DEFAULT 'unknown' CHECK (provenance_scope IN ('unknown','installation','project','task'))");
+  addColumn(db, "notification", "project", "TEXT");
+  addColumn(db, "notification", "task_ref", "INTEGER REFERENCES task_ref(id)");
+  addColumn(db, "notification", "task_id", "TEXT");
+  addColumn(db, "notification", "source_run", "INTEGER REFERENCES run(id)");
 
   // v53 (OS containment and login recovery): four additive, nullable
   // columns on run_process. A legacy witness has NULL in all four, which
@@ -14801,7 +14864,7 @@ export class Store {
    */
   enqueueRoutineEpisode(
     prefix: string,
-    notification: { kind: string; subject: string; body: string; pushClass?: "decision" | "pick" | "merge" | "attention"; link?: string },
+    notification: Omit<NotificationInput, "dedupeKey">,
     suffix: string,
     now: Date,
   ): boolean {
@@ -14873,13 +14936,23 @@ export class Store {
    * minted console path a phone may be paged with — stamped here at
    * enqueue or never; subject and body never reach a push service. */
   enqueueNotification(
-    notification: { dedupeKey: string; kind: string; subject: string; body: string; pushClass?: "decision" | "pick" | "merge" | "attention"; link?: string },
+    notification: NotificationInput,
     now: Date,
   ): boolean {
+    const source = notification.source;
+    const run = source !== undefined && "run" in source ? this.getRun(source.run) : null;
+    const taskRef = source !== undefined && "taskRef" in source ? source.taskRef : run?.taskRef ?? null;
+    const ref = taskRef === null ? undefined : this.db.prepare("SELECT id, repo, external_id FROM task_ref WHERE id = ?").get(taskRef);
+    // Invalid or unplaced task references remain explicitly unknown. No guessed
+    // legacy backfill, and a producer cannot smuggle a project beside a run.
+    const scope = ref !== undefined && ref["repo"] != null ? "task"
+      : source !== undefined && "project" in source && source.project !== "" ? "project"
+      : source !== undefined && "installation" in source ? "installation" : "unknown";
+    const project = scope === "task" ? String(ref!["repo"]) : scope === "project" && source !== undefined && "project" in source ? source.project : null;
     const { changes } = this.db
       .prepare(
-        `INSERT OR IGNORE INTO notification (dedupe_key, kind, subject, body, created_at, push_class, link)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO notification (dedupe_key, kind, subject, body, created_at, push_class, link, provenance_scope, project, task_ref, task_id, source_run)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         notification.dedupeKey,
@@ -14889,6 +14962,7 @@ export class Store {
         now.toISOString(),
         notification.pushClass ?? null,
         notification.link ?? null,
+        scope, project, ref === undefined ? null : taskRef, ref === undefined ? null : String(ref["external_id"]), run?.id ?? null,
       );
     return Number(changes) > 0;
   }
@@ -14902,7 +14976,7 @@ export class Store {
    */
   enqueueEpisode(
     prefix: string,
-    notification: { kind: string; subject: string; body: string; pushClass?: "decision" | "pick" | "merge" | "attention"; link?: string },
+    notification: Omit<NotificationInput, "dedupeKey">,
     suffix: string,
     now: Date,
   ): boolean {
@@ -20860,6 +20934,114 @@ export class Store {
 
   // ---- delivery claiming ---------------------------------------------------
 
+  telegramDestination(binding: TelegramBinding): string {
+    return `telegram:${binding.botId}:${binding.chatId}:${binding.id}:${binding.approverGeneration}`;
+  }
+
+  /** The existing outbox, with a separate receipt for this exact pairing. */
+  claimTelegramDeliveries(binding: TelegramBinding, owner: string, ttlMs: number, now: Date, only: "all" | "urgent" = "all"): TelegramDelivery[] {
+    return this.transact(() => {
+      const destination = this.telegramDestination(binding);
+      this.db.prepare(`INSERT OR IGNORE INTO notification_delivery (notification, destination)
+        SELECT id, ? FROM notification WHERE resolved_at IS NULL`).run(destination);
+      if (this.telegramRetryAt(binding.botId) > now.toISOString()) return [];
+      const rows = this.db.prepare(`SELECT n.*, d.claim_generation FROM notification n
+        JOIN notification_delivery d ON d.notification = n.id AND d.destination = ?
+        WHERE n.resolved_at IS NULL AND d.delivered_at IS NULL
+          AND (d.claim_owner IS NULL OR d.claim_expires_at <= ?)
+          AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?)
+          AND (? = 'all' OR d.attempts > 0 OR n.dedupe_key LIKE 'decision:%' OR n.push_class = 'attention'
+            OR EXISTS (SELECT 1 FROM notification urgent
+              WHERE urgent.task_ref = n.task_ref AND urgent.id > n.id AND urgent.resolved_at IS NULL
+                AND (urgent.dedupe_key LIKE 'decision:%' OR urgent.push_class = 'attention')))
+        ORDER BY n.id`).all(destination, now.toISOString(), now.toISOString(), only);
+      return rows.map(row => {
+        this.db.prepare(`UPDATE notification_delivery SET claim_owner = ?, claim_expires_at = ?,
+          claim_generation = claim_generation + 1 WHERE notification = ? AND destination = ?`)
+          .run(owner, new Date(now.getTime() + ttlMs).toISOString(), Number(row["id"]), destination);
+        return { ...readNotification(row), destination, claimGeneration: Number(row["claim_generation"]) + 1 };
+      });
+    });
+  }
+
+  telegramRetryAt(botId: string): string {
+    return String(this.db.prepare("SELECT next_attempt_at FROM telegram_retry WHERE bot_id = ?").get(botId)?.["next_attempt_at"] ?? "");
+  }
+
+  deferTelegram(botId: string, until: string): void {
+    this.db.prepare(`INSERT INTO telegram_retry (bot_id, next_attempt_at) VALUES (?, ?)
+      ON CONFLICT (bot_id) DO UPDATE SET next_attempt_at = MAX(next_attempt_at, excluded.next_attempt_at)`).run(botId, until);
+  }
+
+  /** Synchronous final fence, called AFTER each asynchronous enrollment read. */
+  telegramDeliveryProblem(row: TelegramDelivery, binding: TelegramBinding, owner: string, projects: readonly string[], now: Date, batch: readonly number[] = [row.id]): string | null {
+    const live = this.liveTelegramBinding(binding.botId);
+    if (live?.id !== binding.id || live.approverGeneration !== binding.approverGeneration ||
+        this.accountOf(binding.approver)?.role !== "approver") return "Telegram pairing or actor authorization changed";
+    if (row.destination !== this.telegramDestination(live)) return "Telegram destination changed";
+    if (!this.telegramClaimHeld(row, owner, now)) return "Telegram delivery claim expired or changed";
+    if (this.telegramRetryAt(binding.botId) > now.toISOString()) return "Telegram rate limit is still active";
+    const current = this.db.prepare("SELECT * FROM notification WHERE id = ?").get(row.id);
+    if (current === undefined || current["resolved_at"] !== null) return "Notification no longer needs delivery";
+    if (row.scope === "unknown") return "Notification has no trusted project provenance";
+    if (row.scope === "installation") {
+      if (!this.isInstanceOperator(binding.approver)) return "Installation notification requires instance access";
+    } else {
+      if (row.project === null || !projects.includes(row.project) || !this.accountCanAccess(binding.approver, row.project)) return "Notification project is not currently authorized and enrolled";
+      if (row.scope === "task") {
+        const ref = this.db.prepare("SELECT repo, external_id FROM task_ref WHERE id = ?").get(row.taskRef);
+        if (ref === undefined || ref["repo"] !== row.project || ref["external_id"] !== row.taskId ||
+            (row.run !== null && this.getRun(row.run)?.taskRef !== row.taskRef)) return "Notification task provenance changed";
+      }
+    }
+    if (row.taskRef !== null) {
+      const earlier = this.db.prepare(`SELECT n.id FROM notification n
+        LEFT JOIN notification_delivery d ON d.notification = n.id AND d.destination = ?
+        WHERE n.task_ref = ? AND n.id < ? AND n.resolved_at IS NULL AND d.delivered_at IS NULL`)
+        .all(row.destination, row.taskRef, row.id);
+      if (earlier.some(one => !batch.includes(Number(one["id"])))) return "Earlier task notification is still undelivered";
+    }
+    return null;
+  }
+
+  private telegramClaimHeld(row: TelegramDelivery, owner: string, now: Date): boolean {
+    return this.db.prepare(`SELECT 1 FROM notification_delivery WHERE notification = ? AND destination = ?
+      AND claim_owner = ? AND claim_generation = ? AND claim_expires_at > ? AND delivered_at IS NULL`)
+      .get(row.id, row.destination, owner, row.claimGeneration, now.toISOString()) !== undefined;
+  }
+
+  /** A confirmed network message remains history even if authority changed
+   * while it was in flight. It only binds the OLD destination, never new work. */
+  recordTelegramMessage(row: TelegramDelivery, binding: TelegramBinding, messageId: string, now: Date): void {
+    if (row.destination !== this.telegramDestination(binding)) throw new Error("Telegram message destination mismatch");
+    this.db.prepare(`INSERT OR IGNORE INTO telegram_outbound_message
+      (binding, bot_id, chat_id, message_id, notification, destination, project, task_ref, task_id, source_run, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(binding.id, binding.botId, binding.chatId, messageId, row.id, row.destination, row.project, row.taskRef, row.taskId, row.run, now.toISOString());
+  }
+
+  finalizeTelegramDelivery(row: TelegramDelivery, binding: TelegramBinding, owner: string,
+    outcome: { ok: true; receipt: string | null } | { ok: false; error: string; retryAt?: string }, now: Date): boolean {
+    return this.transact(() => {
+      if (!this.telegramClaimHeld(row, owner, now) || row.destination !== this.telegramDestination(binding)) return false;
+      if (outcome.ok && (this.liveTelegramBinding(binding.botId)?.id !== binding.id || this.accountOf(binding.approver)?.role !== "approver")) return false;
+      this.db.prepare(`UPDATE notification_delivery SET attempts = attempts + 1, last_attempt_at = ?,
+        delivered_at = ?, receipt = ?, last_error = ?, next_attempt_at = ?, claim_owner = NULL, claim_expires_at = NULL
+        WHERE notification = ? AND destination = ? AND claim_owner = ? AND claim_generation = ?`)
+        .run(now.toISOString(), outcome.ok ? now.toISOString() : null, outcome.ok ? outcome.receipt : null,
+          outcome.ok ? null : outcome.error, outcome.ok ? null : outcome.retryAt ?? new Date(now.getTime() + 1_000).toISOString(),
+          row.id, row.destination, owner, row.claimGeneration);
+      return true;
+    });
+  }
+
+  /** Read receipts without changing the meaning of shell/webhook history. */
+  telegramDeliveries(binding: TelegramBinding): Notification[] {
+    return this.db.prepare(`SELECT n.*, d.attempts, d.last_attempt_at, d.last_error, d.delivered_at, d.receipt
+      FROM notification n JOIN notification_delivery d ON d.notification = n.id WHERE d.destination = ? ORDER BY n.id`)
+      .all(this.telegramDestination(binding)).map(readNotification);
+  }
+
   /**
    * Claim pending notifications for one deliverer. Two deliverers — the
    * bridge and `outbox deliver` — select-then-send-then-record, and without
@@ -20970,7 +21152,12 @@ export class Store {
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM notification
-          WHERE delivered_at IS NULL AND resolved_at IS NULL
+          WHERE resolved_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM notification_delivery d
+              JOIN telegram_binding b ON d.destination = 'telegram:' || b.bot_id || ':' || b.chat_id || ':' || b.id || ':' || b.approver_generation
+              JOIN approver a ON a.name = b.approver AND a.generation = b.approver_generation
+              WHERE d.notification = notification.id AND d.delivered_at IS NOT NULL
+                AND b.revoked_at IS NULL AND a.revoked_at IS NULL)
             AND NOT (dedupe_key LIKE 'decision:%' OR COALESCE(push_class, '') = 'attention')`,
       )
       .get();
@@ -21473,6 +21660,11 @@ function readNotification(row: Record<string, unknown>): Notification {
   return {
     id: Number(row["id"]),
     dedupeKey: String(row["dedupe_key"]),
+    scope: row["provenance_scope"] as Notification["scope"],
+    project: row["project"] == null ? null : String(row["project"]),
+    taskRef: row["task_ref"] == null ? null : Number(row["task_ref"]),
+    taskId: row["task_id"] == null ? null : String(row["task_id"]),
+    run: row["source_run"] == null ? null : Number(row["source_run"]),
     kind: String(row["kind"]),
     subject: String(row["subject"]),
     body: String(row["body"]),

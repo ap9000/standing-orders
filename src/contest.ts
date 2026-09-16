@@ -510,6 +510,7 @@ export function maybeAggregate(store: Store, contestId: number, now: Date): Cont
     const taskId = store.externalIdFor(contest.taskRef) ?? `ref ${contest.taskRef}`;
     store.enqueueNotification(
       {
+        source: { taskRef: contest.taskRef },
         dedupeKey: `contest-${target}:${contestId}`,
         kind: "contest-finished",
         // Only a PICKABLE finish pushes (arc 3): exhausted has nothing to tap.
@@ -888,6 +889,7 @@ export async function sweepContestCleanup(
     attention += 1;
     store.enqueueNotification(
       {
+        source: { taskRef: store.getContest(contestant.contest)?.taskRef ?? -1 },
         dedupeKey: `contest-cleanup:${contestant.id}`,
         kind: "contest-cleanup",
         subject: `a tournament checkout needs a look: agent ${contestant.ordinal}`,
@@ -921,6 +923,7 @@ export function escalateOverdueContests(store: Store, now: Date): number {
     const days = Math.floor((now.getTime() - new Date(since).getTime()) / 86_400_000);
     store.enqueueNotification(
       {
+        source: { taskRef: contest.taskRef },
         dedupeKey: `contest-overdue:${contest.id}`,
         kind: "contest-overdue",
         subject: `a tournament has waited ${days} days: ${taskId}`,

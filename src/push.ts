@@ -373,6 +373,7 @@ export async function pushPass(
       store.enqueueEpisode(
         `push-credentials:${keys.fingerprint}`,
         {
+          source: { installation: true },
           kind: "push-credentials",
           subject: "push credentials were rejected",
           body: "the push service refused this console's signing key — if the key file was replaced, phones must re-enroll from /settings",

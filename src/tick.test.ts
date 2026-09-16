@@ -1,3 +1,4 @@
+import { saveRepos } from "./repos.js";
 /**
  * The M1 acceptance test, end to end against real git:
  * one task goes queued → branch → commit, with nobody typing the steps.
@@ -1943,6 +1944,7 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     pool = join(base, "pool");
     script.calls = [];
     script.updates = [];
+    await saveRepos(join(base, "repos.json"), [repo]);
     await mkdir(repo, { recursive: true });
     await git(["init", "-q", "-b", "main"]);
     await git(["config", "user.email", "test@example.com"]);

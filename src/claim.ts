@@ -1026,6 +1026,7 @@ export function finalizeParkHeld(
     for (const artifact of artifactIds) store.linkEvidence(decisionId, artifact);
     store.enqueueNotification(
       {
+        source: { run: runId },
         dedupeKey: `decision:${decisionId}`,
         kind: "decision",
         subject: `${taskId} asked a question mid-session`,
@@ -1160,6 +1161,7 @@ export function finalizeParkFenced(
     }
     store.enqueueNotification(
       {
+        source: { run: runId },
         dedupeKey: `decision:${decisionId}`,
         kind: "decision",
         subject: `${taskId} parked a decision`,
@@ -1230,6 +1232,7 @@ export function finalizeMalformedFenced(
     store.finishRun(runId, { outcome: "failed", reason: "malformed-decision", now });
     store.enqueueNotification(
       {
+        source: { run: runId },
         dedupeKey: `malformed:${runId}`,
         kind: "malformed-decision",
         pushClass: "attention",
@@ -1426,6 +1429,7 @@ export function finalizeFailureFenced(
       );
       store.enqueueNotification(
         {
+          source: { run: runId },
           dedupeKey: `commit-failure:${runId}`,
           kind: "commit-failure",
           pushClass: "attention",
@@ -1458,6 +1462,7 @@ export function finalizeFailureFenced(
       );
       store.enqueueNotification(
         {
+          source: { run: runId },
           dedupeKey: `stalled:${run.taskRef}`,
           kind: "attempts-exhausted",
           pushClass: "attention",
@@ -1487,6 +1492,7 @@ export function finalizeFailureFenced(
     );
     store.enqueueNotification(
       {
+        source: { run: runId },
         dedupeKey: `run:${runId}:failed`,
         kind: "build-failed",
         subject: `${taskId}: attempt failed (${failureClass}), retry ${strikes}/${MAX_STRIKES}`,
@@ -1651,6 +1657,7 @@ export function finalizePlanFenced(
         store.finishRun(runId, { outcome: "refused", reason: "stale-source", now });
         store.enqueueNotification(
           {
+            source: { run: runId },
             dedupeKey: `plan-stale-source:${run.taskRef}:${runId}`,
             kind: "plan-stale-source",
             link: `/t/${encodeURIComponent(taskId)}`,
@@ -1743,6 +1750,7 @@ export function finalizePlanFenced(
     }
     store.enqueueNotification(
       {
+        source: { run: runId },
         dedupeKey: `plan:${run.taskRef}:${runId}`,
         kind: "plan-ready",
         subject: autoApproved ? `${taskId}: unchanged plan auto-approved` : `${taskId}: plan ready for review${contractChanges.length === 0 ? "" : ` — ${contractChanges.length} contract change${contractChanges.length === 1 ? "" : "s"} to check`}`,
@@ -1894,6 +1902,7 @@ export function finalizeRevisionFenced(
     store.finishRun(runId, { outcome: "refused", reason: applied ? "plan-revised" : "plan-revision-blocked", now });
     store.enqueueNotification(
       {
+        source: { run: runId },
         dedupeKey: `plan-revision:${taskRef}:${revisionId}`,
         kind: applied ? "plan-revised" : "plan-revision-blocked",
         ...(applied ? {} : { pushClass: "attention" as const }),
@@ -1980,6 +1989,7 @@ export function finalizePlanFailureFenced(
       );
       store.enqueueNotification(
         {
+          source: { run: runId },
           dedupeKey: `${malformedKind}:${runId}`,
           kind: malformedKind,
           pushClass: "attention",
@@ -2007,6 +2017,7 @@ export function finalizePlanFailureFenced(
       );
       store.enqueueNotification(
         {
+          source: { run: runId },
           dedupeKey: `plan-stalled:${run.taskRef}`,
           kind: "plan-attempts-exhausted",
           pushClass: "attention",
@@ -2035,6 +2046,7 @@ export function finalizePlanFailureFenced(
     );
     store.enqueueNotification(
       {
+        source: { run: runId },
         dedupeKey: `plan-run:${runId}:failed`,
         kind: "plan-failed",
         subject: `${taskId}: planning attempt failed, retry ${strikes}/${MAX_PLAN_STRIKES}`,
@@ -2110,6 +2122,7 @@ export function finalizeScoutFenced(
     }
     store.enqueueNotification(
       {
+        source: { run: runId },
         dedupeKey: `report:${run.taskRef}:${runId}`,
         kind: "report-ready",
         subject: `${taskId}: report ready — ${oneLine(report.title, 120)}`,
@@ -2188,6 +2201,7 @@ export function finalizeScoutFailureFenced(
       );
       store.enqueueNotification(
         {
+          source: { run: runId },
           dedupeKey: `${malformedKind}:${runId}`,
           kind: malformedKind,
           pushClass: "attention",
@@ -2216,6 +2230,7 @@ export function finalizeScoutFailureFenced(
       db.prepare("UPDATE task SET state = 'failed', updated_at = ? WHERE id = ?").run(now.toISOString(), taskId);
       store.enqueueNotification(
         {
+          source: { run: runId },
           dedupeKey: `stalled:${run.taskRef}`,
           kind: "attempts-exhausted",
           pushClass: "attention",
@@ -2242,6 +2257,7 @@ export function finalizeScoutFailureFenced(
     );
     store.enqueueNotification(
       {
+        source: { run: runId },
         dedupeKey: `run:${runId}:failed`,
         kind: "scout-failed",
         subject: `${taskId}: scouting attempt failed, retry ${strikes}/${MAX_STRIKES}`,

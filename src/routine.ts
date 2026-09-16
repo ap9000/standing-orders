@@ -397,7 +397,7 @@ export function fireRoutine(
     if (!manual && error.page !== null) {
       store.enqueueRoutineEpisode(
         `routine-route:${routineId}`,
-        { kind: "routine-blocked", pushClass: "attention", link: `/routines/${routineId}`, subject: error.page.subject, body: error.page.body },
+        { source: { project: store.getRoutine(routineId)?.repo ?? "" }, kind: "routine-blocked", pushClass: "attention", link: `/routines/${routineId}`, subject: error.page.subject, body: error.page.body },
         now.toISOString(),
         now,
       );
@@ -539,7 +539,7 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
         // recurrence (Codex review, L1) — the slot stamp keys each afresh.
         store.enqueueRoutineEpisode(
           page.prefix,
-          { kind: "routine-blocked", subject: page.subject, body: page.body, pushClass: "attention", link: `/routines/${routineId}` },
+          { source: { project: routine.repo }, kind: "routine-blocked", subject: page.subject, body: page.body, pushClass: "attention", link: `/routines/${routineId}` },
           scheduledFor,
           now,
         );

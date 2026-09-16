@@ -31,6 +31,24 @@ const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: str
   route: { routeDigest: "legacy", phase, provider, model, chosen: "legacy" as const },
 });
 
+test("notification provenance comes from trusted records and a duplicate cannot rebind its identity", () => {
+  const store = openStore(":memory:");
+  try {
+    store.createTask({ id: "a", title: "a" }, T0);
+    const taskRef = store.refFor(BUILT_IN, "a").id;
+    store.placeTask(taskRef, "/project/a");
+    const run = store.startRun({ taskRef, leaseId: "a", runner: "b", branch: "a", worktree: "/a", ...bareLegacy("build"), now: T0 });
+    expect(store.enqueueNotification({ source: { run }, dedupeKey: "event", kind: "ready", subject: "pretends to be b", body: "b", link: "/t/b" }, T0)).toBe(true);
+    expect(store.listNotifications()[0]).toMatchObject({ scope: "task", taskRef, taskId: "a", project: "/project/a", run });
+    expect(store.enqueueNotification({ source: { installation: true }, dedupeKey: "event", kind: "ready", subject: "new", body: "new" }, T0)).toBe(false);
+    expect(store.listNotifications()[0]).toMatchObject({ scope: "task", project: "/project/a", run });
+    for (const [key, source] of [["missing-run", { run: 999 }], ["missing-task", { taskRef: 999 }]] as const) {
+      store.enqueueNotification({ source, dedupeKey: key, kind: "task", subject: "a", body: "a", link: "/t/a" }, T0);
+    }
+    expect(store.listNotifications().slice(1).map(row => row.scope)).toEqual(["unknown", "unknown"]);
+  } finally { store.close(); }
+});
+
 describe("same task revision identity (read projection)", () => {
   test("point reads and family pages do not hydrate 1,200 unrelated tasks; counts aggregate before limits", () => {
     const store = openStore(":memory:");

@@ -837,6 +837,15 @@ function telegramReadProjects(context: { databaseFile: string }): () => Promise<
   };
 }
 
+/** A running follower must observe channel changes and token removal too. */
+function telegramCanDeliver(context: { databaseFile: string; telegramTokenFile: string }, token: string): () => boolean {
+  return () => {
+    const current = loadBotToken(process.env, context.telegramTokenFile);
+    return current?.token === token && effectivePrimary(process.env, dirname(context.databaseFile), true).channel === "telegram";
+  };
+}
+
+
 async function dispatch(
   command: string,
   positional: readonly string[],
@@ -941,6 +950,7 @@ async function dispatch(
       );
   }
 }
+
 
 /**
  * The backend a command is talking to, already wrapped in its guard.
@@ -2280,6 +2290,7 @@ async function tickCommand(
         // aggregation stays quiet ASSUMING this row already spoke.
         store.enqueueNotification(
           {
+            source: { run: resumeRun },
             dedupeKey: `decision:${racerDecision}`,
             kind: "decision",
             subject: `${taskId} parked a decision (${contestNoun(waiting.kind)} agent)`,
@@ -2371,6 +2382,7 @@ async function tickCommand(
     dispatched.push({ id: skippedMirror.taskId, outcome: "skipped", reason: skippedMirror.why });
     store.enqueueNotification(
       {
+        source: { taskRef: store.lookupRef(skippedMirror.taskId)?.id ?? -1 },
         dedupeKey: `mirror:${skippedMirror.taskId}:${skippedMirror.why}`,
         kind: "external-skipped",
         subject: `${skippedMirror.taskId} cannot dispatch`,
@@ -2771,6 +2783,7 @@ async function tickCommand(
           const home = ref.repo ?? repo;
           store.enqueueNotification(
             {
+              source: { taskRef: ref.id },
               dedupeKey: `gap:${home}:${parsed.kind}:${parsed.name}`,
               kind: "gap",
               // A gap that blocks work wants a person NOW (v4 review,
@@ -2972,6 +2985,7 @@ async function tickCommand(
             );
             store.enqueueNotification(
               {
+                source: { run: entry.runId },
                 dedupeKey: `decision:${contestantDecision}`,
                 kind: "decision",
                 subject: `${id} parked a decision (${contestNoun(admittedKind)} agent)`,
@@ -4240,6 +4254,7 @@ async function reconcileCommand(
       store.enqueueEpisode(
         `sync:${report.remoteRepo}`,
         {
+          source: { project: repo },
           kind: "sync-failed",
           pushClass: "attention",
           link: "/system",
@@ -4261,6 +4276,7 @@ async function reconcileCommand(
       // Lease ids are unique forever, so each recovery is its own episode.
       store.enqueueNotification(
         {
+          source: { taskRef: Number(store.handle.prepare("SELECT task_ref FROM claim WHERE lease_id = ?").get(leaseId)?.["task_ref"] ?? -1) },
           dedupeKey: `recover:${leaseId}`,
           kind: "runner-recovered",
           subject: `${one.runner} went dead holding work`,
@@ -4275,12 +4291,11 @@ async function reconcileCommand(
       // interrupted exactly once, and said so exactly once.
       store.enqueueNotification(
         {
+          source: { run: runId },
           dedupeKey: `recover-run:${runId}`,
           kind: "runner-recovered",
           subject: `${one.runner} went dead mid-attempt`,
-          body: `Run #${runId} was still open with no live lease; it is now finished as interrupted. ${
-            one.requeued.length > 0 ? `Requeued: ${one.requeued.join(", ")}.` : "Nothing was requeued — a newer claim or a finished outcome owns its task."
-          }`,
+          body: `Run #${runId} was still open with no live lease; it is now finished as interrupted. Check this task's current state in the console.`,
           link: `/r/${runId}`,
         },
         clock(),
@@ -4303,6 +4318,7 @@ async function reconcileCommand(
     for (const path of adoption.adopted) {
       store.enqueueNotification(
         {
+          source: { project: repo },
           dedupeKey: `adopt:${path}:${clock().toISOString()}`,
           kind: "worktree-adopted",
           subject: `Adopted an unrecorded worktree`,
@@ -5132,7 +5148,7 @@ async function webhookCommand(
       return fail(write, json, "webhook test", "unconfigured", "no webhook configured — `standing-orders webhook set slack|discord <url>`", EXIT.refused);
     }
     store.enqueueNotification(
-      { dedupeKey: `webhook-test:${clock().getTime()}`, kind: "test", subject: "standing-orders webhook test", body: "If you can read this, the mirror works. Acting happens in the console." },
+      { source: { installation: true }, dedupeKey: `webhook-test:${clock().getTime()}`, kind: "test", subject: "standing-orders webhook test", body: "If you can read this, the mirror works. Acting happens in the console." },
       clock(),
     );
     const report = await webhookPass(store, { targets, consoleUrl: loadConsoleUrl(process.env, dir), clock });
@@ -7494,10 +7510,9 @@ async function runWatchLoop(args: {
   const followSource = loadBotToken(process.env, context.telegramTokenFile);
   if (followSource !== null) {
     const transport = context.telegramTransport ?? createTransport(followSource.token);
-    const followerPrimary = effectivePrimary(process.env, dirname(context.databaseFile), true);
     follower = followBridge(store, {
       readProjects: telegramReadProjects(context),
-      ...(followerPrimary.channel === "telegram" ? {} : { deliver: false }),
+      canDeliver: telegramCanDeliver(context, followSource.token),
       botId: followSource.botId,
       transport,
       signal: followController.signal,
@@ -8508,6 +8523,7 @@ async function upCommand(
       // "settled conservatively or paged".
       store.enqueueNotification(
         {
+          source: { run: runId },
           dedupeKey: `held-shutdown-unsettled:${runId}`,
           kind: "attended-unsettled",
           subject: `an attended session did not settle before shutdown (run #${runId})`,
@@ -8729,6 +8745,8 @@ async function bridgeCommand(
     try {
       const report = await followBridge(store, {
         readProjects: telegramReadProjects(context),
+        canDeliver: telegramCanDeliver(context, source.token),
+        ...(flags.has("inbound-only") ? { deliver: false } : {}),
         botId: source.botId,
         transport,
         signal: controller.signal,
@@ -8757,6 +8775,7 @@ async function bridgeCommand(
 
   const passed = await bridgePass(store, {
     readProjects: telegramReadProjects(context),
+    canDeliver: telegramCanDeliver(context, source.token),
     botId: source.botId,
     transport,
     clock,

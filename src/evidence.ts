@@ -819,6 +819,7 @@ export async function captureTerminalDiff(
   if (hits.length > 0) {
     store.enqueueNotification(
       {
+        source: { run: runId },
         dedupeKey: `secret:${runId}`,
         kind: "secret-detected",
         pushClass: "attention",

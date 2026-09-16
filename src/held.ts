@@ -840,6 +840,7 @@ export async function sweepHeldOrphans(
         // Page, keep custody, leave 'fencing' for a later helper (v5 P4).
         store.enqueueNotification(
           {
+            source: { run: session.run },
             dedupeKey: `held:${session.run}:unkillable`,
             kind: "attention",
             subject: `run ${session.run}: a held agent process could not be stopped`,
