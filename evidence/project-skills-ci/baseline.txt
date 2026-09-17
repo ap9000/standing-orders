@@ -1,0 +1,11 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Documents/standing-orders-project-skills-ci
+
+(node:49525) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/migration-v56-recipes.test.ts > v55 migration preserves every historical row and refuses missing authority or launch history 4933ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  22:15:22
+   Duration  5.69s (transform 533ms, setup 11ms, import 638ms, tests 4.93s, environment 0ms)
