@@ -668,6 +668,7 @@ export type VerifyCommandFacts =
       attemptFailed: true;
       failure?:
         | "spawn-failed"
+        | "timed-out"
         | "dependency-missing"
         | "setup-stale"
         | "setup-failed"
@@ -1081,6 +1082,8 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
           return "the retried verification command timed out after automatic recovery";
         case "custody-lost":
           return "automatic recovery stopped because this worker no longer owned the build";
+        case "timed-out":
+          return "the approved verification command timed out before checks finished";
         case "spawn-failed":
         default:
           return "the approved verification command could not be run";

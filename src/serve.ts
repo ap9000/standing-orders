@@ -1,3 +1,4 @@
+import { CHAT_ACTIONS, sharedActionPayload, sharedActionNeedsReview, sharedActionReviewPath, mintSharedActionReview } from './chat-actions.js';
 import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkillTest, skillTestResult, skillsView, testSkill, type SkillFile } from "./project-skills.js";
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { changeLearning, learningView } from "./project-learning.js";
@@ -959,6 +960,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
   function actionTarget(url: URL, who: Who, request: IncomingMessage, body: URLSearchParams | null = null): { repo: string | null; taskId: string | null; runId: number | null; action: string } {
+    const shared=/^\/chat\/(?:action\/([0-9]{1,15})|proposal\/([0-9]{1,15})\/(?:confirm|dismiss))$/.exec(url.pathname);
+    if(shared){const proposal=store.getMateProposal(Number(shared[1]??shared[2])),action=proposal?.kind==='action'?sharedActionPayload(proposal.payload):null;if(action&&proposal&&store.getMateThread(proposal.thread)?.approver===who.name)return {repo:action.repo,taskId:typeof action.request['task']==='string'?action.request['task']:null,runId:typeof action.request['run']==='number'?action.request['run']:null,action:action.operation};}
     if (url.pathname.startsWith('/settings/skills')) return {repo:body?.get('repo')??url.searchParams.get('repo')??projectOf(who,request)??null,taskId:null,runId:null,action:body?'project skills change':'project skills view'};
     if (url.pathname.startsWith('/settings/knowledge')) return {repo:body?.get('repo')??url.searchParams.get('repo')??projectOf(who,request)??null,taskId:null,runId:null,action:body?'project knowledge change':'project knowledge view'};
     const task = matchTaskPath(url.pathname, "(?:/([a-z-]+))?$");
@@ -981,6 +984,11 @@ export function createDecisionServer(options: ServeOptions): Server {
   function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
     if (!restricted()) return true;
     const path = url.pathname;
+    if((request.method==='GET'&&/^\/chat\/action\/[0-9]{1,15}$/.test(path))||(request.method==='POST'&&/^\/chat\/proposal\/[0-9]{1,15}\/(confirm|dismiss)$/.test(path))){
+      const proposal=store.getMateProposal(Number(path.split('/')[3])),action=proposal?.kind==='action'?sharedActionPayload(proposal.payload):null;
+      if(action&&proposal&&store.getMateThread(proposal.thread)?.approver===who.name&&visible(action.repo)&&store.accountCanAccess(who.name,action.repo))return true;
+      refuse(response,who,404,'No such action in your projects.','/projects');return false;
+    }
     const read = new Set(["/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
     const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
@@ -2616,6 +2624,25 @@ export function createDecisionServer(options: ServeOptions): Server {
         { chrome: chromeFor(project, "settings"), ...(catalog === null ? {} : { functional: { script: openRouterPickerScript() } }) }));
     }
 
+    const sharedReview = /^\/chat\/action\/([0-9]{1,15})$/.exec(url.pathname);
+    if (sharedReview !== null) {
+      if(who.via!=='cookie'||who.role!=='approver')return refuse(response,who,403,'Sign in to review this action.','/projects');
+      const principal=matePrincipal(who);if(principal===null)return refuse(response,who,403,'Your access changed. Sign in again.','/chat');
+      try {
+        const id=Number(sharedReview[1]),saved=store.getMateProposal(id),savedAction=saved?.kind==='action'?sharedActionPayload(saved.payload):null;
+        if(saved&&savedAction&&saved.state!=='pending'&&store.getMateThread(saved.thread)?.approver===principal.name&&principal.repos.includes(savedAction.repo)&&store.accountCanAccess(principal.name,savedAction.repo)) {
+          const task = typeof saved.outcome?.['taskId']==='string' ? saved.outcome['taskId'] : typeof savedAction.request['task']==='string' ? savedAction.request['task'] : null;
+          const destination = task ? taskHref(task) : `/settings/${savedAction.operation.startsWith('skill_')?'skills':'knowledge'}?repo=${encodeURIComponent(savedAction.repo)}`;
+          const said = typeof saved.outcome?.['said']==='string' ? saved.outcome['said'] : saved.state==='dismissed'?'Action dismissed.':saved.state==='expired'?'This proposal expired. Ask for a fresh proposal.':'This action has no completed outcome yet.';
+          return sendScreen(response,200,screen('Action outcome',`<h1>${escape(savedAction.title)}</h1><p>${escape(said)}</p><a class="button-link" href="${escape(destination)}">${task?'Open task':'Open project settings'}</a>`,{chrome:chromeFor(savedAction.repo,'chat')}));
+        }
+        const review=mintSharedActionReview(store,principal,id,evidenceRoot,clock()),action=review.payload;
+        const terms=action.terms.map(term=>`<p style="white-space:pre-wrap;overflow-wrap:anywhere">${escape(term)}</p>`).join('');
+        const evidenceLink=action.operation==='result_accept'?`<a href="/r/${Number(action.request['run'])}">Inspect this result</a>`:'';
+        const content=`<section class="shared-action"><h1>${escape(action.title)}</h1>${evidenceLink}${terms}<form method="post" action="/chat/proposal/${id}/confirm">${hiddenFields({csrf:who.session.csrf,nonce:review.nonce,return:'/chat'})}<label class="arm"><input type="checkbox" name="confirm" value="yes" required>I confirm this exact action</label>${CHAT_ACTIONS[action.operation].password?'<label>Your password<input type="password" name="token" autocomplete="current-password" required></label>':''}<button>${escape(CHAT_ACTIONS[action.operation].label)}</button></form></section>`;
+        return sendScreen(response,200,screen('Review action',content,{chrome:chromeFor(action.repo,'chat')}));
+      }catch(error){return refuse(response,who,409,error instanceof Error?error.message:'This action could not be reviewed.','/chat');}
+    }
     if (url.pathname === "/settings/skills") {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
       const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
@@ -5673,9 +5700,13 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!dismissMateProposal(store, principal, id, now)) noteMate(who.session.csrf, null, "that proposal was already acted on");
         return redirect(response, chatReturnWithLatest(back));
       }
-      const outcome = confirmMateProposal(store, principal, id, now, { confirm: body.get("confirm") === "yes", via: "web", evidenceRoot, held: options.attended?.coordinator });
+      const outcome = confirmMateProposal(store, principal, id, now, { confirm: body.get("confirm") === "yes", via: "web", evidenceRoot, held: options.attended?.coordinator, ...(body.has("nonce") ? {actionReview:{nonce:body.get("nonce")??"",password:body.get("token")??""}} : {}) });
       if (!outcome.ok && (outcome.reason === "not-yours" || outcome.reason === "standing")) {
         return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, back);
+      }
+      if (outcome.kind === "action" && body.has("nonce")) {
+        if (!outcome.ok && outcome.reason === "needs-confirm") return refuse(response,who,409,outcome.said,sharedActionReviewPath(id));
+        return redirect(response,sharedActionReviewPath(id));
       }
       if (!outcome.ok && outcome.reason === "needs-confirm") noteMate(who.session.csrf, null, outcome.said);
       // A confirmed task proposal leads to the task it actually created
@@ -11129,6 +11160,11 @@ const STYLE = `
   .answer-options { list-style: none; padding: 0; margin: 0.4rem 0; }
   .answer-options li { padding: 0.35rem 0.6rem; border-left: 3px solid var(--border); margin: 0.25rem 0; }
   .answer-options li.picked { border-left-color: var(--foreground); }
+  .shared-action { max-width: 49rem; overflow-wrap: anywhere; }
+  .shared-action form { margin-top: 1.5rem; }
+  .shared-action label.arm { display: flex; align-items: center; gap: .6rem; min-height: 44px; padding-block: .4rem; }
+  .shared-action label.arm input { flex: none; width: 20px; height: 20px; }
+  .shared-action button { white-space: nowrap; }
   .proposal label.arm { display: inline-flex; gap: 0.35rem; align-items: center; margin-right: 0.5rem; font-size: 0.85rem; }
   .coordinator-proposals .card { margin: 0.5rem 0; }
   .workspace-head { display: flex; align-items: center; gap: .5rem; min-width: 0; }
@@ -13793,6 +13829,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     agents: { label: "Agents change", action: "change agents", icon: `<circle cx="12" cy="12" r="3"/><path d="M12 2v3"/><path d="M12 19v3"/><path d="m4.9 4.9 2.2 2.2"/><path d="m16.9 16.9 2.2 2.2"/><path d="M2 12h3"/><path d="M19 12h3"/><path d="m4.9 19.1 2.2-2.2"/><path d="m16.9 7.1 2.2-2.2"/>` },
     review: { label: text("operation") === "revise" ? "Changes to make" : "Note for later", action: text("operation") === "revise" ? "Request changes" : "Save for later", icon: `<path d="M4 5h16v12H8l-4 3z"/>` },
     control: { label: "Open control", action: "Open", icon: `<path d="M5 12h14m-6-6 6 6-6 6"/>` },
+    action: { label: text("title") || "Review action", action: sharedActionPayload(payload) ? CHAT_ACTIONS[sharedActionPayload(payload)!.operation].label : "Unavailable", icon: `<path d="M5 12h14m-6-6 6 6-6 6"/>` },
     task_action: { label: payload["operation"] === "stop" ? "Stop task?" : payload["operation"] === "resume" ? "Resume task?" : "Task update", action: isChatTaskAction(payload["operation"]) ? CHAT_TASK_ACTIONS[payload["operation"]].label : "Unavailable", icon: `<path d="M5 12h14m-6-6 6 6-6 6"/>` },
   };
   const presentation = presentations[view.kind];
@@ -13819,6 +13856,9 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
         ["out of scope", escape(text("not"))],
         ["may touch", Array.isArray(payload["touches"]) ? (payload["touches"] as string[]).map(one => `<span class="mono">${escape(one)}</span>`).join("<br>") : ""],
       );
+  } else if (view.kind === "action") {
+    const action=sharedActionPayload(payload);
+    what=action===null?'<p>This action is unavailable.</p>':(sharedActionNeedsReview(action)?'':action.terms.map(term=>`<p style="white-space:pre-wrap;overflow-wrap:anywhere">${escape(term)}</p>`).join(''));
   } else if (view.kind === "task_action") {
     const operation = payload["operation"];
     what = `<h3>${escape(text("taskTitle") || task)}</h3>` +
@@ -13955,7 +13995,9 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   let acts = "";
   if (view.state === "pending" && !inert) {
     acts =
-      view.kind === "control"
+      view.kind === "action" && sharedActionPayload(payload)!==null && sharedActionNeedsReview(sharedActionPayload(payload)!)
+        ? `<a class="button-link" href="${sharedActionReviewPath(view.id)}">Review action</a><form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button class="quiet">Dismiss</button></form>`
+        : view.kind === "control"
         ? (isChatControl(payload["control"]) ? `<a class="button-link" href="${escape(chatControlHref(payload["control"], task, payload["run"], payload["project"]))}">${escape(CHAT_CONTROLS[payload["control"]].label)}</a>` : `<p>Control unavailable.</p>`)
         : view.kind === "cancel"
         ? `<p class="meta">cancelling is armed on the task itself — <a href="${taskHref(task)}">open ${escape(task)}</a></p>` +

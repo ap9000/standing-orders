@@ -3429,6 +3429,23 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     expect(log).not.toContain("Project check · retry after setup");
   });
 
+  test("a verification timeout stays distinct from a command that never started", async () => {
+    claimIt();
+    approveScope();
+    bindRecoverySetup();
+    let calls = 0;
+    const req = request({ agent: agentWithProof(soundProof), verify: async () => {
+      calls++;
+      return { ...OK, code: 124, timedOut: true, stdout: "Checks started but did not finish" };
+    } });
+    expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+    expect(calls).toBe(1);
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "short", reasons: ["the approved verification command timed out before checks finished"] });
+    const receipt = store.artifactsFor(req.runId as number).find(isVerificationReceipt)!;
+    const saved = readVerifiedArtifact(join2(wt, ".evidence"), receipt);
+    expect(saved.ok && JSON.parse(saved.content.toString("utf8")).result.failure).toBe("timed-out");
+  });
+
   test("an ordinary failing check is refuted without replaying setup", async () => {
     claimIt();
     approveScope();
@@ -3931,6 +3948,21 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       const stored = readVerifiedArtifact(join2(wt, ".evidence"), proof);
       expect(stored.ok && JSON.parse(stored.content.toString("utf8")).changed).toEqual(["src/fixtures/smoke.mjs"]);
       expect(store.runsFor(taskRef).filter(one => one.role === "repair").map(one => one.reason)).toEqual(["proof-corrected"]);
+    });
+
+    test("an over-limit sealed inventory does not spend impossible proof-correction turns", async () => {
+      arrange();
+      const paths = ["src/fixtures/smoke.mjs", ...Array.from({ length: 64 }, (_, i) => `src/item-${i}.ts`)];
+      const oversized: Runner = async (file, args, options) => args.includes("--numstat")
+        ? { ...OK, stdout: paths.map(path => `1\t0\t${path}\0`).join("") }
+        : renameGit(file, args, options);
+      const correcting = correctingAgent(proofClaiming(paths.slice(0, 64), paths[0]!), sealed => sealed);
+      const req = request({ leaseId: "test-lease", agent: correcting.agent, git: oversized, verify });
+      expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
+      expect(correcting.calls()).toBe(1);
+      expect(store.runsFor(taskRef).filter(run => run.role === "repair")).toHaveLength(0);
+      expect(store.proofVerdictFor(req.runId as number)?.verdict).not.toBe("verified");
+      expect(store.proofVerdictFor(req.runId as number)?.reasons.join(" ")).toContain(paths.at(-1));
     });
 
     test("a sealed path the list left out is handed back the same way: the corrected inventory verifies", async () => {

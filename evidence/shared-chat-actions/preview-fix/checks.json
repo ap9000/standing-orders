@@ -1,0 +1,96 @@
+{
+  "synthetic": true,
+  "typecheck": "passed",
+  "focusedTests": {
+    "passed": 507,
+    "files": 6,
+    "log": "focused-tests.txt.gz",
+    "batches": [
+      {
+        "passed": 506,
+        "files": 6,
+        "command": "npx vitest run src/task-notifications.test.ts src/telegram.test.ts src/telegram-mate.test.ts src/reviewer.test.ts src/builder.test.ts src/proof.test.ts --reporter=json"
+      },
+      {
+        "passed": 137,
+        "files": 3,
+        "overlap": 136,
+        "command": "npx vitest run src/task-notifications.test.ts src/telegram.test.ts src/telegram-mate.test.ts --reporter=json"
+      }
+    ],
+    "logEncoding": "gzip",
+    "logSha256": "3e07d10f0f1f687889fd9b4fdf7bafc2f442e664accb753d8b19f337f357580f",
+    "decodedSha256": "dc278c3205505b0f5a5af159d0995cd3e59da50ce4d6bfc6cdcfe030bf5f6f3e",
+    "decodedBytes": 381967
+  },
+  "browserChecks": 39,
+  "uiReport": "ui-report.json",
+  "sourceSha256": {
+    "scripts/shared-chat-actions-proof.mjs": "812b79b97657a16f270818e6d34b78c99a87409a87f6fae527d37683d4db896d",
+    "src/chat-actions.test.ts": "4a0a84a153d62daab059541d55731c77df3670b835c64e1afc060b3804d12e18",
+    "src/chat-actions.ts": "c11b1ecf4be483e7a0fce8e998722d4a9abfe32d6d692ce7970c89cf20f7f4da",
+    "src/chat-display.ts": "04a0c4828fec1c5cf6778aaf14809313eb8ddd8980993b8da42ad5f40f4bc346",
+    "src/mate-contract.ts": "415e72f64caa78724a6eacbdc991536cc6cf9993019d8d9b53924e6649ed1a3c",
+    "src/mate-doors.ts": "919dfcdcd9e4d7b9e3b966a342ec80f252133ef2a4847d3c272ac7babf96e305",
+    "src/mate-tools.ts": "18b33c1b3891e6f9f65d425018afcb79c1ee2393baf8fd6c681f4f85af8fe3d9",
+    "src/mate.test.ts": "082db87db974fdfafc8da5f9445e314418b3516bd2f30e6075434e91c54fc55d",
+    "src/mate.ts": "1721493703565d23539184579bc430daa3d4ec4d9e04ac42ecae1c59c3e3662d",
+    "src/migration-v50-review-retries.test.ts": "98e471dbe622f7577995bfd0493031ca1470bf8150f44ceea31e1e5ac3aa86d1",
+    "src/migration-v53-process-custody.test.ts": "421a87a092d597e8f96e3c41ca59588fcf39131dec8e9e6910d0a99f2b02a8b6",
+    "src/migration-v58-project-learning.test.ts": "12191bc5a1d9f1925a43e788de405b5ab0d36663c8f7c96b49123d361e104611",
+    "src/migration-v61-telegram.test.ts": "3c4b2cd23bacbc7a02f3727f85db1e5b6cbebc0bb00ab123aa50db84f62fe884",
+    "src/migration-v62-telegram-conversation.test.ts": "36f9f44c10e05c3fa9b29f783c51fbeb15f114c0c98702628d449843b10b8452",
+    "src/migration-v63-telegram-delivery.test.ts": "f26990c8e3c652d1a410501c31dae05c5b7cfbf09c524219e3b94b5f0b8fdad0",
+    "src/migration-v64-telegram-images.test.ts": "736ed1f0cf328b8bd4bec474043829f19763d76213349fa23f9baf30bc5d535c",
+    "src/migration-v66-chat-actions.test.ts": "05eee59a29b48da88e44b8514d9ad92110d593fa743e254db9c26d61f4899f7e",
+    "src/project-knowledge.test.ts": "e3e58ffc4231edc88cff553d8c5d4a7fb24b3cf17d42bd5b9e2c91bea7c2db87",
+    "src/project-knowledge.ts": "6c1df79566d082e3a440dd043e54286fcd194a02aabd790f8aad2718a0dd794a",
+    "src/project-skills.ts": "67cf0cf40d73644f4cd4c50defc613ad8560dc3e0c5a8bb84b4ee52260d8b829",
+    "src/recipe-creator.test.ts": "dbaca5ae1d1849a4b7c92a707e3669362d041b804c92ed7a4ea49b4f9c2e5fe0",
+    "src/serve.ts": "9e859b77a3ac0d3c1937ef9f23ebaef3bad943c04405fbd281c2660646010baf",
+    "src/store.ts": "1310b3b73d6733b45ccd523f4277a66299c88f40cd30f75b14975fd20ce5ce2e",
+    "src/task-control.test.ts": "d82469db8ba4a25d21862f546d47981d4fc49b748ca737e4ffbfe66f09293385",
+    "src/telegram-mate.test.ts": "afb327422671388e6df89402bb6602402886d3d22c97be0dff01c4b212956162",
+    "src/telegram-mate.ts": "4ca368875ddee86412793f43476ff37310d31b1ea641c60575addaacb00bd9cb",
+    "src/telegram-status.ts": "cff97ceaad56444b83c23c2255e495ff104aa0c5634335326232ab134520b046",
+    "src/chat-schema.test.ts": "4119df350cf0e6fc3fe7b553fb287a9293b0fca1211407a51f7d6e26e578ea3e",
+    "src/builder.ts": "2da3363316640402c755bb9e604aaa44a218c4daa2cac26a5d002b5241346380",
+    "src/builder.test.ts": "081193b94818e6d80a6354a7b07aeba569018220e37ebffe3fdfb837e07216b0",
+    "src/dispose.ts": "f489d93a8aa90541f666d957fc4f8f1895c700a61c4aaf1bd810dba21aad7e43",
+    "src/reviewer.test.ts": "ab814a6ba2afed151ca0546d3d05d239280a1ee117606c3156d3835fd41f13e5",
+    "src/proof.ts": "496f601e06ff10de2aaf77095747113de86d5c75b93a2a0de780c5347af168bb",
+    "src/proof.test.ts": "0c6eb472bfd67c27e122198da09d09cd29e26193f836d84c608988c1cca32dc3",
+    "src/telegram-progress.ts": "33e502ad98b5311b288356f62af9951ba50848cb7b36c8d588e24908558dde0e",
+    "src/task-notifications.test.ts": "546a5995017cf1299fa1a0bb003017c18f16bb16a3444147571dd9458917e94c",
+    "src/telegram.ts": "feba483962ee04523a10018155858e8653231ad8f09a32d304fcb20a1ff6e572",
+    "src/telegram.test.ts": "50ed1429ec970af7839afa3ad7c7abd361fc25084890d73da3870589aee69677",
+    ".github/workflows/ci.yml": "b9aceb704d2f11c87003c71227413c9d893ac82810e03dd67230b742a9cca593"
+  },
+  "limits": [
+    "The Telegram layouts are synthetic previews of the exact message text and entity ranges, not screenshots of the Telegram app.",
+    "The real current Telegram card was edited and acknowledged by Telegram; physical-phone rendering is unverified.",
+    "The latest source still needs its own native full verification and independent review. The verification copy is now outside Documents and background access is confirmed.",
+    "Prior focused-test and browser evidence remains in commit b44bd47102eb13ebeb04449ec2fe4af4d8b792f4; this bundle contains refreshed evidence."
+  ],
+  "historicalEvidence": {
+    "commit": "b44bd47102eb13ebeb04449ec2fe4af4d8b792f4",
+    "path": "evidence/shared-chat-actions/preview-fix",
+    "status": "Previous candidate: 473 distinct focused tests and 31 browser checks. Retained in Git; not counted as tests of the new flow changes."
+  },
+  "nativeSourceVerification": {
+    "run": 1755,
+    "head": "a0be4800edb4b277082f5d235201084e9f239e3d",
+    "command": "npm run typecheck && npm test -- --run --reporter=dot --no-file-parallelism && npm run build",
+    "exitCode": 0,
+    "limitation": "All application source is unchanged. This packaging candidate still requires a fresh native final gate and independent review. The prior terminal patch was truncated and is retained without alteration."
+  },
+  "windowsCi": {
+    "reason": "Node24 parallel baseline hit test/hook timeouts in different files on two runs; all seven other checks passed.",
+    "change": "Run the same 18 Windows baseline test files sequentially. Internal contention tests and all timeouts are unchanged.",
+    "failedJobs": [
+      105361838462,
+      105364079697
+    ],
+    "validation": "Workflow parsed, exact test-file list preserved, other jobs unchanged. Windows CI still must pass for this candidate."
+  }
+}

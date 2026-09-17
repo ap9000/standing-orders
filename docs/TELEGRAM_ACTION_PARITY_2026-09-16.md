@@ -29,9 +29,12 @@ that waits for the operator's bot configuration and pairing.
 
 | Tool | Support | How the phone reaches it | Test | Remaining gap |
 | --- | --- | --- | --- | --- |
+| `get_action_status` | direct | Reads the exact saved shared action and its outcome, including completion through secure review. | Shared action lifecycle and secure-review regressions (`chat-actions.test.ts`) | none |
+| `get_actions` | direct | Lists the shared action catalogue and required inputs. | Shared action lifecycle and secure-review regressions (`chat-actions.test.ts`) | none |
+| `propose_action` | direct | Prepares exact shared skill, knowledge, approval, acceptance, review, cancel and resume actions. Short ordinary changes confirm here; protected or long changes use one secure review and record the result on the same proposal. | Shared action lifecycle and secure-review regressions (`chat-actions.test.ts`) | Secure review requires a working HTTPS console connection. Real transport verification is required. |
 | `recap` | direct | Read by the model during a phone turn over the enrolled ceiling. | journey turn (`telegram-mate.test.ts`, first test) reads through the engine | none |
 | `list_repos` | direct | Read during a turn; projects are r1..rN in enrollment order, as on the console. | ceiling digest equality with the console/CLI (first test) | none |
-| `get_skills` | direct | Reads the same project skill library and enabled versions as the console. Import, enable, disable and test use one project Skills link. | Project skills chat index, version read and project handoff regression (`project-skills.test.ts`) | Changes and tests require the signed-in console. |
+| `get_skills` | direct | Reads the same project skill library, saved selections and enabled versions as the console. Use propose_action for changes and tests. | Project skills chat index, version read and project handoff regression (`project-skills.test.ts`) | Skill import and long content require secure review. Folder and GitHub import still use the project Skills screen. |
 | `get_project_knowledge` | direct | Read during a turn. | engine read tools (`mate.test.ts`), same turn path | none |
 | `list_tasks` | direct | Read during a turn. | engine read tools (`mate.test.ts`), same turn path | none |
 | `get_task` | direct | Read during a turn; a reply to a result message pins the exact execution. | reply-to-result test | none |
@@ -58,7 +61,25 @@ that waits for the operator's bot configuration and pairing.
 | `propose_review` | direct | note saves feedback; revise creates the same-family revision through the shared result service, honouring automatic approval settings; the confirmed card links Review & start for the revision while it waits, or the task once approved. | reply-to-result test (revise, manual approval: Review & start for the exact revision), automatic-approval journey test (revise under a signed mode: Open task), review note card test | Under manual approval the revision is approved in the console, reached from the card's button; under a signed automatic-approval mode it runs unattended. |
 | `propose_cancel` | handoff | The door refuses cancel from any card; the card links the exact task's Cancel control when a trusted https console-url is configured, and the cancel is armed there. | cancel card test (Cancel task button under a trusted origin, none without one, a forged tap changes nothing) | Incomplete phone action: no phone path to cancel by design; the button only opens the task. |
 
-## Three kinds of phone road (2026-09-16 phone handoff)
+## Shared actions (2026-09-17)
+
+`propose_action` adds a shared proposal for skills, project knowledge, scope
+approval, human acceptance, review requests, cancellation and resume. Short
+ordinary changes confirm in the conversation. Protected, long or redacted changes link
+to a complete, signed-in review of that exact proposal. Completion updates the
+same saved proposal; `get_action_status` reads its actual outcome. Opening a
+link is not confirmation. Existing legacy `propose_cancel` and `show_control`
+remain navigation-only; the shared action is the complete new route.
+
+Secure review still requires a working HTTPS console. A completed web action
+does not automatically edit its old Telegram message; reopen its link or ask
+for action status. Folder/GitHub skill sourcing, skill-test revisions and
+committed-file knowledge sourcing still use their project screens. Publication,
+deployment, installation settings and a new generic MCP manager are not added
+by this change. Fixture checks do not prove live Slack, Discord or Teams support.
+
+## Original phone handoff design (2026-09-16; historical)
+
 
 - **In-chat action** — a `direct` row's Confirm button. The shared door
   acts inside the update's transaction, recorded `via: telegram`. The
