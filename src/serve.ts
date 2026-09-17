@@ -4004,6 +4004,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     problem: string | null,
     status: number,
     scopeDraft?: URLSearchParams,
+    cancelDraft?: string,
   ): void {
     const admittedFamily = familyOf(taskId);
     if (admittedFamily?.problem != null) return sendScreen(response, status, screen(admittedFamily.root.title,
@@ -4015,6 +4016,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       history: family === null ? "" : familyHistory(family),
       versionLabel: family !== null && family.current.id !== taskId ? `Viewing ${family.versions.findIndex(one => one.id === taskId) === 0 ? "Original" : `Revision ${family.versions.findIndex(one => one.id === taskId)}`} · ${family.current.state === "running" ? "A newer revision is running" : "A newer revision is current"}` : null };
     if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
+    if (cancelDraft !== undefined) presentedData.cancelDraft = cancelDraft;
     const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
     return sendScreen(
       response,
@@ -6995,8 +6997,16 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, taskHref(taskId));
       }
       case "cancel": {
-        const cancelled = store.cancelTask(taskId, now);
+        const reason = body.get("reason") ?? undefined;
+        const cancelled = store.cancelTask(taskId, now, reason);
         if (!cancelled.ok) {
+          if (cancelled.reason === "reason-required" || cancelled.reason === "bad-reason") {
+            return taskScreen(response, who, taskId,
+              cancelled.reason === "reason-required"
+                ? "Enter a reason for cancelling this coordinator filing."
+                : "Use at most 500 plain characters, without hidden or control characters.",
+              400, undefined, reason ?? "");
+          }
           return taskScreen(response, who, taskId, `not cancelled: ${cancelled.reason}`, 409);
         }
         return redirect(response, taskHref(taskId));
@@ -16672,6 +16682,7 @@ function taskBody(data: {
   csrf: string;
   nonce: string;
   scopeDraft?: URLSearchParams;
+  cancelDraft?: string;
   problem: string | null;
   /** The attended road (Phase 2E): mint offer, or the open authorization. */
   attended?: {
@@ -17708,10 +17719,11 @@ function taskBody(data: {
   const cancelAct =
     task.state === "queued" || task.state === "running" || task.state === "failed"
       ? [
-          `<details class="arm-danger"><summary>cancel this task — tap to arm</summary>`,
+          `<details class="arm-danger"${data.cancelDraft === undefined ? "" : " open"}><summary>Cancel task</summary>`,
           `<form method="post" action="${taskHref(task.id)}/cancel">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-          `<button type="submit" class="danger">cancel ${escape(task.id)}</button>`,
+          data.coordinator == null ? "" : `<label>Reason for cancellation<textarea name="reason" rows="3" maxlength="500" required>${escape(data.cancelDraft ?? "")}</textarea></label>`,
+          `<button type="submit" class="danger">Confirm cancellation</button>`,
           `</form></details>`,
         ].join("")
       : "";

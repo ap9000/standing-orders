@@ -1,0 +1,30 @@
+{
+  "synthetic": true,
+  "sourceCandidate": "9392ea9d9eb8914e918013ab056a46cdcdbd2a38",
+  "sourceSha256": {
+    "docs/mcp-gateway-spec.md": "7bea6444d22507a64b64bc5c27a27f723a04b35a25e81d3738a44d17cb2242e1",
+    "src/backend.ts": "fb68a35c2e9dddd2aef666854db81cdf5b0d76b4296a8f60795b4f9f9bab4b87",
+    "src/coordinator.test.ts": "a56de0b6da556a6c24fbf69825356fa67261da573bc0ed47df5306068bbd3924",
+    "src/mcp.test.ts": "13e97588b256059c58691ce14e10e0dd04985393b92a2a33baa84d9baaa78961",
+    "src/mcp.ts": "0c8176e3e43d6f8ff027d773ce744c6a2bfc5dbfb19b4d33f63034c42db8521c",
+    "src/operate.test.ts": "42b69306066798460de3c652ac52da052b7602dec8e5a56155604498c88749a3",
+    "src/operate.ts": "b30e8e1be02d00a05a46ff009fc15a298b74a30494eac7cec972719922004ac8",
+    "src/schema-epoch.test.ts": "e975d004246ffafa2fe1fcea1d17a157831c19698eca4d887a9502ba906b6892",
+    "src/serve.test.ts": "2fb0e5bcdcccee59c89b45e3132aeba8554ffdfe7d4789d951412e7087632acf",
+    "src/serve.ts": "d73d8e1a6bb8e48c3489c6ccb04ba2418c48adc7d31f3de4e7d093f91c2df762",
+    "src/store.ts": "84ccfd06f236a0e13c95f20ad139a03f0c29af6680f5b0024ccd233a701b7ba8"
+  },
+  "typecheck": {
+    "command": "npm run typecheck",
+    "exitCode": 0
+  },
+  "focusedTests": {
+    "command": "./node_modules/.bin/vitest run src/mcp.test.ts src/mcp-cli.test.ts src/coordinator.test.ts src/coordinator-proposals.test.ts src/cancel-floor.test.ts src/schema-epoch.test.ts src/migration-v48-authentic.test.ts src/store.test.ts src/backend.test.ts src/operate.test.ts src/serve.test.ts",
+    "files": 11,
+    "passed": 658,
+    "exitCode": 0,
+    "log": "focused-checks.txt"
+  },
+  "uiReport": "ui-report.json",
+  "browserChecks": 16
+}

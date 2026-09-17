@@ -257,6 +257,17 @@ describe("the MCP stdio server", () => {
     expect(h.out()).toHaveLength(1);
   });
 
+  test("a wide request below the byte limit cannot exhaust the depth checker's argument stack", () => {
+    const h = harness(store, token);
+    const line = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "no/such", params: { pad: Array(125_000).fill(0) } });
+    expect(Buffer.byteLength(line, "utf8")).toBeLessThan(256 * 1024);
+    expect(() => h.sendRaw(line)).not.toThrow();
+    expect(h.last()["error"]).toMatchObject({ code: -32601 });
+    h.send({ jsonrpc: "2.0", id: 2, method: "ping" });
+    expect(h.last()).toMatchObject({ id: 2, result: {} });
+    expect(h.exitCode()).toBeNull();
+  });
+
   test("file_proposal files through the door; the task is quarantined; a tool refusal is isError, not a protocol error", () => {
     const h = harness(store, token);
     h.send({

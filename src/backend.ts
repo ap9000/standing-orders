@@ -150,6 +150,8 @@ export function builtIn(store: Store, now: () => Date = () => new Date()): Graph
         "rejected",
         moved.reason === "external-closed"
           ? `the tracker closed \`${id}\` — reopen it first`
+          : moved.reason === "reason-required" || moved.reason === "bad-reason"
+          ? `cancelling \`${id}\` requires a plain reason — use task state ${id} cancelled --reason <text>`
           : `no task \`${id}\``,
       );
     },

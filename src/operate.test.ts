@@ -265,6 +265,29 @@ describe("operating the queue from the command line", () => {
 
       expect(await run(["task", "state", "later", "done", "--key", "s-1"])).toBe(EXIT.ok);
     });
+
+    test("coordinator state cancellation requires --reason and a corrected retry keeps the same key", async () => {
+      const { mintCoordinator, fileCoordinatorProposal } = await import("./coordinator.js");
+      const store = openStore(db);
+      const minted = mintCoordinator(store, { name: "cancel-review", repos: [REPO], by: "alex", now: T0 });
+      if (!minted.ok) throw new Error("mint failed");
+      const filed = fileCoordinatorProposal(store, minted.token, { repo: REPO, title: "Replace the outdated export", idempotencyKey: "cli-cancel" }, T0);
+      if (!filed.ok) throw new Error("filing failed");
+      store.close();
+      const argv = ["task", "state", filed.id, "cancelled", "--key", "cancel-retry", "--json"];
+      expect(await run(argv)).toBe(EXIT.refused);
+      expect(payload()).toMatchObject({ ok: false, reason: "reason-required" });
+      expect(payload().message).toContain("--reason");
+      expect(await run([...argv, "--reason", "x".repeat(501)])).toBe(EXIT.refused);
+      expect(payload()).toMatchObject({ ok: false, reason: "bad-reason" });
+      expect(await run([...argv, "--reason", "Superseded by the smaller export task."])).toBe(EXIT.ok);
+      const checked = openStore(db);
+      try {
+        expect(checked.getTask(filed.id)?.state).toBe("cancelled");
+        expect(checked.handle.prepare("SELECT detail FROM coordinator_event WHERE task_id = ? AND kind = 'dismissed'").all(filed.id))
+          .toEqual([{ detail: "Superseded by the smaller export task." }]);
+      } finally { checked.close(); }
+    });
   });
 
   describe("the dispatch loop", () => {

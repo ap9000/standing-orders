@@ -1701,6 +1701,38 @@ describe("the operations console", () => {
     expect(store.getTask("t-r")?.state).not.toBe("cancelled");
   });
 
+  test("coordinator cancellation requires a reason and retains the rejected draft", async () => {
+    const { mintCoordinator, fileCoordinatorProposal } = await import("./coordinator.js");
+    const minted = mintCoordinator(store, { name: "cancel-review", repos: ["/repo/main"], by: "alex", now: T0 });
+    if (!minted.ok) throw new Error("mint failed");
+    const filed = fileCoordinatorProposal(store, minted.token, { repo: "/repo/main", title: "Replace the outdated export", idempotencyKey: "console-cancel" }, T0);
+    if (!filed.ok) throw new Error("filing failed");
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    const path = `/t/${filed.id}`;
+    const page = await (await fetch(url(path), { headers: { cookie } })).text();
+    expect(page).toContain('Reason for cancellation<textarea name="reason" rows="3" maxlength="500" required>');
+    expect(page).toContain('class="danger">Confirm cancellation</button>');
+
+    const empty = await post(`${path}/cancel`, cookie, { csrf });
+    expect(empty.status).toBe(400);
+    expect(await empty.text()).toContain("Enter a reason for cancelling this coordinator filing.");
+    const draft = "<superseded> " + "x".repeat(501);
+    const invalid = await post(`${path}/cancel`, cookie, { csrf, reason: draft });
+    expect(invalid.status).toBe(400);
+    const refusedPage = await invalid.text();
+    expect(refusedPage).toContain('class="arm-danger" open');
+    expect(refusedPage).toContain("&lt;superseded&gt; " + "x".repeat(501));
+    expect(store.getTask(filed.id)?.state).toBe("queued");
+    expect(store.handle.prepare("SELECT 1 FROM coordinator_event WHERE task_id = ? AND kind = 'dismissed'").get(filed.id)).toBeUndefined();
+
+    const cancelled = await post(`${path}/cancel`, cookie, { csrf, reason: "The smaller export task replaces this proposal." });
+    expect(cancelled.status).toBe(303);
+    expect(store.getTask(filed.id)?.state).toBe("cancelled");
+    expect(store.handle.prepare("SELECT detail FROM coordinator_event WHERE task_id = ? AND kind = 'dismissed'").get(filed.id))
+      .toMatchObject({ detail: "The smaller export task replaces this proposal." });
+  });
+
   test("inbox: approvals link (never forms), retry acts inline and returns home", async () => {
     store.createTask({ id: "t-stalled", title: "stalled work" }, T0);
     store.setTaskState("t-stalled", "failed", T0);
