@@ -101,6 +101,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // task, run, artifact and recorded hash of one verified screenshot) and the
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
+// v65 adds immutable skill packages, project selections, run snapshots and skill tests.
 export const SCHEMA_VERSION = 65;
 
 /**

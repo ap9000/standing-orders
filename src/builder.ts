@@ -270,6 +270,7 @@ export type BuildResult =
   | { ok: false; reason: BuildRefusal; message: string; problems?: Problem[] };
 
 export type BuildRefusal =
+  | "skills-unavailable"
   | "unapproved"
   | "scope-changed"
   | "stale-approval"
@@ -1206,6 +1207,13 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     lastStates: new Map<string, MilestoneState>(),
   };
 
+  let projectSkillContext: string;
+  try {
+    projectSkillContext = skillsContext(store, root, request.runId);
+  } catch (error) {
+    return { ok: false, reason: "skills-unavailable", message: `Project skills could not be loaded: ${error instanceof Error ? error.message : String(error)}` };
+  }
+
   const pulseMs = request.pulseMs ?? DEFAULT_PULSE_MS;
   let fencedMidBuild = false;
   let pulseTimer: ReturnType<typeof setInterval> | undefined;
@@ -1336,7 +1344,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   const pinnedBase = store.firstBuilderBase(taskRef, branch);
   const retryBase = pinnedBase !== null && pinnedBase !== baseRevision ? pinnedBase : null;
   const lessonContext = learningContext(store, root, request.runId, "build", clock());
-  const briefText = skillsContext(store, root, request.runId) + knowledgeContext(store, request.runId) + lessonContext + brief(
+  const briefText = projectSkillContext + knowledgeContext(store, request.runId) + lessonContext + brief(
     scope as Scope,
     branch,
     mailbox,

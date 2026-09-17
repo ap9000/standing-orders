@@ -2,6 +2,8 @@
 
 The prepared source passed typecheck and 423 focused tests across nine affected suites. The unchanged full command is reserved for the native final machine gate.
 
+Follow-up review reproduced unreadable skill context leaving builder/planner/scout attempts unsettled. The repair returns a clear failure before provider spend and before starting heartbeat/log resources. Typecheck and 262 focused tests across six suites pass, including all three new failure regressions. The before/after logs are retained here. Rendering code is unchanged, so the original synthetic browser screenshots are reused.
+
 The browser journey uses an isolated synthetic fixture and Chrome at 1440×900 and 390×844. Both viewports cover empty and failed imports, a retained draft, long instructions, enabling an exact version, an unapproved test task, a saved report, readable supplied-version details, feedback, and a linked test revision awaiting approval. The feedback action clears the fixed phone navigation. Desktop also verifies browser folder import retains a supporting file and library search has a useful empty state. No live model is invoked by this fixture.
 
 The simplicity pass removed repeated saved-state copy, collapsed older versions and technical details, kept the source and requirements before enablement, and replaced the inapplicable code-diff feedback explanation with the test’s own revision form. Report headings now say “Report saved” instead of “No changes were needed.” Mobile inputs use 16px text and controls meet the checked 44px minimum.

@@ -1,5 +1,5 @@
 {
-  "preparedAt": "2026-09-17T04:09:07.777927+00:00",
+  "preparedAt": "2026-09-17T04:35:04.578426+00:00",
   "verifiedBase": "443936f8a919b1d5afd10b0e550cb35cb6f8e0d5",
   "kind": "Synthetic browser proof and focused implementation tests; not live agent acceptance",
   "sources": [
@@ -25,7 +25,7 @@
     },
     {
       "path": "src/store.ts",
-      "sha256": "1730c97a5fc630ee8db53f860a779c2b8752fae4a57de0889487e8a1a7cf5a1d"
+      "sha256": "df24283180f3a5cb46129be95b5ab5aebe48ad668c82fde468739992fdf816cd"
     },
     {
       "path": "src/serve.ts",
@@ -33,15 +33,15 @@
     },
     {
       "path": "src/builder.ts",
-      "sha256": "314970be996db3af02c5ffb7078f7f900bb414d99c01689bdcfbf92fd6cfa735"
+      "sha256": "e4b9dc82d66e0e56b7dfe46f4d6d1b1c15337d075390d8ae95854d364b5fb123"
     },
     {
       "path": "src/planner.ts",
-      "sha256": "900c15dbe7468390f0c7aec750ef3741193de8f8058c20e43b16f93fdaa6c0d0"
+      "sha256": "64a721678b0283986b37a1a7dc5154a774bf39965f7c27420072fb12b0d25a54"
     },
     {
       "path": "src/scout.ts",
-      "sha256": "f90c351c729d3884d0853804c016c27e03c90a1520861894c79d43d87dfa9cc5"
+      "sha256": "64973849716196148a909bc395bb467e238fb1258f8c692b75d4251d716204a2"
     },
     {
       "path": "src/reviewer.ts",
@@ -74,6 +74,18 @@
     {
       "path": "scripts/project-skills-proof.mjs",
       "sha256": "96f139598d51fbdad66310e61fe6a9cc3eeaf76765fbf8915cdf0d768e622783"
+    },
+    {
+      "path": "src/builder.test.ts",
+      "sha256": "a29d3c590ce33bf5827e8d6e3300606eb352e6bcbae383cacc61b5a25fa236b5"
+    },
+    {
+      "path": "src/planner.test.ts",
+      "sha256": "acd842cf1cb6ec67cda64eb0c7971531d9b7bbbc153b73815fcb813efa898e96"
+    },
+    {
+      "path": "src/scout.test.ts",
+      "sha256": "29281db41ce4011685cc5620d72798823f4d7790d9abd657fdd61528bc794e36"
     }
   ],
   "images": [
@@ -141,5 +153,6 @@
       "path": "evidence/project-skills/phone-test-task.png",
       "sha256": "eef9b7a4155a201e5c3f384f6557526ffb30f781d568e0b4b35576f1feab70a6"
     }
-  ]
+  ],
+  "reuseNote": "The browser rendering and interactions are unchanged. Worker skill-load refusal handling and a schema-history comment changed; screenshots remain the original synthetic UI evidence."
 }

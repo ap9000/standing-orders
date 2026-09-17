@@ -26,6 +26,8 @@ The library stores each package once. Immutable run snapshots contain package ha
 
 Schema 65 also advances the older-reader fence regressions in `src/migration-v50-review-retries.test.ts`: a v66 or −66 marker refuses as a newer build and −65 is the impossible mid-flight marker, so the schema-compatibility check passes for this candidate.
 
+Unreadable or unverifiable skill packages no longer leave a builder, planner or scout attempt open without agent spend: each worker loads project skills after its admission checks and returns the `skills-unavailable` failure before any provider, heartbeat or log resource starts, so normal dispatch settles the run and releases the claim. See `docs/PROJECT_SKILLS_REFUSAL_FIX_2026-09-16.md`; the browser rendering is unchanged, so the synthetic screenshots are reused.
+
 The first version supports portable SKILL.md packages. Provider-specific settings are shown but are not installed or granted. Requirements are reported as unverified until a test or run supplies evidence. Tests are read-only reports, so skills requiring deployment or other external writes can report that limitation but cannot complete those actions. Importing private GitHub repositories is not supported by this form; upload an authorized local folder instead. Local folder upload requires browser JavaScript.
 
 A skill can be tested while disabled. Create test opens its normal task, where the operator can change the agent and review the exact scope before approval. Repeated submissions reuse the same test. Results distinguish supplied versions from demonstrated use; recorded feedback creates a linked test revision with its own approval.

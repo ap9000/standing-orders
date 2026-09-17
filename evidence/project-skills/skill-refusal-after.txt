@@ -1,0 +1,21 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Documents/standing-orders-project-skills
+
+(node:2806) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+········································(node:2805) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:2804) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··············································(node:2808) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·····················································(node:2809) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·························(node:2807) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··································································································
+
+ Test Files  6 passed (6)
+      Tests  262 passed (262)
+   Start at  21:34:04
+   Duration  16.55s (transform 6.55s, setup 67ms, import 8.88s, tests 44.62s, environment 0ms)

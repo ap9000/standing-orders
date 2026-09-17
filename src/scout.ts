@@ -203,6 +203,13 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
   }
 
   const clock = request.clock ?? (() => now);
+  let projectSkillContext: string;
+  try {
+    projectSkillContext = skillsContext(store, root, request.runId);
+  } catch (error) {
+    return { ok: false, kind: "failure", reason: "skills-unavailable", message: `Project skills could not be loaded: ${error instanceof Error ? error.message : String(error)}` };
+  }
+
   const pulseMs = request.pulseMs ?? DEFAULT_PULSE_MS;
   let fencedMidScout = false;
   let pulseTimer: ReturnType<typeof setInterval> | undefined;
@@ -237,7 +244,7 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
       { provider: request.provider ?? "claude", model: request.model ?? null },
       {
         phase: "plan",
-        brief: skillsContext(store, root, request.runId) + scoutBrief(request.taskTitle, request.goal, request.outOfScope, mailbox, reportFile, request.answers ?? []),
+        brief: projectSkillContext + scoutBrief(request.taskTitle, request.goal, request.outOfScope, mailbox, reportFile, request.answers ?? []),
         maxTurns,
         // Read-only by policy AND by check: plan mode is the permission
         // posture; the clean-tree proof below is the law.

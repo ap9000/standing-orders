@@ -705,6 +705,13 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
   }
 
   const clock = request.clock ?? (() => now);
+  let projectSkillContext: string;
+  try {
+    projectSkillContext = skillsContext(store, root, request.runId);
+  } catch (error) {
+    return { ok: false, kind: "failure", reason: "skills-unavailable", message: `Project skills could not be loaded: ${error instanceof Error ? error.message : String(error)}` };
+  }
+
   const pulseMs = request.pulseMs ?? DEFAULT_PULSE_MS;
   let fencedMidPlan = false;
   let pulseTimer: ReturnType<typeof setInterval> | undefined;
@@ -876,7 +883,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
       { provider, model },
       {
         phase: "plan",
-        brief: skillsContext(store, root, request.runId) + knowledgeContext(store, request.runId) + learningContext(store, root, request.runId, "plan", clock()) + plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? [], request.source),
+        brief: projectSkillContext + knowledgeContext(store, request.runId) + learningContext(store, root, request.runId, "plan", clock()) + plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? [], request.source),
         maxTurns,
         // Claude's built-in `plan` permission mode diverts writes into its
         // own ~/.claude/plans file and refuses the nonce-bound handoff file.
