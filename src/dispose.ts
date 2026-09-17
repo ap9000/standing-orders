@@ -27,7 +27,7 @@ import { modeTermsFromJson } from "./modes.js";
 import { writeEvidenceFile } from "./evidence.js";
 import type { BuildResult } from "./builder.js";
 import type { Store } from "./store.js";
-import type { ProofVerdict } from "./proof.js";
+import { manualReviewOnly, type ProofVerdict } from "./proof.js";
 
 /**
  * Which road is disposing. 'tick' = the unattended loop: full task
@@ -139,6 +139,13 @@ export function maybeRequestAutoReview(store: Store, repo: string, runId: number
   const run = store.getRun(runId);
   const ref = run === null ? null : store.refForId(run.taskRef);
   const scope = ref === null ? null : store.getScope(ref.externalId);
+  // A diagnostic review of failed checks remains available explicitly. The
+  // automatic path waits for the machine gate, before spending a review ask.
+  const command = store.liveVerifyCommand(repo);
+  const proof = store.proofVerdictFor(runId);
+  if (command !== null && (run === null || command.approvedAt > run.startedAt || proof === null ||
+      ((proof.machineVerdict ?? proof.verdict) !== "verified" && !manualReviewOnly(proof)))) return;
+  if (proof?.matrix.some(row => row.requiredEvidence.includes("check") && row.state !== "pass" && !manualReviewOnly(proof))) return;
   if (
     run?.qualityMode === "strict" &&
     scope?.qualityMode === "strict" &&

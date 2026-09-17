@@ -1,3 +1,4 @@
+import { sharedActionPayload, sharedActionNeedsReview, sharedActionReviewPath } from './chat-actions.js';
 /**
  * The paired phone as one more way to use the same assistant.
  *
@@ -239,6 +240,10 @@ function taskLink(store: Store, taskId: string, repos: readonly string[]): Phone
  */
 export function proposalLink(store: Store, proposal: MateProposal, repos: readonly string[]): PhoneLink | null {
   const payload = proposal.payload;
+  if(proposal.kind==='action'){
+    const action=sharedActionPayload(payload);
+    return action && repos.includes(action.repo) && sharedActionNeedsReview(action)?{label:'Review action',path:sharedActionReviewPath(proposal.id)}:null;
+  }
   const task = typeof payload["task"] === "string" ? payload["task"] : "";
   if (proposal.kind === "cancel") return task !== "" && taskInCeiling(store, task, repos) ? controlLink("cancel", task) : null;
   if (proposal.kind === "control") {
@@ -260,6 +265,7 @@ export function proposalLink(store: Store, proposal: MateProposal, repos: readon
  */
 export function confirmedLink(store: Store, outcome: DoorOutcome, proposal: MateProposal, repos: readonly string[]): PhoneLink | null {
   if (!outcome.ok || outcome.taskId === null) return null;
+  if(proposal.kind==='action' && proposal.payload['operation']==='skill_test')return taskLink(store,outcome.taskId,repos);
   const staged = proposal.kind === "task" || proposal.kind === "scope" || proposal.kind === "agents"
     || (proposal.kind === "task_action" && proposal.payload["operation"] === "resume")
     || (proposal.kind === "review" && proposal.payload["operation"] === "revise");
@@ -308,6 +314,11 @@ export function proposalPreview(store: Store, proposal: MateProposal, repos: rea
   const handoff = (headline: string, body: string[] = []): { text: string; buttons: boolean } => ({ text: [headline, ...body, "", HANDOFF].join("\n"), buttons: false });
 
   switch (proposal.kind) {
+    case 'action': {
+      const action=sharedActionPayload(payload);
+      if(!action)return handoff('This action is unavailable.');
+      return sharedActionNeedsReview(action)?handoff(phoneText(action.title,200),['Review the full details and confirm this exact action.']):card(phoneText(action.title,200),action.terms.map(term=>phoneText(term,1200)));
+    }
     case "task":
       return card(
         `Create task in ${repoLabel || "the project"}: ${t("title", 120)}`,
@@ -419,9 +430,12 @@ export type ParitySupport = "direct" | "handoff" | "missing";
  * committed matrix document must agree with it line for line.
  */
 export const TELEGRAM_ACTION_PARITY: Record<string, { support: ParitySupport; how: string; gap: string | null }> = {
+  get_action_status: {support:'direct',how:'Reads the exact saved shared action and its outcome, including completion through secure review.',gap:null},
+  get_actions: {support:'direct',how:'Lists the shared action catalogue and required inputs.',gap:null},
+  propose_action: {support:'direct',how:'Prepares exact shared skill, knowledge, approval, acceptance, review, cancel and resume actions. Short ordinary changes confirm here; protected or long changes use one secure review and record the result on the same proposal.',gap:'Secure review requires a working HTTPS console connection. Real transport verification is required.'},
   recap: { support: "direct", how: "Read by the model during a phone turn over the enrolled ceiling.", gap: null },
   list_repos: { support: "direct", how: "Read during a turn; projects are r1..rN in enrollment order, as on the console.", gap: null },
-  get_skills: { support: "direct", how: "Reads the same project skill library and enabled versions as the console. Import, enable, disable and test use one project Skills link.", gap: "Changes and tests require the signed-in console." },
+  get_skills: { support: "direct", how: "Reads the same project skill library, saved selections and enabled versions as the console. Use propose_action for changes and tests.", gap: "Skill import and long content require secure review. Folder and GitHub import still use the project Skills screen." },
   get_project_knowledge: { support: "direct", how: "Read during a turn.", gap: null },
   list_tasks: { support: "direct", how: "Read during a turn.", gap: null },
   get_task: { support: "direct", how: "Read during a turn; a reply to a result message pins the exact execution.", gap: null },

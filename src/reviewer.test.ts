@@ -2822,6 +2822,18 @@ describe("the reviewer role in the store", () => {
     expect(store.openReviewRequests()).toHaveLength(0);
   });
 
+  test.each(["missing", "failed", "settings-changed", "passed"] as const)("automatic review waits for usable project checks: %s", state => {
+    const terms = presetTerms("hands-off", new Date(T0.getTime() + 86_400_000).toISOString());
+    store.signMode({ repo: REPO, name: "hands-off", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, T0);
+    store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 600_000, approvedBy: "alex" }, new Date(T0.getTime() + (state === "settings-changed" ? 1000 : -1000)));
+    if (state !== "missing") store.saveProofVerdict(builtRun, state === "failed" ? "refuted" : "verified", [], T0, []);
+    maybeRequestAutoReview(store, REPO, builtRun, true, false, new Date(T0.getTime() + 2000));
+    expect(store.openReviewRequests()).toHaveLength(state === "passed" ? 1 : 0);
+    expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(0);
+    // An operator may still explicitly request a diagnostic review.
+    if (state === "failed") expect(store.requestReview(builtRun, "alex", T0).ok).toBe(true);
+  });
+
   test("Strict / release queues its isolated reviewer from the signed scope; Default stays on the fast path", () => {
     maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
     expect(store.openReviewRequests()).toHaveLength(0);

@@ -102,7 +102,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
-export const SCHEMA_VERSION = 65;
+export const SCHEMA_VERSION = 66;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -409,7 +409,7 @@ export type MateThread = { id: number; approver: string; ceilingDigest: string; 
 
 export type MateMessage = { id: number; thread: number; turn: number | null; role: "operator" | "assistant"; text: string; activity: string | null; createdAt: string };
 
-export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "steer" | "scope" | "cancel" | "answer" | "repair" | "agents" | "review" | "control" | "task_action";
+export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "steer" | "scope" | "cancel" | "answer" | "repair" | "agents" | "review" | "control" | "task_action" | "action";
 
 /** A coordinator's proposal over the MCP gateway (mate arc v3): the same
  * kinds as the mate's (no `task` — filing has its own door), confirmed by
@@ -619,10 +619,13 @@ export function isLifecycleNotification(row: Pick<Notification, "dedupeKey">): b
   return row.dedupeKey.startsWith(LIFECYCLE_KEY_PREFIX);
 }
 
-/** Only routine attempt progress can replace an earlier progress message. */
-export function isTelegramProgressNotification(row: Pick<Notification, "dedupeKey" | "kind" | "pushClass">): boolean {
-  return isLifecycleNotification(row) && row.pushClass === null &&
-    ["run-started", "run-phase", "run-finished", "review-requested", "review-finished", "run-stopping", "run-stopped", "run-resumed"].includes(row.kind);
+/** Only known progress producers can repaint a card. Decisions and urgent
+ * incidents keep their own alerts; a routine retry updates its saved attempt. */
+export function isTelegramProgressNotification(row: Pick<Notification, "dedupeKey" | "kind" | "pushClass" | "run">): boolean {
+  if (row.pushClass !== null) return false;
+  if (row.kind === "build-failed" && row.run !== null && row.dedupeKey === `run:${row.run}:failed`) return true;
+  return isLifecycleNotification(row) &&
+    ["run-started", "run-phase", "run-finished", "review-requested", "review-finished", "run-stopping", "run-stopped", "run-resumed", "task-held", "task-released"].includes(row.kind);
 }
 
 /** Display words for a lifecycle fact: one line, control-free, bounded, with
@@ -1991,7 +1994,7 @@ CREATE TABLE IF NOT EXISTS mate_proposal (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
   turn           INTEGER NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','steer','scope','cancel','answer','repair','agents','review','control','task_action')),
+  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','steer','scope','cancel','answer','repair','agents','review','control','task_action','action')),
   payload_json   TEXT NOT NULL,
   ceiling_digest TEXT NOT NULL,
   state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
@@ -3892,6 +3895,10 @@ function initializeStore(db: Database, file: string): Store {
       if (!tableExists(db, table)) throw new Error(`${file}: saved skills are missing; refusing to recreate them`);
     }
   }
+  if (preflight !== null && Math.abs(preflight) >= 66) {
+    const ddl = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='mate_proposal'").get()?.["sql"];
+    if (typeof ddl !== "string" || canonicalDdl(ddl) !== canonicalDdl(MATE_PROPOSAL_V66_DDL("mate_proposal"))) throw new Error(`${file}: shared action history has an unknown shape; refusing to recreate it`);
+  }
   if (preflight !== null && preflight > 0 && preflight < SCHEMA_VERSION) {
     const stamped = db.prepare("UPDATE schema_version SET version = ? WHERE version = ?").run(-preflight, preflight);
     if (Number(stamped.changes) !== 1) {
@@ -4955,6 +4962,7 @@ function migrate(db: Database, origin: number | null): void {
   addColumn(db, "routine", "approved_route_json", "TEXT");
   rebuildMateProposalForV48(db);
   rebuildMateProposalForV60(db);
+  rebuildMateProposalForV66(db);
   db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
 
   // v49: reviews have no task claim. Bind watch-owned reviews explicitly so
@@ -5472,6 +5480,15 @@ const MATE_PROPOSAL_V48_DDL = (name: string): string =>
 const MATE_PROPOSAL_V60_DDL = (name: string): string =>
   MATE_PROPOSAL_V48_DDL(name).replace("'agents'", "'agents','review','control','task_action'");
 
+const MATE_PROPOSAL_V66_DDL = (name: string): string =>
+  MATE_PROPOSAL_V60_DDL(name).replace("'task_action'", "'task_action','action'");
+
+export function rebuildMateProposalForV66(db: Database): void {
+  rebuildExact(db, "mate_proposal", MATE_PROPOSAL_V60_DDL, MATE_PROPOSAL_V66_DDL,
+    ["id", "thread", "turn", "kind", "payload_json", "ceiling_digest", "state", "created_at", "resolved_at", "resolved_by", "outcome_json"]);
+  db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
+}
+
 const RUN_STOP_V52_DDL = (name: string): string => `CREATE TABLE ${name} (
   run           INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
   task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
@@ -5551,10 +5568,11 @@ export function rebuildRunStopForV62(db: Database): void {
 
 function isMateProposalV60(db: Database): boolean {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
-  return row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(MATE_PROPOSAL_V60_DDL("mate_proposal"));
+  return row !== undefined && [MATE_PROPOSAL_V60_DDL, MATE_PROPOSAL_V66_DDL].some(ddl => canonicalDdl(String(row["sql"])) === canonicalDdl(ddl("mate_proposal")));
 }
 
 export function rebuildMateProposalForV60(db: Database): void {
+  if (isMateProposalV60(db)) return;
   rebuildExact(db, "mate_proposal", MATE_PROPOSAL_V48_DDL, MATE_PROPOSAL_V60_DDL,
     ["id", "thread", "turn", "kind", "payload_json", "ceiling_digest", "state", "created_at", "resolved_at", "resolved_by", "outcome_json"]);
   db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
@@ -7850,7 +7868,8 @@ export class Store {
     if (taskId === null) return;
     this.noteLifecycle(
       {
-        taskRef: hold.taskRef, kind: "task-held", identity: `t${hold.taskRef}`,
+        taskRef: hold.taskRef, run: this.runsFor(hold.taskRef).find(one => one.role === "builder" && one.contestant === null)?.id ?? null,
+        kind: "task-held", identity: `t${hold.taskRef}`,
         subject: until === null ? "Paused" : `Paused until ${until.slice(0, 16).replace("T", " ")} UTC`,
         body: "The next attempt waits until the hold is released. An attempt already running is not stopped by this.",
         link: chatControlHref("recovery", taskId),
@@ -7882,7 +7901,8 @@ export class Store {
           const others = this.activeHolds(taskRef, at).map(one => LIFECYCLE_HOLD_WORDS[one.ownerKind]);
           this.noteLifecycle(
             {
-              taskRef, kind: "task-released", identity: `t${taskRef}`,
+              taskRef, run: this.runsFor(taskRef).find(one => one.role === "builder" && one.contestant === null)?.id ?? null,
+              kind: "task-released", identity: `t${taskRef}`,
               subject: "Hold released",
               body: others.length === 0 ? "The next attempt can start." : `It still waits on ${[...new Set(others)].join(" and ")}.`,
               link: chatControlHref(others.length === 0 ? "task" : "recovery", taskId),

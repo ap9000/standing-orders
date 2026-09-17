@@ -2205,6 +2205,10 @@ async function correctProofReceipt(
   // review (every discrepancy explained by the stat) asks for a turn, and
   // then the one admissible answer is the sealed inventory exactly.
   const inventory = changedListProblems(initial.proof.changed, sealedStat);
+  // No receipt can represent more paths than the schema permits. Preserve the
+  // original evidence and let adjudication report the gap, without asking an
+  // agent to produce an impossible correction (or shrinking the real diff).
+  if (inventory.sealed !== null && inventory.sealed.length > PROOF_LIMITS.changed) return unchanged;
   const changedProblems = (proof: import("./proof.js").ParsedProof): string[] => {
     const sameList = JSON.stringify(proof.changed) === JSON.stringify(initial.proof.changed);
     if (!inventory.recoverable) return sameList ? [] : ["The changed list must stay exactly as submitted; the sealed diff does not explain a different one."];
@@ -2514,7 +2518,7 @@ async function settleProof(
     };
     const first = await runVerification("Project check · attempt 1");
     if (first.notFound || first.timedOut) {
-      verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "spawn-failed" };
+      verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: first.timedOut ? "timed-out" : "spawn-failed" };
     } else if (!verificationExecutableMissing(first)) {
       verifyCommand = { configured: true, ran: true, exitCode: first.code };
     } else {

@@ -1,8 +1,8 @@
+import { publicChatText } from './chat-display.js';
 import { manualReviewOnly } from "./proof.js";
 /** Read-only phone views over the same dispatch and proof records as chat.
  * No provider calls, repository access, new workflow state, or inferred success. */
 import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
-import { scanForSecrets } from "./evidence.js";
 import type { Notification, Store } from "./store.js";
 import { CHAT_CONTROLS, chatControlHref, chatResultHref, type ChatControl } from "./chat-controls.js";
 
@@ -33,17 +33,7 @@ export const PHONE_HELP = [
 
 /** A third-party transport receives a small display copy, not logs, paths,
  * credentials, or arbitrary markup. Scan BEFORE truncation/normalization. */
-function plain(value: string, cap: number): string {
-  if (scanForSecrets(value).length > 0 || /\b\d{5,}:[A-Za-z0-9_-]{20,}\b/.test(value)) return "[sensitive text hidden]";
-  const text = value
-    .replace(/(?:[A-Za-z]:[\\/]|\\\\)[^\s"'<>]+/g, "[path]")
-    .replace(/(^|[\s"'`(<[=:,])\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+/g, "$1[path]")
-    .replace(/\b[0-9a-f]{32,}\b/gi, "[digest]")
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g, " ")
-    .replace(/\s+/g, " ").trim();
-  // Keep surrogate pairs intact while bounding Telegram's UTF-16 ceiling.
-  return text.length <= cap ? text : text.slice(0, cap - 2).replace(/[\uD800-\uDBFF]$/, "") + "…";
-}
+const plain = publicChatText;
 
 /** The same display scrub for every phone-bound string a person or a model authored. */
 export const phoneText = plain;
