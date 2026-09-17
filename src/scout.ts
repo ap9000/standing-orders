@@ -1,3 +1,4 @@
+import { skillsContext } from "./project-skills.js";
 /**
  * The scout (mate arc §10): an agent that reads a repository and delivers
  * a report — never a builder, never a planner. It has no completion, no
@@ -236,7 +237,7 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
       { provider: request.provider ?? "claude", model: request.model ?? null },
       {
         phase: "plan",
-        brief: scoutBrief(request.taskTitle, request.goal, request.outOfScope, mailbox, reportFile, request.answers ?? []),
+        brief: skillsContext(store, root, request.runId) + scoutBrief(request.taskTitle, request.goal, request.outOfScope, mailbox, reportFile, request.answers ?? []),
         maxTurns,
         // Read-only by policy AND by check: plan mode is the permission
         // posture; the clean-tree proof below is the law.

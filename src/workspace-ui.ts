@@ -374,9 +374,10 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
 /** The completion receipt's heading: what the record actually supports.
  * Never "shipped" — local changes are saved; a PR or merge is named only
  * from its observed record. */
-export function receiptHeadingOf(outcome: string | null, publication: PublicationFacts): string {
+export function receiptHeadingOf(outcome: string | null, publication: PublicationFacts, role?: string | null): string {
   const published = publicationStatusOf(publication);
   if (published !== null && (published.token === "merge-observed" || published.token === "pr-opened")) return published.label;
+  if (role === "scout" && outcome === "no-change") return "Report saved";
   if (outcome === "no-change") return "No changes were needed";
   return "Changes saved";
 }

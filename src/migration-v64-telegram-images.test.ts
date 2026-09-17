@@ -99,8 +99,8 @@ describe("v64 Telegram result images", () => {
     }
 
     store = openStore(file);
-    expect(SCHEMA_VERSION).toBe(64);
-    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(64);
+    expect(SCHEMA_VERSION).toBe(65);
+    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(65);
     const after = store.handle.prepare("SELECT * FROM telegram_conversation_part ORDER BY ordinal").all() as Record<string, unknown>[];
     expect(after.map(v63Columns)).toEqual(before.parts.map(v63Columns));
     expect(after.map(row => [row["task_id"], row["source_run"], row["artifact"], row["sha256"]])).toEqual([[null, null, null, null], [null, null, null, null]]);
@@ -140,7 +140,7 @@ describe("v64 Telegram result images", () => {
     expect(store.dropTelegramConversationPart(next.id, 1, "owner", "late", NOW)).toBe(false);
     const rows = store.handle.prepare("SELECT * FROM telegram_conversation_part ORDER BY conversation, ordinal").all();
     store.close(); store = openStore(file);
-    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(64);
+    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(65);
     expect(store.handle.prepare("SELECT * FROM telegram_conversation_part ORDER BY conversation, ordinal").all()).toEqual(rows);
   });
 

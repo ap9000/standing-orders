@@ -1,3 +1,4 @@
+import { skillsContext } from "./project-skills.js";
 import { sealVerificationReceipt } from "./verification-evidence.js";
 import { learningContext } from "./project-learning.js";
 import { knowledgeContext } from "./project-knowledge.js";
@@ -1335,7 +1336,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   const pinnedBase = store.firstBuilderBase(taskRef, branch);
   const retryBase = pinnedBase !== null && pinnedBase !== baseRevision ? pinnedBase : null;
   const lessonContext = learningContext(store, root, request.runId, "build", clock());
-  const briefText = knowledgeContext(store, request.runId) + lessonContext + brief(
+  const briefText = skillsContext(store, root, request.runId) + knowledgeContext(store, request.runId) + lessonContext + brief(
     scope as Scope,
     branch,
     mailbox,

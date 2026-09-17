@@ -66,8 +66,8 @@ describe("v63 Telegram durable replies", () => {
     const fromV62 = Math.abs(version) === 62;
 
     store = openStore(file);
-    expect(SCHEMA_VERSION).toBe(64);
-    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(64);
+    expect(SCHEMA_VERSION).toBe(65);
+    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(65);
     expect(store.handle.prepare("SELECT * FROM telegram_conversation ORDER BY id").all()).toEqual(fromV62 ? before.conversation : []);
     expect(store.handle.prepare("SELECT * FROM telegram_proposal_action ORDER BY token").all()).toEqual(fromV62 ? before.actions : []);
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM telegram_conversation_part").get()?.["n"]).toBe(0);
@@ -94,7 +94,7 @@ describe("v63 Telegram durable replies", () => {
     }
     const after = store.handle.prepare("SELECT * FROM telegram_conversation ORDER BY id").all();
     store.close(); store = openStore(file);
-    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(64);
+    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(65);
     expect(store.handle.prepare("SELECT * FROM telegram_conversation ORDER BY id").all()).toEqual(after);
   });
 

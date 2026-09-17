@@ -1,3 +1,4 @@
+import { skillReviewSource } from "./project-skills.js";
 import { verificationEvidence, REVIEW_GATE_NAME } from "./verification-evidence.js";
 import { run as gitRead } from "./exec.js";
 import { learningContext, recoverLearning } from "./project-learning.js";
@@ -845,6 +846,13 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     const screenshotsSealed = screenshotFiles.map(shot => writeSealed(scratch, shot.name, shot.content));
     const contextSealed = contextForReview === null ? null : writeSealedText(scratch, REVIEW_CONTEXT_NAME, reviewContextManifest(contextForReview));
     const contextFiles = (contextForReview?.items ?? []).map(item => writeSealedText(scratch, reviewContextFileName(item.id), item.content));
+    let skillsSource: string | null;
+    try { skillsSource = skillReviewSource(store, request.reviewerRunId); }
+    catch (error) {
+      if (!store.proveRunnerCustodyForSpawn(request.reviewerRunId, clock())) return {ok:false,reason:"runner-custody",message:"The reviewer no longer has access to this project."};
+      return {ok:false,reason:"evidence",message:error instanceof Error?error.message:"Saved skills could not be verified."};
+    }
+    if (skillsSource) contextFiles.push(writeSealedText(scratch, "source-skills.json", skillsSource));
     // Codex's isolated review disables shell/unified_exec, which also
     // removes its text-reading path. File names alone gave it no evidence.
     // Deliver exactly the sealed text through stdin and the real screenshots

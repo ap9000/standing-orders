@@ -218,8 +218,8 @@ function approvalState(store: Store, taskId: string): "none" | "waiting" | "appr
   return scope.approvedDigest != null && scope.approvedDigest === scope.digest ? "approved" : "waiting";
 }
 
-function controlLink(control: ChatControl, taskId: string, run?: unknown): PhoneLink {
-  return { label: CHAT_CONTROLS[control].label, path: chatControlHref(control, taskId, run) };
+function controlLink(control: ChatControl, taskId: string, run?: unknown, project?: unknown): PhoneLink {
+  return { label: CHAT_CONTROLS[control].label, path: chatControlHref(control, taskId, run, project) };
 }
 
 /**
@@ -244,6 +244,7 @@ export function proposalLink(store: Store, proposal: MateProposal, repos: readon
   if (proposal.kind === "control") {
     const control = payload["control"];
     if (!isChatControl(control)) return null;
+    if (control === "skills") return typeof payload["project"] === "string" && repos.includes(payload["project"]) ? controlLink(control, task, undefined, payload["project"]) : null;
     if ("href" in CHAT_CONTROLS[control]) return controlLink(control, task);
     return task !== "" && taskInCeiling(store, task, repos) ? controlLink(control, task, payload["run"]) : null;
   }
@@ -420,6 +421,7 @@ export type ParitySupport = "direct" | "handoff" | "missing";
 export const TELEGRAM_ACTION_PARITY: Record<string, { support: ParitySupport; how: string; gap: string | null }> = {
   recap: { support: "direct", how: "Read by the model during a phone turn over the enrolled ceiling.", gap: null },
   list_repos: { support: "direct", how: "Read during a turn; projects are r1..rN in enrollment order, as on the console.", gap: null },
+  get_skills: { support: "direct", how: "Reads the same project skill library and enabled versions as the console. Import, enable, disable and test use one project Skills link.", gap: "Changes and tests require the signed-in console." },
   get_project_knowledge: { support: "direct", how: "Read during a turn.", gap: null },
   list_tasks: { support: "direct", how: "Read during a turn.", gap: null },
   get_task: { support: "direct", how: "Read during a turn; a reply to a result message pins the exact execution.", gap: null },

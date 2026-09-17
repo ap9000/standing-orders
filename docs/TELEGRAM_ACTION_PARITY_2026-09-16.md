@@ -31,6 +31,7 @@ that waits for the operator's bot configuration and pairing.
 | --- | --- | --- | --- | --- |
 | `recap` | direct | Read by the model during a phone turn over the enrolled ceiling. | journey turn (`telegram-mate.test.ts`, first test) reads through the engine | none |
 | `list_repos` | direct | Read during a turn; projects are r1..rN in enrollment order, as on the console. | ceiling digest equality with the console/CLI (first test) | none |
+| `get_skills` | direct | Reads the same project skill library and enabled versions as the console. Import, enable, disable and test use one project Skills link. | Project skills chat index, version read and project handoff regression (`project-skills.test.ts`) | Changes and tests require the signed-in console. |
 | `get_project_knowledge` | direct | Read during a turn. | engine read tools (`mate.test.ts`), same turn path | none |
 | `list_tasks` | direct | Read during a turn. | engine read tools (`mate.test.ts`), same turn path | none |
 | `get_task` | direct | Read during a turn; a reply to a result message pins the exact execution. | reply-to-result test | none |

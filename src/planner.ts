@@ -1,3 +1,4 @@
+import { skillsContext } from "./project-skills.js";
 import { learningContext } from "./project-learning.js";
 import { knowledgeContext } from "./project-knowledge.js";
 /**
@@ -875,7 +876,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
       { provider, model },
       {
         phase: "plan",
-        brief: knowledgeContext(store, request.runId) + learningContext(store, root, request.runId, "plan", clock()) + plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? [], request.source),
+        brief: skillsContext(store, root, request.runId) + knowledgeContext(store, request.runId) + learningContext(store, root, request.runId, "plan", clock()) + plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? [], request.source),
         maxTurns,
         // Claude's built-in `plan` permission mode diverts writes into its
         // own ~/.claude/plans file and refuses the nonce-bound handoff file.
