@@ -377,7 +377,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
 export function receiptHeadingOf(outcome: string | null, publication: PublicationFacts, role?: string | null): string {
   const published = publicationStatusOf(publication);
   if (published !== null && (published.token === "merge-observed" || published.token === "pr-opened")) return published.label;
-  if (role === "scout" && outcome === "no-change") return "Report saved";
+  if (role === "scout" && (outcome === "built" || outcome === "no-change")) return "Report saved";
   if (outcome === "no-change") return "No changes were needed";
   return "Changes saved";
 }

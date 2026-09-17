@@ -18851,7 +18851,7 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
     runId: run.id,
     role: run.role,
     outcome: run.outcome,
-    summary: handoff?.conclusion ?? run.handoff,
+    summary: run.role === "scout" ? report?.ok ? report.summary : "The report needs attention." : handoff?.conclusion ?? run.handoff,
     verdict: proof?.verdict ?? null,
     reasons: proof?.reasons ?? [],
     accepted: proof?.accepted !== null && proof?.accepted !== undefined,
@@ -19512,9 +19512,11 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       summaryParts.push(`<p class="problem" data-result-report="problem">The report cannot be shown: ${escape(report.problem)}.</p>`);
     } else {
       // Escaped text in a fenced block, never markup, never a page: the
-      // download serves the exact stored bytes as text.
+      // download serves the exact stored bytes as text. The summary is
+      // already the outcome line above (and, when shortened there, waits
+      // in "What the agent reported"), so the article never repeats it.
       summaryParts.push(
-        `<article class="result-report" data-result-report="ok"><h3>${escape(report.title)}</h3><p class="recap">${escape(report.summary)}</p>` +
+        `<article class="result-report" data-result-report="ok"><h3>${escape(report.title)}</h3>` +
           `<pre class="recap plan-doc">${escape(report.document)}</pre>` +
           `<p class="meta"><a href="/r/${runId}/evidence/${report.artifactId}">${report.truncated ? "Download the stored part of the report (shortened at storage — not the full report)" : "Download the report"}</a>${report.followUps === 0 ? "" : ` · ${report.followUps} proposed follow-up${report.followUps === 1 ? "" : "s"} on <a href="${taskHref(detail.rootId ?? detail.taskId)}">the task</a>`}</p></article>`,
       );

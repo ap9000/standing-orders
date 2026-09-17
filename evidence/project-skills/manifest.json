@@ -29,7 +29,7 @@
     },
     {
       "path": "src/serve.ts",
-      "sha256": "d473b139267bf07d1022cbd389a327913abbef60a7e5e24d2c0816ee3e5600ad"
+      "sha256": "90ba505efc996cb1edbf951a6fe0ad7ca90d14f5ca45e588bdcd07120cd346b0"
     },
     {
       "path": "src/builder.ts",
@@ -69,11 +69,11 @@
     },
     {
       "path": "src/workspace-ui.ts",
-      "sha256": "a4a039719181afb380d02d90c97c4a85c16b2c2528f31ed57677f235f3576ed1"
+      "sha256": "3ce9dd2babee71153f86b82aea2b7c5e0c454db67d7091bb8988c9bc3f0bca9c"
     },
     {
       "path": "scripts/project-skills-proof.mjs",
-      "sha256": "96f139598d51fbdad66310e61fe6a9cc3eeaf76765fbf8915cdf0d768e622783"
+      "sha256": "7b07403c95d775c80007b59dc12e85f7f0a9eecddced0df7ddb53be92d1d0478"
     },
     {
       "path": "src/builder.test.ts",

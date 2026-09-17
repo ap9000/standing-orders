@@ -1,0 +1,51 @@
+{
+  "base": "cdf7a514786ba4140468def89d225c39535ffddb",
+  "sourcesAndEvidence": [
+    {
+      "path": "src/serve.ts",
+      "sha256": "90ba505efc996cb1edbf951a6fe0ad7ca90d14f5ca45e588bdcd07120cd346b0"
+    },
+    {
+      "path": "src/workspace-ui.ts",
+      "sha256": "3ce9dd2babee71153f86b82aea2b7c5e0c454db67d7091bb8988c9bc3f0bca9c"
+    },
+    {
+      "path": "src/serve.test.ts",
+      "sha256": "7a54478217775cbb7e066193ecf4b0c4740ee7beaf53e792a623c1985f526368"
+    },
+    {
+      "path": "src/workspace-ui.test.ts",
+      "sha256": "361e626a69921a1483a2404d06486b8cadb01cf8698b0e56362622df4026ac14"
+    },
+    {
+      "path": "scripts/project-skills-proof.mjs",
+      "sha256": "7b07403c95d775c80007b59dc12e85f7f0a9eecddced0df7ddb53be92d1d0478"
+    },
+    {
+      "path": "scripts/project-skills-report-proof.mjs",
+      "sha256": "244ce520dbb5865ca58cff3279cad0b8c1b4ba0675c01ab79b8d795f499933ba"
+    },
+    {
+      "path": "evidence/project-skills-report-copy/desktop-report.png",
+      "sha256": "0d72ef6d17c1dfa6e9c81ff3129583523bb76410d4c617e8995be46f7d14d501"
+    },
+    {
+      "path": "evidence/project-skills-report-copy/phone-report.png",
+      "sha256": "b0c8e1c8f2cd92a48efe365e5e3f1adbb3cff02fc51251dc3586c03253e54db1"
+    },
+    {
+      "path": "evidence/project-skills-report-copy/ui-report.json",
+      "sha256": "3dd1a95953379dd186814d124446f0b805ec4710d7939f21c9f32688e68f95f2"
+    },
+    {
+      "path": "evidence/project-skills-report-copy/checks.txt",
+      "sha256": "224e410a2318ce856baf48bf60f9662886d9cc720b9e641b742db312611c2cfd"
+    }
+  ],
+  "realRunEvidence": {
+    "sourceRun": 1732,
+    "revisedRun": 1733,
+    "chatTurn": 21,
+    "candidate": "cdf7a514786ba4140468def89d225c39535ffddb"
+  }
+}

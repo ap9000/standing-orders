@@ -1,0 +1,5 @@
+Candidate input based on cdf7a514786ba4140468def89d225c39535ffddb.
+Typecheck passed.
+Focused command: npx vitest run src/workspace-ui.test.ts src/serve.test.ts -t "package 3 c2|repair c9|publication|receipt|report|Reports" --reporter=dot
+17 tests passed; 329 tests excluded by the name filter. No tests were removed or skipped in source.
+Actual Chrome desktop 1440x900 and phone 390x844 report receipts passed; screenshot labels explicitly say synthetic.
