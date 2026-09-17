@@ -1,0 +1,381 @@
+{
+  "synthetic": true,
+  "checks": [
+    {
+      "name": "desktop complete review fits",
+      "ok": true,
+      "detail": {
+        "viewport": 1440,
+        "width": 1440,
+        "buttons": [
+          {
+            "label": "I confirm this exact action",
+            "height": 44,
+            "width": 784,
+            "scroll": 784
+          },
+          {
+            "label": "Accept result",
+            "height": 44,
+            "width": 106.375,
+            "scroll": 104
+          }
+        ]
+      }
+    },
+    {
+      "name": "desktop exact result and human acceptance terms",
+      "ok": true
+    },
+    {
+      "name": "desktop keyboard confirmation",
+      "ok": true
+    },
+    {
+      "name": "desktop shared receipt records actual completion",
+      "ok": true
+    },
+    {
+      "name": "desktop result feedback creates one unapproved revision",
+      "ok": true
+    },
+    {
+      "name": "desktop long review fits",
+      "ok": true,
+      "detail": {
+        "viewport": 1440,
+        "width": 1440,
+        "buttons": [
+          {
+            "label": "I confirm this exact action",
+            "height": 44,
+            "width": 784,
+            "scroll": 784
+          },
+          {
+            "label": "Save project instructions",
+            "height": 44,
+            "width": 174.90625,
+            "scroll": 173
+          }
+        ]
+      }
+    },
+    {
+      "name": "desktop full long instructions remain visible",
+      "ok": true
+    },
+    {
+      "name": "desktop chat change appears in project knowledge",
+      "ok": true
+    },
+    {
+      "name": "desktop redacted chat details are complete in secure review",
+      "ok": true
+    },
+    {
+      "name": "desktop redacted preview review fits",
+      "ok": true,
+      "detail": {
+        "viewport": 1440,
+        "width": 1440,
+        "buttons": [
+          {
+            "label": "I confirm this exact action",
+            "height": 44,
+            "width": 784,
+            "scroll": 784
+          },
+          {
+            "label": "Save project instructions",
+            "height": 44,
+            "width": 174.90625,
+            "scroll": 173
+          }
+        ]
+      }
+    },
+    {
+      "name": "desktop pending review is available",
+      "ok": true
+    },
+    {
+      "name": "desktop stale action names the error without overwriting",
+      "ok": true
+    },
+    {
+      "name": "desktop error fits",
+      "ok": true,
+      "detail": {
+        "viewport": 1440,
+        "width": 1440,
+        "buttons": []
+      }
+    },
+    {
+      "name": "desktop missing action is clear",
+      "ok": true
+    },
+    {
+      "name": "desktop unavailable action fits",
+      "ok": true,
+      "detail": {
+        "viewport": 1440,
+        "width": 1440,
+        "buttons": []
+      }
+    },
+    {
+      "name": "desktop browser errors",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "desktop Telegram cards fit with comfortable single-line actions",
+      "ok": true,
+      "detail": {
+        "width": 1440,
+        "content": 1440,
+        "actions": [
+          {
+            "height": 48.671875,
+            "width": 333,
+            "content": 333
+          },
+          {
+            "height": 48.671875,
+            "width": 333,
+            "content": 333
+          },
+          {
+            "height": 48.671875,
+            "width": 333,
+            "content": 333
+          },
+          {
+            "height": 48.671875,
+            "width": 333,
+            "content": 333
+          }
+        ]
+      }
+    },
+    {
+      "name": "desktop Telegram blocker omits internal paths and has one next step",
+      "ok": true
+    },
+    {
+      "name": "desktop Telegram preview keyboard reaches its action",
+      "ok": true
+    },
+    {
+      "name": "desktop Telegram hold action opens real recovery controls",
+      "ok": true,
+      "detail": {
+        "path": "/t/csv-range-tests"
+      }
+    },
+    {
+      "name": "phone complete review fits",
+      "ok": true,
+      "detail": {
+        "viewport": 390,
+        "width": 390,
+        "buttons": [
+          {
+            "label": "I confirm this exact action",
+            "height": 44,
+            "width": 358,
+            "scroll": 358
+          },
+          {
+            "label": "Accept result",
+            "height": 44,
+            "width": 106.375,
+            "scroll": 104
+          }
+        ]
+      }
+    },
+    {
+      "name": "phone exact result and human acceptance terms",
+      "ok": true
+    },
+    {
+      "name": "phone shared receipt records actual completion",
+      "ok": true
+    },
+    {
+      "name": "phone result feedback creates one unapproved revision",
+      "ok": true
+    },
+    {
+      "name": "phone long review fits",
+      "ok": true,
+      "detail": {
+        "viewport": 390,
+        "width": 390,
+        "buttons": [
+          {
+            "label": "I confirm this exact action",
+            "height": 44,
+            "width": 358,
+            "scroll": 358
+          },
+          {
+            "label": "Save project instructions",
+            "height": 44,
+            "width": 174.90625,
+            "scroll": 173
+          }
+        ]
+      }
+    },
+    {
+      "name": "phone full long instructions remain visible",
+      "ok": true
+    },
+    {
+      "name": "phone chat change appears in project knowledge",
+      "ok": true
+    },
+    {
+      "name": "phone redacted chat details are complete in secure review",
+      "ok": true
+    },
+    {
+      "name": "phone redacted preview review fits",
+      "ok": true,
+      "detail": {
+        "viewport": 390,
+        "width": 390,
+        "buttons": [
+          {
+            "label": "I confirm this exact action",
+            "height": 44,
+            "width": 358,
+            "scroll": 358
+          },
+          {
+            "label": "Save project instructions",
+            "height": 44,
+            "width": 174.90625,
+            "scroll": 173
+          }
+        ]
+      }
+    },
+    {
+      "name": "phone pending review is available",
+      "ok": true
+    },
+    {
+      "name": "phone stale action names the error without overwriting",
+      "ok": true
+    },
+    {
+      "name": "phone error fits",
+      "ok": true,
+      "detail": {
+        "viewport": 390,
+        "width": 390,
+        "buttons": []
+      }
+    },
+    {
+      "name": "phone missing action is clear",
+      "ok": true
+    },
+    {
+      "name": "phone unavailable action fits",
+      "ok": true,
+      "detail": {
+        "viewport": 390,
+        "width": 390,
+        "buttons": []
+      }
+    },
+    {
+      "name": "phone browser errors",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "phone Telegram cards fit with comfortable single-line actions",
+      "ok": true,
+      "detail": {
+        "width": 390,
+        "content": 390,
+        "actions": [
+          {
+            "height": 48.671875,
+            "width": 366,
+            "content": 366
+          },
+          {
+            "height": 48.671875,
+            "width": 366,
+            "content": 366
+          },
+          {
+            "height": 48.671875,
+            "width": 366,
+            "content": 366
+          },
+          {
+            "height": 48.671875,
+            "width": 366,
+            "content": 366
+          }
+        ]
+      }
+    },
+    {
+      "name": "phone Telegram blocker omits internal paths and has one next step",
+      "ok": true
+    },
+    {
+      "name": "phone Telegram preview keyboard reaches its action",
+      "ok": true
+    },
+    {
+      "name": "phone Telegram hold action opens real recovery controls",
+      "ok": true,
+      "detail": {
+        "path": "/t/csv-range-tests"
+      }
+    }
+  ],
+  "screenshots": [
+    "desktop-proposal.png",
+    "desktop-review.png",
+    "desktop-confirm.png",
+    "desktop-receipt.png",
+    "desktop-revision.png",
+    "desktop-long-review.png",
+    "desktop-redacted-review.png",
+    "desktop-stale.png",
+    "desktop-telegram-status.png",
+    "desktop-telegram-missing.png",
+    "phone-proposal.png",
+    "phone-review.png",
+    "phone-confirm.png",
+    "phone-receipt.png",
+    "phone-revision.png",
+    "phone-long-review.png",
+    "phone-redacted-review.png",
+    "phone-stale.png",
+    "phone-telegram-status.png",
+    "phone-telegram-missing.png"
+  ],
+  "source": {
+    "src/chat-actions.ts": "c11b1ecf4be483e7a0fce8e998722d4a9abfe32d6d692ce7970c89cf20f7f4da",
+    "src/mate-doors.ts": "919dfcdcd9e4d7b9e3b966a342ec80f252133ef2a4847d3c272ac7babf96e305",
+    "src/mate-tools.ts": "18b33c1b3891e6f9f65d425018afcb79c1ee2393baf8fd6c681f4f85af8fe3d9",
+    "src/serve.ts": "fb9570b2b8eb6300bc4170a261aaf95703811e3d1b83a53a0a366769a058a880",
+    "src/telegram-mate.ts": "4ca368875ddee86412793f43476ff37310d31b1ea641c60575addaacb00bd9cb",
+    "src/store.ts": "1310b3b73d6733b45ccd523f4277a66299c88f40cd30f75b14975fd20ce5ce2e",
+    "src/telegram-progress.ts": "33e502ad98b5311b288356f62af9951ba50848cb7b36c8d588e24908558dde0e",
+    "src/telegram.ts": "feba483962ee04523a10018155858e8653231ad8f09a32d304fcb20a1ff6e572"
+  }
+}

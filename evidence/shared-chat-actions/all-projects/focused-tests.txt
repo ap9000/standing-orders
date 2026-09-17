@@ -1,0 +1,18 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-chat-links
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+·······························································(node:45414) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+····················(node:45413) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···
+
+ Test Files  2 passed (2)
+      Tests  86 passed (86)
+   Start at  13:57:40
+   Duration  13.13s (transform 2.58s, setup 22ms, import 3.11s, tests 17.08s, environment 0ms)
+

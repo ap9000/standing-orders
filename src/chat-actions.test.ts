@@ -755,13 +755,24 @@ describe("shared chat action lifecycle", () => {
       ),
     ).toThrow(/unsupported/);
   });
-  test("secure HTTP review requires the owner, CSRF and one receipt, and shows the saved outcome on reopening", async () => {
+  test.each([false, true])("secure HTTP review preserves owner, CSRF and receipt checks (All projects: %s)", async (multiple) => {
+    const repos = [repo];
+    if (multiple) {
+      const second = join(root, "second-project");
+      mkdirSync(second);
+      repos.push(second);
+      const verified = verifyApproverStanding(store, who.name, who.generation, repos);
+      if (!verified.ok) throw Error("identity");
+      who = verified.who;
+      session = store.mintMateSession({ approver: who.name, approverGeneration: who.generation, credentialKey: "shared-fixture", ceilingMicrousd: 10000000, ceilingDigest: who.ceilingDigest, termsDigest: "fixture" }, now);
+      thread = store.openMateThread(who.name, who.ceilingDigest, now).thread.id;
+    }
     const id = task(),
       action = proposal("task_cancel", { task: id });
     const server = createDecisionServer({
       store,
       evidenceRoot: root,
-      repos: [repo],
+      repos,
       clock: () => now,
     });
     await new Promise<void>((resolve) =>
@@ -783,9 +794,11 @@ describe("shared chat action lifecycle", () => {
       ).toBe(303);
       const response = await fetch(base + `/chat/action/${action}`, {
           headers: { cookie },
+          redirect: "manual",
         }),
         html = await response.text();
       expect(response.status).toBe(200);
+      expect((await fetch(base + "/chat/action/999999", { headers: { cookie }, redirect: "manual" })).status).toBe(409);
       expect(html).toContain("I confirm this exact action");
       expect(html).not.toContain('type="password"');
       const nonce = /name="nonce" value="([^"]+)"/.exec(html)![1]!,

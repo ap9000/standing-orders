@@ -1038,8 +1038,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     // task fragment must be too — a 303 to the opener answered the poll
     // with HTML and the page wrongly said the sign-in was lost. Each
     // route keeps its own cookie, role, session, ceiling, and task
-    // admission checks; only the project-opener bounce is skipped, and
-    // only for these two exact paths.
+    // admission checks. Shared action links likewise recheck the saved
+    // owner and project in their handler, so they stay reachable from All
+    // projects without changing the selected project or granting access.
     const needsProject =
       who.via === "cookie" && project === null && !unscopedMode &&
       url.pathname !== "/" && url.pathname !== "/work" &&
@@ -1052,6 +1053,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
       url.pathname !== "/chat" && url.pathname !== "/chat/mate/status" && url.pathname !== "/chat/task-status" &&
+      !/^\/chat\/action\/[0-9]{1,15}$/.test(url.pathname) &&
       !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");

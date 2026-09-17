@@ -108,7 +108,7 @@ try {
     ["desktop", { width: 1440, height: 900 }],
     ["phone", { width: 390, height: 844 }],
   ]) {
-    const f = await startFixture({ sameTaskRevisions: true }),
+    const f = await startFixture({ sameTaskRevisions: true, secondProject: true }),
       store = f.store,
       root = join(f.repos.main, "..", "evidence");
     const context = await browser.newContext({
@@ -126,7 +126,7 @@ try {
           store,
           f.name,
           store.accountOf(f.name).generation,
-          [f.repos.main],
+          Object.values(f.repos).filter(Boolean),
         );
       if (!verified.ok) throw Error("principal");
       const who = verified.who,

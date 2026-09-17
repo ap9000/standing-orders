@@ -1,0 +1,26 @@
+{
+  "synthetic": true,
+  "sourceSha256": {
+    "src/serve.ts": "fb9570b2b8eb6300bc4170a261aaf95703811e3d1b83a53a0a366769a058a880",
+    "src/chat-actions.test.ts": "a2e2b1693b4cb0d5ca59691cea65139f7a5029294ef0a59886c5bacd5ac09993",
+    "scripts/shared-chat-actions-proof.mjs": "283850877f0501f7bc0f0064fe216db91026ea9e8a24b9d40a4971ee4cd226b0"
+  },
+  "focusedTests": {
+    "command": "npx vitest run src/chat-actions.test.ts src/telegram-mate.test.ts --reporter=dot",
+    "passed": 86,
+    "files": 2,
+    "log": "focused-tests.txt"
+  },
+  "typecheck": {
+    "command": "npm run typecheck",
+    "exitCode": 0
+  },
+  "uiReport": "ui-report.json",
+  "browserChecks": 39,
+  "reproduction": {
+    "singleProject": "passes",
+    "multipleProjectsBefore": "303 redirect instead of 200 review",
+    "multipleProjectsAfter": "200 review and 409 missing action; CSRF and duplicate-confirm checks pass"
+  },
+  "installedDiscovery": "3c93d0e installed live check found the All-projects redirect; current installed build remains usable after project selection."
+}
