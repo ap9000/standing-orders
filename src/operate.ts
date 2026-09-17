@@ -292,7 +292,7 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task add <title>          queue work
   standing-orders task list [--state <s>]   everything, or one state
   standing-orders task show <id>
-  standing-orders task state <id> <state>   queued|running|done|failed|cancelled
+  standing-orders task state <id> <state> [--reason <text>]   queued|running|done|failed|cancelled
   standing-orders task block <id> --on <id> <id> waits for <on>
   standing-orders task unblock <id> --on <id>  stop waiting for <on>
   standing-orders task next <id> [--undo]   move it to the front of ITS
@@ -1204,7 +1204,7 @@ function claimCommand(
         json,
         "claim",
         "unplaced",
-        "this task is placed in no repository — place it first, then claim",
+        "this task has no repository — preserve its history and file a replacement with `task add <title> --repo <path>`, then approve the new scope",
         EXIT.refused,
       );
     }
@@ -10176,8 +10176,14 @@ async function stateTask(
     ]);
   }
 
-  const moved = store.setTaskState(id, state as TaskState, now, mutationFrom(flags, now));
+  const moved = store.setTaskState(id, state as TaskState, now, mutationFrom(flags, now), text(flags, "reason"));
   if (!moved.ok) {
+    if (moved.reason === "reason-required" || moved.reason === "bad-reason") {
+      return fail(write, json, "task state", moved.reason,
+        moved.reason === "reason-required"
+          ? "a coordinator filed this task — add --reason with why you are cancelling it"
+          : "--reason must be at most 500 plain characters, without hidden or control characters", EXIT.refused);
+    }
     return moved.reason === "external-closed"
       ? fail(write, json, "task state", "external-closed", "the tracker closed this — reopen it first, or leave it cancelled", EXIT.refused)
       : fail(write, json, "task state", "unknown-task", `no task \`${id}\``, EXIT.refused);

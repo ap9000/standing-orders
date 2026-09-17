@@ -43,7 +43,7 @@ import { worktreeProcessOccupancy } from "./worktree.js";
 import { processMayBeAlive } from "./process-liveness.js";
 import { currentBootId, provenDeadByBootChange } from "./boot-identity.js";
 import { containerEmptiness } from "./container-state.js";
-import { hasForbiddenControls, validateNote } from "./decision.js";
+import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
 import { parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
 import { foldReview, manualReviewOnly, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
 import { approvalOf, digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileDigestOf, profileFromJson, scopeAuthorityOf, routeParityProblem, parseAcceptanceCriteria, exactAcceptance, exactStringList, exactSafeIntegerOrNull, exactKeys, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
@@ -120,6 +120,9 @@ export const SCHEMA_VERSION = 66;
 export const BUILT_IN = "built-in";
 
 export type TaskState = "queued" | "running" | "done" | "failed" | "cancelled";
+
+type CancellationRefusal = "reason-required" | "bad-reason";
+type CancellationTransition = { changed: boolean; reason?: never } | { changed: false; reason: CancellationRefusal };
 
 /** States from which no further work is dispatched. */
 export const TERMINAL_STATES: readonly TaskState[] = ["done", "failed", "cancelled"];
@@ -7076,14 +7079,7 @@ export class Store {
       | { kind: "machine"; code: "mirror-latched" | "disowned-completion" },
     now: Date,
     admittedFrom: readonly TaskState[] | null,
-  ): { changed: boolean } {
-    // An operator reason is approver-read text like every other: bounded,
-    // control-free, no disguised writing (review finding 8).
-    if (reason.kind === "operator" && reason.text !== null) {
-      if (reason.text.length > 500 || hasForbiddenControls(reason.text)) {
-        throw new Error("a cancellation reason is at most 500 plain characters");
-      }
-    }
+  ): CancellationTransition {
     return this.transact(() => this.applyCancellationLocked(taskId, reason, now, admittedFrom));
   }
 
@@ -7094,7 +7090,22 @@ export class Store {
       | { kind: "machine"; code: "mirror-latched" | "disowned-completion" },
     now: Date,
     admittedFrom: readonly TaskState[] | null,
-  ): { changed: boolean } {
+  ): CancellationTransition {
+    const ref = this.db
+      .prepare("SELECT id, coordinator_cid FROM task_ref WHERE backend = ? AND external_id = ?")
+      .get(BUILT_IN, taskId);
+    const coordinator = ref?.["coordinator_cid"] != null;
+    // Check the authoritative linkage and the reason in the transaction
+    // that changes state. No wrapper can substitute a generic dismissal.
+    if (reason.kind === "operator") {
+      if (coordinator) {
+        if (reason.text === null || reason.text.trim() === "") return { changed: false, reason: "reason-required" };
+        if (reason.text.length > 500 || hasDisguisedText(reason.text)) return { changed: false, reason: "bad-reason" };
+      } else if (reason.text !== null && (reason.text.length > 500 || hasForbiddenControls(reason.text))) {
+        // Preserve the ordinary-task API's existing validation behavior.
+        throw new Error("a cancellation reason is at most 500 plain characters");
+      }
+    }
     const filter = admittedFrom === null ? "" : ` AND state IN (${admittedFrom.map(() => "?").join(",")})`;
     const prior = this.db.prepare("SELECT state FROM task WHERE id = ?").get(taskId);
     const { changes } = this.db
@@ -7105,16 +7116,13 @@ export class Store {
     // transaction, whichever road cancelled it — a note silently waiting
     // for a build that can no longer happen is wrong on every road, not
     // just the state verb's.
-    const ref = this.db
-      .prepare("SELECT id, coordinator_cid FROM task_ref WHERE backend = ? AND external_id = ?")
-      .get(BUILT_IN, taskId);
     if (ref !== undefined) this.supersedeSteerNotes(Number(ref["id"]), now);
     // The reason is part of the transition, not decoration: a
     // coordinator-filed task's dismissal writes its durable event IN THIS
     // transaction — operator text and typed machine codes alike (MCP spec
     // v6: events atomic with state changes; the filer deserves words).
-    if (ref !== undefined && ref["coordinator_cid"] !== null && ref["coordinator_cid"] !== undefined) {
-      const detail = reason.kind === "operator" ? (reason.text ?? "dismissed") : reason.code;
+    if (ref !== undefined && coordinator) {
+      const detail = reason.kind === "operator" ? reason.text! : reason.code;
       this.db
         .prepare("INSERT INTO coordinator_event (cid, kind, task_id, detail, created_at) VALUES (?, 'dismissed', ?, ?, ?)")
         .run(String(ref["coordinator_cid"]), taskId, detail, now.toISOString());
@@ -7146,7 +7154,8 @@ export class Store {
     state: TaskState,
     now: Date,
     mutation: Mutation = {},
-  ): { ok: true } | { ok: false; reason: "unknown-task" | "external-closed" } {
+    cancellationReason?: string,
+  ): { ok: true } | { ok: false; reason: "unknown-task" | "external-closed" | CancellationRefusal } {
     return this.once(
       mutation,
       "setTaskState",
@@ -7164,9 +7173,8 @@ export class Store {
         }
         return this.transact(() => {
           if (state === "cancelled") {
-            // The floor is the only writer of 'cancelled' — the state verb
-            // is an operator road with no ceremony text of its own.
-            const done = this.applyCancellation(id, { kind: "operator", text: null }, now, null);
+            const done = this.applyCancellation(id, { kind: "operator", text: cancellationReason ?? null }, now, null);
+            if (done.reason !== undefined) return { ok: false as const, reason: done.reason };
             if (!done.changed) return { ok: false as const, reason: "unknown-task" as const };
             this.bumpWake();
             return { ok: true as const };
@@ -12991,7 +12999,7 @@ export class Store {
     taskId: string,
     now: Date,
     reason?: string,
-  ): { ok: true } | { ok: false; reason: "unknown-task" | "claimed" | "already-terminal" } {
+  ): { ok: true } | { ok: false; reason: "unknown-task" | "claimed" | "already-terminal" | CancellationRefusal } {
     return this.transact(() => {
       const ref = this.db
         .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
@@ -13006,6 +13014,7 @@ export class Store {
         now,
         ["queued", "failed", "running"],
       );
+      if (done.reason !== undefined) return { ok: false as const, reason: done.reason };
       if (!done.changed) return { ok: false as const, reason: "already-terminal" as const };
       this.bumpWake();
       return { ok: true as const };

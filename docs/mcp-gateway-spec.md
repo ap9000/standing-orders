@@ -3,6 +3,15 @@
 Parity II's MCP phase. The plane becomes reachable by agent clients as
 an MCP **server** — never the other way round.
 
+This document defines the v6 gateway baseline. The later
+[mate arc §2](mate-arc.md#2-the-tools-shared-with-mcp),
+[§9](mate-arc.md#9-v3-2026-09-02-suggested-answers-and-proposals-over-the-gateway), and
+[§10](mate-arc.md#10-v4-2026-09-02-scout-tasks-and-telegram-digests) extend that
+baseline with read tools, coordinator proposal rows, and scout reports.
+Those sections supersede the six-tool/single-write surface only where
+they explicitly add a tool or result; the credential, quarantine,
+approval, and transaction requirements here continue to apply.
+
 Structure (round-1 rulings, round-2 corrections folded):
 
 - **No new task state.** The write tool calls the EXISTING canonical
@@ -109,7 +118,7 @@ rechecks allowlist membership before task, run, and evidence lookups
 from absent). New store methods, credential-scoped by construction;
 tests prove repo-null and foreign-repo rows never appear.
 
-## Tools (v1 — the whole surface)
+## Tools (v1 — the baseline surface)
 
 One typed descriptor per tool is the single source: runtime parsing,
 `inputSchema`/`outputSchema`, exposure, projection. Schemas:
@@ -168,6 +177,8 @@ transaction.
   the server stops work on that request id and suppresses its
   response.
 - Limits: request ≤ 256 KiB, depth ≤ 32, in-flight ≤ 4.
+  Depth validation must also accept wide, shallow JSON within the byte
+  limit without overflowing the runtime's call or argument stack.
 - Protocol errors are JSON-RPC errors; tool refusals are `tools/call`
   results with `isError: true` + words. Channels never mix. Malformed
   input never crashes; fixtures prove it.
@@ -214,10 +225,13 @@ Runner authority (round 1 f3, round 2 f4 — ALL mint/exec roads):
     review, and held sessions alike; no enumerated-phase list to
     fall out of date.
 - **Repo-null tasks stop dispatching** — no repo-scoped runner can
-  authorize null. The refusal names the placement road (place the
-  task into a repo first, the existing placement-proof ceremony);
-  existing repo-null queued tasks surface as visibly unplaceable, in
-  words, not silently stuck.
+  authorize null. Existing repo-null queued tasks surface as visibly
+  unplaceable. Recovery preserves the original task and its history:
+  file a new task with `task add <title> --repo <path>` (or select the
+  repository when creating it in the console), restate its scope, and
+  obtain fresh approval. Once a scope exists, `placeTask` refuses a
+  repository change; do not move an existing approval, copy its grants,
+  or rewrite its evidence. The refusal names this replacement road.
 - Existing runners (`repos = []`): **deny-all at the gate**, refusal
   naming the one-time authenticated ceremony `runner bind <name>
   --repo <path>... --as <approver>`. No wildcard interpretation
@@ -283,6 +297,15 @@ live-claim refusal. An architecture test forbids any other
 in-flight disown producing typed events. Ordinary tasks are
 untouched in behavior — they simply share the floor.
 
+For coordinator-filed tasks, the private transition rejects missing,
+blank, over-500-character, control-bearing, or disguised human reasons
+before changing state or audit rows. `task state <id> cancelled
+--reason <text>` and the console's armed cancellation form pass the
+operator's reason to that transition. A refusal does not consume an
+idempotency key; the operator can correct the reason and retry. Machine
+reasons remain typed, and ordinary-task cancellation keeps its existing
+behavior.
+
 ## Demo mode
 
 `standing-orders mcp` against a demo db refuses at startup. No partial
@@ -342,3 +365,6 @@ mode.
 Auto-admission mode term · public-read mode · HTTP transport ·
 evidence bodies (`get_evidence` later, bounded + hash-verified) ·
 routine filing via MCP · any second write verb.
+
+These exclusions describe the baseline; the reviewed mate extensions
+linked above separately authorize their proposal-row write verbs.

@@ -236,6 +236,30 @@ describe("the coordinator quarantine", () => {
     expect(events[1]?.["detail"]).toBe("not this week");
   });
 
+  test.each([undefined, "", " \n\t ", "x".repeat(501), "hidden\u001btext", "hidden\u202etext"])(
+    "coordinator cancellation rejects an absent or invalid human reason: %j",
+    reason => {
+      const before = store.getTask(taskId);
+      const refusal = reason === undefined || reason.trim() === "" ? "reason-required" : "bad-reason";
+      expect(store.cancelTask(taskId, later(1_000), reason)).toMatchObject({ ok: false, reason: refusal });
+      expect(store.setTaskState(taskId, "cancelled", later(1_000), {}, reason)).toMatchObject({ ok: false, reason: refusal });
+      expect(store.applyCancellation(taskId, { kind: "operator", text: reason ?? null }, later(1_000), null))
+        .toEqual({ changed: false, reason: refusal });
+      expect(store.getTask(taskId)).toEqual(before);
+      expect(store.handle.prepare("SELECT kind FROM coordinator_event WHERE cid = ? ORDER BY id").all(cid))
+        .toEqual([{ kind: "filed" }]);
+    },
+  );
+
+  test("a refused state cancellation can retry the same key with a real reason", () => {
+    const mutation = { idempotencyKey: "cancel-retry", at: later(1_000) };
+    expect(store.setTaskState(taskId, "cancelled", later(1_000), mutation)).toMatchObject({ ok: false, reason: "reason-required" });
+    expect(store.setTaskState(taskId, "cancelled", later(1_000), mutation, "superseded by the smaller task")).toEqual({ ok: true });
+    expect(store.getTask(taskId)?.state).toBe("cancelled");
+    expect(store.handle.prepare("SELECT detail FROM coordinator_event WHERE cid = ? AND kind = 'dismissed'").all(cid))
+      .toEqual([{ detail: "superseded by the smaller task" }]);
+  });
+
   test("the PLANNER road shares the quarantine: a plan-requested filing dispatches for nobody before the seal", () => {
     expect(store.requestPlan(taskRef, T0)).toMatchObject({ ok: true });
     const refused = acquireIfReady(store, taskRef, "b-1", { now: later(1_000), token: "tok-b-1", dispatchRole: "planner" });

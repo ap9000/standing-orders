@@ -1,0 +1,115 @@
+{
+  "synthetic": true,
+  "tool": "Playwright CLI with the existing scripts/ui-polish-fixture.mjs, two isolated in-memory fixtures; no model calls",
+  "source": {
+    "src/serve.ts": "d73d8e1a6bb8e48c3489c6ccb04ba2418c48adc7d31f3de4e7d093f91c2df762",
+    "src/store.ts": "84ccfd06f236a0e13c95f20ad139a03f0c29af6680f5b0024ccd233a701b7ba8"
+  },
+  "checks": [
+    {
+      "name": "desktop: Empty reason blocked and textbox focused",
+      "ok": true
+    },
+    {
+      "name": "desktop: Overlong submitted reason refused with HTTP 400",
+      "ok": true
+    },
+    {
+      "name": "desktop: Rejected draft remains visible and editable",
+      "ok": true
+    },
+    {
+      "name": "desktop: Tab reaches a single-line confirmation button with at least 44px height",
+      "ok": true
+    },
+    {
+      "name": "desktop: No horizontal document overflow",
+      "ok": true
+    },
+    {
+      "name": "desktop: Corrected reason cancels successfully",
+      "ok": true
+    },
+    {
+      "name": "desktop: Result feedback creates an unapproved revision preserving its exact words",
+      "ok": true
+    },
+    {
+      "name": "desktop: Expanded revision brief is readable without horizontal overflow",
+      "ok": true
+    },
+    {
+      "name": "phone: Empty reason blocked and textbox focused",
+      "ok": true
+    },
+    {
+      "name": "phone: Overlong submitted reason refused with HTTP 400",
+      "ok": true
+    },
+    {
+      "name": "phone: Rejected draft remains visible and editable",
+      "ok": true
+    },
+    {
+      "name": "phone: Tab reaches a single-line confirmation button with at least 44px height",
+      "ok": true
+    },
+    {
+      "name": "phone: No horizontal document overflow",
+      "ok": true
+    },
+    {
+      "name": "phone: Corrected reason cancels successfully",
+      "ok": true
+    },
+    {
+      "name": "phone: Result feedback creates an unapproved revision preserving its exact words",
+      "ok": true
+    },
+    {
+      "name": "phone: Expanded revision brief is readable without horizontal overflow",
+      "ok": true
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "desktop-cancel.png",
+      "synthetic": true
+    },
+    {
+      "path": "desktop-error.png",
+      "synthetic": true
+    },
+    {
+      "path": "desktop-revision.png",
+      "synthetic": true
+    },
+    {
+      "path": "phone-empty.png",
+      "synthetic": true
+    },
+    {
+      "path": "phone-error.png",
+      "synthetic": true
+    },
+    {
+      "path": "phone-draft.png",
+      "synthetic": true
+    },
+    {
+      "path": "phone-cancel.png",
+      "synthetic": true
+    },
+    {
+      "path": "phone-revision.png",
+      "synthetic": true
+    }
+  ],
+  "notes": [
+    "Desktop 1440x1000 and phone viewport 390x844, Chromium, not a physical phone.",
+    "Long-reason HTTP rejection is exercised by removing the client maxlength in the fixture only.",
+    "Screenshots were inspected after transitions settled. Error text is above the task content; the draft remains expanded lower on the page.",
+    "The old Add note selector timed out after the main rebase because current main uses Request changes. The journey was completed using the observed current control.",
+    "No runtime implementation changed during these checks."
+  ]
+}
