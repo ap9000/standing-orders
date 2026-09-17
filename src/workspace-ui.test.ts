@@ -185,6 +185,7 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(receiptHeadingOf("built", null)).toBe("Changes saved");
     expect(receiptHeadingOf("no-change", null)).toBe("No changes were needed");
     expect(receiptHeadingOf("no-change", null, "scout")).toBe("Report saved");
+    expect(receiptHeadingOf("built", null, "scout")).toBe("Report saved");
     expect(receiptHeadingOf("built", pub({}))).toBe("PR opened");
     expect(receiptHeadingOf("built", pub({ remoteState: "MERGED" }))).toBe("Merge observed");
     expect(receiptHeadingOf("built", pub({ state: "pushed" }))).toBe("Changes saved");

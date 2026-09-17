@@ -231,28 +231,8 @@ try {
         "synthetic UI fixture",
         now,
       );
-      storeEvidence(
-        store,
-        evidenceRoot,
-        run,
-        "handoff",
-        "handoff.json",
-        Buffer.from(
-          JSON.stringify({
-            schema: 1,
-            outcome: "no-change",
-            committed: false,
-            conclusion,
-            changes: [],
-            verification: ["Synthetic UI fixture only."],
-            followUps: [],
-            decisionsIncorporated: [],
-          }),
-        ),
-        "synthetic UI fixture",
-        now,
-      );
-      store.finishRun(run, { outcome: "no-change", committed: false, now });
+      // Match native report completion: no builder handoff is produced.
+      store.finishRun(run, { outcome: "built", reason: "report-delivered", committed: false, now });
       store.setTaskState(testId, "done", now);
       await page.goto(fixture.url + `/chat?task=${testId}&result=${run}`);
       await settle(page);

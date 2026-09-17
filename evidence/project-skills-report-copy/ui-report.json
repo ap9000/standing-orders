@@ -1,0 +1,29 @@
+{
+  "synthetic": true,
+  "checks": [
+    {
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "name": "desktop",
+      "runShape": "scout, built/report-delivered, report artifact only",
+      "heading": "Report saved",
+      "verifiedReportSummary": true,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "name": "phone",
+      "runShape": "scout, built/report-delivered, report artifact only",
+      "heading": "Report saved",
+      "verifiedReportSummary": true,
+      "overflow": false,
+      "errors": []
+    }
+  ]
+}
