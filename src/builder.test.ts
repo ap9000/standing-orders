@@ -1,5 +1,6 @@
+import * as projectSkills from "./project-skills.js";
 import { isVerificationReceipt, verificationEvidence } from "./verification-evidence.js";
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { agentExitWords, build, PROTECTED, proveApprovedProfile, verificationExecutableMissing, type Runner } from "./builder.js";
 import { routeDigestOf } from "./phase-routing.js";
 import { openStore, type Store } from "./store.js";
@@ -187,6 +188,16 @@ describe("the builder's gates", () => {
   // the claim must carry the exact lease id the fixtures start runs under.
   const claimIt = () =>
     acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
+
+  test("unreadable skill context refuses before provider spend", async () => {
+    approveScope();
+    claimIt();
+    const failure = vi.spyOn(projectSkills, "skillsContext").mockImplementationOnce(() => { throw Error("Saved skill package failed verification."); });
+    try {
+      expect(await build(store, request())).toMatchObject({ ok: false, reason: "skills-unavailable", message: expect.stringContaining("Saved skill package failed verification.") });
+      expect(agentCalls).toHaveLength(0);
+    } finally { failure.mockRestore(); }
+  });
 
   test("will not build a task nobody approved", async () => {
     // The gap this closes: "fix the payouts flow" is a sentence, and an agent

@@ -1,3 +1,5 @@
+import { currentClaim } from "./claim.js";
+import * as projectSkills from "./project-skills.js";
 /**
  * Planning mode, end to end against real git: the operator asks for a plan,
  * a planner interrogates and drafts, the operator approves the proposed
@@ -9,7 +11,7 @@
  */
 
 import { routeDigestOf } from "./phase-routing.js";
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { realpathSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -210,6 +212,24 @@ describe("planning mode, against real git", () => {
       agent,
       now,
     );
+
+  test("unreadable skill context settles a failed attempt without provider spend", async () => {
+    const { runnerToken, approverToken } = await setup();
+    await run(["task", "plan", "limiter", "--as", "alex", "--token", approverToken, "--json"], planningAgent);
+    const failure = vi.spyOn(projectSkills, "skillsContext").mockImplementationOnce(() => { throw Error("Saved skill package failed verification."); });
+    try {
+      await tick(runnerToken, planningAgent);
+      expect(prompts).toHaveLength(0);
+      const saved = openStore(db);
+      try {
+        const ref = saved.refFor("built-in", "limiter");
+        const run = saved.runsFor(ref.id)[0];
+        expect(run).toMatchObject({ outcome: "failed", reason: "Project skills could not be loaded: Saved skill package failed verification.", providerStartedAt: null });
+        expect(run?.finishedAt).not.toBeNull();
+        expect(currentClaim(saved, ref.id, T0)).toBeNull();
+      } finally { saved.close(); }
+    } finally { failure.mockRestore(); }
+  });
 
   test("the whole negotiation: ask, answer, draft, approve, build — in that order, never earlier", async () => {
     const { runnerToken, approverToken } = await setup();

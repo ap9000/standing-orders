@@ -1,3 +1,5 @@
+import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkillTest, skillTestResult, skillsView, testSkill, type SkillFile } from "./project-skills.js";
+import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { changeLearning, learningView } from "./project-learning.js";
 import { changeKnowledge, knowledgeView, knowledgeVersion, readKnowledgeSnapshot, type KnowledgeDraft } from "./project-knowledge.js";
 import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS } from "./knowledge-ui.js";
@@ -919,7 +921,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     };
     if (method === "GET" || method === "POST") return requestContext.run(requestFacts, async () => {
       const taskTextForm = url.pathname === "/tasks/add" || /^\/t\/[^/]+\/scope$/.test(url.pathname);
-      const body = method === "POST" ? await form(request, taskTextForm ? TASK_FORM_BODY_CAP : BODY_CAP) : null;
+      const body = method === "POST" ? await form(request, url.pathname === "/settings/skills/import" ? 2 * 1024 * 1024 : taskTextForm ? TASK_FORM_BODY_CAP : BODY_CAP) : null;
       const target = actionTarget(url, who, request, body);
       const execute = async () => {
         if (!projectRequestAllowed(url, who, request, response)) return;
@@ -957,6 +959,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
   function actionTarget(url: URL, who: Who, request: IncomingMessage, body: URLSearchParams | null = null): { repo: string | null; taskId: string | null; runId: number | null; action: string } {
+    if (url.pathname.startsWith('/settings/skills')) return {repo:body?.get('repo')??url.searchParams.get('repo')??projectOf(who,request)??null,taskId:null,runId:null,action:body?'project skills change':'project skills view'};
     if (url.pathname.startsWith('/settings/knowledge')) return {repo:body?.get('repo')??url.searchParams.get('repo')??projectOf(who,request)??null,taskId:null,runId:null,action:body?'project knowledge change':'project knowledge view'};
     const task = matchTaskPath(url.pathname, "(?:/([a-z-]+))?$");
     if (task !== null) return { repo: store.lookupRef(task.taskId)?.repo ?? null, taskId: task.taskId, runId: null, action: `task ${task.verb || "view"}` };
@@ -978,8 +981,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
     if (!restricted()) return true;
     const path = url.pathname;
-    const read = new Set(["/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
-    const write = new Set(["/settings/knowledge/change", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
+    const read = new Set(["/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path)
@@ -995,7 +998,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     // Every collection except these three must have a concrete project;
     // NULL otherwise means all rows in legacy store APIs.
-    if (!["/settings/knowledge", "/settings/knowledge/change", "/settings", "/settings/learning", "/settings/learning/change", "/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
+    if (!["/settings/skills", "/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge", "/settings/knowledge/change", "/settings", "/settings/learning", "/settings/learning/change", "/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
       refuse(response, who, 403, "No assigned project is available. Ask an instance operator for access.", "/projects"); return false;
     }
     if (request.method === "GET" && path === "/board") {
@@ -2613,6 +2616,18 @@ export function createDecisionServer(options: ServeOptions): Server {
         { chrome: chromeFor(project, "settings"), ...(catalog === null ? {} : { functional: { script: openRouterPickerScript() } }) }));
     }
 
+    if (url.pathname === "/settings/skills") {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
+      if (chosen && !projects.includes(chosen)) return refuse(response,who,403,"That project is outside your access.","/projects");
+      const selector = projects.length > 1 ? `<form class="skills" method="get"><label>Project<select name="repo">${projects.map(p=>`<option value="${escape(p)}"${p===chosen?' selected':''}>${escape(p.split('/').at(-1)??p)}</option>`).join('')}</select></label><button>Show project</button></form>` : '';
+      let content = '<p>Add a project to manage its skills.</p>';
+      if (chosen) {
+        try { const agent=resolvePhaseAgent(store,'build',chosen,{});content = skillsHtml(skillsView(store,chosen,who.name),who.via==='cookie'?who.session.csrf:'',who.role==='approver',{focus:url.searchParams.get('skill')??'',agent:agent.ok?`Report agent: ${agent.spec.provider} · ${agent.spec.model??'default'}. Change it on the test task before approval`:'Choose a report agent on the test task before approval'}); }
+        catch(error) { content = `<p class="problem" role="alert">${escape(error instanceof Error?error.message:'Skills are unavailable. Reload to retry.')}</p>`; }
+      }
+      return sendScreen(response,200,screen('Skills',`<p><a href="/settings">Settings</a></p><h1>Skills</h1>${url.searchParams.get('saved')==='1'?'<p role="status">Saved.</p>':''}${selector}${content}`,{chrome:chromeFor(chosen||project,'settings'),functional:{script:skillsScript()}}));
+    }
     if (url.pathname === "/settings/knowledge") {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
       const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
@@ -2648,7 +2663,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(response, 200, screen("Learning", `<p><a href="/settings">Settings</a></p><h1>Learning</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
     if (url.pathname === "/settings" && (options.telegramTokenFile === undefined || restricted())) {
-      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/knowledge">Project knowledge</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
+      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
     }
 
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
@@ -4489,6 +4504,43 @@ export function createDecisionServer(options: ServeOptions): Server {
     // re-counts within five seconds either way, this just makes it exact.
     bustBadge();
 
+    if (url.pathname === "/settings/skills/revise") {
+      if(who.via!=='cookie'||who.role!=='approver')return refuse(response,who,403,'Sign in to revise a test.','/settings/skills');
+      try {
+        const run=Number(body.get('run')),source=skillTestResult(store,run,who.name);
+        if(!source||!visible(source.repo)||body.get('repo')!==source.repo||['run','repo','nonce','feedback'].some(k=>body.getAll(k).length!==1))return refuse(response,who,403,'That skill test is outside your access.','/settings/skills');
+        try{const revision=reviseSkillTest(store,{run,actor:who.name,feedback:body.get('feedback')??'',nonce:body.get('nonce')??''},clock());return redirect(response,`/t/${encodeURIComponent(revision.id)}`);}
+        catch(error){return sendScreen(response,409,screen('Revise skill test',skillTestFeedbackHtml(source,who.session.csrf,true,error instanceof Error?error.message:'The test could not be created.',body.get('feedback')??''),{chrome:chromeFor(source.repo,'settings')}));}
+      } catch {return refuse(response,who,409,'The source test could not be verified. Open its result and try again.','/settings/skills');}
+    }
+    if (url.pathname === "/settings/skills/import" || url.pathname === "/settings/skills/change") {
+      if (who.via !== 'cookie' || who.role !== 'approver') return refuse(response,who,403,'Sign in as an approver to manage skills.','/settings/skills');
+      const repo=body.get('repo')??'',back=`/settings/skills?repo=${encodeURIComponent(repo)}`;
+      if (!visible(repo)||![...(admissionList()??[]),...managedRepos(),...store.knownRepos()].includes(repo)) return refuse(response,who,403,'That project is outside your access.','/projects');
+      if ([...new Set(body.keys())].some(k=>body.getAll(k).length!==1)) return refuse(response,who,400,'Invalid skills form.',back);
+      try {
+        const view=skillsView(store,repo,who.name);
+        if(body.get('identity')!==view.identity||body.get('revision')!==String(view.revision)) throw Error('Skills changed in another window. Review the current selection and try again.');
+        if(url.pathname.endsWith('/import')) {
+          const method=body.get('method');let files:SkillFile[],source:string;
+          if(method==='paste'){files=[{path:'SKILL.md',base64:Buffer.from(body.get('content')??'').toString('base64')}];source='Pasted SKILL.md';}
+          else if(method==='folder'){files=JSON.parse(body.get('files')??'[]') as SkillFile[];source='Uploaded local folder';}
+          else if(method==='github'){const imported=await githubSkill(body.get('url')??'');files=imported.files;source=imported.source;}
+          else throw Error('Choose how to add the skill.');
+          const skill=importSkill(store,repo,who.name,files,source,clock());return redirect(response,`${back}&skill=${skill.sha}#skill-${skill.sha}`);
+        }
+        const action=body.get('action');
+        if(action==='test'){const task=testSkill(store,{repo,actor:who.name,sha:body.get('sha')??'',sample:body.get('sample')??'',nonce:body.get('nonce')??''},clock());return redirect(response,`/t/${encodeURIComponent(task.id)}`);}
+        if(action!=='enable'&&action!=='disable'&&action!=='restore')throw Error('Choose a supported skills action.');
+        changeSkills(store,{repo,actor:who.name,identity:view.identity,revision:view.revision,action,sha:body.get('sha')??'',restore:Number(body.get('restore'))},clock());
+        return redirect(response,`${back}&saved=1`);
+      } catch(error) {
+        const message=error instanceof Error?error.message:'Skills could not be saved. Try again.';
+        let content=`<p role="alert">${escape(message)}</p><a href="${escape(back)}">Reload Skills</a>`;
+        try {content=skillsHtml(skillsView(store,repo,who.name),who.session.csrf,true,{error:message,draft:Object.fromEntries(['method','content','url','sample','sha'].map(k=>[k,body.get(k)??'']))});}catch{/* Do not display unverified packages. */}
+        return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
+      }
+    }
     if (url.pathname === "/settings/knowledge/change") {
       if (who.via !== 'cookie' || who.role !== 'approver') return refuse(response,who,403,'Sign in as an approver to change project knowledge.','/settings/knowledge');
       const repo = body.get('repo') ?? '', action = body.get('action') ?? '';
@@ -7730,16 +7782,19 @@ export function createDecisionServer(options: ServeOptions): Server {
       cited.size > 0,
     );
     const publication = store.publicationForRun(run.id);
-    let learning = "";
+    let learning = "", skillTest = false;
     const learningRepo = store.refForId(run.taskRef)?.repo;
     if (learningRepo && visible(learningRepo)) {
       try { learning = learningHtml(learningView(store, evidenceRoot, learningRepo, who.name), who.via === "cookie" ? who.session.csrf : "", who.role === "approver", run.id); }
       catch { /* Learning failures remain available in Settings; the result is independent. */ }
-      try { learning = knowledgeContextHtml(readKnowledgeSnapshot(store,run.id)) + learning; }
+      try { const test=skillTestResult(store,run.id,who.name);if(test){skillTest=true;learning=skillTestFeedbackHtml(test,who.via==='cookie'?who.session.csrf:'',who.role==='approver')+learning;} }
+      catch { learning='<p role="alert">The saved skill test could not be verified.</p>'+learning; }
+      try { learning = skillsSnapshotHtml(readSkillsSnapshot(store,run.id)) + knowledgeContextHtml(readKnowledgeSnapshot(store,run.id)) + learning; }
       catch { learning = '<p class="problem" role="alert">The context saved for this run could not be verified.</p>' + learning; }
     }
     return {
       learning,
+      skillTest,
       taskId,
       rootId: familyOf(taskId)?.root.id ?? taskId,
       history: (() => { const family = familyOf(taskId); return family === null ? "" : familyHistory(family); })(),
@@ -11394,7 +11449,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -13779,7 +13834,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
       const title = text("taskTitle");
       return `<article class="card proposal proposal-control" data-card-kind="control">` +
         (title === "" ? "" : `<div class="proposal-body"><h3>${escape(title)}</h3></div>`) +
-        `<footer class="proposal-actions"><a class="button-link" href="${escape(chatControlHref(control, task, payload["run"]))}" aria-label="${escape(title === "" ? label : `${label}: ${title}`)}">${escape(label)}</a></footer></article>`;
+        `<footer class="proposal-actions"><a class="button-link" href="${escape(chatControlHref(control, task, payload["run"], payload["project"]))}" aria-label="${escape(title === "" ? label : `${label}: ${title}`)}">${escape(label)}</a></footer></article>`;
     }
     what = `<h3>${escape(label)}</h3>${text("taskTitle") === "" ? "" : `<p>${escape(text("taskTitle"))}</p>`}`;
   } else if (view.kind === "review") {
@@ -13901,7 +13956,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   if (view.state === "pending" && !inert) {
     acts =
       view.kind === "control"
-        ? (isChatControl(payload["control"]) ? `<a class="button-link" href="${escape(chatControlHref(payload["control"], task, payload["run"]))}">${escape(CHAT_CONTROLS[payload["control"]].label)}</a>` : `<p>Control unavailable.</p>`)
+        ? (isChatControl(payload["control"]) ? `<a class="button-link" href="${escape(chatControlHref(payload["control"], task, payload["run"], payload["project"]))}">${escape(CHAT_CONTROLS[payload["control"]].label)}</a>` : `<p>Control unavailable.</p>`)
         : view.kind === "cancel"
         ? `<p class="meta">cancelling is armed on the task itself — <a href="${taskHref(task)}">open ${escape(task)}</a></p>` +
           `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button type="submit" class="quiet">dismiss</button></form>`
@@ -19291,7 +19346,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
   const resultHref = status.token === "review-failed" ? reviewHref(taskId) : place === "chat" ? chatResultHref(taskId, view.runId, status.action?.kind === "open-review" ? "checks" : "summary") : statusActionHref(status, taskId, view.runId, view.publication?.prUrl ?? null) ?? `/r/${view.runId}`;
   return (
     `<section class="card completion-receipt" data-card-kind="result-receipt"${resultFactsAttributes(facts)}>` +
-    `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>${escape(receiptHeadingOf(view.outcome, view.publication))}</h2></div>` +
+    `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>${escape(receiptHeadingOf(view.outcome, view.publication, view.role))}</h2></div>` +
     `${statusLineHtml(status)}</div>` +
     // The agent's handoff is its narrative, labeled as such; the
     // publication line is the observed record — never "shipped".
@@ -19337,6 +19392,7 @@ const chatResultHref = (taskId: string, runId: number, tab: ResultTab = "summary
  */
 type ResultDetail = {
   learning?: string;
+  skillTest?: boolean;
   rootId?: string;
   history?: string;
   taskId: string;
@@ -19696,7 +19752,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     `</nav>`;
   const view = (tab: ResultTab, parts: string[]): string =>
     `<div class="result-view" role="tabpanel" data-result-view="${tab}"${tab === o.tab ? "" : " hidden"}>${parts.join("\n")}</div>`;
-  const heading = receiptHeadingOf(run.outcome, receipt.publication);
+  const heading = receiptHeadingOf(run.outcome, receipt.publication, run.role);
   return (
     `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.rootId ?? detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
       (o.back === null ? "" : `<p class="result-back"><a href="${escape(o.back.href)}" data-result-back>← ${escape(o.back.label)}</a></p>`) +
@@ -19711,7 +19767,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       view("changes", changeParts) +
       view("checks", checkParts) +
       (detail.learning ?? "") +
-      `<section class="result-request" id="request-changes">${requestParts.join("\n")}</section>` +
+      (detail.skillTest ? "" : `<section class="result-request" id="request-changes">${requestParts.join("\n")}</section>`) +
     `</section>`
   );
 }
@@ -20413,7 +20469,7 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return screen("settings", [
     "<h1>settings</h1>",
-    '<p><a href="/settings/knowledge">Project knowledge</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
+    '<p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
     permissionCard,
     qualityCard,
     pushCard,

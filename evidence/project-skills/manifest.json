@@ -1,0 +1,158 @@
+{
+  "preparedAt": "2026-09-17T04:35:04.578426+00:00",
+  "verifiedBase": "443936f8a919b1d5afd10b0e550cb35cb6f8e0d5",
+  "kind": "Synthetic browser proof and focused implementation tests; not live agent acceptance",
+  "sources": [
+    {
+      "path": "package.json",
+      "sha256": "8d529ff13c4d577ce7fd49ece4da02cc6c5495f8125d59d2f70ce69b3a83db51"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "f691c8b91fbad6cf04a6a3011bf0494fc16cec5c26d215061120d66af482b113"
+    },
+    {
+      "path": "src/project-skills.ts",
+      "sha256": "9ec547d9880826f0c060fc9b48f08f91dd5a1ba1f4e12b78f2ae7ec9a7ee063f"
+    },
+    {
+      "path": "src/project-skills.test.ts",
+      "sha256": "1c8df4c3a8f313771dfa1d4b57525d15043a689e5e45749edb4df3e9166996ce"
+    },
+    {
+      "path": "src/skills-ui.ts",
+      "sha256": "8073c037f076caf8db9a9231177e61bd6dad0b431451fd300281e1238a5e5c2d"
+    },
+    {
+      "path": "src/store.ts",
+      "sha256": "df24283180f3a5cb46129be95b5ab5aebe48ad668c82fde468739992fdf816cd"
+    },
+    {
+      "path": "src/serve.ts",
+      "sha256": "d473b139267bf07d1022cbd389a327913abbef60a7e5e24d2c0816ee3e5600ad"
+    },
+    {
+      "path": "src/builder.ts",
+      "sha256": "e4b9dc82d66e0e56b7dfe46f4d6d1b1c15337d075390d8ae95854d364b5fb123"
+    },
+    {
+      "path": "src/planner.ts",
+      "sha256": "64a721678b0283986b37a1a7dc5154a774bf39965f7c27420072fb12b0d25a54"
+    },
+    {
+      "path": "src/scout.ts",
+      "sha256": "64973849716196148a909bc395bb467e238fb1258f8c692b75d4251d716204a2"
+    },
+    {
+      "path": "src/reviewer.ts",
+      "sha256": "5c9840aea71d1f87952c1f1c932fe72b76dc3aba1620ea3efdfb347cb46d082f"
+    },
+    {
+      "path": "src/mate-tools.ts",
+      "sha256": "367c3935a17d6727815947e47413b31a5156180d6839fd13839fbdaf1c24e72b"
+    },
+    {
+      "path": "src/mate-contract.ts",
+      "sha256": "48a36a18dd51b2f77b2bc6b2cc6811bf355d6561904447a2e3bf1efcb5206e81"
+    },
+    {
+      "path": "src/chat-controls.ts",
+      "sha256": "44b8c552a6836c85739a1cb5b312827d479f0b2950e40c86b6b77e119fe496ea"
+    },
+    {
+      "path": "src/mate-cli.ts",
+      "sha256": "6929d8a4ce3a910f42aa28a5e3f6e2f56c4ca6c939f998fa475d4aafe3fbc6d7"
+    },
+    {
+      "path": "src/telegram-mate.ts",
+      "sha256": "f384c89d49ca1849011f754c2c918c44b77d261c6f04d4dff3fae7bc7fef219e"
+    },
+    {
+      "path": "src/workspace-ui.ts",
+      "sha256": "a4a039719181afb380d02d90c97c4a85c16b2c2528f31ed57677f235f3576ed1"
+    },
+    {
+      "path": "scripts/project-skills-proof.mjs",
+      "sha256": "96f139598d51fbdad66310e61fe6a9cc3eeaf76765fbf8915cdf0d768e622783"
+    },
+    {
+      "path": "src/builder.test.ts",
+      "sha256": "a29d3c590ce33bf5827e8d6e3300606eb352e6bcbae383cacc61b5a25fa236b5"
+    },
+    {
+      "path": "src/planner.test.ts",
+      "sha256": "acd842cf1cb6ec67cda64eb0c7971531d9b7bbbc153b73815fcb813efa898e96"
+    },
+    {
+      "path": "src/scout.test.ts",
+      "sha256": "29281db41ce4011685cc5620d72798823f4d7790d9abd657fdd61528bc794e36"
+    }
+  ],
+  "images": [
+    {
+      "path": "evidence/project-skills/desktop-empty.png",
+      "sha256": "ce37d0a0bb346633916497c4c0124d195a4996aa6518f0a416404330be26ac14"
+    },
+    {
+      "path": "evidence/project-skills/desktop-error.png",
+      "sha256": "f6d146425c601911ef33114a4d83b1833d68e8e2c9d0a722d14c8bf373ebcf22"
+    },
+    {
+      "path": "evidence/project-skills/desktop-feedback.png",
+      "sha256": "94dca879ea400ab94d1495a4486529fce769cfd09116015fb9dbc66ed53641de"
+    },
+    {
+      "path": "evidence/project-skills/desktop-library.png",
+      "sha256": "c053f16f52066cf4d7368ed0c04ad27890603b9c187e1c0c91b7b5a940ae2d8e"
+    },
+    {
+      "path": "evidence/project-skills/desktop-review-source.png",
+      "sha256": "43b08e7cf9aebd7a040c04040080b9d5b1e951e9c322bf975c7be6f5cf53e230"
+    },
+    {
+      "path": "evidence/project-skills/desktop-revision.png",
+      "sha256": "0d8e133b89cf1c1e3a7203ab0a5740371800c76d08f043da192c68df4eddedcd"
+    },
+    {
+      "path": "evidence/project-skills/desktop-test-result.png",
+      "sha256": "85f4fde3435703c612c56426221f1142c20e4d03c276fb84c47bd77d1544b619"
+    },
+    {
+      "path": "evidence/project-skills/desktop-test-task.png",
+      "sha256": "0009a3f4d29326c416f28b05830e9df722d3cd74cfd9948bf58228bbbad0ebe1"
+    },
+    {
+      "path": "evidence/project-skills/phone-empty.png",
+      "sha256": "44e6b7dd128cdb4acffd97bd6eaa4820f5ad643eb3cbbc246434b44e6620134d"
+    },
+    {
+      "path": "evidence/project-skills/phone-error.png",
+      "sha256": "4dccb4981745f9fa80cf2926f7f75457e6d159b343cfd52a93df60a4860c1c20"
+    },
+    {
+      "path": "evidence/project-skills/phone-feedback.png",
+      "sha256": "5158327b1863babb1b26e15e3b2e45b11a292578528d8b65fc615bb8896ea832"
+    },
+    {
+      "path": "evidence/project-skills/phone-library.png",
+      "sha256": "91fa5c9d4332550d68ebcb48e3ce3da60b1c1ad48f2083f09a7092c4b25ff963"
+    },
+    {
+      "path": "evidence/project-skills/phone-review-source.png",
+      "sha256": "8911b11ca0223d339ac3aab4b36c53b96e3010055121bd5b3f59ba3e448144c5"
+    },
+    {
+      "path": "evidence/project-skills/phone-revision.png",
+      "sha256": "e24e3e8e44446a21e740347e18983ddeaecd9b3f15f4788ad0f0d7b74a1b726b"
+    },
+    {
+      "path": "evidence/project-skills/phone-test-result.png",
+      "sha256": "b4b6a49627990f37c4f00405837097fcb0d2c4bf1894bd48eca37f7b272f6d58"
+    },
+    {
+      "path": "evidence/project-skills/phone-test-task.png",
+      "sha256": "eef9b7a4155a201e5c3f384f6557526ffb30f781d568e0b4b35576f1feab70a6"
+    }
+  ],
+  "reuseNote": "The browser rendering and interactions are unchanged. Worker skill-load refusal handling and a schema-history comment changed; screenshots remain the original synthetic UI evidence."
+}

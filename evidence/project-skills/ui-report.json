@@ -1,0 +1,199 @@
+{
+  "fixture": "Synthetic skill test and result. No live agent invoked.",
+  "checks": [
+    {
+      "name": "desktop empty fits",
+      "ok": true,
+      "detail": {
+        "width": 1440,
+        "scroll": 1440,
+        "buttons": []
+      }
+    },
+    {
+      "name": "desktop error retains draft",
+      "ok": true
+    },
+    {
+      "name": "desktop error fits",
+      "ok": true,
+      "detail": {
+        "width": 1440,
+        "scroll": 1440,
+        "buttons": [
+          {
+            "text": "Add to library",
+            "height": 44,
+            "width": 108.34375,
+            "scroll": 106
+          }
+        ]
+      }
+    },
+    {
+      "name": "desktop long skill fits",
+      "ok": true,
+      "detail": {
+        "width": 1440,
+        "scroll": 1440,
+        "buttons": [
+          {
+            "text": "Enable skill",
+            "height": 44,
+            "width": 96,
+            "scroll": 94
+          }
+        ]
+      }
+    },
+    {
+      "name": "desktop enabled exact version",
+      "ok": true
+    },
+    {
+      "name": "desktop enabled fits",
+      "ok": true,
+      "detail": {
+        "width": 1440,
+        "scroll": 1440,
+        "buttons": []
+      }
+    },
+    {
+      "name": "desktop normal test awaits approval",
+      "ok": true
+    },
+    {
+      "name": "desktop result includes supplied skills",
+      "ok": true
+    },
+    {
+      "name": "desktop feedback action clears fixed navigation",
+      "ok": true
+    },
+    {
+      "name": "desktop feedback creates revision awaiting approval",
+      "ok": true,
+      "detail": {
+        "child": "skill-test-f84b939edab48e39c1f1"
+      }
+    },
+    {
+      "name": "desktop local upload preserves resource file",
+      "ok": true
+    },
+    {
+      "name": "desktop library search finds the matching skill",
+      "ok": true
+    },
+    {
+      "name": "desktop search empty state is visible",
+      "ok": true
+    },
+    {
+      "name": "desktop no browser errors",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "phone empty fits",
+      "ok": true,
+      "detail": {
+        "width": 390,
+        "scroll": 390,
+        "buttons": []
+      }
+    },
+    {
+      "name": "phone error retains draft",
+      "ok": true
+    },
+    {
+      "name": "phone error fits",
+      "ok": true,
+      "detail": {
+        "width": 390,
+        "scroll": 390,
+        "buttons": [
+          {
+            "text": "Add to library",
+            "height": 44,
+            "width": 108.34375,
+            "scroll": 106
+          }
+        ]
+      }
+    },
+    {
+      "name": "phone long skill fits",
+      "ok": true,
+      "detail": {
+        "width": 390,
+        "scroll": 390,
+        "buttons": [
+          {
+            "text": "Enable skill",
+            "height": 44,
+            "width": 96,
+            "scroll": 94
+          }
+        ]
+      }
+    },
+    {
+      "name": "phone enabled exact version",
+      "ok": true
+    },
+    {
+      "name": "phone enabled fits",
+      "ok": true,
+      "detail": {
+        "width": 390,
+        "scroll": 390,
+        "buttons": []
+      }
+    },
+    {
+      "name": "phone normal test awaits approval",
+      "ok": true
+    },
+    {
+      "name": "phone result includes supplied skills",
+      "ok": true
+    },
+    {
+      "name": "phone feedback action clears fixed navigation",
+      "ok": true
+    },
+    {
+      "name": "phone feedback creates revision awaiting approval",
+      "ok": true,
+      "detail": {
+        "child": "skill-test-f7d4183c1f79086d1bc0"
+      }
+    },
+    {
+      "name": "phone no browser errors",
+      "ok": true,
+      "detail": []
+    }
+  ],
+  "screenshots": [
+    "evidence/project-skills/desktop-empty.png",
+    "evidence/project-skills/desktop-error.png",
+    "evidence/project-skills/desktop-review-source.png",
+    "evidence/project-skills/desktop-library.png",
+    "evidence/project-skills/desktop-test-task.png",
+    "evidence/project-skills/desktop-test-result.png",
+    "evidence/project-skills/desktop-feedback.png",
+    "evidence/project-skills/desktop-revision.png",
+    "evidence/project-skills/phone-empty.png",
+    "evidence/project-skills/phone-error.png",
+    "evidence/project-skills/phone-review-source.png",
+    "evidence/project-skills/phone-library.png",
+    "evidence/project-skills/phone-test-task.png",
+    "evidence/project-skills/phone-test-result.png",
+    "evidence/project-skills/phone-feedback.png",
+    "evidence/project-skills/phone-revision.png"
+  ]
+}

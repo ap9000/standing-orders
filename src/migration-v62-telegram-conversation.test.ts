@@ -65,8 +65,8 @@ describe("v62 Telegram conversation queue", () => {
     expect(before).toHaveLength(1);
 
     store = openStore(file);
-    expect(SCHEMA_VERSION).toBe(64);
-    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(64);
+    expect(SCHEMA_VERSION).toBe(65);
+    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(65);
     expect(store.handle.prepare("SELECT * FROM run_stop ORDER BY run").all()).toEqual(before);
     expect(String(store.handle.prepare("SELECT sql FROM sqlite_master WHERE name = 'run_stop'").get()?.["sql"])).toContain("'cli','web','telegram'");
     for (const table of tables) expect(store.handle.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.["n"]).toBe(0);
@@ -74,7 +74,7 @@ describe("v62 Telegram conversation queue", () => {
     // The widened audit is real: a second stop on another run names the phone.
     expect(() => store!.handle.prepare("INSERT INTO run_stop (run, task_ref, requested_by, requested_via, requested_at) VALUES (?, ?, 'alex', 'telegram', ?)").run(run + 1, ref, NOW.toISOString())).toThrow(/FOREIGN KEY|constraint/);
     store.close(); store = openStore(file);
-    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(64);
+    expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(65);
     expect(store.handle.prepare("SELECT * FROM run_stop ORDER BY run").all()).toEqual(before);
   });
 

@@ -1,5 +1,6 @@
 import { verificationEvidence } from "./verification-evidence.js";
 import { LEARNING_SCHEMA, queueLearning } from "./project-learning.js";
+import { SKILLS_SCHEMA } from "./project-skills.js";
 import { KNOWLEDGE_SCHEMA } from "./project-knowledge.js";
 import { validateTaskText } from "./task-text.js";
 import { chatControlHref, chatResultHref } from "./chat-controls.js";
@@ -100,7 +101,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // task, run, artifact and recorded hash of one verified screenshot) and the
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
-export const SCHEMA_VERSION = 64;
+// v65 adds immutable skill packages, project selections, run snapshots and skill tests.
+export const SCHEMA_VERSION = 65;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -3885,6 +3887,11 @@ function initializeStore(db: Database, file: string): Store {
   if (preflight !== null && Math.abs(preflight) >= 64) {
     if (!tableExists(db, "mate_turn_evidence") || !hasColumn(db, "telegram_conversation_part", "artifact")) throw new Error(`${file}: Telegram image history is missing; refusing to recreate it`);
   }
+  if (preflight !== null && Math.abs(preflight) >= 65) {
+    for (const table of ["skill_package", "skill_owner", "project_skill_change", "skill_snapshot", "skill_test"]) {
+      if (!tableExists(db, table)) throw new Error(`${file}: saved skills are missing; refusing to recreate them`);
+    }
+  }
   if (preflight !== null && preflight > 0 && preflight < SCHEMA_VERSION) {
     const stamped = db.prepare("UPDATE schema_version SET version = ? WHERE version = ?").run(-preflight, preflight);
     if (Number(stamped.changes) !== 1) {
@@ -3894,6 +3901,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(SCHEMA);
   db.exec(LEARNING_SCHEMA);
   db.exec(KNOWLEDGE_SCHEMA);
+  db.exec(SKILLS_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");

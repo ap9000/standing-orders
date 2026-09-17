@@ -492,7 +492,7 @@ describe("schema 62 compatibility without manual refresh", () => {
     const root = mkdtempSync(join(tmpdir(), "refresh-migration-")), file = join(root, "test.db");
     try {
       let store = openStore(file); seed(store, join(root, "evidence"));
-      expect(SCHEMA_VERSION).toBe(64);
+      expect(SCHEMA_VERSION).toBe(65);
       expect(store.raw().prepare("PRAGMA table_info(run)").all().some(row => row["name"] === "review_refresh")).toBe(false);
       expect(store.raw().prepare("PRAGMA table_info(review_request)").all().some(row => row["name"] === "refresh_json")).toBe(false);
       // The retired schema-62 draft (a refresh request ledger, a second
@@ -529,19 +529,19 @@ describe("schema 62 compatibility without manual refresh", () => {
       raw.prepare("UPDATE schema_version SET version = ?").run(version);
       raw.close();
       store = openStore(file);
-      expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(64);
+      expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(65);
       for (const table of [...V61_TABLES, ...V62_TABLES]) expect(store.raw().prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.["n"]).toBe(0);
       for (const column of V61_COLUMNS) expect(store.raw().prepare("PRAGMA table_info(notification)").all().some(row => row["name"] === column)).toBe(true);
       expect(String(store.raw().prepare("SELECT sql FROM sqlite_master WHERE name = 'run_stop'").get()?.["sql"])).toContain("'cli','web','telegram'");
       tables.forEach((t, index) => expect(store.raw().prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()).toEqual(before[index]));
       expect(store.raw().prepare("PRAGMA foreign_key_check").all()).toEqual([]);
       store.close(); store = openStore(file);
-      expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(64);
+      expect(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(65);
       tables.forEach((t, index) => expect(store.raw().prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()).toEqual(before[index]));
       expect(store.criterionReviewsFor(1)).not.toEqual([]); store.close();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
-  test.each([65, -65])("schema %s refuses before every write and preserves bytes — the fence an older reader applies to this v64 file", version => {
+  test.each([66, -66])("schema %s refuses before every write and preserves bytes — the fence an older reader applies to this v65 file", version => {
     const root = mkdtempSync(join(tmpdir(), "refresh-refusal-")), file = join(root, "test.db");
     try {
       const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(version); store.close();
@@ -552,10 +552,10 @@ describe("schema 62 compatibility without manual refresh", () => {
       expect(readFileSync(file)).toEqual(before);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
-  test("-64 is an impossible marker: an upgrade never begins at the version it upgrades to", () => {
+  test("-65 is an impossible marker: an upgrade never begins at the version it upgrades to", () => {
     const root = mkdtempSync(join(tmpdir(), "refresh-refusal-")), file = join(root, "test.db");
     try {
-      const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(-64); store.close();
+      const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(-65); store.close();
       const before = readFileSync(file);
       expect(() => openStore(file)).toThrow(/mid-flight marker no build ever wrote/);
       expect(readFileSync(file)).toEqual(before);

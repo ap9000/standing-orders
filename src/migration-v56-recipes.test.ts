@@ -18,10 +18,12 @@ test("v55 migration preserves every historical row and refuses missing authority
     const upgraded = openStore(file); expect(upgraded.handle.prepare("SELECT version FROM schema_version").get()?.version).toBe(SCHEMA_VERSION);
     expect(tables.map(table => upgraded.handle.prepare(`SELECT * FROM "${table}"`).all())).toEqual(before);
     expect(upgraded.handle.prepare("PRAGMA integrity_check").get()?.integrity_check).toBe("ok"); expect(upgraded.handle.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-    upgraded.close(); const stable = readFileSync(file); openStore(file).close(); expect(readFileSync(file)).toEqual(stable);
+    // Buffer.equals compares every byte natively. Deep matcher traversal makes
+    // these multi-megabyte snapshots exceed the unchanged Windows test budget.
+    upgraded.close(); const stable = readFileSync(file); openStore(file).close(); expect(readFileSync(file).equals(stable)).toBe(true);
     const broken = new DatabaseSync(file); broken.exec("DROP TABLE workflow_preview"); broken.close(); const bytes = readFileSync(file);
-    expect(() => openStore(file)).toThrow("refusing to recreate launch history"); expect(readFileSync(file)).toEqual(bytes);
+    expect(() => openStore(file)).toThrow("refusing to recreate launch history"); expect(readFileSync(file).equals(bytes)).toBe(true);
     const missing = new DatabaseSync(file); missing.exec("UPDATE schema_version SET version=55; DROP TABLE plan_authorization"); missing.close(); const missingBytes = readFileSync(file);
-    expect(() => openStore(file)).toThrow("refusing to recreate authority"); expect(readFileSync(file)).toEqual(missingBytes);
+    expect(() => openStore(file)).toThrow("refusing to recreate authority"); expect(readFileSync(file).equals(missingBytes)).toBe(true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

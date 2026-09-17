@@ -1,3 +1,5 @@
+import { currentClaim } from "./claim.js";
+import * as projectSkills from "./project-skills.js";
 /**
  * Scout tasks (mate arc §10), end to end against real git: a task filed
  * with --report, its scope approved like any other, a scout dispatched on
@@ -7,7 +9,7 @@
  * gets nothing ingested.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { realpathSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -251,6 +253,23 @@ describe("scout tasks, against real git", () => {
 
   const tick = (runnerToken: string, agent: Runner, now = T0) =>
     run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], agent, now);
+
+  test("unreadable skill context settles a failed attempt without provider spend", async () => {
+    const { runnerToken } = await setup();
+    const failure = vi.spyOn(projectSkills, "skillsContext").mockImplementationOnce(() => { throw Error("Saved skill package failed verification."); });
+    try {
+      await tick(runnerToken, reportingAgent);
+      expect(prompts).toHaveLength(0);
+      const saved = openStore(db);
+      try {
+        const ref = saved.refFor("built-in", "flaky");
+        const run = saved.runsFor(ref.id)[0];
+        expect(run).toMatchObject({ outcome: "failed", reason: "Project skills could not be loaded: Saved skill package failed verification.", providerStartedAt: null });
+        expect(run?.finishedAt).not.toBeNull();
+        expect(currentClaim(saved, ref.id, T0)).toBeNull();
+      } finally { saved.close(); }
+    } finally { failure.mockRestore(); }
+  });
 
   test("the whole road: filed --report, approved, scouted, reported — a report, never a branch; the follow-up files with the scout's authorship", async () => {
     const { runnerToken } = await setup();
