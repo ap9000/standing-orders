@@ -1,0 +1,18 @@
+Captured terminal summary, 2026-09-17, candidate 9392ea9d9eb8914e918013ab056a46cdcdbd2a38.
+This is the tool-returned summary, not a fabricated per-test transcript.
+
+$ npm run typecheck
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+Exit code: 0
+
+$ ./node_modules/.bin/vitest run src/mcp.test.ts src/mcp-cli.test.ts src/coordinator.test.ts src/coordinator-proposals.test.ts src/cancel-floor.test.ts src/schema-epoch.test.ts src/migration-v48-authentic.test.ts src/store.test.ts src/backend.test.ts src/operate.test.ts src/serve.test.ts
+RUN v4.1.10 /Users/alekseypelletier/Documents/standing-orders-mcp-review-release
+Global setup built the current dist with npm run build.
+Test Files 11 passed (11)
+Tests 658 passed (658)
+Start at 15:07:41
+Duration 33.39s (transform 13.03s, setup 132ms, import 18.97s, tests 57.96s, environment 1ms)
+Exit code: 0
+
+The native approved full gate has not run for this candidate yet.

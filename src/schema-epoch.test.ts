@@ -1,12 +1,30 @@
-import { describe, expect, test } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { afterEach, describe, expect, test } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
-import { openStore, openStoreNoMigrate, SCHEMA_VERSION, type Database } from "./store.js";
+import { openStore, openStoreNoMigrate, readSchemaVersion, SCHEMA_VERSION, Store, type Database } from "./store.js";
+import { mintCoordinator } from "./coordinator.js";
+import { MODERN, serveMcp } from "./mcp.js";
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (path: string) => Database };
+
+const directories: string[] = [];
+function scratch(): string {
+  const dir = mkdtempSync(join(tmpdir(), "epoch-"));
+  directories.push(dir);
+  return dir;
+}
+afterEach(() => {
+  for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function loadV47(file: string): void {
+  const db = new DatabaseSync(file);
+  try { db.exec(readFileSync(join(import.meta.dirname, "fixtures/v47-authentic.sql"), "utf8")); }
+  finally { db.close(); }
+}
 
 /**
  * The migration epoch + the non-migrating door (MCP gateway spec v6,
@@ -16,13 +34,13 @@ const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (path: st
  */
 describe("the non-migrating door", () => {
   test("an absent database refuses in words — it never creates one", () => {
-    const dir = mkdtempSync(join(tmpdir(), "epoch-"));
+    const dir = scratch();
     const answer = openStoreNoMigrate(join(dir, "never-made.db"));
     expect(answer).toMatchObject({ ok: false, reason: "missing" });
   });
 
   test("a current database opens; a mid-flight epoch refuses with the sentinel named", () => {
-    const dir = mkdtempSync(join(tmpdir(), "epoch-"));
+    const dir = scratch();
     const file = join(dir, "orders.db");
     openStore(file).close();
 
@@ -30,75 +48,104 @@ describe("the non-migrating door", () => {
     expect(opened).toMatchObject({ ok: true });
     if (!opened.ok) throw new Error("unreachable");
     expect(opened.store.schemaCurrent()).toBe(true);
-
-    // A migrator that died after its epoch stamp, before the version bump:
-    // the sentinel is a NEGATIVE version, and both the door and the
-    // per-call check refuse — this is exactly the mid-DDL window a plain
-    // version re-read would have blessed.
-    opened.store.handle.prepare("UPDATE schema_version SET version = ?").run(-(SCHEMA_VERSION - 1));
-    expect(opened.store.schemaCurrent()).toBe(false);
     opened.store.close();
 
-    const refused = openStoreNoMigrate(file);
+    // A real predecessor shape with a committed epoch, as left by a
+    // migrator that died before its first DDL. No newer fields are relabeled
+    // as an older schema.
+    const interrupted = join(dir, "interrupted.db");
+    loadV47(interrupted);
+    const prior = new Store(new DatabaseSync(interrupted));
+    prior.handle.prepare("UPDATE schema_version SET version = -47").run();
+    expect(prior.schemaCurrent()).toBe(false);
+    prior.close();
+
+    const refused = openStoreNoMigrate(interrupted);
     expect(refused).toMatchObject({ ok: false, reason: "version" });
     if (refused.ok) throw new Error("unreachable");
     expect(refused.message).toContain("mid-flight");
 
     // The real migrator resumes and clears the sentinel; the door opens.
-    openStore(file).close();
-    expect(openStoreNoMigrate(file)).toMatchObject({ ok: true });
+    openStore(interrupted).close();
+    const recovered = openStoreNoMigrate(interrupted);
+    expect(recovered).toMatchObject({ ok: true });
+    if (recovered.ok) recovered.store.close();
   });
 
-  test("the REAL migrator commits the epoch BEFORE any DDL — the version row is already negative at the first exec", () => {
-    const dir = mkdtempSync(join(tmpdir(), "epoch-"));
+  test.each(["status", "file_proposal"])("MCP %s refuses while the real migrator is paused after its first DDL", tool => {
+    const dir = scratch();
     const file = join(dir, "orders.db");
-    openStore(file).close();
-
-    // Simulate an older database: the shape is current (every migration
-    // step is idempotent, so re-running is the documented resume road), but
-    // the version row says a lower POSITIVE version — exactly what the
-    // migrator sees when it opens a database from the previous release.
-    const back = new DatabaseSync(file);
-    back.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION - 1);
-    back.close();
-
-    // A connect wrapper whose db proxies exec(): at the FIRST DDL exec —
-    // after connection-local busy handling — read the version
-    // row through a SECOND, independent connection to the same file. If the
-    // epoch stamp were ordered after any DDL (the race the review named), a
-    // non-migrating reader at this instant would see new shapes under an
-    // old positive version.
-    let versionAtFirstExec: number | null = null;
-    const connect = (path: string): Database => {
-      const real = new DatabaseSync(path);
-      return {
-        prepare: sql => real.prepare(sql),
-        close: () => real.close(),
-        exec: sql => {
-          if (versionAtFirstExec === null && sql.trim() !== "PRAGMA busy_timeout = 5000") {
-            const peek = new DatabaseSync(path);
-            const row = peek.prepare("SELECT version FROM schema_version").get();
-            versionAtFirstExec = row === undefined ? Number.NaN : Number(row["version"]);
-            peek.close();
-          }
-          real.exec(sql);
-        },
-      };
-    };
-
-    const store = openStore(file, { connect });
-    // The sentinel was COMMITTED before the first DDL: negative, and
-    // exactly −(the version being migrated from).
-    expect(versionAtFirstExec).toBe(-(SCHEMA_VERSION - 1));
-    // ...and the finished migrator cleared it to the target version.
-    const finished = store.handle.prepare("SELECT version FROM schema_version").get();
-    expect(Number(finished?.["version"])).toBe(SCHEMA_VERSION);
-    store.close();
-    expect(openStoreNoMigrate(file)).toMatchObject({ ok: true });
+    loadV47(file);
+    // Model the already-running v47 build's version constant, keeping the
+    // real strict reader, MCP dispatcher, credential verification, and SQL
+    // connection. Production gains no version-override or test hook.
+    class V47Reader extends Store {
+      override schemaCurrent(): boolean {
+        const version = readSchemaVersion(this.handle);
+        return version.ok && version.version === 47;
+      }
+    }
+    const reader = new V47Reader(new DatabaseSync(file));
+    let migrated: Store | undefined;
+    try {
+      const now = new Date("2026-09-17T12:00:00Z");
+      const minted = mintCoordinator(reader, { name: "epoch-reader", repos: ["/repo/app"], by: "alex", now });
+      if (!minted.ok) throw new Error("fixture credential failed");
+      const output: Record<string, unknown>[] = [];
+      let receive: (line: string) => void = () => {};
+      let exitCode: number | null = null;
+      expect(serveMcp(reader, minted.token, {
+        onLine: handler => { receive = handler; }, onEof: () => {},
+        write: line => output.push(JSON.parse(line)), log: () => {}, exit: code => { exitCode = code; },
+      }, () => now, ["/repo/app"])).toEqual({ ok: true });
+      const meta = { "io.modelcontextprotocol/protocolVersion": MODERN, "io.modelcontextprotocol/clientCapabilities": {} };
+      receive(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: meta, name: "status", arguments: {} } }));
+      expect(output[0]).toHaveProperty("result");
+      expect(exitCode).toBeNull();
+      const tasksBefore = reader.handle.prepare("SELECT COUNT(*) AS n FROM task").get();
+      let paused = false;
+      migrated = openStore(file, { connect: path => {
+        const real = new DatabaseSync(path);
+        return {
+          prepare: sql => real.prepare(sql), close: () => real.close(),
+          exec: sql => {
+            const firstDdl = sql.indexOf("CREATE TABLE");
+            if (!paused && firstDdl !== -1) {
+              const boundary = sql.indexOf(";", firstDdl) + 1;
+              expect(boundary).toBeGreaterThan(firstDdl);
+              real.exec(sql.slice(0, boundary));
+              paused = true;
+              // Independent connection: the marker must already be
+              // committed while the migrator has completed just one DDL.
+              expect(readSchemaVersion(reader.handle)).toMatchObject({ ok: true, version: -47 });
+              receive(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+                _meta: meta, name: tool, arguments: tool === "status" ? {} : {
+                  repo: "/repo/app", title: "Must not file during migration", idempotency_key: "epoch-file-refused",
+                },
+              } }));
+              expect(output[1]).toMatchObject({ id: 2, error: { code: -32000 } });
+              expect(output[1]).not.toHaveProperty("result");
+              expect(exitCode).toBe(0);
+              expect(reader.handle.prepare("SELECT COUNT(*) AS n FROM task").get()).toEqual(tasksBefore);
+              expect(reader.handle.prepare("SELECT 1 FROM mcp_idempotency WHERE cid = ?").get(minted.cid)).toBeUndefined();
+              real.exec(sql.slice(boundary));
+              return;
+            }
+            real.exec(sql);
+          },
+        };
+      } });
+      expect(paused).toBe(true);
+      expect(readSchemaVersion(migrated.handle)).toMatchObject({ ok: true, version: SCHEMA_VERSION });
+      expect(migrated.handle.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally {
+      migrated?.close();
+      reader.close();
+    }
   });
 
   test("a version this build does not speak refuses without touching it", () => {
-    const dir = mkdtempSync(join(tmpdir(), "epoch-"));
+    const dir = scratch();
     const file = join(dir, "orders.db");
     openStore(file).close();
     const opened = openStoreNoMigrate(file);

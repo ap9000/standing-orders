@@ -52,14 +52,21 @@ const MAX_DEPTH = 32;
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
-function depthOf(value: unknown, depth = 0): number {
-  if (depth > MAX_DEPTH) return depth;
-  if (Array.isArray(value)) return Math.max(depth, ...value.map(one => depthOf(one, depth + 1)));
-  if (value !== null && typeof value === "object") {
-    const inner = Object.values(value as Record<string, unknown>);
-    return inner.length === 0 ? depth : Math.max(depth, ...inner.map(one => depthOf(one, depth + 1)));
+function depthOf(value: unknown): number {
+  // The byte cap bounds the work list. Neither nesting nor array width
+  // becomes a JavaScript call stack or a spread argument list.
+  const pending = [{ value, depth: 0 }];
+  let maximum = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current.depth > MAX_DEPTH) return current.depth;
+    maximum = Math.max(maximum, current.depth);
+    if (current.value !== null && typeof current.value === "object") {
+      const children = Array.isArray(current.value) ? current.value : Object.values(current.value);
+      for (const child of children) pending.push({ value: child, depth: current.depth + 1 });
+    }
   }
-  return depth;
+  return maximum;
 }
 
 /** One typed descriptor per tool — THE source for parsing, inputSchema,
