@@ -16,9 +16,10 @@ test("v59 chat migration preserves cards, sequence and foreign keys, and reopens
     const db = new DatabaseSync(file);
     const ddl = String(db.prepare("SELECT sql FROM sqlite_master WHERE name='mate_proposal'").get()!.sql);
     db.exec("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE");
-    db.exec(ddl.replace("mate_proposal", "old_proposal").replace(",'review','control','task_action'", ""));
+    db.exec(ddl.replace("mate_proposal", "old_proposal").replace(",'review','control','task_action','action'", ""));
     db.exec("INSERT INTO old_proposal SELECT * FROM mate_proposal; DROP TABLE mate_proposal; ALTER TABLE old_proposal RENAME TO mate_proposal");
     db.prepare("UPDATE sqlite_sequence SET seq=100 WHERE name='mate_proposal'").run();
+    expect(String(db.prepare("SELECT sql FROM sqlite_master WHERE name='mate_proposal'").get()!.sql)).not.toContain("'action'");
     db.exec("UPDATE schema_version SET version=59; COMMIT");
     db.close();
     store = openStore(file);

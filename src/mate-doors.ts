@@ -1,3 +1,4 @@
+import { executeSharedAction, sharedActionPayload, sharedActionNeedsReview, type SharedActionOptions } from './chat-actions.js';
 /**
  * The confirm doors (mate arc §2, ruling 7; v3 §9): a pending proposal —
  * the mate's, or a coordinator's over the gateway — becomes an act only
@@ -52,6 +53,8 @@ export type DoorRefusal =
 
 export type DoorOptions = {
   evidenceRoot?: string;
+  /** Only the secure human review endpoint supplies this; never saved or model-authored. */
+  actionReview?: SharedActionOptions["review"];
   held?: import("./task-control.js").StopRequest["held"];
   /** The existing ceremony for an irreversible decision option: `confirm=yes`, typed explicitly (ruling 12). */
   confirm?: boolean;
@@ -121,6 +124,12 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
       return { ok: false, kind: proposal.kind, reason: "not-confirmable", said: "cancelling is armed on the task itself — open the task" } as const;
     }
     if (proposal.kind === "control") return { ok: false, kind: proposal.kind, reason: "not-confirmable", said: "Open the linked control to complete this action." } as const;
+    if (proposal.kind === "action") {
+      if (proposal.state !== "pending") return {ok:false,kind:proposal.kind,reason:"not-pending",said:"This proposal was already acted on."} as const;
+      const action = sharedActionPayload(proposal.payload);
+      if (action === null) return { ok: false, kind: proposal.kind, reason: "refused", said: "This action is incomplete." } as const;
+      if (sharedActionNeedsReview(action) && (options.via !== "web" || options.actionReview === undefined || options.confirm !== true)) return { ok: false, kind: proposal.kind, reason: "needs-confirm", said: "Review this action in the secure confirmation screen." } as const;
+    }
     // An irreversible answer takes the explicit field BEFORE the CAS: a
     // missing confirmation leaves the card pending, not refused.
     const needsConfirm = proposal.kind === "answer" && proposal.payload["reversible"] === false && options.confirm !== true;
@@ -128,7 +137,13 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
     if (!store.casMateProposal(proposalId, "pending", "confirming", who.name, null, now)) {
       return { ok: false, kind: proposal.kind, reason: "not-pending", said: "this proposal was already acted on" } as const;
     }
-    const outcome = executeProposal(store, who, proposal.kind, proposal.payload, now, { ...options, deferSignal: defer });
+    const outcome: DoorOutcome = proposal.kind === "action"
+      ? { ...executeSharedAction(store, who, proposal.id, sharedActionPayload(proposal.payload)!, now, {via:options.via, ...(options.evidenceRoot===undefined?{}:{root:options.evidenceRoot}), ...(options.actionReview===undefined?{}:{review:options.actionReview}), ...(options.confirm===undefined?{}:{confirm:options.confirm})}), kind: proposal.kind }
+      : executeProposal(store, who, proposal.kind, proposal.payload, now, { ...options, deferSignal: defer });
+    if (!outcome.ok && outcome.reason === "needs-confirm") {
+      store.casMateProposal(proposalId, "confirming", "pending", null, null, now);
+      return outcome;
+    }
     // The recorded outcome names the surface that confirmed — the audit a
     // card shows on every other surface afterwards.
     store.casMateProposal(proposalId, "confirming", outcome.ok ? "confirmed" : "refused", who.name, { ...outcome, via: options.via }, now);

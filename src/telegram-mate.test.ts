@@ -10,6 +10,7 @@
  * Fixture transport, not a phone: nothing here is a live Telegram proof.
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,6 +20,8 @@ import { addApprover, approve, propose } from "./scope.js";
 import { bridgePass, createTransport, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport, type TelegramUpload } from "./telegram.js";
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
 import { subscriptionCredentialKey } from "./converse.js";
+import { knowledgeView } from './project-knowledge.js';
+import { mintSharedActionReview } from './chat-actions.js';
 import { confirmMateProposal } from "./mate-doors.js";
 import { MATE_TOOL_SCHEMAS, executeMateTool } from "./mate-tools.js";
 import { runMateCli } from "./mate-cli.js";
@@ -225,6 +228,28 @@ describe("Telegram conversation: the same chat, from the phone", () => {
   });
   afterEach(() => { try { store.close(); } catch { /* a production-wiring test closed it */ } rmSync(dir, { recursive: true, force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
+  test("new shared changes confirm once in Telegram; protected actions link to the same saved review outcome", async () => {
+    origin = "https://console.example";
+    execFileSync("git",["init","-q",repo]);writeFileSync(join(repo,"README.md"),"Synthetic shared action test\n");execFileSync("git",["-C",repo,"add","."]);execFileSync("git",["-C",repo,"-c","user.name=Test","-c","user.email=test@localhost","commit","-qm","seed"]);
+    answers.push({text:"Save these project instructions.",calls:[{id:"shared-1",name:"propose_action",args:{operation:"knowledge_instructions",repo:"r1",instructions:"Use concise progress updates."}}]},{text:"Review the proposed instructions."});
+    script.updates.push([textUpdate(2,"Save instructions")]);await pass();const change=script.card();expect(change.text).toContain("Use concise progress updates.");
+    script.updates.push([tap(3,change.button(/Confirm/),change.messageId)]);await pass();expect(knowledgeView(store,repo,"alex").knowledge.instructions).toBe("Use concise progress updates.");
+    script.updates.push([tap(4,change.button(/Confirm/),change.messageId)]);await pass();expect(knowledgeView(store,repo,"alex").revision).toBe(1);
+    task("shared-cancel","Cancel only this synthetic task");
+    answers.push({text:"Review cancellation.",calls:[{id:"shared-2",name:"propose_action",args:{operation:"task_cancel",task:"shared-cancel"}}]},{text:"Open the full review to cancel."});
+    script.updates.push([textUpdate(5,"Cancel the synthetic task")]);await pass();const protectedCard=script.card();
+    const actions=store.handle.prepare("SELECT id FROM mate_proposal WHERE kind='action' ORDER BY id DESC").all(),id=Number(actions[0]!['id']);
+    expect(urlButtons(script.sends().at(-1))).toEqual([["Review action",`https://console.example/chat/action/${id}`]]);
+    expect(protectedCard.rows.flat().some(button=>/Confirm/.test(button.text))).toBe(false);expect(store.getTask("shared-cancel")?.state).not.toBe("cancelled");
+    const review=mintSharedActionReview(store,who(),id,evidenceRoot,now);
+    expect(confirmMateProposal(store,who(),id,now,{via:"web",evidenceRoot,confirm:true,actionReview:{nonce:review.nonce,password:""}})).toMatchObject({ok:true});
+    expect(store.getMateProposal(id)?.outcome).toMatchObject({ok:true,via:"web",said:"Task cancelled."});
+    expect(executeMateTool({store,who:who(),now,step:1,readDecisions:new Map(),draft:()=>null},"get_action_status",{proposal:id})).toMatchObject({ok:true,body:{state:"confirmed",outcome:{ok:true,via:"web"}}});
+  });
+  test("a hidden path uses complete review instead of offering incomplete confirmation",()=>{
+    const preview=proposalPreview(store,{kind:'action',payload:{operation:'knowledge_instructions',request:{},repo,title:'Save project instructions',terms:['Use /Users/operator/project/reference.md'],stamp:'fixture',state:{}}} as Parameters<typeof proposalPreview>[1],[repo]);
+    expect(preview.buttons).toBe(false);expect(preview.text).not.toContain('/Users/operator/project/reference.md');
+  });
   test("ordinary text runs the shared engine on the shared thread; the card confirms through the shared door as telegram; web and CLI read the same rows; a replay does nothing twice", async () => {
     answers.push(
       { text: "Let me draft that.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Tighten the payout guard", goal: "Refuse a payout over the limit.", acceptance: [{ id: "c1", statement: "Over-limit payouts are refused.", evidence: ["manual-review"] }] } }] },

@@ -125,7 +125,7 @@ describe("the mate's turn", () => {
     });
 
   test("the intake contract treats one outcome as enough and asks only material questions", () => {
-    expect(MATE_CONTRACT_VERSION).toBe(16);
+    expect(MATE_CONTRACT_VERSION).toBe(17);
     expect(MATE_CONTRACT).toContain("call get_acceptance_evidence for the exact task/run");
     expect(MATE_CONTRACT).toContain("also call get_result_images for that run");
     expect(MATE_CONTRACT).toContain("call get_result_images for that exact execution and run");

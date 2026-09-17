@@ -26,7 +26,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
 import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
-import { telegramProgressCard } from "./telegram-progress.js";
+import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
 import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import {
@@ -488,7 +488,7 @@ async function processConversations(
 // ---- outbound --------------------------------------------------------------
 
 type SendResult = { ok: true; messageId: string | null } | { ok: false; error: string; retryAfter?: number };
-type OutboundSender = (text: string, keyboard?: InlineButton[][], messageRows?: readonly TelegramDelivery[]) => Promise<SendResult>;
+type OutboundSender = (text: string, keyboard?: InlineButton[][], messageRows?: readonly TelegramDelivery[], entities?: ProgressEntity[]) => Promise<SendResult>;
 
 /** The one button a plain fact may carry: its machine-minted console path
  * under the trusted origin read now — the same road `/task` uses. The label
@@ -570,11 +570,11 @@ async function deliverOutbox(
       }
       return null;
     };
-    const sender: OutboundSender = async (text, keyboard, messageRows = rows) => {
+    const sender: OutboundSender = async (text, keyboard, messageRows = rows, entities) => {
       // Finish every await before the synchronous fence and transport call.
       const problem = (await readAccess()) ?? fence();
       if (problem !== null) return { ok: false, error: problem };
-      const sent = await send(transport, binding.chatId, text, keyboard);
+      const sent = await send(transport, binding.chatId, text, keyboard, entities);
       if (!sent.ok) {
         if (sent.retryAfter !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + sent.retryAfter * 1_000).toISOString());
         return sent;
@@ -624,17 +624,17 @@ async function deliverOutbox(
       if (problem !== null) return { ok: false, error: problem };
       const messageId = store.telegramProgressMessage(binding, progressRun);
       if (messageId === null && onlyExisting) return null;
-      const card = telegramProgressCard(store, store.getRun(progressRun.id)!, row.taskId, row.project);
+      const card = telegramProgressCard(store, store.getRun(progressRun.id)!, row.taskId, row.project, clock());
       let button: InlineButton[] | null = null;
       try { button = phoneLinkButton(phoneOrigin?.() ?? null, card.link); } catch { /* No trusted origin. */ }
       const keyboard = button === null ? [] : [button];
-      if (messageId === null) return sender(card.text, keyboard);
-      const edited = await editProgress(transport, binding.chatId, messageId, card.text, keyboard);
+      if (messageId === null) return sender(card.text, keyboard, rows, card.entities);
+      const edited = await editProgress(transport, binding.chatId, messageId, card.text, keyboard, card.entities);
       if (!edited.ok) {
         if (edited.retryAfter !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + edited.retryAfter * 1000).toISOString());
         // Only Telegram's definitive missing/uneditable response permits a
         // replacement. Timeouts, rate limits and uncertain edits retry in place.
-        if (!onlyExisting && edited.replace) return sender(card.text, keyboard);
+        if (!onlyExisting && edited.replace) return sender(card.text, keyboard, rows, card.entities);
         return edited;
       }
       if (!onlyExisting) store.recordTelegramMessage(row, binding, messageId, clock());
@@ -842,14 +842,16 @@ async function send(
   chatId: string,
   text: string,
   keyboard?: InlineButton[][],
+  entities?: ProgressEntity[],
 ): Promise<SendResult> {
-  // No parse_mode and no entities, ever: agent text is text. Link previews
-  // off: a URL in a recap must not become a fetch.
+  // No markup parsing. Only machine-selected heading ranges may be bold;
+  // agent text remains literal and URLs never trigger link previews.
   let answer: Awaited<ReturnType<TelegramTransport>>;
   try {
     answer = await transport("sendMessage", {
       chat_id: chatId,
       text,
+      ...(entities === undefined ? {} : { entities }),
       link_preview_options: { is_disabled: true },
       ...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }),
     });
@@ -862,10 +864,10 @@ async function send(
   return { ok: true, messageId: Number.isSafeInteger(messageId) && messageId! > 0 ? String(messageId) : null };
 }
 
-async function editProgress(transport: TelegramTransport, chatId: string, messageId: string, text: string, keyboard: InlineButton[][]): Promise<SendResult & { replace?: boolean }> {
+async function editProgress(transport: TelegramTransport, chatId: string, messageId: string, text: string, keyboard: InlineButton[][], entities?: ProgressEntity[]): Promise<SendResult & { replace?: boolean }> {
   let answer: Awaited<ReturnType<TelegramTransport>>;
   try {
-    answer = await transport("editMessageText", { chat_id: chatId, message_id: Number(messageId), text,
+    answer = await transport("editMessageText", { chat_id: chatId, message_id: Number(messageId), text, ...(entities === undefined ? {} : { entities }),
       link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard: keyboard } });
   } catch { return { ok: false, error: "Telegram progress update is unconfirmed; it will retry in place" }; }
   // The retry may be repainting the same bytes after an acknowledgement was

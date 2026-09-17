@@ -262,6 +262,17 @@ export function skillsView(store: Store, repo: string, actor: string) {
   return { repo, identity, ...value, library, history };
 }
 export type SkillsView = ReturnType<typeof skillsView>;
+/** The same verified selection used by Restore, including disabled versions. */
+export function skillsVersion(store: Store, repo: string, actor: string, revision: number): Selection {
+  const identity = admit(store, repo, actor);
+  if (!Number.isSafeInteger(revision) || revision < 1) throw Error("Choose a saved skills version.");
+  const row = store.handle.prepare("SELECT payload,sha FROM project_skill_change WHERE repo=? AND identity=? AND revision=?").get(repo, identity, revision);
+  if (!row) throw Error("That skills version is unavailable.");
+  const selection = unpack<Selection>(row["payload"], row["sha"]);
+  for (const choice of Object.values(selection)) packageOf(store, choice.sha);
+  return selection;
+}
+
 export function importSkill(
   store: Store,
   repo: string,
@@ -371,6 +382,7 @@ export function conversationSkills(
   if (sha && !skills.length) throw Error("Choose a skill from the library.");
   return {
     revision: v.revision,
+    history: v.history.map(({revision,enabled}) => ({revision,enabled})),
     skills: skills.map((p) => ({
       name: p.name,
       description: p.description,
@@ -392,7 +404,7 @@ export function conversationSkills(
         : {}),
     })),
     notice:
-      "Managed skills for future worker runs. Usage is not implied by enablement. Import, enable, disable and test in the project Skills control. Skills cannot grant tools or change approvals.",
+      "Managed skills for future worker runs. Usage is not implied by enablement. Use shared action proposals to import, enable, disable, restore and test. Skills cannot grant tools or change approvals.",
   };
 }
 export function readSkillsSnapshot(
