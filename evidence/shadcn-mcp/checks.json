@@ -1,0 +1,20 @@
+{
+  "base": "d54bb730222c079492d1452bca73161ba211fe6b",
+  "package": "shadcn@4.21.0",
+  "typecheck": "passed",
+  "focused": {
+    "command": "npx vitest run src/provider.test.ts src/capscan.test.ts --reporter=dot",
+    "passed": 64,
+    "failed": 0
+  },
+  "sources": {
+    ".mcp.json": "7830818f0c396f4d8a032269e9a9db4a3c1a6271536bc21fe689c77e3ed3f3de",
+    ".codex/config.toml": "c2f5b482ab6f76a1cf97dd9e09534c423b74b671b768af70fa2332975f807938"
+  },
+  "limits": [
+    "No model invocation or component installation tested",
+    "Claude interactive project approval pending",
+    "Unified Library UI not implemented",
+    "Upstream search add-command preview renders [object Promise]; dedicated command lookup works"
+  ]
+}

@@ -1,0 +1,4 @@
+# Project-scoped shadcn registry tools. Keep the tested version in sync with .mcp.json.
+[mcp_servers.shadcn]
+command = "npx"
+args = ["--yes", "shadcn@4.21.0", "mcp"]
