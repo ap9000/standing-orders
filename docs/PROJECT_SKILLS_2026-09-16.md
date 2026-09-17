@@ -24,6 +24,8 @@ Sources checked: https://agentskills.io/specification ; https://learn.chatgpt.co
 
 The library stores each package once. Immutable run snapshots contain package hashes, avoiding full package copies in every database row. First attempts pin the selection; later attempts and reviewer context retain those versions. Imported resources are materialized in private run-owned folders outside leased checkouts. Reviewer inputs use the existing sealed, integrity-checked text/range path; the reviewer gets no new tool or permission.
 
+Schema 65 also advances the older-reader fence regressions in `src/migration-v50-review-retries.test.ts`: a v66 or −66 marker refuses as a newer build and −65 is the impossible mid-flight marker, so the schema-compatibility check passes for this candidate.
+
 The first version supports portable SKILL.md packages. Provider-specific settings are shown but are not installed or granted. Requirements are reported as unverified until a test or run supplies evidence. Tests are read-only reports, so skills requiring deployment or other external writes can report that limitation but cannot complete those actions. Importing private GitHub repositories is not supported by this form; upload an authorized local folder instead. Local folder upload requires browser JavaScript.
 
 A skill can be tested while disabled. Create test opens its normal task, where the operator can change the agent and review the exact scope before approval. Repeated submissions reuse the same test. Results distinguish supplied versions from demonstrated use; recorded feedback creates a linked test revision with its own approval.

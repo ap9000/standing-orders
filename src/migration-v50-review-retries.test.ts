@@ -541,7 +541,7 @@ describe("schema 62 compatibility without manual refresh", () => {
       expect(store.criterionReviewsFor(1)).not.toEqual([]); store.close();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
-  test.each([65, -65])("schema %s refuses before every write and preserves bytes — the fence an older reader applies to this v64 file", version => {
+  test.each([66, -66])("schema %s refuses before every write and preserves bytes — the fence an older reader applies to this v65 file", version => {
     const root = mkdtempSync(join(tmpdir(), "refresh-refusal-")), file = join(root, "test.db");
     try {
       const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(version); store.close();
@@ -552,10 +552,10 @@ describe("schema 62 compatibility without manual refresh", () => {
       expect(readFileSync(file)).toEqual(before);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
-  test("-64 is an impossible marker: an upgrade never begins at the version it upgrades to", () => {
+  test("-65 is an impossible marker: an upgrade never begins at the version it upgrades to", () => {
     const root = mkdtempSync(join(tmpdir(), "refresh-refusal-")), file = join(root, "test.db");
     try {
-      const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(-64); store.close();
+      const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(-65); store.close();
       const before = readFileSync(file);
       expect(() => openStore(file)).toThrow(/mid-flight marker no build ever wrote/);
       expect(readFileSync(file)).toEqual(before);
