@@ -706,6 +706,10 @@ export async function invokeHeldAgent(
         store.recordRunProcess(runId, pid, clock(), group);
         runOptions.onDescendant?.(pid, group);
       },
+      onDescendantExit: (pid, group) => {
+        store.recordRunProcessExits(runId, clock(), { pid, group });
+        runOptions.onDescendantExit?.(pid, group);
+      },
       onUnknown: () => {
         if (!nativeHeld && !unknownTree) { store.reserveRunProcess(runId, clock()); unknownTree = true; }
         runOptions.onUnknown?.();

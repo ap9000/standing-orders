@@ -1,8 +1,15 @@
 import { execFileSync, type ChildProcess } from "node:child_process";
+import { processMayBeAlive } from "./process-liveness.js";
 
 type ProcessRow = { pid: number; parent: number; group: number };
-export type ProcessTreeObserver = { onDescendant?: (pid: number, group: boolean) => void; onUnknown?: () => void };
-const observed = new Map<ChildProcess, { observer: ProcessTreeObserver; seen: Set<number> }>();
+export type ProcessTreeObserver = {
+  onDescendant?: (pid: number, group: boolean) => void;
+  /** An observed PID (and its group, when recorded) is now proven absent.
+   * This never follows merely from reparenting or the root's exit. */
+  onDescendantExit?: (pid: number, group: boolean) => void;
+  onUnknown?: () => void;
+};
+const observed = new Map<ChildProcess, { observer: ProcessTreeObserver; seen: Map<string, { pid: number; group: boolean }> }>();
 let timer: ReturnType<typeof setInterval> | null = null;
 
 /** Read identifiers only: command lines can contain private provider inputs. */
@@ -29,9 +36,24 @@ function live(child: ChildProcess): boolean { return child.pid !== undefined && 
 function remember(child: ChildProcess, rows: ProcessRow[]): void {
   const tracked = observed.get(child);
   if (!tracked) return;
-  for (const row of rows) if (!tracked.seen.has(row.pid)) {
-    tracked.observer.onDescendant?.(row.pid, row.group === row.pid);
-    tracked.seen.add(row.pid);
+  for (const row of rows) {
+    const group = row.group === row.pid, key = `${row.pid}:${group}`;
+    if (tracked.seen.has(key)) continue;
+    tracked.observer.onDescendant?.(row.pid, group);
+    tracked.seen.set(key, { pid: row.pid, group });
+  }
+}
+function recordExits(child: ChildProcess, rows: ProcessRow[]): void {
+  const tracked = observed.get(child);
+  if (!tracked) return;
+  const pids = new Set(rows.map(row => row.pid)), groups = new Set(rows.map(row => row.group));
+  for (const [key, prior] of tracked.seen) {
+    if (pids.has(prior.pid) || (prior.group && groups.has(prior.pid))) continue;
+    // A missing ancestry edge proves nothing. Require both the complete
+    // system snapshot and an ESRCH-only probe; no birth inference or signal.
+    if (processMayBeAlive(prior.pid, prior.group)) continue;
+    tracked.observer.onDescendantExit?.(prior.pid, prior.group);
+    tracked.seen.delete(key); // The same number can later identify a NEW child.
   }
 }
 function uncertain(child: ChildProcess): void {
@@ -45,7 +67,7 @@ function uncertain(child: ChildProcess): void {
  * a killed tool can retain its PID briefly after its process group is gone. */
 export function sampleProcessTree(child: ChildProcess): void {
   if (!live(child) || !observed.has(child)) return;
-  try { remember(child, descendants(snapshot(), child.pid!)); }
+  try { const rows = snapshot(); recordExits(child, rows); remember(child, descendants(rows, child.pid!)); }
   catch { uncertain(child); }
 }
 
@@ -54,8 +76,11 @@ export function sampleProcessTree(child: ChildProcess): void {
  * shell. They never grant permission to send a signal after worker recovery. */
 export function observeProcessTree(child: ChildProcess, observer: ProcessTreeObserver): void {
   if (process.platform === "win32" || observer.onDescendant === undefined) return;
-  observed.set(child, { observer, seen: new Set() });
+  observed.set(child, { observer, seen: new Map() });
   child.once("close", () => {
+    if (observed.get(child)?.seen.size) {
+      try { recordExits(child, snapshot()); } catch { uncertain(child); }
+    }
     observed.delete(child);
     if (observed.size === 0 && timer !== null) { clearInterval(timer); timer = null; }
   });
@@ -63,7 +88,10 @@ export function observeProcessTree(child: ChildProcess, observer: ProcessTreeObs
   timer = setInterval(() => {
     try {
       const rows = snapshot();
-      for (const [one] of observed) if (live(one)) remember(one, descendants(rows, one.pid!));
+      for (const [one] of observed) if (live(one)) {
+        recordExits(one, rows);
+        remember(one, descendants(rows, one.pid!));
+      }
     } catch {
       for (const [one] of observed) if (live(one)) uncertain(one);
     }

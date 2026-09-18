@@ -241,6 +241,18 @@ describe("operator review: cancellation cannot cross custody boundaries", () => 
     }
   });
 
+  test("a completed owned command retains its verified process exit", async () => {
+    const f = fixture();
+    const result = await witnessedRunner(f.store, f.id, () => new Date(), run)(process.execPath, ["-e", "process.exit(0)"], {
+      processGroup: true, owner: runOwnerTag(f.store, f.id), timeoutMs: 10_000,
+    });
+    expect(result.code).toBe(0);
+    const witnesses = f.store.raw().prepare("SELECT * FROM run_process WHERE run=? AND pid IS NOT NULL").all(f.id);
+    expect(witnesses.length).toBeGreaterThan(0);
+    expect(witnesses.every(row => typeof row.exited_at === "string")).toBe(true);
+    expect(f.store.getRun(f.id)?.outcome).toBeNull();
+  });
+
   test("review retry waits for an orphan even when that reviewer has no worktree", async () => {
     const f = fixture();
     f.store.finishRun(f.id, { outcome: "built", now: new Date() });
