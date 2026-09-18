@@ -684,6 +684,11 @@ export type VerifyCommandFacts =
   | { configured: true; ran: true; exitCode: number; setupReplayed?: true };
 
 export type AdjudicateInput = {
+  /** New captures may assess the signed goal directly when the builder wrote
+   * no optional proof. Historical calls retain their original contract. */
+  directAssessment?: boolean;
+  /** Controller-owned command label, never a builder-reported check. */
+  verificationCommand?: string;
   /** Whether a `proof` artifact was stored at all for this run. */
   proofArtifactPresent: boolean;
   /** null when no proof artifact exists; otherwise the parse of its bytes. */
@@ -708,7 +713,14 @@ export type AdjudicateInput = {
   reviewContext?: readonly ({ id: string } & CriterionCoverage)[];
 };
 
-export type AdjudicateResult = { verdict: ProofVerdict; reasons: string[]; matrix: CriterionMatrixRow[] };
+export type AdjudicateResult = { verdict: ProofVerdict; reasons: string[]; matrix: CriterionMatrixRow[]; machineVerdict?: ProofVerdict };
+export const GOAL_ASSESSMENT_PENDING = "The saved evidence is awaiting independent goal assessment.";
+/** Legacy folds could only lower a verdict. Direct assessment also records an
+ * ordinary wait between green machine checks and the goal judgement. */
+export function reviewConflict(matrix: readonly CriterionMatrixRow[], machine: ProofVerdict | null, verdict: ProofVerdict | null): boolean {
+  return matrix.some(row => row.assessment !== undefined) ? matrix.some(row => row.review?.judgement === "contradicts")
+    : machine !== null && machine !== verdict;
+}
 
 /** One row of the criterion-to-evidence matrix every result-facing surface
  * renders identically (task, run, done, builds, board, inbox, chat —
@@ -731,6 +743,9 @@ export function manualReviewOnly(proof: { verdict: string; reasons: readonly str
     && proof.reasons.every(reason => /^criterion "[^"]+" requires manual-review evidence — an operator must accept it before this can verify$/.test(reason));
 }
 export type CriterionMatrixRow = {
+  /** Controller-captured evidence for direct goal assessment. Kept separately
+   * from the final row state: available evidence is not a satisfied goal. */
+  assessment?: { evidenceState: CriterionMatrixState; detail: string[] };
   id: string;
   statement: string;
   requiredEvidence: readonly EvidenceKind[];
@@ -910,6 +925,123 @@ function criterionMatrix(
   });
 }
 
+/** Evidence readiness only. The signed criteria are copied from the scope,
+ * never restated by the builder; an independent assessment must settle them. */
+function assessCapturedEvidence(input: AdjudicateInput): AdjudicateResult {
+  const completeDiff = input.diffStat !== null && input.diffStat.captured && !input.diffStat.truncated;
+  const check = input.verifyCommand;
+  const checked = check.configured && check.ran && check.exitCode === 0;
+  let machineVerdict: ProofVerdict = checked ? "verified" : "attested";
+  const problems: string[] = [];
+  if (!input.handoffPresent) problems.push("the terminal handoff is missing");
+  if (!input.terminalDiffPresent || input.terminalDiffCaptureStatus !== "ok") problems.push("the machine-captured diff is missing or failed to capture");
+  if (!completeDiff) problems.push("the sealed diff is unavailable or truncated; the exact candidate cannot be assessed");
+  if (check.configured && !check.ran) problems.push(verificationFailureWords(check.failure));
+  if (problems.length > 0) machineVerdict = "short";
+  if (check.configured && check.ran && check.exitCode !== 0) {
+    machineVerdict = "refuted";
+    problems.push(`the repository's approved verification command exited ${check.exitCode}`);
+  }
+  const matrix = (input.approvedCriteria ?? []).map((criterion): CriterionMatrixRow => {
+    const detail: string[] = [];
+    const answered: CriterionEvidenceRef[] = [];
+    let missing = false, failed = false, manual = false;
+    for (const kind of criterion.evidence) {
+      if (kind === "check") {
+        if (checked) answered.push({ kind, ref: input.verificationCommand ?? "approved project check" });
+        else {
+          failed ||= check.configured && check.ran && check.exitCode !== 0;
+          missing ||= !check.configured || !check.ran;
+          detail.push(`criterion "${criterion.id}" needs a passing approved project check`);
+        }
+      } else if (kind === "changed-path") {
+        if (completeDiff) {
+          for (const path of input.diffStat!.paths) answered.push({ kind, ref: path });
+        } else { missing = true; detail.push(`criterion "${criterion.id}" needs the complete saved source inventory`); }
+      } else if (kind === "screenshot") {
+        // Screenshots must have been explicitly captured and validated, never
+        // guessed from arbitrary files or inferred from a passing test.
+        const shots = input.screenshots.filter(shot => shot.ok && (shot.bytes ?? 0) >= SCREENSHOT_EVIDENCE_MIN_BYTES &&
+          shot.dims != null && shot.dims.width >= SCREENSHOT_EVIDENCE_MIN_WIDTH && shot.dims.height >= SCREENSHOT_EVIDENCE_MIN_HEIGHT);
+        if (shots.length === 0) { missing = true; detail.push(`criterion "${criterion.id}" needs a captured screenshot of the required behavior`); }
+        else for (const shot of shots) answered.push({ kind, ref: shot.path });
+      } else {
+        manual = true;
+        detail.push(`criterion "${criterion.id}" requires manual-review evidence — an operator must accept it before this can verify`);
+      }
+    }
+    const evidenceState: CriterionMatrixState = failed ? "failed" : missing ? "missing" : manual ? "manual-review" : "pass";
+    const coverage = input.reviewContext?.find(one => one.id === criterion.id);
+    return {
+      id: criterion.id, statement: criterion.statement, requiredEvidence: criterion.evidence,
+      assessment: { evidenceState, detail }, state: evidenceState === "pass" ? "missing" : evidenceState,
+      detail: [...detail, `criterion "${criterion.id}" awaits independent goal assessment`], answered, review: null,
+      ...(coverage === undefined ? {} : { coverage: { state: coverage.state, inherited: coverage.inherited, items: [...coverage.items], gaps: [...coverage.gaps], priorSupport: coverage.priorSupport } }),
+    };
+  });
+  return { machineVerdict, verdict: machineVerdict === "refuted" ? "refuted" : "short", matrix,
+    reasons: problems.length > 0 ? problems : [GOAL_ASSESSMENT_PENDING] };
+}
+
+/** Only direct assessments can settle a pending goal. Machine failures and
+ * required evidence remain authoritative; this never upgrades a legacy proof. */
+function foldGoalAssessment(base: AdjudicateResult, judgements: readonly CriterionJudgement[]): AdjudicateResult {
+  const byId = new Map(judgements.map(one => [one.id, one]));
+  const matrix = base.matrix.map((row): CriterionMatrixRow => {
+    const evidence = row.assessment!;
+    const judgement = byId.get(row.id);
+    const review = judgement === undefined ? row.review : { judgement: judgement.judgement, note: judgement.note, author: judgement.author };
+    const contradicted = review?.judgement === "contradicts";
+    const upheld = review?.judgement === "upholds";
+    return { ...row, review,
+      state: contradicted ? "failed" : evidence.evidenceState === "pass" ? upheld ? "pass" : "missing" : evidence.evidenceState,
+      detail: [...evidence.detail, ...(upheld ? [] : [review === null
+        ? `criterion "${row.id}" awaits independent goal assessment`
+        : `${review.author} ${contradicted ? "contradicts" : "needs more evidence for"} criterion "${row.id}": ${review.note}`])],
+    };
+  });
+  const machineReady = base.machineVerdict === "verified" || base.machineVerdict === "attested";
+  const contradicted = matrix.some(row => row.review?.judgement === "contradicts");
+  const passed = machineReady && matrix.every(row => row.state === "pass" && row.review?.judgement === "upholds");
+  const verdict = base.machineVerdict === "refuted" || contradicted ? "refuted" : passed ? base.machineVerdict! : "short";
+  return { ...base, verdict, matrix, reasons: passed ? ["The saved evidence and independent assessment satisfy the approved goal."]
+    : [...(!machineReady ? base.reasons : []), ...matrix.flatMap(row => row.detail)] };
+}
+
+function verificationFailureWords(failure: Extract<VerifyCommandFacts, { ran: false }>["failure"]): string {
+  return (() => {
+      switch (failure) {
+        case "dependency-missing":
+          return "the approved verification command could not start because a required project executable was unavailable and no approved recovery was enabled";
+        case "setup-stale":
+          return "automatic recovery stopped because the project setup or check changed";
+        case "setup-failed":
+          return "the approved setup command failed during automatic recovery";
+        case "tracked-files-changed":
+          return "automatic recovery stopped because tracked files no longer matched the built result";
+        case "setup-changed-files":
+          return "automatic recovery stopped because the setup command changed tracked files after the build";
+        case "checkout-moved":
+          return "automatic recovery stopped because the checkout moved away from the built commit";
+        case "cleanliness-unavailable":
+          return "automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged";
+        case "dependency-still-missing":
+          return "the required project executable was still unavailable after replaying the approved setup command";
+        case "retry-spawn-failed":
+          return "the retried verification command could not be started after automatic recovery";
+        case "retry-timed-out":
+          return "the retried verification command timed out after automatic recovery";
+        case "custody-lost":
+          return "automatic recovery stopped because this worker no longer owned the build";
+        case "timed-out":
+          return "the approved verification command timed out before checks finished";
+        case "spawn-failed":
+        default:
+          return "the approved verification command could not be run";
+      }
+    })();
+}
+
 /**
  * Ordered rules; the first that fires wins. Every reason is a sentence the
  * surfaces print verbatim — this function is the only place that decides
@@ -934,8 +1066,16 @@ function criterionMatrix(
  * unchecked. An unavailable or truncated diff-stat cannot prove either
  * direction, so it can only ever produce SHORT, never REFUTED.
  */
+/** An optional screenshot inventory carries no builder-authored completion
+ * claims. The existing bounded parser still validates every supplied field. */
+export function artifactManifestOnly(proof: ParsedProof): boolean {
+  return proof.criteria.length === 0 && proof.checks.length === 0 && proof.changed.length === 0 && proof.caveats.length === 0;
+}
+
 export function adjudicate(input: AdjudicateInput): AdjudicateResult {
   const approvedCriteria = input.approvedCriteria ?? [];
+  if (input.directAssessment && approvedCriteria.length > 0 && (!input.proofArtifactPresent ||
+    (input.proofParse?.ok && artifactManifestOnly(input.proofParse.proof)))) return assessCapturedEvidence(input);
   const coverageById = new Map((input.reviewContext ?? []).map(one => [one.id, one] as const));
   const matrixOf = (proof: ParsedProof | null): CriterionMatrixRow[] =>
     criterionMatrix(approvedCriteria, proof, input.diffStat, input.screenshots).map(row => {
@@ -1058,37 +1198,7 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
   // contradictory evidence. This precedes criterion-state checks so the
   // actionable environment cause is never buried under a generic gap.
   if (input.verifyCommand.configured && !input.verifyCommand.ran) {
-    const reason = (() => {
-      switch (input.verifyCommand.failure) {
-        case "dependency-missing":
-          return "the approved verification command could not start because a required project executable was unavailable and no approved recovery was enabled";
-        case "setup-stale":
-          return "automatic recovery stopped because the project setup or check changed";
-        case "setup-failed":
-          return "the approved setup command failed during automatic recovery";
-        case "tracked-files-changed":
-          return "automatic recovery stopped because tracked files no longer matched the built result";
-        case "setup-changed-files":
-          return "automatic recovery stopped because the setup command changed tracked files after the build";
-        case "checkout-moved":
-          return "automatic recovery stopped because the checkout moved away from the built commit";
-        case "cleanliness-unavailable":
-          return "automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged";
-        case "dependency-still-missing":
-          return "the required project executable was still unavailable after replaying the approved setup command";
-        case "retry-spawn-failed":
-          return "the retried verification command could not be started after automatic recovery";
-        case "retry-timed-out":
-          return "the retried verification command timed out after automatic recovery";
-        case "custody-lost":
-          return "automatic recovery stopped because this worker no longer owned the build";
-        case "timed-out":
-          return "the approved verification command timed out before checks finished";
-        case "spawn-failed":
-        default:
-          return "the approved verification command could not be run";
-      }
-    })();
+    const reason = verificationFailureWords(input.verifyCommand.failure);
     return { verdict: "short", reasons: [reason], matrix };
   }
 
@@ -1174,6 +1284,9 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
  */
 export function foldReview(base: AdjudicateResult, judgements: readonly CriterionJudgement[]): AdjudicateResult {
   if (judgements.length === 0) return base;
+  if (base.matrix.length > 0 && base.matrix.every(row => row.assessment !== undefined)) {
+    return foldGoalAssessment(base, judgements);
+  }
   const byId = new Map(judgements.map(j => [j.id, j] as const));
   let anyContradiction = false;
   const matrix = base.matrix.map((row): CriterionMatrixRow => {
@@ -1245,7 +1358,7 @@ export function semanticCoverage(matrix: readonly CriterionMatrixRow[], policy: 
   const reviewed = matrix.length - unreviewed.length;
   return {
     policy,
-    required: policy === "strict",
+    required: policy === "strict" || matrix.some(row => row.assessment !== undefined),
     total: matrix.length,
     upheld,
     contradicted,
@@ -1269,7 +1382,7 @@ export function coverageWords(coverage: SemanticCoverage): string[] {
         : coverage.required
           ? `required under strict quality — NOT satisfied (${[...(coverage.uncertain.length > 0 ? [`cannot-tell never counts: ${coverage.uncertain.join(", ")}`] : []), ...(coverage.contradicted.length > 0 ? [`contradicted: ${coverage.contradicted.join(", ")}`] : []), ...(coverage.unreviewed.length > 0 ? [`unreviewed: ${coverage.unreviewed.join(", ")}`] : [])].join("; ")})`
           : `optional under default quality — ${coverage.upheld.length}/${coverage.total} upheld${coverage.uncertain.length > 0 ? `, cannot-tell: ${coverage.uncertain.join(", ")}` : ""}${coverage.contradicted.length > 0 ? `, contradicted: ${coverage.contradicted.join(", ")}` : ""}`;
-  lines.push(`semantic coverage: ${coverage.upheld.length}/${coverage.total} upheld by an independent reviewer — ${standing}`);
+  lines.push(`semantic coverage: ${coverage.upheld.length}/${coverage.total} upheld by an independent reviewer — ${coverage.policy === "default" && coverage.required ? standing.replaceAll("under strict quality", "for goal assessment") : standing}`);
   for (const gap of coverage.contextGaps) lines.push(`context gap ${gap.id}: ${gap.gaps.join("; ")}`);
   return lines;
 }

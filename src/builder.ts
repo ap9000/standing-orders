@@ -79,7 +79,7 @@ import {
   imageDimensions,
   SCREENSHOT_BYTE_CAP,
 } from "./evidence.js";
-import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, proofSubmissionProblems, changedListProblems, frozenCriterionProblems, sameDiffStatFacts, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
+import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, artifactManifestOnly, proofSubmissionProblems, changedListProblems, frozenCriterionProblems, sameDiffStatFacts, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
 import { storeStructuredAttempt, normalizeStructuredJson } from "./structured-output.js";
 import { captureReviewContext } from "./review-context.js";
 import {
@@ -1378,7 +1378,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     milestones.length === 0 || planRevisionHash === null
       ? null
       : { revision: planRevisionNumber, hash: planRevisionHash, milestones, progress, proposal },
-  ) + `\nCanonical signed rubric: ${rubric}. Its statement fields are exact; evidence requirements are separate fields. Do not edit this input. When using scripts/proof-preflight.mjs, pass --rubric ${rubric} with --proof ${proof}. Preflight checks the submission; the worker still checks the committed result.\n`;
+  ) + `\nCanonical signed rubric: ${rubric}. Its statement fields are exact; evidence requirements are separate fields. Do not edit this input.${(scope?.acceptance.length ?? 0) === 0 ? ` When using scripts/proof-preflight.mjs, pass --rubric ${rubric} with --proof ${proof}. Preflight checks the submission; the worker still checks the committed result.` : " The independent reviewer reads these criteria directly; no restatement is needed."}\n`;
 
   // THE HELD BRANCH (Phase 2, v2 S0d + v6 W8): ownership transfers to the
   // coordinator at the spawn point. Everything build() armed that its
@@ -1932,7 +1932,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     // A predecessor may have committed and crashed before checking. The
     // successor truthfully makes no new edits, but still owes the original
     // branch's proof and approved verification. Never require a dummy edit.
-    if (pinnedBase !== baseRevision || store.repairChainForDraft(taskId) !== null) {
+    if (pinnedBase !== baseRevision || store.repairChainForDraft(taskId) !== null || (store.getScope(taskId)?.acceptance.length ?? 0) > 0) {
       try {
         store.setRunPhase(request.runId, "verifying-proof");
         await settleProof(captured, diffEvidence.statId, baseRevision);
@@ -2213,6 +2213,7 @@ async function correctProofReceipt(
   // Without a parsed original there is no trustworthy inventory of checks
   // to freeze. Preserve it for inspection rather than manufacture evidence.
   if (!initial.ok) return unchanged;
+  if (artifactManifestOnly(initial.proof) && (store.getScope(request.taskId)?.acceptance.length ?? 0) > 0) return unchanged;
   const rubric = captured.scope?.acceptance ?? [];
   // The changed-list review against the sealed stat: only a recoverable
   // review (every discrepancy explained by the stat) asks for a turn, and
@@ -2705,7 +2706,9 @@ async function settleProof(
     }
   }
 
-  const { verdict, reasons, matrix } = adjudicate({
+  const { verdict, reasons, matrix, machineVerdict } = adjudicate({
+    directAssessment: true,
+    ...(configured === null ? {} : { verificationCommand: configured.command }),
     proofArtifactPresent,
     proofParse,
     handoffPresent: handoffArtifact !== null,
@@ -2717,7 +2720,7 @@ async function settleProof(
     approvedCriteria,
     ...(reviewContext === undefined ? {} : { reviewContext }),
   });
-  store.saveProofVerdict(runId, verdict, reasons, now(), matrix);
+  store.saveProofVerdict(runId, verdict, reasons, now(), matrix, machineVerdict);
   // v40: a repair attempt that reaches verified/attested closes its chain
   // right here — a review can only ever lower this verdict, never raise
   // it, so this structural save is the one place "resolved" can fire.
@@ -3331,11 +3334,9 @@ function brief(
     "- When you finish — and you must always end explicitly, unless you",
     `  parked — write ONE file named exactly ${done} in the worktree root:`,
     '    { "version": 2, "status": "completed" | "no-change" | "failed",',
-    `      "conclusion": "<outcome first, plain language, at most ${HANDOFF_CONCLUSION_CAP} characters>",`,
-    `      "changes": ["<specific change, at most ${HANDOFF_ITEM_CAP} characters>"],`,
-    `      "verification": ["<check and result, at most ${HANDOFF_ITEM_CAP} characters>"],`,
-    '      "followUps": ["<remaining concern, only when one exists>"] }',
-    `  Keep each list to at most ${HANDOFF_LIST_CAP} items. The conclusion is the operator's`,
+    `      "conclusion": "<short outcome or blocker, at most ${HANDOFF_CONCLUSION_CAP} characters>" }`,
+    `  Optional changes, verification and followUps lists may add useful caveats:`,
+    `  at most ${HANDOFF_LIST_CAP} items each, ${HANDOFF_ITEM_CAP} characters per item. The conclusion is the operator's`,
     "  compact result, not a transcript: never include a preamble, file dump,",
     "  or repeated explanation. The machine stores full diffs separately.",
     `  The whole file must be under ${HANDOFF_PAYLOAD_CAP} bytes, and the conclusion and every`,
@@ -3344,6 +3345,21 @@ function brief(
     "  completed = you made the changes; no-change = the goal needs no change",
     "  and the conclusion says why; failed = you could not do it. Write to a",
     "  temporary name first, then rename it into place.",
+    ...(scope.acceptance.length > 0 ? [
+      "- The machine captures the exact changes, approved checks and source context.",
+      "  One independent reviewer assesses that evidence against the signed goal.",
+      `  You do not need to write ${proof} or repeat the acceptance criteria,`,
+      "  changed-file inventory or final check results. This applies to no-change",
+      "  results too. Put useful caveats in the short handoff; do not invent evidence.",
+      "  Run focused checks for your edits. The machine runs the approved full check.",
+      "  If screenshots are required, capture the actual candidate and list them in",
+      `  ${proof}: { "version": 1, "screenshots": [`,
+      '    { "path": "<repository-relative PNG or JPEG>", "caption": "<what it shows>" } ] }.',
+      `  List at most ${PROOF_LIMITS.screenshots} screenshots, with paths/captions under ${PROOF_LIMITS.evidenceRef} UTF-8 bytes,`,
+      "  on one line each; no absolute paths or dot segments. Images must be real,",
+      "  at least 320 by 200 pixels. A list is optional; missing required images",
+      "  remain an evidence gap. Do not add completion claims to this inventory.",
+    ] : [
     "- If you completed the task, you may additionally write ONE file named",
     `  exactly ${proof} in the worktree root — your proof. It is not required,`,
     "  but a completed task with no proof reads as needing verification, not",
@@ -3473,6 +3489,12 @@ function brief(
     "  characters; every path repository-relative — no leading slash, drive",
     "  letter, backslash, or `.`/`..` segment; and every field that says",
     "  \"required\" above present and non-empty.",
+    ]),
+    ...(scope.acceptance.length > 0 ? [
+      "- Re-read the handoff and any screenshot inventory before you exit.",
+      "  Confirm valid JSON, the stated size limits, and that every named image",
+      "  exists. No criterion answers or self-reported file list are required.",
+    ] : [
     "- Preflight every protocol file before you exit. After you write the",
     "  handoff, the proof, or a park file: re-read it from disk, parse it as",
     "  JSON, and measure every capped string's UTF-8 byte length (for",
@@ -3486,6 +3508,7 @@ function brief(
     "  verbatim. Fix anything short, rewrite through a temporary name, and",
     "  only then end. A file that does not parse, or that breaks one cap, is",
     "  refused whole — the machine never repairs it for you.",
+    ]),
     // The two adaptive-execution-plan files. Both are optional to the
     // machine and neither can widen anything: one reports where the work
     // has got to, the other says the road itself was wrong.

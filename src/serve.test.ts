@@ -11168,6 +11168,47 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(diff.indexOf("src/payout/guard.ts")).toBeLessThan(diff.indexOf("package-lock.json"));
   });
 
+  test("pending goal assessment does not invent a review conflict or failed checks", async () => {
+    const ref = seed("t-assess", "Assess the saved goal", "/repo/main", { acceptance: [{ id: "c1", statement: "Saved values survive reload", evidence: ["check"] }] });
+    const run = build("t-assess", ref, {
+      patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", stat: [{ path: "x", additions: 1, deletions: 1 }],
+      handoff: { conclusion: "Saved values now survive reload.", changes: [], verification: [], followUps: [] }, checkLog: "$ npm test\n164 passed\n",
+      verdict: { verdict: "short", machineVerdict: "verified", reasons: ["The saved evidence is awaiting independent goal assessment."],
+        matrix: [{ ...row("c1", "Saved values survive reload", "missing", [{ kind: "check", ref: "npm test" }]), assessment: { evidenceState: "pass", detail: [] } }] },
+    });
+    await boot(); const cookie = await login();
+    for (const path of [`/r/${run}?tab=checks`, "/review?result=t-assess", "/t/t-assess"]) {
+      const html = await (await fetch(url(path), { headers: { cookie } })).text();
+      expect(html).not.toContain("An independent review found conflicting evidence");
+      expect(html).toContain("Ready for goal review");
+      expect(html).toContain("Review pending");
+      if (path.startsWith("/r/")) {
+        expect(html).toContain("Review goal");
+        expect(html).not.toContain("At completion:");
+        expect(html).not.toContain("The agent reported no checks.");
+        expect(html).not.toContain("No screenshots were needed.");
+        expect(html).not.toContain("No caveats were reported.");
+      }
+    }
+  });
+
+  test("missing goal evidence is shown once with a precise review action", async () => {
+    const ref = seed("t-gap", "Check saved settings", "/repo/main", { acceptance: [{ id: "c1", statement: "Saved values survive reload", evidence: ["check"] }] });
+    const note = "Capture the selected controller layout after reloading the saved run.";
+    const reason = `reviewer:codex needs more evidence for criterion "c1": ${note}`;
+    const run = build("t-gap", ref, {
+      patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", stat: [{ path: "x", additions: 1, deletions: 1 }],
+      handoff: { conclusion: "Saved values now survive reload.", changes: [], verification: [], followUps: [] }, checkLog: "$ npm test\n164 passed\n",
+      verdict: { verdict: "short", machineVerdict: "verified", reasons: [reason], matrix: [{ ...row("c1", "Saved values survive reload", "missing", [{ kind: "check", ref: "npm test" }], [reason], { judgement: "cannot-tell", note, author: "reviewer:codex" }), assessment: { evidenceState: "pass", detail: [] } }] },
+    });
+    await boot(); const cookie = await login();
+    const html = await (await fetch(url(`/r/${run}?tab=checks`), { headers: { cookie } })).text();
+    expect(html).toContain("More evidence needed");
+    expect(html).toContain("Review evidence");
+    expect(html.split(note)).toHaveLength(2);
+    expect(html).not.toContain("At completion:");
+  });
+
   test("evidence is labeled by source — machine re-run, agent checks, reviewer judgements and findings, screenshots, caveats — and says plainly what is missing", async () => {
     // The project's reviewer is codex, so the sealed review leg — and the
     // reviewer run below — is codex (v48: a run spends only as its leg).

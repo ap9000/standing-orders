@@ -2343,9 +2343,9 @@ describe("watch — the loop, zero tokens idle", () => {
     await run(["task", "show", "t-reviewed", "--json"]);
     const source = payload().runs.find((one: { role: string }) => one.role === "builder");
     expect(await run(["task", "review", String(source.id), "--as", "alex", "--token", approverToken])).toBe(EXIT.ok);
-    // The builder wrote no proof (needs verification, not done): the first
-    // reviewer still gets the sealed context, which states that gap truthfully
-    // instead of the preflight refusing a build that hid nothing.
+    // No builder proof is needed to validate captured source. The first
+    // reviewer receives the sealed patch context, while the signed human
+    // decision remains unfulfilled regardless of the review's execution result.
     type Coverage = { id: string; state: string; inherited: boolean; gaps: string[] }[];
     let sealed: { proof: boolean; coverage: Coverage; verified: boolean } | null = null;
     const code = await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], async (_file, _args, options) => {
@@ -2357,9 +2357,11 @@ describe("watch — the loop, zero tokens idle", () => {
         : { ...OK, code: 1, stderr: "simulated reviewer outage" };
     });
     expect(code, lines.join("\n")).toBe(succeeds ? EXIT.ok : EXIT.failed);
-    expect(sealed).toMatchObject({ proof: false, verified: false, coverage: [{ id: "c1", state: "gap", inherited: false, gaps: [expect.stringContaining("no sealed proof")] }] });
+    expect(sealed).toMatchObject({ proof: false, verified: true, coverage: [{ id: "c1", state: "patch", inherited: false, gaps: [] }] });
     expect(payload().dispatched).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: succeeds ? "reviewed" : "review-failed" })]));
     if (!succeeds) expect(payload().reason).toBe("review-failed");
+    await run(["task", "show", "t-reviewed", "--json"]);
+    expect(payload()).toMatchObject({ proofVerdict: "short", proofAccepted: false, proofMatrix: [{ id: "c1", state: "manual-review" }] });
   });
 
   test("explicit review retries through the CLI: a failed review is retried at most twice, every refusal is typed, and task show states the attempt truthfully (v50)", async () => {

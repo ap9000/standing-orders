@@ -1,6 +1,6 @@
 import {chatSchema,chatTables} from "./chat-delivery-state.js";
 import { SLACK_SCHEMA, SLACK_TABLES } from "./slack-state.js";
-import { verificationEvidence } from "./verification-evidence.js";
+import { assessmentFromSavedEvidence, verificationEvidence } from "./verification-evidence.js";
 import { LEARNING_SCHEMA, queueLearning } from "./project-learning.js";
 import { SKILLS_SCHEMA } from "./project-skills.js";
 import { KNOWLEDGE_SCHEMA } from "./project-knowledge.js";
@@ -10102,6 +10102,7 @@ export class Store {
    */
   ingestCriterionReviews(
     args: {
+      evidenceRoot?: string;
       reviewerRunId: number;
       runId: number;
       artifactId: number;
@@ -10320,11 +10321,14 @@ export class Store {
             boundContext?.sha256 ?? null,
           );
       }
+      const reassessed = args.evidenceRoot === undefined || args.bindings.verification === undefined || args.bindings.context == null
+        ? null : assessmentFromSavedEvidence(this, args.evidenceRoot, args.runId);
+      if (reassessed !== null) this.addRunNote(args.runId, "Standing Orders", "Fresh goal assessment uses this result's original saved source and verification receipt. Its earlier status was: no proof was written. No check or artifact was replaced.", now);
       const folded = foldReview(
-        { verdict: existing.verdict, reasons: existing.reasons, matrix: existing.matrix },
+        reassessed ?? { verdict: existing.verdict, reasons: existing.reasons, matrix: existing.matrix, ...(existing.machineVerdict === null ? {} : { machineVerdict: existing.machineVerdict }) },
         args.judgements.map((j): CriterionJudgement => ({ id: j.id, judgement: j.judgement, note: j.note, author: args.author })),
       );
-      this.saveProofVerdict(args.runId, folded.verdict, folded.reasons, now, folded.matrix, existing.machineVerdict ?? existing.verdict);
+      this.saveProofVerdict(args.runId, folded.verdict, folded.reasons, now, folded.matrix, reassessed?.machineVerdict ?? existing.machineVerdict ?? existing.verdict);
       return { verdict: folded.verdict };
     });
   }
@@ -10428,6 +10432,7 @@ export class Store {
       );
       const folded = this.ingestCriterionReviews(
         {
+          ...(args.evidenceRoot === undefined ? {} : { evidenceRoot: args.evidenceRoot }),
           reviewerRunId: args.reviewerRunId,
           runId: args.runId,
           artifactId: args.artifactId,

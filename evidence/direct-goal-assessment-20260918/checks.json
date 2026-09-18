@@ -1,0 +1,48 @@
+{
+  "candidateBase": "9da7e03cdf77a59b7b83484b7bea8b2715be2b88",
+  "sourceSha256": {
+    "docs/DESIGN.md": "e7165d59db22f579364382096dc15e4c52bc7cda74aaeab679d55f26f42bb893",
+    "src/builder.test.ts": "6a795d8049000fc4ba7e8b5ff0dee5528a0fc4706efc35cd003cb5c27015a078",
+    "src/builder.ts": "0a835f23196a5cf2a1e2de5de1eb42b89928e43cc3a6675b4d16127057376580",
+    "src/dispose.ts": "d2faee808f53b21124ed96635c19ad7ea81f63c7d02bce221a7a404ffc474417",
+    "src/proof.test.ts": "b1b7c2b3b9159501899b3e18c069a355f78c5282f8d95cb4a513e5924eb7e85c",
+    "src/proof.ts": "7f12933d2b792dc237736add910a9b2b5bd76c818aa3716e414dff16a35e7d96",
+    "src/review-context.test.ts": "f7e48ce2379329c05fa0479da77336774e55a7953a5ea082ea38fafc5e17bfe2",
+    "src/review-context.ts": "df232367d69e9c60a64912c8a258b08ef3a11b486d38a654c652413075d01b20",
+    "src/reviewer.ts": "4e7b047e37528062df08deed65d92684b569f4b3acf9a7eb2bf92117ba64e345",
+    "src/serve.test.ts": "6b4280ed3921ecf054c25c8d9ffeaf683f96c73b305018605f22e3b7caad65f4",
+    "src/serve.ts": "fdb64737be3dbb765dcecc06628f65effdd59a9c1836d3d4062e2ca2147571f8",
+    "src/store.ts": "85f8fa9069af6aa94e0f6da3de7b2c0d113e7aaca331495f8f3ec92fc441d749",
+    "src/task-notifications.test.ts": "c7062e3dbce9f5cdc8689817460b63c11b30956269b2890ce2d57eba6111bdac",
+    "src/telegram-progress.ts": "32f4bba9686fe76695b5bc08592d8b8c41a40b5b65777dee24263fe3fc3ba622",
+    "src/unattended.test.ts": "14daf80fb12c4a55a3be5bee1ed35d1baadebf7aac3e7e0fca43181f7be68598",
+    "src/verification-evidence.ts": "5e45d9e080e388cdfce66b48795c5c80c8c83050c5be0da5f534381535bf2a19",
+    "src/workspace-ui.test.ts": "cf26d6155f5785bde228bf13959380334444caa502158bd8f173f40565fa8859",
+    "src/workspace-ui.ts": "7cffcc3bc7606cd31b66f950bf6fa5612cd6aa8276f40ed28adc31806b18e838",
+    "src/tick.test.ts": "84e1263c3ccb0d7c637420ea5d9f5ceb31fe2ecec345e52b80c4bea7432532e5"
+  },
+  "focusedTests": {
+    "log": "checks.txt.gz",
+    "commands": [
+      "npm run typecheck",
+      "npm run build",
+      "npx vitest run src/builder.test.ts src/proof.test.ts src/review-context.test.ts src/reviewer.test.ts src/unattended.test.ts src/repair-loop.test.ts src/task-notifications.test.ts src/workspace-ui.test.ts --reporter=dot",
+      "npx vitest run src/task-notifications.test.ts src/workspace-ui.test.ts --reporter=dot",
+      "npx vitest run src/serve.test.ts -t \"pending goal assessment|missing goal evidence|evidence is labeled by source\" --reporter=dot",
+      "npx vitest run src/serve.test.ts -t \"missing goal evidence\" --reporter=dot",
+      "npx vitest run src/tick.test.ts -t 'a review-only tick reports' --reporter=dot"
+    ],
+    "result": "Core affected run: 560 passed. Subsequent status run: 40 passed. Render run: 2 passed, one new regression exposed the header overriding the evidence-needed label; fixed that override, failed test rerun passed. Initial obsolete prompt assertions updated to the smaller handoff contract and rerun successfully. Typecheck/build passed. Complete logs preserved. Native full verification pending; no full suite run by builder/operator. Native gate on dde4701: 3520 passed, 2 failed in tick.test.ts, 23 pre-existing skips. Both failures expected missing builder proof to invalidate complete source context. Updated those assertions and added explicit checks that the human-only criterion stays short and unaccepted. First focused rerun exposed the CLI boolean representation (false rather than null); corrected it. Final targeted rerun: 2 passed, 52 filtered out. Typecheck passed. No production source or UI changes after the first native gate. Fresh native verification is pending for the corrected candidate.",
+    "syntheticJourney": "Real Git/CLI recovery uses two builders, two gates, one reviewer. Covers proofless fix/no-change, missing observations without code repair, substantive defects with green checks, stale evidence refusal and guarded historical reassessment.",
+    "logEncoding": "gzip",
+    "logSha256": "8b00b0e29f598cd6709e667151478d0eefe1534a44f7f447198d8a77abd79f56",
+    "decodedSha256": "f8c62bc3dfc31dad894ea31d5380f4a8d75ddf921b1bc29b57882d5bf876cecd",
+    "decodedBytes": 96886
+  },
+  "uiReport": "ui-report.json",
+  "browserChecks": 8,
+  "planningModel": "claude-fable-5-1",
+  "implementationModel": "gpt-6-astra",
+  "review": "Pending one native independent Astra assessment.",
+  "priorEvidence": "native-attempt-1788.json"
+}

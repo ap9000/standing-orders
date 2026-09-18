@@ -54,7 +54,7 @@ import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { invokeAgent } from "./invoke.js";
 import { resolvePhaseAgent } from "./agentconfig.js";
 import { legOf } from "./phase-routing.js";
-import { maybeTriggerRepair } from "./dispose.js";
+import { maybeSettleRepairChain, maybeTriggerRepair } from "./dispose.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import { evidenceRoot, readMailbox, readVerifiedArtifact, sniffImageKind, storeEvidence } from "./evidence.js";
 import type { Runner } from "./builder.js";
@@ -356,6 +356,7 @@ function reviewerBrief(
     ...(hasGate ? [REVIEW_GATE_NAME] : []),
     ...screenshotFiles,
     ...(context === null ? [] : [REVIEW_CONTEXT_NAME, ...context.items.map(one => reviewContextFileName(one.id))]),
+    ...(context?.handoff === undefined ? [] : ["REVIEW-BUILDER-NOTES.json"]),
   ];
   const fileList = files.map(name => `\`${name}\``).join(files.length > 2 ? ", " : " and ");
   return [
@@ -376,6 +377,7 @@ function reviewerBrief(
       : "in your working directory — the exact, sealed diff of the finished run",
     ...(criteria.length > 0 ? [`under review, its signed rubric, and whatever of its proof, verification`, `log, and screenshots actually exist.`] : ["under review."]),
     REVIEW_READ_BRIEF,
+    ...(context?.handoff === undefined ? [] : ["REVIEW-BUILDER-NOTES.json contains the builder's short outcome and caveats. Consider unresolved caveats; these notes alone never prove completion."]),
     ...(hasGate ? [`${REVIEW_GATE_NAME} is the machine verification receipt: exact candidate, approved command, result and retained log binding. Shortened or redacted verbose output is not a failed gate; omitted output is unavailable and must never be claimed as inspected.`] : []),
     ...(!inline ? ["Read the manifest first, then use Read with offset and limit (at most 200 lines per read) on the declared files. For long lines or shortened tool output, use the byte-range request instead. An unread range is not evidence you inspected."] : []),
     "You cannot open any other file, and you must not try: judge only what",
@@ -398,6 +400,12 @@ function reviewerBrief(
           "`cannot-tell` is a CORRECT answer whenever these files alone cannot",
           "settle a criterion — you have no repository and must never guess.",
           "`upholds` and `contradicts` are for when you can actually tell.",
+          "Assess the approved goal, constraints and each criterion directly from",
+          "the saved source and observations. A passing test command alone does",
+          "not establish the behavior. Missing builder proof is not missing source",
+          "evidence. Cite the specific file or observation for every judgement;",
+          "for cannot-tell, name the observation needed next. Human acceptance",
+          "remains a separate human decision even when you uphold the behavior.",
           ...(context === null ? [] : reviewContextBriefLines(context)),
         ]),
     "",
@@ -846,6 +854,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     const screenshotsSealed = screenshotFiles.map(shot => writeSealed(scratch, shot.name, shot.content));
     const contextSealed = contextForReview === null ? null : writeSealedText(scratch, REVIEW_CONTEXT_NAME, reviewContextManifest(contextForReview));
     const contextFiles = (contextForReview?.items ?? []).map(item => writeSealedText(scratch, reviewContextFileName(item.id), item.content));
+    if (contextForReview?.handoff !== undefined) contextFiles.push(writeSealedText(scratch, "REVIEW-BUILDER-NOTES.json", contextForReview.handoff.content));
     let skillsSource: string | null;
     try { skillsSource = skillReviewSource(store, request.reviewerRunId); }
     catch (error) {
@@ -1440,7 +1449,8 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
         }
         return finalCustody;
       }
-      ({ commentIds, folded } = store.ingestReview(
+      ({ commentIds, folded } = store.transact(() => {
+        const ingested = store.ingestReview(
         {
           reviewerRunId: authoringRunId,
           evidenceRoot: root,
@@ -1463,7 +1473,11 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
           },
         },
         clock(),
-      ));
+        );
+        const task = store.externalIdFor(source.taskRef);
+        if (task !== null && ingested.folded !== null) maybeSettleRepairChain(store, task, ingested.folded.verdict, clock());
+        return ingested;
+      }));
     } catch (error) {
       const reason = error instanceof Error && error.name === "ReviewerCustodyError" ? "runner-custody"
         : error instanceof Error && error.name === "ReviewerStoppedError" ? "stopped"

@@ -140,18 +140,20 @@ const STANDALONE_BROKE_REASONS = new Set([
 export function maybeRequestAutoReview(store: Store, repo: string, runId: number, committed: boolean, noChange: boolean, now: Date): void {
   const run = store.getRun(runId);
   const ref = run === null ? null : store.refForId(run.taskRef);
+  const proof = store.proofVerdictFor(runId);
+  const direct = (proof?.matrix.length ?? 0) > 0 && proof!.matrix.every(row => row.assessment !== undefined);
   // A diagnostic repair may establish that no code change was needed. Its
   // fresh machine gate and inherited review context still need review.
   const unchangedRepair = noChange && ref !== null && store.repairChainForDraft(ref.externalId) !== null;
-  if ((!committed || noChange) && !unchangedRepair) return;
+  if ((!committed || noChange) && !unchangedRepair && !(noChange && direct)) return;
   const scope = ref === null ? null : store.getScope(ref.externalId);
   // A diagnostic review of failed checks remains available explicitly. The
   // automatic path waits for the machine gate, before spending a review ask.
   const command = store.liveVerifyCommand(repo);
-  const proof = store.proofVerdictFor(runId);
   if (command !== null && (run === null || command.approvedAt > run.startedAt || proof === null ||
       ((proof.machineVerdict ?? proof.verdict) !== "verified" && !manualReviewOnly(proof)))) return;
-  if (proof?.matrix.some(row => row.requiredEvidence.includes("check") && row.state !== "pass" && !manualReviewOnly(proof))) return;
+  if (direct && proof!.machineVerdict !== "verified" && proof!.machineVerdict !== "attested") return;
+  if (!direct && proof?.matrix.some(row => row.requiredEvidence.includes("check") && row.state !== "pass" && !manualReviewOnly(proof))) return;
   if (
     run?.qualityMode === "strict" &&
     scope?.qualityMode === "strict" &&
@@ -643,6 +645,14 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   if (run === null) return { kind: "none" };
   const stored = store.proofVerdictFor(sourceRunId);
   if (stored === null) return { kind: "none" };
+  const direct = stored.matrix.length > 0 && stored.matrix.every(row => row.assessment !== undefined);
+  if (cause === "review" && direct && !stored.matrix.some(row => row.review?.judgement === "contradicts")) {
+    const missing = stored.matrix.filter(row => row.state === "missing");
+    if (missing.length > 0) store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `assessment-evidence:${sourceRunId}`,
+      kind: "repair-evidence", pushClass: "attention", subject: "More evidence is needed",
+      body: missing.flatMap(row => row.detail).join("\n"), link: `/r/${sourceRunId}` }, now);
+    return { kind: "none" };
+  }
   const mode = store.activeMode(repo, now);
   const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
   let verification: { sourceRun: number; digest: string } | undefined;
@@ -664,7 +674,7 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
     verification = { sourceRun: sourceRunId, digest: failure.digest };
   }
   const unresolved = stored.matrix
-    .filter(row => row.state === "missing" || row.state === "failed")
+    .filter(row => cause === "review" && direct ? row.review?.judgement === "contradicts" : row.state === "missing" || row.state === "failed")
     .map(row => row.id)
     .sort();
   // The project gate is independent of agent-reported criterion passes.
