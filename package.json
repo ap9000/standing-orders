@@ -1,7 +1,7 @@
 {
   "name": "standing-orders",
   "version": "0.4.3",
-  "description": "A control plane for unattended coding agents \u2014 queue tasks, walk away, come back to pull requests. Agents build in leased worktrees, never touch your default branch, and interrupt you only for decisions that need a human.",
+  "description": "A control plane for unattended coding agents — queue tasks, walk away, come back to pull requests. Agents build in leased worktrees, never touch your default branch, and interrupt you only for decisions that need a human.",
   "directories": {
     "doc": "docs"
   },
@@ -78,6 +78,7 @@
     "scripts/fixtures/restart-service.mjs"
   ],
   "dependencies": {
+    "@slack/socket-mode": "3.0.1",
     "yaml": "^2.9.1"
   }
 }

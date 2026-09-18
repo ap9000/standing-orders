@@ -1,3 +1,6 @@
+import { slackSettingsHtml } from "./slack-settings.js";
+import { checkSlackCredentials, loadSlackCredentials, saveSlackCredentials, clearSlackCredentials, SLACK_MANIFEST, SlackError } from "./slack-api.js";
+import { SlackState } from "./slack-state.js";
 import { CHAT_ACTIONS, sharedActionPayload, sharedActionNeedsReview, sharedActionReviewPath, mintSharedActionReview } from './chat-actions.js';
 import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkillTest, skillTestResult, skillsView, testSkill, type SkillFile } from "./project-skills.js";
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
@@ -251,6 +254,8 @@ export type ServeOptions = {
   /** Where messaging config files live (beside the database) — enables the
    * primary-messenger selector on the settings screen. */
   configDir?: string;
+  /** Test seam for the Slack setup handshake. */
+  slackFetcher?: typeof fetch;
   /**
    * The repo this console serves. Scopes run evidence to that repo's tasks
    * (and unplaced ones) and turns on the gaps and capabilities views —
@@ -2691,6 +2696,15 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return sendScreen(response, 200, screen("Learning", `<p><a href="/settings">Settings</a></p><h1>Learning</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
+    if (url.pathname === "/settings/slack" || url.pathname === "/settings/slack/manifest") {
+      if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response,who,403,"An installation approver can connect Slack.","/settings");
+      if (url.pathname.endsWith("/manifest")) {
+        response.writeHead(200,{"Content-Type":"application/json; charset=utf-8","Content-Disposition":'attachment; filename="standing-orders-slack.json"',"Cache-Control":"no-store"});
+        response.end(JSON.stringify(SLACK_MANIFEST,null,2));return;
+      }
+      return sendScreen(response,200,screen("Slack",slackSettingsHtml(store,options.configDir,who.session.csrf),{chrome:chromeFor(project,"settings"),forceSensitive:true}));
+    }
+
     if (url.pathname === "/settings" && (options.telegramTokenFile === undefined || restricted())) {
       return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
     }
@@ -4630,6 +4644,40 @@ export function createDecisionServer(options: ServeOptions): Server {
       const approved = approveSetup(store, project, inputs, body.get("fingerprint") ?? "", who.name, body.get("token") ?? "", now);
       if (!approved.ok) return refuse(response, who, 409, approved.message, "/control");
       return redirect(response, "/control");
+    }
+
+    if (["connect","pair","disconnect","alerts"].some(action=>url.pathname===`/settings/slack/${action}`)) {
+      if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response,who,403,"An installation approver can connect Slack.","/settings");
+      const dir=options.configDir, state=new SlackState(store), action=url.pathname.split("/").at(-1);
+      const show=(problem:string,status=400)=>sendScreen(response,status,screen("Slack",slackSettingsHtml(store,dir,who.session.csrf,{problem}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
+      if (["password","app-token","bot-token"].some(key=>body.getAll(key).length>1)) return show("Submit one value for each field.");
+      const credentials=loadSlackCredentials(dir);
+      if(action==="alerts") {
+        if(!credentials || !state.binding(credentials.installation) || !state.live(state.binding(credentials.installation)!)) return show("Pair your Slack account first.",409);
+        savePrimary(dir,"slack");return redirect(response,"/settings/slack");
+      }
+      if(!authenticateApprover(store,who.name,body.get("password")??"").ok) return show("Enter your Standing Orders password to change Slack access.",403);
+      const generation=store.accountOf(who.name)!.generation;
+      if(action==="connect") {
+        try {
+          const checked=await checkSlackCredentials((body.get("app-token")??"").trim(),(body.get("bot-token")??"").trim(),options.slackFetcher);
+          const account=store.accountOf(who.name);
+          if(account?.role!=="approver"||account.generation!==generation||account.revokedAt!==null) return show("Your access changed. Sign in again.",403);
+          if(credentials || loadSlackCredentials(dir)) return show("Disconnect the current Slack app before connecting another.",409);
+          saveSlackCredentials(dir,checked);
+        } catch(error) {return show(error instanceof SlackError?error.message:"Slack could not be connected. Check the tokens and try again.");}
+      } else if(action==="disconnect") {
+        if(credentials) state.revoke(credentials.installation,now);
+        clearSlackCredentials(dir);
+      } else if(action==="pair") {
+        if(!credentials) return show("Connect your Slack app first.",409);
+        const binding=state.binding(credentials.installation);
+        if(binding&&state.live(binding)) return show("Slack is already paired. Disconnect before pairing another account.",409);
+        if(binding) state.revoke(credentials.installation,now);
+        const code=state.pairing(credentials.installation,who.name,generation,now);
+        return sendScreen(response,200,screen("Pair Slack",slackSettingsHtml(store,dir,who.session.csrf,{code}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
+      }
+      return redirect(response,"/settings/slack");
     }
 
     if (url.pathname === "/settings/messaging" && options.configDir !== undefined && options.telegramTokenFile !== undefined) {
@@ -20527,7 +20575,7 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return screen("settings", [
     "<h1>settings</h1>",
-    '<p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
+    '<p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/slack">Slack</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
     permissionCard,
     qualityCard,
     pushCard,

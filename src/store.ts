@@ -1,3 +1,4 @@
+import { SLACK_SCHEMA, SLACK_TABLES } from "./slack-state.js";
 import { verificationEvidence } from "./verification-evidence.js";
 import { LEARNING_SCHEMA, queueLearning } from "./project-learning.js";
 import { SKILLS_SCHEMA } from "./project-skills.js";
@@ -102,7 +103,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
-export const SCHEMA_VERSION = 66;
+export const SCHEMA_VERSION = 67;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -754,7 +755,7 @@ export type RunStop = {
 };
 
 /** Which surface asked for a stop or a resume — named by the caller, never defaulted. */
-export type StopVia = "cli" | "web" | "telegram";
+export type StopVia = "cli" | "web" | "telegram" | "slack";
 
 /** One ROOT review attempt of a source run (v50): the reviewer run, its
  * ordinal, how it ended, and the request it was spent on. */
@@ -1079,7 +1080,7 @@ export type Decision = {
   createdAt: string;
   answeredAt: string | null;
   answeredBy: string | null;
-  answeredVia: "cli" | "web" | "telegram" | null;
+  answeredVia: "cli" | "web" | "telegram" | "slack" | null;
   choice: string | null;
   note: string | null;
 };
@@ -3902,6 +3903,9 @@ function initializeStore(db: Database, file: string): Store {
     const ddl = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='mate_proposal'").get()?.["sql"];
     if (typeof ddl !== "string" || canonicalDdl(ddl) !== canonicalDdl(MATE_PROPOSAL_V66_DDL("mate_proposal"))) throw new Error(`${file}: shared action history has an unknown shape; refusing to recreate it`);
   }
+  if (preflight !== null && Math.abs(preflight) >= 67) {
+    for (const table of SLACK_TABLES) if (!tableExists(db, table)) throw new Error(`${file}: Slack history is missing; refusing to recreate receipts`);
+  }
   if (preflight !== null && preflight > 0 && preflight < SCHEMA_VERSION) {
     const stamped = db.prepare("UPDATE schema_version SET version = ? WHERE version = ?").run(-preflight, preflight);
     if (Number(stamped.changes) !== 1) {
@@ -3912,6 +3916,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(LEARNING_SCHEMA);
   db.exec(KNOWLEDGE_SCHEMA);
   db.exec(SKILLS_SCHEMA);
+  db.exec(SLACK_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
@@ -5037,6 +5042,7 @@ function migrate(db: Database, origin: number | null): void {
   // exact-recognizer rebuild; every v52 row, id and settlement is carried
   // whole, and an unknown shape refuses rather than being guessed.
   rebuildRunStopForV62(db);
+  rebuildSlackAuditForV67(db);
 
   // v64 (result screenshots on demand): telegram_conversation_part admits
   // 'image' and carries typed media identity through the same exact-
@@ -5283,6 +5289,10 @@ function rebuildExact(
         // Bound as INTEGER (a JS number would land as REAL in this untyped
         // system table and read back as a different type).
         for (const row of sequenceBefore) restore.run(row.name, typeof row.seq === "bigint" ? row.seq : BigInt(row.seq));
+      } else if (tableExists(db, "sqlite_sequence")) {
+        // Copying an empty AUTOINCREMENT table can mint a zero counter.
+        // Preserve the absence of bookkeeping the predecessor never wrote.
+        db.prepare("DELETE FROM sqlite_sequence WHERE name = ?").run(table);
       }
       const broken = db.prepare("PRAGMA foreign_key_check").all();
       if (broken.length > 0) throw new Error(`foreign keys did not survive the ${table} rebuild`);
@@ -5510,6 +5520,55 @@ const RUN_STOP_V52_DDL = (name: string): string => `CREATE TABLE ${name} (
 const RUN_STOP_V62_DDL = (name: string): string =>
   RUN_STOP_V52_DDL(name).replace("requested_via IN ('cli','web')", "requested_via IN ('cli','web','telegram')").replace("resumed_via IN ('cli','web')", "resumed_via IN ('cli','web','telegram')");
 
+
+const DECISION_V66_DDL = (name: string): string => `CREATE TABLE ${name} (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  urgency        TEXT NOT NULL CHECK (urgency IN ('blocking')),
+  state          TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','expired','answered')),
+  recap          TEXT NOT NULL,
+  question       TEXT NOT NULL,
+  options        TEXT NOT NULL,
+  recommendation TEXT NOT NULL,
+  assignee       TEXT,
+  -- Attention metadata only. A deadline is never a hold expiry: a blocking
+  -- decision that goes overdue becomes 'expired' and MORE visible, not a
+  -- task that quietly dispatches itself unanswered.
+  deadline       TEXT,
+  created_at     TEXT NOT NULL,
+  answered_at    TEXT,
+  answered_by    TEXT,
+  -- Which racing agent asked (v14); lets one-open-question-per-agent be a
+  -- real database rule instead of a hope (finding 28). NULL = ordinary.
+  contestant     INTEGER REFERENCES contestant(id),
+  -- Typed closure (v14): 'excluded' = the operator stopped the asking
+  -- agent instead of answering. Never a fake option.
+  closed_reason  TEXT CHECK (closed_reason IN ('excluded')),
+  answered_via   TEXT CHECK (answered_via IN ('cli','web','telegram')),
+  choice         TEXT,
+  note           TEXT,
+  -- v25 held-session linkage. session_turn = the turn whose settlement
+  -- produced this park (causal, held runs only). delivered_turn = the
+  -- answer turn that claimed delivery into the live session — the
+  -- delivery-CAS target: set once (WHERE delivered_turn IS NULL), reverted
+  -- only when that turn terminally never reached acceptance.
+  session_turn   INTEGER REFERENCES session_turn(id),
+  delivered_turn INTEGER REFERENCES session_turn(id)
+)`;
+const DECISION_V67_DDL = (name: string): string => DECISION_V66_DDL(name).replace("'cli','web','telegram'", "'cli','web','telegram','slack'");
+const RUN_STOP_V67_DDL = (name: string): string => RUN_STOP_V62_DDL(name).replaceAll("'cli','web','telegram'", "'cli','web','telegram','slack'");
+function isSlackAudit(db: Database, table: "decision" | "run_stop"): boolean {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table);
+  return row !== undefined && canonicalDdl(String(row.sql)) === canonicalDdl((table === "decision" ? DECISION_V67_DDL : RUN_STOP_V67_DDL)(table));
+}
+export function rebuildSlackAuditForV67(db: Database): void {
+  rebuildExact(db, "decision", DECISION_V66_DDL, DECISION_V67_DDL,
+    ["id","run","urgency","state","recap","question","options","recommendation","assignee","deadline","created_at","answered_at","answered_by","contestant","closed_reason","answered_via","choice","note","session_turn","delivered_turn"]);
+  rebuildExact(db, "run_stop", RUN_STOP_V62_DDL, RUN_STOP_V67_DDL,
+    ["run","task_ref","requested_by","requested_via","requested_at","settled_at","settlement","resumed_at","resumed_by","resumed_via"]);
+  db.exec("CREATE INDEX IF NOT EXISTS run_stop_by_task ON run_stop (task_ref, requested_at DESC)");
+}
+
 const TELEGRAM_CONVERSATION_PART_V63_DDL = (name: string): string => `CREATE TABLE ${name} (
   conversation    INTEGER NOT NULL REFERENCES telegram_conversation(id) ON DELETE CASCADE,
   ordinal         INTEGER NOT NULL,
@@ -5565,6 +5624,7 @@ export function rebuildTelegramConversationPartForV64(db: Database): void {
 
 /** v62: the stop audit admits 'telegram'. Rows, ids and settlements are carried whole. */
 export function rebuildRunStopForV62(db: Database): void {
+  if (isSlackAudit(db, "run_stop")) return;
   rebuildExact(db, "run_stop", RUN_STOP_V52_DDL, RUN_STOP_V62_DDL,
     ["run", "task_ref", "requested_by", "requested_via", "requested_at", "settled_at", "settlement", "resumed_at", "resumed_by", "resumed_via"]);
 }
@@ -6773,6 +6833,7 @@ function rebuildForV4(
  * migration eats a database.
  */
 function rebuildDecisionVia(db: Database): void {
+  if (isSlackAudit(db, "decision")) return;
   const row = db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'decision'")
     .get();
@@ -15753,6 +15814,10 @@ export class Store {
     return Number(changes);
   }
 
+  notificationsAfter(id: number, limit = 100): Notification[] {
+    return this.db.prepare("SELECT * FROM notification WHERE id>? ORDER BY id LIMIT ?").all(id, Math.max(1,Math.min(100,limit))).map(readNotification);
+  }
+
   listNotifications(only: "pending" | "all" = "pending"): Notification[] {
     // Resolved-but-undelivered is not pending: a decision answered before the
     // outbox ran is a fact that stopped wanting a person, and paging someone
@@ -18467,7 +18532,7 @@ export class Store {
    * is not negotiable, and neither is "decided".
    */
   answerDecision(
-    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram"; note?: string },
+    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram" | "slack"; note?: string },
     now: Date,
     mutation: Mutation = {},
   ):
@@ -18489,7 +18554,7 @@ export class Store {
    * claims and only the second one authorizes anything.
    */
   answerDecisionLocked(
-    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram"; note?: string },
+    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram" | "slack"; note?: string },
     now: Date,
   ):
     | { ok: true; decision: Decision; duplicate?: boolean }
