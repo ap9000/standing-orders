@@ -607,7 +607,7 @@ export function mintSharedActionReview(
   return { payload: live, nonce };
 }
 export type SharedActionOptions = {
-  via: "web" | "cli" | "telegram" | "slack";
+  via: "web" | "cli" | "telegram" | "slack" | "discord";
   root?: string;
   review?: { nonce: string; password: string };
   confirm?: boolean;

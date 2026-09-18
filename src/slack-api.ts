@@ -1,3 +1,4 @@
+import { ChatDeliveryError } from "./chat-delivery-state.js";
 import {
   chmodSync,
   readFileSync,
@@ -17,13 +18,10 @@ export type SlackApi = (
   method: string,
   args?: Record<string, unknown>,
 ) => Promise<Record<string, unknown>>;
-export class SlackError extends Error {
-  constructor(
-    readonly code: string,
-    readonly retryMs = 5_000,
-    readonly uncertain = false,
-  ) {
-    super(
+export class SlackError extends ChatDeliveryError {
+  constructor(code: string, retryMs = 5_000, uncertain = false) {
+    super(code, retryMs, uncertain);
+    this.message =
       (
         {
           invalid_auth:
@@ -43,8 +41,7 @@ export class SlackError extends Error {
             "The original Slack message was removed. Open the saved chat to recover it.",
           already_complete: "Waiting to confirm the uploaded file’s receipt.",
         } as Record<string, string>
-      )[code] ?? code,
-    );
+      )[code] ?? code;
   }
 }
 const errors = new Set([

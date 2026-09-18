@@ -1,16 +1,9 @@
+import {loadDiscordCredentials} from "./discord-api.js";
 import { loadSlackCredentials } from "./slack-api.js";
 /**
- * UI-only chat mirrors: Slack and Discord as NOTIFICATION surfaces.
- *
- * Deliberately one-way. No bot, no pairing, no inbound events — each page
- * is a message with a deep link into the console, and the ACTING happens
- * there, behind the console's own authentication and step-ups. That makes
- * this integration cheap on purpose: an outbound webhook is not an
- * authentication surface, so the whole Telegram answering apparatus
- * (bindings, opaque tokens, idempotent updates, note drafts) simply does
- * not apply. The day acting-from-Slack is wanted, it gets the Telegram
- * treatment: its own review, its own identity model — never a shortcut
- * through this module.
+ * Legacy notification-only webhooks. Interactive Slack and Discord adapters
+ * have their own paired identities and reuse the shared action engine.
+ * A configured interactive adapter suppresses its legacy webhook delivery.
  *
  * The webhook URL is a CREDENTIAL (anyone holding it can post to the
  * channel): it lives in a 0600 file beside the database or in the
@@ -144,7 +137,8 @@ export function effectivePrimary(
   const configured: MessagingChannel[] = [
     ...(telegramConfigured ? (["telegram"] as const) : []),
     ...(loadSlackCredentials(dir) !== null ? (["slack"] as const) : []),
-    ...targets.map(one => one.kind).filter(kind => kind !== "slack" || loadSlackCredentials(dir) === null),
+    ...(loadDiscordCredentials(dir) !== null ? (["discord"] as const) : []),
+    ...targets.map(one => one.kind).filter(kind => (kind !== "slack" || loadSlackCredentials(dir) === null) && (kind !== "discord" || loadDiscordCredentials(dir) === null)),
   ];
   const chosen = loadPrimary(env, dir);
   if (chosen !== null && configured.includes(chosen)) {
