@@ -1,0 +1,271 @@
+
+=== typecheck.txt ===
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+
+=== focused-integration.txt ===
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-evidence-followup
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+···············(node:70851) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+················(node:70852) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··························································(node:70845) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+································································································································································
+
+ Test Files  3 passed (3)
+      Tests  249 passed (249)
+   Start at  13:43:53
+   Duration  18.81s (transform 3.11s, setup 42ms, import 5.28s, tests 40.08s, environment 0ms)
+
+
+
+=== followup-tests.txt ===
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-evidence-followup
+
+·································(node:43624) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··(node:43621) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·(node:43622) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+················x·······
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/unattended.test.ts > v40: a drafted, unapproved repair moves the idle-spend invariant not at all > missing observation → unchanged follow-up → review completes with one full gate
+AssertionError: {
+  "envelopeVersion": 1,
+  "ok": false,
+  "command": "tick",
+  "reason": "empty",
+  "message": "nothing is ready",
+  "considered": 0,
+  "dispatched": [],
+  "routines": []
+}: expected 3 to be +0 // Object.is equality
+
+- Expected
++ Received
+
+- 0
++ 3
+
+ ❯ tick src/unattended.test.ts:435:261
+
+ ❯ src/unattended.test.ts:457:13
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  1 failed | 59 passed (60)
+   Start at  13:51:20
+   Duration  19.36s (transform 3.34s, setup 38ms, import 5.17s, tests 23.51s, environment 0ms)
+
+
+
+=== native-loop-final.txt ===
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-evidence-followup
+
+--(node:14770) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·-------
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 9 skipped (10)
+   Start at  13:52:16
+   Duration  4.93s (transform 1.52s, setup 12ms, import 2.22s, tests 2.59s, environment 0ms)
+
+
+
+=== chat-entry-tests.txt ===
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-evidence-followup
+
+···········(node:21479) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··(node:21480) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+········
+
+ Test Files  2 passed (2)
+      Tests  21 passed (21)
+   Start at  13:52:22
+   Duration  3.31s (transform 2.28s, setup 25ms, import 3.01s, tests 1.85s, environment 0ms)
+
+
+
+=== typecheck-final.txt ===
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+
+=== authority-fix-tests.txt ===
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-evidence-followup
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+·------------------(node:89806) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·-------
+
+ Test Files  2 passed (2)
+      Tests  2 passed | 25 skipped (27)
+   Start at  14:06:48
+   Duration  5.86s (transform 3.33s, setup 26ms, import 4.97s, tests 2.54s, environment 0ms)
+
+
+=== gate-fixes-typecheck.txt ===
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+=== gate-fixes-tests.txt ===
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-evidence-followup
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+··(node:74833) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··(node:74839) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+······················(node:74840) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·················
+
+ Test Files  3 passed (3)
+      Tests  43 passed (43)
+   Start at  14:46:48
+   Duration  20.41s (transform 4.16s, setup 40ms, import 6.53s, tests 26.81s, environment 0ms)
+
+
+test-selection-focused.txt
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-evidence-followup
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+··(node:16300) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·(node:16303) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+········xx····x··············
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/observations.test.ts > focused evidence follow-ups > captures a real baseline failure and candidate pass, reuses the exact gate and refuses later tampering (color=false)
+ FAIL  src/observations.test.ts > focused evidence follow-ups > captures a real baseline failure and candidate pass, reuses the exact gate and refuses later tampering (color=true)
+Error: The focused command did not execute exactly the requested test.
+ ❯ collectObservations src/observations.ts:186:93
+    184|       if (selected.length !== 1 || !selectedTest || selectedTest.path …
+    185|           (selectedTest.title !== item.testName && selectedTest.fullNa…
+    186|           (selectedTest.status === "passed" ? result.code !== 0 : resu…
+       |                                                                                             ^
+    187|       observations.push({ ...item, revision: at, testBlob: test.blob, …
+    188|         selectedTest: { ...selectedTest, path: item.testPath },
+ ❯ src/observations.test.ts:120:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/observations.test.ts > focused evidence follow-ups > literal punctuation selects the requested nested test at both revisions
+Error: The focused command did not execute exactly the requested test.
+ ❯ collectObservations src/observations.ts:186:93
+    184|       if (selected.length !== 1 || !selectedTest || selectedTest.path …
+    185|           (selectedTest.title !== item.testName && selectedTest.fullNa…
+    186|           (selectedTest.status === "passed" ? result.code !== 0 : resu…
+       |                                                                                             ^
+    187|       observations.push({ ...item, revision: at, testBlob: test.blob, …
+    188|         selectedTest: { ...selectedTest, path: item.testPath },
+ ❯ src/observations.test.ts:185:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  3 failed | 29 passed (32)
+   Start at  15:12:35
+   Duration  19.83s (transform 2.79s, setup 31ms, import 4.30s, tests 24.45s, environment 0ms)
+
+
+test-selection-focused-corrected.txt
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-evidence-followup
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+··(node:83115) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·(node:83111) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·····························
+
+ Test Files  2 passed (2)
+      Tests  32 passed (32)
+   Start at  15:13:28
+   Duration  20.33s (transform 2.62s, setup 21ms, import 4.26s, tests 26.04s, environment 0ms)
+
+
+test-selection-typecheck-final.txt
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+bounded-parallel-typecheck.txt
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+integrated-main-typecheck.txt
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+integrated-main-focused.txt
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-evidence-followup
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+···········································(node:70911) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··(node:70918) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··(node:70916) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·····························
+
+ Test Files  4 passed (4)
+      Tests  76 passed (76)
+   Start at  15:53:33
+   Duration  20.11s (transform 3.48s, setup 47ms, import 5.10s, tests 28.10s, environment 0ms)
+

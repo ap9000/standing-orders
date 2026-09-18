@@ -18,9 +18,9 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
 import { run as exec, type ExecResult, type RunOptions } from "./exec.js";
 import { openStore } from "./store.js";
@@ -380,6 +380,84 @@ describe("v40: a drafted, unapproved repair moves the idle-spend invariant not a
     expect(afterApproval).toBe(EXIT.ok);
     expect(spawns).toBe(1); // one dispatch — the approved draft, and only it
   });
+  test("missing observation → unchanged follow-up → review completes with one full gate", async () => {
+    const { addApprover, propose, approve } = await import("./scope.js");
+    const { presetTerms, modeTermsJson, modeDigestOf } = await import("./modes.js");
+    const log = join(base, "gate-count.txt");
+    await writeFile(log, "0");
+    await writeFile(join(repo, ".gitignore"), "node_modules\n");
+    await writeFile(join(repo, "package.json"), JSON.stringify({ type: "module", scripts: { test: "vitest run" } }));
+    await writeFile(join(repo, "package-lock.json"), "{}\n");
+    await writeFile(join(repo, "value.ts"), "export const value = 'map';\n");
+    await writeFile(join(repo, "gate-count.cjs"), `const fs = require('node:fs'); const log = ${JSON.stringify(log)}; fs.writeFileSync(log, String(Number(fs.readFileSync(log,'utf8'))+1));`);
+    await git(["add", "."]); await git(["commit", "-qm", "original value and verification"]);
+    const store = openStore(db), who = addApprover(store, "alex", T0);
+    if (!who.ok) throw Error("approver");
+    for (const phase of ["plan", "build", "review"] as const) store.setPhaseConfig("installation", phase, "claude", "sonnet", "alex", T0);
+    register(store, { name: "builder-1", host: "test", capacity: 4, repos: [repo], now: T0, newToken: () => "tok-builder-1" });
+    store.createTask({ id: "t-observe", title: "Restore the earned draft" }, T0);
+    store.placeTask(store.lookupRef("t-observe")!.id, repo);
+    propose(store, { taskId: "t-observe", goal: "Restore the earned draft after reload", touches: ["value.ts", "value.test.ts"], acceptance: [{ id: "c1", statement: "The regression fails on the original and passes on the saved candidate", how: null, evidence: ["check"] }], now: T0 });
+    expect(approve(store, "t-observe", "alex", T0, store.getScope("t-observe")!.digest, who.token).ok).toBe(true);
+    store.setVerifyCommand({ repo, command: "npm test -- --reporter=dot && node gate-count.cjs", timeoutMs: 30000, approvedBy: "alex" }, T0);
+    const terms = { ...presetTerms("standard", at(60).toISOString()), repairAuto: true, repairMaxAttempts: 3, reviewAuto: true };
+    store.signMode({ repo, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, T0);
+    store.close();
+    let builds = 0, reviews = 0, sourceRun = 0;
+    const provider: Runner = async (_file, args, options) => {
+      const cwd = options!.cwd!, prompt = args[args.indexOf("-p") + 1]!;
+      if (prompt.includes("You are a REVIEWER")) {
+        reviews++;
+        if (reviews === 2) {
+          const observations = JSON.parse(await readFile(join(cwd, "REVIEW-OBSERVATIONS.json"), "utf8"));
+          expect(observations.sourceRun).toBe(sourceRun);
+          expect(observations.observations.map((o: { exitCode: number }) => o.exitCode)).toEqual([1, 0]);
+          expect(observations.observations[0].testSha256).toBe(observations.observations[1].testSha256);
+          expect(JSON.parse(await readFile(join(cwd, "REVIEW-VERIFICATION.json"), "utf8"))).toMatchObject({ version: 2, executedHere: false, reusedFrom: { run: sourceRun } });
+        }
+        return { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: reviews === 1 ? "cannot-tell" : "upholds", note: reviews === 1 ? "Run the saved regression on the original base and candidate" : "REVIEW-OBSERVATIONS.json shows the same regression failing on the original and passing on the saved candidate" }], learningAssessment: { decision: "none", reason: "Synthetic regression covers this flow" }, learning: [] }) }) };
+      }
+      builds++;
+      if (!existsSync(join(cwd, "node_modules"))) symlinkSync(realpathSync(resolve("node_modules")), join(cwd, "node_modules"), "junction");
+      if (builds === 1) {
+        await writeFile(join(cwd, "value.ts"), "export const value = 'augment_draft';\n");
+        await writeFile(join(cwd, "value.test.ts"), "import {test,expect} from 'vitest'; import {value} from './value'; test('restored reward opens draft',()=>expect(value).toBe('augment_draft'));\n");
+      } else {
+        expect(prompt).toContain("STANDING-ORDERS-OBSERVATIONS.json");
+        await writeFile(join(cwd, "STANDING-ORDERS-OBSERVATIONS.json"), JSON.stringify({ version: 1, observations: ["base", "head"].map(at => ({ criterion: "c1", at, testPath: "value.test.ts", testName: "restored reward opens draft" })) }));
+      }
+      const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)![0];
+      await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: builds === 1 ? "completed" : "no-change", conclusion: "Synthetic original/candidate regression" }));
+      return { ...OK, stdout: JSON.stringify({ result: "Synthetic original/candidate regression" }) };
+    };
+    const tick = async (now: Date, expected: number = EXIT.ok) => {
+      const output: string[] = [];
+      expect(await runOperate("tick", ["--runner", "builder-1", "--token", "tok-builder-1", "--repo", repo, "--pool", pool, "--max", "1", "--json"], line => output.push(line), { databaseFile: db, evidenceRoot, now, agentRunner: provider }), output.join("\n")).toBe(expected);
+      return JSON.parse(output.join("\n"));
+    };
+    await tick(at(1));
+    const first = openStore(db);
+    const chain = first.repairChainForRoot("t-observe");
+    expect(chain).toHaveLength(1);
+    expect(chain[0]).toMatchObject({ draftTask: "t-observe-evidence-1", outcome: "drafted" });
+    sourceRun = chain[0]!.sourceRun;
+    const oldProof = first.proofVerdictFor(sourceRun), oldReview = first.reviewRetryStateOf(sourceRun), head = first.getRun(sourceRun)!.headRevision;
+    first.close();
+    await tick(at(2));
+    const final = openStore(db);
+    const result = final.runsFor(final.lookupRef("t-observe-evidence-1")!.id).find(r => r.role === "builder")!;
+    expect(result, result.handoff ?? "").toMatchObject({ outcome: "no-change", headRevision: head, baseRevision: head });
+    expect(final.proofVerdictFor(result.id)).toMatchObject({ verdict: "verified", machineVerdict: "verified" });
+    expect(final.repairChainForRoot("t-observe")).toMatchObject([{ outcome: "resolved" }]);
+    expect(final.proofVerdictFor(sourceRun)).toEqual(oldProof);
+    expect(final.reviewRetryStateOf(sourceRun)).toEqual(oldReview);
+    expect(final.proofAcceptance(result.id)).toBeNull();
+    expect(final.openReviewRequests()).toHaveLength(0);
+    final.close();
+    expect((await tick(at(3), EXIT.refused)).dispatched).toHaveLength(0);
+    expect({ builds, reviews, fullGates: await readFile(log, "utf8") }).toEqual({ builds: 2, reviews: 2, fullGates: "1" });
+  });
+
   // Synthetic providers, real CLI dispatch, Git worktrees, verification command,
   // receipts and revision queue. This tests the product loop without model spend.
   test.each(["fix", "no-change", "changed-evidence", "no-proof-fix", "no-proof-no-change", "evidence-missing", "goal-fails"])("failed gate → automatic repair → fresh gate → one review (%s)", scenario => {

@@ -1,3 +1,4 @@
+import { originalTaskBase, focusedTestCommandSupported } from "./observations.js";
 /**
  * The build disposition service (Parity II Phase 2, v4 Q2 / v6 W1): the
  * operations that actually END an attempt — sealing parks, accepting
@@ -28,7 +29,7 @@ import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
 import type { BuildResult } from "./builder.js";
 import type { Store } from "./store.js";
 import { manualReviewOnly, type ProofVerdict, type VerifyCommandFacts } from "./proof.js";
-import { failedVerificationEvidence } from "./verification-evidence.js";
+import { verificationEvidence, failedVerificationEvidence } from "./verification-evidence.js";
 import { classifyGateFailure, describeGateFailure, type GateFailureClass } from "./gate-failure.js";
 
 /**
@@ -669,12 +670,22 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   const stored = store.proofVerdictFor(sourceRunId);
   if (stored === null) return { kind: "none" };
   const direct = stored.matrix.length > 0 && stored.matrix.every(row => row.assessment !== undefined);
-  if (cause === "review" && direct && !stored.matrix.some(row => row.review?.judgement === "contradicts")) {
-    const missing = stored.matrix.filter(row => row.state === "missing");
-    if (missing.length > 0) store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `assessment-evidence:${sourceRunId}`,
-      kind: "repair-evidence", pushClass: "attention", subject: "More evidence is needed",
-      body: missing.flatMap(row => row.detail).join("\n"), link: `/r/${sourceRunId}` }, now);
-    return { kind: "none" };
+  const observation = cause === "review" && direct && !stored.matrix.some(row => row.review?.judgement === "contradicts") && stored.matrix.some(row => row.review?.judgement === "cannot-tell");
+  if (cause === "review" && direct && !stored.matrix.some(row => row.review?.judgement === "contradicts") && !observation) return { kind: "none" };
+  if (store.applicableStopFor(sourceRunId) !== null || store.activeHolds(run.taskRef, now).length > 0) return { kind: "none" };
+  let observationGate: { digest: string; originalBase: string } | undefined;
+  if (observation) {
+    if (store.refForId(run.taskRef)?.repo !== repo) return { kind: "none" };
+    const missing = stored.matrix.filter(row => row.review?.judgement === "cannot-tell");
+    const supported = missing.every(row => row.requiredEvidence.includes("check") && !row.requiredEvidence.includes("screenshot") && !row.requiredEvidence.includes("manual-review")) && focusedTestCommandSupported(store.liveVerifyCommand(repo)?.command ?? "");
+    if (!supported) {
+      store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `assessment-evidence:${sourceRunId}`, kind: "repair-evidence", pushClass: "attention", subject: "More evidence is needed", body: missing.flatMap(row => row.detail).join("\n"), link: `/r/${sourceRunId}` }, now);
+      return { kind: "none" };
+    }
+    const gate = verificationEvidence(store, evidenceRoot, sourceRunId);
+    const originalBase = originalTaskBase(store, store.externalIdFor(run.taskRef)!);
+    if (!gate.ok || !gate.bytes || !originalBase || JSON.parse(gate.bytes).result?.exitCode !== 0 || stored.machineVerdict !== "verified") return { kind: "none" };
+    observationGate = { digest: gate.digest, originalBase };
   }
   const mode = store.activeMode(repo, now);
   const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
@@ -709,7 +720,7 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
     verification = { sourceRun: sourceRunId, digest: failure.digest };
   }
   const unresolved = stored.matrix
-    .filter(row => cause === "review" && direct ? row.review?.judgement === "contradicts" : row.state === "missing" || row.state === "failed")
+    .filter(row => cause === "review" && direct ? row.review?.judgement === (observation ? "cannot-tell" : "contradicts") : row.state === "missing" || row.state === "failed")
     .map(row => row.id)
     .sort();
   // The project gate is independent of agent-reported criterion passes.
@@ -802,7 +813,7 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   const unresolvedDetail = stored.matrix.filter(row => unresolved.includes(row.id)).map(row => ({ id: row.id, statement: row.statement, detail: row.detail }));
   const draftBrief = {
     schema: 1 as const,
-    kind: "criterion-repair" as const,
+    kind: observation ? "evidence-observation" as const : "criterion-repair" as const,
     sourceTask: ref.externalId,
     sourceRun: sourceRunId,
     sourceScopeDigest: scope.digest,
@@ -812,12 +823,13 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
     unresolved: unresolvedDetail,
     reviewerContradictions: contradictions.map(one => ({ id: one.criterionId, author: one.author, note: one.note })),
     ...(verification === undefined ? {} : { verification }),
+    ...(observationGate === undefined ? {} : { originalBase: observationGate.originalBase, gateDigest: observationGate.digest }),
   };
   const briefBytes = Buffer.from(JSON.stringify(draftBrief, null, 2), "utf8");
   const key = writeEvidenceFile(evidenceRoot, sourceRunId, `repair-brief-${sourceRunId}-${attempt}.json`, briefBytes);
   // Suffixes survive truncation (the CI-repair rule, verbatim): the prefix
   // gives way, the identity-bearing tail never does.
-  const suffix = `-fix-${attempt}`;
+  const suffix = observation ? `-evidence-${attempt}` : `-fix-${attempt}`;
   const draftId = `${rootTask.slice(0, 64 - suffix.length)}${suffix}`;
   // The draft files through the ONE revision boundary: the source's goal,
   // exclusions, touches, rubric, risk, quality, posture, budget, overrides
@@ -829,8 +841,8 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
       brief: { evidenceRoot, key, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "machine-authored repair brief (exit 0)" },
       child: {
         id: draftId,
-        title: verification === undefined ? `repair ${ref.externalId}: ${unresolved.length} criteri${unresolved.length === 1 ? "on" : "a"} unmet` : `Fix failed checks for ${ref.externalId}`,
-        repair: verification === undefined ? `repair exactly the unmet criteria named below; a comment cannot widen the scope. Unmet: ${unresolved.join(", ")}.` : "Diagnose the saved failed project check and repair within the original scope. Preserve the acceptance criteria and verification command; the revision brief binds the exact failure evidence.",
+        title: observation ? `Collect missing evidence for ${ref.externalId}` : verification === undefined ? `repair ${ref.externalId}: ${unresolved.length} criteri${unresolved.length === 1 ? "on" : "a"} unmet` : `Fix failed checks for ${ref.externalId}`,
+        repair: observation ? `Collect only the missing observations for ${unresolved.join(", ")}. Keep the saved candidate unchanged. The machine runs supported focused test observations and reuses its intact passing gate; a fresh review assesses the added evidence.` : verification === undefined ? `repair exactly the unmet criteria named below; a comment cannot widen the scope. Unmet: ${unresolved.join(", ")}.` : "Diagnose the saved failed project check and repair within the original scope. Preserve the acceptance criteria and verification command; the revision brief binds the exact failure evidence.",
       },
       rootTask,
       attempt,
@@ -852,5 +864,7 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
       approved = store.sealScopeApproval(drafted.id, `mode ${mode.name}`, now, {}, { kind: "mode", modeDigest: mode.digest });
     }
   }
+  if (observation && !approved) store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `assessment-evidence:${sourceRunId}`,
+    kind: "repair-evidence", pushClass: "attention", subject: "Review evidence collection", body: "A follow-up is ready to collect the missing observations without changing the saved code.", link: `/t/${encodeURIComponent(drafted.id)}` }, now);
   return { kind: "drafted", draftTaskId: drafted.id, attempt, approved };
 }

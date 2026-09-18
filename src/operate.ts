@@ -1,3 +1,4 @@
+import { maybeTriggerRepair } from "./dispose.js";
 import {followDiscord} from "./discord.js";
 import {loadDiscordCredentials} from "./discord-api.js";
 import { loadSlackCredentials } from "./slack-api.js";
@@ -10112,8 +10113,8 @@ async function acceptTaskProof(
  * `task repair <run-id>` (v40, evidence-review-v1) — the first CLI road to
  * a revision at all. Reads the chain the trigger already drafted for that
  * source run; `--yes` approves it, the same act `approve()` already offers
- * on any scope. Never mints a draft itself — that is the trigger's job,
- * fired from a review pass, never from a CLI invocation.
+ * on any scope. For a historical review missing observations, authenticated
+ * --yes with the exact repository can invoke the same bounded draft trigger.
  */
 async function repairTaskCommand(
   positional: readonly string[],
@@ -10126,7 +10127,20 @@ async function repairTaskCommand(
   if (runText === undefined || !Number.isInteger(runId) || runId < 1) {
     return fail(write, json, "task repair", "usage", "`standing-orders task repair <run-id> [--yes] --as <you> --token <t>`", EXIT.usage);
   }
-  const chain = store.repairChainFor(runId);
+  let chain = store.repairChainFor(runId);
+  if (chain === null && flags.get("yes") === true) {
+    const acting = await askCredentials(flags, context);
+    if (acting === null) return fail(write, json, "task repair", "usage", "Evidence collection requires --as and --token.", EXIT.usage);
+    const authenticated = authenticateApprover(store, acting.name, acting.token);
+    if (!authenticated.ok) return fail(write, json, "task repair", authenticated.reason, describeApproveFailure(authenticated.reason, String(runId)), EXIT.refused);
+    const run = store.getRun(runId), proof = store.proofVerdictFor(runId);
+    const repo = run && store.refById(run.taskRef)?.repo;
+    if (repo && repo === repoFrom(flags) && proof?.matrix.some(row => row.assessment && row.review?.judgement === "cannot-tell") &&
+        !proof.matrix.some(row => row.review?.judgement === "contradicts")) {
+      maybeTriggerRepair(store, repo, context.evidenceRoot, runId, proof.verdict, clock());
+      chain = store.repairChainFor(runId);
+    }
+  }
   if (chain === null) {
     return fail(write, json, "task repair", "unknown-task", `run ${runId} has no drafted repair — a repair is only drafted after a review names unmet criteria`, EXIT.refused);
   }

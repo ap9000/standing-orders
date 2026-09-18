@@ -1,0 +1,14 @@
+{
+  "run": 1795,
+  "candidate": "57c1ecea7167c64e521589423badd9022e4f217a",
+  "result": "Full gate exited1;3535passed,5failed,23existing skipped,191files. Typecheck passed; final build did not run after test failure. Original verdict refuted and artifacts preserved; log is bounded/truncated, ending retains failures and counts. No review requested.",
+  "failures": [
+    "Three demo tests: the new broad repository-identity guard rejected an existing repair fixture with a path alias.",
+    "Collector and native-loop tests: ANSI-colored Vitest summary was not recognized as executed tests."
+  ],
+  "corrections": [
+    "Limit new exact-repository guard to the new observation path.",
+    "Strip terminal control codes only for summary recognition; retain original output bytes. Reject zero-test summaries. Add colored-stream regression."
+  ],
+  "focusedVerification": "Typecheck and all43 tests in the3 affected files passed. Fresh native gate required on corrected candidate."
+}

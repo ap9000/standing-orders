@@ -1,0 +1,16 @@
+{
+  "runs": [
+    {
+      "run": 1798,
+      "candidate": "30dc2151096f297eff1a5b7404c8175733c3c032",
+      "result": "Typecheck,3545 tests and build passed with23 existing skips. Current approval changed from command7 to9 while running, so no review was requested under the superseded command."
+    },
+    {
+      "run": 1799,
+      "candidate": "e382c26c672cd013d9d63685e2189095d3867ebc",
+      "result": "Same source; parallel command9 exited1 without final test summary. The installed service log records all five project watches losing renewal, Hard stop:1 provider process group terminated, and controller restart. This was not a completed test suite. Some failure markers were present before termination; individual failures are not recoverable from the bounded capture."
+    }
+  ],
+  "correction": "Keep the current approved parallel command and its600-second limit. Bound Vitest to4 concurrent test files because the suite launches real subprocesses and SQLite writers. This addresses likely resource contention without removing tests, changing test deadlines, weakening custody or editing historical results. A fresh complete native gate must verify this configuration.",
+  "originalEvidence": "All original receipts, logs and verdicts remain in the installed evidence store. No prior pass is claimed for the new concurrency configuration."
+}

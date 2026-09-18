@@ -1,5 +1,6 @@
+import { OBSERVATION_MAILBOX, observationBrief, parseObservationCases, collectObservations } from "./observations.js";
 import { skillsContext } from "./project-skills.js";
-import { failedVerificationEvidence, sealVerificationReceipt } from "./verification-evidence.js";
+import { failedVerificationEvidence, sealVerificationReceipt, verificationEvidence, reuseObservationVerification } from "./verification-evidence.js";
 import { learningContext } from "./project-learning.js";
 import { knowledgeContext } from "./project-knowledge.js";
 /**
@@ -1870,6 +1871,11 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     return { ok: false, reason: "agent-reported", message: handoff.conclusion };
   }
 
+  let observation;
+  try { observation = observationBrief(store, root, taskRef); }
+  catch (error) { return { ok: false, reason: "revision-brief", message: String(error) }; }
+  if (observation && (handoff.status !== "no-change" || baseRevision !== observation.head)) return { ok: false, reason: "no-op", message: "Evidence collection must preserve the exact saved candidate and finish with no-change." };
+
   const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain"], { cwd: worktree });
   if (status.code !== 0) {
     return { ok: false, reason: "git", message: firstLine(status.stderr) };
@@ -1929,6 +1935,27 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       followUps: handoff.followUps,
       freshness: { stampedAt: clock().toISOString(), currentAsOf: baseRevision },
     }, clock());
+    if (observation) {
+      try {
+        const mailbox = readMailbox(join(worktree, OBSERVATION_MAILBOX), 16 * 1024);
+        if (!mailbox.ok) throw Error("Write the focused observation request before finishing; no new evidence was collected.");
+        const cases = parseObservationCases(mailbox.raw.toString("utf8"), observation.unresolved.map(row => row.id));
+        unlinkSync(join(worktree, OBSERVATION_MAILBOX));
+        const eligible = () => {
+          const current = verificationEvidence(store, root, observation.sourceRun);
+          return current.ok && current.digest === observation.gateDigest && !stopRequestedFor(store, request.runId, request.shouldStop) && store.proveRunnerCustodyForSpawn(request.runId, clock());
+        };
+        if (!eligible()) throw Error("The observation source or execution authority changed.");
+        const execute: Runner = (file, args, options) => underStopWatch(store, request.runId, () => runWithIsolatedDatabase(witnessedRunner(store, request.runId, clock, request.verify ?? run), file, args, {
+          ...options, processGroup: true, owner: runOwnerTag(store, request.runId), beforeSpawn: eligible,
+          onSpawn: pid => request.onProviderSpawn?.(pid), envAllowlist: SETUP_ENV_ALLOWLIST, omitEnv: SETUP_ENV_DENYLIST,
+        }));
+        await collectObservations(store, root, request.runId, worktree, observation, cases, execute, clock);
+        if (!eligible()) throw Error("The observation authority changed before settlement.");
+      } catch (error) {
+        return { ok: false, reason: stopRequestedFor(store, request.runId, request.shouldStop) ? "stopped" : "revision-brief", message: `Evidence collection needs attention: ${String(error)}` };
+      }
+    }
     // A predecessor may have committed and crashed before checking. The
     // successor truthfully makes no new edits, but still owes the original
     // branch's proof and approved verification. Never require a dummy edit.
@@ -2503,7 +2530,11 @@ async function settleProof(
     if (diff.notFound || diff.timedOut || (diff.code !== 0 && diff.code !== 1)) return "unavailable";
     return diff.code === 0 ? "clean" : "changed";
   };
-  if (configured === null) {
+  const reused = reuseObservationVerification(store, root, runId, now());
+  if (reused !== null) {
+    if (await sealedTreeState(captured.git) !== "clean") throw Error("The observation checkout changed before gate reuse.");
+    verifyCommand = reused;
+  } else if (configured === null) {
     verifyCommand = { configured: false };
   } else if (!store.proveRunnerCustodyForSpawn(runId, now())) {
     verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "custody-lost" };
@@ -3304,6 +3335,19 @@ function brief(
     "- Do not push, open a pull request, or run any network write.",
     "- Stay inside this worktree.",
     ...(revisionBrief === null ? [] : [
+      "- If the sealed revision kind is evidence-observation, collect observations only.",
+      "  Keep every repository file and HEAD unchanged; do not run the full suite.",
+      "  Write STANDING-ORDERS-OBSERVATIONS.json with version:1 and observations:",
+      '  [{criterion:"c1",at:"base"|"head",testPath:"src/example.test.ts",testName:"exact test name"}].',
+      "  Include one to four entries covering exactly the requested criterion ids.",
+      "  The machine runs the named Vitest tests from isolated original-base/head",
+      "  snapshots under the existing approved npm test command. On base it overlays",
+      "  that one candidate test file; it must belong to the whole-task patch.",
+      "  No shell commands, new test files, source edits or arbitrary revisions are accepted.",
+      "  Finish with no-change. The machine captures output and reuses the original",
+      "  passing gate only for the unchanged candidate. If the observation requires",
+      "  another runner, new access, a new test, UI interaction or judgment, park with",
+      "  that specific need. A new review assesses the observations, never the old review.",
       "- For failed project checks, inspect the saved command, candidate and complete log",
       "  before editing. Distinguish a code failure from missing setup or a timeout.",
       "  For a suspected transient failure, rerun only the failing test once to diagnose",

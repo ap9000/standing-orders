@@ -1,3 +1,4 @@
+import { OBSERVATION_FILE } from "./observations.js";
 import { skillReviewSource } from "./project-skills.js";
 import { verificationEvidence, REVIEW_GATE_NAME } from "./verification-evidence.js";
 import { run as gitRead } from "./exec.js";
@@ -357,6 +358,7 @@ function reviewerBrief(
     ...screenshotFiles,
     ...(context === null ? [] : [REVIEW_CONTEXT_NAME, ...context.items.map(one => reviewContextFileName(one.id))]),
     ...(context?.handoff === undefined ? [] : ["REVIEW-BUILDER-NOTES.json"]),
+    ...(context?.observations === undefined ? [] : [OBSERVATION_FILE]),
   ];
   const fileList = files.map(name => `\`${name}\``).join(files.length > 2 ? ", " : " and ");
   return [
@@ -377,6 +379,7 @@ function reviewerBrief(
       : "in your working directory — the exact, sealed diff of the finished run",
     ...(criteria.length > 0 ? [`under review, its signed rubric, and whatever of its proof, verification`, `log, and screenshots actually exist.`] : ["under review."]),
     REVIEW_READ_BRIEF,
+    ...(context?.observations === undefined ? [] : ["REVIEW-OBSERVATIONS.json contains machine-captured focused test observations at the exact original base/candidate, including the candidate test overlay. Judge the actual behavior shown; an expected baseline failure is not a failed candidate gate. A reused gate remains bound to the original passing run and was not rerun."]),
     ...(context?.handoff === undefined ? [] : ["REVIEW-BUILDER-NOTES.json contains the builder's short outcome and caveats. Consider unresolved caveats; these notes alone never prove completion."]),
     ...(hasGate ? [`${REVIEW_GATE_NAME} is the machine verification receipt: exact candidate, approved command, result and retained log binding. Shortened or redacted verbose output is not a failed gate; omitted output is unavailable and must never be claimed as inspected.`] : []),
     ...(!inline ? ["Read the manifest first, then use Read with offset and limit (at most 200 lines per read) on the declared files. For long lines or shortened tool output, use the byte-range request instead. An unread range is not evidence you inspected."] : []),
@@ -855,6 +858,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     const contextSealed = contextForReview === null ? null : writeSealedText(scratch, REVIEW_CONTEXT_NAME, reviewContextManifest(contextForReview));
     const contextFiles = (contextForReview?.items ?? []).map(item => writeSealedText(scratch, reviewContextFileName(item.id), item.content));
     if (contextForReview?.handoff !== undefined) contextFiles.push(writeSealedText(scratch, "REVIEW-BUILDER-NOTES.json", contextForReview.handoff.content));
+    if (contextForReview?.observations !== undefined) contextFiles.push(writeSealedText(scratch, OBSERVATION_FILE, contextForReview.observations.content));
     let skillsSource: string | null;
     try { skillsSource = skillReviewSource(store, request.reviewerRunId); }
     catch (error) {
@@ -937,10 +941,11 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
                 sealedFiles: new Set([
                   ...(criterion?.evidence.includes("check") ? [checkLogSealed, gateSealed].filter((f): f is SealedScratchFile => f !== null).map(f => f.name) : []),
                   ...(criterion?.evidence.includes("screenshot") ? screenshotsSealed.map(one => one.name) : []),
+                  ...(contextForReview.observations === undefined ? [] : [OBSERVATION_FILE]),
                 ]),
               }];
             })),
-            sealedFiles: new Set([...([checkLogSealed, gateSealed].filter((f): f is SealedScratchFile => f !== null).map(f => f.name)), ...screenshotsSealed.map(one => one.name)]),
+            sealedFiles: new Set([...([checkLogSealed, gateSealed].filter((f): f is SealedScratchFile => f !== null).map(f => f.name)), ...screenshotsSealed.map(one => one.name), ...(contextForReview.observations === undefined ? [] : [OBSERVATION_FILE])]),
           };
     const recheckScratch = (): ReviewResult | null => {
       const liveSource = store.getRun(source.id);
