@@ -138,9 +138,9 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
   };
   const repairGate = (run: number) => maybeTriggerRepair(store, REPO, evidenceRoot, run, store.proofVerdictFor(run)!.verdict, T0, "verification");
 
-  test.each(["exit", "timeout"])("%s failure repairs even when every criterion passed; replay and review share one draft", kind => {
+  test("an exit failure repairs even when every criterion passed; replay and review share one draft", () => {
     signMode({ repairAuto: true, repairMaxAttempts: 3 });
-    const run = failedGate("t-gate", kind === "exit" ? { configured: true, ran: true, exitCode: 1 } : { configured: true, ran: false, attemptFailed: true, failure: "timed-out" });
+    const run = failedGate("t-gate", { configured: true, ran: true, exitCode: 1 });
     expect(repairGate(run)).toMatchObject({ kind: "drafted", approved: true, attempt: 1 });
     expect(store.repairChainFor(run)?.unresolved).toEqual(["project checks"]);
     expect(store.getScope("t-gate-fix-1")?.acceptance).toEqual(store.getScope("t-gate")?.acceptance);
@@ -181,6 +181,62 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
     }
     expect(repairGate(run)).toEqual({ kind: "none" });
     expect(store.repairChainFor(run)).toBeNull();
+  });
+
+  const unrelatedNotice = (run: number) => store.raw().prepare("SELECT subject, body, link FROM notification WHERE dedupe_key=?").get(`repair-unrelated:${run}`) as { subject: string; body: string; link: string } | undefined;
+
+  test("a gate that ran out of time tells a person instead of drafting a repair", () => {
+    signMode({ repairAuto: true, repairMaxAttempts: 3 });
+    const run = failedGate("t-gate", { configured: true, ran: false, attemptFailed: true, failure: "timed-out" });
+    expect(repairGate(run)).toEqual({ kind: "none" });
+    expect(store.repairChainFor(run)).toBeNull();
+    expect(unrelatedNotice(run)).toEqual({
+      subject: "The project check ran out of time",
+      body: "The project check ran out of time (300 s) before any test failed, so the code was not shown to be wrong and no repair task was filed. Raise the check's time limit or shorten the suite, then run `standing-orders task requeue t-gate`.",
+      link: "/t/t-gate",
+    });
+    expect(repairGate(run)).toEqual({ kind: "none" });
+    expect(store.raw().prepare("SELECT count(*) AS n FROM notification WHERE dedupe_key=?").get(`repair-unrelated:${run}`)).toEqual({ n: 1 });
+  });
+
+  /** Run 1784 (mayhem-spire, 2026-09-18): the diff touched run.ts and two
+   * tests; the only failure was an untouched balance probe's own timeout. */
+  const probeLog = [
+    "      Tests  1 failed | 163 passed (164)", "",
+    " FAIL  src/core/autobattler.test.ts > balance probe (non-asserting) > win-rate & leak table",
+    "Error: Test timed out in 120000ms.",
+  ].join("\n");
+  const inventory = (files: string[], filesTruncated = false) => JSON.stringify({ schema: 1, base: "b".repeat(40), head: "a".repeat(40), fileCount: files.length, additions: 1, deletions: 0, binaryCount: 0, files: files.map(path => ({ path, additions: 1, deletions: 0 })), filesTruncated });
+  const untouchedProbe = (files: string[], options: { filesTruncated?: boolean; log?: string } = {}) => {
+    seedTask("t-gate");
+    store.setVerifyCommand({ repo: REPO, command: "npm test && npm run build", timeoutMs: 300_000, approvedBy: "alex" }, T0);
+    const run = seedRun("t-gate", "refuted", CRITERIA.map(c => row(c.id, "pass")));
+    store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), baseRevision: "b".repeat(40) });
+    storeEvidence(store, evidenceRoot, run, "diff-stat", "terminal-diff-stat.json", Buffer.from(inventory(files, options.filesTruncated)), "git diff --numstat (exit 0)", T0, { captureStatus: "ok" });
+    storeEvidence(store, evidenceRoot, run, "check-log", "check-log.txt", Buffer.from(options.log ?? probeLog), "project check", T0, { captureStatus: "ok" });
+    sealVerificationReceipt(store, evidenceRoot, run, "a".repeat(40), store.liveVerifyCommand(REPO)!, { configured: true, ran: true, exitCode: 1 }, T0);
+    return run;
+  };
+
+  test("an untouched test's own timeout tells a person which test to fix instead of drafting a repair", () => {
+    signMode({ repairAuto: true, repairMaxAttempts: 3 });
+    const run = untouchedProbe(["src/core/run.ts", "src/core/run.test.ts", "src/core/save.test.ts"]);
+    expect(repairGate(run)).toEqual({ kind: "none" });
+    expect(store.repairChainFor(run)).toBeNull();
+    expect(unrelatedNotice(run)).toEqual({
+      subject: "A slow test outside this change failed the project check",
+      body: "The project check failed only because src/core/autobattler.test.ts timed out, and this change did not touch that file. No repair task was filed. Fix or skip the slow test outside this task, then run `standing-orders task requeue t-gate`.",
+      link: "/t/t-gate",
+    });
+  });
+
+  test.each(["touched", "truncated-inventory", "assertion"])("a failure the change may have caused still repairs (%s)", problem => {
+    signMode({ repairAuto: true, repairMaxAttempts: 3 });
+    const run = problem === "touched" ? untouchedProbe(["src/core/autobattler.test.ts"])
+      : problem === "truncated-inventory" ? untouchedProbe(["src/core/run.ts"], { filesTruncated: true })
+      : untouchedProbe(["src/core/run.ts"], { log: "      Tests  1 failed | 163 passed (164)\n FAIL  src/core/autobattler.test.ts > balance probe\nAssertionError: expected 14 to be 15" });
+    expect(repairGate(run)).toMatchObject({ kind: "drafted", approved: true, attempt: 1 });
+    expect(unrelatedNotice(run)).toBeUndefined();
   });
 
   test("a publication intent that has never run does not strand failed-check repair", () => {
