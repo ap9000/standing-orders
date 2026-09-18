@@ -24,11 +24,12 @@ import {
 } from "./claim.js";
 import { bodyHashOf, publicationBody } from "./publish.js";
 import { modeTermsFromJson } from "./modes.js";
-import { writeEvidenceFile } from "./evidence.js";
+import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
 import type { BuildResult } from "./builder.js";
 import type { Store } from "./store.js";
-import { manualReviewOnly, type ProofVerdict } from "./proof.js";
+import { manualReviewOnly, type ProofVerdict, type VerifyCommandFacts } from "./proof.js";
 import { failedVerificationEvidence } from "./verification-evidence.js";
+import { classifyGateFailure, describeGateFailure, type GateFailureClass } from "./gate-failure.js";
 
 /**
  * Which road is disposing. 'tick' = the unattended loop: full task
@@ -616,6 +617,28 @@ export function maybeSettleRepairChain(store: Store, taskId: string, verdict: Pr
   store.settleRepairChain(chain.id, "resolved", now);
 }
 
+/** Read the sealed receipt, log and candidate inventory behind a failed gate
+ * and say whether the failure is one no repair attempt could fix. An
+ * unreadable or truncated inventory leaves the failure repairable. */
+function unrelatedGateFailure(store: Store, evidenceRoot: string, failure: { receipt: string; log: string }, runId: number): Exclude<GateFailureClass, { kind: "repairable" }> | null {
+  const receipt = JSON.parse(failure.receipt) as { result: VerifyCommandFacts; command?: { timeoutMs?: number } };
+  let changed: string[] | null = null;
+  const stat = store.artifactsFor(runId).find(a => a.kind === "diff-stat");
+  if (stat && !stat.truncated && stat.captureStatus === "ok") {
+    const read = readVerifiedArtifact(evidenceRoot, stat);
+    if (read.ok) {
+      try {
+        const inventory = JSON.parse(read.content.toString("utf8")) as { filesTruncated?: boolean; files?: { path?: unknown }[] };
+        if (inventory.filesTruncated === false && Array.isArray(inventory.files)) {
+          changed = inventory.files.map(one => one.path).filter((path): path is string => typeof path === "string");
+        }
+      } catch { changed = null; }
+    }
+  }
+  const classified = classifyGateFailure(receipt.result, failure.log, changed, receipt.command?.timeoutMs ?? null);
+  return classified.kind === "repairable" ? null : classified;
+}
+
 export type RepairTrigger =
   | { kind: "drafted"; draftTaskId: string; attempt: number; approved: boolean }
   | { kind: "stopped"; reason: RepairStopReason }
@@ -671,6 +694,18 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
       return { kind: "none" };
     }
     if (failure.kind !== "failed") return { kind: "none" };
+    // A failure the change cannot have caused — the whole gate timing out,
+    // or an untouched test's own timeout — is handed to a person, not to
+    // another code-writing attempt (2026-09-18: mayhem-spire run 1784
+    // drafted a repair for a balance probe the diff never touched).
+    const unrelated = unrelatedGateFailure(store, evidenceRoot, failure, sourceRunId);
+    if (unrelated !== null) {
+      const taskId = store.refById(run.taskRef)?.externalId ?? "";
+      store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `repair-unrelated:${sourceRunId}`, kind: "repair-evidence", pushClass: "attention",
+        subject: unrelated.kind === "gate-timed-out" ? "The project check ran out of time" : "A slow test outside this change failed the project check",
+        body: describeGateFailure(unrelated, taskId), link: `/t/${encodeURIComponent(taskId)}` }, now);
+      return { kind: "none" };
+    }
     verification = { sourceRun: sourceRunId, digest: failure.digest };
   }
   const unresolved = stored.matrix

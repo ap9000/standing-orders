@@ -1,5 +1,26 @@
 # Progress
 
+**2026-09-18 UTC — Stop paying for failures the change did not cause.**
+Mayhem-spire run 1784 passed 163 of 164 tests; the one failure was an
+untouched, non-asserting balance probe timing out at its own 120 s limit.
+The machine gate read exit 1 as a refuted proof and drafted `-fix-1`, whose
+builder correctly changed nothing, and whose gate then passed. Three changes:
+(1) `src/gate-failure.ts` classifies a failed gate from its sealed receipt,
+log and candidate inventory; the automatic failed-check repair in
+`maybeTriggerRepair` now skips the draft and tells a person, in plain words,
+when the whole command timed out or when every failure is a per-test timeout
+in a file the candidate did not touch. Assertion failures anywhere, timeouts
+in touched files, and unreadable inventories still repair as before.
+(2) The planner is told to state criteria as things observable on the
+candidate alone, never "fails on the original base": the gate runs only the
+candidate, so such a criterion can only send finished work back for evidence.
+(3) The full suite runs in about 130 s with Vitest's file parallelism and
+about 900 s without it; the two tests that could not finish in 15 s with
+every core busy get 60 s, the default becomes 30 s, and the approved local
+gate for the Developer checkout drops `--no-file-parallelism` (CI already
+ran without it). The mayhem-spire probe itself now runs only under
+`BALANCE_PROBE=1` (`npm run test:balance`); its gate takes 25 s.
+
 **2026-09-13 UTC — npm/browser deployment preflight (not deployed).**
 Separated the npm/browser installation path from publisher-only Mac signing.
 The current source built and its 262-file npm tarball installed successfully

@@ -7,8 +7,9 @@ export default defineConfig({
     setupFiles: ["./test/setup-state.ts"],
     globalSetup: ["./test/ensure-build.ts"],
     // The suite exercises real SQLite files, git repositories, and child
-    // processes. Shared CI runners can legitimately take more than Vitest's
-    // five-second unit-test default without the underlying operation hanging.
-    testTimeout: 15_000,
+    // processes. Shared CI runners, and every core busy when the files run
+    // in parallel, can legitimately take more than Vitest's five-second
+    // unit-test default without the underlying operation hanging.
+    testTimeout: 30_000,
   },
 });

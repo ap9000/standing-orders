@@ -228,6 +228,11 @@ function plannerBrief(
     "redundant evidence kinds. Use `manual-review` only for a genuinely",
     "judgmental claim those other kinds cannot establish; requiring it",
     "guarantees the task will still need a person before it reads verified.",
+    "State every criterion as something observable on the finished candidate",
+    "alone. Never require proof that a test fails on the original base or any",
+    "other before/after comparison: the machine gate runs only the candidate,",
+    "so such a criterion cannot read verified and only sends the finished",
+    "work back for evidence nobody can produce.",
   ].join("\n");
 }
 
