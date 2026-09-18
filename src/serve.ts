@@ -1,3 +1,6 @@
+import {discordSettingsHtml} from "./discord-settings.js";
+import {checkDiscordCredentials,loadDiscordCredentials,saveDiscordCredentials,clearDiscordCredentials,DiscordError} from "./discord-api.js";
+import {ChatState} from "./chat-delivery-state.js";
 import { slackSettingsHtml } from "./slack-settings.js";
 import { checkSlackCredentials, loadSlackCredentials, saveSlackCredentials, clearSlackCredentials, SLACK_MANIFEST, SlackError } from "./slack-api.js";
 import { SlackState } from "./slack-state.js";
@@ -256,6 +259,7 @@ export type ServeOptions = {
   configDir?: string;
   /** Test seam for the Slack setup handshake. */
   slackFetcher?: typeof fetch;
+  discordFetcher?: typeof fetch;
   /**
    * The repo this console serves. Scopes run evidence to that repo's tasks
    * (and unplaced ones) and turns on the gaps and capabilities views —
@@ -2696,6 +2700,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return sendScreen(response, 200, screen("Learning", `<p><a href="/settings">Settings</a></p><h1>Learning</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
+    if (url.pathname === "/settings/discord") {
+      if(who.via!=="cookie"||who.role!=="approver"||restricted()||!options.configDir) return refuse(response,who,403,"An installation approver can connect Discord.","/settings");
+      return sendScreen(response,200,screen("Discord",discordSettingsHtml(store,options.configDir,who.session.csrf),{chrome:chromeFor(project,"settings"),forceSensitive:true}));
+    }
     if (url.pathname === "/settings/slack" || url.pathname === "/settings/slack/manifest") {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response,who,403,"An installation approver can connect Slack.","/settings");
       if (url.pathname.endsWith("/manifest")) {
@@ -4678,6 +4686,40 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response,200,screen("Pair Slack",slackSettingsHtml(store,dir,who.session.csrf,{code}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
       }
       return redirect(response,"/settings/slack");
+    }
+
+    if (["connect","pair","disconnect","alerts"].some(action=>url.pathname===`/settings/discord/${action}`)) {
+      if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response,who,403,"An installation approver can connect Discord.","/settings");
+      const dir=options.configDir, state=new ChatState(store,"discord"), action=url.pathname.split("/").at(-1);
+      const show=(problem:string,status=400)=>sendScreen(response,status,screen("Discord",discordSettingsHtml(store,dir,who.session.csrf,{problem}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
+      if (["password","bot-token"].some(key=>body.getAll(key).length>1)) return show("Submit one value for each field.");
+      const credentials=loadDiscordCredentials(dir);
+      if(action==="alerts") {
+        if(!credentials || !state.binding(credentials.installation) || !state.live(state.binding(credentials.installation)!)) return show("Pair your Discord account first.",409);
+        savePrimary(dir,"discord");return redirect(response,"/settings/discord");
+      }
+      if(!authenticateApprover(store,who.name,body.get("password")??"").ok) return show("Enter your Standing Orders password to change Discord access.",403);
+      const generation=store.accountOf(who.name)!.generation;
+      if(action==="connect") {
+        try {
+          const checked=await checkDiscordCredentials((body.get("bot-token")??"").trim(),options.discordFetcher);
+          const account=store.accountOf(who.name);
+          if(account?.role!=="approver"||account.generation!==generation||account.revokedAt!==null) return show("Your access changed. Sign in again.",403);
+          if(credentials || loadDiscordCredentials(dir)) return show("Disconnect the current Discord app before connecting another.",409);
+          saveDiscordCredentials(dir,checked);
+        } catch(error) {return show(error instanceof DiscordError?error.message:"Discord could not be connected. Check the token and try again.");}
+      } else if(action==="disconnect") {
+        if(credentials) state.revoke(credentials.installation,now);
+        clearDiscordCredentials(dir);
+      } else if(action==="pair") {
+        if(!credentials) return show("Connect your Discord app first.",409);
+        const binding=state.binding(credentials.installation);
+        if(binding&&state.live(binding)) return show("Discord is already paired. Disconnect before pairing another account.",409);
+        if(binding) state.revoke(credentials.installation,now);
+        const code=state.pairing(credentials.installation,who.name,generation,now);
+        return sendScreen(response,200,screen("Pair Discord",discordSettingsHtml(store,dir,who.session.csrf,{code}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
+      }
+      return redirect(response,"/settings/discord");
     }
 
     if (url.pathname === "/settings/messaging" && options.configDir !== undefined && options.telegramTokenFile !== undefined) {
@@ -20575,7 +20617,7 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return screen("settings", [
     "<h1>settings</h1>",
-    '<p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/slack">Slack</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
+    '<p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/slack">Slack</a> · <a href="/settings/discord">Discord</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
     permissionCard,
     qualityCard,
     pushCard,

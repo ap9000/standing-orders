@@ -1,3 +1,5 @@
+import {followDiscord} from "./discord.js";
+import {loadDiscordCredentials} from "./discord-api.js";
 import { loadSlackCredentials } from "./slack-api.js";
 import { followSlack } from "./slack.js";
 import { validateScopeText } from "./task-text.js";
@@ -7569,6 +7571,14 @@ async function runWatchLoop(args: {
     notifications:()=>effectivePrimary(process.env,dirname(context.databaseFile),loadBotToken(process.env,context.telegramTokenFile)!==null).channel==="slack",
   }).catch(()=>progress("watch: Slack stopped. Check Slack settings before reconnecting."));
 
+  const discordFollower = followDiscord({store,dir:dirname(context.databaseFile),signal:followController.signal,
+    readProjects:telegramReadProjects(context),evidenceRoot:context.evidenceRoot,
+    ...(context.mateSeams?.subscriptionRunner ? {subscriptionRunner:context.mateSeams.subscriptionRunner} : {}),
+    ...(context.heldCoordinator ? {held:context.heldCoordinator} : {}),
+    origin:()=>phoneOrigin(process.env,dirname(context.databaseFile),{serverOrigin:text(flags,"public-url")??null}),
+    notifications:()=>effectivePrimary(process.env,dirname(context.databaseFile),loadBotToken(process.env,context.telegramTokenFile)!==null).channel==="discord",
+  }).catch(()=>progress("watch: Discord stopped. Check Discord settings before reconnecting."));
+
   // Passes reuse the tested commands with a quiet sink; watch narrates one
   // line per pass that did something instead of streaming their reports.
   const quiet: string[] = [];
@@ -7713,7 +7723,7 @@ async function runWatchLoop(args: {
           );
         }
         if (primary.channel !== null && primary.channel !== "telegram") {
-          const targets = loadWebhookTargets(process.env, dir).filter(one => one.kind === primary.channel && (one.kind !== "slack" || loadSlackCredentials(dir) === null));
+          const targets = loadWebhookTargets(process.env, dir).filter(one => one.kind === primary.channel && (one.kind !== "slack" || loadSlackCredentials(dir) === null) && (one.kind !== "discord" || loadDiscordCredentials(dir) === null));
           if (targets.length > 0) {
             await webhookPass(store, { targets, consoleUrl: loadConsoleUrl(process.env, dir), clock: context.clock });
           }
@@ -7754,6 +7764,7 @@ async function runWatchLoop(args: {
     followController.abort();
     if (follower !== null) await follower;
     await slackFollower;
+    await discordFollower;
     store.endWatchEpisode(incarnation, { ticks, built, broke: brokeCount }, new Date());
     store.releaseWatchLease(runner, repo, incarnation, new Date());
   }

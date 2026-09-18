@@ -1,3 +1,4 @@
+import {chatSchema,chatTables} from "./chat-delivery-state.js";
 import { SLACK_SCHEMA, SLACK_TABLES } from "./slack-state.js";
 import { verificationEvidence } from "./verification-evidence.js";
 import { LEARNING_SCHEMA, queueLearning } from "./project-learning.js";
@@ -103,7 +104,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
-export const SCHEMA_VERSION = 67;
+export const SCHEMA_VERSION = 68;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -755,7 +756,7 @@ export type RunStop = {
 };
 
 /** Which surface asked for a stop or a resume — named by the caller, never defaulted. */
-export type StopVia = "cli" | "web" | "telegram" | "slack";
+export type StopVia = "cli" | "web" | "telegram" | "slack" | "discord";
 
 /** One ROOT review attempt of a source run (v50): the reviewer run, its
  * ordinal, how it ended, and the request it was spent on. */
@@ -1080,7 +1081,7 @@ export type Decision = {
   createdAt: string;
   answeredAt: string | null;
   answeredBy: string | null;
-  answeredVia: "cli" | "web" | "telegram" | "slack" | null;
+  answeredVia: "cli" | "web" | "telegram" | "slack" | "discord" | null;
   choice: string | null;
   note: string | null;
 };
@@ -3906,6 +3907,9 @@ function initializeStore(db: Database, file: string): Store {
   if (preflight !== null && Math.abs(preflight) >= 67) {
     for (const table of SLACK_TABLES) if (!tableExists(db, table)) throw new Error(`${file}: Slack history is missing; refusing to recreate receipts`);
   }
+  if (preflight !== null && Math.abs(preflight) >= 68) {
+    for (const table of chatTables("discord")) if (!tableExists(db, table)) throw new Error(`${file}: Discord history is missing; refusing to recreate receipts`);
+  }
   if (preflight !== null && preflight > 0 && preflight < SCHEMA_VERSION) {
     const stamped = db.prepare("UPDATE schema_version SET version = ? WHERE version = ?").run(-preflight, preflight);
     if (Number(stamped.changes) !== 1) {
@@ -3917,6 +3921,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(KNOWLEDGE_SCHEMA);
   db.exec(SKILLS_SCHEMA);
   db.exec(SLACK_SCHEMA);
+  db.exec(chatSchema("discord"));
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
@@ -5043,6 +5048,7 @@ function migrate(db: Database, origin: number | null): void {
   // whole, and an unknown shape refuses rather than being guessed.
   rebuildRunStopForV62(db);
   rebuildSlackAuditForV67(db);
+  rebuildDiscordAuditForV68(db);
 
   // v64 (result screenshots on demand): telegram_conversation_part admits
   // 'image' and carries typed media identity through the same exact-
@@ -5557,14 +5563,26 @@ const DECISION_V66_DDL = (name: string): string => `CREATE TABLE ${name} (
 )`;
 const DECISION_V67_DDL = (name: string): string => DECISION_V66_DDL(name).replace("'cli','web','telegram'", "'cli','web','telegram','slack'");
 const RUN_STOP_V67_DDL = (name: string): string => RUN_STOP_V62_DDL(name).replaceAll("'cli','web','telegram'", "'cli','web','telegram','slack'");
+const DECISION_V68_DDL = (name:string):string => DECISION_V67_DDL(name).replace("'cli','web','telegram','slack'", "'cli','web','telegram','slack','discord'");
+const RUN_STOP_V68_DDL = (name:string):string => RUN_STOP_V67_DDL(name).replaceAll("'cli','web','telegram','slack'", "'cli','web','telegram','slack','discord'");
+function isDiscordAudit(db:Database,table:"decision"|"run_stop"):boolean {
+ const row=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table);
+ return row!==undefined&&canonicalDdl(String(row.sql))===canonicalDdl((table==="decision"?DECISION_V68_DDL:RUN_STOP_V68_DDL)(table));
+}
+export function rebuildDiscordAuditForV68(db:Database):void {
+ rebuildExact(db,"decision",DECISION_V67_DDL,DECISION_V68_DDL,["id","run","urgency","state","recap","question","options","recommendation","assignee","deadline","created_at","answered_at","answered_by","contestant","closed_reason","answered_via","choice","note","session_turn","delivered_turn"]);
+ rebuildExact(db,"run_stop",RUN_STOP_V67_DDL,RUN_STOP_V68_DDL,["run","task_ref","requested_by","requested_via","requested_at","settled_at","settlement","resumed_at","resumed_by","resumed_via"]);
+ db.exec("CREATE INDEX IF NOT EXISTS run_stop_by_task ON run_stop (task_ref, requested_at DESC)");
+}
 function isSlackAudit(db: Database, table: "decision" | "run_stop"): boolean {
+  if(isDiscordAudit(db,table)) return true;
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table);
   return row !== undefined && canonicalDdl(String(row.sql)) === canonicalDdl((table === "decision" ? DECISION_V67_DDL : RUN_STOP_V67_DDL)(table));
 }
 export function rebuildSlackAuditForV67(db: Database): void {
-  rebuildExact(db, "decision", DECISION_V66_DDL, DECISION_V67_DDL,
+  if(!isDiscordAudit(db,"decision")) rebuildExact(db, "decision", DECISION_V66_DDL, DECISION_V67_DDL,
     ["id","run","urgency","state","recap","question","options","recommendation","assignee","deadline","created_at","answered_at","answered_by","contestant","closed_reason","answered_via","choice","note","session_turn","delivered_turn"]);
-  rebuildExact(db, "run_stop", RUN_STOP_V62_DDL, RUN_STOP_V67_DDL,
+  if(!isDiscordAudit(db,"run_stop")) rebuildExact(db, "run_stop", RUN_STOP_V62_DDL, RUN_STOP_V67_DDL,
     ["run","task_ref","requested_by","requested_via","requested_at","settled_at","settlement","resumed_at","resumed_by","resumed_via"]);
   db.exec("CREATE INDEX IF NOT EXISTS run_stop_by_task ON run_stop (task_ref, requested_at DESC)");
 }
@@ -18532,7 +18550,7 @@ export class Store {
    * is not negotiable, and neither is "decided".
    */
   answerDecision(
-    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram" | "slack"; note?: string },
+    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram" | "slack" | "discord"; note?: string },
     now: Date,
     mutation: Mutation = {},
   ):
@@ -18554,7 +18572,7 @@ export class Store {
    * claims and only the second one authorizes anything.
    */
   answerDecisionLocked(
-    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram" | "slack"; note?: string },
+    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram" | "slack" | "discord"; note?: string },
     now: Date,
   ):
     | { ok: true; decision: Decision; duplicate?: boolean }
