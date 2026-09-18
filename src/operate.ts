@@ -1,3 +1,5 @@
+import { loadSlackCredentials } from "./slack-api.js";
+import { followSlack } from "./slack.js";
 import { validateScopeText } from "./task-text.js";
 /**
  * The commands that actually move work: authoring tasks, and the claim loop.
@@ -7559,6 +7561,14 @@ async function runWatchLoop(args: {
     });
   }
 
+  const slackFollower = followSlack({store,dir:dirname(context.databaseFile),signal:followController.signal,
+    readProjects:telegramReadProjects(context),evidenceRoot:context.evidenceRoot,
+    ...(context.mateSeams?.subscriptionRunner ? {subscriptionRunner:context.mateSeams.subscriptionRunner} : {}),
+    ...(context.heldCoordinator ? {held:context.heldCoordinator} : {}),
+    origin:()=>phoneOrigin(process.env,dirname(context.databaseFile),{serverOrigin:text(flags,"public-url")??null}),
+    notifications:()=>effectivePrimary(process.env,dirname(context.databaseFile),loadBotToken(process.env,context.telegramTokenFile)!==null).channel==="slack",
+  }).catch(()=>progress("watch: Slack stopped. Check Slack settings before reconnecting."));
+
   // Passes reuse the tested commands with a quiet sink; watch narrates one
   // line per pass that did something instead of streaming their reports.
   const quiet: string[] = [];
@@ -7703,7 +7713,7 @@ async function runWatchLoop(args: {
           );
         }
         if (primary.channel !== null && primary.channel !== "telegram") {
-          const targets = loadWebhookTargets(process.env, dir).filter(one => one.kind === primary.channel);
+          const targets = loadWebhookTargets(process.env, dir).filter(one => one.kind === primary.channel && (one.kind !== "slack" || loadSlackCredentials(dir) === null));
           if (targets.length > 0) {
             await webhookPass(store, { targets, consoleUrl: loadConsoleUrl(process.env, dir), clock: context.clock });
           }
@@ -7743,6 +7753,7 @@ async function runWatchLoop(args: {
     clearInterval(heartbeat);
     followController.abort();
     if (follower !== null) await follower;
+    await slackFollower;
     store.endWatchEpisode(incarnation, { ticks, built, broke: brokeCount }, new Date());
     store.releaseWatchLease(runner, repo, incarnation, new Date());
   }

@@ -1,3 +1,4 @@
+import { loadSlackCredentials } from "./slack-api.js";
 /**
  * UI-only chat mirrors: Slack and Discord as NOTIFICATION surfaces.
  *
@@ -142,7 +143,8 @@ export function effectivePrimary(
   const targets = loadWebhookTargets(env, dir);
   const configured: MessagingChannel[] = [
     ...(telegramConfigured ? (["telegram"] as const) : []),
-    ...targets.map(one => one.kind),
+    ...(loadSlackCredentials(dir) !== null ? (["slack"] as const) : []),
+    ...targets.map(one => one.kind).filter(kind => kind !== "slack" || loadSlackCredentials(dir) === null),
   ];
   const chosen = loadPrimary(env, dir);
   if (chosen !== null && configured.includes(chosen)) {
