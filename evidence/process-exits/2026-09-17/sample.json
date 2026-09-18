@@ -1,0 +1,27 @@
+{
+  "at": "2026-09-18T04:34:52.601Z",
+  "sourceReadOnly": true,
+  "copyOnly": true,
+  "run": 1772,
+  "rows": 902,
+  "recordedExits": 901,
+  "unchangedIdentities": true,
+  "identitySha256": "b9643f5efc721e29697fa6e29707d9d544c78aad3d4d9da272a7950ab47e846a",
+  "historicalOutcomeUnchanged": true,
+  "reportedBlocker": {
+    "id": 72698,
+    "run": 1772,
+    "pid": 4682,
+    "host": "AlexsMacStudio.localdomain",
+    "process_group": 0,
+    "observed_at": "2026-09-18T03:46:59.913Z",
+    "exited_at": "2026-09-18T04:34:52.601Z",
+    "boot_id": "0774c645-ad9a-4d83-9efb-eca6506656c5",
+    "containment": null,
+    "container": null,
+    "container_empty_at": null,
+    "container_identity": null
+  },
+  "remaining": 1,
+  "note": "OS exit observations on a private SQLite backup; production history is unchanged. An unproven reused PID remains pending. No signal other than zero is issued by this API."
+}

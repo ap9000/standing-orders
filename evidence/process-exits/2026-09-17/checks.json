@@ -1,0 +1,31 @@
+{
+  "originalBase": "e62d2da7b5574e62aaa300f195ee9ac8d778cb52",
+  "sourceSha256": {
+    "src/exec.ts": "06145c7609f9ae5c6148e7f54df45c994273d0fe18d91d8bc32ff4d914181a19",
+    "src/invoke.ts": "bb039f6a2b2b0add79ba2a6e148ce762840865e5c1df0fa3e02c606a0719749c",
+    "src/process-custody.ts": "0fc0d36ac22137850d253dae891e80018e82049632869f8c147b84c8d3afa38d",
+    "src/process-tree.ts": "18294d2c0be6760bbc9133dd2b4bdc1e8c62c07cb786319f38e23ebae498ecd5",
+    "src/process-tree.test.ts": "b0398b81ec7068acd63e2ab8c65c1db13c40367d53ca9ca78335d9a451e3d79c",
+    "src/store.ts": "eba5699486ca8ab521877875838974e08ad8e2383a2b1226e0b3ebf4d7eb617c",
+    "src/task-control.test.ts": "c7caf108988200b8d422fd1395b3e90add40aae4bae75b802e659223923bf339",
+    "src/task-control-adversarial.test.ts": "3491dcbb402a313631f2a0127318d970b3bda31c79d90104cc8c10406244e4b4",
+    "docs/process-exit-records.md": "2a1c20ec4a69224a3cfe22a90738f39921bdb8c75164ed72e71d42290d792222"
+  },
+  "focusedTests": {
+    "command": "npm run typecheck; npx vitest run src/process-tree.test.ts src/task-control-adversarial.test.ts src/held.test.ts src/containment.test.ts --reporter=dot; npx vitest run src/task-control.test.ts --reporter=dot",
+    "tests": 80,
+    "files": 5,
+    "typecheck": true,
+    "build": true,
+    "log": "focused.log.gz",
+    "logEncoding": "gzip",
+    "logSha256": "c7f39c3889c65f10fd23356accad8117f21842bb50b2a56dbf3211b2093cf1db",
+    "decodedSha256": "0813790d2768ba2b34fdb872575f8d0089bdce8bbcb62e07f7dd165ea9aa41dd",
+    "decodedBytes": 1482
+  },
+  "priorEvidence": "prior-focused.log.gz",
+  "priorEvidenceNote": "208 checks across 9 files passed before the final process-tree close guard omitted an unnecessary snapshot when there are no descendants. The affected process-tree/transport/held/containment checks (57) were rerun on the final source. Unchanged store/liveness/stop/boot/restart/updater results are reused, not rerun. No full suite run by the builder.",
+  "realSample": "sample.json",
+  "limitations": "No birth inference is added. A process number reused between observations can remain uncertain; legacy records without a proven exit keep the existing conservative guard. No schema, UI, privileges, test timeout or verifier changes. Native final gate and independent review still required.",
+  "correction": "Preserve run1775/candidate ecf8198bcb5ac9c5b4d30a77eb8258894a8bb82f. The operator interrupted its first native gate promptly after finding that the new orphan-group regression assumed POSIX on Windows. The fixture now explicitly simulates Darwin and restores the platform, matching the existing platform-isolated tests. Production code is unchanged. Only the affected task-control file (23 checks) and typecheck were rerun; the preceding57 affected checks and broader208 checks are reused for unchanged behavior. Corrective task starts at the same verified original base e62d2da. No independent review ran for the superseded candidate."
+}

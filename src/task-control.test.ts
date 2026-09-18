@@ -91,6 +91,63 @@ describe("safe task stop and resume (v52)", () => {
   });
   afterEach(() => store.close());
 
+  test.each([false, true])("an observed exit survives PID reuse before the owning run finishes (group=%s)", group => {
+    const a = runningAttempt(store, "t-exit-reused"), pid = 4682;
+    store.recordRunProcess(a.runId, pid, T0, group);
+    const before = store.raw().prepare("SELECT * FROM run_process WHERE run=?").get(a.runId)!;
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
+    try {
+      expect(store.recordRunProcessExits(a.runId, later(100), { pid, group })).toBe(1);
+      const ended = store.raw().prepare("SELECT * FROM run_process WHERE run=?").get(a.runId);
+      expect(ended).toEqual({ ...before, exited_at: later(100).toISOString() });
+      // An unrelated service takes the same number while the builder continues.
+      kill.mockReturnValue(true);
+      store.finishRun(a.runId, { outcome: "built", now: later(1000) });
+      expect(store.stopQuiescenceProblem(a.runId)).toBeNull();
+      expect(store.recordRunProcessExits(a.runId, later(2000))).toBe(0);
+      expect(store.raw().prepare("SELECT * FROM run_process WHERE run=?").get(a.runId)).toEqual(ended);
+      expect(kill.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+    } finally { kill.mockRestore(); }
+  });
+
+  test.each(["live", "orphan-group", "EPERM", "EIO"])("exit recording retains %s custody", state => {
+    // These are POSIX group semantics even when this fixture runs on Windows.
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const a = runningAttempt(store, "t-exit-unknown");
+    store.recordRunProcess(a.runId, 4682, T0, true);
+    const before = store.raw().prepare("SELECT * FROM run_process WHERE run=?").all(a.runId);
+    const kill = vi.spyOn(process, "kill").mockImplementation(target => {
+      if (state === "live" || (state === "orphan-group" && target < 0)) return true;
+      throw Object.assign(new Error(state), { code: state === "orphan-group" ? "ESRCH" : state });
+    });
+    try {
+      expect(store.recordRunProcessExits(a.runId, later(100))).toBe(0);
+      store.finishRun(a.runId, { outcome: "built", now: later(1000) });
+      expect(store.raw().prepare("SELECT * FROM run_process WHERE run=?").all(a.runId)).toEqual(before);
+      expect(kill.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+    } finally { kill.mockRestore(); Object.defineProperty(process, "platform", platform); }
+  });
+
+  test("exit recording retains incomplete, foreign, future and unproven native witnesses", () => {
+    const a = runningAttempt(store, "t-exit-scope");
+    store.reserveRunProcess(a.runId, T0);
+    for (const [host, observed, backend, container] of [
+      ["different-host", T0.toISOString(), null, null],
+      [hostname(), later(2000).toISOString(), null, null],
+      [hostname(), T0.toISOString(), "unknown-native", "owned-object"],
+      [hostname(), T0.toISOString(), "unknown-native", null],
+    ]) store.raw().prepare("INSERT INTO run_process(run,pid,host,process_group,observed_at,containment,container) VALUES(?,4682,?,0,?,?,?)")
+      .run(a.runId, host!, observed!, backend!, container!);
+    const before = store.raw().prepare("SELECT * FROM run_process WHERE run=?").all(a.runId);
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
+    try {
+      expect(store.recordRunProcessExits(a.runId, later(100))).toBe(0);
+      expect(store.raw().prepare("SELECT * FROM run_process WHERE run=?").all(a.runId)).toEqual(before);
+      expect(kill).not.toHaveBeenCalled();
+    } finally { kill.mockRestore(); }
+  });
+
   test.each([false, true])("quiescence dismisses only proven reuse across successful and EPERM probes without changing retained rows (group=%s)", group => {
     const a = runningAttempt(store, "t-reused");
     store.finishRun(a.runId, { outcome: "failed", reason: "interrupted", now: later(1_000) });

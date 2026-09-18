@@ -16994,6 +16994,7 @@ export class Store {
     // An outcome alone does not prove subprocess exit. Settlement checks
     // retained witnesses and every owned run; recovery revisits a pending
     // stop after an orphan or held supervisor finishes shutdown.
+    this.recordRunProcessExits(id, result.now);
     this.settleRunStop(id, result.stopSettlement ?? "finished", result.now);
     // The park rate is *measured* — parked over concluded builder attempts —
     // and maintained where attempts conclude, because the attention budget's
@@ -21613,6 +21614,39 @@ export class Store {
   reserveRunProcess(runId: number, now: Date, group = true): number {
     return Number(this.db.prepare("INSERT INTO run_process (run,host,process_group,observed_at,boot_id) VALUES (?,?,?,?,?)")
       .run(runId, hostname(), group ? 1 : 0, now.toISOString(), currentBootId()).lastInsertRowid);
+  }
+
+  /** Save positive OS exit evidence while it is available, before a numeric
+   * PID can be reused. Completion, missing ancestry and age prove nothing.
+   * Existing rows stay intact; only a previously unknown exit is recorded.
+   * This is also safe for reconciling historical rows after a real exit.
+   * No PID read from the database is ever signalled except with signal zero. */
+  recordRunProcessExits(runId: number, now: Date, only?: { pid: number; group: boolean }): number {
+    const rows = only === undefined
+      ? this.db.prepare("SELECT * FROM run_process WHERE run = ? AND exited_at IS NULL").all(runId)
+      : this.db.prepare("SELECT * FROM run_process WHERE run = ? AND pid = ? AND process_group = ? AND exited_at IS NULL").all(runId, only.pid, only.group ? 1 : 0);
+    let recorded = 0;
+    for (const row of rows) {
+      const host = String(row["host"]), bootId = row["boot_id"] == null ? null : String(row["boot_id"]);
+      if (host !== hostname() || typeof row["observed_at"] !== "string" || !Number.isFinite(Date.parse(row["observed_at"])) || Date.parse(row["observed_at"]) > now.getTime()) continue;
+      let gone = provenDeadByBootChange({ host, bootId });
+      if (!gone) {
+        const backend = row["containment"] == null ? null : String(row["containment"]);
+        const container = row["container"] == null ? null : String(row["container"]);
+        if (backend !== null || container !== null) {
+          gone = backend !== null && container !== null && (row["container_empty_at"] != null || containerEmptiness(backend, container, process.platform, row["container_identity"] == null ? null : String(row["container_identity"])) === "empty");
+        } else {
+          // Do not borrow the run's finish time or guess a legacy spawn time.
+          // With no historical witness argument only ESRCH proves absence.
+          gone = row["pid"] != null && !processMayBeAlive(Number(row["pid"]), row["process_group"] === 1);
+        }
+      }
+      if (gone) recorded += Number(this.db.prepare(`UPDATE run_process SET exited_at = ?
+        WHERE id = ? AND run = ? AND exited_at IS NULL AND pid IS ? AND host = ? AND process_group = ?
+          AND observed_at = ? AND boot_id IS ? AND containment IS ? AND container IS ? AND container_identity IS ?`)
+        .run(now.toISOString(), row["id"], runId, row["pid"], row["host"], row["process_group"], row["observed_at"], row["boot_id"], row["containment"], row["container"], row["container_identity"]).changes);
+    }
+    return recorded;
   }
 
   finishUnspawnedProcess(witness: number, now: Date): void {

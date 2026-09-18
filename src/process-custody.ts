@@ -20,6 +20,10 @@ export function witnessedRunner(store: Store, runId: number, clock: () => Date, 
         store.recordRunProcess(runId, pid, clock(), group);
         options.onDescendant?.(pid, group);
       },
+      onDescendantExit: (pid, group) => {
+        store.recordRunProcessExits(runId, clock(), { pid, group });
+        options.onDescendantExit?.(pid, group);
+      },
       onUnknown: () => {
         if (!native && !unknown) { store.reserveRunProcess(runId, clock(), true); unknown = true; }
         options.onUnknown?.();
@@ -47,6 +51,7 @@ export function witnessedRunner(store: Store, runId: number, clock: () => Date, 
       },
     });
     for (const witness of witnesses) store.finishUnspawnedProcess(witness, clock());
+    store.recordRunProcessExits(runId, clock());
     return result;
   };
 }
