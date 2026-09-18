@@ -17,7 +17,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -380,4 +380,105 @@ describe("v40: a drafted, unapproved repair moves the idle-spend invariant not a
     expect(afterApproval).toBe(EXIT.ok);
     expect(spawns).toBe(1); // one dispatch — the approved draft, and only it
   });
+  // Synthetic providers, real CLI dispatch, Git worktrees, verification command,
+  // receipts and revision queue. This tests the product loop without model spend.
+  test.each(["fix", "no-change", "changed-evidence"])("failed gate → automatic repair → fresh gate → one review (%s)", scenario => {
+    const noChange = scenario === "no-change";
+    return (async () => {
+      const { addApprover, propose, approve } = await import("./scope.js");
+      const { presetTerms, modeTermsJson, modeDigestOf } = await import("./modes.js");
+      const log = join(base, "gate-count.txt");
+      await writeFile(log, "0");
+      await writeFile(join(repo, "value.txt"), "initial");
+      await writeFile(join(repo, "check.cjs"), `const fs = require('node:fs'); const log = ${JSON.stringify(log)};
+const attempt = Number(fs.readFileSync(log, 'utf8')) + 1; fs.writeFileSync(log, String(attempt));
+const passed = ${noChange ? "attempt > 1" : "fs.readFileSync('value.txt','utf8') === 'fixed'"};
+if (!passed) { console.error('balance probe timed out; 163 passed, 1 failed'); process.exitCode = 1; }
+`);
+      await git(["add", "."]);
+      await git(["commit", "-qm", "synthetic verification fixture"]);
+      const store = openStore(db);
+      const who = addApprover(store, "alex", T0);
+      if (!who.ok) throw Error("approver");
+      for (const phase of ["plan", "build", "review"] as const) store.setPhaseConfig("installation", phase, "claude", "sonnet", "alex", T0);
+      register(store, { name: "builder-1", host: "test", capacity: 4, repos: [repo], now: T0, newToken: () => "tok-builder-1" });
+      store.createTask({ id: "t-check", title: "Repair saved state" }, T0);
+      const ref = store.refFor("built-in", "t-check");
+      store.placeTask(ref.id, repo);
+      const statement = "The project check succeeds";
+      propose(store, { taskId: "t-check", goal: "Fix value.txt and verify it", touches: ["value.txt"], acceptance: [{ id: "c1", statement, how: null, evidence: ["check"] }], now: T0 });
+      expect(approve(store, "t-check", "alex", T0, store.getScope("t-check")!.digest, who.token).ok).toBe(true);
+      store.setVerifyCommand({ repo, command: "node check.cjs", timeoutMs: 5000, approvedBy: "alex" }, T0);
+      const terms = { ...presetTerms("standard", at(60).toISOString()), repairAuto: true, repairMaxAttempts: 3, reviewAuto: true };
+      store.signMode({ repo, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, T0);
+      store.close();
+      let builds = 0, reviews = 0;
+      const provider: Runner = async (_file, args, options) => {
+        const cwd = options!.cwd!;
+        const prompt = args[args.indexOf("-p") + 1]!;
+        if (prompt.includes("You are a REVIEWER")) {
+          reviews++;
+          const receipt = JSON.parse(await readFile(join(cwd, "REVIEW-VERIFICATION.json"), "utf8"));
+          expect(receipt.result).toMatchObject({ ran: true, exitCode: 0 });
+          return { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "REVIEW-VERIFICATION.json and REVIEW-CHECK-LOG.txt show the exact candidate passed" }], learningAssessment: { decision: "none", reason: "Synthetic loop already covered by this regression" }, learning: [] }) }) };
+        }
+        builds++;
+        const repairing = builds === 2;
+        if (repairing) {
+          expect(prompt).toContain("balance probe timed out; 163 passed, 1 failed");
+          expect(prompt).toContain("rerun only the failing test once");
+        }
+        const unchanged = repairing && noChange;
+        if (!unchanged) await writeFile(join(cwd, "value.txt"), repairing ? "fixed" : "broken");
+        expect((await exec(process.execPath, ["--check", "check.cjs"], { cwd })).code).toBe(0);
+        const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)![0];
+        const proof = /STANDING-ORDERS-PROOF-[0-9a-f]{16}\.json/.exec(prompt)![0];
+        await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: unchanged ? "no-change" : "completed", conclusion: "Synthetic recovery result" }));
+        await writeFile(join(cwd, proof), JSON.stringify({ version: 1, criteria: [{ id: "c1", statement, verdict: "pending-verification", how: "Awaiting the native check", evidence: [{ kind: "check", ref: "node --check check.cjs" }] }], checks: [{ command: "node --check check.cjs", exitCode: 0, summary: "Syntax checked" }], changed: unchanged ? [] : ["value.txt"], caveats: [], screenshots: [] }));
+        return { ...OK, stdout: JSON.stringify({ result: "Synthetic recovery result" }) };
+      };
+      const tick = async (now: Date) => {
+        const output: string[] = [];
+        const code = await runOperate("tick", ["--runner", "builder-1", "--token", "tok-builder-1", "--repo", repo, "--pool", pool, "--max", "1", "--json"], line => output.push(line), { databaseFile: db, evidenceRoot, now, agentRunner: provider });
+        expect(code, output.join("\n")).toBe(EXIT.ok);
+      };
+      await tick(at(1));
+      const first = openStore(db);
+      const chain = first.repairChainForRoot("t-check");
+      expect(chain).toHaveLength(1);
+      expect(chain[0]).toMatchObject({ draftTask: "t-check-fix-1", basis: "mode", outcome: "drafted" });
+      expect(first.openReviewRequests()).toHaveLength(0);
+      const failedRun = chain[0]!.sourceRun;
+      const failedHead = first.getRun(failedRun)!.headRevision;
+      const failedLog = first.artifactsFor(failedRun).find(a => a.kind === "check-log")!;
+      first.close();
+      if (scenario === "changed-evidence") {
+        await writeFile(join(evidenceRoot, failedLog.key), "changed after the repair was approved");
+        const output: string[] = [];
+        await runOperate("tick", ["--runner", "builder-1", "--token", "tok-builder-1", "--repo", repo, "--pool", pool, "--max", "1", "--json"], line => output.push(line), { databaseFile: db, evidenceRoot, now: at(2), agentRunner: provider });
+        expect(JSON.parse(output.join("\n")).dispatched).toMatchObject([{ outcome: "failed" }]);
+        const refused = openStore(db);
+        expect(refused.runsFor(refused.lookupRef("t-check-fix-1")!.id).find(r => r.role === "builder")?.handoff).toContain("failed-check evidence is no longer current and complete");
+        refused.close();
+        expect(builds).toBe(1);
+        expect(reviews).toBe(0);
+        expect(await readFile(log, "utf8")).toBe("1");
+        return;
+      }
+      await tick(at(2));
+      const final = openStore(db);
+      const result = final.runsFor(final.lookupRef("t-check-fix-1")!.id).find(r => r.role === "builder")!;
+      expect(final.proofVerdictFor(result.id)?.verdict).toBe("verified");
+      expect(final.repairChainForRoot("t-check")[0]?.outcome).toBe("resolved");
+      expect(final.openReviewRequests()).toHaveLength(0);
+      expect(final.reviewRetryStateOf(result.id)?.state).toBe("succeeded");
+      expect(final.proofVerdictFor(failedRun)?.verdict).toBe("refuted");
+      if (noChange) expect(result.headRevision).toBe(failedHead);
+      final.close();
+      expect(builds).toBe(2);
+      expect(reviews).toBe(1);
+      expect(await readFile(log, "utf8")).toBe("2");
+    })();
+  });
+
 });

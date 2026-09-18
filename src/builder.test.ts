@@ -1,4 +1,6 @@
 import * as projectSkills from "./project-skills.js";
+import { disposeBuildOutcome } from "./dispose.js";
+import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { isVerificationReceipt, verificationEvidence } from "./verification-evidence.js";
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { agentExitWords, build, PROTECTED, proveApprovedProfile, verificationExecutableMissing, type Runner } from "./builder.js";
@@ -3307,6 +3309,23 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     const raw = readVerifiedArtifact(join2(wt, ".evidence"), artifact);
     expect(raw.ok).toBe(true);
     if (raw.ok) expect(JSON.parse(raw.content.toString("utf8")).criteria[0].verdict).toBe("pending-verification");
+
+    const terms = { ...presetTerms("standard", new Date(T0.getTime() + 86_400_000).toISOString()), repairAuto: true, repairMaxAttempts: 3 };
+    store.signMode({ repo: REPO, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, T0);
+    const context = { store, policy: "tick" as const, leaseId: "test-lease", runId: req.runId!, taskId: "t-1", taskRef, runner: "builder-1", repo: REPO, branch: "feat/a", origin: "ours", provider: "claude", model: "sonnet", worktreePath: wt, evidenceRoot: join2(wt, ".evidence"), clock: () => T0 };
+    const disposition = disposeBuildOutcome(context, { ok: true, committed: true, branch: "feat/a", summary: "Built" });
+    expect(disposition.kind).toBe("built");
+    if (exitCode === 1) {
+      expect(store.repairChainFor(req.runId!)).toMatchObject({ draftTask: "t-1-fix-1", attempt: 1, basis: "mode" });
+      expect(store.getScope("t-1-fix-1")?.approvedAt).not.toBeNull();
+      const source = store.revisionSourceOf(store.lookupRef("t-1-fix-1")!.id)!;
+      const brief = readVerifiedArtifact(context.evidenceRoot, source.briefArtifact);
+      expect(brief.ok && JSON.parse(brief.content.toString("utf8")).verification.sourceRun).toBe(req.runId);
+      expect(store.openReviewRequests().filter(one => one.run === req.runId)).toHaveLength(0);
+    } else {
+      expect(store.repairChainFor(req.runId!)).toBeNull();
+    }
+    expect(checks).toBe(1); // disposition never repeats the full gate
   });
 
   test("a sound proof, an approved verify command that fails: refuted, but the work still commits", async () => {

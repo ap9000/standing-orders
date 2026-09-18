@@ -9,14 +9,16 @@
  * stop fires and why.
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, BUILT_IN, type Store } from "./store.js";
 import { addApprover, propose, approve } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
 import { maybeTriggerRepair, maybeSettleRepairChain } from "./dispose.js";
-import type { CriterionMatrixRow } from "./proof.js";
+import type { CriterionMatrixRow, VerifyCommandFacts } from "./proof.js";
+import { sealVerificationReceipt } from "./verification-evidence.js";
+import { readVerifiedArtifact, storeEvidence } from "./evidence.js";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -124,6 +126,81 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
     );
     return merged;
   };
+
+  const failedGate = (taskId = "t-gate", result: VerifyCommandFacts = { configured: true, ran: true, exitCode: 1 }) => {
+    if (!store.lookupRef(taskId)) seedTask(taskId);
+    if (!store.liveVerifyCommand(REPO)) store.setVerifyCommand({ repo: REPO, command: "npm test && npm run build", timeoutMs: 300_000, approvedBy: "alex" }, T0);
+    const run = seedRun(taskId, result.configured && !result.ran ? "short" : "refuted", CRITERIA.map(c => row(c.id, "pass")));
+    store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), baseRevision: "b".repeat(40) });
+    storeEvidence(store, evidenceRoot, run, "check-log", "check-log.txt", Buffer.from("163 passed, 1 timed out: balance probe"), "project check", T0, { captureStatus: "ok" });
+    sealVerificationReceipt(store, evidenceRoot, run, "a".repeat(40), store.liveVerifyCommand(REPO)!, result, T0);
+    return run;
+  };
+  const repairGate = (run: number) => maybeTriggerRepair(store, REPO, evidenceRoot, run, store.proofVerdictFor(run)!.verdict, T0, "verification");
+
+  test.each(["exit", "timeout"])("%s failure repairs even when every criterion passed; replay and review share one draft", kind => {
+    signMode({ repairAuto: true, repairMaxAttempts: 3 });
+    const run = failedGate("t-gate", kind === "exit" ? { configured: true, ran: true, exitCode: 1 } : { configured: true, ran: false, attemptFailed: true, failure: "timed-out" });
+    expect(repairGate(run)).toMatchObject({ kind: "drafted", approved: true, attempt: 1 });
+    expect(store.repairChainFor(run)?.unresolved).toEqual(["project checks"]);
+    expect(store.getScope("t-gate-fix-1")?.acceptance).toEqual(store.getScope("t-gate")?.acceptance);
+    const source = store.revisionSourceOf(store.lookupRef("t-gate-fix-1")!.id)!;
+    const brief = readVerifiedArtifact(evidenceRoot, source.briefArtifact);
+    expect(brief.ok && JSON.parse(brief.content.toString("utf8"))).toMatchObject({ sourceRun: run, head: "a".repeat(40), verification: { sourceRun: run, digest: expect.any(String) } });
+    expect(repairGate(run)).toEqual({ kind: "none" });
+    expect(maybeTriggerRepair(store, REPO, evidenceRoot, run, "refuted", T0)).toEqual({ kind: "none" });
+  });
+
+  test.each(["no-mode", "disabled", "expired", "hold", "unfinished", "uncommitted", "accepted", "decision", "custody", "stale-setup", "truncated", "redacted", "tampered", "new-command", "moved-head", "moved-scope", "published"])("automatic failed-check repair refuses %s", problem => {
+    if (problem !== "no-mode") signMode({ repairAuto: problem !== "disabled", repairMaxAttempts: 3, ...(problem === "expired" ? { absoluteExpiry: new Date(T0.getTime() - 1).toISOString() } : {}) });
+    const result: VerifyCommandFacts = problem === "custody" || problem === "stale-setup"
+      ? { configured: true, ran: false, attemptFailed: true, failure: problem === "custody" ? "custody-lost" : "setup-stale" }
+      : { configured: true, ran: true, exitCode: 1 };
+    const run = failedGate("t-gate", result);
+    const taskRef = store.lookupRef("t-gate")!.id;
+    if (problem === "hold") store.holdOwned({ taskRef, ownerKind: "operator", ownerId: "alex", reason: "wait", until: null }, T0);
+    if (problem === "unfinished") store.raw().prepare("UPDATE run SET outcome=NULL,finished_at=NULL WHERE id=?").run(run);
+    if (problem === "uncommitted") store.raw().prepare("UPDATE run SET committed=0 WHERE id=?").run(run);
+    if (problem === "accepted") store.acceptProof(run, "alex", null, T0);
+    if (problem === "decision") store.saveDecision({ run, urgency: "blocking", recap: "r", question: "q", options: [{ id: "a", label: "a", consequence: "c", reversible: true }], recommendation: "a" }, T0);
+    if (problem === "truncated" || problem === "redacted") {
+      const log = store.artifactsFor(run).find(a => a.kind === "check-log")!;
+      store.raw().prepare(`UPDATE artifact SET ${problem}=1 WHERE id=?`).run(log.id);
+    }
+    if (problem === "tampered") {
+      const log = store.artifactsFor(run).find(a => a.kind === "check-log")!;
+      writeFileSync(join(evidenceRoot, log.key), "different output");
+    }
+    if (problem === "new-command") store.setVerifyCommand({ repo: REPO, command: "different-check", timeoutMs: 300_000, approvedBy: "alex" }, new Date(T0.getTime() + 1));
+    if (problem === "moved-head") store.recordOutcomeFacts(run, { headRevision: "c".repeat(40) });
+    if (problem === "moved-scope") store.raw().prepare("UPDATE run SET scope_digest=? WHERE id=?").run("different", run);
+    if (problem === "published") {
+      const id = store.createPublicationIntent({ run, taskRef, githubRepo: "a/b", remote: "origin", base: "main", head: "b-t-gate", headSha: "a".repeat(40), bodyHash: "", draft: true }, T0);
+      store.markPublicationPushed(id, T0);
+      store.markPublicationOpened(id, 1, "https://github.com/a/b/pull/1", T0);
+    }
+    expect(repairGate(run)).toEqual({ kind: "none" });
+    expect(store.repairChainFor(run)).toBeNull();
+  });
+
+  test("a publication intent that has never run does not strand failed-check repair", () => {
+    signMode({ repairAuto: true, repairMaxAttempts: 3 });
+    const run = failedGate();
+    store.createPublicationIntent({ run, taskRef: store.lookupRef("t-gate")!.id, githubRepo: "a/b", remote: "origin", base: "main", head: "b-t-gate", headSha: "a".repeat(40), bodyHash: "", draft: true }, T0);
+    expect(repairGate(run)).toMatchObject({ kind: "drafted" });
+  });
+
+  test.each([1, 3])("failed-check repairs share the existing attempt and no-progress stops (cap %i)", cap => {
+    signMode({ repairAuto: true, repairMaxAttempts: cap });
+    const first = repairGate(failedGate());
+    if (first.kind !== "drafted") throw Error("expected first repair");
+    const second = repairGate(failedGate(first.draftTaskId));
+    if (cap === 1) expect(second).toEqual({ kind: "stopped", reason: "repair-attempts-spent" });
+    else {
+      if (second.kind !== "drafted") throw Error("expected second repair");
+      expect(repairGate(failedGate(second.draftTaskId))).toEqual({ kind: "stopped", reason: "repair-no-progress" });
+    }
+  });
 
   test("short → draft → approve → attempt 2 resolves → chain closes", () => {
     seedTask("t-1");
