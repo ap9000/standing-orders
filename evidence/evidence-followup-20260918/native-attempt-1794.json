@@ -1,0 +1,7 @@
+{
+  "run": 1794,
+  "candidate": "b8fb573da48e90f19a787177bafc92be2a52701d",
+  "outcome": "interrupted",
+  "reason": "Operator stopped the gate after the native review-context reader showed that the compressed log was binary and therefore a gap for all criteria. Previous evidence and source records remain preserved. No complete passing gate is claimed.",
+  "correction": "Losslessly retain the identical full focused log as plain text. Product source and tests are unchanged. Check the actual installed review-context capture before another dispatch; a fresh scoped task starts at original verified base97fdd3280176a0ec8bdd1da3e3604ac46788d0cd."
+}

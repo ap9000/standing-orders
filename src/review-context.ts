@@ -1,3 +1,4 @@
+import { readObservationEvidence, OBSERVATION_CAPTURE, OBSERVATION_FILE, type ObservationEvidence } from "./observations.js";
 import { isVerificationReceipt } from "./verification-evidence.js";
 /**
  * Inherited review context (v51, contract handoff task 3): the bounded,
@@ -83,6 +84,7 @@ export function reviewContextManifest(inventory: ReviewContextInventory): string
   return JSON.stringify({
     ...inventory,
     ...(inventory.handoff === undefined ? {} : { handoff: { artifact: inventory.handoff.artifact, sha256: inventory.handoff.sha256, file: "REVIEW-BUILDER-NOTES.json" } }),
+    ...(inventory.observations === undefined ? {} : { observations: { artifact: inventory.observations.artifact, sha256: inventory.observations.sha256, file: OBSERVATION_FILE } }),
     format: "review-context-manifest-v1",
     items: inventory.items.map(({ content: _content, ...item }) => ({
       ...item, file: reviewContextFileName(item.id),
@@ -203,6 +205,7 @@ export type ReviewContextInventory = {
   /** Optional builder caveats, bound to the captured handoff, never evidence
    * that a criterion passed. Older inventories remain byte-compatible. */
   handoff?: { artifact: number; sha256: string; content: string };
+  observations?: ObservationEvidence;
   /** Tree identity is independent of whether content fits capture bounds. */
   identities?: ReviewContextIdentity[];
   bindings?: { run: number; sha256: string; candidate?: true }[];
@@ -263,7 +266,7 @@ export function reviewContextBindingOf(store: Store, runId: number, candidate = 
     task: taskId, head: run?.headRevision ?? null, base: run?.baseRevision ?? null, scopeDigest: run?.scopeDigest ?? null,
     currentScope: scope?.digest ?? null, termsProblem: scope?.termsProblem ?? null,
     revisionOf: ref?.revisionOf ?? null, revisionBrief: ref?.revisionBriefArtifact ?? null,
-    artifacts: store.artifactsFor(runId).filter(one => (CONTEXT_INPUT_KINDS.has(one.kind) && (!candidate || one.kind !== "review-context")) || isVerificationReceipt(one)),
+    artifacts: store.artifactsFor(runId).filter(one => (CONTEXT_INPUT_KINDS.has(one.kind) && (!candidate || one.kind !== "review-context")) || isVerificationReceipt(one) || one.capture === OBSERVATION_CAPTURE),
     reviews: candidate ? [] : store.criterionReviewsFor(runId),
     reviewerLineages: candidate ? [] : [...new Set(store.criterionReviewsFor(runId).map(one => one.reviewerRun))].map(id => historicalReviewerLineage(store, id)),
   };
@@ -272,6 +275,11 @@ export function reviewContextBindingOf(store: Store, runId: number, candidate = 
 
 /** Re-prove sealed context before spending and inside final ingestion. */
 export function reviewContextCustodyProblem(store: Store, root: string, inventory: ReviewContextInventory): string | null {
+  try {
+    const current = readObservationEvidence(store, root, inventory.run);
+    if (JSON.stringify(current) !== JSON.stringify(inventory.observations ?? null)) return "the focused observation inventory changed";
+  } catch { return "the focused observations no longer verify"; }
+
   if (inventory.handoff !== undefined) {
     const found = store.artifactsFor(inventory.run).filter(one => one.kind === "handoff");
     const artifact = found[0];
@@ -352,6 +360,11 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   if (!optionalStr(r["base"], 40)) return { ok: false, problem: "base must be a string or null" };
   const bindings = r["bindings"];
   const handoff = r["handoff"] as ReviewContextInventory["handoff"];
+  const observations = r["observations"] as ObservationEvidence | undefined;
+  if (observations !== undefined && (!observations || !Number.isSafeInteger(observations.artifact) || observations.artifact <= 0 ||
+      typeof observations.content !== "string" || Buffer.byteLength(observations.content) > 64 * 1024 ||
+      typeof observations.sha256 !== "string" || createHash("sha256").update(observations.content).digest("hex") !== observations.sha256)) return { ok: false, problem: "focused observations are malformed or do not match their hash" };
+
   if (handoff !== undefined && (handoff === null || !Number.isSafeInteger(handoff.artifact) || handoff.artifact <= 0 ||
     typeof handoff.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(handoff.sha256) || typeof handoff.content !== "string" ||
     Buffer.byteLength(handoff.content) > 64 * 1024 || createHash("sha256").update(handoff.content).digest("hex") !== handoff.sha256)) return { ok: false, problem: "builder notes are malformed or do not match their hash" };
@@ -516,6 +529,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     inventory: {
       schema: r["schema"],
       ...(handoff === undefined ? {} : { handoff }),
+      ...(observations === undefined ? {} : { observations }),
       ...(r["schema"] !== 1 ? { identities } : {}),
       ...(bindings === undefined ? {} : { bindings: bindings as { run: number; sha256: string }[] }),
       run: Number(r["run"]),
@@ -755,6 +769,8 @@ export async function deriveReviewContext(
   const gapAll = (reason: ContextGapReason, detail: string): void => {
     gaps.push({ reason, path: null, criteria: allIds, detail });
   };
+  try { const observations = readObservationEvidence(store, args.root, args.runId); if (observations) inventory.observations = observations; }
+  catch { gapAll("capture-failed", "the focused observations could not be verified"); }
   const handoffs = store.artifactsFor(args.runId).filter(one => one.kind === "handoff");
   if (handoffs.length === 1) {
     const artifact = handoffs[0]!;

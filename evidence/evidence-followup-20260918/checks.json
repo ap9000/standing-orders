@@ -1,0 +1,77 @@
+{
+  "sourceSha256": {
+    "src/builder.ts": "585e94e14273cf849d99e5141cf1d7fc6560866fb77fde6d4d62f27207a2d0e7",
+    "src/dispose.ts": "82ccc2d2b77f22b649153d1d2cfd09a09cb3193b182c07d91dddb8cff70c249f",
+    "src/evidence.ts": "339157f111d86d74266073b0820c82afbe25baefb5e55bb1a69c7580d1c9935a",
+    "src/operate.ts": "ed0772b01f46a5e8a2a642fcbcc5fe9744c265be6419d0453d242f8da98ce0cd",
+    "src/review-context.ts": "1adac0ea7ef1b19f7c928b35a1ade454e770edbcf62e4a9e0821f267aa2aefa9",
+    "src/reviewer.ts": "3e082df4d9d8fa9c1b4641fd6d8c6f5bdb0dc1e14f477c65ae8874631b327dc2",
+    "src/verification-evidence.ts": "ed6ae29476efb13e5e7010f7746aba1e5c5397e4616c15ea35c620ce02ece75a",
+    "src/observations.ts": "3ddc8e93c2eebc79ba6e1a9a700489f6cb78fc6b517b577849a9521040be1834",
+    "src/observations.test.ts": "0e1185f46e8f9191499525feba1db49e8ee41305db0c3bc22ce9d5338a15df34",
+    "src/unattended.test.ts": "0ce5bb60b2695266ed5cf6ed4d0aa7871cb099b4880a72400ff10c15a38bac6b",
+    "vitest.config.ts": "7fc7ba863cdf19eb3233b9160008bbcaec3a205c96a5131a4c9b1942c507027d"
+  },
+  "focusedTests": {
+    "log": "focused-checks.txt",
+    "logSha256": "7935a4d8aacf7b83c70355469ead5e93df17393e60bd263960009a378ec8754e",
+    "bytes": 10889
+  },
+  "checks": [
+    {
+      "command": "npm run typecheck",
+      "result": "passed"
+    },
+    {
+      "command": "npx vitest run src/builder.test.ts src/unattended.test.ts src/operate.test.ts --reporter=dot",
+      "result": "249 passed before the new native-loop regression was added"
+    },
+    {
+      "command": "npx vitest run src/observations.test.ts src/unattended.test.ts src/repair-loop.test.ts --reporter=dot",
+      "result": "59 passed; one new test initially failed because its empty-tick assertion expected success. The production flow had completed correctly. Fixed only that expectation and reran the affected case."
+    },
+    {
+      "command": "npx vitest run src/unattended.test.ts -t 'missing observation' --reporter=dot",
+      "result": "1 passed; 9 filtered by test-name selection, no source skips added"
+    },
+    {
+      "command": "npx vitest run src/mate-cli.test.ts src/mate-doors.test.ts --reporter=dot",
+      "result": "21 passed with existing spend defaults"
+    },
+    {
+      "command": "npm run typecheck",
+      "result": "Passed after the command-authority correction"
+    },
+    {
+      "command": "npx vitest run src/observations.test.ts src/unattended.test.ts -t 'test authority|missing observation' --reporter=dot",
+      "result": "2 passed;25 filtered by selection. New test rejects quoted text, substitutions, redirects, semicolons, alternate shell operators and incomplete chains. The whole native-loop case still passes."
+    },
+    {
+      "command": "npm run typecheck",
+      "result": "Passed after native-gate corrections"
+    },
+    {
+      "command": "npx vitest run src/observations.test.ts src/unattended.test.ts src/demo.test.ts --reporter=dot",
+      "result": "43 passed across all3 affected files. Added colored-output regression while preserving raw evidence. Limited new repository ownership guard to observation collection, preserving existing repair semantics."
+    },
+    {
+      "command": "npx vitest run src/observations.test.ts src/unattended.test.ts --reporter=dot",
+      "result": "Initial32-test run:29passed,3failed because macOS reports canonical /private/var paths for /var temporary snapshots. Canonicalized both paths without weakening file identity. Corrected run:32passed in2files, including four new test-selection cases and real native-loop regression."
+    },
+    {
+      "command": "npm run typecheck",
+      "result": "Passed on final literal-test-identity correction."
+    },
+    {
+      "command": "npm run typecheck",
+      "result": "Passed with Vitest maxWorkers4. Collector and native-loop source hashes are unchanged from the32 focused-test pass. Fresh full native gate remains required for the new scheduling configuration."
+    },
+    {
+      "command": "npm run typecheck; npx vitest run src/observations.test.ts src/unattended.test.ts src/repair-loop.test.ts src/gate-failure.test.ts --reporter=dot",
+      "result": "Typecheck and all76 tests in4 affected files passed after integrating main eac1fe0 (PR23). Preserves gate-failure classification and new planner/test-timeout changes; evidence follow-ups remain supported for existing goals. Vitest capped at4 files. No local full suite repeated."
+    }
+  ],
+  "scope": "Focused implementation checks. Native unchanged approved full command runs once on the final committed candidate; no claim of a local full-suite pass. Existing review-context/repair-loop131 tests also passed before repository identity guard; repair-loop rechecked above. No UI layout change.",
+  "priorEvidence": "native-attempt-1798-1799.json",
+  "currentBase": "eac1fe0f5bd2d1080ab5e6e6c0f332a3e19b440f"
+}

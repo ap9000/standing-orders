@@ -1,0 +1,9 @@
+{
+  "run": 1796,
+  "candidate": "24c2af772d527e18fab56d93c61ef80f278f1478",
+  "reviewer": 1797,
+  "result": "Native typecheck, 3541 tests and build passed; 23 existing skips. Review upheld c1/c3 and contradicted c2: a literal test name was passed as a regex and aggregate counts could accept another test. Original review and evidence remain unchanged.",
+  "correction": "Escape regex punctuation and require exactly one reported executed test with the requested literal title or full name and exact source path; retain the selected identity with raw output. Reject duplicates and suffix lookalikes.",
+  "reviewQuestion": "The operator checks prepared and native Git tree equality. Independent review assesses the signed behavior using native candidate source and gate; a builder assertion alone does not establish tree equality.",
+  "focusedVerification": "Updated checks.json records actual correction checks; fresh native gate and review still required."
+}

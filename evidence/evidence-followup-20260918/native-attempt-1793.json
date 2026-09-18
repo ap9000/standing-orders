@@ -1,0 +1,7 @@
+{
+  "run": 1793,
+  "candidate": "fd509f578d1cf32c66f855a89dd839c637713371",
+  "outcome": "interrupted",
+  "reason": "Operator stopped the in-progress gate after identifying quoted shell text could be mistaken for test-command authority. Historical attempt preserved; no passing gate or review claimed. Its bounded check log is truncated.",
+  "correction": "Validate every approved command segment as simple argv before recognizing npm test. Focused regression and native-loop case pass. Fresh corrective task must start from original verified base97fdd3280176a0ec8bdd1da3e3604ac46788d0cd, never this interrupted candidate."
+}

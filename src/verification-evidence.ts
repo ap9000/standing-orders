@@ -1,3 +1,4 @@
+import { observationBrief, readObservationEvidence } from "./observations.js";
 /** Machine verification receipts use the existing sealed artifact store (schema
  * 60). Verbose output is independently bounded; no agent-authored check claim
  * can create or replace this receipt. */
@@ -12,18 +13,19 @@ export const VERIFICATION_RECEIPT_CAPTURE = "machine verification receipt v1";
 export const REVIEW_GATE_NAME = "REVIEW-VERIFICATION.json";
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const binding = (a: Artifact) => ({ artifactId: a.id, sha256: a.sha256, bytesStored: a.bytesStored, bytesOriginal: a.bytesOriginal, truncated: a.truncated, redacted: a.redacted, captureStatus: a.captureStatus });
-export const isVerificationReceipt = (a: Artifact) => a.kind === "structured-output" && a.capture === VERIFICATION_RECEIPT_CAPTURE;
+export const isVerificationReceipt = (a: Artifact) => a.kind === "structured-output" && (a.capture === VERIFICATION_RECEIPT_CAPTURE || a.capture === "machine verification reuse v1");
 
-export function sealVerificationReceipt(store: Store, root: string, runId: number, head: string, command: VerifyCommand, result: VerifyCommandFacts, now: Date): void {
+export function sealVerificationReceipt(store: Store, root: string, runId: number, head: string, command: VerifyCommand, result: VerifyCommandFacts, now: Date, reusedFrom?: { run: number; digest: string }): void {
   const source = store.getRun(runId)!;
   const log = store.artifactsFor(runId).find(a => a.kind === "check-log");
   if (!log) throw new Error("Verification receipt requires its retained log");
   const raw = JSON.stringify({
-    version: 1, run: runId, head, base: source.baseRevision, scopeDigest: source.scopeDigest,
+    version: reusedFrom === undefined ? 1 : 2, run: runId, head, base: source.baseRevision, scopeDigest: source.scopeDigest,
+    ...(reusedFrom === undefined ? {} : { reusedFrom, executedHere: false }),
     command, result, log: binding(log),
   }, null, 1);
   const hits = scanForSecrets(raw);
-  storeEvidence(store, root, runId, "structured-output", "verification-receipt.json", Buffer.from(hits.length ? redactSecretLines(raw, hits) : raw), VERIFICATION_RECEIPT_CAPTURE, now, { captureStatus: "ok", redacted: hits.length > 0 });
+  storeEvidence(store, root, runId, "structured-output", "verification-receipt.json", Buffer.from(hits.length ? redactSecretLines(raw, hits) : raw), reusedFrom === undefined ? VERIFICATION_RECEIPT_CAPTURE : "machine verification reuse v1", now, { captureStatus: "ok", redacted: hits.length > 0 });
 }
 
 /** Read and bind existing evidence, never backfill historical receipts. A legacy
@@ -55,7 +57,22 @@ export function verificationEvidence(store: Store, root: string, runId: number):
     const sealed = readVerifiedArtifact(root, artifact);
     if (!sealed.ok) return fail("The verification receipt no longer verifies.");
     try { receipt = JSON.parse(sealed.content.toString("utf8")); } catch { return fail("The verification receipt cannot be read."); }
-    if (receipt?.version !== 1 || receipt.run !== runId || receipt.head !== source.headRevision || receipt.base !== source.baseRevision || receipt.scopeDigest !== source.scopeDigest || JSON.stringify(receipt.command) !== JSON.stringify(command) || JSON.stringify(receipt.log) !== JSON.stringify(binding(log))) return fail("The candidate, approved command or retained log changed since verification.");
+    if ((receipt?.version !== 1 && receipt?.version !== 2) || receipt.run !== runId || receipt.head !== source.headRevision || receipt.base !== source.baseRevision || receipt.scopeDigest !== source.scopeDigest || JSON.stringify(receipt.command) !== JSON.stringify(command) || JSON.stringify(receipt.log) !== JSON.stringify(binding(log))) return fail("The candidate, approved command or retained log changed since verification.");
+    if (receipt.version === 2) {
+      try {
+      const brief = observationBrief(store, root, source.taskRef);
+      const reused = receipt.reusedFrom;
+      if (!brief || !readObservationEvidence(store, root, runId) || !reused || reused.run !== brief.sourceRun || reused.run >= runId || reused.digest !== brief.gateDigest ||
+          source.baseRevision !== brief.head || source.headRevision !== brief.head || receipt.executedHere !== false) return fail("The reused gate is not bound to an unchanged observation follow-up.");
+      const original = verificationEvidence(store, root, reused.run);
+      if (!original.ok || !original.bytes || original.digest !== reused.digest) return fail("The original passing gate no longer verifies.");
+      const previous = JSON.parse(original.bytes);
+      const originalLog = store.getArtifact(previous.log.artifactId);
+      if (previous.head !== source.headRevision || previous.result.exitCode !== 0 || JSON.stringify(previous.command) !== JSON.stringify(command) ||
+          JSON.stringify(previous.result) !== JSON.stringify(receipt.result) || originalLog?.sha256 !== log.sha256 ||
+          originalLog.bytesOriginal !== log.bytesOriginal || originalLog.redacted !== log.redacted || originalLog.truncated !== log.truncated) return fail("The reused gate's candidate, command, result or copied log changed.");
+      } catch { return fail("The reused gate or its observations no longer verify."); }
+    } else if (receipt.reusedFrom !== undefined) return fail("The gate reuse receipt has an unsupported version.");
     const result = receipt.result;
     if (result?.configured !== true || typeof result.ran !== "boolean" || (result.ran ? !Number.isInteger(result.exitCode) || result.exitCode < 0 || result.exitCode > 255 : result.attemptFailed !== true)) return fail("The machine verification result is malformed.");
     if (verified && (!result.ran || result.exitCode !== 0)) return fail("The passing machine verdict disagrees with its verification receipt.");
@@ -144,4 +161,28 @@ export function assessmentFromSavedEvidence(store: Store, root: string, runId: n
       verifyCommand: receipt.result, verificationCommand: receipt.command.command, screenshots: [],
       approvedCriteria: scope.acceptance, reviewContext: parsedContext.inventory.coverage });
   } catch { return null; }
+}
+
+/** Reuse is exclusive to a machine-authored observation revision, with its
+ * own current approval and complete new observations. Never synthesize a pass. */
+export function reuseObservationVerification(store: Store, root: string, runId: number, now: Date): VerifyCommandFacts | null {
+  const run = store.getRun(runId);
+  if (!run) throw Error("The observation run is missing.");
+  const brief = observationBrief(store, root, run.taskRef);
+  if (!brief) return null;
+  const scope = store.getScope(store.externalIdFor(run.taskRef)!);
+  if (!scope || scope.digest !== run.scopeDigest || scope.approvedDigest !== scope.digest || run.baseRevision !== brief.head || run.headRevision !== brief.head ||
+      !readObservationEvidence(store, root, runId)) throw Error("Only complete observations for the unchanged approved candidate can reuse its gate.");
+  const original = verificationEvidence(store, root, brief.sourceRun);
+  if (!original.ok || !original.bytes || original.digest !== brief.gateDigest) throw Error("The original passing gate is unavailable or changed.");
+  const receipt = JSON.parse(original.bytes), log = store.getArtifact(receipt.log.artifactId);
+  if (!log || receipt.head !== brief.head || receipt.result?.ran !== true || receipt.result.exitCode !== 0) throw Error("The source gate did not pass this candidate.");
+  const read = readVerifiedArtifact(root, log);
+  if (!read.ok) throw Error("The original check log no longer verifies.");
+  if (store.artifactsFor(runId).some(a => a.kind === "check-log" || isVerificationReceipt(a))) throw Error("This attempt already has a gate; it cannot be replaced.");
+  storeEvidence(store, root, runId, "check-log", "check-log.txt", read.content, `Reused unchanged passing checks from run #${brief.sourceRun}; no full command executed in this attempt`, now,
+    { captureStatus: "ok", redacted: log.redacted, sourceBytesOriginal: log.bytesOriginal });
+  sealVerificationReceipt(store, root, runId, brief.head, receipt.command, receipt.result, now, { run: brief.sourceRun, digest: brief.gateDigest });
+  store.addRunNote(runId, "Standing Orders", `Reused the passing project checks from run #${brief.sourceRun} for the unchanged candidate. This attempt collected only the missing focused observations.`, now);
+  return receipt.result as VerifyCommandFacts;
 }

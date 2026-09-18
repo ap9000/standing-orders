@@ -132,6 +132,7 @@ export function looksLikeProtocolFile(name: string): boolean {
       name.startsWith(REPORT_PREFIX) ||
       name.startsWith(PROOF_PREFIX) ||
       name.startsWith(RUBRIC_PREFIX) ||
+      name === "STANDING-ORDERS-OBSERVATIONS.json" ||
       name.startsWith(PROGRESS_PREFIX) ||
       name.startsWith(PROPOSAL_PREFIX) ||
       name.startsWith("NIGHTORDERS-")) &&
