@@ -1,0 +1,73 @@
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+> standing-orders@0.4.3 test
+> vitest run --run --reporter=dot
+ RUN  v4.1.10 /private/tmp/claude-501/-Users-alekseypelletier-Documents-standing-orders/9cb8a898-caa5-4471-bd56-7df17af760ba/scratchpad/harness
+·repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-wJncKU/project
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+up: stopped cleanly — 1 pass(es), 0 with work. Run `standing-orders up` anywhere on this machine to reconnect every saved project.
+···········stderr | src/desktop-update.test.ts > Stop still disables automatic recovery when its intent cannot be saved
+The update stop request could not be recorded, so automatic update recovery was disabled. Preserve the update files and check Update status before restarting.
+········repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-T3XLp0/project
+·watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·····up: stopped cleanly — 1 pass(es), 0 with work. Run `standing-orders up` anywhere on this machine to reconnect every saved project.
+repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-T3XLp0/project
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+···········up: stopped cleanly — 1 pass(es), 0 with work. Run `standing-orders up` anywhere on this machine to reconnect every saved project.
+················································repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-IZPZ6P/project
+projects    /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-IZPZ6P
+·watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+························up: stopped cleanly — 1 pass(es), 0 with work. Run `standing-orders up` anywhere on this machine to reconnect every saved project.
+·····repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-IZPZ6P/project
+projects    /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-IZPZ6P
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·····up: stopped cleanly — 1 pass(es), 0 with work. Run `standing-orders up` anywhere on this machine to reconnect every saved project.
+··················································repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-hKJOZa/project
+······················································································repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-XTFTEf/project
+··············································repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-cVYsP5/project
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·······················up: stopped cleanly — 1 pass(es), 0 with work. Run `standing-orders up` anywhere on this machine to reconnect every saved project.
+··············································repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-CupLWN/project
+projects    /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-CupLWN
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+···[second-project] watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+[second-project] builder connected — queued work can start
+·····················up: stopped cleanly — 2 pass(es), 0 with work. Run `standing-orders up` anywhere on this machine to reconnect every saved project.
+·repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-d2bYgw/project
+·watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·······················up: stopped cleanly — 1 pass(es), 0 with work. Run `standing-orders up` anywhere on this machine to reconnect every saved project.
+·····repository  /private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/so-up-6yZuYJ/project
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+········································up: stopped cleanly — 1 pass(es), 0 with work. Run `standing-orders up` anywhere on this machine to reconnect every saved project.
+···································stdout | src/provider.test.ts > the historical Telegram delivery manifest > scripts/delivery-manifest-check.mjs proves all 23 paths, every hash and the digest
+delivery-manifest-check: docs/TELEGRAM_DELIVERY_CANDIDATE_2026-09-15.json lists all 23 src/ paths changed in ba101e6..8217f55; every sha256 matches 8217f55 bytes and sourceDigest recomputes
+········stdout | src/containment-windows.test.ts > native containment (Windows Job Object) > the facility is reported truthfully — and expected where CI runs Windows
+native containment (job object): not win32 (darwin) — skipped here
+·············································stdout | src/containment-native.test.ts > native containment (Linux, delegated cgroup v2) > the facility is reported truthfully — and expected where CI delegated one
+native containment: not linux (darwin) — the native tests skip here
+·····················································································watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·watch: pass 1 did work (2026-09-18T22:46:36.409Z)
+watch: pass 2 did work (2026-09-18T22:46:36.829Z)
+·········watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·watch: pass 1 did work (2026-09-18T22:46:41.370Z)
+·watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+watch: reconciliation failed — simulated unavailable recovery store; new work is paused until a recovery pass succeeds
+watch: reconciliation recovered — new work may resume
+··watch: pass 1 did work (2026-09-18T22:46:42.361Z)
+·watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+watch: reconciliation failed — simulated unavailable recovery store; new work is paused until a recovery pass succeeds
+·········watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+·watch: pass 1 did work (2026-09-18T22:46:48.599Z)
+·····Recovered 1 claim(s) from the previous watch (inc-dead…) before dispatching anything.
+watch: containment: observed (observed) — macOS has no supported cgroup or Job Object equivalent (kqueue NOTE_TRACK/NOTE_CHILD have been unsupported since 10.5; launchd AbandonProcessGroup covers only a process group) — containment stays observational here; for native containment run this runner on a Linux VM or Linux runner with a delegated cgroup v2 (or on Windows)
+watch: pass 1 did work (2026-09-18T22:46:51.823Z)
+ Test Files  191 passed (191)
+      Tests  3532 passed | 23 skipped (3555)
+   Start at  15:44:25
+   Duration  161.04s (transform 55.70s, setup 4.95s, import 149.22s, tests 2455.92s, environment 866ms)
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+real 163.39
+user 456.12
+sys 428.56
+exit=0

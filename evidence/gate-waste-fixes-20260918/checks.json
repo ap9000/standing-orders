@@ -1,0 +1,48 @@
+{
+ "candidateBase": "97fdd3280176a0ec8bdd1da3e3604ac46788d0cd",
+ "mergedAs": "eac1fe0",
+ "sourceSha256": {
+  "docs/PROGRESS.md": "1da8dde49c11af833f3248471c09d697629f4d159fe4064b7d14f01552fc4c11",
+  "evidence/gate-waste-fixes-20260918/checks.txt": "908dd70550ec320e12f2e86ca99e53f67bc823d15048e7c64945033f03909e83",
+  "evidence/gate-waste-fixes-20260918/plan.md": "49bdbfc8ba1933c18fcbac06b05bad9762d9e42175f34288ed721ab2cb55f2b2",
+  "src/dispose.ts": "4c606214efd33f1904362eb1e04f623948d8057aa3cfd50a459ff13cb5b21b28",
+  "src/gate-failure.test.ts": "274d7ca5715bc0c9ae41cda87e00d0a0edb04b004d34b4e27318de288b6424d5",
+  "src/gate-failure.ts": "3a505ecc820a21de82bbdabc77377034c931d91857300a434227475943add840",
+  "src/planner.ts": "a9065c5558002ec8196496fe036145e8aa2c3354b4acf85ec4e017130456aa44",
+  "src/project-learning.test.ts": "608a21bd7a2b232a42903f9c9c3f8f3ee11dd3ca9eee4512f046a9f2368277fd",
+  "src/repair-loop.test.ts": "a8c568b94fa1f205e4ff18f2049a6de48433827146f9d40819d99f105bcf980a",
+  "vitest.config.ts": "ce3579d276d8fb769326de01d29d6b87b1b64bc749a53b9dffe300813b0d3d0d"
+ },
+ "checks": [
+  {
+   "command": "npm run typecheck && npm test -- --run --reporter=dot && npm run build",
+   "where": "clean worktree at origin/main eac1fe0 after PR 23 merged",
+   "exitCode": 0,
+   "summary": [
+    "Test Files  191 passed (191)",
+    "Tests  3532 passed | 23 skipped (3555)",
+    "Duration  161.04s (transform 55.70s, setup 4.95s, import 149.22s, tests 2455.92s, environment 866ms)",
+    "real 163.39",
+    "exit=0"
+   ],
+   "log": "checks.txt"
+  },
+  {
+   "command": "npx vitest run --reporter=dot src/gate-failure.test.ts src/repair-loop.test.ts src/planner.test.ts src/prompt.test.ts",
+   "exitCode": 0,
+   "summary": [
+    "4 files, 76 tests passed"
+   ]
+  },
+  {
+   "command": "GitHub Actions on PR 23",
+   "exitCode": 0,
+   "summary": [
+    "8 of 8 jobs passed"
+   ]
+  }
+ ],
+ "planningModel": "claude-fable-5-1",
+ "implementationModel": "claude-fable-5-1",
+ "review": "Pending one native independent assessment under approved command 9 (digest b493d5e45201512f)."
+}
