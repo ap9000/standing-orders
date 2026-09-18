@@ -4,6 +4,8 @@
 import { createHash } from "node:crypto";
 import type { Artifact, Store, VerifyCommand } from "./store.js";
 import type { VerifyCommandFacts } from "./proof.js";
+import { adjudicate, type AdjudicateResult } from "./proof.js";
+import { parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
 import { readVerifiedArtifact, storeEvidence, scanForSecrets, redactSecretLines } from "./evidence.js";
 
 export const VERIFICATION_RECEIPT_CAPTURE = "machine verification receipt v1";
@@ -101,4 +103,45 @@ export function failedVerificationEvidence(store: Store, root: string, runId: nu
   const read = readVerifiedArtifact(root, artifact);
   if (!read.ok) return { kind: "unavailable", problem: "The failed-check log no longer verifies." };
   return { kind: "failed", digest: verified.digest, receipt: verified.bytes, log: read.content.toString("utf8") };
+}
+
+/** A fresh review may assess a pre-upgrade result which stopped solely because
+ * no builder proof was written. Read original sealed facts; never run checks,
+ * backfill receipts, rewrite artifacts, or reuse a different candidate's gate.
+ * Called inside review ingestion, after its exact bindings have been proved. */
+export function assessmentFromSavedEvidence(store: Store, root: string, runId: number): AdjudicateResult | null {
+  const previous = store.proofVerdictFor(runId);
+  if (previous?.verdict !== "short" || previous.reasons.length !== 1 || previous.reasons[0] !== "no proof was written" ||
+    previous.matrix.some(row => row.review !== null || row.assessment !== undefined)) return null;
+  const source = store.getRun(runId);
+  if (!source?.headRevision || !source.baseRevision) return null;
+  const task = store.externalIdFor(source.taskRef);
+  const scope = task === null ? null : store.getScope(task);
+  if (!scope || scope.digest !== source.scopeDigest || scope.acceptance.length === 0) return null;
+  const artifacts = store.artifactsFor(runId);
+  if (artifacts.some(one => one.kind === "proof")) return null;
+  const readOne = (kind: Artifact["kind"]) => {
+    const found = artifacts.filter(one => one.kind === kind);
+    if (found.length !== 1 || found[0]!.truncated || found[0]!.redacted || found[0]!.captureStatus === "failed") return null;
+    const read = readVerifiedArtifact(root, found[0]!);
+    return read.ok ? read.content.toString("utf8") : null;
+  };
+  const diff = readOne("terminal-diff"), stat = readOne("diff-stat"), handoff = readOne("handoff"), context = readOne("review-context");
+  if (diff === null || stat === null || handoff === null || context === null) return null;
+  const parsedContext = parseReviewContext(context);
+  if (!parsedContext.ok || parsedContext.inventory.run !== runId || reviewContextCustodyProblem(store, root, parsedContext.inventory) !== null) return null;
+  const gate = verificationEvidence(store, root, runId);
+  if (!gate.ok || gate.bytes === null) return null;
+  try {
+    const inventory = JSON.parse(stat), receipt = JSON.parse(gate.bytes);
+    const base = source.branch ? store.firstBuilderBase(source.taskRef, source.branch) ?? source.baseRevision : source.baseRevision;
+    if (inventory.schema !== 1 || inventory.head !== source.headRevision || inventory.base !== base || inventory.filesTruncated !== false ||
+      !Array.isArray(inventory.files) || inventory.fileCount !== inventory.files.length || !inventory.files.every((one: { path?: unknown }) => typeof one?.path === "string") ||
+      new Set(inventory.files.map((one: { path: string }) => one.path)).size !== inventory.files.length) return null;
+    return adjudicate({ directAssessment: true, proofArtifactPresent: false, proofParse: null,
+      handoffPresent: true, terminalDiffPresent: true, terminalDiffCaptureStatus: "ok",
+      diffStat: { captured: true, truncated: false, paths: new Set(inventory.files.map((one: { path: string }) => one.path)) },
+      verifyCommand: receipt.result, verificationCommand: receipt.command.command, screenshots: [],
+      approvedCriteria: scope.acceptance, reviewContext: parsedContext.inventory.coverage });
+  } catch { return null; }
 }

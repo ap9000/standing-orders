@@ -894,3 +894,58 @@ describe("verdictWords and dispatchStatusToken", () => {
     expect(tokens).toEqual(["complete-verified", "complete-with-evidence", "needs-verification", "proof-refuted"]);
   });
 });
+
+describe("direct assessment of captured evidence", () => {
+  const captured = (extra: Partial<AdjudicateInput> = {}): AdjudicateInput => ({
+    directAssessment: true, proofArtifactPresent: false, proofParse: null,
+    handoffPresent: true, terminalDiffPresent: true, terminalDiffCaptureStatus: "ok",
+    diffStat: { captured: true, truncated: false, paths: new Set(["src/save.ts"]) },
+    verifyCommand: { configured: true, ran: true, exitCode: 0 }, verificationCommand: "npm test",
+    screenshots: [], approvedCriteria: [{ id: "c1", statement: "Saved flags survive reload", evidence: ["check", "changed-path"] }], ...extra,
+  });
+  const judge = (base: AdjudicateResult, judgement: CriterionJudgement["judgement"] = "upholds") => foldReview(base, [{ id: "c1", judgement, author: "reviewer", note: "src/save.ts and its reload test show the outcome" }]);
+
+  test("green checks await goal assessment even under default quality; only the independent assessment completes it", () => {
+    const before = adjudicate(captured());
+    expect(before).toMatchObject({ verdict: "short", machineVerdict: "verified", matrix: [{ state: "missing", assessment: { evidenceState: "pass" }, review: null }] });
+    expect(passFraction(before.matrix)).toEqual({ passed: 0, total: 1 });
+    expect(semanticCoverage(before.matrix, "default")).toMatchObject({ required: true, satisfied: null });
+    const after = judge(before);
+    expect(after).toMatchObject({ verdict: "verified", machineVerdict: "verified", matrix: [{ state: "pass" }] });
+    expect(semanticCoverage(after.matrix, "default")).toMatchObject({ required: true, satisfied: true });
+    expect(judge(before, "contradicts").verdict).toBe("refuted");
+    expect(judge(before, "cannot-tell").verdict).toBe("short");
+  });
+
+  test.each([
+    { verifyCommand: { configured: true, ran: true, exitCode: 1 } },
+    { verifyCommand: { configured: true, ran: false, attemptFailed: true, failure: "timed-out" } },
+    { handoffPresent: false }, { terminalDiffCaptureStatus: "failed" },
+    { diffStat: { captured: true, truncated: true, paths: new Set(["src/save.ts"]) } },
+  ] as Partial<AdjudicateInput>[])("a review cannot override failed or incomplete machine evidence: %j", extra => {
+    const result = judge(adjudicate(captured(extra)));
+    expect(["short", "refuted"]).toContain(result.verdict);
+    expect(["short", "refuted"]).toContain(result.machineVerdict);
+  });
+
+  test.each(["screenshot", "manual-review"] as const)("required %s remains unresolved even with an upholding reviewer", kind => {
+    const result = judge(adjudicate(captured({ approvedCriteria: [{ id: "c1", statement: "Inspect the result", evidence: [kind] }] })));
+    expect(result.verdict).toBe("short");
+    expect(result.matrix[0]?.state).toBe(kind === "screenshot" ? "missing" : "manual-review");
+    expect(result.reasons.join(" ")).toContain(kind === "screenshot" ? "captured screenshot" : "an operator must accept");
+  });
+
+  test("a bounded screenshot-only inventory needs no duplicated criterion or changed-path claims", () => {
+    const input = captured({ proofArtifactPresent: true, proofParse: parse({ version: 1, screenshots: [{ path: "screen.png", caption: "Saved result" }] }),
+      screenshots: [{ path: "screen.png", ok: true, bytes: 10000, dims: { width: 800, height: 600 } }],
+      approvedCriteria: [{ id: "c1", statement: "The result is readable", evidence: ["screenshot"] }] });
+    expect(judge(adjudicate(input)).verdict).toBe("verified");
+    expect(adjudicate({ ...input, proofParse: parseProof("malformed") })).toMatchObject({ verdict: "short", reasons: [expect.stringContaining("malformed")] });
+  });
+
+  test("a complete empty diff can be assessed; it does not claim a change or a satisfied goal", () => {
+    const result = adjudicate(captured({ diffStat: { captured: true, truncated: false, paths: new Set() } }));
+    expect(result).toMatchObject({ verdict: "short", machineVerdict: "verified" });
+    expect(result.matrix[0]?.answered).toEqual([{ kind: "check", ref: "npm test" }]);
+  });
+});

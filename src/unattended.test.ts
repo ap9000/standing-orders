@@ -382,8 +382,9 @@ describe("v40: a drafted, unapproved repair moves the idle-spend invariant not a
   });
   // Synthetic providers, real CLI dispatch, Git worktrees, verification command,
   // receipts and revision queue. This tests the product loop without model spend.
-  test.each(["fix", "no-change", "changed-evidence"])("failed gate → automatic repair → fresh gate → one review (%s)", scenario => {
-    const noChange = scenario === "no-change";
+  test.each(["fix", "no-change", "changed-evidence", "no-proof-fix", "no-proof-no-change", "evidence-missing", "goal-fails"])("failed gate → automatic repair → fresh gate → one review (%s)", scenario => {
+    const direct = ["no-proof-fix", "no-proof-no-change", "evidence-missing", "goal-fails"].includes(scenario);
+    const noChange = ["no-change", "no-proof-no-change", "evidence-missing", "goal-fails"].includes(scenario);
     return (async () => {
       const { addApprover, propose, approve } = await import("./scope.js");
       const { presetTerms, modeTermsJson, modeDigestOf } = await import("./modes.js");
@@ -405,8 +406,8 @@ if (!passed) { console.error('balance probe timed out; 163 passed, 1 failed'); p
       store.createTask({ id: "t-check", title: "Repair saved state" }, T0);
       const ref = store.refFor("built-in", "t-check");
       store.placeTask(ref.id, repo);
-      const statement = "The project check succeeds";
-      propose(store, { taskId: "t-check", goal: "Fix value.txt and verify it", touches: ["value.txt"], acceptance: [{ id: "c1", statement, how: null, evidence: ["check"] }], now: T0 });
+      const statement = direct ? "Saved values are correct after reload" : "The project check succeeds";
+      propose(store, { taskId: "t-check", goal: "Fix value.txt and verify it", touches: ["value.txt"], acceptance: [{ id: "c1", statement, how: null, evidence: scenario === "evidence-missing" ? ["check", "screenshot"] : ["check"] }], now: T0 });
       expect(approve(store, "t-check", "alex", T0, store.getScope("t-check")!.digest, who.token).ok).toBe(true);
       store.setVerifyCommand({ repo, command: "node check.cjs", timeoutMs: 5000, approvedBy: "alex" }, T0);
       const terms = { ...presetTerms("standard", at(60).toISOString()), repairAuto: true, repairMaxAttempts: 3, reviewAuto: true };
@@ -418,9 +419,19 @@ if (!passed) { console.error('balance probe timed out; 163 passed, 1 failed'); p
         const prompt = args[args.indexOf("-p") + 1]!;
         if (prompt.includes("You are a REVIEWER")) {
           reviews++;
+          if (direct) {
+            const state = openStore(db);
+            const pending = state.runsFor(state.lookupRef("t-check-fix-1")!.id).find(r => r.role === "builder")!;
+            expect(state.proofVerdictFor(pending.id)).toMatchObject({ verdict: "short", machineVerdict: "verified", matrix: [{ state: "missing" }] });
+            expect(state.repairChainForRoot("t-check")[0]?.outcome).toBe("drafted");
+            expect(state.artifactsFor(pending.id).some(a => a.kind === "proof")).toBe(false);
+            state.close();
+            expect(await readFile(join(cwd, "REVIEW-BUILDER-NOTES.json"), "utf8")).toContain("Synthetic recovery result");
+            expect(prompt).toContain("name the observation needed next");
+          }
           const receipt = JSON.parse(await readFile(join(cwd, "REVIEW-VERIFICATION.json"), "utf8"));
           expect(receipt.result).toMatchObject({ ran: true, exitCode: 0 });
-          return { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "REVIEW-VERIFICATION.json and REVIEW-CHECK-LOG.txt show the exact candidate passed" }], learningAssessment: { decision: "none", reason: "Synthetic loop already covered by this regression" }, learning: [] }) }) };
+          return { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: scenario === "goal-fails" ? "contradicts" : scenario === "evidence-missing" ? "cannot-tell" : "upholds", note: scenario === "goal-fails" ? "REVIEW-CONTEXT-ctx-1.txt retains a broken value despite green checks" : scenario === "evidence-missing" ? "Capture the saved result after reloading at a phone viewport" : "REVIEW-VERIFICATION.json and REVIEW-CHECK-LOG.txt show the exact candidate passed" }], learningAssessment: { decision: "none", reason: "Synthetic loop already covered by this regression" }, learning: [] }) }) };
         }
         builds++;
         const repairing = builds === 2;
@@ -434,7 +445,7 @@ if (!passed) { console.error('balance probe timed out; 163 passed, 1 failed'); p
         const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)![0];
         const proof = /STANDING-ORDERS-PROOF-[0-9a-f]{16}\.json/.exec(prompt)![0];
         await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: unchanged ? "no-change" : "completed", conclusion: "Synthetic recovery result" }));
-        await writeFile(join(cwd, proof), JSON.stringify({ version: 1, criteria: [{ id: "c1", statement, verdict: "pending-verification", how: "Awaiting the native check", evidence: [{ kind: "check", ref: "node --check check.cjs" }] }], checks: [{ command: "node --check check.cjs", exitCode: 0, summary: "Syntax checked" }], changed: unchanged ? [] : ["value.txt"], caveats: [], screenshots: [] }));
+        if (!direct) await writeFile(join(cwd, proof), JSON.stringify({ version: 1, criteria: [{ id: "c1", statement, verdict: "pending-verification", how: "Awaiting the native check", evidence: [{ kind: "check", ref: "node --check check.cjs" }] }], checks: [{ command: "node --check check.cjs", exitCode: 0, summary: "Syntax checked" }], changed: unchanged ? [] : ["value.txt"], caveats: [], screenshots: [] }));
         return { ...OK, stdout: JSON.stringify({ result: "Synthetic recovery result" }) };
       };
       const tick = async (now: Date) => {
@@ -468,8 +479,13 @@ if (!passed) { console.error('balance probe timed out; 163 passed, 1 failed'); p
       await tick(at(2));
       const final = openStore(db);
       const result = final.runsFor(final.lookupRef("t-check-fix-1")!.id).find(r => r.role === "builder")!;
-      expect(final.proofVerdictFor(result.id)?.verdict).toBe("verified");
-      expect(final.repairChainForRoot("t-check")[0]?.outcome).toBe("resolved");
+      expect(final.proofVerdictFor(result.id)?.verdict).toBe(scenario === "goal-fails" ? "refuted" : scenario === "evidence-missing" ? "short" : "verified");
+      expect(final.repairChainForRoot("t-check")[0]?.outcome).toBe(["goal-fails", "evidence-missing"].includes(scenario) ? "drafted" : "resolved");
+      if (scenario === "evidence-missing") {
+        expect(final.repairChainForRoot("t-check")).toHaveLength(1);
+        expect(final.raw().prepare("SELECT body FROM notification WHERE dedupe_key = ?").get(`assessment-evidence:${result.id}`)).toMatchObject({ body: expect.stringContaining("phone viewport") });
+      }
+      if (scenario === "goal-fails") expect(final.repairChainForRoot("t-check")).toHaveLength(2);
       expect(final.openReviewRequests()).toHaveLength(0);
       expect(final.reviewRetryStateOf(result.id)?.state).toBe("succeeded");
       expect(final.proofVerdictFor(failedRun)?.verdict).toBe("refuted");

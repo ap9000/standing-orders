@@ -1,0 +1,171 @@
+{
+  "source": {
+    "src/serve.ts": "fdb64737be3dbb765dcecc06628f65effdd59a9c1836d3d4062e2ca2147571f8",
+    "src/workspace-ui.ts": "7cffcc3bc7606cd31b66f950bf6fa5612cd6aa8276f40ed28adc31806b18e838"
+  },
+  "checks": [
+    {
+      "name": "phone pending",
+      "ok": true,
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "overflow": false,
+      "buttons": [
+        {
+          "text": "Review goal",
+          "height": 44,
+          "nowrap": true
+        },
+        {
+          "text": "Request changes",
+          "height": 44,
+          "nowrap": true
+        },
+        {
+          "text": "Save for later",
+          "height": 44,
+          "nowrap": true
+        }
+      ]
+    },
+    {
+      "name": "phone missing",
+      "ok": true,
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "overflow": false,
+      "buttons": [
+        {
+          "text": "Review evidence",
+          "height": 44,
+          "nowrap": true
+        },
+        {
+          "text": "Request changes",
+          "height": 44,
+          "nowrap": true
+        },
+        {
+          "text": "Save for later",
+          "height": 44,
+          "nowrap": true
+        }
+      ]
+    },
+    {
+      "name": "phone empty",
+      "ok": true,
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "overflow": false,
+      "buttons": []
+    },
+    {
+      "name": "desktop pending",
+      "ok": true,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "overflow": false,
+      "buttons": [
+        {
+          "text": "Review goal",
+          "height": 40,
+          "nowrap": true
+        },
+        {
+          "text": "Request changes",
+          "height": 44,
+          "nowrap": true
+        },
+        {
+          "text": "Save for later",
+          "height": 44,
+          "nowrap": true
+        }
+      ]
+    },
+    {
+      "name": "desktop missing",
+      "ok": true,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "overflow": false,
+      "buttons": [
+        {
+          "text": "Review evidence",
+          "height": 40,
+          "nowrap": true
+        },
+        {
+          "text": "Request changes",
+          "height": 44,
+          "nowrap": true
+        },
+        {
+          "text": "Save for later",
+          "height": 44,
+          "nowrap": true
+        }
+      ]
+    },
+    {
+      "name": "desktop empty",
+      "ok": true,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "overflow": false,
+      "buttons": []
+    },
+    {
+      "name": "desktop open result, inspect changes, leave feedback, create revision",
+      "ok": true,
+      "result": "Unapproved revision created through browser form. Later copy-only fixes rechecked in visual states above."
+    },
+    {
+      "name": "phone open result, inspect changes, leave feedback, create revision",
+      "ok": true,
+      "result": "Unapproved revision created through browser form. Later copy-only fixes rechecked in visual states above."
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "desktop-pending.png",
+      "caption": "Synthetic desktop pending state. Browser viewport, not physical-device acceptance."
+    },
+    {
+      "path": "desktop-missing.png",
+      "caption": "Synthetic desktop missing state. Browser viewport, not physical-device acceptance."
+    },
+    {
+      "path": "desktop-empty.png",
+      "caption": "Synthetic desktop empty state. Browser viewport, not physical-device acceptance."
+    },
+    {
+      "path": "phone-pending.png",
+      "caption": "Synthetic phone pending state. Browser viewport, not physical-device acceptance."
+    },
+    {
+      "path": "phone-missing.png",
+      "caption": "Synthetic phone missing state. Browser viewport, not physical-device acceptance."
+    },
+    {
+      "path": "phone-empty.png",
+      "caption": "Synthetic phone empty state. Browser viewport, not physical-device acceptance."
+    }
+  ],
+  "inspection": "Captured after transitions and font readiness; all six images inspected. Requirement and evidence-request text readable, no horizontal overflow, keyboard tab navigation worked. Phone actions 44px, short labels unbroken. Full-page captures show the fixed bottom navigation at the viewport edge; feedback controls scroll into view and both journeys submitted successfully.",
+  "simplicity": "Before: pending review was mislabeled as a review conflict and long evidence requests repeated four times. After: Ready for goal review / More evidence needed, Requirements count, one primary action, one full reviewer request under its requirement. Optional empty sections removed. Actual check failures, missing evidence and human acceptance remain distinct.",
+  "limits": "Synthetic Chrome desktop 1440x1000 and phone 390x844. No physical-phone or live-chat delivery claim."
+}

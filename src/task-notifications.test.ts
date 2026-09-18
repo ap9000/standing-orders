@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { isLifecycleNotification, LIFECYCLE_KEY_PREFIX, openStore, type Notification, type Store } from "./store.js";
 import { addApprover } from "./scope.js";
 import { register } from "./runner.js";
+import { adjudicate } from "./proof.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { acquire } from "./claim.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
@@ -538,6 +539,24 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(view()).toContain("Evidence needs attention");
     expect(view()).toContain("1 requirement needs better evidence.");
     expect(view()).toContain("Human acceptance recorded");
+  });
+
+  test("direct assessment shows passed checks and pending review without inventing a check failure", () => {
+    const { run } = progressAttempt();
+    store.finishRun(run, { outcome: "built", committed: true, now });
+    const proof = adjudicate({ directAssessment: true, proofArtifactPresent: false, proofParse: null, handoffPresent: true,
+      terminalDiffPresent: true, terminalDiffCaptureStatus: "ok", diffStat: { captured: true, truncated: false, paths: new Set(["src/save.ts"]) },
+      verifyCommand: { configured: true, ran: true, exitCode: 0 }, screenshots: [],
+      approvedCriteria: [{ id: "c1", statement: "Saved values survive reload", evidence: ["check"] }] });
+    store.saveProofVerdict(run, proof.verdict, proof.reasons, now, proof.matrix, proof.machineVerdict);
+    const card = telegramProgressCard(store, store.getRun(run)!, "clear-acceptance", ALPHA, now);
+    expect(card.text).toContain("Ready for goal review");
+    expect(card.text).toContain("✓ Checks passed");
+    expect(card.text).not.toContain("failed or missing checks");
+    expect(card.text).not.toContain("Evidence needs attention");
+    store.saveArtifact({ run, kind: "terminal-diff", key: `${run}/diff.patch`, bytesOriginal: 12, bytesStored: 12, truncated: false, sha256: "a".repeat(64), capture: "git diff (exit 0)", captureStatus: "ok" }, now);
+    expect(store.requestReview(run, "alex", now).ok).toBe(true);
+    expect(telegramProgressCard(store, store.getRun(run)!, "clear-acceptance", ALPHA, now).text).toContain("Waiting for review");
   });
 
   test("progress does not invent an optional review blocker or mark required review complete without its judgements", () => {

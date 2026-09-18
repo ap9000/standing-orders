@@ -18,7 +18,7 @@
  */
 
 import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
-import { manualReviewOnly, type ProofVerdict } from "./proof.js";
+import { GOAL_ASSESSMENT_PENDING, manualReviewOnly, type ProofVerdict } from "./proof.js";
 import type { ReviewRetryState, TaskState } from "./store.js";
 import type { TaskControlView } from "./task-control.js";
 
@@ -240,6 +240,9 @@ export function resultStatusOf(result: ResultFacts | null, publication: Publicat
   // the detail as history, never as the main wording.
   if (result === null || result.runId === null || result.role === "scout" || result.accepted) return stored;
   const review = reviewStatusOf(result.review ?? null);
+  if (review === null && result.verdict === "short" && result.reasons.includes(GOAL_ASSESSMENT_PENDING)) {
+    return { token: "review-pending", label: "Ready for goal review", detail: "The saved evidence needs independent assessment against the approved goal.", tone: "attention", action: { label: "Review result", kind: "open-review" } };
+  }
   if (review === null) return stored;
   return { ...review, detail: `${review.detail} ${priorVerdictWords(stored)}` };
 }

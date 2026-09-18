@@ -82,6 +82,7 @@ export function reviewContextFileName(id: string): string {
 export function reviewContextManifest(inventory: ReviewContextInventory): string {
   return JSON.stringify({
     ...inventory,
+    ...(inventory.handoff === undefined ? {} : { handoff: { artifact: inventory.handoff.artifact, sha256: inventory.handoff.sha256, file: "REVIEW-BUILDER-NOTES.json" } }),
     format: "review-context-manifest-v1",
     items: inventory.items.map(({ content: _content, ...item }) => ({
       ...item, file: reviewContextFileName(item.id),
@@ -199,6 +200,9 @@ export type CriterionContextCoverage = {
 
 export type ReviewContextInventory = {
   schema: 1 | 2 | 3;
+  /** Optional builder caveats, bound to the captured handoff, never evidence
+   * that a criterion passed. Older inventories remain byte-compatible. */
+  handoff?: { artifact: number; sha256: string; content: string };
   /** Tree identity is independent of whether content fits capture bounds. */
   identities?: ReviewContextIdentity[];
   bindings?: { run: number; sha256: string; candidate?: true }[];
@@ -268,6 +272,13 @@ export function reviewContextBindingOf(store: Store, runId: number, candidate = 
 
 /** Re-prove sealed context before spending and inside final ingestion. */
 export function reviewContextCustodyProblem(store: Store, root: string, inventory: ReviewContextInventory): string | null {
+  if (inventory.handoff !== undefined) {
+    const found = store.artifactsFor(inventory.run).filter(one => one.kind === "handoff");
+    const artifact = found[0];
+    if (found.length !== 1 || artifact?.id !== inventory.handoff.artifact || artifact.sha256 !== inventory.handoff.sha256) return "the builder notes binding changed";
+    const read = readVerifiedArtifact(root, artifact);
+    if (!read.ok || read.content.toString("utf8") !== inventory.handoff.content) return "the captured builder notes no longer verify";
+  }
   const run = store.getRun(inventory.run);
   const source = run === null ? null : store.revisionSourceOf(run.taskRef) ?? { sourceRun: run.id, sourceTask: store.externalIdFor(run.taskRef) };
   if (run === null || run.headRevision !== inventory.head || run.baseRevision !== inventory.base || source?.sourceRun !== inventory.source.run || source.sourceTask !== inventory.source.task) return "the review context's run, head, base or revision ancestry changed";
@@ -340,6 +351,10 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
   if (!str(r["head"], 40) || !SHA1.test(r["head"])) return { ok: false, problem: "head must be a 40-hex commit" };
   if (!optionalStr(r["base"], 40)) return { ok: false, problem: "base must be a string or null" };
   const bindings = r["bindings"];
+  const handoff = r["handoff"] as ReviewContextInventory["handoff"];
+  if (handoff !== undefined && (handoff === null || !Number.isSafeInteger(handoff.artifact) || handoff.artifact <= 0 ||
+    typeof handoff.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(handoff.sha256) || typeof handoff.content !== "string" ||
+    Buffer.byteLength(handoff.content) > 64 * 1024 || createHash("sha256").update(handoff.content).digest("hex") !== handoff.sha256)) return { ok: false, problem: "builder notes are malformed or do not match their hash" };
   if (bindings !== undefined && (!Array.isArray(bindings) || bindings.length > REVIEW_CONTEXT_LIMITS.ancestors || !bindings.every(one => one !== null && typeof one === "object" && Number.isSafeInteger(one.run) && one.run > 0 && typeof one.sha256 === "string" && /^[0-9a-f]{64}$/.test(one.sha256) && (one.candidate === undefined || one.candidate === true)) || new Set(bindings.map(one => one.run)).size !== bindings.length)) return { ok: false, problem: "source bindings are malformed" };
   const source = r["source"];
   if (source === null || typeof source !== "object" || Array.isArray(source)) return { ok: false, problem: "source must be an object" };
@@ -500,6 +515,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     ok: true,
     inventory: {
       schema: r["schema"],
+      ...(handoff === undefined ? {} : { handoff }),
       ...(r["schema"] !== 1 ? { identities } : {}),
       ...(bindings === undefined ? {} : { bindings: bindings as { run: number; sha256: string }[] }),
       run: Number(r["run"]),
@@ -739,6 +755,13 @@ export async function deriveReviewContext(
   const gapAll = (reason: ContextGapReason, detail: string): void => {
     gaps.push({ reason, path: null, criteria: allIds, detail });
   };
+  const handoffs = store.artifactsFor(args.runId).filter(one => one.kind === "handoff");
+  if (handoffs.length === 1) {
+    const artifact = handoffs[0]!;
+    const read = readVerifiedArtifact(args.root, artifact);
+    if (read.ok && !artifact.truncated && artifact.captureStatus !== "failed") inventory.handoff = { artifact: artifact.id, sha256: artifact.sha256, content: read.content.toString("utf8") };
+    else gapAll("capture-failed", "the captured builder notes could not be verified");
+  } else if (handoffs.length > 1) gapAll("source-unverified", "multiple builder notes make the handoff ambiguous");
   const patchOnly = (id: string, inherited: boolean, extra: string[] = []): CriterionContextCoverage => ({
     id, state: "patch", inherited, paths: [], items: [], gaps: extra, priorSupport: "none",
   });
@@ -774,7 +797,8 @@ export async function deriveReviewContext(
     }
     return verified.content;
   };
-  const proofBytes = verifiedOne("proof", "proof");
+  const hasProof = sourceArtifacts.some(one => one.kind === "proof");
+  const proofBytes = hasProof ? verifiedOne("proof", "proof") : null;
   let sourceProof: ParsedProof | null = null;
   if (proofBytes !== null) {
     const parsed = parseProof(proofBytes.toString("utf8"));
@@ -794,7 +818,7 @@ export async function deriveReviewContext(
     }
   }
   const sourceDiffOk = verifiedOne("terminal-diff", "terminal diff") !== null;
-  inventory.source.verified = sourceProof !== null && sourceDiffPaths !== null && sourceDiffOk && sourceHead !== null;
+  inventory.source.verified = sourceProblems.length === 0 && sourceDiffPaths !== null && sourceDiffOk && sourceHead !== null;
 
   // 2. The source rubric: only the exact scope the source run built under
   // (its digest still live on the source task) can say what a criterion
@@ -822,7 +846,7 @@ export async function deriveReviewContext(
     inventory.ancestry = { verified: false, detail: "the source run has no sealed head to check ancestry against" };
     gapAll("source-unverified", inventory.ancestry.detail);
   }
-  if (sourceProof === null) gapAll("source-proof-missing", sourceProblems.find(one => one.includes("proof")) ?? "the source run's proof is unavailable");
+  if (hasProof && sourceProof === null) gapAll("source-proof-missing", sourceProblems.find(one => one.includes("proof")) ?? "the source run's proof is unavailable");
   else if (!inventory.source.verified) gapAll("source-unverified", sourceProblems.join("; "));
 
   // 4. Relevance: which paths matter to which criterion, from the source
@@ -846,6 +870,17 @@ export async function deriveReviewContext(
     gapAll("source-unverified", "the source revision has no inherited context inventory");
   }
   const generalPaths = [...new Set([...(sourceProof?.changed ?? []), ...(sourceDiffPaths ?? []), ...(parentContext?.coverage.flatMap(one => one.paths) ?? [])])].filter(safeContextPath).sort();
+  // A first no-change result has no patch to select files from. Only the
+  // signed scope may widen its context; read exact committed paths/directories,
+  // under the same existing size/item bounds. Unsupported patterns stay gaps.
+  if (generalPaths.length === 0 && sourceScopeVerified) {
+    const paths = sourceScope!.touches.filter(path => safeContextPath(path.replace(/\/$/, "")) && !/[?*\[\]]/.test(path));
+    if (paths.length > 0) {
+      const listed = await git("git", [...GIT_READ, "ls-tree", "-r", "-z", "--name-only", args.head, "--", ...paths], { cwd: args.worktree, maxBuffer: 4 * 1024 * 1024 });
+      if (listed.code === 0) generalPaths.push(...[...new Set(listed.stdout.split("\0").filter(safeContextPath))].sort());
+      else gapAll("capture-failed", "the committed source paths in the approved scope could not be listed");
+    }
+  }
   const specificFor = new Map<string, string[]>();
   for (const criterion of sourceProof?.criteria ?? []) {
     const cited = [...new Set(criterion.evidence.filter(one => one.kind === "changed-path").map(one => one.ref))].filter(safeContextPath).sort();
@@ -1015,7 +1050,7 @@ export async function deriveReviewContext(
     const items = plan.paths.flatMap(path => (itemsByPath.has(path) ? [itemsByPath.get(path)!.id] : []));
     // "Judged from the patch" needs KNOWN relevance: only a verified source
     // proof can say the patch touched what this criterion is about.
-    const touched = sourceProof !== null && plan.paths.some(path => args.patchPaths.has(path));
+    const touched = inventory.source.verified && plan.paths.some(path => args.patchPaths.has(path));
     const complete = plan.paths.length > 0 && plan.paths.every(path => itemsByPath.has(path) && !itemsByPath.get(path)!.redacted && !itemsByPath.get(path)!.patch) && inventory.source.verified && inventory.ancestry.verified;
     const state: CriterionContextCoverage["state"] = complete && relevantGaps.length === 0 ? (touched && plan.paths.every(path => args.patchPaths.has(path)) ? "patch" : "context") : "gap";
     const gapsFor = state === "gap" && relevantGaps.length === 0 ? [plan.paths.length === 0 ? "no relevant source paths are known" : "inherited context is incomplete"] : relevantGaps;

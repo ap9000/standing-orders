@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { GOAL_ASSESSMENT_PENDING } from "./proof.js";
 import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
 import {
   compareWorkRows,
@@ -271,4 +272,8 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(parseWorkView("running")).toBe("running");
     expect(parseWorkView("completed")).toBe("completed");
   });
+});
+
+ test("saved evidence awaiting assessment has one clear review action", () => {
+  expect(resultStatusOf(built({ verdict: "short", reasons: [GOAL_ASSESSMENT_PENDING] }))).toMatchObject({ token: "review-pending", label: "Ready for goal review", action: { label: "Review result", kind: "open-review" } });
 });

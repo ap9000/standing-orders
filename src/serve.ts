@@ -92,7 +92,7 @@ import { TEMPLATES, templateByName } from "./templates.js";
 import { starterRecipes, savedRecipes, findRecipe, importRecipe, exportRecipe, createWorkflowPreview, workflowPreview, launchWorkflow, saveWorkflowRecipe, RecipeError, prepareRecipeRun } from "./recipes.js";
 import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtml, recipeScript, RECIPE_CSS, recipeDefinitionPreviewHtml, recipeRunHtml, recipeAnswersFromForm } from "./recipe-ui.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
-import { manualReviewOnly, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
+import { GOAL_ASSESSMENT_PENDING, reviewConflict, manualReviewOnly, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
   WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, workCounts, compareWorkRows, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
@@ -8452,13 +8452,15 @@ function criterionMatrixHtml(
   };
   const rows = matrix.map((row, index) => {
     const state = row.state;
-    const label = state === "pass" ? "Evidence checks passed" : state === "manual-review" ? "Human review" : state === "missing" ? "Evidence missing" : "Evidence failed";
-    const cls = state === "pass" ? "badge-done" : state === "manual-review" ? "badge-manual-review" : "badge-failed";
+    const awaitingAssessment = row.assessment?.evidenceState === "pass" && row.review === null;
+    const confirmed = row.assessment !== undefined && state === "pass";
+    const label = awaitingAssessment ? "Review pending" : confirmed ? "Confirmed" : state === "pass" ? "Evidence checks passed" : state === "manual-review" ? "Human review" : state === "missing" ? "Evidence missing" : "Evidence failed";
+    const cls = awaitingAssessment ? "" : state === "pass" ? "badge-done" : state === "manual-review" ? "badge-manual-review" : "badge-failed";
     const warnings: string[] = [];
     // Only replace the known boilerplate. Other recorded failure details
     // remain verbatim, so concision cannot hide a different problem.
-    const detail = row.detail.filter(line => !(state === "manual-review" && /^criterion "[^"\n]+" requires manual-review evidence — an operator must accept it before this can verify$/.test(line)));
-    if (state !== "pass" && detail.length > 0) warnings.push(`<ul class="requirement-issues">${detail.map(line => `<li>${escape(line)}</li>`).join("")}</ul>`);
+    const detail = row.detail.filter(line => !(row.assessment && row.review && line === `${row.review.author} ${row.review.judgement === "contradicts" ? "contradicts" : "needs more evidence for"} criterion "${row.id}": ${row.review.note}`) && !(state === "manual-review" && /^criterion "[^"\n]+" requires manual-review evidence — an operator must accept it before this can verify$/.test(line)));
+    if (!awaitingAssessment && state !== "pass" && detail.length > 0) warnings.push(`<ul class="requirement-issues">${detail.map(line => `<li>${escape(line)}</li>`).join("")}</ul>`);
     const review = row.review;
     if (review !== null && review.judgement !== "upholds") {
       warnings.push(`<div class="requirement-warning" data-review-judgement="${escape(review.judgement)}"><strong>${review.judgement === "contradicts" ? "Reviewer found a problem" : "Reviewer could not confirm this"}</strong><p>${escape(review.note)}</p></div>`);
@@ -8476,7 +8478,7 @@ function criterionMatrixHtml(
     return `<li class="requirement" data-criterion-id="${escape(row.id)}">` +
       `<div class="requirement-heading"><span>Requirement ${index + 1}</span><span class="badge ${cls}" data-matrix-state="${escape(state)}">${label}</span></div>` +
       `<p class="requirement-statement">${escape(row.statement)}</p>` +
-      (review?.judgement === "upholds" ? `<p class="requirement-review" data-review-judgement="upholds">Reviewer confirmed</p>` : "") +
+      (review?.judgement === "upholds" && !confirmed ? `<p class="requirement-review" data-review-judgement="upholds">Reviewer confirmed</p>` : "") +
       warnings.join("") +
       `<details class="requirement-evidence"><summary>View evidence</summary><div class="requirement-evidence-body">` +
       `<p class="meta">Required: ${row.requiredEvidence.map(kind => kinds[kind]).join(", ") || "No evidence types specified"}</p>` +
@@ -8571,6 +8573,7 @@ function semanticCoverageHtml(matrix: readonly CriterionMatrixRow[], qualityMode
   const outcome = coverage.satisfied === null
     ? "No independent review is recorded."
     : `Independent review confirmed ${coverage.upheld.length} of ${coverage.total} requirements.`;
+  if (matrix.some(row => row.assessment !== undefined)) return `<div class="result-section semantic-coverage" data-semantic-coverage="${coverage.satisfied === true ? "satisfied" : coverage.satisfied === null ? "unsettled" : "unsatisfied"}" data-coverage-policy="${coverage.policy}"><p class="meta">Independent review confirmed ${coverage.upheld.length} of ${coverage.total} requirements.</p></div>`;
   const policy = coverage.required
     ? coverage.satisfied ? "Required review is complete." : "Required review is incomplete."
     : "Independent review is optional for this scope.";
@@ -17016,7 +17019,7 @@ function taskBody(data: {
       // moved it — "the machine attested it; reviewer:codex contradicted
       // c2" — never pretending the machine always disagreed.
       const machineNote =
-        proof.machineVerdict === null || proof.machineVerdict === proof.proofVerdict
+        !reviewConflict(proof.proofMatrix, proof.machineVerdict, proof.proofVerdict)
           ? ""
           : `<p class="meta">An independent review found conflicting evidence.</p>`;
       const chainHtml = repairChainHtml(proof.repairChain);
@@ -19364,7 +19367,7 @@ function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | 
 
   parts.push(criterionMatrixHtml(view.matrix, { runId, links: view.matrixLinks }));
   parts.push(semanticCoverageHtml(view.matrix, view.qualityMode));
-  if (view.machineVerdict !== null && view.machineVerdict !== view.verdict) {
+  if (reviewConflict(view.matrix, view.machineVerdict, view.verdict)) {
     parts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
   }
   parts.push(repairChainHtml(view.repairChain));
@@ -19605,9 +19608,14 @@ function revisionSealFields(comments: readonly { id: number }[], sourceDigest: s
 function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const { run, receipt, proof, terminal, handoff } = detail;
   const facts = receipt.facts;
-  const status = receiptStatusOf(receipt);
+  let status = receiptStatusOf(receipt);
   const stored = receiptStatusOf(receipt, null);
   const humanReview = manualReviewOnly(proof === null ? null : { ...proof, verdict: proof.verdict ?? "" });
+  const directAssessment = proof?.matrix.some(row => row.assessment !== undefined) === true;
+  const awaitingGoalReview = directAssessment && proof?.reasons.length === 1 && proof.reasons[0] === GOAL_ASSESSMENT_PENDING;
+  const assessmentReasons = directAssessment ? new Set(proof!.matrix.flatMap(row => row.review ? [`${row.review.author} ${row.review.judgement === "contradicts" ? "contradicts" : "needs more evidence for"} criterion "${row.id}": ${row.review.note}`] : [])) : new Set<string>();
+  const physicalReasons = receipt.reasons.filter(reason => !assessmentReasons.has(reason));
+  if (directAssessment && status.token === "verification-needed" && proof?.verdict === "short" && proof.matrix.some(row => row.review?.judgement === "cannot-tell") && physicalReasons.length === 0) status = { ...status, label: "More evidence needed", tone: "attention" };
   const runId = run.id;
   const shots = proof?.screenshots ?? [];
   const shown = shots.filter(one => one.problem === null);
@@ -19625,7 +19633,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   // The visible status already says verification is needed. Only omit the
   // generic repeat; failed checks, specific reasons and damaged evidence stay.
   const missingVerdictNamed = o.headStatus !== false && status.token === "verification-needed" && receipt.verdict === null && receipt.reasons.length === 0;
-  if (!humanReview && !missingVerdictNamed && stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, receipt.reasons));
+  if (!humanReview && !awaitingGoalReview && (!directAssessment || physicalReasons.length > 0) && !missingVerdictNamed && stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, physicalReasons));
   attention.push(...facts.evidenceProblems);
   if (detail.outsideTouches.length > 0) attention.push(`${detail.outsideTouches.length} changed file${detail.outsideTouches.length === 1 ? "" : "s"} outside the approved paths: ${detail.outsideTouches.join(", ")}.`);
   attention.push(...receipt.caveats);
@@ -19781,15 +19789,15 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const checkParts: string[] = [];
   const reviewerNotes = detail.reviewerFindings.map(one => `<li><span class="badge${one.severity === "problem" ? " badge-failed" : ""}">${escape(one.severity ?? "note")}</span> ${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span>${!isRevisionFeedback(one) && detail.canAnnotate && o.csrf !== "" ? ` <button type="button" class="pick-file" data-path="${escape(one.path ?? "")}" data-line="${one.line ?? ""}" data-review-note="${escape(one.note)}">Request change</button>` : ""}</li>`).join("");
   if (proof === null && reviewerNotes !== "") checkParts.push(`<div class="result-section" data-cockpit-source="reviewer"><strong>Independent review</strong><ul>${reviewerNotes}</ul></div>`);
-  if (run.outcome === "no-change") checkParts.push(`<p class="meta">The build concluded that no repository change was needed. A no-change conclusion owes no proof — its handoff and machine-captured diff are the record.</p>`);
+  if (run.outcome === "no-change" && !directAssessment) checkParts.push(`<p class="meta">The build concluded that no repository change was needed. A no-change conclusion owes no proof — its handoff and machine-captured diff are the record.</p>`);
   if (proof === null) {
     if (run.outcome !== "no-change") checkParts.push(`<p class="meta" data-proof-verdict="none">This build has no verification result or captured evidence. Review its recorded changes yourself.</p>`);
   } else {
-    if (proof.verdict !== null) {
+    if (proof.verdict !== null && !directAssessment) {
       // The same status line the panel leads with (one status per surface,
       // workspace package 1), beside the machine verdict's own explanation.
       checkParts.push(`<p class="row result-verdict" data-proof-verdict="${escape(dispatchStatusToken(proof.verdict))}"><span class="meta">At completion: ${escape(humanReview ? "Human review required for the requirements below." : verificationExplanation(proof.verdict, proof.reasons))}</span></p>`);
-    } else if (run.outcome !== "no-change") {
+    } else if (proof.verdict === null && run.outcome !== "no-change") {
       checkParts.push(`<p class="meta" data-proof-verdict="none">No verification result is available for this build.</p>`);
     }
     if (proof.accepted !== null) checkParts.push(`<p class="meta">${humanReview ? "Accepted after human review" : "Accepted with an exception"} by <span class="mono">${escape(proof.accepted.by)}</span> · ${escape(when(proof.accepted.at))}${proof.accepted.note === null ? "" : ` — ${escape(proof.accepted.note)}`}</p>`);
@@ -19799,7 +19807,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       checkParts.push(criterionMatrixHtml(proof.matrix, { runId, links: proof.matrixLinks, fileAnchors: detail.fileAnchors }));
     }
     checkParts.push(semanticCoverageHtml(proof.matrix, proof.qualityMode));
-    if (proof.machineVerdict !== null && proof.machineVerdict !== proof.verdict) checkParts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
+    if (reviewConflict(proof.matrix, proof.machineVerdict, proof.verdict)) checkParts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
     checkParts.push(repairChainHtml(proof.repairChain));
     if (detail.reviewerFindings.length > 0) {
       checkParts.push(
@@ -19812,7 +19820,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     checkParts.push(proof.checkLog === null ? `<p class="meta" data-cockpit-source="machine">No automated check was configured for this build.</p>` : checkLogHtml(proof.checkLog, runId, ' data-cockpit-source="machine"'));
     checkParts.push(
       proof.proof === null || proof.proof.checks.length === 0
-        ? `<p class="meta" data-cockpit-source="agent">The agent reported no checks.</p>`
+        ? directAssessment ? "" : `<p class="meta" data-cockpit-source="agent">The agent reported no checks.</p>`
         : `<details class="cockpit-proof-group" data-cockpit-source="agent"><summary>Agent checks · ${proof.proof.checks.length}</summary><div class="result-section"><ul>` +
           proof.proof.checks.map(one => `<li><span class="mono">${escape(one.command)}</span> <span class="meta">(exit ${one.exitCode}) — ${escape(one.summary)}</span></li>`).join("") +
           `</ul></div></details>`,
@@ -19820,7 +19828,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     const screenshotRequired = proof.matrix.some(one => one.requiredEvidence.includes("screenshot"));
     checkParts.push(
       shots.length === 0
-        ? `<p class="meta" data-cockpit-source="screenshots">No screenshots${screenshotRequired ? " were captured, although one was required" : " were needed"}.</p>`
+        ? directAssessment && !screenshotRequired ? "" : `<p class="meta" data-cockpit-source="screenshots">No screenshots${screenshotRequired ? " were captured, although one was required" : " were needed"}.</p>`
         : lead === "screenshots"
           ? `<p class="meta" data-cockpit-source="screenshots">${shown.length} validated screenshot${shown.length === 1 ? "" : "s"} shown in Summary${unavailableShots.length > 0 ? `; ${unavailableShots.length} unavailable` : ""}.</p>`
           : `<details class="cockpit-proof-group" data-cockpit-source="screenshots"><summary>Screenshots · ${shown.length}${unavailableShots.length > 0 ? ` (${unavailableShots.length} unavailable)` : ""}</summary><div class="receipt-visuals" aria-label="validated screenshots">` +
@@ -19829,13 +19837,13 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     );
     checkParts.push(
       receipt.caveats.length === 0
-        ? `<p class="meta" data-cockpit-source="caveats">No caveats were reported.</p>`
+        ? directAssessment ? "" : `<p class="meta" data-cockpit-source="caveats">No caveats were reported.</p>`
         : `<div class="receipt-caveats" data-cockpit-source="caveats"><strong>Caveats · ${receipt.caveats.length}</strong><ul>${receipt.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`,
     );
   }
   // The handoff's own account of its checks — the agent's words, labeled
   // as such, whether or not a proof exists.
-  if (handoff !== null && handoff.verification.length > 0) checkParts.push(`<div class="result-section" data-cockpit-source="agent-words"><strong>the agent's own account</strong><ul>${handoff.verification.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`);
+  if (!directAssessment && handoff !== null && handoff.verification.length > 0) checkParts.push(`<div class="result-section" data-cockpit-source="agent-words"><strong>the agent's own account</strong><ul>${handoff.verification.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`);
   if (o.extraChecks !== undefined) checkParts.push(o.extraChecks);
 
   // ---- request changes: both feedback styles, one sealed road ------------
@@ -19896,7 +19904,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   };
   const tabs =
     `<nav class="result-tabs" role="tablist" aria-label="result views">` +
-    RESULT_TABS.map(tab => `<a role="tab" href="${tabHref(tab.key)}" data-result-tab="${tab.key}" aria-selected="${tab.key === o.tab ? "true" : "false"}"${tab.key === o.tab ? "" : ' tabindex="-1"'}>${tab.label}${tabCounts[tab.key] === "" ? "" : `<span class="count">${escape(tabCounts[tab.key])}</span>`}</a>`).join("") +
+    RESULT_TABS.map(tab => `<a role="tab" href="${tabHref(tab.key)}" data-result-tab="${tab.key}" aria-selected="${tab.key === o.tab ? "true" : "false"}"${tab.key === o.tab ? "" : ' tabindex="-1"'}>${tab.key === "checks" && proof?.matrix.some(row => row.assessment !== undefined) ? "Requirements" : tab.label}${tabCounts[tab.key] === "" ? "" : `<span class="count">${escape(tabCounts[tab.key])}</span>`}</a>`).join("") +
     `</nav>`;
   const view = (tab: ResultTab, parts: string[]): string =>
     `<div class="result-view" role="tabpanel" data-result-view="${tab}"${tab === o.tab ? "" : " hidden"}>${parts.join("\n")}</div>`;
@@ -19905,7 +19913,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.rootId ?? detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
       (o.back === null ? "" : `<p class="result-back"><a href="${escape(o.back.href)}" data-result-back>← ${escape(o.back.label)}</a></p>`) +
       (detail.history ?? "") +
-      `<header class="result-head"><div><span class="eyebrow">Build #${runId}</span><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" ? { ...status, label: "Verification needed" } : status)}</header>` +
+      `<header class="result-head"><div><span class="eyebrow">Build #${runId}</span><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" && !directAssessment ? { ...status, label: "Verification needed" } : status)}</header>` +
       `<p class="result-summary">${escape(outcome)}</p>` +
       action +
       (REVIEW_TOKENS.has(status.token) ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
@@ -19942,6 +19950,8 @@ function resultPrimaryAction(detail: ResultDetail, o: ResultPanelOptions, prUrl:
   }
   if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="result-feedback-link" href="#request-changes">Review saved notes</a>`);
   if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) return wrap("open-pr", `<a class="button-link" href="${escape(prUrl)}">Open PR #${detail.publication.prNumber}</a>`);
+  if (detail.proof?.matrix.some(row => row.assessment !== undefined) && detail.proof.reasons.includes(GOAL_ASSESSMENT_PENDING)) return wrap("review-goal", `<a class="button-link" href="${reviewHref(detail.taskId)}">Review goal</a>`);
+  if (detail.proof?.matrix.some(row => row.assessment !== undefined && row.review?.judgement === "cannot-tell")) return wrap("review-evidence", `<a class="button-link" href="${escape(o.hrefFor("checks"))}">Review evidence</a>`);
   if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="result-feedback-link" href="#request-changes">Suggest changes</a>`);
   return "";
 }

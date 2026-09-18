@@ -3,7 +3,7 @@ import { executeMateTool, MATE_TOOLS } from "./mate-tools.js";
 import { applyChatTaskAction, CHAT_TASK_ACTIONS } from "./chat-task-actions.js";
 import { CHAT_CONTROLS } from "./chat-controls.js";
 import { createDecisionServer } from "./serve.js";
-import { verificationEvidence, REVIEW_GATE_NAME, sealVerificationReceipt } from "./verification-evidence.js";
+import { assessmentFromSavedEvidence, verificationEvidence, REVIEW_GATE_NAME, sealVerificationReceipt } from "./verification-evidence.js";
 import { verifyApproverByPassword } from "./principal.js";
 /**
  * Inherited review context (v51, contract handoff task 3), end to end
@@ -144,6 +144,10 @@ describe("inherited review context (v51)", () => {
     machineGate?: boolean;
     databaseFile?: string;
     rootOnly?: boolean;
+    omitProof?: boolean;
+    noChange?: boolean;
+    touches?: string[];
+    handoff?: string;
     guardSource?: string;
     revisionFiles?: Record<string, string>;
     intermediateFiles?: Record<string, string>;
@@ -157,7 +161,7 @@ describe("inherited review context (v51)", () => {
     const repo = realpathSync(temp("so-ctx-repo-"));
     git(repo, "init", "-q", "-b", "main");
     const base = commitFiles(repo, { "README.md": "# fixture\n", ...options.baseFiles }, "base");
-    const source = commitFiles(
+    const source = options.noChange ? base : commitFiles(
       repo,
       { "src/limit.ts": LIMIT_TS, "src/guard.ts": options.guardSource ?? GUARD_TS, "src/report.ts": REPORT_TS, ...(options.extraSourceFiles ?? {}) },
       "feature",
@@ -183,7 +187,7 @@ describe("inherited review context (v51)", () => {
     store.createTask({ id: "feat", title: "retry limiter" }, T0);
     const sourceTaskRef = store.refFor("built-in", "feat").id;
     store.placeTask(sourceTaskRef, repo);
-    const sourceScope = propose(store, { taskId: "feat", goal: "cap retries", acceptance: RUBRIC, now: T0, ...(options.strict === true ? { qualityMode: "strict" as const } : {}) });
+    const sourceScope = propose(store, { taskId: "feat", goal: "cap retries", touches: options.touches ?? [], acceptance: RUBRIC, now: T0, ...(options.strict === true ? { qualityMode: "strict" as const } : {}) });
     const sourceSealed = approve(store, "feat", "alex", T0, sourceScope.digest, alex.token);
     if (!sourceSealed.ok) throw new Error(`approve feat: ${sourceSealed.reason}`);
     const sourceRun = store.startRun({ taskRef: sourceTaskRef, leaseId: "lease-src", runner: "builder-1", branch: "standing-orders/feat", worktree: repo, provider: "claude", model: "sonnet", now: T0, ...presented(store, sourceTaskRef) });
@@ -208,11 +212,12 @@ describe("inherited review context (v51)", () => {
       caveats: [],
       screenshots: [],
     };
-    const sourceProofArtifact = storeEvidence(store, evidenceRoot, sourceRun, "proof", "proof.json", Buffer.from(JSON.stringify(sourceProof), "utf8"), "agent-authored proof (validated, re-serialized)", T0);
+    const sourceProofArtifact = options.omitProof ? 0 : storeEvidence(store, evidenceRoot, sourceRun, "proof", "proof.json", Buffer.from(JSON.stringify(sourceProof), "utf8"), "agent-authored proof (validated, re-serialized)", T0);
     if (options.machineGate) store.setVerifyCommand({ repo, command: "npm test", timeoutMs: 60000, approvedBy: "alex" }, T0);
     const checkLog = options.machineGate ? store.getArtifact(storeEvidence(store, evidenceRoot, sourceRun, "check-log", "check-log.txt", Buffer.from("=== Attempt summary ===\n- Project check · attempt 1: (exit 0)\n\n=== Project check · attempt 1 ===\n$ npm test\n(exit 0)\n\n--- stdout ---\nall green\n… output shortened; ending follows …\n\n--- stderr ---\n".padEnd(14566, " ")), "sh -c npm test (attempt recorded)", T0, { captureStatus: "ok", sourceBytesOriginal: 100541 })) : options.shortenedLog ? store.getArtifact(storeEvidence(store, evidenceRoot, sourceRun, "check-log", "check-log.txt", Buffer.from("npm test: exit 0\n[output shortened]\nall green\n"), "bounded verification log", T0, { captureStatus: "ok", sourceBytesOriginal: 100000 })) : null;
+    if (options.handoff !== undefined) storeEvidence(store, evidenceRoot, sourceRun, "handoff", "handoff.json", Buffer.from(JSON.stringify({ schema: 1, conclusion: options.handoff, followUps: ["Inspect the retry boundary before acceptance"] })), "captured handoff", T0, { captureStatus: "ok" });
     store.recordOutcomeFacts(sourceRun, { headRevision: source, handoff: "capped retries" });
-    store.finishRun(sourceRun, { outcome: "built", committed: true, now: T0 });
+    store.finishRun(sourceRun, { outcome: options.noChange ? "no-change" : "built", committed: !options.noChange, now: T0 });
 
     // An earlier reviewer's judgements on the SOURCE run, bound exactly as
     // ingestReview binds them (head, scope, diff, proof).
@@ -307,6 +312,44 @@ describe("inherited review context (v51)", () => {
     return { ...f, databaseFile, ask, pass, who: login.who };
   };
   const firstVerdict = (judgement = "upholds") => ({ version: 1, comments: [], criteria: RUBRIC.map(c => ({ id: c.id, judgement: c.id === "c4" ? "cannot-tell" : judgement, note: c.id === "c4" ? "The unrelated fixture is redacted; its lines remain unavailable." : `src/${c.id === "c1" ? "limit" : c.id === "c2" ? "guard" : "report"}.ts supplies the criterion's complete source.` })) });
+
+  test("a first no-change result reads the signed scope's committed source without a builder proof", async () => {
+    const f = await seed({ rootOnly: true, omitProof: true, noChange: true, priorJudgements: [],
+      baseFiles: { "src/limit.ts": LIMIT_TS }, touches: ["src/"], handoff: "The retry limit already exists" });
+    const result = await captureReviewContext(f.store, exec, { runId: f.sourceRun, taskRef: f.sourceTaskRef, head: f.shas.source, base: f.shas.base,
+      rubric: RUBRIC, patchPaths: new Set(), worktree: f.repo, root: f.evidenceRoot, now: () => T0 });
+    expect(result!.inventory.source.verified).toBe(true);
+    expect(result!.inventory.items.map(one => one.path)).toEqual(["src/limit.ts"]);
+    expect(result!.inventory.coverage.every(one => one.state === "context")).toBe(true);
+    expect(result!.inventory.handoff?.content).toContain("Inspect the retry boundary");
+    expect(parseReviewContext(serializeReviewContext(result!.inventory))).toMatchObject({ ok: true });
+    expect(reviewContextCustodyProblem(f.store, f.evidenceRoot, result!.inventory)).toBeNull();
+    const handoff = f.store.artifactsFor(f.sourceRun).find(one => one.kind === "handoff")!;
+    writeFileSync(join(f.evidenceRoot, handoff.key), "changed notes");
+    expect(reviewContextCustodyProblem(f.store, f.evidenceRoot, result!.inventory)).toMatch(/builder notes no longer verify/);
+  });
+
+  test("a fresh review assesses a pre-upgrade missing-proof result without replacing evidence or rerunning checks", async () => {
+    const f = await seed({ rootOnly: true, omitProof: true, machineGate: true, priorJudgements: [], handoff: "The retry limit is implemented" });
+    const matrix = RUBRIC.map(c => ({ id: c.id, statement: c.statement, requiredEvidence: [...c.evidence], state: "missing" as const, detail: ["no proof was written"], answered: [], review: null }));
+    f.store.saveProofVerdict(f.sourceRun, "short", ["no proof was written"], T0, matrix);
+    const command = f.store.liveVerifyCommand(f.repo)!;
+    sealVerificationReceipt(f.store, f.evidenceRoot, f.sourceRun, f.shas.source, command, { configured: true, ran: true, exitCode: 0 }, T0);
+    await captureReviewContext(f.store, exec, { runId: f.sourceRun, taskRef: f.sourceTaskRef, head: f.shas.source, base: f.shas.base,
+      rubric: RUBRIC, patchPaths: new Set(["src/limit.ts", "src/guard.ts", "src/report.ts"]), worktree: f.repo, root: f.evidenceRoot, now: () => T0 });
+    const before = f.store.artifactsFor(f.sourceRun).map(row => ({ row, bytes: readFileSync(join(f.evidenceRoot, row.key)) }));
+    expect(assessmentFromSavedEvidence(f.store, f.evidenceRoot, f.sourceRun)).toMatchObject({ verdict: "short", machineVerdict: "verified" });
+    expect(f.store.requestReview(f.sourceRun, "alex", T0).ok).toBe(true);
+    const reports = await reviewPass(f.store, { runner: "builder-1", token: "tok-builder-1", now: T0, evidenceRoot: f.evidenceRoot,
+      scratchRoot: temp("proofless-review-"), agent: async (_file, _args, options) => {
+        expect(readFileSync(join(options!.cwd!, "REVIEW-BUILDER-NOTES.json"), "utf8")).toContain("retry boundary");
+        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: RUBRIC.map(c => ({ id: c.id, judgement: "upholds", note: "src/limit.ts, src/guard.ts, src/report.ts and REVIEW-VERIFICATION.json demonstrate the criterion" })) }) };
+      } });
+    expect(reports[0]).toMatchObject({ outcome: "reviewed", verdict: "verified" });
+    expect(f.store.proofVerdictFor(f.sourceRun)).toMatchObject({ verdict: "verified", machineVerdict: "verified" });
+    for (const a of before) { expect(f.store.getArtifact(a.row.id)).toEqual(a.row); expect(readFileSync(join(f.evidenceRoot, a.row.key))).toEqual(a.bytes); }
+    expect(f.store.runsFor(f.sourceTaskRef).filter(r => r.role !== "reviewer")).toHaveLength(1);
+  });
 
   test("first review: legacy null proof capture and 14572/100541 log retain full source/tests without rebuilding", async () => {
     const f = await firstReady();

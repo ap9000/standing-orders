@@ -1,0 +1,42 @@
+{
+  "run": 1788,
+  "candidate": "dde4701c20aa92230354ff1843902016eadcdbd7",
+  "originalBase": "9da7e03cdf77a59b7b83484b7bea8b2715be2b88",
+  "outcome": "built",
+  "verdict": "refuted",
+  "nativeGate": {
+    "version": 1,
+    "run": 1788,
+    "head": "dde4701c20aa92230354ff1843902016eadcdbd7",
+    "base": "9da7e03cdf77a59b7b83484b7bea8b2715be2b88",
+    "scopeDigest": "23d6a6421426f3a12370416e50bc7daf",
+    "command": {
+      "id": 7,
+      "repo": "/Users/alekseypelletier/Developer/standing-orders",
+      "command": "npm run typecheck && npm test -- --run --reporter=dot --no-file-parallelism && npm run build",
+      "timeoutMs": 1200000,
+      "digest": "f6e5852c8a5bcc52",
+      "recoverySetupDigest": "a69bcc43efa17f1e",
+      "approvedBy": "alex",
+      "approvedAt": "2026-09-17T19:15:23.558Z",
+      "revokedAt": null,
+      "revokedBy": null
+    },
+    "result": {
+      "configured": true,
+      "ran": true,
+      "exitCode": 1
+    },
+    "log": {
+      "artifactId": 1718,
+      "sha256": "2e7aba52e1fd3c0f540d5d3ad4220058e0a6d61344babc9ba6a5eadd0d7344b5",
+      "bytesStored": 14572,
+      "bytesOriginal": 114553,
+      "truncated": true,
+      "redacted": false,
+      "captureStatus": "ok"
+    }
+  },
+  "observedSummary": "190 files: 189 passed, tick.test.ts failed. 3520 tests passed, 2 failed, 23 existing skips. Two obsolete source-proof expectations; original result preserved.",
+  "evidenceLimit": "The native log excerpt is marked truncated (114553 original bytes, 14572 stored). It is not represented as a complete log. Complete original diff, changed inventory, proof and six screenshots remain immutable in the controller store. This prior failed result cannot establish the corrected candidate. A separately scoped corrective task starts at the same verified base and captures fresh complete candidate evidence."
+}

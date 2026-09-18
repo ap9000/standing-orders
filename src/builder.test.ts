@@ -854,13 +854,7 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain('measure every "how" string\'s UTF-8 byte length');
   });
 
-  test("the brief tells the agent to default to exactly the signed criteria and states the hard 4-entry cap on a criterion's evidence array", async () => {
-    // Run 1462 came back short only because an extra (unsigned) criterion
-    // carried 5 evidence entries, over PROOF_LIMITS.evidencePerCriterion (4)
-    // — the whole proof was refused and the signed criteria, which were
-    // otherwise fine, were never checked. The brief must say plainly that an
-    // extra criterion is optional and risky, and state the evidence-array
-    // cap explicitly, the same way it already does for "how" and caveats.
+  test("a signed goal uses a short handoff and captured evidence instead of duplicate criterion claims", async () => {
     propose(store, {
       taskId: "t-1",
       goal: "add a guard on the payout path",
@@ -873,12 +867,12 @@ describe("what the builder tells the agent", () => {
     await build1();
 
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
-    expect(prompt).toContain("Default to exactly the signed criteria above and nothing more");
-    expect(prompt).toContain("it cannot turn a signed criterion's");
-    expect(prompt).toContain("failure into a pass.");
-    expect(prompt).toContain("evidence array — signed or extra — has a hard cap of");
-    expect(prompt).toContain("a 5th entry refuses the ENTIRE proof");
-    expect(prompt).toContain("Every evidence ref must exactly match its source");
+    expect(prompt).toContain("One independent reviewer assesses that evidence against the signed goal");
+    expect(prompt).toContain("No criterion answers or self-reported file list are required");
+    expect(prompt).not.toContain("signed criterion is answered by its exact id");
+    expect(prompt).not.toContain("pass --rubric");
+    expect(prompt).toContain('"screenshots": [');
+    expect(prompt).toContain("missing required images");
   });
 
   test("the brief states the hard 300-byte cap on a caveat, a 180-byte target, and tells the agent to measure before finalizing", async () => {
@@ -982,7 +976,7 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("every path repository-relative");
     // The handoff: the whole-file cap and the one-line rule.
     expect(prompt).toContain(`The whole file must be under ${HANDOFF_PAYLOAD_CAP} bytes`);
-    expect(prompt).toContain(`Keep each list to at most ${HANDOFF_LIST_CAP} items`);
+    expect(prompt).toContain(`at most ${HANDOFF_LIST_CAP} items each`);
     expect(prompt).toContain("a newline or other control");
     // The exit preflight.
     expect(prompt).toContain("Preflight every protocol file before you exit");
@@ -3303,7 +3297,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     if (gate.ok) expect(JSON.parse(gate.bytes!)).toMatchObject({ head: store.getRun(req.runId!)!.headRevision, command: { command: "final-check" }, result: { ran: true, exitCode } });
     expect(store.artifactsFor(req.runId!).filter(isVerificationReceipt)).toHaveLength(1);
     expect(agentCalls).toHaveLength(1); // no extra model turn to restate success
-    expect(agentCalls[0]!.join(" ")).toContain("use pending-verification");
+    expect(agentCalls[0]!.join(" ")).toContain("One independent reviewer assesses that evidence");
     expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: exitCode === 0 ? "verified" : "refuted" });
     const artifact = store.artifactsFor(req.runId as number).find(one => one.kind === "proof")!;
     const raw = readVerifiedArtifact(join2(wt, ".evidence"), artifact);

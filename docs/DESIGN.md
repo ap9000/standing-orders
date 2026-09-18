@@ -260,6 +260,25 @@ weaker assertions, higher timeouts and changed approval terms are not repairs.
 Missing or changed evidence, lost custody, changed setup authority, holds and
 stops require attention rather than another unattended edit.
 
+A builder working against signed acceptance criteria can finish with only its
+short terminal handoff. The controller captures the exact diff, current source,
+approved check and output; one existing independent reviewer assesses those
+facts against the goal and every criterion. Available evidence and passing
+checks do not mean the goal is satisfied. Direct assessment is required even
+under default quality, and a repair chain resolves only after that assessment.
+An optional screenshot-only inventory uses the existing bounded proof parser;
+no criterion restatement or self-reported changed-file list is needed. Explicit
+legacy proofs retain their original integrity and claim-validation rules.
+
+Missing observations stay named evidence gaps and do not create report-writing
+repairs. Contradicted behavior uses the existing bounded repair path; human-only
+acceptance still requires a person. Builder caveats are supplied as sealed notes,
+not as proof of success. A fresh review can also assess an older result stopped
+solely by missing builder proof, using its original source, command authority
+and gate receipt. It records that reassessment, preserves the old artifacts and
+never runs a replacement gate merely to create paperwork. Changed candidates,
+failed checks, stale authority or damaged evidence cannot take that shortcut.
+
 Rollback proves worktree cleanliness and base revision first. `git reset --hard` leaves untracked files behind and can destroy repairable work.
 
 **Malformed decisions get bounded repair, not an instant 422** — the adapter

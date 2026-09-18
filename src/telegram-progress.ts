@@ -12,6 +12,8 @@ export type ProgressEntity = { type: "bold"; offset: number; length: number };
 export function telegramProgressCard(store: Store, run: Run, taskId: string, project: string, now = new Date()): { text: string; entities: ProgressEntity[]; link: PhoneTaskLink } {
   const proof = store.proofVerdictFor(run.id);
   const rows = proof?.matrix ?? [];
+  const direct = rows.length > 0 && rows.every(row => row.assessment !== undefined);
+  const awaitingAssessment = direct && rows.every(row => row.review === null) && (proof?.machineVerdict === "verified" || proof?.machineVerdict === "attested");
   const passed = rows.filter(row => row.state === "pass").length;
   const human = manualReviewOnly(proof);
   const accepted = store.proofAcceptance(run.id) !== null;
@@ -27,6 +29,7 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
   let next = "";
   let build = built ? "✓ Build saved" : "● Build in progress";
   let checks = rows.length ? `${passed === rows.length ? "✓" : "○"} Checks · ${passed}/${rows.length} requirements` : "○ Checks pending";
+  if (direct) checks = proof?.machineVerdict === "verified" ? "✓ Checks passed" : proof?.machineVerdict === "attested" ? "○ Checks not configured" : "! Checks need attention";
   let reviewer = "○ Review pending";
   let label = built ? "Review result" : "Open task";
   if (run.outcome === null && run.phase !== null && run.phase !== "agent-running") {
@@ -37,6 +40,7 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
   if (built) {
     status = run.committed === false ? "Finished without a commit" : "Result saved";
     next = reviewPlanned ? "Next: independent review." : "";
+    if (awaitingAssessment && review?.state === "unrequested") { status = "Ready for goal review"; next = "Next: request an independent review."; }
     if (!reviewPlanned && run.committed !== false && (proof?.verdict === "verified" || human)) {
       status = accepted ? "Human acceptance recorded" : "Ready for your review";
       icon = "✅";
@@ -73,11 +77,17 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
     next = "Next: inspect the blocker.";
     label = "Review blocker";
   }
-  if (built && (concerns > 0 || proof?.verdict === "refuted" || (proof?.verdict === "short" && !human))) {
+  if (built && !awaitingAssessment && (concerns > 0 || proof?.verdict === "refuted" || (proof?.verdict === "short" && !human))) {
     status = "Evidence needs attention";
     icon = "⚠️";
     next = concerns > 0 ? `${concerns} requirement${concerns === 1 ? " needs" : "s need"} better evidence. Review the findings.` : "Next: fix the failed or missing checks.";
     label = "Review checks";
+    if (direct && review?.state === "succeeded") {
+      const defect = rows.some(row => row.review?.judgement === "contradicts");
+      status = defect ? "Changes needed" : "More evidence needed";
+      next = defect ? "Next: address the review findings." : "Next: collect the evidence named in the review.";
+      label = "Review findings";
+    }
   }
   const stop = store.stopOf(run.id);
   if (run.outcome === null && stop !== null && stop.resumedAt === null) {
