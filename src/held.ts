@@ -703,6 +703,7 @@ export class HeldSessionCoordinator {
         provider: args.dispose.provider,
         model: args.dispose.model,
         worktreePath: args.cwd,
+        evidenceRoot: args.captured.root,
         clock: args.clock,
       },
       result,

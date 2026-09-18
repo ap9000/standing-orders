@@ -234,11 +234,31 @@ its digest; confirmation must echo it with `--setup-digest <shown> --yes`. If
 the project check cannot start because a required project executable is
 missing, the worker can run that setup once and retry the exact check once.
 Ordinary failures, timeouts, and executables that exist but cannot run do not
-trigger recovery. It records all three steps in one evidence log and stops if
+trigger this setup replay. It records all three steps in one evidence log and stops if
 the setup or project check changes, setup fails, files change, the checkout
 moves, unchanged files cannot be confirmed, worker custody is lost, or the
 executable remains missing. This is not permission to invent a shell command,
 install system software, or retry without a bound.
+
+
+A failed project check or verification timeout on a saved result can instead
+start the existing bounded repair loop when the project's signed mode allows
+`repairAuto`. The complete machine receipt and log must still match the
+candidate, original run base, scope and approved command. The repair inherits
+the same scope, rubric and routes; it shares the existing attempt cap,
+no-progress stop and duplicate prevention with review-driven repairs. A failed
+project check remains a repair target even if every individual criterion was
+reported as passing. No database migration or additional scheduler is involved.
+
+The repair builder receives the verified failure as quoted evidence. It
+inspects the failure first, can rerun the failing test once to diagnose a
+suspected timeout or transient failure, and runs affected checks while fixing.
+The unchanged full command runs at the native final gate for the result;
+independent review follows a passing gate. A repair that needs no code edit
+still gets a fresh gate and review. Prior failures remain recorded. Test skips,
+weaker assertions, higher timeouts and changed approval terms are not repairs.
+Missing or changed evidence, lost custody, changed setup authority, holds and
+stops require attention rather than another unattended edit.
 
 Rollback proves worktree cleanliness and base revision first. `git reset --hard` leaves untracked files behind and can destroy repairable work.
 

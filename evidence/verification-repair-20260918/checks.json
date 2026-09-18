@@ -1,0 +1,27 @@
+{
+  "candidateBase": "a64f7a196d3a8371c3c30a13b63d652a17be9662",
+  "sourceSha256": {
+    "docs/DESIGN.md": "304cb1590471735b88130fab887a99276062682db91c1f6a39f16b1fdd63cfe5",
+    "src/builder.test.ts": "ac5dbc32185a0019cc2c246be8ba8bbc1b246cc7da5d58e7f9e2b1b69f0feca8",
+    "src/builder.ts": "8d4f2879485021d041c7de62976ca0115828bfba4358b4caab3b9ab299839abf",
+    "src/dispose.ts": "326490503e5fdc9b8974dc977c936d3f27ff10ee7447fc59f090ae9f84cf4c27",
+    "src/held.ts": "17c1d376722efeda2d57658d5e97b6bc748a86459f0def602be4c3b6221521aa",
+    "src/operate.ts": "3b881d4c2ca83a22782fc271ff78053da5692cf54aa8be61eee8a27aacba06b4",
+    "src/repair-loop.test.ts": "cfc95b3ce1944ddba05cc41daecd618c3d9cc9ee8895b7e1ef38e9f982079d1f",
+    "src/unattended.test.ts": "879155d84aaf8593f9c068f65d142f44c3e61aa85da30c98eb056abef49be725",
+    "src/verification-evidence.ts": "4705fd82e36755960d01ca88434e114e92d63b80b170ef1f6e2ca01ed6abd12c"
+  },
+  "focusedTests": {
+    "log": "checks.txt",
+    "commands": [
+      "npm run typecheck",
+      "npx vitest run src/repair-loop.test.ts src/builder.test.ts src/unattended.test.ts src/reviewer.test.ts src/revision-terms.test.ts src/task-control.test.ts src/held.test.ts --reporter=dot",
+      "npx vitest run src/unattended.test.ts -t changed-evidence --reporter=dot"
+    ],
+    "result": "Typecheck passed. Broad affected-behavior run: 360 passed, one fixture assertion failed because the CLI projects the failure classification rather than the raw refusal. Corrected that assertion to inspect the saved cause; its focused rerun passed. No production code changed between these runs. Native full verification is pending.",
+    "syntheticJourney": "Real Git, CLI dispatch, verification, receipts and review with synthetic providers; two builds, two native checks, one review, including a repair with no code edits. Changed source evidence refuses before another provider spawn."
+  },
+  "planningModel": "claude-fable-5-1",
+  "implementationModel": "gpt-6-astra",
+  "review": "Pending native independent Astra review; no review verdict claimed."
+}

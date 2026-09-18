@@ -77,3 +77,28 @@ export function verificationEvidence(store: Store, root: string, runId: number):
   const bytes = JSON.stringify(receipt);
   return { ok: true, bytes, digest: hash({ receipt, receipts }) };
 }
+
+/** Only a sealed failed check can start unattended diagnosis. Lost custody,
+ * changed approvals/trees and incomplete evidence still need attention; they
+ * must not become another code-writing attempt. Keep the log out of the small
+ * revision artifact and re-read it when the repair builder starts. */
+export function failedVerificationEvidence(store: Store, root: string, runId: number):
+  | { kind: "none" }
+  | { kind: "unavailable"; problem: string }
+  | { kind: "failed"; digest: string; receipt: string; log: string } {
+  if (!store.artifactsFor(runId).some(isVerificationReceipt)) return { kind: "none" };
+  const verified = verificationEvidence(store, root, runId);
+  if (!verified.ok) return { kind: "unavailable", problem: verified.problem };
+  if (verified.bytes === null) return { kind: "none" };
+  const receipt = JSON.parse(verified.bytes) as { result: VerifyCommandFacts; log: { artifactId: number } };
+  const result = receipt.result;
+  if (!result.configured || (result.ran ? result.exitCode === 0 :
+    result.failure !== "timed-out" && result.failure !== "retry-timed-out")) return { kind: "none" };
+  const artifact = store.getArtifact(receipt.log.artifactId);
+  if (!artifact || artifact.truncated || artifact.redacted || artifact.captureStatus !== "ok") {
+    return { kind: "unavailable", problem: "Automatic repair needs the complete, unredacted failed-check log." };
+  }
+  const read = readVerifiedArtifact(root, artifact);
+  if (!read.ok) return { kind: "unavailable", problem: "The failed-check log no longer verifies." };
+  return { kind: "failed", digest: verified.digest, receipt: verified.bytes, log: read.content.toString("utf8") };
+}

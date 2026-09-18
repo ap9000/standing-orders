@@ -28,6 +28,7 @@ import { writeEvidenceFile } from "./evidence.js";
 import type { BuildResult } from "./builder.js";
 import type { Store } from "./store.js";
 import { manualReviewOnly, type ProofVerdict } from "./proof.js";
+import { failedVerificationEvidence } from "./verification-evidence.js";
 
 /**
  * Which road is disposing. 'tick' = the unattended loop: full task
@@ -56,6 +57,8 @@ export type DisposeContext = {
   model: string | null;
   /** Where the attempt's tree lives — failure records name it. */
   worktreePath: string;
+  /** The same evidence root the builder used; required for automatic repair. */
+  evidenceRoot?: string;
   clock: () => Date;
 };
 
@@ -135,9 +138,12 @@ const STANDALONE_BROKE_REASONS = new Set([
  * page keeps that evidence visible).
  */
 export function maybeRequestAutoReview(store: Store, repo: string, runId: number, committed: boolean, noChange: boolean, now: Date): void {
-  if (!committed || noChange) return;
   const run = store.getRun(runId);
   const ref = run === null ? null : store.refForId(run.taskRef);
+  // A diagnostic repair may establish that no code change was needed. Its
+  // fresh machine gate and inherited review context still need review.
+  const unchangedRepair = noChange && ref !== null && store.repairChainForDraft(ref.externalId) !== null;
+  if ((!committed || noChange) && !unchangedRepair) return;
   const scope = ref === null ? null : store.getScope(ref.externalId);
   // A diagnostic review of failed checks remains available explicitly. The
   // automatic path waits for the machine gate, before spending a review ask.
@@ -161,6 +167,17 @@ export function maybeRequestAutoReview(store: Store, repo: string, runId: number
   const terms = modeTermsFromJson(mode.termsJson);
   if (terms === null || !terms.reviewAuto) return;
   store.requestReview(runId, `mode ${mode.name}`, now, { kind: "mode", digest: mode.digest });
+}
+
+/** One follow-up after fenced completion: diagnose a failed machine gate or
+ * request the ordinary independent review. No inline retry or extra reviewer. */
+function followUpBuild(context: DisposeContext, committed: boolean, noChange: boolean): void {
+  const { store, repo, runId, clock } = context;
+  const verdict = store.proofVerdictFor(runId);
+  if (context.evidenceRoot !== undefined && verdict !== null) {
+    maybeTriggerRepair(store, repo, context.evidenceRoot, runId, verdict.machineVerdict ?? verdict.verdict, clock(), "verification");
+  }
+  maybeRequestAutoReview(store, repo, runId, committed, noChange, clock());
 }
 
 export function disposeBuildOutcome(context: DisposeContext, result: BuildResult): Disposition {
@@ -266,7 +283,7 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
       });
       store.clearQuota(runner, provider, model ?? "");
       if (sealed.disowned) return { kind: "disowned" };
-      maybeRequestAutoReview(store, repo, runId, result.committed, result.noChange === true, clock());
+      followUpBuild(context, result.committed, result.noChange === true);
       return { kind: "built", committed: result.committed, noChange: result.noChange === true };
     }
     if (policy === "standalone") {
@@ -351,7 +368,7 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
       store.clearQuota(runner, provider, model ?? "");
       // The standalone road deliberately stays out: its historical shape
       // touches nothing beyond run records, and `task review` covers it.
-      maybeRequestAutoReview(store, repo, runId, result.committed, result.noChange === true, clock());
+      followUpBuild(context, result.committed, result.noChange === true);
       return { kind: "built", committed: result.committed, noChange: result.noChange === true };
     }
     store.transact(() => {
@@ -603,8 +620,8 @@ export type RepairTrigger =
   | { kind: "none" };
 
 /**
- * The bounded repair loop's trigger (v40): fired after a review pass folds
- * at least one criterion judgement into a run's proof verdict. Composes at
+ * The bounded repair loop's trigger: fired after a failed machine gate or a
+ * review pass identifies unmet criteria. Composes at
  * most one durable revision draft naming exactly the unmet criterion ids,
  * inheriting the source scope and rubric verbatim — or settles the chain
  * at one of its four independent stops (integrity, no-progress, attempts
@@ -616,7 +633,7 @@ export type RepairTrigger =
  * the ordinary rails and strikes — this function only ever composes a
  * task and, at most, one scope approval.
  */
-export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: string, sourceRunId: number, verdict: ProofVerdict, now: Date): RepairTrigger {
+export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: string, sourceRunId: number, verdict: ProofVerdict, now: Date, cause: "review" | "verification" = "review"): RepairTrigger {
   if (verdict !== "short" && verdict !== "refuted") return { kind: "none" };
   // One attempt per source run, ever (source_run UNIQUE) — checked first so
   // a re-fired trigger is a silent no-op, never a duplicate.
@@ -626,10 +643,34 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   if (run === null) return { kind: "none" };
   const stored = store.proofVerdictFor(sourceRunId);
   if (stored === null) return { kind: "none" };
+  const mode = store.activeMode(repo, now);
+  const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
+  let verification: { sourceRun: number; digest: string } | undefined;
+  if (cause === "verification") {
+    // A signed repair mode is required for this automatic producer. The
+    // existing review/manual road continues to offer unapproved drafts.
+    if (terms?.repairAuto !== true || run.finishedAt === null || !run.headRevision ||
+      (run.outcome !== "built" && run.outcome !== "no-change")) return { kind: "none" };
+    const owner = store.refForId(run.taskRef);
+    if (owner === null || owner.repo !== repo || store.applicableStopFor(sourceRunId) !== null ||
+      store.activeHolds(run.taskRef, now).length > 0 ||
+      (!run.committed && !(run.outcome === "no-change" && store.repairChainForDraft(owner.externalId) !== null))) return { kind: "none" };
+    const failure = failedVerificationEvidence(store, evidenceRoot, sourceRunId);
+    if (failure.kind === "unavailable") {
+      store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `repair-evidence:${sourceRunId}`, kind: "repair-evidence", pushClass: "attention", subject: "Repair needs complete evidence", body: failure.problem, link: `/t/${encodeURIComponent(store.refById(run.taskRef)?.externalId ?? "")}` }, now);
+      return { kind: "none" };
+    }
+    if (failure.kind !== "failed") return { kind: "none" };
+    verification = { sourceRun: sourceRunId, digest: failure.digest };
+  }
   const unresolved = stored.matrix
     .filter(row => row.state === "missing" || row.state === "failed")
     .map(row => row.id)
     .sort();
+  // The project gate is independent of agent-reported criterion passes.
+  // This ledger target is not a new acceptance criterion or a changed verdict.
+  if (verification !== undefined && !unresolved.includes("project checks")) unresolved.push("project checks");
+  unresolved.sort();
   if (unresolved.length === 0) return { kind: "none" };
 
   const brief = store.refById(run.taskRef);
@@ -640,7 +681,8 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   // back into).
   if (ref.deliverable === "report") return { kind: "none" };
   // Never repair: a run already published or holding a merge blocker.
-  if (store.publicationForRun(sourceRunId) !== null) return { kind: "none" };
+  const publication = store.publicationForRun(sourceRunId);
+  if (publication !== null && !(verification !== undefined && publication.state === "intended" && publication.attempts === 0)) return { kind: "none" };
   // Never repair: a task with an open decision or a pending steering note.
   if (store.decisionsForTask(ref.id).some(d => d.state === "open" || d.state === "expired")) return { kind: "none" };
   if (store.pendingSteerCount(ref.id) > 0) return { kind: "none" };
@@ -666,8 +708,6 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   const rootTask = lineage.rootTask;
   const attempt = lineage.attempts.reduce((highest, row) => Math.max(highest, row.attempt), 0) + 1;
 
-  const mode = store.activeMode(repo, now);
-  const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
   const auto = terms?.repairAuto === true;
   const basis: "human" | "mode" = auto ? "mode" : "human";
   const modeDigest = auto && mode !== null ? mode.digest : null;
@@ -726,6 +766,7 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
     attempt,
     unresolved: unresolvedDetail,
     reviewerContradictions: contradictions.map(one => ({ id: one.criterionId, author: one.author, note: one.note })),
+    ...(verification === undefined ? {} : { verification }),
   };
   const briefBytes = Buffer.from(JSON.stringify(draftBrief, null, 2), "utf8");
   const key = writeEvidenceFile(evidenceRoot, sourceRunId, `repair-brief-${sourceRunId}-${attempt}.json`, briefBytes);
@@ -743,8 +784,8 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
       brief: { evidenceRoot, key, sha256: createHash("sha256").update(briefBytes).digest("hex"), bytes: briefBytes.length, capture: "machine-authored repair brief (exit 0)" },
       child: {
         id: draftId,
-        title: `repair ${ref.externalId}: ${unresolved.length} criteri${unresolved.length === 1 ? "on" : "a"} unmet`,
-        repair: `repair exactly the unmet criteria named below; a comment cannot widen the scope. Unmet: ${unresolved.join(", ")}.`,
+        title: verification === undefined ? `repair ${ref.externalId}: ${unresolved.length} criteri${unresolved.length === 1 ? "on" : "a"} unmet` : `Fix failed checks for ${ref.externalId}`,
+        repair: verification === undefined ? `repair exactly the unmet criteria named below; a comment cannot widen the scope. Unmet: ${unresolved.join(", ")}.` : "Diagnose the saved failed project check and repair within the original scope. Preserve the acceptance criteria and verification command; the revision brief binds the exact failure evidence.",
       },
       rootTask,
       attempt,

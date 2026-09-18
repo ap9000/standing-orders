@@ -1,0 +1,130 @@
+===== typecheck.log =====
+
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+===== regression-before.log =====
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-repair-loop
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+------------------------------------------------------------------------------------------------------------·(node:24664) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+x--------------------------------------
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/builder.test.ts > the proof (Priority 2): a missing or malformed proof never destroys committed work > pending final check settles from the machine once (exit 1), with the original receipt retained
+AssertionError: expected null to match object { draftTask: 't-1-fix-1', …(2) }
+
+- Expected:
+{
+  "attempt": 1,
+  "basis": "mode",
+  "draftTask": "t-1-fix-1",
+}
+
++ Received:
+null
+
+ ❯ src/builder.test.ts:3319:48
+    3317|     expect(disposition.kind).toBe("built");
+    3318|     if (exitCode === 1) {
+    3319|       expect(store.repairChainFor(req.runId!)).toMatchObject({ draftTa…
+       |                                                ^
+    3320|       expect(store.getScope("t-1-fix-1")?.approvedAt).not.toBeNull();
+    3321|       const source = store.revisionSourceOf(store.lookupRef("t-1-fix-1…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed | 146 skipped (148)
+   Start at  08:24:04
+   Duration  2.90s (transform 914ms, setup 15ms, import 1.09s, tests 173ms, environment 0ms)
+
+
+===== focused.log =====
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-repair-loop
+
+········································(node:85882) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··························································(node:85881) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+······························(node:85889) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··················(node:85890) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···········(node:85891) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·························(node:85884) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·····························································(node:85879) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·····················································································································x
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/unattended.test.ts > v40: a drafted, unapproved repair moves the idle-spend invariant not at all > failed gate → automatic repair → fresh gate → one review (changed-evidence)
+AssertionError: expected [ { id: 't-check-fix-1', …(4) } ] to match object [ { reason: 'revision-brief' } ]
+(4 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  [
+    {
+-     "reason": "revision-brief",
++     "reason": "unknown — retry 1/3",
+    },
+  ]
+
+ ❯ src/unattended.test.ts:459:58
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 6 passed (7)
+      Tests  1 failed | 360 passed (361)
+   Start at  08:33:32
+   Duration  12.00s (transform 6.66s, setup 72ms, import 8.54s, tests 34.59s, environment 0ms)
+
+
+===== changed-evidence.log =====
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-repair-loop
+
+(node:77266) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+----·
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 4 skipped (5)
+   Start at  08:34:53
+   Duration  3.21s (transform 1.50s, setup 11ms, import 2.20s, tests 908ms, environment 0ms)
+
+
+===== journey.log =====
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-repair-loop
+
+--(node:17508) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··
+
+ Test Files  1 passed (1)
+      Tests  2 passed | 2 skipped (4)
+   Start at  08:32:27
+   Duration  4.40s (transform 1.45s, setup 12ms, import 1.92s, tests 2.38s, environment 0ms)
+
