@@ -191,6 +191,38 @@ describe("the builder's gates", () => {
   const claimIt = () =>
     acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
 
+  test("a prepared candidate is checked out by the machine and settles without an agent (v69)", async () => {
+    const candidate = "c".repeat(40);
+    propose(store, { taskId: "t-1", goal: "Install the prepared commit", candidate, now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    claimIt();
+    const gitCalls: string[][] = [];
+    // The stub's tree: one modified path, reported consistently by status and diff.
+    const preparedGit: Runner = async (file, args, options) => {
+      gitCalls.push([...args]);
+      if (args.includes("diff") && args.includes("--name-only")) return { ...OK, stdout: args.includes("--diff-filter=D") ? "" : "src/index.ts\0" };
+      return git(file, args, options);
+    };
+    const req = request({ git: preparedGit });
+    const result = await build(store, req);
+    expect(result).toMatchObject({ ok: true, committed: true, summary: expect.stringContaining("no agent ran") });
+    expect(agentCalls).toHaveLength(0);
+    expect(gitCalls.some(args => args.includes("merge-base") && args.includes("--is-ancestor") && args.includes(candidate))).toBe(true);
+    expect(gitCalls.some(args => args.includes("checkout") && args.includes(candidate))).toBe(true);
+    // The dispatcher settles the run row after build() returns; here the sealed note is the machine's own word.
+    expect(store.handle.prepare("SELECT note FROM run_note WHERE run = ?").all(req.runId as number).some(row => String(row["note"]).includes(`Prepared candidate ${candidate} checked out; no agent ran.`))).toBe(true);
+  });
+
+  test("a prepared candidate that is not a commit here, or does not descend from the base, refuses before anything moves (v69)", async () => {
+    const candidate = "e".repeat(40);
+    propose(store, { taskId: "t-1", goal: "Install the prepared commit", candidate, now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    claimIt();
+    const strangerGit: Runner = async (file, args, options) => args.includes("cat-file") ? { ...OK, code: 1, stderr: "fatal: Not a valid object name" } : git(file, args, options);
+    expect(await build(store, request({ git: strangerGit }))).toMatchObject({ ok: false, reason: "no-op", message: expect.stringContaining("is not a commit in this repository") });
+    expect(agentCalls).toHaveLength(0);
+  });
+
   test("unreadable skill context refuses before provider spend", async () => {
     approveScope();
     claimIt();

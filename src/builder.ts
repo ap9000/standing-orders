@@ -487,7 +487,7 @@ export function proveApprovedProfile(
               outOfScope: scope.outOfScope,
               touches: scope.touches,
               budgetMicrousd: scope.budgetMicrousd,
-              acceptance: scope.acceptance,
+              acceptance: scope.acceptance, candidate: scope.candidate ?? null,
               qualityMode: scope.qualityMode ?? "default",
             },
             snapshot,
@@ -496,7 +496,7 @@ export function proveApprovedProfile(
             // the seal's own snapshot, never from mutable configuration.
             routeFromJson(scope.approvedRouteJson ?? null),
           )
-        : digestOf({ goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance });
+        : digestOf({ goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, candidate: scope.candidate ?? null });
     if (rederived !== scope.approvedDigest) {
       return { ok: false, message: "the approval record does not verify against the stored terms — re-approve (stale-approval)" };
     }
@@ -1387,6 +1387,56 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // writers) and the live-log handle rides the capture (the live window
   // stays streaming across the whole hold). build() returns WITHOUT
   // settling: the run, the lease, and the worktree are the coordinator's.
+  // THE PREPARED-CANDIDATE ROAD (v69): the scope names a commit. The machine
+  // proves it descends from this task's base, brings the worktree to its
+  // tree — uncommitted, exactly as an agent would leave it — writes the
+  // handoff itself, and settles through the SAME state machine every agent
+  // attempt settles through: commit, sealed diff from the pinned base, the
+  // approved gate, the review. No provider is spawned and nothing is spent.
+  const prepared = scope?.candidate ?? null;
+  if (prepared !== null && attended === undefined) {
+    if (pulseTimer !== undefined) clearInterval(pulseTimer);
+    liveLog?.close();
+    try {
+      const pinned = store.firstBuilderBase(taskRef, branch) ?? baseRevision;
+      const known = await git(GIT, ["--no-optional-locks", "cat-file", "-e", `${prepared}^{commit}`], { cwd: worktree });
+      if (known.code !== 0) return { ok: false, reason: "no-op", message: `prepared candidate ${prepared.slice(0, 7)} is not a commit in this repository — fetch it first` };
+      const lineage = await git(GIT, ["--no-optional-locks", "merge-base", "--is-ancestor", pinned, prepared], { cwd: worktree });
+      if (lineage.code !== 0) return { ok: false, reason: "no-op", message: `prepared candidate ${prepared.slice(0, 7)} does not descend from this task's base ${pinned.slice(0, 7)}` };
+      const removed = await git(GIT, ["--no-optional-locks", "diff", "--name-only", "--diff-filter=D", "-z", "HEAD", prepared], { cwd: worktree });
+      if (removed.code !== 0) return { ok: false, reason: "git", message: firstLine(removed.stderr) };
+      const restored = await git(GIT, ["--no-optional-locks", "checkout", prepared, "--", "."], { cwd: worktree });
+      if (restored.code !== 0) return { ok: false, reason: "git", message: firstLine(restored.stderr) };
+      for (const path of removed.stdout.split("\0").filter(Boolean)) {
+        const gone = await git(GIT, ["--no-optional-locks", "rm", "-q", "--", path], { cwd: worktree });
+        if (gone.code !== 0) return { ok: false, reason: "git", message: firstLine(gone.stderr) };
+      }
+      const sinceHead = await git(GIT, ["--no-optional-locks", "diff", "--name-only", "-z", "HEAD", prepared], { cwd: worktree });
+      const sinceBase = await git(GIT, ["--no-optional-locks", "diff", "--name-only", "-z", pinned, prepared], { cwd: worktree });
+      if (sinceHead.code !== 0 || sinceBase.code !== 0) return { ok: false, reason: "git", message: firstLine(sinceHead.stderr || sinceBase.stderr) };
+      const unchanged = sinceHead.stdout.split("\0").filter(Boolean).length === 0;
+      writeFileSync(join(worktree, done), JSON.stringify({
+        version: 1,
+        status: unchanged ? "no-change" : "completed",
+        conclusion: `Prepared candidate ${prepared} was checked out by the machine; no agent ran. ${unchanged ? "The branch already matched it." : "The sealed diff spans this task's base to that candidate."}`,
+        changes: sinceBase.stdout.split("\0").filter(Boolean).slice(0, HANDOFF_LIST_CAP),
+        verification: [],
+        followUps: [],
+      }, null, 2), { mode: 0o600 });
+      store.addRunNote(request.runId, "Standing Orders", `Prepared candidate ${prepared} checked out; no agent ran.`, clock());
+      const captured: CapturedBuild = {
+        store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
+        runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof, rubric,
+        clock, fenced: () => fencedMidBuild,
+        plan: { proposal, revision: planRevisionNumber, authority, progress: progressState },
+      };
+      const outcome: AgentOutcome = { code: 0, stderr: "", timedOut: false, notFound: false, sessionId: null, initFailed: false, finalMessage: `prepared candidate ${prepared.slice(0, 7)}`, usage: { tokensIn: null, tokensOut: null, costUsd: null } };
+      return await settleProviderOutcome(captured, outcome);
+    } finally {
+      try { unlinkSync(join(worktree, rubric)); } catch { /* already consumed */ }
+    }
+  }
+
   if (attended !== undefined) {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
     // The follow-up is NEW INSTRUCTION inside the signed terms (v2 S3c):

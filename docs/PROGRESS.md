@@ -1,5 +1,16 @@
 # Progress
 
+**2026-09-19 UTC — A prepared commit is an attempt (v69).**
+`task scope --candidate <sha>` names a commit the machine installs as the
+attempt: it proves the commit descends from the task's base, brings the
+worktree to its tree uncommitted, writes the handoff itself, and settles
+through the same state machine as an agent attempt — commit, sealed diff
+from the pinned base, approved gate, review. No provider is spawned. The
+candidate is signed into the scope digest (folded only when present, so no
+earlier digest changes); schema 69 adds `task_scope.candidate`. Yesterday
+about twenty builder runs, three to eight minutes each, existed only to
+`git apply` a diff someone had already written; those become zero.
+
 **2026-09-19 UTC — Corrections ride the same filing.**
 `task requeue` now accepts a finished task whose last builder result was not
 accepted: a failed gate, a contradicting review, or a refuted proof. The next

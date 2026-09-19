@@ -134,6 +134,23 @@ The scheduler and worker recheck actual authority, availability, budget,
 containment, and completion requirements at their existing boundaries.
 
 
+## Install a prepared commit as the attempt (no agent)
+
+When the change already exists as a commit, name it on the scope and the
+machine does the rest: it proves the commit descends from the task's base,
+brings the worktree to its tree, commits, seals the diff from the original
+base, runs the approved gate and asks for the review. No agent is dispatched
+and nothing is spent on one.
+
+```
+standing-orders task scope <id> --repo <path> --goal "Install commit <sha>: …" --candidate <sha> --acceptance "…"
+standing-orders task approve <id> --yes --digest <shown> --as <you>
+```
+
+The commit must be reachable in the repository (fetch it first) and must
+descend from the task's base. On a later attempt, re-scope with the new
+commit and requeue; the branch keeps the earlier attempt underneath.
+
 ## Correct a rejected result on the same filing
 
 A gate that failed, a review that contradicted, or a proof that read refuted
