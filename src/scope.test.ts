@@ -1210,3 +1210,30 @@ describe("one strict projection gates filing, consent, the seal, and dispatch (a
     expect(store.runRoute(planner)).toMatchObject({ routeDigest: "legacy", chosen: "legacy", phase: "plan" });
   });
 });
+
+describe("acceptance rubric on the command line", () => {
+  test("a semicolon inside a statement does not split the criterion", async () => {
+    const { splitAcceptanceRubric, acceptanceLinesToInput, parseAcceptanceCriteria } = await import("./scope.js");
+    const parts = splitAcceptanceRubric("Timeouts yield a notice; assertion failures still repair|check,changed-path;The prompt forbids base comparisons|check");
+    expect(parts).toEqual(["Timeouts yield a notice; assertion failures still repair|check,changed-path", "The prompt forbids base comparisons|check"]);
+    const parsed = parseAcceptanceCriteria(acceptanceLinesToInput(parts));
+    expect(parsed.problems).toEqual([]);
+    expect(parsed.criteria.map(c => c.statement)).toEqual(["Timeouts yield a notice; assertion failures still repair", "The prompt forbids base comparisons"]);
+  });
+  test("`plan` expands to the placeholder rubric the planner replaces", async () => {
+    const { splitAcceptanceRubric, acceptanceLinesToInput, parseAcceptanceCriteria, rubricIsPlaceholder, PLACEHOLDER_RUBRIC } = await import("./scope.js");
+    const parsed = parseAcceptanceCriteria(acceptanceLinesToInput(splitAcceptanceRubric(" Plan ")));
+    expect(parsed.problems).toEqual([]);
+    expect(parsed.criteria).toEqual(PLACEHOLDER_RUBRIC);
+    expect(rubricIsPlaceholder(parsed.criteria)).toBe(true);
+    expect(rubricIsPlaceholder([{ statement: "Real outcome", evidence: ["check"] }])).toBe(false);
+    expect(rubricIsPlaceholder([...PLACEHOLDER_RUBRIC, { id: "c2", statement: "Real outcome", how: null, evidence: ["check"] }])).toBe(false);
+  });
+  test("a statement may run to a thousand bytes", async () => {
+    const { acceptanceLinesToInput, parseAcceptanceCriteria, ACCEPTANCE_LIMITS } = await import("./scope.js");
+    expect(ACCEPTANCE_LIMITS.statement).toBe(1000);
+    const long = "x".repeat(900);
+    expect(parseAcceptanceCriteria(acceptanceLinesToInput([`${long}|check`])).problems).toEqual([]);
+    expect(parseAcceptanceCriteria(acceptanceLinesToInput([`${"x".repeat(1001)}|check`])).problems.map(p => p.message)).toEqual(["acceptance[0].statement is over 1000 bytes"]);
+  });
+});

@@ -1,5 +1,6 @@
 import { mkdtempSync } from "node:fs";
 import { openStore } from "./store.js";
+import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { DEFAULT_LIVENESS_MS, register } from "./runner.js";
 import { completeFenced } from "./claim.js";
 import { canonicalProject } from "./project.js";
@@ -889,6 +890,32 @@ describe("agreeing to a scope from the command line", () => {
     return payload().scope.digest as string;
   };
   let approverToken = "";
+
+  test("a placeholder rubric under a planning mode asks the planner instead of building against it", async () => {
+    await scopeIt();
+    const expiry = new Date(T0.getTime() + 24 * 60 * 60_000).toISOString();
+    const terms = { ...presetTerms("standard", expiry), autoApproveFiling: true, planAuto: true, reviewAuto: true };
+    {
+      const store = openStore(db);
+      store.signMode({ repo: process.cwd(), name: terms.name, termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, T0);
+      store.close();
+    }
+    await run(["task", "add", "persist targeting", "--id", "later", "--repo", process.cwd()]);
+    expect(await run(["task", "scope", "later", "--goal", "Persist targeting to the roster", "--touches", "src/a.ts", "--acceptance", "plan", "--as", "alex", "--token", approverToken, "--json"])).toBe(EXIT.ok);
+    await run(["task", "add", "real rubric", "--id", "real", "--repo", process.cwd()]);
+    expect(await run(["task", "scope", "real", "--goal", "Guard the upgrade", "--touches", "src/a.ts", "--acceptance", "It works; nothing double-charges|check", "--as", "alex", "--token", approverToken, "--json"])).toBe(EXIT.ok);
+    const store = openStore(db);
+    try {
+      // The placeholder became a plan request and nothing was promised yet.
+      expect(store.refFor("built-in", "later").plan).toBe("requested");
+      expect(store.getScope("later")!.approvedAt).toBeNull();
+      expect(store.getScope("later")!.acceptance.map(c => c.evidence)).toEqual([["manual-review"]]);
+      // A real rubric under the same mode is sealed as before, semicolon and all.
+      expect(store.refFor("built-in", "real").plan).toBeNull();
+      expect(store.getScope("real")!.approvedAt).not.toBeNull();
+      expect(store.getScope("real")!.acceptance.map(c => c.statement)).toEqual(["It works; nothing double-charges"]);
+    } finally { store.close(); }
+  });
 
   test("new CLI goals and exclusions use the canonical text policy without rewriting on rejection", async () => {
     await scopeIt();

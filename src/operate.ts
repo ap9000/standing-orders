@@ -200,7 +200,7 @@ import {
 import { mintCoordinator, revokeCoordinator, listCoordinators } from "./coordinator.js";
 import { serveMcp } from "./mcp.js";
 import { createInterface } from "node:readline";
-import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage, acceptanceLinesToInput, parseAcceptanceCriteria } from "./scope.js";
+import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage, acceptanceLinesToInput, parseAcceptanceCriteria, splitAcceptanceRubric, rubricIsPlaceholder } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
 import { requestTaskStop, resumeTaskStop, taskControlOf } from "./task-control.js";
@@ -7046,7 +7046,7 @@ async function routineCommand(
         goal,
         outOfScope: text(flags, "not") ?? null,
         touches: (text(flags, "touches") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
-        acceptance: acceptanceLinesToInput(acceptanceGiven.split(";")),
+        acceptance: acceptanceLinesToInput(splitAcceptanceRubric(acceptanceGiven)),
         requirements: (text(flags, "require") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
         schedule,
         costCeilingUsd: ceilingGiven === undefined ? null : Number(ceilingGiven),
@@ -10527,9 +10527,10 @@ function scopeTask(
       EXIT.usage,
     );
   }
-  const acceptanceParse = parseAcceptanceCriteria(acceptanceLinesToInput(acceptanceGiven.split(";")));
+  const acceptanceParse = parseAcceptanceCriteria(acceptanceLinesToInput(splitAcceptanceRubric(acceptanceGiven)));
   if (acceptanceParse.problems.length > 0) {
-    return fail(write, json, "task scope", "bad-acceptance", acceptanceParse.problems.map(p => p.message).join("; "), EXIT.usage);
+    return fail(write, json, "task scope", "bad-acceptance",
+      `${acceptanceParse.problems.map(p => p.message).join("; ")} — each criterion is \`<statement>|<evidence,kinds>\`, criteria are \`;\`-separated, and \`--acceptance plan\` asks the planner to write the rubric`, EXIT.usage);
   }
   const riskGiven = text(flags, "risk");
   if (riskGiven !== undefined && !isRiskLevel(riskGiven)) {
@@ -10709,6 +10710,14 @@ function scopeTask(
     });
     let sealedUnderMode = false;
     let modeRefusedCoordinator = false;
+    // A placeholder rubric is a request for a plan, not a promise to build
+    // against: under a mode that plans automatically, the planner writes the
+    // real criteria first, exactly as a console-filed scout follow-up does.
+    if (coverage !== null && rubricIsPlaceholder(proposed.acceptance) && store.lookupRef(id)?.plan == null) {
+      const mode = store.activeMode(store.lookupRef(id)?.repo ?? "", now);
+      const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
+      if (terms?.planAuto === true) store.requestPlan(store.refFor(BUILT_IN, id).id, now);
+    }
     if (coverage !== null && store.lookupRef(id)?.plan === "requested") {
       authorizePlanUnderMode(store, id, actor as string, now);
     } else if (coverage !== null && proposed.profileState === "resolved") {
