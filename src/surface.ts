@@ -178,6 +178,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     notableReasons: ["unknown-task"] },
   operator("task approve", "the yes — nothing builds without one; binds to the scope digest"),
   operator("task requeue", "exit a stall: incidents resolved, strikes cleared, queued again"),
+  operator("task regate", "run the approved check again on the last attempt's exact commit — no agent, fresh review"),
   operator("task review", "ask an agent to review a finished run's sealed diff — its comments land for you to prune and seal"),
   operator("task accept", "accept a short or refuted proof anyway — the one act that lets a task read done despite incomplete evidence"),
   operator("task repair", "show the repair a short/refuted run's review drafted, or --yes to approve it — the first CLI road to a revision at all"),

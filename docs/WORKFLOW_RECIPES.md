@@ -151,6 +151,21 @@ The commit must be reachable in the repository (fetch it first) and must
 descend from the task's base. On a later attempt, re-scope with the new
 commit and requeue; the branch keeps the earlier attempt underneath.
 
+## Run the check again on the same commit
+
+A gate that failed on a flaky or unrelated test does not need a rebuild:
+
+```
+standing-orders task regate <id> --as <you>
+```
+
+The machine files a new attempt whose prepared candidate is the last
+attempt's exact commit, checks it out without an agent, seals a fresh
+receipt and proof, and asks for the review. Under a mode that allows
+automatic repair, a failure the change did not cause (the whole check timing
+out, or an untouched test's own timeout) reruns once on its own; a second
+failure on the same commit goes to a person.
+
 ## Correct a rejected result on the same filing
 
 A gate that failed, a review that contradicted, or a proof that read refuted

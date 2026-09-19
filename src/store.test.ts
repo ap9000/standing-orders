@@ -1623,6 +1623,9 @@ describe("console mutation semantics, re-proved server-side", () => {
     expect(store.requeueTask("t-1", "alex", later(4_000))).toMatchObject({ ok: false, reason: "accepted-result" });
     const published = attempt("refuted");
     const intent = store.createPublicationIntent({ run: published, taskRef: ref, githubRepo: "a/b", remote: "origin", base: "main", head: "b-t-1", headSha: "a".repeat(40), bodyHash: "", draft: true }, later(4_500));
+    // An intent that never pushed is not a publication: the rerun is allowed.
+    expect(store.requeueTask("t-1", "alex", later(4_550))).toMatchObject({ ok: true });
+    store.setTaskState("t-1", "done", later(4_580));
     store.markPublicationPushed(intent, later(4_600));
     expect(store.requeueTask("t-1", "alex", later(5_000))).toMatchObject({ ok: false, reason: "published" });
     void verified;

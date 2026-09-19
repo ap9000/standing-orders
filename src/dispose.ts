@@ -30,7 +30,8 @@ import type { BuildResult } from "./builder.js";
 import type { Store } from "./store.js";
 import { manualReviewOnly, type ProofVerdict, type VerifyCommandFacts } from "./proof.js";
 import { verificationEvidence, failedVerificationEvidence } from "./verification-evidence.js";
-import { classifyGateFailure, describeGateFailure, type GateFailureClass } from "./gate-failure.js";
+import { classifyGateFailure, describeGateFailure, gateFailureSummary, type GateFailureClass } from "./gate-failure.js";
+import { propose, approve } from "./scope.js";
 
 /**
  * Which road is disposing. 'tick' = the unattended loop: full task
@@ -640,6 +641,67 @@ function unrelatedGateFailure(store: Store, evidenceRoot: string, failure: { rec
   return classified.kind === "repairable" ? null : classified;
 }
 
+/**
+ * Run the approved gate again on the SAME commit (v70): a new attempt whose
+ * prepared candidate is the last attempt's head. The machine checks the
+ * commit out (no agent), seals a fresh diff, receipt and proof, and the
+ * ordinary review follows. Used by `task regate` (an operator's yes) and by
+ * the automatic single rerun after a failure the change did not cause.
+ */
+export type RegateRefusal = "no-task" | "no-attempt" | "accepted-result" | "published" | "claimed" | "not-approved" | "not-rejected";
+export function regateTask(
+  store: Store,
+  taskId: string,
+  now: Date,
+  approval: { kind: "operator"; name: string; token: string } | { kind: "mode"; name: string; modeDigest: string },
+): { ok: true; run: number; head: string } | { ok: false; reason: RegateRefusal; message: string } {
+  const ref = store.lookupRef(taskId);
+  if (ref === null) return { ok: false, reason: "no-task", message: `no task ${taskId}` };
+  const last = store.lastBuilderRun(ref.id);
+  if (last === null || !last.headRevision) return { ok: false, reason: "no-attempt", message: `${taskId} has no finished attempt to rerun the check on` };
+  const verdict = store.proofVerdictFor(last.id);
+  if (verdict !== null && (verdict.verdict === "verified" || verdict.verdict === "attested")) return { ok: false, reason: "accepted-result", message: `${taskId}'s last result already reads ${verdict.verdict}; there is nothing to rerun` };
+  if (store.proofAcceptance(last.id) !== null) return { ok: false, reason: "accepted-result", message: `${taskId}'s last result was accepted by an operator` };
+  // Rejected: the proof was refuted, or the machine never got a passing
+  // gate (a timed-out check reads "short", not "refuted"). A short verdict
+  // whose gate passed is a result awaiting review, not one to rerun.
+  const machinePassed = verdict?.machineVerdict === "verified" || verdict?.machineVerdict === "attested";
+  if (verdict === null || !(verdict.verdict === "refuted" || (verdict.verdict === "short" && !machinePassed))) {
+    return { ok: false, reason: "not-rejected", message: `${taskId}'s last result is still being assessed; wait for it or stop it` };
+  }
+  // A pushed or opened branch is revised through its pull request, never
+  // rerun underneath it; a live claim means an attempt is still running.
+  const publication = store.publicationForRun(last.id);
+  if (publication !== null && (publication.state === "pushed" || publication.state === "opened")) return { ok: false, reason: "published", message: `${taskId}'s last result is published; revise it through its pull request` };
+  if (store.hasLiveClaim(ref.id, now)) return { ok: false, reason: "claimed", message: `a runner holds ${taskId} right now — wait for the attempt to end, or stop it` };
+  const scope = store.getScope(taskId);
+  if (scope === null) return { ok: false, reason: "no-attempt", message: `${taskId} has no scope` };
+  const head = last.headRevision;
+  const actor = approval.kind === "operator" ? approval.name : `mode ${approval.name}`;
+  return store.transact(() => {
+    const proposed = propose(store, {
+      taskId, goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd,
+      acceptance: scope.acceptance, qualityMode: scope.qualityMode ?? "default", riskLevel: scope.riskLevel ?? "routine",
+      candidate: head, now,
+    });
+    let sealed = false;
+    if (approval.kind === "operator") sealed = approve(store, taskId, approval.name, now, proposed.digest, approval.token).ok;
+    else sealed = store.sealScopeApproval(taskId, actor, now, {}, { kind: "mode", modeDigest: approval.modeDigest });
+    if (!sealed) return { ok: false as const, reason: "not-approved" as const, message: `${taskId}'s rerun scope could not be approved` };
+    // A finished task returns to the queue; one already queued (a park, a
+    // stop) simply dispatches with the rerun scope on its next turn.
+    if (store.getTask(taskId)?.state !== "queued") {
+      const queued = store.requeueTask(taskId, actor, now);
+      if (!queued.ok) {
+        const why: Record<string, RegateRefusal> = { claimed: "claimed", "accepted-result": "accepted-result", published: "published" };
+        return { ok: false as const, reason: why[queued.reason] ?? "not-rejected", message: `${taskId} could not be queued again: ${queued.reason}` };
+      }
+    }
+    store.addRunNote(last.id, "Standing Orders", `The check will run again on this exact commit (${head.slice(0, 7)}) as a new attempt, ${approval.kind === "operator" ? `on ${approval.name}'s say-so` : "automatically once, because the failure was outside this change"}.`, now);
+    return { ok: true as const, run: last.id, head };
+  });
+}
+
 export type RepairTrigger =
   | { kind: "drafted"; draftTaskId: string; attempt: number; approved: boolean }
   | { kind: "stopped"; reason: RepairStopReason }
@@ -669,6 +731,22 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   if (run === null) return { kind: "none" };
   const stored = store.proofVerdictFor(sourceRunId);
   if (stored === null) return { kind: "none" };
+  // THE RERUN STOP (v70): this attempt was a rerun of the same commit — the
+  // scope names that commit as its prepared candidate and the commit has
+  // been attempted before. The machine has had its one retry; whatever
+  // rejected it this time, a failed check or a contradicting review, goes
+  // to a person. No repair draft, no third pass, on either road.
+  {
+    const rerunTask = store.refById(run.taskRef)?.externalId ?? "";
+    if (run.headRevision && store.getScope(rerunTask)?.candidate === run.headRevision && store.builderAttemptsAt(run.taskRef, run.headRevision) >= 2) {
+      const contradicted = cause === "review";
+      store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `regate-failed:${sourceRunId}`, kind: "repair-evidence", pushClass: "attention",
+        subject: contradicted ? "The rerun on the same commit was contradicted by its review" : "The project check failed again on the same commit",
+        body: `Attempt #${sourceRunId} reran commit ${run.headRevision.slice(0, 7)} and ${contradicted ? "its review contradicted the result" : "the approved check failed again"}. No repair task was filed: decide whether the code or the check is wrong, then run \`standing-orders task regate ${rerunTask}\` or re-scope a corrected candidate.`,
+        link: `/t/${encodeURIComponent(rerunTask)}` }, now);
+      return { kind: "none" };
+    }
+  }
   const direct = stored.matrix.length > 0 && stored.matrix.every(row => row.assessment !== undefined);
   const observation = cause === "review" && direct && !stored.matrix.some(row => row.review?.judgement === "contradicts") && stored.matrix.some(row => row.review?.judgement === "cannot-tell");
   if (cause === "review" && direct && !stored.matrix.some(row => row.review?.judgement === "contradicts") && !observation) return { kind: "none" };
@@ -712,6 +790,20 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
     const unrelated = unrelatedGateFailure(store, evidenceRoot, failure, sourceRunId);
     if (unrelated !== null) {
       const taskId = store.refById(run.taskRef)?.externalId ?? "";
+      // One automatic rerun of the check on the same commit, under the mode
+      // that already authorizes automatic repair (a rerun is strictly less
+      // than a repair). A second failure on the same commit goes to a person.
+      const rerunBefore = run.headRevision ? store.builderAttemptsAt(run.taskRef, run.headRevision) : 0;
+      if (mode !== null && terms?.repairAuto === true && run.headRevision && rerunBefore < 2) {
+        const rerun = regateTask(store, taskId, now, { kind: "mode", name: mode.name, modeDigest: mode.digest });
+        if (rerun.ok) {
+          store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `regate:${sourceRunId}`, kind: "repair-evidence",
+            subject: unrelated.kind === "gate-timed-out" ? "The project check ran out of time; running it once more" : "A slow test outside this change failed the check; running it once more",
+            body: `${gateFailureSummary(unrelated)} The check runs again once on the same commit ${run.headRevision.slice(0, 7)}, with no agent. If it fails again, a person decides.`,
+            link: `/t/${encodeURIComponent(taskId)}` }, now);
+          return { kind: "none" };
+        }
+      }
       store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `repair-unrelated:${sourceRunId}`, kind: "repair-evidence", pushClass: "attention",
         subject: unrelated.kind === "gate-timed-out" ? "The project check ran out of time" : "A slow test outside this change failed the project check",
         body: describeGateFailure(unrelated, taskId), link: `/t/${encodeURIComponent(taskId)}` }, now);

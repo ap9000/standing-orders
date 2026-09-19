@@ -167,7 +167,7 @@ import {
   SYNC_MAX_AGE_MS,
   acquireContinuation,
 } from "./claim.js";
-import { disposeBuildOutcome, holdStaleApproval } from "./dispose.js";
+import { disposeBuildOutcome, holdStaleApproval, regateTask } from "./dispose.js";
 import { attendedLivenessState } from "./liveness.js";
 import { HeldSessionCoordinator, sweepHeldOrphans } from "./held.js";
 import {
@@ -362,6 +362,10 @@ External trackers — build what a tracker nominates, under local approvals
   standing-orders task requeue <id> --as <you> --token <t>
                                         exit a stall: incidents resolved,
                                         strikes cleared, queued again
+  standing-orders task regate <id> --as <you> --token <t>
+                                        run the approved check again on the
+                                        last attempt's exact commit — a new
+                                        attempt, no agent, fresh review
   standing-orders config set budgets [--build-usd <n>] [--race-per-usd <n>]
       [--race-total-usd <n>] [--race-agents 2..4] --as <you> --token <t>
                                         spend defaults new filings pre-fill
@@ -585,7 +589,7 @@ type Args = {
  */
 export const TASK_ACTIONS = [
   "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
-  "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "plan",
+  "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "regate", "plan",
   "review", "accept", "repair", "route", "stop", "resume",
 ] as const;
 export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
@@ -4952,6 +4956,37 @@ async function requeueTask(
     result.rejectedRun !== null
       ? `${id} is queued again: attempt #${result.rejectedRun} was not accepted, so the next attempt continues on the same branch under the current scope. Re-scope first if the candidate changed.`
       : `${id} is queued again${result.resolvedIncidents > 0 ? `, ${result.resolvedIncidents} incident(s) resolved` : ""}. Strikes cleared; the next pass may take it.`,
+  ]);
+}
+
+/**
+ * `standing-orders task regate <id>` — the approved check again on the last
+ * attempt's exact commit (v70). A new attempt whose prepared candidate is
+ * that commit: no agent, a fresh receipt and proof, the ordinary review.
+ * The operator's yes seals the rerun scope; who asked is recorded.
+ */
+async function regateTaskCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [id] = positional;
+  if (id === undefined) {
+    return fail(write, json, "task regate", "usage", "`standing-orders task regate <id> --as <you> --token <t>`", EXIT.usage);
+  }
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "task regate", "usage", "rerunning the check takes `--as <you> --token <t>` — the rerun scope is approved in your name", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, "task regate", authenticated.reason, describeApproveFailure(authenticated.reason, id), EXIT.refused);
+  }
+  const result = regateTask(store, id, clock(), { kind: "operator", name: acting.name, token: acting.token });
+  if (!result.ok) return fail(write, json, "task regate", result.reason, result.message, EXIT.refused);
+  return succeed(write, json, "task regate", { id, run: result.run, head: result.head }, () => [
+    `${id} is queued again: the approved check runs on commit ${result.head.slice(0, 7)} exactly as attempt #${result.run} left it, with no agent. A fresh review follows.`,
   ]);
 }
 
@@ -9553,6 +9588,8 @@ function taskCommand(
       return requireTask(rest, flags, context);
     case "requeue":
       return requeueTask(rest, flags, context);
+    case "regate":
+      return regateTaskCommand(rest, flags, context);
     case "plan":
       return planTaskCommand(rest, flags, context);
     case "review":

@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { openStore, BUILT_IN, type Store } from "./store.js";
 import { addApprover, propose, approve } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
-import { maybeTriggerRepair, maybeSettleRepairChain } from "./dispose.js";
+import { maybeTriggerRepair, maybeSettleRepairChain, regateTask } from "./dispose.js";
 import type { CriterionMatrixRow, VerifyCommandFacts } from "./proof.js";
 import { sealVerificationReceipt } from "./verification-evidence.js";
 import { readVerifiedArtifact, storeEvidence } from "./evidence.js";
@@ -185,18 +185,21 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
 
   const unrelatedNotice = (run: number) => store.raw().prepare("SELECT subject, body, link FROM notification WHERE dedupe_key=?").get(`repair-unrelated:${run}`) as { subject: string; body: string; link: string } | undefined;
 
-  test("a gate that ran out of time tells a person instead of drafting a repair", () => {
+  test("a gate that ran out of time reruns once on the same commit instead of drafting a repair", () => {
     signMode({ repairAuto: true, repairMaxAttempts: 3 });
     const run = failedGate("t-gate", { configured: true, ran: false, attemptFailed: true, failure: "timed-out" });
+    store.setTaskState("t-gate", "done", T0);
     expect(repairGate(run)).toEqual({ kind: "none" });
     expect(store.repairChainFor(run)).toBeNull();
-    expect(unrelatedNotice(run)).toEqual({
-      subject: "The project check ran out of time",
-      body: "The project check ran out of time (300 s) before any test failed, so the code was not shown to be wrong and no repair task was filed. Raise the check's time limit or shorten the suite, then run `standing-orders task requeue t-gate`.",
-      link: "/t/t-gate",
+    expect(store.raw().prepare("SELECT subject, body FROM notification WHERE dedupe_key=?").get(`regate:${run}`)).toEqual({
+      subject: "The project check ran out of time; running it once more",
+      body: "The project check ran out of time (300 s) before any test failed, so the code was not shown to be wrong. The check runs again once on the same commit aaaaaaa, with no agent. If it fails again, a person decides.",
     });
+    expect(store.getScope("t-gate")).toMatchObject({ candidate: "a".repeat(40), approvalBasis: "mode" });
+    expect(store.getTask("t-gate")?.state).toBe("queued");
+    expect(unrelatedNotice(run)).toBeUndefined();
     expect(repairGate(run)).toEqual({ kind: "none" });
-    expect(store.raw().prepare("SELECT count(*) AS n FROM notification WHERE dedupe_key=?").get(`repair-unrelated:${run}`)).toEqual({ n: 1 });
+    expect(store.raw().prepare("SELECT count(*) AS n FROM notification WHERE dedupe_key=?").get(`regate:${run}`)).toEqual({ n: 1 });
   });
 
   /** Run 1784 (mayhem-spire, 2026-09-18): the diff touched run.ts and two
@@ -208,8 +211,8 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
   ].join("\n");
   const inventory = (files: string[], filesTruncated = false) => JSON.stringify({ schema: 1, base: "b".repeat(40), head: "a".repeat(40), fileCount: files.length, additions: 1, deletions: 0, binaryCount: 0, files: files.map(path => ({ path, additions: 1, deletions: 0 })), filesTruncated });
   const untouchedProbe = (files: string[], options: { filesTruncated?: boolean; log?: string } = {}) => {
-    seedTask("t-gate");
-    store.setVerifyCommand({ repo: REPO, command: "npm test && npm run build", timeoutMs: 300_000, approvedBy: "alex" }, T0);
+    if (!store.lookupRef("t-gate")) seedTask("t-gate");
+    if (!store.liveVerifyCommand(REPO)) store.setVerifyCommand({ repo: REPO, command: "npm test && npm run build", timeoutMs: 300_000, approvedBy: "alex" }, T0);
     const run = seedRun("t-gate", "refuted", CRITERIA.map(c => row(c.id, "pass")));
     store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), baseRevision: "b".repeat(40) });
     storeEvidence(store, evidenceRoot, run, "diff-stat", "terminal-diff-stat.json", Buffer.from(inventory(files, options.filesTruncated)), "git diff --numstat (exit 0)", T0, { captureStatus: "ok" });
@@ -218,16 +221,74 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
     return run;
   };
 
-  test("an untouched test's own timeout tells a person which test to fix instead of drafting a repair", () => {
+  test("an unrelated failure reruns the check once on the same commit, automatically, then defers to a person", () => {
+    const mode = signMode({ repairAuto: true, repairMaxAttempts: 3 });
+    const first = untouchedProbe(["src/core/run.ts", "src/core/run.test.ts"]);
+    store.setTaskState("t-gate", "done", T0);
+    expect(repairGate(first)).toEqual({ kind: "none" });
+    // The rerun: the same scope terms, the last head as the prepared candidate, sealed under the mode, queued.
+    const scope = store.getScope("t-gate")!;
+    expect(scope.candidate).toBe("a".repeat(40));
+    expect(scope.approvedDigest).toBe(scope.digest);
+    expect(scope.approvalBasis).toBe("mode");
+    expect(scope.modeDigest).toBe(mode.digest ?? modeDigestOf(mode));
+    expect(store.getTask("t-gate")?.state).toBe("queued");
+    expect(store.raw().prepare("SELECT subject FROM notification WHERE dedupe_key=?").get(`regate:${first}`)).toMatchObject({ subject: "A slow test outside this change failed the check; running it once more" });
+    expect(store.raw().prepare("SELECT count(*) AS n FROM notification WHERE dedupe_key=?").get(`repair-unrelated:${first}`)).toEqual({ n: 0 });
+    expect(store.repairChainFor(first)).toBeNull();
+    // The rerun fails the same way on the same commit: no second rerun, a person is told.
+    const second = untouchedProbe(["src/core/run.ts", "src/core/run.test.ts"]);
+    store.setTaskState("t-gate", "done", T0);
+    expect(repairGate(second)).toEqual({ kind: "none" });
+    expect(store.raw().prepare("SELECT count(*) AS n FROM notification WHERE dedupe_key=?").get(`regate:${second}`)).toEqual({ n: 0 });
+    expect(store.repairChainFor(second)).toBeNull();
+    expect(store.raw().prepare("SELECT body FROM notification WHERE dedupe_key=?").get(`regate-failed:${second}`)).toMatchObject({ body: expect.stringContaining("standing-orders task regate t-gate") });
+  });
+
+  test("task regate on an operator's say-so reruns the check on the last commit and refuses an accepted result", () => {
+    const run = failedGate("t-gate");
+    store.setTaskState("t-gate", "done", T0);
+    const rerun = regateTask(store, "t-gate", T0, { kind: "operator", name: "alex", token: alexToken });
+    expect(rerun).toEqual({ ok: true, run, head: "a".repeat(40) });
+    expect(store.getScope("t-gate")).toMatchObject({ candidate: "a".repeat(40), approvedBy: "alex" });
+    expect(store.getTask("t-gate")?.state).toBe("queued");
+    expect(store.raw().prepare("SELECT note FROM run_note WHERE run=?").all(run).some(row => String(row["note"]).includes("on alex's say-so"))).toBe(true);
+    store.acceptProof(run, "alex", null, T0);
+    expect(regateTask(store, "t-gate", T0, { kind: "operator", name: "alex", token: alexToken })).toMatchObject({ ok: false, reason: "accepted-result" });
+    expect(regateTask(store, "t-none", T0, { kind: "operator", name: "alex", token: alexToken })).toMatchObject({ ok: false, reason: "no-task" });
+  });
+
+  test("a failed rerun on the same commit never drafts a repair, whatever failed the second time", () => {
     signMode({ repairAuto: true, repairMaxAttempts: 3 });
-    const run = untouchedProbe(["src/core/run.ts", "src/core/run.test.ts", "src/core/save.test.ts"]);
-    expect(repairGate(run)).toEqual({ kind: "none" });
-    expect(store.repairChainFor(run)).toBeNull();
-    expect(unrelatedNotice(run)).toEqual({
-      subject: "A slow test outside this change failed the project check",
-      body: "The project check failed only because src/core/autobattler.test.ts timed out, and this change did not touch that file. No repair task was filed. Fix or skip the slow test outside this task, then run `standing-orders task requeue t-gate`.",
-      link: "/t/t-gate",
+    const first = untouchedProbe(["src/core/run.ts"]);
+    store.setTaskState("t-gate", "done", T0);
+    expect(repairGate(first)).toEqual({ kind: "none" });
+    expect(store.getScope("t-gate")?.candidate).toBe("a".repeat(40));
+    // The rerun fails on an ordinary, repairable failure at the same head.
+    const rerun = failedGate("t-gate");
+    store.setTaskState("t-gate", "done", T0);
+    expect(repairGate(rerun)).toEqual({ kind: "none" });
+    expect(store.repairChainFor(rerun)).toBeNull();
+    expect(store.raw().prepare("SELECT subject, body FROM notification WHERE dedupe_key=?").get(`regate-failed:${rerun}`)).toMatchObject({
+      subject: "The project check failed again on the same commit",
+      body: expect.stringContaining("standing-orders task regate t-gate"),
     });
+    // A contradicting review of a rerun at the same commit goes to a person too, on the review road.
+    const reviewed = seedRun("t-gate", "refuted", [row("c1", "failed"), row("c2", "pass"), row("c3", "pass")]);
+    store.recordOutcomeFacts(reviewed, { headRevision: "a".repeat(40), baseRevision: "b".repeat(40) });
+    expect(maybeTriggerRepair(store, REPO, evidenceRoot, reviewed, "refuted", T0)).toEqual({ kind: "none" });
+    expect(store.repairChainFor(reviewed)).toBeNull();
+    expect(store.raw().prepare("SELECT subject FROM notification WHERE dedupe_key=?").get(`regate-failed:${reviewed}`)).toEqual({ subject: "The rerun on the same commit was contradicted by its review" });
+  });
+
+  test("task regate refuses a published or claimed result even when the task is already queued", () => {
+    const run = failedGate("t-gate");
+    const taskRef = store.lookupRef("t-gate")!.id;
+    const intent = store.createPublicationIntent({ run, taskRef, githubRepo: "a/b", remote: "origin", base: "main", head: "b-t-gate", headSha: "a".repeat(40), bodyHash: "", draft: true }, T0);
+    store.markPublicationPushed(intent, T0);
+    expect(store.getTask("t-gate")?.state).toBe("queued");
+    expect(regateTask(store, "t-gate", T0, { kind: "operator", name: "alex", token: alexToken })).toMatchObject({ ok: false, reason: "published" });
+    expect(store.getScope("t-gate")?.candidate ?? null).toBeNull();
   });
 
   test.each(["touched", "truncated-inventory", "assertion"])("a failure the change may have caused still repairs (%s)", problem => {
