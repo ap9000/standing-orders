@@ -1,5 +1,15 @@
 # Progress
 
+**2026-09-19 UTC — The check runs again on the same commit (v70 behaviour, schema unchanged).**
+`task regate <id>` files a new attempt whose prepared candidate is the last
+attempt's exact commit: no agent, a fresh receipt and proof, the ordinary
+review. Under a mode with automatic repair, a gate failure the change did
+not cause — the whole check timing out, or an untouched test's own timeout —
+reruns once automatically; a second failure on the same commit is handed to
+a person with the `regate` command named. A publication intent that never
+pushed no longer blocks a rerun. Yesterday two candidates lost a full round
+each to a flaky test; both would have rerun in three minutes.
+
 **2026-09-19 UTC — A prepared commit is an attempt (v69).**
 `task scope --candidate <sha>` names a commit the machine installs as the
 attempt: it proves the commit descends from the task's base, brings the

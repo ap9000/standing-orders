@@ -13026,6 +13026,22 @@ export class Store {
     return live === undefined ? null : String(live["lease_id"]);
   }
 
+  /** The task's most recent finished builder attempt, or null. */
+  lastBuilderRun(taskRef: number): Run | null {
+    const row = this.db
+      .prepare("SELECT id FROM run WHERE task_ref = ? AND role = 'builder' AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1")
+      .get(taskRef);
+    return row === undefined ? null : this.getRun(Number(row["id"]));
+  }
+
+  /** How many finished builder attempts of this task ended at `head`. */
+  builderAttemptsAt(taskRef: number, head: string): number {
+    const row = this.db
+      .prepare("SELECT count(*) AS n FROM run WHERE task_ref = ? AND role = 'builder' AND finished_at IS NOT NULL AND head_revision = ?")
+      .get(taskRef, head);
+    return Number(row?.["n"] ?? 0);
+  }
+
   requeueTask(
     taskId: string,
     by: string,
@@ -13073,8 +13089,10 @@ export class Store {
           const verdict = this.proofVerdictFor(rejectedRun);
           if (verdict !== null && (verdict.verdict === "verified" || verdict.verdict === "attested")) return { ok: false as const, reason: "accepted-result" as const };
           if (this.proofAcceptance(rejectedRun) !== null) return { ok: false as const, reason: "accepted-result" as const };
+          // An intent that never pushed is not a publication; a pushed or
+          // opened branch is, and is revised through its pull request.
           const publication = this.publicationForRun(rejectedRun);
-          if (publication !== null && publication.state !== "failed") return { ok: false as const, reason: "published" as const };
+          if (publication !== null && (publication.state === "pushed" || publication.state === "opened")) return { ok: false as const, reason: "published" as const };
         }
       } else if (incidents.length === 0 && state !== "failed") {
         return { ok: false as const, reason: "not-stalled" as const };

@@ -69,14 +69,19 @@ export function classifyGateFailure(
   return { kind: "repairable" };
 }
 
-/** Plain words for the person who has to act. */
-export function describeGateFailure(failure: Exclude<GateFailureClass, { kind: "repairable" }>, taskId: string): string {
+/** What happened, in one sentence, for every notice about this failure. */
+export function gateFailureSummary(failure: Exclude<GateFailureClass, { kind: "repairable" }>): string {
   if (failure.kind === "gate-timed-out") {
     const limit = failure.timeoutMs === null ? "its time limit" : `${Math.round(failure.timeoutMs / 1000)} s`;
-    return `The project check ran out of time (${limit}) before any test failed, so the code was not shown to be wrong and no repair task was filed. ` +
-      `Raise the check's time limit or shorten the suite, then run \`standing-orders task requeue ${taskId}\`.`;
+    return `The project check ran out of time (${limit}) before any test failed, so the code was not shown to be wrong.`;
   }
-  const list = failure.files.join(", ");
-  return `The project check failed only because ${list} timed out, and this change did not touch ${failure.files.length === 1 ? "that file" : "those files"}. ` +
-    `No repair task was filed. Fix or skip the slow test outside this task, then run \`standing-orders task requeue ${taskId}\`.`;
+  return `The project check failed only because ${failure.files.join(", ")} timed out, and this change did not touch ${failure.files.length === 1 ? "that file" : "those files"}.`;
+}
+
+/** Plain words for the person who has to act. */
+export function describeGateFailure(failure: Exclude<GateFailureClass, { kind: "repairable" }>, taskId: string): string {
+  const next = failure.kind === "gate-timed-out"
+    ? `Raise the check's time limit or shorten the suite, then run \`standing-orders task regate ${taskId}\` to check the same commit again.`
+    : `Run \`standing-orders task regate ${taskId}\` to check the same commit again, or fix the slow test outside this task first.`;
+  return `${gateFailureSummary(failure)} No repair task was filed. ${next}`;
 }

@@ -60,8 +60,8 @@ describe("classifyGateFailure", () => {
 describe("describeGateFailure", () => {
   test("says what happened and what to do in plain words", () => {
     expect(describeGateFailure({ kind: "gate-timed-out", timeoutMs: 300_000 }, "t-gate")).toBe(
-      "The project check ran out of time (300 s) before any test failed, so the code was not shown to be wrong and no repair task was filed. Raise the check's time limit or shorten the suite, then run `standing-orders task requeue t-gate`.");
+      "The project check ran out of time (300 s) before any test failed, so the code was not shown to be wrong. No repair task was filed. Raise the check's time limit or shorten the suite, then run `standing-orders task regate t-gate` to check the same commit again.");
     expect(describeGateFailure({ kind: "untouched-test-timeout", files: ["src/core/autobattler.test.ts"] }, "t-gate")).toBe(
-      "The project check failed only because src/core/autobattler.test.ts timed out, and this change did not touch that file. No repair task was filed. Fix or skip the slow test outside this task, then run `standing-orders task requeue t-gate`.");
+      "The project check failed only because src/core/autobattler.test.ts timed out, and this change did not touch that file. No repair task was filed. Run `standing-orders task regate t-gate` to check the same commit again, or fix the slow test outside this task first.");
   });
 });
