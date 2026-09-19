@@ -284,17 +284,21 @@ async function finish() {
   say({ deployed: candidateHead, runtime: nextDist, at: r.deployedAt, projects: r.leases.length, remote });
 }
 
+// Every entry point — the whole run or one resumed phase — proves the
+// candidate against the plane's records first. Nothing is staged, and no
+// service is touched, for a run that does not read verified and reviewed.
 const phases = { stage, prepare, rehearse, swap, finish };
+requireTrue(phaseWanted === "all" || phases[phaseWanted], "Use --phase stage|prepare|rehearse|swap|finish, or omit it for all.");
+const proven = (() => { const db = new DatabaseSync(database, { readOnly: true }); try { return facts(db); } finally { db.close(); } })();
+say(`Candidate ${short} — task ${proven.taskId}, run ${runId}, review ${proven.reviewer}, proof ${proven.proofVerdict}, ${proven.criteria} criteria upheld.`);
+say(`Installed runtime: ${priorDist}`);
+say(`Staging directory: ${stageDir}`);
 if (phaseWanted === "all") {
-  const f = (() => { const db = new DatabaseSync(database, { readOnly: true }); try { return facts(db); } finally { db.close(); } })();
-  say(`Candidate ${short} — task ${f.taskId}, run ${runId}, review ${f.reviewer}, proof ${f.proofVerdict}, ${f.criteria} criteria upheld.`);
-  say(`Installed runtime: ${priorDist}`);
-  say(`Staging directory: ${stageDir}`);
   if (!has("yes")) { say("Add --yes to drain the plane, back up the database, and swap the service."); process.exit(0); }
   const staged = stage(); await prepare(staged); await rehearse(); await swap(); await finish();
 } else {
-  requireTrue(phases[phaseWanted], "Use --phase stage|prepare|rehearse|swap|finish, or omit it for all.");
+  if (phaseWanted !== "stage") requireTrue(flag("stage"), `--phase ${phaseWanted} resumes a staging directory: pass --stage <dir>.`);
   if (phaseWanted === "stage") say(stage());
-  else if (phaseWanted === "prepare") { requireTrue(flag("stage"), "--phase prepare needs --stage <dir> from a completed stage."); await prepare({ packageSha256: sha(readFileSync(join(stageDir, readdirSync(stageDir).find(f => f.endsWith(".tgz"))))) }); }
+  else if (phaseWanted === "prepare") await prepare({ packageSha256: sha(readFileSync(join(stageDir, readdirSync(stageDir).find(f => f.endsWith(".tgz"))))) });
   else await phases[phaseWanted]();
 }
