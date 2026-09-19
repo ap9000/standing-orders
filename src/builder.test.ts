@@ -222,25 +222,51 @@ describe("the builder's gates", () => {
     expect(await build(store, first)).toMatchObject({ ok: true, committed: true });
     const agentCallsAfterFirst = agentCalls.length;
     expect(agentCallsAfterFirst).toBeGreaterThan(0);
+    const savedHead = "a".repeat(40);
     // The attempt is settled by the dispatcher; here its head and a rejected gate are recorded as disposal would.
     store.finishRun(first.runId as number, { outcome: "built", committed: true, now: T0 });
-    store.recordOutcomeFacts(first.runId as number, { headRevision: "feat/a" });
+    store.recordOutcomeFacts(first.runId as number, { headRevision: savedHead });
     store.saveProofVerdict(first.runId as number, "refuted", ["the repository's approved verification command exited 1"], T0, []);
     store.setTaskState("t-1", "done", T0);
     store.raw().prepare("UPDATE claim SET released_at = ? WHERE task_ref = ?").run(T0.toISOString(), taskRef);
+    store.setVerifyCommand({ repo: REPO, command: "final-check", timeoutMs: 5_000, approvedBy: "alex" }, T0);
     const rerun = regateTask(store, "t-1", T0, { kind: "operator", name: "alex", token: approverToken });
-    expect(rerun).toEqual({ ok: true, run: first.runId, head: "feat/a" });
-    expect(store.getScope("t-1")).toMatchObject({ candidate: "feat/a", approvedBy: "alex" });
+    expect(rerun).toEqual({ ok: true, run: first.runId, head: savedHead });
+    expect(store.getScope("t-1")).toMatchObject({ candidate: savedHead, approvedBy: "alex" });
     // The rerun attempt under a fresh lease: same fixture git, the scope's candidate is the last head, no provider is spawned.
     acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease-2" });
-    const preparedGit: Runner = async (file, args, options) => args.includes("diff") && args.includes("--name-only") ? { ...OK, stdout: "src/index.ts\0" } : git(file, args, options);
+    const gitCalls: string[][] = [];
+    let checkedOut: string | null = null;
+    let checks = 0;
+    const preparedGit: Runner = async (file, args, options) => {
+      gitCalls.push([...args]);
+      if (args.includes("read-tree") && args.includes("--reset")) checkedOut = args.at(-1)!;
+      if (args.includes("rev-parse") && !args.includes("--abbrev-ref") && args.at(-1) === "HEAD") return { ...OK, stdout: `${savedHead}\n` };
+      if (args.includes("diff") && args.includes("--name-only")) return { ...OK, stdout: "src/index.ts\0" };
+      return git(file, args, options);
+    };
     const second = {
       taskId: "t-1", taskRef, runner: "builder-1", worktree: wt, leaseId: "test-lease-2",
       runId: store.startRun({ taskRef, leaseId: "test-lease-2", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0, ...presented(store, taskRef, "builder") }),
       evidenceRoot: join2(wt, ".evidence"), branch: "feat/a", now: T0, agent, git: preparedGit,
+      verify: async (_file: string, args: readonly string[], options?: { cwd?: string }) => {
+        checks++;
+        expect(checkedOut).toBe(savedHead);
+        expect(args).toContain("final-check");
+        expect(options?.cwd).toBe(wt);
+        expect(agentCalls.length).toBe(agentCallsAfterFirst);
+        return { ...OK, stdout: "saved candidate check passed" };
+      },
     };
-    expect(await build(store, second)).toMatchObject({ ok: true, committed: true, summary: expect.stringContaining("no agent ran") });
+    const result = await build(store, second);
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, committed: true, summary: expect.stringContaining("no agent ran") });
     expect(agentCalls.length).toBe(agentCallsAfterFirst);
+    expect(gitCalls.filter(args => args.includes("read-tree") && args.includes("--reset") && args.at(-1) === savedHead)).toHaveLength(1);
+    expect(checks).toBe(1);
+    const receipt = verificationEvidence(store, join2(wt, ".evidence"), second.runId);
+    expect(receipt.ok).toBe(true);
+    if (receipt.ok) expect(JSON.parse(receipt.bytes!)).toMatchObject({ run: second.runId, head: savedHead, command: { command: "final-check" }, result: { configured: true, ran: true, exitCode: 0 } });
+    expect(store.artifactsFor(second.runId).filter(isVerificationReceipt)).toHaveLength(1);
     expect(store.handle.prepare("SELECT note FROM run_note WHERE run = ?").all(second.runId as number).some(row => String(row["note"]).includes("no agent ran"))).toBe(true);
   });
 

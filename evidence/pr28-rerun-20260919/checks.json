@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "sourceSha256": {
+    "docs/PROGRESS.md": "286edba568655eead894e7678becc6f21cb3fc8a2d2ae75706521156cfd7b4aa",
+    "docs/WORKFLOW_RECIPES.md": "950e8ddfccf90747500887765027536f919291329cc545be94477a3a3d950c3c",
+    "src/builder.test.ts": "4f917e0652fbe72cc858b9c25ba83debf7a6ab31852a2e48eaeb9188c6757793",
+    "src/dispose.ts": "e3e1aa5736c0b30a5a0386593f564f15ef5dd38ab04e8555e76f50123ad08e99",
+    "src/gate-failure.test.ts": "efc9ae70b2a5d73c84e2624efe0f729377fa0d4082c102050b930768cee3a892",
+    "src/gate-failure.ts": "a00a78aef1a7d277a2048e035c0d35db3220b77d852d29d80a88eaca61c61c5e",
+    "src/operate.ts": "c9ad779cffecb3663ca26782665821f9fbaf1b680c1b3b736bfb834e3ccb7055",
+    "src/repair-loop.test.ts": "457f5ba800b033d0d17213e4a36a7108e0969b4d5225f3cc1b935f1d3e799dd0",
+    "src/store.test.ts": "44a60043c45417de0fc04f5af169a13d6de3ae7b9c7ec1a0f57e0ef34bd9d2ce",
+    "src/store.ts": "0dfd428fca9aeca6bbefc89d34cc31b3d67e99340e72e27dd4dc50b9b2f1874f",
+    "src/surface.ts": "accb1c7258d2efc8603abd4f2f0e34ed8d91044e753633ec498a1f19741d44d0"
+  },
+  "focusedTests": {
+    "command": "npx vitest run src/builder.test.ts --reporter=dot",
+    "passed": 152,
+    "failed": 0,
+    "log": "checks.txt",
+    "logSha256": "3107643b17e94b86ed1d317677cffe1a9f300a9ac9aca24a3a8c593f83d2d75c"
+  },
+  "typecheck": {
+    "command": "npm run typecheck",
+    "exitCode": 0
+  },
+  "purpose": "Strengthen the existing regate regression to assert the exact saved commit is checked out before one approved gate call, with no agent, and verify its immutable receipt names that commit.",
+  "priorEvidence": {
+    "run": 1844,
+    "status": "Historical only: the full gate passed but review c2 lacked checkout/check observation. Its check log was truncated and unrelated fixture content was redacted. Preserve it; this corrective task captures fresh whole-task evidence from the same intended base."
+  }
+}

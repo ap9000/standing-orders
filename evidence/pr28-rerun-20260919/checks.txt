@@ -1,0 +1,17 @@
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-pr28
+
+·····································································(node:35806) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···················································································
+
+ Test Files  1 passed (1)
+      Tests  152 passed (152)
+   Start at  08:37:40
+   Duration  11.03s (transform 893ms, setup 11ms, import 1.07s, tests 9.84s, environment 0ms)
+
