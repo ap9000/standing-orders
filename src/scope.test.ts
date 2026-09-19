@@ -1237,3 +1237,25 @@ describe("acceptance rubric on the command line", () => {
     expect(parseAcceptanceCriteria(acceptanceLinesToInput([`${"x".repeat(1001)}|check`])).problems.map(p => p.message)).toEqual(["acceptance[0].statement is over 1000 bytes"]);
   });
 });
+
+describe("a prepared candidate is signed into the scope (v69)", () => {
+  test("the digest folds the commit only when present, so every earlier digest is untouched", async () => {
+    const { digestOf } = await import("./scope.js");
+    const base = { goal: "Install it", outOfScope: null, touches: ["src/a.ts"] };
+    expect(digestOf({ ...base, candidate: null })).toBe(digestOf(base));
+    expect(digestOf({ ...base, candidate: "a".repeat(40) })).not.toBe(digestOf(base));
+    expect(digestOf({ ...base, candidate: "a".repeat(40) })).not.toBe(digestOf({ ...base, candidate: "b".repeat(40) }));
+  });
+  test("propose stores it and describeScope names it", async () => {
+    const { propose, describeScope } = await import("./scope.js");
+    const { openStore } = await import("./store.js");
+    const store = openStore(":memory:");
+    try {
+      store.createTask({ id: "t-c", title: "candidate" }, new Date("2026-09-19T00:00:00.000Z"));
+      const scope = propose(store, { taskId: "t-c", goal: "Install commit", candidate: "c".repeat(40), now: new Date("2026-09-19T00:00:00.000Z") });
+      expect(scope.candidate).toBe("c".repeat(40));
+      expect(store.getScope("t-c")?.candidate).toBe("c".repeat(40));
+      expect(describeScope(store.getScope("t-c")!).some(line => line.includes("candidate    " + "c".repeat(40)))).toBe(true);
+    } finally { store.close(); }
+  });
+});

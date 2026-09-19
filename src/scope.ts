@@ -679,6 +679,8 @@ export function splitAcceptanceRubric(text: string): string[] {
   return out;
 }
 
+export const isCommitSha = (value: string): boolean => /^[0-9a-f]{40}$/.test(value);
+
 export function acceptanceLinesToInput(lines: readonly string[]): unknown[] {
   const out: unknown[] = [];
   let auto = 1;
@@ -770,6 +772,9 @@ export type Scope = {
    * row filed since — for those, a missing or unreadable route is corrupt
    * and fails closed everywhere. */
   riskLevel?: RiskLevel;
+  /** A prepared commit the machine checks out instead of running an agent
+   * (v69). Signed into the digest; must descend from the task's base. */
+  candidate?: string | null;
   proposedRouteJson?: string | null;
   approvedRouteJson?: string | null;
   routeEra?: number | null;
@@ -809,6 +814,8 @@ export type ScopeInput = {
   /** Concrete task quality choice. When absent, the task override and then
    * the installation default are resolved by the store. */
   qualityMode?: QualityMode;
+  /** v69: a prepared commit to install as this attempt — no agent runs. */
+  candidate?: string | null;
   /** v47: the task's declared risk. When absent, the task's stored choice
    * (if any), else routine. A durable TASK choice, like qualityMode. */
   riskLevel?: RiskLevel;
@@ -845,6 +852,9 @@ export function digestOf(
      * here (advisory, never signed); evidence kinds do. */
     acceptance?: readonly AcceptanceCriterion[];
     qualityMode?: QualityMode;
+    /** v69: a prepared commit, folded in only when present so every earlier
+     * digest is untouched. */
+    candidate?: string | null;
   },
   // The execution target: a single profile (legacy v24), OR an explicit
   // fallback chain (v30). BOTH fold through the SAME outer `profileDigest`
@@ -884,6 +894,7 @@ export function digestOf(
         // Default is the historical behavior and therefore hashes exactly
         // like an absent v41 field. Strict is an explicit signed promise.
         ...(scope.qualityMode === "strict" ? { qualityMode: "strict" } : {}),
+        ...(scope.candidate ? { candidate: scope.candidate } : {}),
         // The single outer key, whichever target produced its inner value:
         // absent => the golden and every profileless approval are untouched;
         // a legacy profile => its exact profileDigestOf; an explicit chain
@@ -906,7 +917,7 @@ export function digestOf(
 export function propose(store: Store, input: ScopeInput): Scope {
   const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, acceptance = [], qualityMode = "default", now, mutation = {}, profile, permissionMode, posture, proposedVia = null, riskLevel } = input;
 
-  const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd, acceptance: [...acceptance], qualityMode };
+  const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd, acceptance: [...acceptance], qualityMode, candidate: input.candidate ?? null };
   const previous = store.getScope(taskId);
 
   const scope: Scope = {
@@ -1364,7 +1375,7 @@ export function scopeAuthorityOf(scope: Scope, env: ScopeAuthorityEnv = {}): Sco
   const parity = routeParityProblem(route, profile, { riskLevel: scope.riskLevel ?? "routine", qualityMode: scope.qualityMode ?? "default" });
   if (parity !== null) return { ok: false, reason: "parity", problem: parity };
   const digest = digestOf(
-    { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode: scope.qualityMode ?? "default" },
+    { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, candidate: scope.candidate ?? null, qualityMode: scope.qualityMode ?? "default" },
     chain !== null ? { chain } : profile,
     route,
   );
@@ -1428,6 +1439,7 @@ export function describeScope(scope: Scope, readiness: ReadinessLookup = NO_READ
   return [
     `  goal         ${scope.goal}`,
     ...(scope.outOfScope === null ? [] : [`  not this     ${scope.outOfScope}`]),
+    ...(scope.candidate ? [`  candidate    ${scope.candidate} — checked out by the machine, no agent runs`] : []),
     ...(scope.touches.length === 0 ? [] : [`  touches      ${scope.touches.join(", ")}`]),
     ...acceptanceWords(scope.acceptance),
     ...(scope.budgetMicrousd === null

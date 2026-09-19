@@ -104,7 +104,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
-export const SCHEMA_VERSION = 68;
+export const SCHEMA_VERSION = 69;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -4963,6 +4963,8 @@ function migrate(db: Database, origin: number | null): void {
   // the one durable proof that a scope predates routing — and set by every
   // saveScope since. Never backfilled.
   addColumn(db, "task_scope", "route_era", "INTEGER");
+  // v69: a prepared commit the machine installs as the attempt, no agent.
+  addColumn(db, "task_scope", "candidate", "TEXT");
   addColumn(db, "review_request", "route_digest", "TEXT");
 
   // v48 (routing authority): a routine freezes its four-role agent route
@@ -8675,6 +8677,7 @@ export class Store {
         budgetMicrousd: scope.budgetMicrousd,
         acceptance: scope.acceptance,
         qualityMode,
+        candidate: scope.candidate ?? null,
       };
       // EVERY route filed since v47 binds into the digest — routine-shaped
       // ones included — so approval freezes exactly which agent runs each
@@ -8765,8 +8768,8 @@ export class Store {
           `INSERT INTO task_scope
              (task_id, goal, out_of_scope, touches, budget_microusd, proposed_at, digest, approved_at, approved_by, approved_digest,
               profile_json, profile_state, unresolved_reason, digest_version, profile_provenance, proposed_chain_json, acceptance_json, quality_mode,
-              risk_level, proposed_route_json, route_era)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              risk_level, proposed_route_json, route_era, candidate)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (task_id) DO UPDATE SET
              goal = excluded.goal, out_of_scope = excluded.out_of_scope,
              touches = excluded.touches, budget_microusd = excluded.budget_microusd,
@@ -8777,7 +8780,8 @@ export class Store {
              unresolved_reason = excluded.unresolved_reason, digest_version = excluded.digest_version,
              profile_provenance = excluded.profile_provenance, proposed_chain_json = excluded.proposed_chain_json,
              acceptance_json = excluded.acceptance_json, quality_mode = excluded.quality_mode,
-             risk_level = excluded.risk_level, proposed_route_json = excluded.proposed_route_json, route_era = excluded.route_era`,
+             risk_level = excluded.risk_level, proposed_route_json = excluded.proposed_route_json, route_era = excluded.route_era,
+             candidate = excluded.candidate`,
         )
         .run(
           scope.taskId,
@@ -8802,6 +8806,7 @@ export class Store {
           route === null ? null : canonicalRouteJson(route),
           // The durable era: every row this method writes is a routed row.
           ROUTE_ERA,
+          scope.candidate ?? null,
         );
       // Who wrote THIS text (mate arc, ruling 2): set per write, so a human
       // rewrite clears the mate's mark and a mate rewrite sets it.
@@ -10659,7 +10664,7 @@ export class Store {
     // the current scope fields + this chain and require an exact match, so a
     // snapshot that does not correspond to the approved digest never governs.
     const rederived = digestOf(
-      { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode: scope.qualityMode ?? "default" },
+      { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, candidate: scope.candidate ?? null, qualityMode: scope.qualityMode ?? "default" },
       { chain },
       routeFromJson(scope.approvedRouteJson ?? null),
     );
@@ -14143,7 +14148,7 @@ export class Store {
     if (route === null) {
       return { ok: false, reason: "unreadable", detail: scope.approvedRouteJson == null ? "the approval sealed no agent route — re-file the scope and approve it again" : "the approval's sealed agent route cannot be read — re-file the scope and approve it again" };
     }
-    const fields = { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode: scope.qualityMode ?? "default" };
+    const fields = { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, candidate: scope.candidate ?? null, qualityMode: scope.qualityMode ?? "default" };
     const chain = scope.approvalKind === "chain" ? chainFromJson(scope.approvedChainJson ?? null) : null;
     const target = chain !== null ? { chain } : (scope.approvedProfile ?? null);
     if (target === null) return { ok: false, reason: "unreadable", detail: "the approval sealed no agent profile — re-file the scope and approve it again" };
@@ -24443,6 +24448,7 @@ function readScope(row: Record<string, unknown>): Scope {
     approvedRouteJson:
       row["approved_route_json"] === null || row["approved_route_json"] === undefined ? null : String(row["approved_route_json"]),
     routeEra: row["route_era"] === null || row["route_era"] === undefined ? null : Number(row["route_era"]),
+    candidate: typeof row["candidate"] === "string" && row["candidate"] !== "" ? row["candidate"] : null,
     proposedVia: row["proposed_via"] === "mate" || row["proposed_via"] === "coordinator" || row["proposed_via"] === "scout" ? row["proposed_via"] : null,
   };
 }

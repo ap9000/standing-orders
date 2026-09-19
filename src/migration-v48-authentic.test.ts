@@ -67,6 +67,8 @@ function withoutNew(table: string, row: Record<string, unknown>): Record<string,
   if (table === "run") { delete copy["watch_incarnation"]; delete copy["review_attempt"]; }
   if (table === "review_request") { delete copy["reviewer_run"]; delete copy["origin"]; }
   if (table === "approver" || table === "invite") delete copy["projects_json"];
+  // v69's prepared candidate is a later additive column on the scope.
+  if (table === "task_scope") delete copy["candidate"];
   return copy;
 }
 

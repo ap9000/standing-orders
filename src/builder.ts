@@ -487,7 +487,7 @@ export function proveApprovedProfile(
               outOfScope: scope.outOfScope,
               touches: scope.touches,
               budgetMicrousd: scope.budgetMicrousd,
-              acceptance: scope.acceptance,
+              acceptance: scope.acceptance, candidate: scope.candidate ?? null,
               qualityMode: scope.qualityMode ?? "default",
             },
             snapshot,
@@ -496,7 +496,7 @@ export function proveApprovedProfile(
             // the seal's own snapshot, never from mutable configuration.
             routeFromJson(scope.approvedRouteJson ?? null),
           )
-        : digestOf({ goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance });
+        : digestOf({ goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, candidate: scope.candidate ?? null });
     if (rederived !== scope.approvedDigest) {
       return { ok: false, message: "the approval record does not verify against the stored terms — re-approve (stale-approval)" };
     }
@@ -886,6 +886,14 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // so the same digest never runs twice in one worktree. It sees the same
   // scrubbed environment the agent does — an approved `npm ci` is not an
   // approved read of the bot token.
+  // A prepared candidate (v69) is proved BEFORE the setup command runs and
+  // before the mailbox sweep: an unknown or stray commit refuses here, with
+  // nothing in the worktree touched.
+  const preparedCandidate = scope?.candidate ?? null;
+  if (preparedCandidate !== null) {
+    const refusal = await proveCandidate(git, worktree, preparedCandidate, store.firstBuilderBase(taskRef, branch));
+    if (refusal !== null) return { ok: false, reason: "no-op", message: refusal };
+  }
   const setupWanted = store.liveWorktreeSetup(leased.repo);
   const observeSpawn = request.onProviderSpawn;
   request = { ...request, onProviderSpawn: pid => {
@@ -1387,6 +1395,47 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // writers) and the live-log handle rides the capture (the live window
   // stays streaming across the whole hold). build() returns WITHOUT
   // settling: the run, the lease, and the worktree are the coordinator's.
+  // THE PREPARED-CANDIDATE ROAD (v69): the scope names a commit, proved
+  // above before setup ran. The machine brings the worktree to its exact
+  // tree — uncommitted, as an agent would leave it — writes the handoff
+  // itself, and settles through the SAME state machine every agent attempt
+  // settles through: commit, sealed diff from the pinned base, the approved
+  // gate, the review. No provider is spawned; the lease heartbeat keeps
+  // running until settlement returns, exactly as it does around a provider.
+  const prepared = scope?.candidate ?? null;
+  if (prepared !== null && attended === undefined) {
+    try {
+      const pinned = store.firstBuilderBase(taskRef, branch) ?? baseRevision;
+      const brought = await bringWorktreeTo(git, worktree, prepared);
+      if (!brought.ok) return { ok: false, reason: "git", message: brought.message };
+      const sinceHead = await git(GIT, ["--no-optional-locks", "diff", "--name-only", "-z", "--no-renames", "HEAD", prepared], { cwd: worktree });
+      const sinceBase = await git(GIT, ["--no-optional-locks", "diff", "--name-only", "-z", "--no-renames", pinned, prepared], { cwd: worktree });
+      if (sinceHead.code !== 0 || sinceBase.code !== 0) return { ok: false, reason: "git", message: firstLine(sinceHead.stderr || sinceBase.stderr) };
+      const unchanged = sinceHead.stdout.split("\0").filter(Boolean).length === 0;
+      writeFileSync(join(worktree, done), JSON.stringify({
+        version: 1,
+        status: unchanged ? "no-change" : "completed",
+        conclusion: `Prepared candidate ${prepared} was checked out by the machine; no agent ran. ${unchanged ? "The branch already matched it." : "The sealed diff spans this task's base to that candidate."}`,
+        changes: sinceBase.stdout.split("\0").filter(Boolean).slice(0, HANDOFF_LIST_CAP),
+        verification: [],
+        followUps: [],
+      }, null, 2), { mode: 0o600 });
+      store.addRunNote(request.runId, "Standing Orders", `Prepared candidate ${prepared} checked out; no agent ran.`, clock());
+      const captured: CapturedBuild = {
+        store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
+        runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof, rubric,
+        clock, fenced: () => fencedMidBuild,
+        plan: { proposal, revision: planRevisionNumber, authority, progress: progressState },
+      };
+      const outcome: AgentOutcome = { code: 0, stderr: "", timedOut: false, notFound: false, sessionId: null, initFailed: false, finalMessage: `prepared candidate ${prepared.slice(0, 7)}`, usage: { tokensIn: null, tokensOut: null, costUsd: null } };
+      return await settleProviderOutcome(captured, outcome);
+    } finally {
+      try { unlinkSync(join(worktree, rubric)); } catch { /* already consumed */ }
+      if (pulseTimer !== undefined) clearInterval(pulseTimer);
+      liveLog?.close();
+    }
+  }
+
   if (attended !== undefined) {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
     // The follow-up is NEW INSTRUCTION inside the signed terms (v2 S3c):
@@ -1529,6 +1578,35 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
  * never a paraphrase. `fenced()` reads the pulse's live flag: settlement
  * decisions are about NOW, not about the moment of capture.
  */
+/** The prepared candidate must be a commit this repository holds and must
+ * descend from the task's base (the first attempt's base once one exists,
+ * otherwise the current HEAD). Plain words on refusal, nothing touched. */
+export async function proveCandidate(git: Runner, worktree: string, candidate: string, pinnedBase: string | null): Promise<string | null> {
+  const known = await git(GIT, ["--no-optional-locks", "cat-file", "-e", `${candidate}^{commit}`], { cwd: worktree });
+  if (known.code !== 0) return `prepared candidate ${candidate.slice(0, 7)} is not a commit in this repository — fetch it first`;
+  let base = pinnedBase;
+  if (base === null) {
+    const head = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
+    if (head.code !== 0) return `could not read the base revision in ${worktree}`;
+    base = head.stdout.trim();
+  }
+  const lineage = await git(GIT, ["--no-optional-locks", "merge-base", "--is-ancestor", base, candidate], { cwd: worktree });
+  if (lineage.code !== 0) return `prepared candidate ${candidate.slice(0, 7)} does not descend from this task's base ${base.slice(0, 7)}`;
+  return null;
+}
+
+/** Make the worktree's tracked tree EXACTLY the candidate commit's tree —
+ * renames, deletions and additions included — without moving HEAD, so the
+ * result is uncommitted work on the task branch, as an agent would leave it.
+ * Untracked files (the protocol mailbox among them) are not touched. */
+export async function bringWorktreeTo(git: Runner, worktree: string, candidate: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const reset = await git(GIT, ["--no-optional-locks", "read-tree", "-u", "--reset", candidate], { cwd: worktree });
+  if (reset.code !== 0) return { ok: false, message: firstLine(reset.stderr) || "git read-tree failed" };
+  const exact = await git(GIT, ["--no-optional-locks", "diff", "--quiet", candidate, "--"], { cwd: worktree });
+  if (exact.code !== 0) return { ok: false, message: exact.code === 1 ? "the worktree does not match the candidate's tree after checkout" : firstLine(exact.stderr) };
+  return { ok: true };
+}
+
 export type CapturedBuild = {
   store: Store;
   request: BuildRequest;

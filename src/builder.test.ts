@@ -191,6 +191,39 @@ describe("the builder's gates", () => {
   const claimIt = () =>
     acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
 
+  test("a prepared candidate is checked out by the machine and settles without an agent (v69)", async () => {
+    const candidate = "c".repeat(40);
+    propose(store, { taskId: "t-1", goal: "Install the prepared commit", candidate, now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    claimIt();
+    const gitCalls: string[][] = [];
+    // The stub's tree: one modified path, reported consistently by status and diff;
+    // read-tree and the exact-tree check answer as real git would after it.
+    const preparedGit: Runner = async (file, args, options) => {
+      gitCalls.push([...args]);
+      if (args.includes("diff") && args.includes("--name-only")) return { ...OK, stdout: "src/index.ts\0" };
+      return git(file, args, options);
+    };
+    const req = request({ git: preparedGit });
+    const result = await build(store, req);
+    expect(result).toMatchObject({ ok: true, committed: true, summary: expect.stringContaining("no agent ran") });
+    expect(agentCalls).toHaveLength(0);
+    expect(gitCalls.some(args => args.includes("merge-base") && args.includes("--is-ancestor") && args.includes(candidate))).toBe(true);
+    expect(gitCalls.some(args => args.includes("read-tree") && args.includes("--reset") && args.includes(candidate))).toBe(true);
+    // The dispatcher settles the run row after build() returns; here the sealed note is the machine's own word.
+    expect(store.handle.prepare("SELECT note FROM run_note WHERE run = ?").all(req.runId as number).some(row => String(row["note"]).includes(`Prepared candidate ${candidate} checked out; no agent ran.`))).toBe(true);
+  });
+
+  test("a prepared candidate that is not a commit here, or does not descend from the base, refuses before anything moves (v69)", async () => {
+    const candidate = "e".repeat(40);
+    propose(store, { taskId: "t-1", goal: "Install the prepared commit", candidate, now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    claimIt();
+    const strangerGit: Runner = async (file, args, options) => args.includes("cat-file") ? { ...OK, code: 1, stderr: "fatal: Not a valid object name" } : git(file, args, options);
+    expect(await build(store, request({ git: strangerGit }))).toMatchObject({ ok: false, reason: "no-op", message: expect.stringContaining("is not a commit in this repository") });
+    expect(agentCalls).toHaveLength(0);
+  });
+
   test("unreadable skill context refuses before provider spend", async () => {
     approveScope();
     claimIt();
@@ -4431,5 +4464,41 @@ describe("adaptive execution plans", () => {
     } finally {
       bare.close();
     }
+  });
+});
+
+describe("bringWorktreeTo against real git (v69)", () => {
+  test("renames, deletions, additions and edits land exactly, HEAD stays, untracked files survive", async () => {
+    const { run } = await import("./exec.js");
+    const { bringWorktreeTo, proveCandidate } = await import("./builder.js");
+    const { execFileSync } = await import("node:child_process");
+    const { join } = await import("node:path");
+    const { mkdirSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const repo = mkdtempSync(join(tmpdir(), "so-candidate-git-"));
+    try {
+      const sh = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" } }).trim();
+      sh("init", "-q", "-b", "main");
+      mkdirSync(join(repo, "dir"));
+      writeFileSync(join(repo, "a.txt"), "alpha\n"); writeFileSync(join(repo, "b.txt"), "beta\n"); writeFileSync(join(repo, "dir", "c.txt"), "gamma\n");
+      sh("add", "."); sh("commit", "-q", "-m", "base");
+      const base = sh("rev-parse", "HEAD");
+      sh("checkout", "-q", "-b", "prepared");
+      sh("mv", "a.txt", "z.txt"); sh("rm", "-q", "b.txt"); writeFileSync(join(repo, "d.txt"), "delta\n"); writeFileSync(join(repo, "dir", "c.txt"), "gamma two\n");
+      sh("add", "-A"); sh("commit", "-q", "-m", "candidate");
+      const candidate = sh("rev-parse", "HEAD");
+      sh("checkout", "-q", "main");
+      writeFileSync(join(repo, ".standing-orders-mailbox"), "untracked protocol file");
+      expect(await proveCandidate(run, repo, candidate, base)).toBeNull();
+      expect(await proveCandidate(run, repo, "f".repeat(40), base)).toMatch(/is not a commit in this repository/);
+      const stranger = (() => { sh("checkout", "-q", "--orphan", "stray"); writeFileSync(join(repo, "s.txt"), "s"); sh("add", "s.txt"); sh("commit", "-q", "-m", "stray"); const id = sh("rev-parse", "HEAD"); sh("checkout", "-q", "-f", "main"); return id; })();
+      expect(await proveCandidate(run, repo, stranger, base)).toMatch(/does not descend from this task's base/);
+      expect(await bringWorktreeTo(run, repo, candidate)).toEqual({ ok: true });
+      expect(sh("rev-parse", "HEAD")).toBe(base);
+      expect(sh("diff", "--quiet", candidate, "--")).toBe("");
+      expect(sh("ls-files").split("\n").sort()).toEqual(["d.txt", "dir/c.txt", "z.txt"]);
+      expect(readFileSync(join(repo, ".standing-orders-mailbox"), "utf8")).toBe("untracked protocol file");
+      expect(sh("status", "--porcelain").split("\n").filter(line => !line.startsWith("??")).sort()).toEqual(["A  d.txt", "M  dir/c.txt", "R  a.txt -> z.txt", "D  b.txt"].sort());
+    } finally { rmSync(repo, { recursive: true, force: true }); }
   });
 });

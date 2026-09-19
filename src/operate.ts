@@ -200,7 +200,7 @@ import {
 import { mintCoordinator, revokeCoordinator, listCoordinators } from "./coordinator.js";
 import { serveMcp } from "./mcp.js";
 import { createInterface } from "node:readline";
-import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage, acceptanceLinesToInput, parseAcceptanceCriteria, splitAcceptanceRubric, rubricIsPlaceholder } from "./scope.js";
+import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage, acceptanceLinesToInput, parseAcceptanceCriteria, splitAcceptanceRubric, rubricIsPlaceholder, isCommitSha } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
 import { requestTaskStop, resumeTaskStop, taskControlOf } from "./task-control.js";
@@ -10520,7 +10520,7 @@ function scopeTask(
   const id = positional[0];
   const goal = text(flags, "goal");
   if (id === undefined || goal === undefined) {
-    return fail(write, json, "task scope", "usage", "`standing-orders task scope <id> --goal <what success is> --acceptance <rubric> [--not <text>] [--touches a,b] [--budget-usd <n>] [--race provider:model[,provider:model…]] [--race-count 2..4] [--race-per-usd <n>] [--race-total-usd <n>]`", EXIT.usage);
+    return fail(write, json, "task scope", "usage", "`standing-orders task scope <id> --goal <what success is> --acceptance <rubric> [--not <text>] [--touches a,b] [--candidate <commit>] [--budget-usd <n>] [--race provider:model[,provider:model…]] [--race-count 2..4] [--race-per-usd <n>] [--race-total-usd <n>]`", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task scope", "unknown-task", `no task \`${id}\``, EXIT.refused);
@@ -10544,6 +10544,12 @@ function scopeTask(
   const riskGiven = text(flags, "risk");
   if (riskGiven !== undefined && !isRiskLevel(riskGiven)) {
     return fail(write, json, "task scope", "usage", `--risk is one of ${RISK_LEVELS.join(", ")}`, EXIT.usage);
+  }
+  // v69: a prepared commit. The machine checks it out as the attempt and
+  // runs the gate and the review; no agent is dispatched for it.
+  const candidateGiven = text(flags, "candidate");
+  if (candidateGiven !== undefined && !isCommitSha(candidateGiven)) {
+    return fail(write, json, "task scope", "usage", "--candidate is the full 40-character commit hash the machine will check out", EXIT.usage);
   }
   if (acceptanceParse.criteria.length === 0) {
     return fail(write, json, "task scope", "acceptance-required", "--acceptance named no valid criteria", EXIT.usage);
@@ -10701,6 +10707,7 @@ function scopeTask(
         ? modeFilingCoverage(store, store.refFor(BUILT_IN, id).repo, actor, now)
         : null;
     const proposed = propose(store, {
+      ...(candidateGiven === undefined ? {} : { candidate: candidateGiven }),
       taskId: id,
       goal,
       outOfScope: text(flags, "not") ?? null,
