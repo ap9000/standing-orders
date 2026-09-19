@@ -1,5 +1,14 @@
 # Progress
 
+**2026-09-19 UTC — Corrections ride the same filing.**
+`task requeue` now accepts a finished task whose last builder result was not
+accepted: a failed gate, a contradicting review, or a refuted proof. The next
+attempt continues on the task's own branch under the current scope, so a
+corrected candidate is a re-scope plus a requeue, not a new task. An accepted
+or published result still refuses, with the reason in plain words. Yesterday's
+deployment-script fix took six filings because each rejection needed a new
+task; it now takes one.
+
 **2026-09-18 UTC — Fewer limits in the way of filing and installing.**
 Four frictions met in one day of real work, removed: (1) acceptance
 statements may run to 1,000 bytes, and a `;` inside a statement no longer

@@ -13026,8 +13026,8 @@ export class Store {
     by: string,
     now: Date,
   ):
-    | { ok: true; resolvedIncidents: number }
-    | { ok: false; reason: "unknown-task" | "not-stalled" | "claimed" } {
+    | { ok: true; resolvedIncidents: number; rejectedRun: number | null }
+    | { ok: false; reason: "unknown-task" | "not-stalled" | "claimed" | "accepted-result" | "published" } {
     return this.transact(() => {
       const ref = this.db
         .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
@@ -13046,8 +13046,32 @@ export class Store {
         )
         .all(taskRef)
         .map(row => Number(row["id"]));
-      const state = this.db.prepare("SELECT state FROM task WHERE id = ?").get(taskId);
-      if (incidents.length === 0 && String(state?.["state"]) !== "failed") {
+      const state = String(this.db.prepare("SELECT state FROM task WHERE id = ?").get(taskId)?.["state"]);
+      // A finished task whose last result was rejected — a failed gate, a
+      // contradicting review, a refuted proof — runs again on the SAME
+      // filing: the branch keeps the earlier attempt, the sealed diff still
+      // spans from the original base, and a corrected candidate needs a
+      // re-scope, not a new task. An accepted or published result is final
+      // here; it is revised through a revision or its pull request.
+      let rejectedRun: number | null = null;
+      if (state === "done") {
+        // The guards hold whether or not an incident is open: a finished
+        // task's last result decides, and an accepted or published one is
+        // never reopened by resolving an incident beside it.
+        const last = this.db
+          .prepare("SELECT id FROM run WHERE task_ref = ? AND role = 'builder' AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1")
+          .get(taskRef);
+        if (last === undefined) {
+          if (incidents.length === 0) return { ok: false as const, reason: "not-stalled" as const };
+        } else {
+          rejectedRun = Number(last["id"]);
+          const verdict = this.proofVerdictFor(rejectedRun);
+          if (verdict !== null && (verdict.verdict === "verified" || verdict.verdict === "attested")) return { ok: false as const, reason: "accepted-result" as const };
+          if (this.proofAcceptance(rejectedRun) !== null) return { ok: false as const, reason: "accepted-result" as const };
+          const publication = this.publicationForRun(rejectedRun);
+          if (publication !== null && publication.state !== "failed") return { ok: false as const, reason: "published" as const };
+        }
+      } else if (incidents.length === 0 && state !== "failed") {
         return { ok: false as const, reason: "not-stalled" as const };
       }
 
@@ -13055,7 +13079,7 @@ export class Store {
 
       this.resetStrikes(taskRef);
       this.db
-        .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state IN ('failed','queued')")
+        .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state IN ('failed','queued','done')")
         .run(stamp, taskId);
       // The stall's page is answered by the act itself.
       this.resolveEpisode(`stalled:${taskRef}`, now);
@@ -13063,13 +13087,15 @@ export class Store {
         {
           taskRef, kind: "task-requeued", identity: `t${taskRef}`,
           subject: "Requeued",
-          body: `${incidents.length > 0 ? "Its incident is resolved and its" : "Its"} failure streak is cleared; a worker can take it again.`,
+          body: rejectedRun !== null
+            ? `Its last result (attempt #${rejectedRun}) was not accepted; the next attempt continues on the same branch under the current scope.`
+            : `${incidents.length > 0 ? "Its incident is resolved and its" : "Its"} failure streak is cleared; a worker can take it again.`,
           link: chatControlHref("task", taskId),
         },
         now,
       );
       this.bumpWake();
-      return { ok: true as const, resolvedIncidents: incidents.length };
+      return { ok: true as const, resolvedIncidents: incidents.length, rejectedRun };
     });
   }
 

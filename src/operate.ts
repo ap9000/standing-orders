@@ -4939,10 +4939,19 @@ async function requeueTask(
 
   const result = store.requeueTask(id, asWho, clock());
   if (!result.ok) {
-    return fail(write, json, "task requeue", result.reason, `no task ${id}`, EXIT.refused);
+    const why: Record<typeof result.reason, string> = {
+      "unknown-task": `no task ${id}`,
+      "not-stalled": `${id} has nothing to rerun: it is queued or running, or it finished without a rejected result`,
+      claimed: `a runner holds ${id} right now — wait for the attempt to end, or stop it`,
+      "accepted-result": `${id}'s last result was accepted; change it through a revision, not a rerun`,
+      published: `${id}'s last result is published; revise it through its pull request`,
+    };
+    return fail(write, json, "task requeue", result.reason, why[result.reason], EXIT.refused);
   }
-  return succeed(write, json, "task requeue", { id, resolvedIncidents: result.resolvedIncidents }, () => [
-    `${id} is queued again${result.resolvedIncidents > 0 ? `, ${result.resolvedIncidents} incident(s) resolved` : ""}. Strikes cleared; the next pass may take it.`,
+  return succeed(write, json, "task requeue", { id, resolvedIncidents: result.resolvedIncidents, rejectedRun: result.rejectedRun }, () => [
+    result.rejectedRun !== null
+      ? `${id} is queued again: attempt #${result.rejectedRun} was not accepted, so the next attempt continues on the same branch under the current scope. Re-scope first if the candidate changed.`
+      : `${id} is queued again${result.resolvedIncidents > 0 ? `, ${result.resolvedIncidents} incident(s) resolved` : ""}. Strikes cleared; the next pass may take it.`,
   ]);
 }
 
