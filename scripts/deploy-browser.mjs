@@ -134,9 +134,9 @@ function stage() {
   requireTrue(!execFileSync("git", ["-C", source, "status", "--porcelain", "--untracked-files=no"], { encoding: "utf8" }).trim(), "The candidate checkout has tracked changes.");
   requireTrue(existsSync(join(source, "dist")), "The candidate has no dist; the native gate builds it.");
   mkdirSync(stageDir, { recursive: true, mode: 0o700 });
-  // The runtime is the gate checkout's own production graph, copied byte for
-  // byte: the packed package plus every production dependency it resolved.
-  // Nothing is fetched, so nothing can drift from what the gate verified.
+  // The runtime is the packed package plus every production dependency of a
+  // clean, lockfile-verified install of the candidate commit — nothing from
+  // the worktree's mutable node_modules.
   const packed = execFileSync("npm", ["pack", "--silent", "--pack-destination", stageDir], { cwd: source, encoding: "utf8" }).trim().split("\n").pop();
   const runtime = join(stageDir, "runtime");
   const self = join(runtime, "node_modules", "standing-orders");
@@ -145,7 +145,8 @@ function stage() {
   // npm pack normalises package.json; the runtime carries the checkout's exact bytes.
   copyFileSync(join(source, "package.json"), join(self, "package.json"));
   writeFileSync(join(runtime, "package.json"), JSON.stringify({ name: "standing-orders-installed", private: true, candidate: candidateHead, dependencies: { "standing-orders": `file:../${packed}` } }, null, 2));
-  for (const dep of productionDependencies(source)) cpSync(join(source, dep), join(runtime, dep), { recursive: true, dereference: true, errorOnExist: false });
+  const built = cleanBuildOf(candidateHead);
+  for (const dep of built.dependencies) cpSync(join(built.scratch, dep), join(runtime, dep), { recursive: true, dereference: true, errorOnExist: false });
   const proof = proveStaged();
   return { packed, packageSha256: sha(readFileSync(join(stageDir, packed))), distFiles: proof.distFiles };
 }
@@ -161,16 +162,22 @@ const productionDependencies = root => execFileSync("npm", ["ls", "--omit=dev", 
  * dependency is checked against the commit's lockfile. Proved when staged and
  * again before every later phase, once per process. */
 let cleanBuild = null;
+process.on("exit", () => { if (cleanBuild?.scratch) rmSync(cleanBuild.scratch, { recursive: true, force: true }); });
+/** A clean checkout of the commit, its dependencies installed from the
+ * committed lockfile (npm verifies every package against the lockfile's
+ * integrity hash), and dist built there. Nothing from the worktree's
+ * mutable node_modules is used; the compiler itself comes from the lockfile. */
 function cleanBuildOf(commit) {
   if (cleanBuild?.commit === commit) return cleanBuild;
   const scratch = mkdtempSync(join(tmpdir(), "so-deploy-"));
   execFileSync("sh", ["-c", `git -C "${source}" archive --format=tar ${commit} | tar -x -C "${scratch}"`]);
-  symlinkSync(join(source, "node_modules"), join(scratch, "node_modules"));
-  execFileSync("npm", ["run", "build", "--silent"], { cwd: scratch, stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, NODE_OPTIONS: "" } });
+  const env = { ...process.env, NODE_OPTIONS: "" };
+  execFileSync("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefer-offline", "--silent"], { cwd: scratch, stdio: ["ignore", "ignore", "inherit"], env });
+  execFileSync("npm", ["run", "build", "--silent"], { cwd: scratch, stdio: ["ignore", "ignore", "inherit"], env });
   const files = list(join(scratch, "dist"));
   const bytes = new Map(files.map(f => [f, readFileSync(join(scratch, "dist", f))]));
-  rmSync(scratch, { recursive: true, force: true });
-  cleanBuild = { commit, files, bytes };
+  const dependencies = productionDependencies(scratch);
+  cleanBuild = { commit, scratch, files, bytes, dependencies };
   return cleanBuild;
 }
 /** Package roots under a node_modules directory: scoped or not, and the
@@ -188,6 +195,11 @@ function stagedPackages(dir, prefix) {
   }
   return out;
 }
+/** The staged runtime is the verified candidate COMMIT, byte for byte: dist
+ * equals a clean build of the commit, every other packed file equals the
+ * commit's blob, and every production dependency equals the clean install
+ * from the commit's lockfile. Proved when staged and again before every
+ * later phase (once per process). */
 function proveStaged() {
   requireTrue(existsSync(nextDist), `No staged runtime at ${nextDist}.`);
   const runtime = join(stageDir, "runtime"), self = join(runtime, "node_modules", "standing-orders");
@@ -199,17 +211,13 @@ function proveStaged() {
     const blob = spawnSync("git", ["-C", source, "show", `${candidateHead}:${f}`], { maxBuffer: 64 * 1024 * 1024 });
     requireTrue(blob.status === 0 && blob.stdout.equals(readFileSync(join(self, f))), `Packed file differs from the candidate commit: ${f}`);
   }
-  const lock = JSON.parse(execFileSync("git", ["-C", source, "show", `${candidateHead}:package-lock.json`], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })).packages ?? {};
   const staged = stagedPackages(join(runtime, "node_modules"), "node_modules").filter(dep => dep !== "node_modules/standing-orders").sort();
+  requireTrue(JSON.stringify(staged) === JSON.stringify(built.dependencies), `Staged dependency inventory differs from the lockfile install: ${JSON.stringify({ staged: staged.length, lockfile: built.dependencies.length })}`);
   for (const dep of staged) {
-    const entry = lock[dep];
-    requireTrue(entry !== undefined && entry.dev !== true, `Staged dependency is not a production entry of the candidate's lockfile: ${dep}`);
-    const version = JSON.parse(readFileSync(join(runtime, dep, "package.json"), "utf8")).version;
-    requireTrue(version === entry.version, `Staged dependency version differs from the candidate's lockfile: ${dep} ${version} vs ${entry.version}`);
+    const clean = join(built.scratch, dep), installed = join(runtime, dep), depFiles = list(clean);
+    requireTrue(JSON.stringify(depFiles) === JSON.stringify(list(installed)), `Dependency file inventory differs from the lockfile install: ${dep}`);
+    for (const f of depFiles) requireTrue(readFileSync(join(clean, f)).equals(readFileSync(join(installed, f))), `Dependency bytes differ from the lockfile install: ${dep}/${f}`);
   }
-  const required = Object.entries(lock).filter(([path, entry]) => path.startsWith("node_modules/") && entry.dev !== true && entry.optional !== true && path !== "node_modules/standing-orders").map(([path]) => path).sort();
-  const missing = required.filter(dep => !staged.includes(dep));
-  requireTrue(missing.length === 0, `Production dependencies of the candidate's lockfile are not staged: ${missing.slice(0, 5).join(", ")}`);
   return { distFiles: built.files.length, dependencies: staged.length };
 }
 
