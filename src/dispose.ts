@@ -669,6 +669,11 @@ export function regateTask(
   if (verdict === null || !(verdict.verdict === "refuted" || (verdict.verdict === "short" && !machinePassed))) {
     return { ok: false, reason: "not-rejected", message: `${taskId}'s last result is still being assessed; wait for it or stop it` };
   }
+  // A pushed or opened branch is revised through its pull request, never
+  // rerun underneath it; a live claim means an attempt is still running.
+  const publication = store.publicationForRun(last.id);
+  if (publication !== null && (publication.state === "pushed" || publication.state === "opened")) return { ok: false, reason: "published", message: `${taskId}'s last result is published; revise it through its pull request` };
+  if (store.hasLiveClaim(ref.id, now)) return { ok: false, reason: "claimed", message: `a runner holds ${taskId} right now — wait for the attempt to end, or stop it` };
   const scope = store.getScope(taskId);
   if (scope === null) return { ok: false, reason: "no-attempt", message: `${taskId} has no scope` };
   const head = last.headRevision;
@@ -762,6 +767,17 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
       return { kind: "none" };
     }
     if (failure.kind !== "failed") return { kind: "none" };
+    // This attempt was itself a rerun of the same commit: the machine has
+    // had its one retry, and whatever failed this time — related or not —
+    // goes to a person. No repair draft, no third pass.
+    if (run.headRevision && store.builderAttemptsAt(run.taskRef, run.headRevision) >= 2) {
+      const taskId = store.refById(run.taskRef)?.externalId ?? "";
+      store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `regate-failed:${sourceRunId}`, kind: "repair-evidence", pushClass: "attention",
+        subject: "The project check failed again on the same commit",
+        body: `Attempt #${sourceRunId} reran the approved check on commit ${run.headRevision.slice(0, 7)} and it failed again. No repair task was filed: decide whether the code or the check is wrong, then run \`standing-orders task regate ${taskId}\` or re-scope a corrected candidate.`,
+        link: `/t/${encodeURIComponent(taskId)}` }, now);
+      return { kind: "none" };
+    }
     // A failure the change cannot have caused — the whole gate timing out,
     // or an untouched test's own timeout — is handed to a person, not to
     // another code-writing attempt (2026-09-18: mayhem-spire run 1784

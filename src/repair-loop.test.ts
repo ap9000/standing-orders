@@ -241,7 +241,8 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
     store.setTaskState("t-gate", "done", T0);
     expect(repairGate(second)).toEqual({ kind: "none" });
     expect(store.raw().prepare("SELECT count(*) AS n FROM notification WHERE dedupe_key=?").get(`regate:${second}`)).toEqual({ n: 0 });
-    expect(unrelatedNotice(second)?.body).toContain("standing-orders task regate t-gate");
+    expect(store.repairChainFor(second)).toBeNull();
+    expect(store.raw().prepare("SELECT body FROM notification WHERE dedupe_key=?").get(`regate-failed:${second}`)).toMatchObject({ body: expect.stringContaining("standing-orders task regate t-gate") });
   });
 
   test("task regate on an operator's say-so reruns the check on the last commit and refuses an accepted result", () => {
@@ -255,6 +256,33 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
     store.acceptProof(run, "alex", null, T0);
     expect(regateTask(store, "t-gate", T0, { kind: "operator", name: "alex", token: alexToken })).toMatchObject({ ok: false, reason: "accepted-result" });
     expect(regateTask(store, "t-none", T0, { kind: "operator", name: "alex", token: alexToken })).toMatchObject({ ok: false, reason: "no-task" });
+  });
+
+  test("a failed rerun on the same commit never drafts a repair, whatever failed the second time", () => {
+    signMode({ repairAuto: true, repairMaxAttempts: 3 });
+    const first = untouchedProbe(["src/core/run.ts"]);
+    store.setTaskState("t-gate", "done", T0);
+    expect(repairGate(first)).toEqual({ kind: "none" });
+    expect(store.getScope("t-gate")?.candidate).toBe("a".repeat(40));
+    // The rerun fails on an ordinary, repairable failure at the same head.
+    const rerun = failedGate("t-gate");
+    store.setTaskState("t-gate", "done", T0);
+    expect(repairGate(rerun)).toEqual({ kind: "none" });
+    expect(store.repairChainFor(rerun)).toBeNull();
+    expect(store.raw().prepare("SELECT subject, body FROM notification WHERE dedupe_key=?").get(`regate-failed:${rerun}`)).toMatchObject({
+      subject: "The project check failed again on the same commit",
+      body: expect.stringContaining("standing-orders task regate t-gate"),
+    });
+  });
+
+  test("task regate refuses a published or claimed result even when the task is already queued", () => {
+    const run = failedGate("t-gate");
+    const taskRef = store.lookupRef("t-gate")!.id;
+    const intent = store.createPublicationIntent({ run, taskRef, githubRepo: "a/b", remote: "origin", base: "main", head: "b-t-gate", headSha: "a".repeat(40), bodyHash: "", draft: true }, T0);
+    store.markPublicationPushed(intent, T0);
+    expect(store.getTask("t-gate")?.state).toBe("queued");
+    expect(regateTask(store, "t-gate", T0, { kind: "operator", name: "alex", token: alexToken })).toMatchObject({ ok: false, reason: "published" });
+    expect(store.getScope("t-gate")?.candidate ?? null).toBeNull();
   });
 
   test.each(["touched", "truncated-inventory", "assertion"])("a failure the change may have caused still repairs (%s)", problem => {
