@@ -731,6 +731,22 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
   if (run === null) return { kind: "none" };
   const stored = store.proofVerdictFor(sourceRunId);
   if (stored === null) return { kind: "none" };
+  // THE RERUN STOP (v70): this attempt was a rerun of the same commit — the
+  // scope names that commit as its prepared candidate and the commit has
+  // been attempted before. The machine has had its one retry; whatever
+  // rejected it this time, a failed check or a contradicting review, goes
+  // to a person. No repair draft, no third pass, on either road.
+  {
+    const rerunTask = store.refById(run.taskRef)?.externalId ?? "";
+    if (run.headRevision && store.getScope(rerunTask)?.candidate === run.headRevision && store.builderAttemptsAt(run.taskRef, run.headRevision) >= 2) {
+      const contradicted = cause === "review";
+      store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `regate-failed:${sourceRunId}`, kind: "repair-evidence", pushClass: "attention",
+        subject: contradicted ? "The rerun on the same commit was contradicted by its review" : "The project check failed again on the same commit",
+        body: `Attempt #${sourceRunId} reran commit ${run.headRevision.slice(0, 7)} and ${contradicted ? "its review contradicted the result" : "the approved check failed again"}. No repair task was filed: decide whether the code or the check is wrong, then run \`standing-orders task regate ${rerunTask}\` or re-scope a corrected candidate.`,
+        link: `/t/${encodeURIComponent(rerunTask)}` }, now);
+      return { kind: "none" };
+    }
+  }
   const direct = stored.matrix.length > 0 && stored.matrix.every(row => row.assessment !== undefined);
   const observation = cause === "review" && direct && !stored.matrix.some(row => row.review?.judgement === "contradicts") && stored.matrix.some(row => row.review?.judgement === "cannot-tell");
   if (cause === "review" && direct && !stored.matrix.some(row => row.review?.judgement === "contradicts") && !observation) return { kind: "none" };
@@ -767,17 +783,6 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
       return { kind: "none" };
     }
     if (failure.kind !== "failed") return { kind: "none" };
-    // This attempt was itself a rerun of the same commit: the machine has
-    // had its one retry, and whatever failed this time — related or not —
-    // goes to a person. No repair draft, no third pass.
-    if (run.headRevision && store.builderAttemptsAt(run.taskRef, run.headRevision) >= 2) {
-      const taskId = store.refById(run.taskRef)?.externalId ?? "";
-      store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `regate-failed:${sourceRunId}`, kind: "repair-evidence", pushClass: "attention",
-        subject: "The project check failed again on the same commit",
-        body: `Attempt #${sourceRunId} reran the approved check on commit ${run.headRevision.slice(0, 7)} and it failed again. No repair task was filed: decide whether the code or the check is wrong, then run \`standing-orders task regate ${taskId}\` or re-scope a corrected candidate.`,
-        link: `/t/${encodeURIComponent(taskId)}` }, now);
-      return { kind: "none" };
-    }
     // A failure the change cannot have caused — the whole gate timing out,
     // or an untouched test's own timeout — is handed to a person, not to
     // another code-writing attempt (2026-09-18: mayhem-spire run 1784

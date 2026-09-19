@@ -273,6 +273,12 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
       subject: "The project check failed again on the same commit",
       body: expect.stringContaining("standing-orders task regate t-gate"),
     });
+    // A contradicting review of a rerun at the same commit goes to a person too, on the review road.
+    const reviewed = seedRun("t-gate", "refuted", [row("c1", "failed"), row("c2", "pass"), row("c3", "pass")]);
+    store.recordOutcomeFacts(reviewed, { headRevision: "a".repeat(40), baseRevision: "b".repeat(40) });
+    expect(maybeTriggerRepair(store, REPO, evidenceRoot, reviewed, "refuted", T0)).toEqual({ kind: "none" });
+    expect(store.repairChainFor(reviewed)).toBeNull();
+    expect(store.raw().prepare("SELECT subject FROM notification WHERE dedupe_key=?").get(`regate-failed:${reviewed}`)).toEqual({ subject: "The rerun on the same commit was contradicted by its review" });
   });
 
   test("task regate refuses a published or claimed result even when the task is already queued", () => {
