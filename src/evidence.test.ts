@@ -252,3 +252,17 @@ describe("screenshot evidence: signature, not extension (Priority 2)", () => {
     expect(result.problem).toMatch(/PNG or JPEG/);
   });
 });
+
+describe("boundStreamHeadTail", () => {
+  test("keeps the ending, where a test runner prints its summary", async () => {
+    const { boundStreamHeadTail, SHORTENED_MARKER } = await import("./evidence.js");
+    const dots = "·".repeat(20_000);
+    const summary = "\n Test Files  1 failed | 190 passed (191)\n      Tests  2 failed | 3520 passed (3522)\n";
+    const bounded = boundStreamHeadTail(`RUN v4\n${dots}${summary}`, 4096);
+    expect(Buffer.byteLength(bounded, "utf8")).toBeLessThanOrEqual(4096);
+    expect(bounded.startsWith("RUN v4\n")).toBe(true);
+    expect(bounded).toContain(SHORTENED_MARKER);
+    expect(bounded.endsWith(summary)).toBe(true);
+    expect(boundStreamHeadTail("short", 4096)).toBe("short");
+  });
+});

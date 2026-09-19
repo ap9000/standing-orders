@@ -78,8 +78,7 @@ import {
   storeEvidence,
   validateScreenshotBytes,
   imageDimensions,
-  SCREENSHOT_BYTE_CAP,
-} from "./evidence.js";
+  SCREENSHOT_BYTE_CAP, boundStreamHeadTail } from "./evidence.js";
 import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, artifactManifestOnly, proofSubmissionProblems, changedListProblems, frozenCriterionProblems, sameDiffStatFacts, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
 import { storeStructuredAttempt, normalizeStructuredJson } from "./structured-output.js";
 import { captureReviewContext } from "./review-context.js";
@@ -2486,15 +2485,13 @@ async function settleProof(
   // out of the authoritative log.
   let checkLogRedacted = false;
   let checkLogSourceBodyBytes = 0;
-  const boundedAttemptStream = (value: string, cap = 7 * 1024): string => {
+  // 24 KiB per stream, four fifths of it the ending: a full parallel Vitest
+  // run's progress dots alone exceeded the old 7 KiB and cut the summary off.
+  const boundedAttemptStream = (value: string, cap = 24 * 1024): string => {
     const hits = scanForSecrets(value);
     checkLogRedacted ||= hits.length > 0;
     const safe = hits.length > 0 ? redactSecretLines(value, hits) : value;
-    const bytes = Buffer.from(safe, "utf8");
-    if (bytes.length <= cap) return safe;
-    const marker = Buffer.from("\n… output shortened; ending follows …\n", "utf8");
-    const side = Math.floor((cap - marker.length) / 2);
-    return Buffer.concat([bytes.subarray(0, side), marker, bytes.subarray(bytes.length - side)]).toString("utf8");
+    return boundStreamHeadTail(safe, cap);
   };
   const attemptOutcome = (label: string, result: ExecResult): string =>
     `${label}: (exit ${result.code}${result.notFound ? " · could not start" : ""}${result.timedOut ? " · timed out" : ""})`;

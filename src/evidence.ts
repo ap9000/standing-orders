@@ -71,6 +71,22 @@ export const MAILBOX_SUFFIX = ".json";
 export const SCREENSHOT_BYTE_CAP = 5 * 1024 * 1024;
 
 /** Bytes each kind may store. Originals can be any size; the record says what was cut. */
+/** Bound one captured stream to `cap` bytes keeping its beginning and, mostly,
+ * its end: a test runner's summary and failure list come last, and that is
+ * what a reviewer or a repair needs to read. */
+export const SHORTENED_MARKER = "\n… output shortened; ending follows …\n";
+export function boundStreamHeadTail(value: string, cap: number, headShare = 0.2): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= cap) return value;
+  const marker = Buffer.from(SHORTENED_MARKER, "utf8");
+  // A cut inside a multi-byte character decodes as U+FFFD (three bytes);
+  // leave room for one at each edge so the result never exceeds the cap.
+  const room = Math.max(0, cap - marker.length - 8);
+  const head = Math.floor(room * headShare);
+  const tail = room - head;
+  return Buffer.concat([bytes.subarray(0, head), marker, bytes.subarray(bytes.length - tail)]).toString("utf8");
+}
+
 export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   diff: 256 * 1024,
   status: 64 * 1024,
@@ -84,7 +100,8 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   "revision-brief": 64 * 1024,
   report: REPORT_LIMITS.payload,
   proof: PROOF_LIMITS.payload,
-  "check-log": 64 * 1024,
+  // Six bounded streams (three attempts × stdout/stderr) plus the summary.
+  "check-log": 160 * 1024,
   screenshot: SCREENSHOT_BYTE_CAP,
   "structured-output": 64 * 1024,
   // The planner's recorded source is bounded BEFORE it is written (the

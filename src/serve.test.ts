@@ -11012,7 +11012,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const patchArtifact = store.artifactsFor(brokenRun).find(one => one.kind === "terminal-diff");
     if (patchArtifact === undefined) throw new Error("no patch");
     writeFileSync(join(evidenceRoot, patchArtifact.key), "diff --git a/x b/x\n+tampered\n");
-    storeEvidence(store, evidenceRoot, brokenRun, "check-log", "check-log.txt", Buffer.alloc(70 * 1024, "x"), `sh -c "npm test" (exit 0)`, at(4));
+    storeEvidence(store, evidenceRoot, brokenRun, "check-log", "check-log.txt", Buffer.alloc(170 * 1024, "x"), `sh -c "npm test" (exit 0)`, at(4));
     storeEvidence(store, evidenceRoot, brokenRun, "diff-stat", "diff-stat.json", Buffer.from("{}"), "git diff --numstat (exit 128)", at(4), { captureStatus: "failed" });
     await boot();
     const cookie = await login();
@@ -11822,7 +11822,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
 
   test("package 3 c2: a tampered screenshot, a shortened check log, a failed change-summary capture, and an unverifiable report are named in the open, never rendered, never called validated; an investigation's report is escaped text", async () => {
     const ref = seed("t-damaged", "evidence damaged after sealing", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
-    const run = build("t-damaged", ref, { ...RICH, checkLog: "x".repeat(70 * 1024), stat: undefined });
+    const run = build("t-damaged", ref, { ...RICH, checkLog: "x".repeat(170 * 1024), stat: undefined });
     storeEvidence(store, evidenceRoot, run, "diff-stat", "diff-stat.json", Buffer.from("{}"), "git diff --numstat (exit 128)", T0, { captureStatus: "failed" });
     const shot = store.artifactsFor(run).find(one => one.kind === "screenshot");
     if (shot === undefined) throw new Error("no screenshot");
@@ -12460,7 +12460,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const run = build("t-log", ref, RICH);
     const shortRef = seed("t-short", "shortened records", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
     const longPatch = `${PATCH}${"+// padding line that pushes the sealed diff past its storage cap\n".repeat(5_000)}`;
-    const shortRun = build("t-short", shortRef, { ...RICH, patch: longPatch, checkLog: "x".repeat(70 * 1024) });
+    const shortRun = build("t-short", shortRef, { ...RICH, patch: longPatch, checkLog: "x".repeat(170 * 1024) });
     await boot();
     const cookie = await login();
     const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();

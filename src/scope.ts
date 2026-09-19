@@ -513,7 +513,9 @@ export type AcceptanceCriterion = {
 export const ACCEPTANCE_LIMITS = {
   criteria: 12,
   id: 40,
-  statement: 300,
+  // A statement is one testable outcome; three hundred bytes forced people to
+  // drop the qualifying clause that made it testable.
+  statement: 1000,
   how: 500,
   evidenceKinds: EVIDENCE_KINDS.length,
 } as const;
@@ -649,6 +651,34 @@ export function parseAcceptanceCriteria(value: unknown): { criteria: AcceptanceC
  * same plain-object shape `parseAcceptanceCriteria` already validates, so
  * both entry points can never drift on what counts as a valid criterion.
  */
+/** The one criterion a filing may carry when nobody has written the rubric
+ * yet: the console's scout follow-ups file with it, and `--acceptance plan`
+ * on the command line expands to it. A mode with planAuto sends such a
+ * filing to the planner instead of building against it. */
+export const PLACEHOLDER_RUBRIC_STATEMENT = "The operator has reviewed this follow-up and written a real rubric before approving it.";
+export const PLACEHOLDER_RUBRIC: AcceptanceCriterion[] = [{ id: "c1", statement: PLACEHOLDER_RUBRIC_STATEMENT, how: null, evidence: ["manual-review"] }];
+export function rubricIsPlaceholder(acceptance: readonly { statement: string; evidence: readonly string[] }[]): boolean {
+  return acceptance.length === 1 && acceptance[0]!.statement === PLACEHOLDER_RUBRIC_STATEMENT &&
+    acceptance[0]!.evidence.length === 1 && acceptance[0]!.evidence[0] === "manual-review";
+}
+
+/** Split a `--acceptance` rubric into criteria. Criteria are `;`-separated,
+ * but a `;` inside a statement must not split it: every criterion ends with
+ * its `|<evidence kinds>` part, so a segment with no `|` is the front of the
+ * next one and is glued back on. The single word `plan` means the placeholder. */
+export function splitAcceptanceRubric(text: string): string[] {
+  if (text.trim().toLowerCase() === "plan") return [`${PLACEHOLDER_RUBRIC_STATEMENT}|manual-review`];
+  const out: string[] = [];
+  let pending = "";
+  for (const segment of text.split(";")) {
+    const joined = pending === "" ? segment : `${pending};${segment}`;
+    if (joined.includes("|")) { out.push(joined); pending = ""; }
+    else pending = joined;
+  }
+  if (pending.trim() !== "") out.push(pending);
+  return out;
+}
+
 export function acceptanceLinesToInput(lines: readonly string[]): unknown[] {
   const out: unknown[] = [];
   let auto = 1;

@@ -1,5 +1,23 @@
 # Progress
 
+**2026-09-18 UTC — Fewer limits in the way of filing and installing.**
+Four frictions met in one day of real work, removed: (1) acceptance
+statements may run to 1,000 bytes, and a `;` inside a statement no longer
+splits the rubric — `splitAcceptanceRubric` glues a segment with no
+`|evidence` part onto the next; `--acceptance plan` files the placeholder.
+(2) A placeholder rubric under a mode with `planAuto` now requests a plan
+from the command line exactly as a console-filed scout follow-up does, so a
+build is never judged against "the operator has written a real rubric".
+(3) Retained check logs keep 24 KiB per stream, four fifths of it the ending
+where a test runner prints its summary and failures (`boundStreamHeadTail`);
+the check-log cap rises to 160 KiB. (4) `scripts/deploy-browser.mjs --run
+<builder run> --yes` is the one-action installation: it stages the packed
+runtime beside the installed ones, proves verified proof, upheld review,
+scope digest and the exact approved command from the plane's own records,
+then drains, backs up, rehearses, swaps the launchd service, migrates and
+reopens admission with a resumable journal. It replaces the per-release
+hand-written script that differed by three strings.
+
 **2026-09-18 UTC — Stop paying for failures the change did not cause.**
 Mayhem-spire run 1784 passed 163 of 164 tests; the one failure was an
 untouched, non-asserting balance probe timing out at its own 120 s limit.

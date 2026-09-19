@@ -210,7 +210,7 @@ import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js
 import { resolvePhaseAgent, resolveRoutineAuthority, INSTALLATION_SCOPE, routeOfTask, agentChoicesFor, type AgentChoice } from "./agentconfig.js";
 import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, agentsSummary, postureWords, RISK_CHOICES, RISK_LEVELS, PHASES as ROUTE_PHASES, type PhaseRoute, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
 import { isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
-import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
+import { authenticateAccount, hashPassword, modeFilingCoverage, PLACEHOLDER_RUBRIC } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, readProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
@@ -6975,9 +6975,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             // per follow-up — a placeholder names the operator's own
             // review as the outstanding work, the same posture a
             // coordinator's bare intent takes.
-            acceptance: [
-              { id: "c1", statement: "The operator has reviewed this follow-up and written a real rubric before approving it.", how: null, evidence: ["manual-review"] },
-            ],
+            acceptance: PLACEHOLDER_RUBRIC,
             filedVia: "console",
             proposedVia: "scout",
             ...(unscopedMode ? {} : { admittedRepos: admissionList() ?? [] }),

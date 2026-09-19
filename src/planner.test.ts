@@ -297,7 +297,7 @@ describe("planning mode, against real git", () => {
     expect(prompts.some(one => one.includes("Per-user or per-tenant?") && one.includes("user"))).toBe(true);
     expect(
       prompts.some(one =>
-        one.includes("Each id is capped at 40 UTF-8 bytes, each statement at 300,") &&
+        one.includes("Each id is capped at 40 UTF-8 bytes, each statement at 1000,") &&
         one.includes("each non-null how at 500") &&
         one.includes("Validate those byte limits"),
       ),

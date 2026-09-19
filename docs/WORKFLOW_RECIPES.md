@@ -132,3 +132,20 @@ Saved recipe editing creates a new copy rather than modifying running work.
 Readiness is a current configuration summary, not an execution certificate.
 The scheduler and worker recheck actual authority, availability, budget,
 containment, and completion requirements at their existing boundaries.
+
+
+## Install a verified candidate (one action)
+
+From the builder's worktree of a run whose proof reads verified and whose
+independent review upheld every signed criterion:
+
+```
+node scripts/deploy-browser.mjs --run <builder run id>        # dry summary
+node scripts/deploy-browser.mjs --run <builder run id> --yes  # drain, back up, rehearse, swap, finish
+```
+
+The script refuses anything less than that evidence, journals each phase in
+`~/.config/standing-orders/staged-upgrades/browser-<sha>-<id>/deployment.json`,
+restores the previous service definition if the new one does not come up,
+and resumes with `--stage <dir> --phase <name>`. Open the console and look at
+a result page afterwards; the script checks that it answers, not how it looks.
