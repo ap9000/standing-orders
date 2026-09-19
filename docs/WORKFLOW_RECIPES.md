@@ -134,6 +134,24 @@ The scheduler and worker recheck actual authority, availability, budget,
 containment, and completion requirements at their existing boundaries.
 
 
+## Correct a rejected result on the same filing
+
+A gate that failed, a review that contradicted, or a proof that read refuted
+does not need a new task. Rewrite the scope if the candidate changed, approve
+it, and requeue: the next attempt continues on the task's own branch, and the
+sealed diff still spans from the original base.
+
+```
+standing-orders task scope <id> --repo <path> --goal "Bring the tree to commit <sha> …" --acceptance "…"
+standing-orders task approve <id> --yes --digest <shown> --as <you>
+standing-orders task requeue <id> --as <you>
+```
+
+Write the goal for a continuing branch: "make the tree equal commit <sha>",
+never "confirm the branch starts at the base" — the branch already carries the
+earlier attempt. A result that was accepted or published is final for that
+filing; change it through a revision or its pull request.
+
 ## Install a verified candidate (one action)
 
 From the builder's worktree of a run whose proof reads verified and whose

@@ -1595,6 +1595,39 @@ describe("console mutation semantics, re-proved server-side", () => {
     expect(store.requeueTask("t-1", "alex", later(2_000))).toMatchObject({ ok: false, reason: "claimed" });
   });
 
+  test("requeue reruns a finished task whose last result was rejected, and refuses an accepted or published one", () => {
+    enroll(store, "runner-a");
+    const ref = store.refFor(BUILT_IN, "t-1").id;
+    store.placeTask(ref, REPO);
+    const attempt = (verdict: "refuted" | "short" | "verified") => {
+      const run = store.startRun({ taskRef: ref, leaseId: `l-${verdict}-${Math.random().toString(16).slice(2, 8)}`, runner: "runner-a", branch: "b-t-1", worktree: "/pool/t-1", ...bareLegacy("build"), now: T0 });
+      store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+      store.saveProofVerdict(run, verdict, verdict === "verified" ? ["the approved verification command passed"] : ["the repository's approved verification command exited 1"], T0, []);
+      store.setTaskState("t-1", "done", T0);
+      return run;
+    };
+    // A failed gate: the same filing runs again, on the same branch.
+    const rejected = attempt("refuted");
+    expect(store.requeueTask("t-1", "alex", later(1_000))).toMatchObject({ ok: true, rejectedRun: rejected });
+    expect(store.getTask("t-1")?.state).toBe("queued");
+    // A result awaiting review may also be rerun (nothing accepted it yet).
+    attempt("short");
+    expect(store.requeueTask("t-1", "alex", later(2_000))).toMatchObject({ ok: true });
+    // An accepted result is final for this filing.
+    const verified = attempt("verified");
+    expect(store.requeueTask("t-1", "alex", later(3_000))).toMatchObject({ ok: false, reason: "accepted-result" });
+    expect(store.getTask("t-1")?.state).toBe("done");
+    // So is an operator-accepted one, and a published one.
+    const accepted = attempt("refuted");
+    store.acceptProof(accepted, "alex", null, later(3_500));
+    expect(store.requeueTask("t-1", "alex", later(4_000))).toMatchObject({ ok: false, reason: "accepted-result" });
+    const published = attempt("refuted");
+    const intent = store.createPublicationIntent({ run: published, taskRef: ref, githubRepo: "a/b", remote: "origin", base: "main", head: "b-t-1", headSha: "a".repeat(40), bodyHash: "", draft: true }, later(4_500));
+    store.markPublicationPushed(intent, later(4_600));
+    expect(store.requeueTask("t-1", "alex", later(5_000))).toMatchObject({ ok: false, reason: "published" });
+    void verified;
+  });
+
   test("console task creation is atomic, capped, and validates what it will later render", () => {
     expect(store.createConsoleTask({ id: "../evil", title: "x" }, T0)).toMatchObject({ ok: false, reason: "bad-id" });
     expect(
