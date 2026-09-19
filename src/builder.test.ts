@@ -214,6 +214,36 @@ describe("the builder's gates", () => {
     expect(store.handle.prepare("SELECT note FROM run_note WHERE run = ?").all(req.runId as number).some(row => String(row["note"]).includes(`Prepared candidate ${candidate} checked out; no agent ran.`))).toBe(true);
   });
 
+  test("a rerun (task regate) dispatches through the builder with no agent call and reruns the check on the last head (v70)", async () => {
+    const { regateTask } = await import("./dispose.js");
+    approveScope();
+    claimIt();
+    const first = request();
+    expect(await build(store, first)).toMatchObject({ ok: true, committed: true });
+    const agentCallsAfterFirst = agentCalls.length;
+    expect(agentCallsAfterFirst).toBeGreaterThan(0);
+    // The attempt is settled by the dispatcher; here its head and a rejected gate are recorded as disposal would.
+    store.finishRun(first.runId as number, { outcome: "built", committed: true, now: T0 });
+    store.recordOutcomeFacts(first.runId as number, { headRevision: "feat/a" });
+    store.saveProofVerdict(first.runId as number, "refuted", ["the repository's approved verification command exited 1"], T0, []);
+    store.setTaskState("t-1", "done", T0);
+    store.raw().prepare("UPDATE claim SET released_at = ? WHERE task_ref = ?").run(T0.toISOString(), taskRef);
+    const rerun = regateTask(store, "t-1", T0, { kind: "operator", name: "alex", token: approverToken });
+    expect(rerun).toEqual({ ok: true, run: first.runId, head: "feat/a" });
+    expect(store.getScope("t-1")).toMatchObject({ candidate: "feat/a", approvedBy: "alex" });
+    // The rerun attempt under a fresh lease: same fixture git, the scope's candidate is the last head, no provider is spawned.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease-2" });
+    const preparedGit: Runner = async (file, args, options) => args.includes("diff") && args.includes("--name-only") ? { ...OK, stdout: "src/index.ts\0" } : git(file, args, options);
+    const second = {
+      taskId: "t-1", taskRef, runner: "builder-1", worktree: wt, leaseId: "test-lease-2",
+      runId: store.startRun({ taskRef, leaseId: "test-lease-2", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0, ...presented(store, taskRef, "builder") }),
+      evidenceRoot: join2(wt, ".evidence"), branch: "feat/a", now: T0, agent, git: preparedGit,
+    };
+    expect(await build(store, second)).toMatchObject({ ok: true, committed: true, summary: expect.stringContaining("no agent ran") });
+    expect(agentCalls.length).toBe(agentCallsAfterFirst);
+    expect(store.handle.prepare("SELECT note FROM run_note WHERE run = ?").all(second.runId as number).some(row => String(row["note"]).includes("no agent ran"))).toBe(true);
+  });
+
   test("a prepared candidate that is not a commit here, or does not descend from the base, refuses before anything moves (v69)", async () => {
     const candidate = "e".repeat(40);
     propose(store, { taskId: "t-1", goal: "Install the prepared commit", candidate, now: T0 });
