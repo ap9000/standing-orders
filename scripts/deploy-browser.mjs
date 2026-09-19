@@ -16,7 +16,7 @@
 // must already read verified and reviewed, or the script stops before touching
 // the service.
 import { DatabaseSync, backup } from "node:sqlite";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, openSync, closeSync, fsyncSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, openSync, closeSync, fsyncSync, writeFileSync } from "node:fs";
 import { randomUUID, createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -44,7 +44,6 @@ if (!Number.isInteger(runId) || runId < 1) requireTrue(false, "Name the verified
 const livePlist = readFileSync(plist, "utf8");
 const priorDist = (livePlist.match(/<string>([^<]*\/dist)\/cli\.js<\/string>/) ?? [])[1];
 requireTrue(priorDist && existsSync(priorDist), `The live service definition at ${plist} names no installed runtime.`);
-const priorRoot = dirname(dirname(dirname(dirname(priorDist))));
 const publicUrl = (livePlist.match(/<string>--public-url<\/string>\s*<string>([^<]+)<\/string>/) ?? [])[1] ?? null;
 const load = async (root, name) => import(pathToFileURL(join(root, name)).href);
 const oldRt = { store: await load(priorDist, "store.js"), gate: await load(priorDist, "desktop-update-gate.js"), evidence: await load(priorDist, "verification-evidence.js"), update: await load(priorDist, "desktop-update.js") };
@@ -132,16 +131,23 @@ function stage() {
   requireTrue(!execFileSync("git", ["-C", source, "status", "--porcelain", "--untracked-files=no"], { encoding: "utf8" }).trim(), "The candidate checkout has tracked changes.");
   requireTrue(existsSync(join(source, "dist")), "The candidate has no dist; the native gate builds it.");
   mkdirSync(stageDir, { recursive: true, mode: 0o700 });
+  // The runtime is the gate checkout's own production graph, copied byte for
+  // byte: the packed package plus every production dependency it resolved.
+  // Nothing is fetched, so nothing can drift from what the gate verified.
   const packed = execFileSync("npm", ["pack", "--silent", "--pack-destination", stageDir], { cwd: source, encoding: "utf8" }).trim().split("\n").pop();
   const runtime = join(stageDir, "runtime");
-  mkdirSync(runtime, { recursive: true });
-  const priorPackage = join(priorRoot, "package.json");
-  const overrides = existsSync(priorPackage) ? JSON.parse(readFileSync(priorPackage, "utf8")).overrides ?? {} : {};
-  writeFileSync(join(runtime, "package.json"), JSON.stringify({ name: "standing-orders-installed", private: true, overrides, dependencies: { "standing-orders": `file:../${packed}` } }, null, 2));
-  execFileSync("npm", ["install", "--omit=dev", "--no-audit", "--no-fund", "--silent"], { cwd: runtime, stdio: "inherit" });
+  const self = join(runtime, "node_modules", "standing-orders");
+  mkdirSync(self, { recursive: true });
+  execFileSync("tar", ["-xzf", join(stageDir, packed), "--strip-components=1", "-C", self]);
+  writeFileSync(join(runtime, "package.json"), JSON.stringify({ name: "standing-orders-installed", private: true, candidate: candidateHead, dependencies: { "standing-orders": `file:../${packed}` } }, null, 2));
+  for (const dep of productionDependencies(source)) cpSync(join(source, dep), join(runtime, dep), { recursive: true, dereference: true, errorOnExist: false });
   const proof = proveStaged();
   return { packed, packageSha256: sha(readFileSync(join(stageDir, packed))), distFiles: proof.distFiles };
 }
+
+/** Relative paths of every production dependency the checkout resolved. */
+const productionDependencies = root => execFileSync("npm", ["ls", "--omit=dev", "--all", "--parseable"], { cwd: root, encoding: "utf8" }).trim().split("\n")
+  .filter(p => p.startsWith(join(root, "node_modules") + "/")).map(p => p.slice(root.length + 1)).sort();
 
 /** The staged runtime is the verified candidate's gate build, byte for byte:
  * every dist file and every production dependency. Proved when staged and
@@ -154,9 +160,11 @@ function proveStaged() {
   requireTrue(JSON.stringify(files) === JSON.stringify(list(nextDist)), "Staged dist inventory differs from the verified candidate's gate build.");
   for (const f of files) requireTrue(readFileSync(join(source, "dist", f)).equals(readFileSync(join(nextDist, f))), `Staged file differs from the gate build: ${f}`);
   const runtime = join(stageDir, "runtime");
-  const deps = root => execFileSync("npm", ["ls", "--omit=dev", "--all", "--parseable"], { cwd: root, encoding: "utf8" }).trim().split("\n").filter(p => p.startsWith(join(root, "node_modules") + "/")).map(p => p.slice(root.length + 1)).sort();
-  const sourceDeps = deps(source), installedDeps = deps(runtime);
-  requireTrue(JSON.stringify(sourceDeps) === JSON.stringify(installedDeps), "Production dependency inventory differs from the gate checkout.");
+  const sourceDeps = productionDependencies(source);
+  const packageJson = JSON.parse(readFileSync(join(runtime, "package.json"), "utf8"));
+  requireTrue(packageJson.candidate === candidateHead, "The staged runtime was built for a different candidate.");
+  const packedFiles = list(join(runtime, "node_modules", "standing-orders")).filter(f => f !== "package.json" && !f.startsWith("dist/"));
+  for (const f of packedFiles) requireTrue(readFileSync(join(source, f)).equals(readFileSync(join(runtime, "node_modules", "standing-orders", f))), `Packed file differs from the checkout: ${f}`);
   for (const dep of sourceDeps) {
     const tested = join(source, dep), installed = join(runtime, dep), depFiles = list(tested);
     requireTrue(JSON.stringify(depFiles) === JSON.stringify(list(installed)), `Dependency file inventory differs: ${dep}`);
