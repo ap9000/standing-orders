@@ -56,6 +56,9 @@ const evidenceRoot = join(dirname(database), "evidence");
 const readJournal = () => JSON.parse(readFileSync(journalFile, "utf8"));
 const save = (r, phase) => { r.phase = phase; r.updatedAt = new Date().toISOString(); oldRt.update.durableJson(journalFile, r); say(`• ${phase}`); };
 const loadPhase = phase => {
+  // The plane's records are re-read before every phase, not only at entry:
+  // a revoked approval or a changed command between phases stops the swap.
+  { const db = new DatabaseSync(database, { readOnly: true }); try { facts(db); } finally { db.close(); } }
   const r = readJournal();
   requireTrue(r.phase === phase && r.candidate === candidateHead && r.database === database, `Journal is at ${r.phase} for ${r.candidate?.slice(0, 7)}, expected ${phase} for ${short}.`);
   requireTrue(r.builder === runId && r.nextRuntime === nextDist, "The journal belongs to a different run or staging directory.");
@@ -139,6 +142,8 @@ function stage() {
   const self = join(runtime, "node_modules", "standing-orders");
   mkdirSync(self, { recursive: true });
   execFileSync("tar", ["-xzf", join(stageDir, packed), "--strip-components=1", "-C", self]);
+  // npm pack normalises package.json; the runtime carries the checkout's exact bytes.
+  copyFileSync(join(source, "package.json"), join(self, "package.json"));
   writeFileSync(join(runtime, "package.json"), JSON.stringify({ name: "standing-orders-installed", private: true, candidate: candidateHead, dependencies: { "standing-orders": `file:../${packed}` } }, null, 2));
   for (const dep of productionDependencies(source)) cpSync(join(source, dep), join(runtime, dep), { recursive: true, dereference: true, errorOnExist: false });
   const proof = proveStaged();
@@ -163,7 +168,7 @@ function proveStaged() {
   const sourceDeps = productionDependencies(source);
   const packageJson = JSON.parse(readFileSync(join(runtime, "package.json"), "utf8"));
   requireTrue(packageJson.candidate === candidateHead, "The staged runtime was built for a different candidate.");
-  const packedFiles = list(join(runtime, "node_modules", "standing-orders")).filter(f => f !== "package.json" && !f.startsWith("dist/"));
+  const packedFiles = list(join(runtime, "node_modules", "standing-orders")).filter(f => !f.startsWith("dist/"));
   for (const f of packedFiles) requireTrue(readFileSync(join(source, f)).equals(readFileSync(join(runtime, "node_modules", "standing-orders", f))), `Packed file differs from the checkout: ${f}`);
   for (const dep of sourceDeps) {
     const tested = join(source, dep), installed = join(runtime, dep), depFiles = list(tested);
