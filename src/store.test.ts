@@ -1628,6 +1628,28 @@ describe("console mutation semantics, re-proved server-side", () => {
     void verified;
   });
 
+  test("an open incident beside a finished task neither hides the rejected attempt nor reopens an accepted one", () => {
+    enroll(store, "runner-a");
+    const ref = store.refFor(BUILT_IN, "t-1").id;
+    store.placeTask(ref, REPO);
+    const attempt = (verdict: "refuted" | "verified") => {
+      const run = store.startRun({ taskRef: ref, leaseId: `l-${verdict}-${Math.random().toString(16).slice(2, 8)}`, runner: "runner-a", branch: "b-t-1", worktree: "/pool/t-1", ...bareLegacy("build"), now: T0 });
+      store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+      store.saveProofVerdict(run, verdict, ["fixture"], T0, []);
+      store.setTaskState("t-1", "done", T0);
+      return run;
+    };
+    const rejected = attempt("refuted");
+    const incident = store.createIncident({ run: rejected, kind: "malformed-proof" }, later(500));
+    expect(store.requeueTask("t-1", "alex", later(1_000))).toMatchObject({ ok: true, rejectedRun: rejected, resolvedIncidents: 1 });
+    expect(store.handle.prepare("SELECT resolved_at FROM incident WHERE id = ?").get(incident)?.["resolved_at"]).not.toBeNull();
+    expect(store.getTask("t-1")?.state).toBe("queued");
+    const verified = attempt("verified");
+    store.createIncident({ run: verified, kind: "malformed-proof" }, later(2_000));
+    expect(store.requeueTask("t-1", "alex", later(3_000))).toMatchObject({ ok: false, reason: "accepted-result" });
+    expect(store.getTask("t-1")?.state).toBe("done");
+  });
+
   test("console task creation is atomic, capped, and validates what it will later render", () => {
     expect(store.createConsoleTask({ id: "../evil", title: "x" }, T0)).toMatchObject({ ok: false, reason: "bad-id" });
     expect(

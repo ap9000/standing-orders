@@ -13054,18 +13054,25 @@ export class Store {
       // re-scope, not a new task. An accepted or published result is final
       // here; it is revised through a revision or its pull request.
       let rejectedRun: number | null = null;
-      if (incidents.length === 0 && state !== "failed") {
-        if (state !== "done") return { ok: false as const, reason: "not-stalled" as const };
+      if (state === "done") {
+        // The guards hold whether or not an incident is open: a finished
+        // task's last result decides, and an accepted or published one is
+        // never reopened by resolving an incident beside it.
         const last = this.db
           .prepare("SELECT id FROM run WHERE task_ref = ? AND role = 'builder' AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1")
           .get(taskRef);
-        if (last === undefined) return { ok: false as const, reason: "not-stalled" as const };
-        rejectedRun = Number(last["id"]);
-        const verdict = this.proofVerdictFor(rejectedRun);
-        if (verdict !== null && (verdict.verdict === "verified" || verdict.verdict === "attested")) return { ok: false as const, reason: "accepted-result" as const };
-        if (this.proofAcceptance(rejectedRun) !== null) return { ok: false as const, reason: "accepted-result" as const };
-        const publication = this.publicationForRun(rejectedRun);
-        if (publication !== null && publication.state !== "failed") return { ok: false as const, reason: "published" as const };
+        if (last === undefined) {
+          if (incidents.length === 0) return { ok: false as const, reason: "not-stalled" as const };
+        } else {
+          rejectedRun = Number(last["id"]);
+          const verdict = this.proofVerdictFor(rejectedRun);
+          if (verdict !== null && (verdict.verdict === "verified" || verdict.verdict === "attested")) return { ok: false as const, reason: "accepted-result" as const };
+          if (this.proofAcceptance(rejectedRun) !== null) return { ok: false as const, reason: "accepted-result" as const };
+          const publication = this.publicationForRun(rejectedRun);
+          if (publication !== null && publication.state !== "failed") return { ok: false as const, reason: "published" as const };
+        }
+      } else if (incidents.length === 0 && state !== "failed") {
+        return { ok: false as const, reason: "not-stalled" as const };
       }
 
       for (const incident of incidents) this.resolveIncidentLocked(incident, by, now);
