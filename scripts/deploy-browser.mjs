@@ -56,7 +56,15 @@ const nextDist = join(stageDir, "runtime", "node_modules", "standing-orders", "d
 const evidenceRoot = join(dirname(database), "evidence");
 const readJournal = () => JSON.parse(readFileSync(journalFile, "utf8"));
 const save = (r, phase) => { r.phase = phase; r.updatedAt = new Date().toISOString(); oldRt.update.durableJson(journalFile, r); say(`• ${phase}`); };
-const loadPhase = phase => { const r = readJournal(); requireTrue(r.phase === phase && r.candidate === candidateHead && r.database === database, `Journal is at ${r.phase} for ${r.candidate?.slice(0, 7)}, expected ${phase} for ${short}.`); return r; };
+const loadPhase = phase => {
+  const r = readJournal();
+  requireTrue(r.phase === phase && r.candidate === candidateHead && r.database === database, `Journal is at ${r.phase} for ${r.candidate?.slice(0, 7)}, expected ${phase} for ${short}.`);
+  requireTrue(r.builder === runId && r.nextRuntime === nextDist, "The journal belongs to a different run or staging directory.");
+  const packed = readdirSync(stageDir).find(f => f.endsWith(".tgz"));
+  requireTrue(packed && sha(readFileSync(join(stageDir, packed))) === r.packageSha256, "The staged package changed since it was proved.");
+  proveStaged();
+  return r;
+};
 
 // ---- the plane's own records for this candidate -----------------------------
 function facts(db) {
@@ -131,9 +139,21 @@ function stage() {
   const overrides = existsSync(priorPackage) ? JSON.parse(readFileSync(priorPackage, "utf8")).overrides ?? {} : {};
   writeFileSync(join(runtime, "package.json"), JSON.stringify({ name: "standing-orders-installed", private: true, overrides, dependencies: { "standing-orders": `file:../${packed}` } }, null, 2));
   execFileSync("npm", ["install", "--omit=dev", "--no-audit", "--no-fund", "--silent"], { cwd: runtime, stdio: "inherit" });
+  const proof = proveStaged();
+  return { packed, packageSha256: sha(readFileSync(join(stageDir, packed))), distFiles: proof.distFiles };
+}
+
+/** The staged runtime is the verified candidate's gate build, byte for byte:
+ * every dist file and every production dependency. Proved when staged and
+ * again before every later phase, so a resumed `--stage <dir>` can never
+ * install bytes the plane did not verify. */
+function proveStaged() {
+  requireTrue(existsSync(nextDist), `No staged runtime at ${nextDist}.`);
+  requireTrue(execFileSync("git", ["-C", source, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() === candidateHead, "The candidate checkout moved.");
   const files = list(join(source, "dist"));
-  requireTrue(JSON.stringify(files) === JSON.stringify(list(nextDist)), "Packed dist inventory differs from the gate build.");
-  for (const f of files) requireTrue(readFileSync(join(source, "dist", f)).equals(readFileSync(join(nextDist, f))), `Packed file differs from the gate build: ${f}`);
+  requireTrue(JSON.stringify(files) === JSON.stringify(list(nextDist)), "Staged dist inventory differs from the verified candidate's gate build.");
+  for (const f of files) requireTrue(readFileSync(join(source, "dist", f)).equals(readFileSync(join(nextDist, f))), `Staged file differs from the gate build: ${f}`);
+  const runtime = join(stageDir, "runtime");
   const deps = root => execFileSync("npm", ["ls", "--omit=dev", "--all", "--parseable"], { cwd: root, encoding: "utf8" }).trim().split("\n").filter(p => p.startsWith(join(root, "node_modules") + "/")).map(p => p.slice(root.length + 1)).sort();
   const sourceDeps = deps(source), installedDeps = deps(runtime);
   requireTrue(JSON.stringify(sourceDeps) === JSON.stringify(installedDeps), "Production dependency inventory differs from the gate checkout.");
@@ -142,12 +162,13 @@ function stage() {
     requireTrue(JSON.stringify(depFiles) === JSON.stringify(list(installed)), `Dependency file inventory differs: ${dep}`);
     for (const f of depFiles) requireTrue(readFileSync(join(tested, f)).equals(readFileSync(join(installed, f))), `Dependency bytes differ: ${dep}/${f}`);
   }
-  return { packed, packageSha256: sha(readFileSync(join(stageDir, packed))), distFiles: files.length };
+  return { distFiles: files.length };
 }
 
 async function prepare(staged) {
   requireTrue(!existsSync(journalFile), "This staging directory already has a deployment; resume it with --phase.");
   requireTrue(lstatSync(database).isFile() && !lstatSync(database).isSymbolicLink(), "Unexpected database path.");
+  staged = { ...staged, distFiles: proveStaged().distFiles };
   const db = new DatabaseSync(database); db.exec("PRAGMA busy_timeout=1000");
   try {
     const schema = db.prepare("SELECT version FROM schema_version").get().version;
