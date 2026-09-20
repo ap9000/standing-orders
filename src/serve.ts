@@ -16,6 +16,7 @@ import { changeLearning, learningView } from "./project-learning.js";
 import { changeKnowledge, knowledgeView, knowledgeVersion, readKnowledgeSnapshot, type KnowledgeDraft } from "./project-knowledge.js";
 import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS } from "./knowledge-ui.js";
 import { learningHtml } from "./workspace-ui.js";
+import { createSessionEndpoint } from './session-server.js';
 import { openWorkDecisionOf } from "./work-summary.js";
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -489,7 +490,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   if (coding === null && options.localRunner !== undefined && !store.isDemo()) {
     const database = store.handle.prepare('PRAGMA database_list').all().find(row => row['name'] === 'main')?.['file'];
     if (typeof database === 'string' && database !== '') {
-      try { coding = new CodingWorkspace({ database: `${database}.coding.sqlite`, worktreeRoot: join(dirname(database), 'coding-worktrees'), admissionPaused: () => updateAdmissionPaused(store.raw()), authorize: (actor, repo) => codingActorAllowed(actor) && rowVisible(liveCeiling(), repo), context: input => prepareCodingContext(store, { ...input, root: join(dirname(database), 'coding-context') }) }); }
+      try { coding = new CodingWorkspace({ database: `${database}.coding.sqlite`, worktreeRoot: join(dirname(database), 'coding-worktrees'), admissionPaused: () => updateAdmissionPaused(store.raw()), authorize: (actor, repo) => codingActorAllowed(actor) && codingProjectAllowed(repo), context: input => prepareCodingContext(store, { ...input, root: join(dirname(database), 'coding-context') }) }); }
       catch (error) { codingProblem = error instanceof Error ? error.message : 'The coding workspace could not open.'; }
     }
   }
@@ -584,6 +585,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     return repos;
   };
+  const codingProjects = (): string[] => [...new Set([...managedRepos(), ...store.listProjects().map(project => project.path)])].filter(repo => rowVisible(liveCeiling(), repo));
+  function codingProjectAllowed(repo: string): boolean { return codingProjects().includes(repo); }
+  const sessionEndpoint = createSessionEndpoint({ store, workspace: coding, projects: codingProjects, projectAllowed: repo => rowVisible(liveCeiling(), repo) });
   /** The enumerable admission list for roll-up SQL: repos-only ceilings
    * enumerate themselves; root ceilings enumerate the STORED repos that
    * pass the ceiling (Codex roll-up review, finding 11); unscoped = null. */
@@ -736,6 +740,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     const method = request.method ?? "GET";
+    if (await sessionEndpoint(request, response)) return;
     // Exact, content-addressed application CSS only. Session-bearing
     // pages and fragments still use no-store and are never compressed.
     if ((method === "GET" || method === "HEAD") && url.pathname === WORKSPACE_STYLE.path) {
@@ -1086,7 +1091,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const match = /^\/code\/([a-f0-9]{32})(?:\/(state|changes|ship))?$/.exec(url.pathname);
       try {
         const selected = match && coding ? coding.get(match[1]!, actor) : null;
-        if (selected && !visible(selected.repo)) return refuse(response, who, 403, 'That project is outside your access.', '/projects');
+        if (selected && !codingProjectAllowed(selected.repo)) return refuse(response, who, 403, 'That project is outside your access.', '/projects');
         if (match?.[2] === 'ship' && selected) {
           const preview = codingHandoffPreview(store, { sessionId: selected.id, actor: who.name });
           return sendScreen(response, 200, screen('Review for shipping', codingShippingHtml(preview, who.session.csrf), { chrome: chromeFor(selected.repo, 'code') }));
@@ -1095,7 +1100,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           if (!selected || !coding) throw Error('The coding session is unavailable.');
           if (match[2] === 'state' && url.searchParams.get('revision') === String(coding.revision(selected.id, actor))) return respond(response, 200, 'application/json', JSON.stringify({ unchanged: true }));
           const result = match[2] === 'changes' ? await coding.changes(selected.id, actor) : coding.snapshot(selected.id, actor);
-          if (!codingActorAllowed(actor) || !visible(selected.repo)) return respond(response, 403, 'application/json', JSON.stringify({ ok: false, error: 'Your access changed. Sign in again.' }));
+          if (!codingActorAllowed(actor) || !codingProjectAllowed(selected.repo)) return respond(response, 403, 'application/json', JSON.stringify({ ok: false, error: 'Your access changed. Sign in again.' }));
           return respond(response, 200, 'application/json', JSON.stringify(result));
         }
         if (url.pathname !== '/code' && !match) return refuse(response, who, 404, 'Coding session not found.', '/code');
@@ -1103,7 +1108,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (requestedProject !== null && (!visible(requestedProject) || ![...managedRepos(), ...store.listProjects().map(p => p.path)].includes(requestedProject))) return refuse(response, who, 403, 'That project is outside your access.', '/projects');
         const codeProject = selected?.repo ?? requestedProject ?? project;
         const chrome = chromeFor(codeProject, 'code');
-        const content = codingWorkspaceHtml({ owner: who.name, projects: chrome.projects ?? [], sessions: coding?.list(actor).filter(s => visible(s.repo)) ?? [], selected: selected && coding ? coding.snapshot(selected.id, actor) : null, csrf: who.session.csrf, project: codeProject, available: coding !== null, ...(codingProblem ? { error: codingProblem } : {}) });
+        const content = codingWorkspaceHtml({ owner: who.name, projects: chrome.projects ?? [], sessions: coding?.list(actor).filter(s => codingProjectAllowed(s.repo)) ?? [], selected: selected && coding ? coding.snapshot(selected.id, actor) : null, csrf: who.session.csrf, project: codeProject, available: coding !== null, ...(codingProblem ? { error: codingProblem } : {}) });
         return sendScreen(response, 200, screen('Code', content, { chrome, functional: { script: codingWorkspaceScript(), fetches: true } }));
       } catch (error) {
         if (!codingActorAllowed(actor)) return match?.[2] && match[2] !== 'ship'
@@ -4631,7 +4636,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!coding) return fail(409, codingProblem || 'Open Standing Orders on the machine with your installed coding agent.');
       if ([...new Set(body.keys())].some(key => body.getAll(key).length !== 1)) return fail(400, 'Submit one value for each field.');
       const actor = { name: who.name, generation: who.session.generation };
-      const permitted = (repo: string): boolean => visible(repo) && [...managedRepos(), ...store.listProjects().map(p => p.path)].includes(repo);
+      const permitted = (repo: string): boolean => visible(repo) && codingProjectAllowed(repo);
       try {
         let id: string;
         if (url.pathname === '/code/start') {

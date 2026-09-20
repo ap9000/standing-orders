@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "scope": "Prepared session CLI/service evidence; no native release dispatch or deployment.",
+  "archive": {
+    "path": "native-journey.json.gz",
+    "encoding": "gzip",
+    "encodedSha256": "caf7d0bf47c865321e712f1ef08be77f48102235d4b51e64c7b1bff9baa139f4",
+    "decodedSha256": "8cc79f2f8decba7338e4dc2fa1e72426542fcbe6abbd5d02a361b5645100e95f",
+    "decodedBytes": 45412,
+    "encodedBytes": 6460
+  },
+  "originalEvidence": {
+    "commit": "5e02e4bc78daae91222371f956d6772cbc13f56f",
+    "path": "evidence/interfaces/native-journey.json",
+    "canaryScripts": [
+      "evidence/interfaces/session-native-canary.mjs",
+      "evidence/interfaces/session-native-canary-read.mjs"
+    ],
+    "note": "Full originals remain in the combined candidate. Scripts are not added again to this bounded release."
+  },
+  "currentSourceSha256": {
+    "src/bin.ts": "f0573c18da6d3155de46ce34d3a3dc217e6b7ba9dd93d65928539f841445fd5c",
+    "src/cli.ts": "dbca123399cf4a817c9f0f289c0c073b60148ccca34ddbe8cd9392a87a92f8cc",
+    "src/serve.ts": "10b9897476ddc2dff31d40a0eab834f2b4b7a5740a1d57c9022c9a4a22bdac4b",
+    "src/session-cli.ts": "46d80ff40e6555d489368c27035f926ef89fb4c1226412680951c80c10d70853",
+    "src/session-service.ts": "2caf24f41c13a39fa2359a6208cf164dd3aad714b9d872fad8323591fdd2177b",
+    "src/session-server.ts": "ca8984988b5e7e4db2b1d58b7258df4e1ad5851e17e4c2b048bfa17482930ec2",
+    "src/session-http.ts": "2d12d8b1030c1f3bf605723ac2a50b30868c9f1f5996e0f6548ea5b175f78193",
+    "src/session-contract.ts": "ea69bc2c3b5c1e4daa41cf9cbfd17afe9999c1ff27613d9f73c2584a964bfcf0",
+    "src/session-brief.ts": "6a52bb8d7b8a5267ffea55f7da0dea46c6b3d2f8826abce0ff97848569e688e3",
+    "src/coding-workspace.ts": "7d9d327e06c93368a0fd1542bc0cd5d2a4e6319cafa005cc57b361f0cf3636a3",
+    "src/coding-provider.ts": "3d979d7b900cec9b75abb2f05bce4b1c3d4540deed0bb8232cd9636aee8273cb",
+    "src/coding-context.ts": "74f50da204d4c1fdacfa2598ba35a8bab6ac7b90d9c360c6a5fc958086b69751",
+    "src/coding-ui.ts": "f727c2a2538ad678f879f14368d881ec3df90095dcae1fc0429ce03c18ff00e7",
+    "src/workspace-ui.ts": "e16cde7dc203ec59dee8fe403ba33a2a6172ff87130d062dc8d557b2052c4fb8",
+    "src/coding-types.ts": "fde78908ebd0416dd5457447865eb92a6dd3db0f0a003c19704604920b1df40f",
+    "src/store.ts": "0dfd428fca9aeca6bbefc89d34cc31b3d67e99340e72e27dd4dc50b9b2f1874f",
+    "src/scope.ts": "72f58889761634b16e7b49592176eec9b33a07874ce3d4deec19c25366e9b785",
+    "src/coding-update.ts": "4864f9fefa33076225772251a0c3f9629e74b371b3566e4e9cfc67ac5511b7c0",
+    "src/coding-handoff.ts": "09f76e1367f00174a5fb6eb976d99f68e8db633f9a9f9ace940a6077b49067bb"
+  },
+  "realProviderTurns": {
+    "sourceCommit": "f39397a4cba2f7e9e760edd94c18523579bd294c",
+    "nativeVersion": "codex-cli 0.154.0",
+    "modelSelection": "Installed default; no model override",
+    "startedAt": "2026-09-20T06:38:05.985Z",
+    "completedAt": "2026-09-20T06:38:41.104Z",
+    "status": "passed",
+    "distUnchanged": true,
+    "sourceChangedDuringRun": [
+      "src/serve.ts"
+    ],
+    "result": {
+      "sessionId": "8562e526b724247095631752315763c1",
+      "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+      "changedPaths": [
+        "welcome.txt"
+      ],
+      "originalCheckoutClean": true,
+      "uncommittedHead": "50f1ec7ebf4519603dbc2fdbc38a863befe09360",
+      "finalText": "Welcome to our garden.\n",
+      "messagesBeforeRestart": 2,
+      "messagesAfterResume": 2,
+      "sameNativeThread": true,
+      "noReplay": true,
+      "noShipTaskOrPublication": true,
+      "finalStatus": "ready"
+    },
+    "verifiedOwnerRelease": true,
+    "coverage": "CLI start, cookie follow-up, verified service close/restart, CLI resume; one native thread and exactly two user messages, no replay. Loaded modules remained those of the recorded original build."
+  },
+  "currentBuildSavedRead": {
+    "sourceCommit": "fd20f8c5c93721017c6cd8d5f71c72baefa9f630",
+    "startedAt": "2026-09-20T06:42:37.653Z",
+    "completedAt": "2026-09-20T06:42:39.481Z",
+    "status": "passed",
+    "parity": {
+      "sessionId": "8562e526b724247095631752315763c1",
+      "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+      "revision": 41,
+      "exactActivityMatch": true,
+      "userMessages": 2,
+      "finalText": "Welcome to our garden.\n",
+      "nativeProviderLaunched": false
+    },
+    "currentSourceUnchanged": true,
+    "currentDistUnchanged": true,
+    "verifiedOwnerRelease": true,
+    "coverage": "Rebuilt CLI brief/activity/changes and cookie state reads agreed on saved identity, revision and activity. No native provider or additional model turn was launched."
+  },
+  "reuseBasis": "All source files in this prepared branch match combined candidate 5e02e4b. Between the real turns at f39397a and saved reads at fd20f8c, production changes were only three review/empty-view strings in serve.ts and workspace-ui.ts; the complete hashes and responses are retained in the archive.",
+  "limits": [
+    "Synthetic disposable Git project; no production output or productivity claim.",
+    "Cookie routes were exercised through HTTP, not a visual browser/device test.",
+    "Preparation evidence does not replace the unchanged full native gate, independent review, or matched UI/worker deployment.",
+    "Development base 07def5a is prospective and unverified. The first native dispatch must instead start from the eventual verified UI release."
+  ]
+}

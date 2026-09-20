@@ -1,0 +1,1036 @@
+{
+  "fixture": "Synthetic welcome.txt example, real installed Codex app-server provider",
+  "startedAt": "2026-09-20T06:38:05.985Z",
+  "sourceCommit": "f39397a4cba2f7e9e760edd94c18523579bd294c",
+  "nativeVersion": "codex-cli 0.154.0",
+  "modelSelection": "Installed default; no model override",
+  "sourceHashes": {
+    "src/bin.ts": "f0573c18da6d3155de46ce34d3a3dc217e6b7ba9dd93d65928539f841445fd5c",
+    "dist/bin.js": "6e0983cb9a929efaddacf2ef5917fbf3a688ef2599d8cf4edc5550a949c30e78",
+    "src/cli.ts": "dbca123399cf4a817c9f0f289c0c073b60148ccca34ddbe8cd9392a87a92f8cc",
+    "dist/cli.js": "21ea15efea2f1d4d79ea5c0fff755cb36bd25c02117922bd6c4a6487a8a06ae4",
+    "src/serve.ts": "4a0e8f0a9e888d3325a9b857baa53bbb15518fcf39981669b5f3ee8ce4b2d7eb",
+    "dist/serve.js": "f7e2c375a7ccab00ef9960a711654b0bd41db760a4ea73e5ed7db83d7f326fd9",
+    "src/session-cli.ts": "46d80ff40e6555d489368c27035f926ef89fb4c1226412680951c80c10d70853",
+    "dist/session-cli.js": "07fb6818e369b4746a5ebf90f4ced8ab936bfc056e850761f0b973f636e2c617",
+    "src/session-service.ts": "2caf24f41c13a39fa2359a6208cf164dd3aad714b9d872fad8323591fdd2177b",
+    "dist/session-service.js": "f6d7dadeeece92c8fd22673bdf5e53c989c4b8f70ef94cd237f32ab8c17c9b7b",
+    "src/session-server.ts": "ca8984988b5e7e4db2b1d58b7258df4e1ad5851e17e4c2b048bfa17482930ec2",
+    "dist/session-server.js": "fff7ac9fe053602b55887ec655c8973889fea6e6e5a988a6e795708b63c10294",
+    "src/session-http.ts": "2d12d8b1030c1f3bf605723ac2a50b30868c9f1f5996e0f6548ea5b175f78193",
+    "dist/session-http.js": "0b9d1dc4649a566877475cf40e7a28e86ec1cd77c9e86f913e66a82ecaa7ea5e",
+    "src/session-contract.ts": "ea69bc2c3b5c1e4daa41cf9cbfd17afe9999c1ff27613d9f73c2584a964bfcf0",
+    "dist/session-contract.js": "b1f23a24977bf5d1d05a3e182ea358d3eabe3b47cea25a843f17d25190cd6186",
+    "src/session-brief.ts": "6a52bb8d7b8a5267ffea55f7da0dea46c6b3d2f8826abce0ff97848569e688e3",
+    "dist/session-brief.js": "a8d8673ea437831e20869361969ee9b2b33b930f0c88b9dbfe61b7cbb649edeb",
+    "src/coding-workspace.ts": "7d9d327e06c93368a0fd1542bc0cd5d2a4e6319cafa005cc57b361f0cf3636a3",
+    "dist/coding-workspace.js": "6a7134f97c4d4d01fbce7c12ced8f93c1336597f16b9f4af56e712bd9f38cffb",
+    "src/coding-provider.ts": "3d979d7b900cec9b75abb2f05bce4b1c3d4540deed0bb8232cd9636aee8273cb",
+    "dist/coding-provider.js": "7fa5a052351aa29ad134a06b75e1be2d0b82aea38ef709b0444aacce6a094892",
+    "src/coding-context.ts": "74f50da204d4c1fdacfa2598ba35a8bab6ac7b90d9c360c6a5fc958086b69751",
+    "dist/coding-context.js": "a7b77a15b2d790c50b061c42312d27d0bff320f55c96cf1f2ad5105f7494e5b3",
+    "src/coding-ui.ts": "f727c2a2538ad678f879f14368d881ec3df90095dcae1fc0429ce03c18ff00e7",
+    "dist/coding-ui.js": "226bcb611da92f566edd191d740c3d22aeeb863a25acf795127ef078100f03ea"
+  },
+  "commands": [
+    {
+      "command": [
+        "node",
+        "dist/bin.js",
+        "session",
+        "start",
+        "--project",
+        "<temporary-canary>/welcome-sample",
+        "--title",
+        "Synthetic welcome canary",
+        "--file",
+        "<temporary-canary>/prompt.txt",
+        "--key",
+        "21efdf8b-4f6a-474a-9fb4-1dec3c794bb0",
+        "--url",
+        "http://127.0.0.1:64717",
+        "--as",
+        "canary",
+        "--token-file",
+        "<private-token-file>",
+        "--json"
+      ],
+      "exitCode": 0,
+      "outcome": {
+        "operation": "start",
+        "ok": true,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "retry": "inspect-first",
+        "message": "Session started.",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "status": "working",
+          "revision": 3,
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "turnId": "01a0bd89-50ee-7170-8f7a-6d6b32f30a68"
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Working.",
+          "nextAction": "Inspect session",
+          "sourceRevision": 3,
+          "sourceItemIds": [],
+          "partialHistory": false
+        },
+        "receipt": {
+          "key": "21efdf8b-4f6a-474a-9fb4-1dec3c794bb0",
+          "status": "accepted"
+        },
+        "activityItemRefs": [],
+        "pendingRequests": 0
+      }
+    },
+    {
+      "command": [
+        "node",
+        "dist/bin.js",
+        "session",
+        "show",
+        "8562e526b724247095631752315763c1",
+        "--view",
+        "brief",
+        "--url",
+        "http://127.0.0.1:64717",
+        "--as",
+        "canary",
+        "--token-file",
+        "<private-token-file>",
+        "--json"
+      ],
+      "exitCode": 0,
+      "outcome": {
+        "operation": "show",
+        "ok": true,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "retry": "safe-read",
+        "message": "Saved session loaded.",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "status": "ready",
+          "revision": 20,
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: In this synthetic sample, change welcome.txt to exactly \"Welcome to the garden.\" followed by one newline. Edit only that file. Read it back to verify. Do not commit, push, publish, install anything, or access other projects. Reply briefly with the resulting sentence.\nLatest saved agent report: Welcome to the garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 20,
+          "sourceItemIds": [
+            "01a0bd89-5bdb-76e2-9d0a-8c59a46c4a5e",
+            "msg_0ecc9412f97d4aaf016aaf7f5b839c87d0a938fb58ee229dc5"
+          ],
+          "partialHistory": false
+        },
+        "activityItemRefs": [],
+        "pendingRequests": 0
+      }
+    },
+    {
+      "command": [
+        "node",
+        "dist/bin.js",
+        "session",
+        "show",
+        "8562e526b724247095631752315763c1",
+        "--view",
+        "activity",
+        "--url",
+        "http://127.0.0.1:64717",
+        "--as",
+        "canary",
+        "--token-file",
+        "<private-token-file>",
+        "--json"
+      ],
+      "exitCode": 0,
+      "outcome": {
+        "operation": "show",
+        "ok": true,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "retry": "safe-read",
+        "message": "Saved session loaded.",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "status": "ready",
+          "revision": 20,
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: In this synthetic sample, change welcome.txt to exactly \"Welcome to the garden.\" followed by one newline. Edit only that file. Read it back to verify. Do not commit, push, publish, install anything, or access other projects. Reply briefly with the resulting sentence.\nLatest saved agent report: Welcome to the garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 20,
+          "sourceItemIds": [
+            "01a0bd89-5bdb-76e2-9d0a-8c59a46c4a5e",
+            "msg_0ecc9412f97d4aaf016aaf7f5b839c87d0a938fb58ee229dc5"
+          ],
+          "partialHistory": false
+        },
+        "activityItemRefs": [
+          "e2c40a6b532f7cff220db5088d65be388ac6146e0aff77f6fc5bd94699767c2b",
+          "bad396a4c03bacaa26528e872e1ac78ad0ea358871714e7da2653690a98b75d8",
+          "7abc34d403a5cc639cb913dc46daefc7fb99bb94bc8bdd3b69b7ae250d9606a0",
+          "fa61354612b9ed67aa472ca212ba663018c7f544c65afa6271b159fe55274319"
+        ],
+        "pendingRequests": 0
+      }
+    },
+    {
+      "command": [
+        "node",
+        "dist/bin.js",
+        "session",
+        "changes",
+        "8562e526b724247095631752315763c1",
+        "--url",
+        "http://127.0.0.1:64717",
+        "--as",
+        "canary",
+        "--token-file",
+        "<private-token-file>",
+        "--json"
+      ],
+      "exitCode": 0,
+      "outcome": {
+        "operation": "changes",
+        "ok": true,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "retry": "safe-read",
+        "message": "Saved session loaded.",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "status": "ready",
+          "revision": 20,
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: In this synthetic sample, change welcome.txt to exactly \"Welcome to the garden.\" followed by one newline. Edit only that file. Read it back to verify. Do not commit, push, publish, install anything, or access other projects. Reply briefly with the resulting sentence.\nLatest saved agent report: Welcome to the garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 20,
+          "sourceItemIds": [
+            "01a0bd89-5bdb-76e2-9d0a-8c59a46c4a5e",
+            "msg_0ecc9412f97d4aaf016aaf7f5b839c87d0a938fb58ee229dc5"
+          ],
+          "partialHistory": false
+        },
+        "changes": {
+          "head": "50f1ec7ebf4519603dbc2fdbc38a863befe09360",
+          "status": " M welcome.txt\n",
+          "diff": "diff --git a/welcome.txt b/welcome.txt\nindex 3054917..2ead756 100644\n--- a/welcome.txt\n+++ b/welcome.txt\n@@ -1 +1 @@\n-Welcome.\n+Welcome to the garden.\n",
+          "truncated": false
+        },
+        "activityItemRefs": [],
+        "pendingRequests": 0
+      }
+    },
+    {
+      "command": [
+        "node",
+        "dist/bin.js",
+        "session",
+        "show",
+        "8562e526b724247095631752315763c1",
+        "--view",
+        "activity",
+        "--url",
+        "http://127.0.0.1:64717",
+        "--as",
+        "canary",
+        "--token-file",
+        "<private-token-file>",
+        "--json"
+      ],
+      "exitCode": 0,
+      "outcome": {
+        "operation": "show",
+        "ok": true,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "retry": "safe-read",
+        "message": "Saved session loaded.",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "status": "ready",
+          "revision": 40,
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.\nLatest saved agent report: Welcome to our garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 40,
+          "sourceItemIds": [
+            "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+            "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2"
+          ],
+          "partialHistory": false
+        },
+        "activityItemRefs": [
+          "e2c40a6b532f7cff220db5088d65be388ac6146e0aff77f6fc5bd94699767c2b",
+          "bad396a4c03bacaa26528e872e1ac78ad0ea358871714e7da2653690a98b75d8",
+          "7abc34d403a5cc639cb913dc46daefc7fb99bb94bc8bdd3b69b7ae250d9606a0",
+          "fa61354612b9ed67aa472ca212ba663018c7f544c65afa6271b159fe55274319",
+          "250e46358388233156609d5e260b84bb839821569679fa6fcec2c72b4666797d",
+          "4507e84c63e7ea19224a35311c4dd16f0bbf609a649881b2d6f8fedac5a3717f",
+          "36449f38bc6db6a8618160d829978380d79302f9c2400c1bccc4e31d0a621db7",
+          "b718ad64321624bd62fa86592d2bc8b500d8000d4d526b10bd3126fdf7a47bed"
+        ],
+        "pendingRequests": 0
+      }
+    },
+    {
+      "command": [
+        "node",
+        "dist/bin.js",
+        "session",
+        "changes",
+        "8562e526b724247095631752315763c1",
+        "--url",
+        "http://127.0.0.1:64717",
+        "--as",
+        "canary",
+        "--token-file",
+        "<private-token-file>",
+        "--json"
+      ],
+      "exitCode": 0,
+      "outcome": {
+        "operation": "changes",
+        "ok": true,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "retry": "safe-read",
+        "message": "Saved session loaded.",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "status": "ready",
+          "revision": 40,
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.\nLatest saved agent report: Welcome to our garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 40,
+          "sourceItemIds": [
+            "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+            "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2"
+          ],
+          "partialHistory": false
+        },
+        "changes": {
+          "head": "50f1ec7ebf4519603dbc2fdbc38a863befe09360",
+          "status": " M welcome.txt\n",
+          "diff": "diff --git a/welcome.txt b/welcome.txt\nindex 3054917..d043838 100644\n--- a/welcome.txt\n+++ b/welcome.txt\n@@ -1 +1 @@\n-Welcome.\n+Welcome to our garden.\n",
+          "truncated": false
+        },
+        "activityItemRefs": [],
+        "pendingRequests": 0
+      }
+    },
+    {
+      "command": [
+        "node",
+        "dist/bin.js",
+        "session",
+        "show",
+        "8562e526b724247095631752315763c1",
+        "--view",
+        "activity",
+        "--url",
+        "http://127.0.0.1:64717",
+        "--as",
+        "canary",
+        "--token-file",
+        "<private-token-file>",
+        "--json"
+      ],
+      "exitCode": 0,
+      "outcome": {
+        "operation": "show",
+        "ok": true,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "retry": "safe-read",
+        "message": "Saved session loaded.",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "status": "ready",
+          "revision": 40,
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.\nLatest saved agent report: Welcome to our garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 40,
+          "sourceItemIds": [
+            "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+            "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2"
+          ],
+          "partialHistory": false
+        },
+        "activityItemRefs": [
+          "e2c40a6b532f7cff220db5088d65be388ac6146e0aff77f6fc5bd94699767c2b",
+          "bad396a4c03bacaa26528e872e1ac78ad0ea358871714e7da2653690a98b75d8",
+          "7abc34d403a5cc639cb913dc46daefc7fb99bb94bc8bdd3b69b7ae250d9606a0",
+          "fa61354612b9ed67aa472ca212ba663018c7f544c65afa6271b159fe55274319",
+          "250e46358388233156609d5e260b84bb839821569679fa6fcec2c72b4666797d",
+          "4507e84c63e7ea19224a35311c4dd16f0bbf609a649881b2d6f8fedac5a3717f",
+          "36449f38bc6db6a8618160d829978380d79302f9c2400c1bccc4e31d0a621db7",
+          "b718ad64321624bd62fa86592d2bc8b500d8000d4d526b10bd3126fdf7a47bed"
+        ],
+        "pendingRequests": 0
+      }
+    },
+    {
+      "command": [
+        "node",
+        "dist/bin.js",
+        "session",
+        "resume",
+        "8562e526b724247095631752315763c1",
+        "--key",
+        "b9ca0bc0-45c4-48e0-bd60-d72e9cf10010",
+        "--revision",
+        "40",
+        "--thread",
+        "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+        "--turn",
+        "none",
+        "--url",
+        "http://127.0.0.1:64717",
+        "--as",
+        "canary",
+        "--token-file",
+        "<private-token-file>",
+        "--json"
+      ],
+      "exitCode": 0,
+      "outcome": {
+        "operation": "resume",
+        "ok": true,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "retry": "inspect-first",
+        "message": "Session reconnected.",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "status": "ready",
+          "revision": 41,
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.\nLatest saved agent report: Welcome to our garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 41,
+          "sourceItemIds": [
+            "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+            "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2"
+          ],
+          "partialHistory": false
+        },
+        "receipt": {
+          "key": "b9ca0bc0-45c4-48e0-bd60-d72e9cf10010",
+          "status": "accepted"
+        },
+        "activityItemRefs": [],
+        "pendingRequests": 0
+      }
+    },
+    {
+      "command": [
+        "node",
+        "dist/bin.js",
+        "session",
+        "show",
+        "8562e526b724247095631752315763c1",
+        "--view",
+        "activity",
+        "--url",
+        "http://127.0.0.1:64717",
+        "--as",
+        "canary",
+        "--token-file",
+        "<private-token-file>",
+        "--json"
+      ],
+      "exitCode": 0,
+      "outcome": {
+        "operation": "show",
+        "ok": true,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "retry": "safe-read",
+        "message": "Saved session loaded.",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "status": "ready",
+          "revision": 41,
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.\nLatest saved agent report: Welcome to our garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 41,
+          "sourceItemIds": [
+            "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+            "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2"
+          ],
+          "partialHistory": false
+        },
+        "activityItemRefs": [
+          "e2c40a6b532f7cff220db5088d65be388ac6146e0aff77f6fc5bd94699767c2b",
+          "bad396a4c03bacaa26528e872e1ac78ad0ea358871714e7da2653690a98b75d8",
+          "7abc34d403a5cc639cb913dc46daefc7fb99bb94bc8bdd3b69b7ae250d9606a0",
+          "fa61354612b9ed67aa472ca212ba663018c7f544c65afa6271b159fe55274319",
+          "250e46358388233156609d5e260b84bb839821569679fa6fcec2c72b4666797d",
+          "4507e84c63e7ea19224a35311c4dd16f0bbf609a649881b2d6f8fedac5a3717f",
+          "36449f38bc6db6a8618160d829978380d79302f9c2400c1bccc4e31d0a621db7",
+          "b718ad64321624bd62fa86592d2bc8b500d8000d4d526b10bd3126fdf7a47bed"
+        ],
+        "pendingRequests": 0
+      }
+    },
+    {
+      "command": [
+        "node",
+        "dist/bin.js",
+        "session",
+        "changes",
+        "8562e526b724247095631752315763c1",
+        "--url",
+        "http://127.0.0.1:64717",
+        "--as",
+        "canary",
+        "--token-file",
+        "<private-token-file>",
+        "--json"
+      ],
+      "exitCode": 0,
+      "outcome": {
+        "operation": "changes",
+        "ok": true,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "retry": "safe-read",
+        "message": "Saved session loaded.",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "status": "ready",
+          "revision": 41,
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.\nLatest saved agent report: Welcome to our garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 41,
+          "sourceItemIds": [
+            "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+            "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2"
+          ],
+          "partialHistory": false
+        },
+        "changes": {
+          "head": "50f1ec7ebf4519603dbc2fdbc38a863befe09360",
+          "status": " M welcome.txt\n",
+          "diff": "diff --git a/welcome.txt b/welcome.txt\nindex 3054917..d043838 100644\n--- a/welcome.txt\n+++ b/welcome.txt\n@@ -1 +1 @@\n-Welcome.\n+Welcome to our garden.\n",
+          "truncated": false
+        },
+        "activityItemRefs": [],
+        "pendingRequests": 0
+      }
+    }
+  ],
+  "http": [
+    {
+      "method": "POST",
+      "path": "/login",
+      "status": 303,
+      "credentials": "redacted"
+    },
+    {
+      "method": "GET",
+      "path": "/code/8562e526b724247095631752315763c1/state",
+      "status": 200,
+      "identity": {
+        "id": "8562e526b724247095631752315763c1",
+        "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+        "revision": 20
+      },
+      "userMessages": [
+        {
+          "id": "01a0bd89-5bdb-76e2-9d0a-8c59a46c4a5e",
+          "clientId": "21efdf8b-4f6a-474a-9fb4-1dec3c794bb0",
+          "text": "In this synthetic sample, change welcome.txt to exactly \"Welcome to the garden.\" followed by one newline. Edit only that file. Read it back to verify. Do not commit, push, publish, install anything, or access other projects. Reply briefly with the resulting sentence."
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/code/8562e526b724247095631752315763c1/send",
+      "status": 200,
+      "authentication": "browser cookie + CSRF + same-origin",
+      "prompt": "Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.",
+      "result": {
+        "ok": true,
+        "id": "8562e526b724247095631752315763c1"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/code/8562e526b724247095631752315763c1/state",
+      "status": 200,
+      "identity": {
+        "id": "8562e526b724247095631752315763c1",
+        "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+        "revision": 40
+      },
+      "userMessages": [
+        {
+          "id": "01a0bd89-5bdb-76e2-9d0a-8c59a46c4a5e",
+          "clientId": "21efdf8b-4f6a-474a-9fb4-1dec3c794bb0",
+          "text": "In this synthetic sample, change welcome.txt to exactly \"Welcome to the garden.\" followed by one newline. Edit only that file. Read it back to verify. Do not commit, push, publish, install anything, or access other projects. Reply briefly with the resulting sentence."
+        },
+        {
+          "id": "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+          "clientId": "57bbf4fe-f0dc-4ccb-a745-0d08b0b505b1",
+          "text": "Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence."
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/login",
+      "status": 303,
+      "credentials": "redacted"
+    },
+    {
+      "method": "GET",
+      "path": "/code/8562e526b724247095631752315763c1/state",
+      "status": 200,
+      "identity": {
+        "id": "8562e526b724247095631752315763c1",
+        "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+        "revision": 41
+      },
+      "userMessages": [
+        {
+          "id": "01a0bd89-5bdb-76e2-9d0a-8c59a46c4a5e",
+          "clientId": "21efdf8b-4f6a-474a-9fb4-1dec3c794bb0",
+          "text": "In this synthetic sample, change welcome.txt to exactly \"Welcome to the garden.\" followed by one newline. Edit only that file. Read it back to verify. Do not commit, push, publish, install anything, or access other projects. Reply briefly with the resulting sentence."
+        },
+        {
+          "id": "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+          "clientId": "57bbf4fe-f0dc-4ccb-a745-0d08b0b505b1",
+          "text": "Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence."
+        }
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "event": "graceful-restart-close",
+      "outcome": "server.close resolved after native provider shutdown"
+    },
+    {
+      "event": "final-verified-close",
+      "outcome": "server.close resolved after native provider shutdown"
+    }
+  ],
+  "status": "passed",
+  "limitations": [
+    "Cookie browser routes exercised through HTTP; no visual/device assertion.",
+    "src/serve.ts received a parallel review-list copy change during this run; loaded dist hashes stayed unchanged. This evidence covers the recorded dist, not the subsequent rebuild."
+  ],
+  "fixtureBase": "50f1ec7ebf4519603dbc2fdbc38a863befe09360",
+  "prompt": "In this synthetic sample, change welcome.txt to exactly \"Welcome to the garden.\" followed by one newline. Edit only that file. Read it back to verify. Do not commit, push, publish, install anything, or access other projects. Reply briefly with the resulting sentence.",
+  "sessionId": "8562e526b724247095631752315763c1",
+  "result": {
+    "sessionId": "8562e526b724247095631752315763c1",
+    "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+    "changedPaths": [
+      "welcome.txt"
+    ],
+    "originalCheckoutClean": true,
+    "uncommittedHead": "50f1ec7ebf4519603dbc2fdbc38a863befe09360",
+    "finalText": "Welcome to our garden.\n",
+    "messagesBeforeRestart": 2,
+    "messagesAfterResume": 2,
+    "sameNativeThread": true,
+    "noReplay": true,
+    "noShipTaskOrPublication": true,
+    "finalStatus": "ready"
+  },
+  "completedAt": "2026-09-20T06:38:41.104Z",
+  "finalSourceHashes": {
+    "src/bin.ts": "f0573c18da6d3155de46ce34d3a3dc217e6b7ba9dd93d65928539f841445fd5c",
+    "dist/bin.js": "6e0983cb9a929efaddacf2ef5917fbf3a688ef2599d8cf4edc5550a949c30e78",
+    "src/cli.ts": "dbca123399cf4a817c9f0f289c0c073b60148ccca34ddbe8cd9392a87a92f8cc",
+    "dist/cli.js": "21ea15efea2f1d4d79ea5c0fff755cb36bd25c02117922bd6c4a6487a8a06ae4",
+    "src/serve.ts": "26365db0dc3b3fdc937d50cb85d84d2dc2bed838f6dcf2b6dcf9d847f3753919",
+    "dist/serve.js": "f7e2c375a7ccab00ef9960a711654b0bd41db760a4ea73e5ed7db83d7f326fd9",
+    "src/session-cli.ts": "46d80ff40e6555d489368c27035f926ef89fb4c1226412680951c80c10d70853",
+    "dist/session-cli.js": "07fb6818e369b4746a5ebf90f4ced8ab936bfc056e850761f0b973f636e2c617",
+    "src/session-service.ts": "2caf24f41c13a39fa2359a6208cf164dd3aad714b9d872fad8323591fdd2177b",
+    "dist/session-service.js": "f6d7dadeeece92c8fd22673bdf5e53c989c4b8f70ef94cd237f32ab8c17c9b7b",
+    "src/session-server.ts": "ca8984988b5e7e4db2b1d58b7258df4e1ad5851e17e4c2b048bfa17482930ec2",
+    "dist/session-server.js": "fff7ac9fe053602b55887ec655c8973889fea6e6e5a988a6e795708b63c10294",
+    "src/session-http.ts": "2d12d8b1030c1f3bf605723ac2a50b30868c9f1f5996e0f6548ea5b175f78193",
+    "dist/session-http.js": "0b9d1dc4649a566877475cf40e7a28e86ec1cd77c9e86f913e66a82ecaa7ea5e",
+    "src/session-contract.ts": "ea69bc2c3b5c1e4daa41cf9cbfd17afe9999c1ff27613d9f73c2584a964bfcf0",
+    "dist/session-contract.js": "b1f23a24977bf5d1d05a3e182ea358d3eabe3b47cea25a843f17d25190cd6186",
+    "src/session-brief.ts": "6a52bb8d7b8a5267ffea55f7da0dea46c6b3d2f8826abce0ff97848569e688e3",
+    "dist/session-brief.js": "a8d8673ea437831e20869361969ee9b2b33b930f0c88b9dbfe61b7cbb649edeb",
+    "src/coding-workspace.ts": "7d9d327e06c93368a0fd1542bc0cd5d2a4e6319cafa005cc57b361f0cf3636a3",
+    "dist/coding-workspace.js": "6a7134f97c4d4d01fbce7c12ced8f93c1336597f16b9f4af56e712bd9f38cffb",
+    "src/coding-provider.ts": "3d979d7b900cec9b75abb2f05bce4b1c3d4540deed0bb8232cd9636aee8273cb",
+    "dist/coding-provider.js": "7fa5a052351aa29ad134a06b75e1be2d0b82aea38ef709b0444aacce6a094892",
+    "src/coding-context.ts": "74f50da204d4c1fdacfa2598ba35a8bab6ac7b90d9c360c6a5fc958086b69751",
+    "dist/coding-context.js": "a7b77a15b2d790c50b061c42312d27d0bff320f55c96cf1f2ad5105f7494e5b3",
+    "src/coding-ui.ts": "f727c2a2538ad678f879f14368d881ec3df90095dcae1fc0429ce03c18ff00e7",
+    "dist/coding-ui.js": "226bcb611da92f566edd191d740c3d22aeeb863a25acf795127ef078100f03ea"
+  },
+  "runtimeSourceUnchanged": false,
+  "audit": {
+    "ledgerCounts": {
+      "task": 0,
+      "run": 0,
+      "publication": 0,
+      "publication_grant": 0
+    },
+    "catalogSessions": 1,
+    "verifiedOwnerRelease": true,
+    "workingStatus": "M welcome.txt",
+    "tokenFileMode": "600",
+    "credentialValueAbsent": true
+  },
+  "distUnchanged": true,
+  "sourceChangesDuringRun": [
+    "src/serve.ts"
+  ],
+  "activityRecords": {
+    "e2c40a6b532f7cff220db5088d65be388ac6146e0aff77f6fc5bd94699767c2b": {
+      "id": "01a0bd89-5bdb-76e2-9d0a-8c59a46c4a5e",
+      "type": "userMessage",
+      "text": "In this synthetic sample, change welcome.txt to exactly \"Welcome to the garden.\" followed by one newline. Edit only that file. Read it back to verify. Do not commit, push, publish, install anything, or access other projects. Reply briefly with the resulting sentence.",
+      "status": null,
+      "clientId": "21efdf8b-4f6a-474a-9fb4-1dec3c794bb0"
+    },
+    "bad396a4c03bacaa26528e872e1ac78ad0ea358871714e7da2653690a98b75d8": {
+      "id": "msg_0ecc9412f97d4aaf016aaf7f54b66087d0a9a466db4c5a4935",
+      "type": "agentMessage",
+      "text": "I’ll update welcome.txt and read it back to verify the exact text and newline.\n",
+      "status": null
+    },
+    "7abc34d403a5cc639cb913dc46daefc7fb99bb94bc8bdd3b69b7ae250d9606a0": {
+      "id": "exec-ff977b8b-1683-440b-a5d7-81713a2af2fa",
+      "type": "commandExecution",
+      "text": "/bin/zsh -lc \"python3 -c 'from pathlib import Path; p = Path(\\\"welcome.txt\\\"); p.write_bytes(b\\\"Welcome to the garden.\\\\n\\\"); result = p.read_bytes(); assert result == b\\\"Welcome to the garden.\\\\n\\\"; print(result.decode(), end=\\\"\\\")'\"\n\nWelcome to the garden.\n",
+      "status": "completed"
+    },
+    "fa61354612b9ed67aa472ca212ba663018c7f544c65afa6271b159fe55274319": {
+      "id": "msg_0ecc9412f97d4aaf016aaf7f5b839c87d0a938fb58ee229dc5",
+      "type": "agentMessage",
+      "text": "Welcome to the garden.",
+      "status": null
+    },
+    "250e46358388233156609d5e260b84bb839821569679fa6fcec2c72b4666797d": {
+      "id": "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+      "type": "userMessage",
+      "text": "Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.",
+      "status": null,
+      "clientId": "57bbf4fe-f0dc-4ccb-a745-0d08b0b505b1"
+    },
+    "4507e84c63e7ea19224a35311c4dd16f0bbf609a649881b2d6f8fedac5a3717f": {
+      "id": "msg_0ecc9412f97d4aaf016aaf7f64905c87d085fe7cbb051d3c82",
+      "type": "agentMessage",
+      "text": "I’ll update welcome.txt and read it back to verify the sentence and newline.\n",
+      "status": null
+    },
+    "36449f38bc6db6a8618160d829978380d79302f9c2400c1bccc4e31d0a621db7": {
+      "id": "exec-4890e954-a209-4600-b69d-f29343c1877b",
+      "type": "commandExecution",
+      "text": "/bin/zsh -lc \"python3 -c 'from pathlib import Path; p = Path(\\\"welcome.txt\\\"); p.write_bytes(b\\\"Welcome to our garden.\\\\n\\\"); result = p.read_bytes(); assert result == b\\\"Welcome to our garden.\\\\n\\\"; print(result.decode(), end=\\\"\\\")'\"\n\nWelcome to our garden.\n",
+      "status": "completed"
+    },
+    "b718ad64321624bd62fa86592d2bc8b500d8000d4d526b10bd3126fdf7a47bed": {
+      "id": "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2",
+      "type": "agentMessage",
+      "text": "Welcome to our garden.",
+      "status": null
+    }
+  },
+  "realProviderTurnCoverage": "The original real turns and native restart/resume cover sourceHashes/dist hashes captured at initial dispatch. currentBuildSavedRead covers the rebuilt service read paths without another model turn.",
+  "currentBuildSavedRead": {
+    "startedAt": "2026-09-20T06:42:37.653Z",
+    "sourceCommit": "fd20f8c5c93721017c6cd8d5f71c72baefa9f630",
+    "sourceHashes": {
+      "src/bin.ts": "f0573c18da6d3155de46ce34d3a3dc217e6b7ba9dd93d65928539f841445fd5c",
+      "dist/bin.js": "6e0983cb9a929efaddacf2ef5917fbf3a688ef2599d8cf4edc5550a949c30e78",
+      "src/cli.ts": "dbca123399cf4a817c9f0f289c0c073b60148ccca34ddbe8cd9392a87a92f8cc",
+      "dist/cli.js": "21ea15efea2f1d4d79ea5c0fff755cb36bd25c02117922bd6c4a6487a8a06ae4",
+      "src/serve.ts": "10b9897476ddc2dff31d40a0eab834f2b4b7a5740a1d57c9022c9a4a22bdac4b",
+      "dist/serve.js": "09bad521fc0acf9fe356fd832104d3e0d6f8f6a079d8ad6ec456ed4fcfe8e3a1",
+      "src/session-cli.ts": "46d80ff40e6555d489368c27035f926ef89fb4c1226412680951c80c10d70853",
+      "dist/session-cli.js": "07fb6818e369b4746a5ebf90f4ced8ab936bfc056e850761f0b973f636e2c617",
+      "src/session-service.ts": "2caf24f41c13a39fa2359a6208cf164dd3aad714b9d872fad8323591fdd2177b",
+      "dist/session-service.js": "f6d7dadeeece92c8fd22673bdf5e53c989c4b8f70ef94cd237f32ab8c17c9b7b",
+      "src/session-server.ts": "ca8984988b5e7e4db2b1d58b7258df4e1ad5851e17e4c2b048bfa17482930ec2",
+      "dist/session-server.js": "fff7ac9fe053602b55887ec655c8973889fea6e6e5a988a6e795708b63c10294",
+      "src/session-http.ts": "2d12d8b1030c1f3bf605723ac2a50b30868c9f1f5996e0f6548ea5b175f78193",
+      "dist/session-http.js": "0b9d1dc4649a566877475cf40e7a28e86ec1cd77c9e86f913e66a82ecaa7ea5e",
+      "src/session-contract.ts": "ea69bc2c3b5c1e4daa41cf9cbfd17afe9999c1ff27613d9f73c2584a964bfcf0",
+      "dist/session-contract.js": "b1f23a24977bf5d1d05a3e182ea358d3eabe3b47cea25a843f17d25190cd6186",
+      "src/session-brief.ts": "6a52bb8d7b8a5267ffea55f7da0dea46c6b3d2f8826abce0ff97848569e688e3",
+      "dist/session-brief.js": "a8d8673ea437831e20869361969ee9b2b33b930f0c88b9dbfe61b7cbb649edeb",
+      "src/coding-workspace.ts": "7d9d327e06c93368a0fd1542bc0cd5d2a4e6319cafa005cc57b361f0cf3636a3",
+      "dist/coding-workspace.js": "6a7134f97c4d4d01fbce7c12ced8f93c1336597f16b9f4af56e712bd9f38cffb",
+      "src/coding-provider.ts": "3d979d7b900cec9b75abb2f05bce4b1c3d4540deed0bb8232cd9636aee8273cb",
+      "dist/coding-provider.js": "7fa5a052351aa29ad134a06b75e1be2d0b82aea38ef709b0444aacce6a094892",
+      "src/coding-context.ts": "74f50da204d4c1fdacfa2598ba35a8bab6ac7b90d9c360c6a5fc958086b69751",
+      "dist/coding-context.js": "a7b77a15b2d790c50b061c42312d27d0bff320f55c96cf1f2ad5105f7494e5b3",
+      "src/coding-ui.ts": "f727c2a2538ad678f879f14368d881ec3df90095dcae1fc0429ce03c18ff00e7",
+      "dist/coding-ui.js": "226bcb611da92f566edd191d740c3d22aeeb863a25acf795127ef078100f03ea",
+      "src/workspace-ui.ts": "e16cde7dc203ec59dee8fe403ba33a2a6172ff87130d062dc8d557b2052c4fb8",
+      "dist/workspace-ui.js": "6c1664fc617b7b6572557ef78eb57ecce7d3598dd870f8aed8e969942cd37365",
+      "src/coding-types.ts": "fde78908ebd0416dd5457447865eb92a6dd3db0f0a003c19704604920b1df40f",
+      "dist/coding-types.js": "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881",
+      "src/store.ts": "0dfd428fca9aeca6bbefc89d34cc31b3d67e99340e72e27dd4dc50b9b2f1874f",
+      "dist/store.js": "77ddc27c5878fbcabe47c704aaa7e0eee717d6b414b0b41952c3b7017adf8725",
+      "src/scope.ts": "72f58889761634b16e7b49592176eec9b33a07874ce3d4deec19c25366e9b785",
+      "dist/scope.js": "76c57a68c03e2351511a6400e4baa7a108d553f572bc80b52b769473ea13286f",
+      "src/coding-update.ts": "4864f9fefa33076225772251a0c3f9629e74b371b3566e4e9cfc67ac5511b7c0",
+      "dist/coding-update.js": "8e7db3d7b1bba370c8f74c9fb008e669402fbb2226968a0a9f89b9ec8fe81733",
+      "src/coding-handoff.ts": "09f76e1367f00174a5fb6eb976d99f68e8db633f9a9f9ace940a6077b49067bb",
+      "dist/coding-handoff.js": "4a9ab65bff0624a9d286e1d78386656cedcbf754165707ddb77b492c20882e49"
+    },
+    "distTreeSha256": "f6bd53aa1557b7e1c28b52770394ae6b0b7037b89266b17ba732736f9353ff87",
+    "distFileCount": 360,
+    "status": "passed",
+    "commands": [
+      {
+        "command": [
+          "node",
+          "dist/bin.js",
+          "session",
+          "show",
+          "8562e526b724247095631752315763c1",
+          "--view",
+          "brief",
+          "--url",
+          "http://127.0.0.1:53004",
+          "--as",
+          "canary",
+          "--token-file",
+          "<private-token-file>",
+          "--json"
+        ],
+        "exitCode": 0,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "status": "ready",
+          "revision": 41,
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.\nLatest saved agent report: Welcome to our garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 41,
+          "sourceItemIds": [
+            "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+            "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2"
+          ],
+          "partialHistory": false
+        }
+      },
+      {
+        "command": [
+          "node",
+          "dist/bin.js",
+          "session",
+          "show",
+          "8562e526b724247095631752315763c1",
+          "--view",
+          "activity",
+          "--url",
+          "http://127.0.0.1:53004",
+          "--as",
+          "canary",
+          "--token-file",
+          "<private-token-file>",
+          "--json"
+        ],
+        "exitCode": 0,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "status": "ready",
+          "revision": 41,
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.\nLatest saved agent report: Welcome to our garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 41,
+          "sourceItemIds": [
+            "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+            "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2"
+          ],
+          "partialHistory": false
+        },
+        "items": [
+          {
+            "id": "01a0bd89-5bdb-76e2-9d0a-8c59a46c4a5e",
+            "type": "userMessage",
+            "textSha256": "d399298b576f03030a5497e2471f37cb031aa91ebf6f672ba1c1c6f9907a0ec0"
+          },
+          {
+            "id": "msg_0ecc9412f97d4aaf016aaf7f54b66087d0a9a466db4c5a4935",
+            "type": "agentMessage",
+            "textSha256": "6bbae6139b9567c5d1a720fb521483f5959f3dba966abd692748ec0cdf836433"
+          },
+          {
+            "id": "exec-ff977b8b-1683-440b-a5d7-81713a2af2fa",
+            "type": "commandExecution",
+            "textSha256": "a43a08e9c10ab66725b45a2e19b6b97e0082b8d75754c51df226a48a17d6718b"
+          },
+          {
+            "id": "msg_0ecc9412f97d4aaf016aaf7f5b839c87d0a938fb58ee229dc5",
+            "type": "agentMessage",
+            "textSha256": "9297755d83019062843593538c77cfc96eaac6dca00e03fa8db432d5e78f317d"
+          },
+          {
+            "id": "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+            "type": "userMessage",
+            "textSha256": "4e6287443d3e2455ade093756a71d801393eebf18927068b2c6d92cd046fc996"
+          },
+          {
+            "id": "msg_0ecc9412f97d4aaf016aaf7f64905c87d085fe7cbb051d3c82",
+            "type": "agentMessage",
+            "textSha256": "cd0a5142583ddf2c81a808b4fad0a7d0157343301c3c024dde97373d3ea4b6e4"
+          },
+          {
+            "id": "exec-4890e954-a209-4600-b69d-f29343c1877b",
+            "type": "commandExecution",
+            "textSha256": "6ac0aa5dd13da69413c8046ad6a12dcbefdeb6f39647f543a6c18c9f7accc290"
+          },
+          {
+            "id": "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2",
+            "type": "agentMessage",
+            "textSha256": "37def47fdf2cab0a8ff3839f9e333b248a7333e214a7ed409194c71dbc729504"
+          }
+        ]
+      },
+      {
+        "command": [
+          "node",
+          "dist/bin.js",
+          "session",
+          "changes",
+          "8562e526b724247095631752315763c1",
+          "--url",
+          "http://127.0.0.1:53004",
+          "--as",
+          "canary",
+          "--token-file",
+          "<private-token-file>",
+          "--json"
+        ],
+        "exitCode": 0,
+        "status": "succeeded",
+        "delivery": "confirmed",
+        "session": {
+          "id": "8562e526b724247095631752315763c1",
+          "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+          "status": "ready",
+          "revision": 41,
+          "turnId": null
+        },
+        "brief": {
+          "summary": "Synthetic welcome canary — Ready to continue.\nLatest saved request: Small correction: change welcome.txt to exactly \"Welcome to our garden.\" followed by one newline. Edit only that file, read it back, and leave the change uncommitted. Do not push or publish. Reply briefly with the final sentence.\nLatest saved agent report: Welcome to our garden.",
+          "nextAction": "Continue session",
+          "sourceRevision": 41,
+          "sourceItemIds": [
+            "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+            "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2"
+          ],
+          "partialHistory": false
+        },
+        "changes": {
+          "head": "50f1ec7ebf4519603dbc2fdbc38a863befe09360",
+          "status": " M welcome.txt\n",
+          "diff": "diff --git a/welcome.txt b/welcome.txt\nindex 3054917..d043838 100644\n--- a/welcome.txt\n+++ b/welcome.txt\n@@ -1 +1 @@\n-Welcome.\n+Welcome to our garden.\n",
+          "truncated": false
+        }
+      }
+    ],
+    "http": [
+      {
+        "method": "POST",
+        "path": "/login",
+        "status": 303,
+        "credentials": "redacted"
+      },
+      {
+        "method": "GET",
+        "path": "/code/8562e526b724247095631752315763c1",
+        "status": 200,
+        "correctSessionMarker": true
+      },
+      {
+        "method": "GET",
+        "path": "/code/8562e526b724247095631752315763c1/state",
+        "status": 200,
+        "sessionId": "8562e526b724247095631752315763c1",
+        "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+        "revision": 41,
+        "itemIds": [
+          "01a0bd89-5bdb-76e2-9d0a-8c59a46c4a5e",
+          "msg_0ecc9412f97d4aaf016aaf7f54b66087d0a9a466db4c5a4935",
+          "exec-ff977b8b-1683-440b-a5d7-81713a2af2fa",
+          "msg_0ecc9412f97d4aaf016aaf7f5b839c87d0a938fb58ee229dc5",
+          "01a0bd89-8e5b-7070-aeb1-aa17e534f4b1",
+          "msg_0ecc9412f97d4aaf016aaf7f64905c87d085fe7cbb051d3c82",
+          "exec-4890e954-a209-4600-b69d-f29343c1877b",
+          "msg_0ecc9412f97d4aaf016aaf7f6a960c87d0a44961514e113cf2"
+        ]
+      }
+    ],
+    "noAdditionalModelTurn": true,
+    "parity": {
+      "sessionId": "8562e526b724247095631752315763c1",
+      "nativeThreadId": "01a0bd89-4f9b-72f0-968c-addb28bd30b5",
+      "revision": 41,
+      "exactActivityMatch": true,
+      "userMessages": 2,
+      "finalText": "Welcome to our garden.\n",
+      "nativeProviderLaunched": false
+    },
+    "verifiedOwnerRelease": true,
+    "completedAt": "2026-09-20T06:42:39.481Z",
+    "currentSourceUnchanged": true,
+    "currentDistUnchanged": true,
+    "changedSinceRealTurns": [
+      "src/serve.ts",
+      "dist/serve.js"
+    ]
+  }
+}

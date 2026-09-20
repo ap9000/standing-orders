@@ -14,10 +14,15 @@ import type { CodingChanges, CodingItem, CodingQuestion, CodingRequest, CodingSe
 
 export type CodingActor = { name: string; generation: number };
 export type CodingDelivery = 'rejected' | 'pending' | 'unknown';
+export type CodingExpected = { revision: number; nativeThreadId: string | null; turnId: string | null };
+export type CodingCommandReceipt = { status: 'accepted' | 'pending' | 'rejected' | 'uncertain'; sessionId: string | null; message: string | null };
 export class CodingActionError extends Error {
   constructor(message: string, readonly delivery: CodingDelivery, readonly sessionId?: string) {
     super(message); this.name = 'CodingActionError';
   }
+}
+export class CodingStateConflictError extends CodingActionError {
+  constructor(id: string) { super('This session changed. Inspect its latest activity before acting again.', 'rejected', id); }
 }
 type Options = { database: string; worktreeRoot: string; provider?: () => CodingProvider; admissionPaused?: () => boolean; authorize?: (actor: CodingActor, repo: string) => boolean; context?: (input: { repo: string; actor: string; baseRevision: string; prompt: string }) => CodingContext };
 const object = (v: unknown): Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v) ? v as Record<string, unknown> : {};
@@ -40,6 +45,8 @@ export class CodingWorkspace {
   private provider: CodingProvider | null = null;
   private unsubscribe: (() => void) | null = null;
   private operations = new Set<string>();
+  private commands = new Set<string>();
+  private commandWaiters = new Set<() => void>();
   private operationWaiters = new Set<() => void>();
   private loaded = new Set<string>();
   private closed = false;
@@ -62,6 +69,7 @@ export class CodingWorkspace {
       CREATE TABLE IF NOT EXISTS coding_request (token TEXT PRIMARY KEY, session TEXT NOT NULL, rpc_id TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS coding_submission (session TEXT NOT NULL, key TEXT NOT NULL, digest TEXT NOT NULL, status TEXT NOT NULL, error TEXT, PRIMARY KEY(session,key));`);
     this.db.exec('CREATE TABLE IF NOT EXISTS coding_custody (singleton INTEGER PRIMARY KEY CHECK(singleton=1), payload TEXT NOT NULL)');
+    this.db.exec('CREATE TABLE IF NOT EXISTS coding_command (owner TEXT NOT NULL, generation INTEGER NOT NULL, key TEXT NOT NULL, digest TEXT NOT NULL, status TEXT NOT NULL, session TEXT, message TEXT, PRIMARY KEY(owner,generation,key))');
     this.db.exec("CREATE INDEX IF NOT EXISTS coding_native_thread ON coding_session(json_extract(document,'$.nativeThreadId'))");
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -90,8 +98,8 @@ export class CodingWorkspace {
   }
 
   private admit(): void {
-    if (this.closed || this.closing || this.persistenceFailed) throw Error('The coding server is closing or cannot save activity. Reopen it after recovery.');
-    if (this.options.admissionPaused?.()) throw Error('Standing Orders is preparing an update. Finish or stop current work; new coding turns can start after the update.');
+    if (this.closed || this.closing || this.persistenceFailed) throw new CodingActionError('The coding server is closing or cannot save activity. Reopen it after recovery.', 'rejected');
+    if (this.options.admissionPaused?.()) throw new CodingActionError('Standing Orders is preparing an update. Finish or stop current work; new coding turns can start after the update.', 'rejected');
   }
 
   private releaseOperation(id: string): void {
@@ -101,6 +109,18 @@ export class CodingWorkspace {
 
   list(actor: CodingActor): CodingSession[] {
     return this.db.prepare('SELECT document FROM coding_session WHERE owner=? AND generation=? ORDER BY rowid DESC').all(actor.name, actor.generation).map(row => JSON.parse(String(row['document'])) as CodingSession);
+  }
+
+  /** Inspect a fixed metadata window before loading admitted documents.
+   * A filtered window can be short without proving the entire list empty. */
+  listBounded(actor: CodingActor, options: { limit: number; repo?: string; authorized: (repo: string) => boolean }): { sessions: CodingSession[]; truncated: boolean } {
+    const rows = options.repo === undefined
+      ? this.db.prepare('SELECT id,repo FROM coding_session WHERE owner=? AND generation=? ORDER BY rowid DESC LIMIT 101').all(actor.name, actor.generation)
+      : this.db.prepare('SELECT id,repo FROM coding_session WHERE owner=? AND generation=? AND repo=? ORDER BY rowid DESC LIMIT 101').all(actor.name, actor.generation, options.repo);
+    const window = rows.slice(0, 100);
+    const admitted = window.filter(row => options.authorized(String(row['repo'])));
+    const selected = admitted.slice(0, Math.min(100, Math.max(1, options.limit)));
+    return { sessions: selected.map(row => this.get(String(row['id']), actor)), truncated: rows.length > window.length || admitted.length > selected.length };
   }
 
   get(id: string, actor: CodingActor): CodingSession {
@@ -119,9 +139,56 @@ export class CodingWorkspace {
     return { session, items, requests, revision };
   }
 
+  /** Bounded transport read: query only the recent window plus one row
+   * for omission detection. The browser's full snapshot remains unchanged. */
+  snapshotBounded(id: string, actor: CodingActor): CodingSnapshot & { truncated: boolean } {
+    const session = this.get(id, actor);
+    const itemRows = this.db.prepare('SELECT payload FROM coding_item WHERE session=? ORDER BY position DESC LIMIT 101').all(id);
+    const requestRows = this.db.prepare("SELECT payload FROM coding_request WHERE session=? AND status='pending' ORDER BY rowid LIMIT 51").all(id);
+    const items = itemRows.slice(0, 100).reverse().map(row => JSON.parse(String(row['payload'])) as CodingItem);
+    const requests = requestRows.slice(0, 50).map(row => JSON.parse(String(row['payload'])) as CodingRequest);
+    const revision = Number(this.db.prepare('SELECT revision FROM coding_session WHERE id=?').get(id)?.['revision']);
+    return { session, items, requests, revision, truncated: itemRows.length > items.length || requestRows.length > requests.length };
+  }
+
   revision(id: string, actor: CodingActor): number {
     this.get(id, actor);
     return Number(this.db.prepare('SELECT revision FROM coding_session WHERE id=?').get(id)?.['revision']);
+  }
+
+  assertExpected(id: string, actor: CodingActor, expected?: CodingExpected): void {
+    const session = this.get(id, actor);
+    if (expected && (expected.revision !== this.revision(id, actor) || expected.nativeThreadId !== session.nativeThreadId || expected.turnId !== session.turnId)) throw new CodingStateConflictError(id);
+  }
+
+  /** Persist acceptance before calling the native owner. Repeating a key only
+   * reads its receipt; it never repeats a mutation, including after restart. */
+  async command(actor: CodingActor, key: string, request: string, check: () => void, perform: () => Promise<string>): Promise<CodingCommandReceipt> {
+    if (!keyPattern.test(key)) throw Error('This operation needs a valid request ID.');
+    check();
+    const fingerprint = digest(request), active = `${actor.name}:${actor.generation}:${key}`;
+    const row = this.db.prepare('SELECT * FROM coding_command WHERE owner=? AND generation=? AND key=?').get(actor.name, actor.generation, key);
+    if (row) {
+      if (row['digest'] !== fingerprint) throw Error('This request ID was already used for a different operation.');
+      const status = String(row['status']) as CodingCommandReceipt['status'];
+      return { status: status === 'pending' && !this.commands.has(active) ? 'uncertain' : status, sessionId: row['session'] === null ? null : String(row['session']), message: row['message'] === null ? null : String(row['message']) };
+    }
+    if (this.closed || this.closing || this.persistenceFailed) throw Error('The coding server cannot save activity.');
+    this.db.prepare("INSERT INTO coding_command VALUES(?,?,?,?,'pending',NULL,NULL)").run(actor.name, actor.generation, key, fingerprint);
+    this.commands.add(active);
+    try {
+      const sessionId = await perform();
+      this.db.prepare("UPDATE coding_command SET status='accepted',session=?,message=NULL WHERE owner=? AND generation=? AND key=?").run(sessionId, actor.name, actor.generation, key);
+      return { status: 'accepted', sessionId, message: null };
+    } catch (error) {
+      const failure = actionError(error, 'unknown');
+      const status = failure.delivery === 'rejected' ? 'rejected' : 'uncertain';
+      this.db.prepare('UPDATE coding_command SET status=?,session=?,message=? WHERE owner=? AND generation=? AND key=?').run(status, failure.sessionId ?? null, failure.message, actor.name, actor.generation, key);
+      return { status, sessionId: failure.sessionId ?? null, message: failure.message };
+    } finally {
+      this.commands.delete(active);
+      if (!this.commands.size) { for (const done of this.commandWaiters) done(); this.commandWaiters.clear(); }
+    }
   }
 
   private save(session: CodingSession): void {
@@ -136,8 +203,10 @@ export class CodingWorkspace {
   }
 
   private putItem(session: string, item: CodingItem): void {
-    this.db.prepare('INSERT INTO coding_item(session,id,payload) VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET payload=excluded.payload').run(session, item.id, JSON.stringify(item));
-    this.db.prepare('UPDATE coding_session SET revision=revision+1 WHERE id=?').run(session);
+    // Re-reading unchanged native history must not invalidate the request
+    // that loaded it. New or changed history still requires a fresh look.
+    const saved = this.db.prepare('INSERT INTO coding_item(session,id,payload) VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET payload=excluded.payload WHERE coding_item.payload <> excluded.payload').run(session, item.id, JSON.stringify(item));
+    if (saved.changes) this.db.prepare('UPDATE coding_session SET revision=revision+1 WHERE id=?').run(session);
     if (item.type === 'userMessage' && item.clientId) this.db.prepare("UPDATE coding_submission SET status='accepted',error=NULL WHERE session=? AND key=? AND digest=?").run(session, item.clientId, digest(item.text));
   }
 
@@ -251,13 +320,14 @@ export class CodingWorkspace {
 
   async start(actor: CodingActor, input: { repo: string; title: string; model: string | null; prompt: string; requestId: string }): Promise<CodingSession> {
     this.validateMessage(input.prompt, input.requestId);
-    if (input.model !== null && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(input.model)) throw Error('Enter a valid model name or leave the model blank.');
+    if (input.model !== null && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(input.model)) throw new CodingActionError('Enter a valid model name or leave the model blank.', 'rejected');
+    const title = input.title.trim().slice(0, 160) || input.prompt.trim().split('\n')[0]!.slice(0, 100);
     const id = digest(`${actor.name}:${actor.generation}:${input.requestId}`).slice(0, 32);
     const previous = this.list(actor).find(s => s.id === id);
     if (previous) {
       this.authorize(actor, previous.repo);
       const receipt = this.db.prepare('SELECT * FROM coding_submission WHERE session=? AND key=?').get(id, input.requestId);
-      if (previous.repo !== realpathSync(input.repo) || receipt?.['digest'] !== digest(input.prompt)) throw Error('This submission ID was already used for a different request.');
+      if (previous.repo !== realpathSync(input.repo) || previous.title !== title || previous.model !== input.model || receipt?.['digest'] !== digest(input.prompt)) throw new CodingActionError('This submission ID was already used for a different request.', 'rejected', id);
       if (receipt['status'] === 'accepted') return previous;
       throw this.receiptError(id, receipt);
     }
@@ -274,7 +344,7 @@ export class CodingWorkspace {
       if (realpathSync(root) !== repo) throw Error('Choose the root of a Git project.');
       const base = (await this.git(repo, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
       const branch = `standing-orders/code-${id}`, worktree = join(this.options.worktreeRoot, id);
-      session = { id, owner: actor.name, generation: actor.generation, repo, title: input.title.trim().slice(0, 160) || input.prompt.trim().split('\n')[0]!.slice(0, 100), provider: 'codex', model: input.model, branch, base, worktree, nativeThreadId: null, turnId: null, status: 'starting', error: null, createdAt: now(), updatedAt: now(), initialRequest: { requestId: input.requestId, prompt: input.prompt } };
+      session = { id, owner: actor.name, generation: actor.generation, repo, title, provider: 'codex', model: input.model, branch, base, worktree, nativeThreadId: null, turnId: null, status: 'starting', error: null, createdAt: now(), updatedAt: now(), initialRequest: { requestId: input.requestId, prompt: input.prompt } };
       this.authorize(actor, repo);
       const context = this.options.context?.({ repo, actor: actor.name, baseRevision: base, prompt: input.prompt });
       if (context) { verifyCodingContext(context, repo, base); session.context = context; }
@@ -283,6 +353,7 @@ export class CodingWorkspace {
       mkdirSync(this.options.worktreeRoot, { recursive: true, mode: 0o700 });
       await this.git(repo, ['worktree', 'add', '-b', branch, '--', worktree, base]);
       this.authorize(actor, repo);
+      this.admit();
       nativeStartupAttempted = true;
       const result = object(await this.request('thread/start', { cwd: worktree, approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: 'workspace-write', ...(input.model ? { model: input.model } : {}), developerInstructions: CODING_INSTRUCTIONS + (context?.text ?? ''), persistExtendedHistory: true }));
       const thread = object(result['thread']), nativeThreadId = string(thread['id']);
@@ -303,8 +374,8 @@ export class CodingWorkspace {
   }
 
   private validateMessage(prompt: string, key: string): void {
-    if (!prompt.trim() || Buffer.byteLength(prompt) > 64_000) throw Error('Write a request of up to 64 KB.');
-    if (!keyPattern.test(key)) throw Error('This message needs a valid submission ID. Reload the page.');
+    if (!prompt.trim() || Buffer.byteLength(prompt) > 64_000) throw new CodingActionError('Write a request of up to 64 KB.', 'rejected');
+    if (!keyPattern.test(key)) throw new CodingActionError('This message needs a valid submission ID. Reload the page.', 'rejected');
   }
 
   private receiptError(id: string, receipt: Record<string, unknown> | undefined): CodingActionError {
@@ -358,15 +429,16 @@ export class CodingWorkspace {
 
   /** Reconnect the exact native conversation. An absent receipt never proves
    * non-delivery, so an unmatched message requires an explicit review action. */
-  async recover(id: string, actor: CodingActor): Promise<void> {
+  async recover(id: string, actor: CodingActor, expected?: CodingExpected): Promise<void> {
     this.admit();
+    this.assertExpected(id, actor, expected);
     const session = this.get(id, actor);
-    if (session.status !== 'uncertain' || this.operations.size || this.recovering || this.closed || this.closing || this.persistenceFailed) throw Error('Recovery is not available while another session operation is active.');
+    if (session.status !== 'uncertain' || this.operations.size || this.recovering || this.closed || this.closing || this.persistenceFailed) throw new CodingActionError('Recovery is not available while another session operation is active.', 'rejected', id);
     this.recovering = true; this.operations.add(id);
     try {
       if (this.provider) {
         const active = this.db.prepare('SELECT document FROM coding_session').all().some(row => busy.has((JSON.parse(String(row['document'])) as CodingSession).status));
-        if (active) throw Error('Another coding turn is still active. Wait for it to finish or stop it before reconnecting the agent.');
+        if (active) throw new CodingActionError('Another coding turn is still active. Wait for it to finish or stop it before reconnecting the agent.', 'rejected', id);
         await this.provider.close(); this.unsubscribe?.(); this.unsubscribe = null; this.provider = null; this.loaded.clear();
       } else if (this.recoveryRequired && !this.priorProcessesGone()) throw Error('The previous agent may still be running. Its process exit could not be verified; work remains preserved.');
       this.recoveryRequired = false;
@@ -399,28 +471,31 @@ export class CodingWorkspace {
     await this.resume(id, actor);
   }
 
-  async send(id: string, actor: CodingActor, prompt: string, requestId: string): Promise<void> {
-    return this.sendMessage(id, actor, prompt, requestId, false);
+  async send(id: string, actor: CodingActor, prompt: string, requestId: string, expected?: CodingExpected): Promise<void> {
+    return this.sendMessage(id, actor, prompt, requestId, false, expected);
   }
 
-  private async sendMessage(id: string, actor: CodingActor, prompt: string, requestId: string, initial: boolean): Promise<void> {
+  private async sendMessage(id: string, actor: CodingActor, prompt: string, requestId: string, initial: boolean, expected?: CodingExpected): Promise<void> {
     this.validateMessage(prompt, requestId);
     let session = this.get(id, actor);
     const receipt = this.db.prepare('SELECT * FROM coding_submission WHERE session=? AND key=?').get(id, requestId);
     if (receipt) {
-      if (receipt['digest'] !== digest(prompt)) throw Error('This message ID was already used with different text.');
+      if (receipt['digest'] !== digest(prompt)) throw new CodingActionError('This message ID was already used with different text.', 'rejected', id);
       if (receipt['status'] === 'accepted') return;
       if (!(initial && receipt['status'] === 'preparing')) throw this.receiptError(id, receipt);
     }
+    this.assertExpected(id, actor, expected);
     this.admit();
-    if ((!initial && this.operations.has(id)) || this.recovering) throw Error('A session operation is still in progress. Your draft is preserved.');
+    if ((!initial && this.operations.has(id)) || this.recovering) throw new CodingActionError('A session operation is still in progress. Your draft is preserved.', 'rejected', id);
     if (session.status === 'uncertain') throw new CodingActionError(session.error || 'Resolve the uncertain delivery before continuing.', 'unknown', id);
-    if (session.status === 'closed') throw Error('This session is closed. Its request and checkout are preserved; start a new session to continue.');
-    if (session.status === 'stopping' || session.status === 'needs-input') throw Error(session.error || 'Finish the current action before sending another message.');
+    if (session.status === 'closed') throw new CodingActionError('This session is closed. Its request and checkout are preserved; start a new session to continue.', 'rejected', id);
+    if (session.status === 'stopping' || session.status === 'needs-input') throw new CodingActionError(session.error || 'Finish the current action before sending another message.', 'rejected', id);
     this.operations.add(id);
     let transmissionAttempted = false;
     try {
       await this.load(session);
+      this.admit();
+      this.assertExpected(id, actor, expected);
       session = this.get(id, actor);
       const steering = session.status === 'working' && session.turnId !== null;
       if (initial) this.db.prepare("UPDATE coding_submission SET status='pending',error=NULL WHERE session=? AND key=? AND status='preparing'").run(id, requestId);
@@ -432,30 +507,35 @@ export class CodingWorkspace {
       const current = this.get(id, actor), turnId = string(result['turnId']) || string(object(result['turn'])['id']);
       if (current.status === 'working' && turnId) this.save({ ...current, turnId });
     } catch (error) {
+      if (error instanceof CodingStateConflictError) throw error;
       const accepted = this.db.prepare("SELECT 1 FROM coding_submission WHERE session=? AND key=? AND status='accepted'").get(id, requestId);
       const failure = accepted ? new CodingActionError(error instanceof Error ? error.message : 'The response could not be confirmed. Check the saved session.', 'unknown', id) : actionError(error, transmissionAttempted ? 'unknown' : 'rejected', id);
       const uncertain = failure.delivery !== 'rejected';
       const message = uncertain && !accepted ? 'The connection closed before delivery was confirmed. Your message may have reached the agent; it will not be sent again automatically.' : failure.message;
       this.db.prepare("UPDATE coding_submission SET status=?,error=? WHERE session=? AND key=? AND status!='accepted'").run(uncertain ? 'uncertain' : 'failed', message, id, requestId);
       const current = this.read(id);
-      this.save({ ...current, status: accepted ? current.status : uncertain ? 'uncertain' : current.turnId ? current.status : 'failed', error: message });
+      // A refused draft does not fail the saved turn. Unknown reconnects still
+      // require reconciliation even when this message never reached transport.
+      this.save({ ...current, status: accepted || (!transmissionAttempted && !uncertain) ? current.status : uncertain ? 'uncertain' : current.turnId ? current.status : 'failed', error: message });
       throw new CodingActionError(message, failure.delivery, id);
     } finally { if (!initial) this.releaseOperation(id); }
   }
 
-  async resume(id: string, actor: CodingActor): Promise<void> {
+  async resume(id: string, actor: CodingActor, expected?: CodingExpected): Promise<void> {
     this.admit();
+    this.assertExpected(id, actor, expected);
     const session = this.get(id, actor);
-    if (session.status === 'closed') throw Error('This session is closed. Its request and checkout are preserved; start a new session to continue.');
-    if (busy.has(session.status) || this.operations.has(id) || this.recovering) throw Error('The session is already active.');
+    if (session.status === 'closed') throw new CodingActionError('This session is closed. Its request and checkout are preserved; start a new session to continue.', 'rejected', id);
+    if (busy.has(session.status) || this.operations.has(id) || this.recovering) throw new CodingActionError('The session is already active.', 'rejected', id);
     this.operations.add(id);
     try { await this.load(session); this.save({ ...this.get(id, actor), status: 'ready', error: null }); }
     finally { this.releaseOperation(id); }
   }
 
-  async stop(id: string, actor: CodingActor): Promise<void> {
+  async stop(id: string, actor: CodingActor, expected?: CodingExpected): Promise<void> {
+    this.assertExpected(id, actor, expected);
     const session = this.get(id, actor);
-    if (!session.nativeThreadId || !session.turnId || !busy.has(session.status)) throw Error('There is no running turn to stop.');
+    if (!session.nativeThreadId || !session.turnId || !busy.has(session.status)) throw new CodingActionError('There is no running turn to stop.', 'rejected', id);
     for (const row of this.db.prepare("SELECT token,rpc_id,payload FROM coding_request WHERE session=? AND status='pending'").all(id)) {
       const request = JSON.parse(String(row['payload'])) as CodingRequest;
       this.native().respond(JSON.parse(String(row['rpc_id'])) as string | number, request.kind === 'questions' ? { answers: {} } : { decision: 'cancel' });
@@ -524,6 +604,7 @@ export class CodingWorkspace {
     try { if (this.provider) await this.provider.close(); }
     catch (error) { shutdownError = error; }
     if (this.operations.size) await new Promise<void>(resolve => this.operationWaiters.add(resolve));
+    if (this.commands.size) await new Promise<void>(resolve => this.commandWaiters.add(resolve));
     // Saving the last delta must never be a prerequisite for stopping the
     // owned agent. A failed save still fences installation and clean release.
     if (persistenceError || this.persistenceFailed) throw Error('Coding activity could not be saved. Agent cleanup was attempted; preserve the catalog and repair storage before restarting.', { cause: persistenceError });

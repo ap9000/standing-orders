@@ -1,0 +1,15 @@
+$ npx vitest run src/decisionscript.test.ts src/queuescript.test.ts src/mate-cli.test.ts src/mate-doors.test.ts --reporter=dot
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-session-release-prep
+
+······················(node:88619) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:88618) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+········
+
+ Test Files  4 passed (4)
+      Tests  30 passed (30)
+   Start at  01:28:52
+   Duration  5.57s (transform 8.44s, setup 67ms, import 10.51s, tests 2.54s, environment 681ms)
+

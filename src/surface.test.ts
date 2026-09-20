@@ -17,6 +17,8 @@ import {
 } from "./operate.js";
 import { OPERATE_COMMANDS, TOP_LEVEL_COMMANDS, SKILLS_ACTIONS, SKILLS_FLAGS, CONTRACT_FLAGS, main } from "./cli.js";
 import { DOCUMENTED_REASONS } from "./envelope.js";
+import { SESSION_CLI_ACTIONS, sessionCliFlags } from './session-cli.js';
+import { sessionDescriptor } from './session-contract.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rootOf = (invocation: string): string => invocation.split(" ")[0] as string;
@@ -53,6 +55,7 @@ describe("the declared command guide, held to the code", () => {
     expect([...subs("people")].sort()).toEqual([...PEOPLE_ACTIONS].sort());
     expect([...subs("keys")].sort()).toEqual([...KEYS_ACTIONS].sort());
     expect([...subs("skills")].sort()).toEqual([...SKILLS_ACTIONS].sort());
+    expect([...subs('session')].sort()).toEqual([...SESSION_CLI_ACTIONS].sort());
   });
 
   test("every declared flag lives in its parser's vocabulary with the declared arity", () => {
@@ -62,7 +65,10 @@ describe("the declared command guide, held to the code", () => {
     for (const row of COMMAND_GUIDE) {
       for (const flag of row.flags ?? []) {
         const root = rootOf(row.invocation);
-        if (row.invocation.startsWith("skills ")) {
+        if (row.invocation.startsWith('session ') && row.invocation !== 'session capabilities') {
+          const spec = sessionDescriptor(row.invocation.split(' ')[1]!)!;
+          expect(sessionCliFlags(spec)[flag.name]).toBe(flag.takesValue ? 'value' : 'flag');
+        } else if (row.invocation.startsWith("skills ")) {
           const action = row.invocation.split(" ")[1] as keyof typeof SKILLS_FLAGS;
           const arity = SKILLS_FLAGS[action][flag.name as keyof (typeof SKILLS_FLAGS)[typeof action]] as string | undefined;
           expect(arity, `skills ${String(action)} does not know --${flag.name}`).toBeDefined();
@@ -83,13 +89,18 @@ describe("the declared command guide, held to the code", () => {
     }
   });
 
-  test("mutation semantics are self-consistent: keyed declares --key; operator rows are detail-free", () => {
+  test("mutation semantics are self-consistent: keyed declares --key; executable session schemas preserve operator authority", () => {
     for (const row of COMMAND_GUIDE) {
       if (row.mutation === "keyed") {
         expect((row.flags ?? []).some(flag => flag.name === "key"), `${row.invocation} is keyed but declares no --key`).toBe(true);
       }
       expect(row.agentMayInvoke).toBe(row.audience === "agent");
       if (!row.agentMayInvoke) {
+        if (row.invocation.startsWith('session ')) {
+          expect(row.inputSchema).toEqual(sessionDescriptor(row.invocation.split(' ')[1]!)!.inputSchema);
+          expect(row.audience).toBe('operator');
+          continue;
+        }
         // a schema is not permission: no flag detail, no reason detail
         expect(row.flags, `${row.invocation} is operator-only but carries flags`).toBeUndefined();
         expect(row.notableReasons, `${row.invocation} is operator-only but carries reasons`).toBeUndefined();

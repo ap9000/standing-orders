@@ -1,7 +1,7 @@
 /**
  * The declared command guide (arc 5): the agent-facing surface as data,
  * dumped by `contract --commands`. This is DOCUMENTATION with a stable
- * shape, not authority — nothing executes from it, no verb consults it,
+ * shape, not authority — legacy verbs do not execute from it,
  * and the runtime envelope remains the truth. Its honest limits ride the
  * envelope itself as SURFACE_NOTES, because a source comment is invisible
  * to consumers (arc-5 review, finding 1).
@@ -15,6 +15,9 @@
  * CANNOT prove — that a given flag is read by a given handler — is why
  * SURFACE_NOTES.flags says "intended".
  */
+
+import { SESSION_DESCRIPTORS, type SessionDescriptor } from './session-contract.js';
+import { sessionCliFlags } from './session-cli.js';
 
 export type CommandFlag = {
   readonly name: string;
@@ -45,12 +48,14 @@ export type CommandRow = {
   readonly positionals?: readonly { name: string; required: boolean; meaning: string }[];
   readonly flags?: readonly CommandFlag[];
   readonly notableReasons?: readonly string[];
+  /** Session schemas are executable input contracts, not a grant of authority. */
+  readonly inputSchema?: SessionDescriptor['inputSchema'];
 };
 
 /** The guide's limits, stated machine-readably in every dump. */
 export const SURFACE_NOTES = {
-  authority: "documentation — behavior and live --help are authoritative; nothing executes from this schema",
-  flags: "intended per command; the parser's flag vocabulary is global, so presence here narrows by hand what the parser alone cannot",
+  authority: "documentation is not permission; session descriptors also drive parser and request validation; legacy entries remain advisory",
+  flags: "session flags are exact per operation; legacy flags are intended per command and may use a global parser vocabulary",
   reasons: "curated, not exhaustive — the runtime `reason` field is the truth; ignore tokens you do not recognize",
 } as const;
 
@@ -108,6 +113,12 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("link", "put standing-orders on PATH"),
   operator("unlink", "take it off PATH"),
   operator("demo", "a seeded throwaway sandbox"),
+  { invocation: 'session capabilities', synopsis: 'Show executable session schemas and operator authority requirements; no credentials needed', audience: 'agent', agentMayInvoke: true, mutation: 'none', flags: [jsonFlag] },
+  ...SESSION_DESCRIPTORS.map(spec => ({
+    invocation: `session ${spec.operation}`, synopsis: spec.synopsis, audience: spec.audience, agentMayInvoke: spec.agentMayInvoke,
+    mutation: spec.mutation ? 'keyed' as const : 'none' as const, inputSchema: spec.inputSchema,
+    flags: Object.entries(sessionCliFlags(spec)).map(([name, arity]) => ({ name, takesValue: arity === 'value', meaning: name === 'key' ? 'keep the same key when reconciling; inspect after unknown delivery, never blind-retry' : `see session ${spec.operation} --help` })),
+  })),
 
   // ---- the queue (agent surface) ----
   { invocation: "ready", synopsis: "what could be dispatched right now (rows carry reservedFor)", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
