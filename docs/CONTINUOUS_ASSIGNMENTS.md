@@ -107,8 +107,10 @@ Start this corrective workflow from verified foundation
 all criteria), not failed workflow 1922/`3111152`. Prior attempts and complete
 historical records remain preserved; no existing task base moves.
 
-The 24 workflow files and UI remain identical to `96ccebe`; this correction adds
-the missing assignment row in the envelope test. Inherited UI fixes remain intact.
+The 24 workflow files and UI remain identical to `96ccebe`; the envelope row is
+fixed. Run 1923 passed 3,906 tests, but review 1924 lacked three safeguard modules.
+Leading comments now document their assignment boundaries and include those files
+in normal capture. Their code is unchanged. Earlier focused logs retain c075 inputs.
 Two images and seven browser checks retain their stated reuse and Chromium-only
 limits: physical devices, software keyboards, screen readers and remote access
 are unverified. Complete reports and the UI1907 canary remain readable.
