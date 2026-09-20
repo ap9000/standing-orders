@@ -586,14 +586,12 @@ describe("shared chat action lifecycle", () => {
       now,
       { captureStatus: "ok" },
     );
-    const action = proposal("result_review", { task: id, run });
-    expect(confirm(action)).toMatchObject({ ok: true });
-    expect(confirm(action)).toMatchObject({ ok: false, reason: "not-pending" });
+    expect(() => proposal("result_review", { task: id, run })).toThrow("Separate model review has been removed");
     expect(
       store.handle
         .prepare("SELECT COUNT(*) AS n FROM review_request WHERE run=?")
         .get(run)?.["n"],
-    ).toBe(1);
+    ).toBe(0);
   });
   test("resume releases only the settled stop and leaves other holds in place", () => {
     const id = task();
