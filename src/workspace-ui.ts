@@ -70,6 +70,7 @@ export type ReviewFacts = {
   interrupted: boolean;
   /** Who asked for the open (queued) request, when one is open. */
   queuedBy: string | null;
+  queuedOrigin?: "operator" | "automatic" | null;
   /** Whether the live attempt's reviewer worker is answering. */
   reviewerAlive: boolean;
 };
@@ -89,6 +90,7 @@ export function reviewFactsOf(retry: ReviewRetryState | null, reviewerAlive: (ru
     latestReason: retry.latest?.reason ?? null,
     interrupted: retry.latest !== null && (retry.latest.outcome === "interrupted" || retry.latest.reason === "interrupted"),
     queuedBy: retry.openRequest?.requestedBy ?? null,
+    queuedOrigin: retry.openRequest?.origin ?? null,
     reviewerAlive: retry.live !== null && reviewerAlive(retry.live.runner),
   };
 }
@@ -96,7 +98,7 @@ export function reviewFactsOf(retry: ReviewRetryState | null, reviewerAlive: (ru
 /** The tokens a review in flight wears — the dispatch codes, unchanged. */
 export const REVIEW_TOKENS: ReadonlySet<string> = new Set(["reviewing", "review-pending", "review-failed", "review-exhausted"]);
 
-const retriesLeft = (count: number): string => (count === 1 ? "1 explicit retry" : `${count} explicit retries`);
+const retriesLeft = (count: number, explicit = true): string => `${count}${explicit ? " explicit" : ""} ${count === 1 ? "retry" : "retries"}`;
 
 /**
  * A review that is queued, running, failed with a retry left, or
@@ -118,7 +120,7 @@ export function reviewStatusOf(review: ReviewFacts | null): DisplayStatus | null
   if (review.state === "queued") {
     return review.attempt === 1
       ? { token: "review-pending", label: "Waiting for review", detail: "The build finished and its requested independent review is waiting for a worker.", tone: "attention", action: open }
-      : { token: "review-pending", label: `Review retry queued (${ordinal})`, detail: `The explicit review retry${review.queuedBy === null ? "" : `, asked by ${review.queuedBy},`} is waiting for a worker; ${retriesLeft(review.retriesRemaining)} would remain after it.`, tone: "attention", action: open };
+      : { token: "review-pending", label: `Review retry queued (${ordinal})`, detail: `${review.queuedOrigin === "automatic" ? "The signed mode queued this retry. It" : `The review retry${review.queuedBy === null ? "" : `, asked by ${review.queuedBy},`}`} is waiting for a worker; ${retriesLeft(review.retriesRemaining, review.queuedOrigin !== "automatic")} would remain after it.`, tone: "attention", action: open };
   }
   if (review.state === "retryable") {
     const what = review.interrupted ? "was interrupted" : "failed";

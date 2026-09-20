@@ -257,6 +257,21 @@ describe("the credentialed-CLI auto-approve road and the plan pins", () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+  test("CLI signs bounded repair and review service retries only through explicit terms", async () => {
+    const args = ["set", "--repo", REPO, "--name", "standard", "--as", "alex", "--token", token, "--json"];
+    expect(await run("mode", [...args, "--repair-auto"])).not.toBe(0);
+    expect(await run("mode", [...args, "--repair-max-attempts", "2"])).not.toBe(0);
+    expect(await run("mode", [...args, "--repair-auto", "--repair-max-attempts", "4"])).not.toBe(0);
+    expect(await run("mode", [...args, "--repair-auto", "--repair-max-attempts", "2", "--review-retry-auto"])).toBe(0);
+    let saved = openStore(db);
+    expect(JSON.parse(saved.activeMode(REPO, T0)!.termsJson)).toMatchObject({ repairAuto: true, repairMaxAttempts: 2, reviewRetryAuto: true, reviewAuto: true });
+    saved.close();
+    expect(await run("mode", args)).toBe(0);
+    saved = openStore(db);
+    expect(JSON.parse(saved.activeMode(REPO, T0)!.termsJson)).toMatchObject({ repairAuto: false, repairMaxAttempts: 0, reviewRetryAuto: false });
+    saved.close();
+  });
+
   test("task scope with --as/--token under the signer's mode files AND approves in one act", async () => {
     const code = await run("task", ["scope", "t-1", "--goal", "guard the payout", "--acceptance", "It is fixed and verified.|manual-review", "--as", "alex", "--token", token]);
     expect(code).toBe(0);

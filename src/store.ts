@@ -77,7 +77,7 @@ import {
 } from "./phase-routing.js";
 import { readAuthModeStrict } from "./keys.js";
 import { isFallbackEligible, recognizesEligible, classMatchesAuthMode, type TerminalClass } from "./exhaustion.js";
-import { modeTermsFromJson } from "./modes.js";
+import { modeDigestOf, modeTermsFromJson } from "./modes.js";
 import { readVerifiedArtifact } from "./evidence.js";
 import { isProviderId, type ProviderId } from "./provider.js";
 import type { BoardFacts } from "./board.js";
@@ -11706,7 +11706,8 @@ export class Store {
    * review allowance (v50) must still admit an attempt — no successful
    * review yet, no root still open, no request already queued, and fewer
    * than REVIEW_ROOT_ATTEMPTS roots so far. A second ask after a failed or
-   * interrupted attempt IS the explicit retry; nothing else retries.
+   * interrupted attempt IS the explicit retry. Signed service retries use
+   * requestAutomaticReviewRetry and the same queue and admission rails.
    *
    * `origin` says how the ask was produced (explicit-only retries): an
    * 'operator' ask is a fresh credentialed act and may be the retry; an
@@ -11722,6 +11723,17 @@ export class Store {
     now: Date,
     basis?: { kind: "mode"; digest: string },
     origin: ReviewRequestOrigin = basis === undefined ? "operator" : "automatic",
+  ): ReturnType<Store["queueReviewRequest"]> {
+    return this.queueReviewRequest(runId, by, now, basis, origin, false);
+  }
+
+  private queueReviewRequest(
+    runId: number,
+    by: string,
+    now: Date,
+    basis: { kind: "mode"; digest: string } | undefined,
+    origin: ReviewRequestOrigin,
+    signedRetry: boolean,
   ):
     | { ok: true; id: number; attempt: number }
     | {
@@ -11763,7 +11775,7 @@ export class Store {
       // the first attempt and nothing after it — a source run that already
       // carries a root attempt, or any earlier ask at all, takes a retry
       // only from a fresh operator act.
-      if (automatic) {
+      if (automatic && !signedRetry) {
         const replay = this.automaticReviewReplayProblem(runId);
         if (replay !== null) return { ok: false as const, reason: "explicit-only" as const, detail: replay };
       }
@@ -11814,6 +11826,74 @@ export class Store {
       this.bumpWake();
       return { ok: true as const, id: Number(inserted.lastInsertRowid), attempt };
     });
+  }
+
+  /** The only producer of automatic retries. The signed mode adds no
+   * attempts: this queues through the existing three-root review allowance. */
+  requestAutomaticReviewRetry(sourceRunId: number, now: Date): ReturnType<Store["requestReview"]> {
+    return this.transact(() => {
+      const authority = this.automaticReviewRetryAuthority(sourceRunId, now);
+      if (!authority.ok) return { ok: false as const, reason: "explicit-only" as const, detail: authority.detail };
+      return this.queueReviewRequest(sourceRunId, authority.mode.signedBy, now, { kind: "mode", digest: authority.mode.digest }, "automatic", true);
+    });
+  }
+
+  /** Recover a crash between recording a failed root and queueing its retry.
+   * One durable keyset page per ordinary pass, wrapping after exhaustion;
+   * one-shot workers reopening the store make the same bounded progress. */
+  reconcileAutomaticReviewRetries(now: Date): void {
+    this.transact(() => {
+      // Page the request primary key BEFORE eligibility checks: even a ledger
+      // full of successes/withdrawn requests reads at most fifty rows, rather
+      // than scanning all history to find fifty eligible failures.
+      const candidates = this.db.prepare("SELECT id, run AS source, reviewer_run FROM review_request WHERE id > ? ORDER BY id LIMIT 50").all(this.serviceCursor("review-retry-scan"));
+      for (const candidate of candidates) {
+        if (candidate["reviewer_run"] !== null) this.requestAutomaticReviewRetry(Number(candidate["source"]), now);
+      }
+      this.setServiceCursor("review-retry-scan", candidates.length < 50 ? 0 : Number(candidates[candidates.length - 1]!["id"]), now);
+    });
+  }
+
+  /** Live permission and failure classification, re-proved at queue, admit,
+   * and raw root insertion. An ordinary automatic producer cannot call this
+   * exception through requestReview. A spent unrun request is not resurrected. */
+  private automaticReviewRetryAuthority(sourceRunId: number, now: Date, ignoringRequest?: number):
+    | { ok: true; mode: NonNullable<ReturnType<Store["activeMode"]>> }
+    | { ok: false; detail: string } {
+    const deny = (detail: string) => ({ ok: false as const, detail });
+    const source = this.getRun(sourceRunId);
+    if (source === null || source.role === "reviewer" || source.outcome === null) return deny("a retry needs a completed source run");
+    const owner = this.refForId(source.taskRef);
+    const scope = owner === null ? null : this.getScope(owner.externalId);
+    if (owner?.repo == null || scope === null || scope.termsProblem != null || !approvalOf(scope).approved || source.scopeDigest !== scope.digest || !this.modeApprovalLive(source.taskRef, now)) {
+      return deny("the completed source no longer holds its exact approved scope");
+    }
+    const scopeSigner = scope.approvedBy === null ? null : this.accountOf(scope.approvedBy);
+    if (scopeSigner?.role !== "approver" || scopeSigner.revokedAt !== null || !this.accountCanAccess(scope.approvedBy!, owner.repo)) return deny("the scope approver no longer has access to this project");
+    const sealed = this.sealedRouteOf(owner.externalId);
+    if (!sealed.ok) return deny(`automatic retries need a current sealed route: ${sealed.detail}`);
+    const mode = this.activeMode(owner.repo, now);
+    const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
+    if (mode === null || terms?.reviewAuto !== true || terms.reviewRetryAuto !== true || modeDigestOf(terms) !== mode.digest || terms.absoluteExpiry !== mode.absoluteExpiry || !this.accountCanAccess(mode.signedBy, owner.repo)) {
+      return deny("no current signed mode permits automatic review retries");
+    }
+    const allowance = this.rootReviewAdmissionProblem(sourceRunId);
+    if (allowance !== null) return deny(allowance.detail);
+    const state = this.reviewRetryStateOf(sourceRunId);
+    const latest = state?.latest;
+    // Only recorded provider exits, timeouts, and initialization failures.
+    // Unknown invocation/ingestion exceptions and every authority refusal
+    // remain manual; a generic exception is not evidence of a transient fault.
+    if (latest == null || latest.outcome !== "failed" || !["reviewer-agent", "reviewer-timeout", "reviewer-provider-init"].includes(latest.reason ?? "")) {
+      return deny("only a failed review service attempt can retry automatically");
+    }
+    // Stops remain stops even after their processes have exited. Holds and
+    // source proof integrity failures also require an operator decision.
+    if (this.applicableStopFor(sourceRunId) !== null || this.applicableStopFor(latest.runId) !== null || this.activeHolds(source.taskRef, now).length > 0) return deny("this work was stopped or held by an operator");
+    if (/custody|integrity|fenced|interrupted|stopped/.test(source.reason ?? "") || this.proofVerdictFor(sourceRunId)?.reasons.some(one => one.includes("was signed as") || one.includes("not in the sealed diff"))) return deny("the source has a custody or integrity failure");
+    const previous = this.db.prepare("SELECT id FROM review_request WHERE run = ? AND id <> ? ORDER BY id DESC LIMIT 1").get(sourceRunId, ignoringRequest ?? -1);
+    if (latest.requestId === null || Number(previous?.["id"]) !== latest.requestId) return deny("a later review request already handled this failure; a person must ask again");
+    return { ok: true, mode };
   }
 
   /** The ordinal the next ROOT reviewer of a source run takes (v50): one
@@ -12021,15 +12101,15 @@ export class Store {
         this.consumeReviewRequest(requestId, allowance.reason, now);
         return { ok: false as const, reason: allowance.reason, detail: allowance.detail };
       }
-      // EXPLICIT ONLY (v50): an automatic ask that would be a retry — a
-      // stale queued one, a replayed disposition's, a row written before
-      // this rule — is spent unrun HERE, before the rail and before any
-      // run row; only a fresh operator act opens attempt 2 or 3.
+      // An automatic replay is still one-shot unless this exact queued
+      // request holds the new signed service-retry authority. Re-prove it
+      // before reserving the rail or opening a run.
       if (reviewRequestOriginOf(row) === "automatic") {
         const replay = this.automaticReviewReplayProblem(sourceRun, requestId);
-        if (replay !== null) {
+        const retry = replay === null ? null : this.automaticReviewRetryAuthority(sourceRun, now, requestId);
+        if (retry !== null && (!retry.ok || String(row["basis"]) !== "mode" || retry.mode.digest !== row["mode_digest"])) {
           this.consumeReviewRequest(requestId, "explicit-only", now);
-          return { ok: false as const, reason: "explicit-only" as const, detail: replay };
+          return { ok: false as const, reason: "explicit-only" as const, detail: retry.ok ? "the retry names another mode signature" : retry.detail };
         }
       }
       if (repo !== null) {
@@ -15829,7 +15909,7 @@ export class Store {
             link: chatControlHref("acceptance", taskId, parent) }, now);
         }
       } else {
-        this.noteLifecycle({ taskRef, run: id, kind: "review-finished", identity: `r${id}`, subject: `Independent review attempt ${attempt} did not finish`, body: "The saved result is unchanged. Another review needs an explicit request.", link }, now);
+        this.noteLifecycle({ taskRef, run: id, kind: "review-finished", identity: `r${id}`, subject: `Independent review attempt ${attempt} did not finish`, body: "The saved result is unchanged. Check the current review status for the next step.", link }, now);
       }
     }
   }
@@ -16356,7 +16436,7 @@ export class Store {
       } else {
         if (parent.role === "reviewer") refuse(`reviewer run #${parent.id} is a review already — a correction child is admitted by admitCorrection`);
         if (request === undefined) refuse(`run #${parent.id} is reviewed only through its open review request — none was presented`);
-        const open = this.db.prepare("SELECT basis, origin FROM review_request WHERE id = ? AND run = ? AND consumed_at IS NULL").get(request, parent.id) as Record<string, unknown> | undefined;
+        const open = this.db.prepare("SELECT basis, origin, mode_digest FROM review_request WHERE id = ? AND run = ? AND consumed_at IS NULL").get(request, parent.id) as Record<string, unknown> | undefined;
         if (open === undefined) refuse(`review request #${request} is not run #${parent.id}'s open request — nothing reviews without one`);
         // THE BOUNDED ALLOWANCE (v50): a root opens only while its source
         // has no successful review, no root still open, and fewer than
@@ -16366,12 +16446,15 @@ export class Store {
         if (allowance !== null) refuse(allowance.detail);
         reviewAttempt = this.nextRootReviewAttempt(parent.id);
         if (reviewAttempt > REVIEW_ROOT_ATTEMPTS) refuse(`run #${parent.id} has spent all ${REVIEW_ROOT_ATTEMPTS} review attempts — nothing retries a fourth time`);
-        // EXPLICIT ONLY (v50): an automatic ask opens attempt 1 and never
-        // another — the insert itself refuses a retry on it, whatever
-        // road presented the request.
+        // The raw insert also re-proves the narrow signed retry exception;
+        // presenting a queued automatic row alone grants no new authority.
         if (reviewRequestOriginOf(open!) === "automatic") {
           const replay = this.automaticReviewReplayProblem(parent.id, request);
-          if (replay !== null) refuse(replay);
+          if (replay !== null) {
+            const retry = this.automaticReviewRetryAuthority(parent.id, run.now, request);
+            if (!retry.ok) refuse(`${replay}; ${retry.detail}`);
+            else if (open!["basis"] !== "mode" || open!["mode_digest"] !== retry.mode.digest) refuse("the automatic review retry names another mode signature");
+          }
         }
         requestToConsume = request;
       }

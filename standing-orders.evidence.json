@@ -1,4 +1,13 @@
 {
   "version": 1,
-  "screenshots": []
+  "screenshots": [
+    {
+      "path": "evidence/continuous-assignment/desktop-assignment.png",
+      "caption": "Synthetic desktop 1440x900: one current action and exact prior task/run links in Attempts."
+    },
+    {
+      "path": "evidence/continuous-assignment/phone-feedback.png",
+      "caption": "Synthetic phone 390x844: full 492-character feedback before approval; no approval submitted."
+    }
+  ]
 }

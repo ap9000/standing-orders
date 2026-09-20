@@ -18,6 +18,8 @@ import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS } from "./knowledge-
 import { learningHtml } from "./workspace-ui.js";
 import { createSessionEndpoint } from './session-server.js';
 import { openWorkDecisionOf } from "./work-summary.js";
+import { assignmentOf, assignmentEvidenceIntact, type AssignmentSnapshot } from './assignment.js';
+import { assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, reviewRetryChoiceHtml, ASSIGNMENT_CSS } from './assignment-ui.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
@@ -1839,6 +1841,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                 `<option value="1">agent-review every finished build</option>` +
                 `<option value="0">only when I ask</option>` +
                 `</select></label>`,
+              reviewRetryChoiceHtml(),
               `<label>if a subscription runs out<select name="allow-paid-fallback">` +
                 `<option value="">never switch to a paid API key on its own (the default, every preset)</option>` +
                 `<option value="1">allow the approved fallback — spend moves to that account</option>` +
@@ -3524,6 +3527,20 @@ export function createDecisionServer(options: ServeOptions): Server {
       return one !== undefined && runnerAlive(one, clock());
     });
 
+  /** Reuse the receipt's detailed damage finding, then validate only a
+   * recorded ready handoff. Accepted limitations remain valid; changed
+   * saved bytes can never keep an assignment ready or complete. */
+  function freshAssignment(assignment: AssignmentSnapshot | null, receipt: CompletionReceiptView | null): AssignmentSnapshot | null {
+    if (assignment === null) return null;
+    const shown = assignmentWithEvidence(assignment, receipt === null ? null : receiptStatusOf(receipt), receipt?.runId ?? null);
+    if (!['ready-to-check', 'complete'].includes(shown.state) || shown.receipt === null || assignmentEvidenceIntact(store, evidenceRoot, shown.receipt)) return shown;
+    return assignmentWithEvidence(shown, {
+      token: 'evidence-damaged', label: 'Evidence unavailable',
+      detail: 'The saved evidence no longer verifies. Review its files and recorded limitations before checking this result.',
+      tone: 'problem', action: null,
+    }, shown.receipt.runId);
+  }
+
   /**
    * One Work row's facts (workspace package 1), from the records the task
    * page already reads: the dispatch diagnosis, the latest finished
@@ -3577,9 +3594,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     const earlierLive = task.family === undefined ? [] : earlierLiveVersions(task.family, now);
     if (earlierLive.length > 0 && !status.views.includes("running")) status.views = [...status.views, "running"];
     const otherActive = new Set([...(task.family?.otherActive.map(one => one.id) ?? []), ...earlierLive]).size;
+    const recordedAssignment = task.family === undefined ? null : assignmentOf(store, task.id, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) });
+    const assignment = freshAssignment(recordedAssignment, result ?? null);
+    const assignmentStatus = assignment === null ? status : assignmentStatusOf(assignment);
+    if (status.views.includes("running") && !assignmentStatus.views.includes("running")) assignmentStatus.views = [...assignmentStatus.views, "running"];
     return { ...facts, executionId: task.id, id: task.family?.root.id ?? task.id, title: task.family?.root.title ?? task.title,
       familyNotice: task.family?.problem ?? (otherActive ? `${otherActive} earlier version${otherActive === 1 ? " is" : "s are"} still waiting or running. Open History.` : null),
-      status, resultRunId: latest === null ? null : latest.id };
+      status: assignment === null ? status : { ...assignmentStatus, diagnostics: [...(status.diagnostics ?? []), ...(status.tone === "problem" && status.detail !== assignment.detail ? [status] : [])] }, assignment, assignmentProblem: status.tone === "problem", resultRunId: latest === null ? null : latest.id };
   }
 
   /** The compact task list for the master pane, the current row marked. */
@@ -3817,7 +3838,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     // focused chat always render identical facts (c2).
     const planRevisions = ref === null ? null : revisionLedgerOf(ref.id);
     const milestoneProgress = ref === null ? null : progressOf(ref.id, planRevisions?.current?.document ?? null);
+    const family = familyOf(taskId);
+    const recordedAssignment = family?.current.id !== taskId ? null : assignmentOf(store, taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) });
+    const assignment = freshAssignment(recordedAssignment, completion?.receipt ?? null);
     return {
+        assignment,
         task: found,
         status: workRowOf({ ...found, repo: ref?.repo ?? null }, now, completion?.receipt).status,
         dispatch: diagnoseTaskDispatch(store, taskId, now),
@@ -4127,7 +4152,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (data === null) return refuse(response, who, 404, "no such task", "/tasks");
     const family = familyOf(taskId);
     const presentedData = { ...data, rootId: family?.root.id ?? taskId, rootTitle: family?.root.title ?? data.task.title,
-      history: family === null ? "" : familyHistory(family),
+      history: family === null || data.assignment != null ? "" : familyHistory(family),
       versionLabel: family !== null && family.current.id !== taskId ? `Viewing ${family.versions.findIndex(one => one.id === taskId) === 0 ? "Original" : `Revision ${family.versions.findIndex(one => one.id === taskId)}`} · ${family.current.state === "running" ? "A newer revision is running" : "A newer revision is current"}` : null };
     if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
     if (cancelDraft !== undefined) presentedData.cancelDraft = cancelDraft;
@@ -5334,6 +5359,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         autoApproveFiling: body.get("auto-approve") === "" || body.get("auto-approve") === null ? preset.autoApproveFiling : body.get("auto-approve") === "1",
         planAuto: body.get("plan-auto") === "1",
         reviewAuto: body.get("review-auto") === "" || body.get("review-auto") === null ? preset.reviewAuto : body.get("review-auto") === "1",
+        reviewRetryAuto: body.get("review-retry-auto") === "1",
         // The paid-fallback grant is NEVER a preset default (R8): unchecked
         // stays false on every preset — only the explicit box grants it.
         allowPaidFallback: body.get("allow-paid-fallback") === "1",
@@ -5344,6 +5370,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         repairMaxAttempts: body.get("repair-auto") === "1" ? Math.max(0, Math.min(3, Math.floor(Number(body.get("repair-max-attempts") ?? "0")) || 0)) : 0,
         publication: body.get("publication") === "automerge" ? "automerge" : "notify",
       };
+      if (terms.reviewRetryAuto && !terms.reviewAuto) {
+        return refuse(response, who, 400, "Review service retries require agent reviews.", "/mode");
+      }
       if (terms.planAuto && (!terms.autoApproveFiling || !terms.reviewAuto)) {
         return refuse(response, who, 400, "Automatic planner approval requires automatic filing approval and agent reviews.", "/mode");
       }
@@ -5357,12 +5386,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         // signs exactly this digest — a drifted form refuses at /mode/sign.
         const nonce = mintApprovalNonce(who.name, "mode-sign", `${project}:${digest}`);
         const bodyHtml =
-          `<h1>sign the ${escape(name)} mode for ${escape(project)}</h1>` +
+          `<h1 style="overflow-wrap:anywhere">sign the ${escape(name)} mode for ${escape(project)}</h1>` +
           `<form method="post" action="/mode/sign" class="card approve-form">` +
           `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">` +
           `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
           `<input type="hidden" name="digest" value="${escape(digest)}">` +
-          ["name", "days", "publication", "auto-approve", "plan-auto", "review-auto", "allow-paid-fallback", "repair-auto", "repair-max-attempts"]
+          ["name", "days", "publication", "auto-approve", "plan-auto", "review-auto", "review-retry-auto", "allow-paid-fallback", "repair-auto", "repair-max-attempts"]
             .map(field => `<input type="hidden" name="${field}" value="${escape(body.get(field) ?? "")}">`)
             .join("") +
           `<input type="hidden" name="expiry" value="${escape(expiry)}">` +
@@ -8474,7 +8503,8 @@ function reviewRetryPanel(
   const cap = retry.cap;
   const latest = retry.latest;
   const ordinal = (attempt: number | null): string => `attempt ${attempt ?? retry.attempts.length} of ${cap}`;
-  const retriesLeft = retry.retriesRemaining === 1 ? "1 explicit retry left" : `${retry.retriesRemaining} explicit retries left`;
+  const automatic = retry.openRequest?.origin === "automatic";
+  const retriesLeft = `${retry.retriesRemaining}${automatic ? "" : " explicit"} ${retry.retriesRemaining === 1 ? "retry" : "retries"} left`;
   const wasInterrupted = latest !== null && (latest.outcome === "interrupted" || latest.reason === "interrupted");
   const latestWords = latest === null ? "" : wasInterrupted ? "was interrupted" : `failed${latest.reason === null ? "" : ` (${escape(latest.reason)})`}`;
   const copy: Record<ReviewRetryState["state"], { title: string; detail: string }> = {
@@ -8483,7 +8513,7 @@ function reviewRetryPanel(
       title: retry.attempts.length === 0 ? "Review queued" : `Review retry queued · ${ordinal(retry.nextAttempt)}`,
       detail: retry.attempts.length === 0
         ? "The requested independent review is waiting for a worker."
-        : `The explicit retry${retry.openRequest === null ? "" : ` asked by ${escape(retry.openRequest.requestedBy)}`} is waiting for a worker; ${latest === null ? "" : `${ordinal(latest.attempt)} ${latestWords}. `}${retriesLeft} after it.`,
+        : `${automatic ? "The signed mode queued this retry. It" : `The explicit retry${retry.openRequest === null ? "" : ` asked by ${escape(retry.openRequest.requestedBy)}`}`} is waiting for a worker; ${latest === null ? "" : `${ordinal(latest.attempt)} ${latestWords}. `}${retriesLeft} after it.`,
     },
     running: {
       title: `Reviewing · ${ordinal(retry.live?.attempt ?? null)}`,
@@ -8491,7 +8521,7 @@ function reviewRetryPanel(
     },
     succeeded: {
       title: `Reviewed · ${ordinal(retry.succeeded?.attempt ?? null)}`,
-      detail: retry.retriesUsed === 0 ? "The independent review landed on its first attempt." : `The independent review landed after ${retry.retriesUsed} explicit ${retry.retriesUsed === 1 ? "retry" : "retries"}; a successful review is never retried.`,
+      detail: retry.retriesUsed === 0 ? "The independent review landed on its first attempt." : `The independent review landed after ${retry.retriesUsed} ${retry.retriesUsed === 1 ? "retry" : "retries"}; a successful review is never retried.`,
     },
     retryable: {
       title: `Review ${wasInterrupted ? "interrupted" : "failed"} · ${ordinal(latest?.attempt ?? null)}`,
@@ -11752,7 +11782,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -14958,7 +14988,7 @@ function taskComposerHtml(data: {
 /** A task list page's ceiling: the newest rows, the bound printed. */
 const WORK_PAGE = 200;
 
-type WorkRow = WorkFacts & { executionId?: string; familyNotice?: string | null; status: WorkStatus; resultRunId: number | null };
+type WorkRow = WorkFacts & { assignment?: AssignmentSnapshot | null; assignmentProblem?: boolean; executionId?: string; familyNotice?: string | null; status: WorkStatus; resultRunId: number | null };
 
 function publicationFactsOf(publication: Publication | null): PublicationFacts {
   return publication === null
@@ -15045,10 +15075,11 @@ function workPage(
       // disclosure that works without script and by keyboard — never
       // removed, never shrunk. The label itself names a failed check, a
       // needed approval, or an exception, so nothing critical folds away.
+      (row.assignment != null ? `<div class="work-row-status">${assignmentSummaryHtml(row.assignment, { compact: true, problem: row.assignmentProblem === true, diagnostics: row.status.diagnostics })}</div>` :
       `<div class="work-row-status">${statusLineHtml(row.status)}${action}${row.familyNotice == null ? "" : `<p class="problem">${escape(row.familyNotice)}</p>`}` +
       `<details class="work-details"><summary>Details</summary><p class="work-detail">${escape(row.status.detail)}</p>` +
       workDiagnosticsHtml(row.status.diagnostics) +
-      `<p class="work-meta work-id">Task <span class="mono">${escape(row.id)}</span></p></details></div>` +
+      `<p class="work-meta work-id">Task <span class="mono">${escape(row.id)}</span></p></details></div>`) +
       `</article>`
     );
   };
@@ -16821,6 +16852,7 @@ function revisionLineageHtml(lineage: RevisionLineage | null): string {
 }
 
 function taskBody(data: {
+  assignment?: AssignmentSnapshot | null;
   rootId?: string;
   rootTitle?: string;
   history?: string;
@@ -18005,7 +18037,7 @@ function taskBody(data: {
       : `<details class="section" id="${title.replace(/\s+/g, "-")}"${open ? " open" : ""}><summary><h2>${title}${count === undefined ? "" : ` <span class="lane-count">${count}</span>`}</h2></summary>` +
         html.replace(`<h2>${title}</h2>`, "") + `</details>`;
 
-  const receiptLeads = task.state === "done" && data.completion?.receipt != null;
+  const receiptLeads = data.assignment == null && task.state === "done" && data.completion?.receipt != null;
   // Exact identity stays available in Task options; failures stay in the
   // status and property rail, and approval provenance stays in the ceremony.
   const identity = `<p class="meta task-identity">Task ID <span class="mono">${escape(task.id)}</span>` +
@@ -18024,11 +18056,11 @@ function taskBody(data: {
     data.versionLabel == null ? "" : `<p class="meta">${escape(data.versionLabel)} · <a href="${taskHref(data.rootId ?? task.id)}">Current work</a></p>`,
     data.history ?? "",
     // The result takes over from the task status as soon as it is ready.
-    receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope"),
+    data.assignment != null ? assignmentSummaryHtml(data.assignment, { hideAction: approveForm !== "" && data.dispatch?.action === "approve-scope", problem: status.tone === "problem", diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] }) : receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope"),
     // The exact-run control (v52), directly under the scheduler's answer:
     // the one place a person stops or resumes THIS attempt.
     taskControlDetailsHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task"),
-    data.completion?.receipt == null || receiptLeads ? "" : `<details class="task-previous-result"><summary>Previous result</summary>${completionReceiptCard(data.completion.receipt, task.id, "task")}</details>`,
+    data.completion?.receipt == null || receiptLeads ? "" : `<details class="task-previous-result"${data.completion.receipt.facts.evidenceProblems.length > 0 || data.completion.receipt.caveats.length > 0 ? " open" : ""}><summary>${data.assignment != null && task.state === "done" ? "Result" : "Previous result"}</summary>${completionReceiptCard(data.completion.receipt, task.id, "task")}</details>`,
     progressCard,
     revisionLedgerCard,
     planCard,
@@ -18122,7 +18154,7 @@ function taskBody(data: {
             : " · no checks observed"
         }</span></p>`,
     section("report", reportCard, true),
-    section("attempts", runs, true, data.runs.length),
+    data.assignment == null ? section("attempts", runs, true, data.runs.length) : section("Build activity", runs.replace("<h2>attempts</h2>", ""), false, data.runs.length).replace('id="Build-activity"', 'id="attempts"'),
     section("usage", spendCard, false),
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
     section(
