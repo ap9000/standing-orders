@@ -383,3 +383,5 @@ function isDatabaseBusy(error) {
 function waitForConcurrentWriter(db) {
     db.exec(`PRAGMA busy_timeout = ${CONCURRENT_WRITER_WAIT_MS}`);
 }
+
+Current recovery review context: The recovery anchor relies on atomic credential authentication, registration and lease updates; the complete functions above establish those transaction boundaries. This annotation grants no process-exit or settlement authority.
