@@ -1,1 +1,1 @@
-{"version":1,"screenshots":["evidence/process-recovery/desktop-review.png","evidence/process-recovery/phone-review.png"]}
+{"version":1,"screenshots":[{"path":"evidence/process-recovery/desktop-review.png","caption":"Synthetic desktop: passing checks reach lead review with missing supporting material visible; reading the result starts no extra work."},{"path":"evidence/process-recovery/phone-review.png","caption":"Synthetic phone viewport: the same ready result, limitation and review action; physical phone behavior untested."}]}
