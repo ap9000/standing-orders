@@ -1,0 +1,243 @@
+{
+  "version": 1,
+  "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+  "sourceTree": "685512ad6ed8f62e3705571d9e8b54a7f69073c1",
+  "source": {
+    "src/serve.ts": "44d1a38d653597e02efdd614a64ab27fa53d4590fc2f05a2fc1b2ab830f874bc",
+    "src/assignment-ui.ts": "303f99a49c7a6f7604fa26f4cdd4ec3e98ea16aab06f436f9663c0af9f9ea5dc",
+    "src/assignment.ts": "9cebb19759a0d3dee8b58751f5ed6ddc346e016df8b7b71e66af9ae423cb64d3",
+    "src/workspace-ui.ts": "dfa3f0164496beccdf037a9b435f2b2cf313b9a675f36127e666a29cf633b838",
+    "src/work-summary.ts": "509ad69a9be56ca1002dfb5336e9eefc9b273fc41cd6764a907d6a5dd349a8b1",
+    "src/modes.ts": "8436845e0f847ac5c2db1d27f9e7de2d822a029b611ca5b89f32645ec28f387e",
+    "src/store.ts": "45f60333e5656de36a3595d9f3aaed44372e14f4fdd251bdef1ffd94cbce069b",
+    "src/result-review.ts": "dfd8db57958c2b9b3526ba8cca2728bf4926b5a7410053e890787c4d8485c8fe",
+    "src/demo.ts": "78e7a944e5019b5570db7f5d14daa78c84b3f5f3fe974447d6feb46e518838e8",
+    "src/evidence.ts": "35924f17c2e81e88fbd637efb2320a1ecedc532948341e8df023e4738ab8fb80",
+    "src/review-context.ts": "3a2d74d91d57721361bf423ccb36edce50964598bf75efdc1a675d0d9d346c25",
+    "src/verification-evidence.ts": "e18c303e0847fbeef913b95d65f0cd7fffb8bc5987a005b56bc4804fc4e81dce"
+  },
+  "loadedRuntime": {
+    "schemaVersion": 70,
+    "hashes": {
+      "dist/serve.js": "d3460ad6e793aca9965d6e7909a6664cb09fa35b8a6a48c278aa865252cb81e5",
+      "dist/assignment-ui.js": "badc767ae7235e053914c0f2de26615079f323626865be991f8a39eea9b56308",
+      "dist/assignment.js": "d208231cc7da23591aba84ad7aa2283d8afd6f33a83c11ebeed4a4177047d080",
+      "dist/workspace-ui.js": "cdb6d457530e17452724041e120e4a2baa7b438725ca0b2a5b2690db546e74f8",
+      "dist/work-summary.js": "f3bcbd1a92dc6828cbaca34645119370228bb263eceeebec2e23da8662de360a",
+      "dist/modes.js": "54c2f2d4ea25dadf2e44f70be0c07f83b4de5a6b799240635283ca02d15a74a6",
+      "dist/store.js": "f30d432644f4b264c12eebfe84b11b85486b0b4cdde082ff3a1e8bf97995cebb",
+      "dist/result-review.js": "cd7aa603edebd00b5b29364ac9a7366bb757c2275159c208288d3bd00f494a74",
+      "dist/demo.js": "5e30f4fc3c5f4bd1b59bc552f7396609bb32a95d2d57109a081eec9e38852a83",
+      "dist/evidence.js": "a856b4f98dce11bca490d4d66729abc0d28a4e10a861e5177c0a123e9730e2ad",
+      "dist/review-context.js": "1655deb2fbcae844a0d82f65e70bcbde230a927d1200284947b156c53bc27f3a",
+      "dist/verification-evidence.js": "d73779c86e3059e7fae5f8882ecf7150f98c878f02128c6e27b34f773e61566c"
+    }
+  },
+  "fixture": "Fresh owned demo; original task confirm-empty-state-copy/run8. Native passing check receipt is synthetically sealed, machine+semantic verdict set short with missing goal-review metadata. This is sample evidence, not a real project test or provider run. No bytes were damaged. Independent review unrequested, no repair chain. No installed DB/runtime used.",
+  "checks": [
+    {
+      "name": "desktop passing-check / missing-metadata handoff",
+      "ok": true,
+      "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+      "observed": {
+        "url": "http://127.0.0.1:4202/t/confirm-empty-state-copy",
+        "assignment": "Ready for review\nReview result\n\nChecks passed.\n\nThe saved source inventory is incomplete; a screenshot is missing.\n\nAttempts 1",
+        "width": 1440,
+        "height": 900,
+        "scrollWidth": 1440,
+        "result": "/review?result=confirm-empty-state-copy&run=8&project=%3Cdemo-project%3E%2Fweb-console",
+        "actionHeight": 44,
+        "checksDetailClass": "meta assignment-detail",
+        "limitationCount": 1,
+        "visibleGenericDiagnostic": 0
+      }
+    },
+    {
+      "name": "phone passing-check / missing-metadata handoff",
+      "ok": true,
+      "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+      "observed": {
+        "url": "http://127.0.0.1:4202/t/confirm-empty-state-copy",
+        "assignment": "Ready for review\nReview result\n\nChecks passed.\n\nThe saved source inventory is incomplete; a screenshot is missing.\n\nAttempts 1",
+        "width": 390,
+        "height": 844,
+        "scrollWidth": 390,
+        "result": "/review?result=confirm-empty-state-copy&run=8&project=%3Cdemo-project%3E%2Fweb-console",
+        "actionHeight": 44,
+        "checksDetailClass": "meta assignment-detail",
+        "limitationCount": 1,
+        "visibleGenericDiagnostic": 0
+      }
+    },
+    {
+      "name": "Read-only views do not create extra work or change proof authority",
+      "ok": true,
+      "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+      "observed": {
+        "checks": {
+          "proof": true,
+          "review": true,
+          "repairChain": true,
+          "family": true,
+          "runs": true
+        },
+        "ok": true,
+        "runCount": 1,
+        "reviewState": "unrequested",
+        "repairChain": null,
+        "proofVerdict": "short",
+        "machineVerdict": "short",
+        "proofAcceptance": null,
+        "task": "confirm-empty-state-copy",
+        "run": 8
+      }
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "desktop-review.png",
+      "sha256": "8cfb39834377bd9f84bb45475d1e7eb411ea8258536a1bc600ccd1bd599fa18a",
+      "width": 1440,
+      "height": 900,
+      "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+      "inspected": true
+    },
+    {
+      "path": "phone-review.png",
+      "sha256": "1dbc9a46c8966219d79a1cb99a5c1c80adf0afd92ee53e8f709eaf8c819cd44b",
+      "width": 390,
+      "height": 844,
+      "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+      "inspected": true
+    }
+  ],
+  "inspection": "Both images inspected after transitions: Ready for review, neutral Checks passed, exactly one visible specific limitation, exact44px Review result, no document overflow or fixed-control overlap. Historical status remains available in collapsed Attempts.",
+  "behaviorStage": {
+    "sourceCommit": "f4f6b87978ddc577133b3857db3e98489822e042",
+    "read": "Both viewports opened exact run8 result; limitation remained visible; before/after exact runs, family, review, repair and proof rows unchanged.",
+    "finalRefresh": "bee changes presentation only. Same owned DB reloaded, both task views captured, row comparison repeated successfully."
+  },
+  "priorJourneys": {
+    "desktop": {
+      "sourceCommit": "e0f2d016a3eeeb0ef2d844e5da69ee9235c6aeb6",
+      "task": "fix-payout-rounding",
+      "run": 6,
+      "steps": [
+        "Opened exact result and Changes; inspected payout.ts/payout.test.ts",
+        "Entered realistic long feedback and requested changes",
+        "Created unsigned revision; reopened Review plan at659860de, exact feedback visible/password empty"
+      ],
+      "changes": {
+        "url": "http://127.0.0.1:4202/review?result=fix-payout-rounding&run=6&project=%3Cdemo-project%3E%2Fpayments-api&tab=changes",
+        "width": 1440,
+        "scrollWidth": 1440,
+        "diffVisible": true,
+        "toggles": [
+          {
+            "label": "View",
+            "height": 28
+          },
+          {
+            "label": "Annotate",
+            "height": 28
+          }
+        ]
+      },
+      "savedPlan": {
+        "url": "http://127.0.0.1:4202/t/fix-payout-rounding?version=revise-fix-payout-rounding-from-1-annotation-on-build-6",
+        "width": 1440,
+        "scrollWidth": 1440,
+        "feedbackVisible": true,
+        "unsigned": true,
+        "passwordEmpty": true
+      }
+    },
+    "phone": {
+      "startedAtSource": "e0f2d016a3eeeb0ef2d844e5da69ee9235c6aeb6",
+      "revisionCreatedAtSource": "659860de3d33d9927ee6f79401704da4ec32e24c",
+      "task": "confirm-empty-state-copy",
+      "run": 8,
+      "steps": [
+        "Opened exact result and Changes; inspected inbox-copy.ts",
+        "Saved475-character realistic feedback",
+        "Reloaded note at659860de; focused Request changes and pressed Enter",
+        "Created unsigned revision; expanded Review plan, exact feedback visible/password empty"
+      ],
+      "changes": {
+        "url": "http://127.0.0.1:4202/review?result=confirm-empty-state-copy&run=8&project=%3Cdemo-project%3E%2Fweb-console&tab=changes",
+        "width": 390,
+        "scrollWidth": 390,
+        "diffVisible": true,
+        "toggles": [
+          {
+            "label": "View",
+            "height": 44
+          },
+          {
+            "label": "Annotate",
+            "height": 44
+          }
+        ]
+      },
+      "savedPlan": {
+        "url": "http://127.0.0.1:4202/t/confirm-empty-state-copy?version=revise-confirm-empty-state-copy-from-1-annotation-on-bui",
+        "width": 390,
+        "scrollWidth": 390,
+        "feedbackVisible": true,
+        "unsigned": true,
+        "passwordEmpty": true
+      }
+    }
+  },
+  "priorStateChecks": {
+    "sourceCommit": "659860de3d33d9927ee6f79401704da4ec32e24c",
+    "reason": "489 removes redundant assignment detail copy only. Changes/revision/error/empty renderers unchanged; final screenshots refreshed without replaying mutations. Initial9a observations are not used.",
+    "desktopEmpty": {
+      "url": "http://127.0.0.1:4202/work?view=completed&project=%3Cdemo-project%3E%2Fweb-console",
+      "text": "work\nAll\n4\nNeeds you\n3\nRunning\n0\nCompleted\n0\n\nNo completed work in this view.\n\nSee all work \u2192",
+      "width": 1440,
+      "scrollWidth": 1440,
+      "recovery": {
+        "text": "See all work \u2192",
+        "height": 44,
+        "href": "/work"
+      }
+    },
+    "phoneEmpty": {
+      "url": "http://127.0.0.1:4202/work?view=completed&project=%3Cdemo-project%3E%2Fweb-console",
+      "text": "work\nWork tools\nAll\n4\nNeeds you\n3\nRunning\n0\nCompleted\n0\n\nNo completed work in this view.\n\nSee all work \u2192",
+      "width": 390,
+      "scrollWidth": 390,
+      "recovery": {
+        "text": "See all work \u2192",
+        "height": 44,
+        "href": "/work"
+      }
+    },
+    "desktopStaleResult": {
+      "url": "http://127.0.0.1:4202/review?result=confirm-empty-state-copy&run=999999",
+      "status": 409,
+      "text": "Result changed\n\nThis acceptance link no longer matches the current result. Review the current task before accepting.\n\nReview results",
+      "width": 1440,
+      "scrollWidth": 1440,
+      "recoveryHeight": 44
+    },
+    "phoneStaleResult": {
+      "url": "http://127.0.0.1:4202/review?result=confirm-empty-state-copy&run=999999",
+      "status": 409,
+      "text": "Result changed\n\nThis acceptance link no longer matches the current result. Review the current task before accepting.\n\nReview results",
+      "width": 390,
+      "scrollWidth": 390,
+      "recoveryHeight": 44
+    },
+    "inspection": "Both viewport empty/error images inspected locally: clear44px recovery controls, no overflow. Project selected through normal switcher."
+  },
+  "reuse": "Earlier current-base desktop/phone feedback\u2192unsigned revision journeys and empty/error checks are reused with their original e0/659 source pins. They were not rerun on bee; final screenshots and the missing-metadata read check are current. Initial9a evidence is excluded. Prior489 report remains preserved locally.",
+  "limits": [
+    "Chromium1440x900 and390x844 simulation; no physical phone/Safari/touch keyboard/screen-reader validation.",
+    "This read-only browser check proves no new work from these reads. No background worker/provider was started, so scheduler/automatic-repair guarantees rely on separate focused code tests.",
+    "No lead acknowledgment, approval signature, proof acceptance or deployment performed. Native release/strict verification is outside this synthetic UI check.",
+    "Earlier desktop diff toggles28px; phone44px. Earlier long-feedback475characters, keyboard revision, unsigned/password-empty and44px recovery checks retain their original source attribution."
+  ],
+  "cleanup": "Both owned browsers closed and preview16915/session16861 exited0; fresh demo and prior journey histories preserved."
+}
