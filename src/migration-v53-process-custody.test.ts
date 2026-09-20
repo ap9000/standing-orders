@@ -72,6 +72,7 @@ const T0 = new Date("2026-09-12T08:00:00.000Z");
     raw.prepare("INSERT INTO run_process (run, pid, host, process_group, observed_at, exited_at) VALUES (?, 4243, ?, 0, ?, ?)").run(run, hostname(), T0.toISOString(), T0.toISOString());
     const before = raw.prepare("SELECT id, run, pid, host, process_group, observed_at, exited_at FROM run_process ORDER BY id").all();
     expect(() => raw.prepare("SELECT boot_id FROM run_process").all()).toThrow();
+    raw.exec("DROP TABLE service_cursor");
     raw.prepare("UPDATE schema_version SET version = 52").run();
     store.close();
     store = null;
@@ -79,7 +80,7 @@ const T0 = new Date("2026-09-12T08:00:00.000Z");
 
     store = openStore(file);
     expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"])).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(69);
+    expect(SCHEMA_VERSION).toBe(70);
     expect(columns(file)).toEqual(expect.arrayContaining(["boot_id", "containment", "container", "container_empty_at"]));
     const after = store.raw().prepare("SELECT * FROM run_process ORDER BY id").all();
     expect(after.map(row => ({ id: row["id"], run: row["run"], pid: row["pid"], host: row["host"], process_group: row["process_group"], observed_at: row["observed_at"], exited_at: row["exited_at"] }))).toEqual(before);

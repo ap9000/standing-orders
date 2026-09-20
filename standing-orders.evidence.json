@@ -1,29 +1,4 @@
 {
   "version": 1,
-  "screenshots": [
-    {
-      "path": "evidence/interface-ui/screenshots/desktop-review.png",
-      "caption": "Summary: exact build8, one Review evidence action, neutral current-list note, original outcome and prior-version warning retained."
-    },
-    {
-      "path": "evidence/interface-ui/screenshots/desktop-changes.png",
-      "caption": "Changes: exact build8, source diff remains in its own horizontal scroller; tabs and feedback controls fit the page."
-    },
-    {
-      "path": "evidence/interface-ui/screenshots/desktop-revision.png",
-      "caption": "Existing revision2: full262-character feedback appears once before the empty password and exact approval terms; approval still required, no attempt."
-    },
-    {
-      "path": "evidence/interface-ui/screenshots/phone-approval-feedback.png",
-      "caption": "Existing revision1: full482-character feedback visible once beneath its source build6; exact terms and empty password remain below."
-    },
-    {
-      "path": "evidence/interface-ui/screenshots/phone-review-changes.png",
-      "caption": "Exact build6 Changes: evidence caveat visible once, two files, View/Annotate44px; diff text scrolls within its own area."
-    },
-    {
-      "path": "evidence/interface-ui/screenshots/phone-revision-history.png",
-      "caption": "Existing revision2: original/build6 and both revisions shown, current revision awaits approval; earlier pending work remains explicit."
-    }
-  ]
+  "screenshots": []
 }

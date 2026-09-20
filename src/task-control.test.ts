@@ -187,7 +187,7 @@ describe("safe task stop and resume (v52)", () => {
   });
 
   test("a fresh file is born at the current schema with the run_stop table and a hold that admits the stop owner", () => {
-    expect(SCHEMA_VERSION).toBe(69);
+    expect(SCHEMA_VERSION).toBe(70);
     expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()?.["version"])).toBe(SCHEMA_VERSION);
     expect(store.raw().prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'run_stop'").get()).toBeDefined();
     const ddl = String(store.raw().prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hold'").get()?.["sql"]);
@@ -463,7 +463,7 @@ describe("safe task stop and resume (v52)", () => {
         owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff','contest','revision')),
         owner_id TEXT NOT NULL, reason TEXT NOT NULL, until TEXT, held_at TEXT NOT NULL, UNIQUE (owner_kind, owner_id))`);
       raw.exec("INSERT INTO hold_old (id, task_ref, owner_kind, owner_id, reason, until, held_at) SELECT id, task_ref, owner_kind, owner_id, reason, until, held_at FROM hold");
-      raw.exec("DROP TABLE hold; ALTER TABLE hold_old RENAME TO hold; DROP TABLE run_stop; DROP TABLE run_process; UPDATE schema_version SET version = 51");
+      raw.exec("DROP TABLE service_cursor; DROP TABLE hold; ALTER TABLE hold_old RENAME TO hold; DROP TABLE run_stop; DROP TABLE run_process; UPDATE schema_version SET version = 51");
       expect(() => raw.prepare("INSERT INTO hold (task_ref, owner_kind, owner_id, reason, held_at) VALUES (?, 'stop', '9', 'x', ?)").run(ref, T0.toISOString())).toThrow();
       legacy.close();
       const upgraded = openStore(file);

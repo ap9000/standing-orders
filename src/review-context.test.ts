@@ -1606,6 +1606,7 @@ describe("inherited review context (v51)", () => {
       DROP TABLE criterion_review; ${V50_CRITERION_REVIEW}; PRAGMA foreign_keys = ON;`);
     const before = raw.prepare("SELECT * FROM artifact ORDER BY id").all();
     expect(() => raw.prepare("INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, sha256, capture, created_at) VALUES (?, 'review-context', ?, 1, 1, 'x', 'x', ?)").run(run, `${run}/rc.json`, T0.toISOString())).toThrow();
+    raw.exec("DROP TABLE service_cursor");
     raw.prepare("UPDATE schema_version SET version = 50").run();
     store.close();
 

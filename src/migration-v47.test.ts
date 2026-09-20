@@ -72,6 +72,7 @@ describe("schema v47: explainable phase routing is additive", () => {
     raw.exec("DROP TABLE phase_tier_config");
     raw.exec("DROP TABLE provider_readiness");
     raw.exec("DROP TABLE run_route");
+    raw.exec("DROP TABLE service_cursor");
     raw.prepare("UPDATE schema_version SET version = 46").run();
     store.close();
     store = null;

@@ -181,7 +181,7 @@ describe("the v22 → v23 migration", () => {
       const { DatabaseSync } = require("node:sqlite");
       const raw = new DatabaseSync(file);
       raw.exec(
-        "DROP INDEX IF EXISTS push_delivery_due; DROP TABLE IF EXISTS push_delivery;" +
+        "DROP TABLE service_cursor; DROP INDEX IF EXISTS push_delivery_due; DROP TABLE IF EXISTS push_delivery;" +
           "DROP INDEX IF EXISTS push_subscription_live; DROP TABLE IF EXISTS push_subscription;" +
           "UPDATE schema_version SET version = 22;",
       );

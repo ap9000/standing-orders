@@ -43,6 +43,7 @@ describe("v66 shared action proposals", () => {
     );
     db.exec("DROP TABLE mate_proposal");
     db.exec("ALTER TABLE mate_proposal_old RENAME TO mate_proposal");
+    db.exec("DROP TABLE service_cursor");
     db.prepare("UPDATE schema_version SET version=?").run(version);
     db.close();
   }

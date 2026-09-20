@@ -2058,6 +2058,7 @@ describe("the v24 migration (Parity II foundations, rulings 10/11)", () => {
     const file = join(dir, "db.sqlite");
     const store = openStore(file);
     seed(store);
+    store.raw().exec("DROP TABLE service_cursor");
     store.raw().prepare("UPDATE schema_version SET version = 23").run();
     store.close();
     return file;
@@ -2191,6 +2192,7 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
     const file = join(dir, "db.sqlite");
     const store = openStore(file);
     seed(store);
+    store.raw().exec("DROP TABLE service_cursor");
     store.raw().prepare("UPDATE schema_version SET version = 24").run();
     store.close();
     return file;
@@ -2301,6 +2303,7 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
         .prepare("INSERT INTO task_steer (task_ref, author, note, created_at) VALUES (?, 'cli', 'legacy words', ?)")
         .run(ref, T0.toISOString());
       db.raw().prepare("UPDATE task_steer SET authorship_state = 'unverified-legacy'").run();
+      db.raw().exec("DROP TABLE service_cursor");
       db.raw().prepare("UPDATE schema_version SET version = 23").run();
       db.close();
       return f;
@@ -2725,6 +2728,7 @@ describe("the v26 attested runtime: phase_config admits gemini", () => {
     db.prepare(
       "INSERT INTO phase_config (scope, phase, provider, model, updated_at, updated_by) VALUES ('installation','build','codex','gpt-5-codex',?, 'alex')",
     ).run(T0.toISOString());
+    db.exec("DROP TABLE service_cursor");
     db.prepare("UPDATE schema_version SET version = 25").run();
     store.close();
     return file;
@@ -2755,6 +2759,7 @@ describe("the v26 attested runtime: phase_config admits gemini", () => {
     // carries the exact v25 CHECK literal — plus a smuggled column the
     // substring recognizer would have waved through (round-3 f6)
     db.exec(V25_PHASE_CONFIG.replace("model      TEXT,", "model      TEXT, smuggled TEXT,"));
+    db.exec("DROP TABLE service_cursor");
     db.prepare("UPDATE schema_version SET version = 25").run();
     store.close();
     expect(() => openStore(file)).toThrow(/not a shape this migration knows/);
@@ -2811,6 +2816,7 @@ describe("the v27 comparison migration: tournament_terms rebuilt, kind-aware mon
         overrun_reserve_microusd, total_budget_microusd, price_version, retries, publication_policy, created_at)
        VALUES (?, 1, 1, 'digest-x', '[{"provider":"claude","model":"m","repairModel":"m"}, {"provider":"claude","model":"n","repairModel":"n"}]', 2, 5000000, 1760000, 20000000, 1, 0, 'none', ?)`,
     ).run(taskRef, T0.toISOString());
+    db.exec("DROP TABLE service_cursor");
     db.prepare("UPDATE schema_version SET version = 26").run();
     store.close();
 
@@ -2863,6 +2869,7 @@ describe("the v27 comparison migration: tournament_terms rebuilt, kind-aware mon
     const db = store.raw();
     db.exec("DROP TABLE tournament_terms");
     db.exec(V26_TERMS_DDL.replace("price_version             INTEGER NOT NULL,", "price_version             INTEGER NOT NULL, smuggled TEXT,"));
+    db.exec("DROP TABLE service_cursor");
     db.prepare("UPDATE schema_version SET version = 26").run();
     store.close();
     expect(() => openStore(file)).toThrow(/not a shape this migration knows/);
@@ -2880,6 +2887,7 @@ describe("the v28 parallel-sessions migration: the per-runner bound is withdrawn
     let store = openStore(file);
     // simulate the v27 world: recreate the old index, wind the version back
     store.raw().exec("CREATE UNIQUE INDEX IF NOT EXISTS one_held_session_per_runner ON held_session (runner) WHERE ended_at IS NULL");
+    store.raw().exec("DROP TABLE service_cursor");
     store.raw().prepare("UPDATE schema_version SET version = 27").run();
     store.close();
 
@@ -2968,7 +2976,7 @@ describe("migration to v30 (fallback chains) from an AUTHENTIC v29 fixture", () 
     // Stamp v29 and reopen — migrate() re-adds fallback tables, quota PK,
     // any missing columns, and must not rewrite the seeded rows.
     const back = openStore(db);
-    back.raw().exec("UPDATE schema_version SET version = 29");
+    back.raw().exec("DROP TABLE service_cursor; UPDATE schema_version SET version = 29");
     back.close();
 
     const up = openStore(db);
@@ -3567,6 +3575,7 @@ describe("migration-recovery: authentic v47 and interrupted −47 databases upgr
       taskRefIds: (raw.prepare("SELECT id, external_id FROM task_ref ORDER BY id").all() as Record<string, unknown>[]),
       routineDigest,
     };
+    raw.exec("DROP TABLE service_cursor");
     raw.prepare("UPDATE schema_version SET version = ?").run(startVersion);
     seeded.close();
     return { db, token: added.token, routineId: created.id, legacyRoutineId: legacy.id, rubric, before };
@@ -3694,6 +3703,7 @@ describe("migration to v48: the routine freezes its route; `agents` joins the pr
     raw.exec("ALTER TABLE mate_proposal_v43 RENAME TO mate_proposal");
     raw.exec("INSERT INTO mate_thread (approver, ceiling_digest, opened_at) VALUES ('alex', 'c', '2026-09-01T00:00:00.000Z')");
     raw.exec("INSERT INTO mate_proposal (id, thread, turn, kind, payload_json, ceiling_digest, state, created_at) VALUES (7, 1, 1, 'steer', '{}', 'c', 'pending', '2026-09-01T00:00:00.000Z')");
+    raw.exec("DROP TABLE service_cursor");
     raw.prepare("UPDATE schema_version SET version = 47").run();
     seeded.close();
     // Reopen: the migration runs.

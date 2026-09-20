@@ -77,6 +77,7 @@ describe("v64 Telegram result images", () => {
     old.exec("DROP TABLE telegram_conversation_part");
     old.exec("ALTER TABLE telegram_conversation_part_v63 RENAME TO telegram_conversation_part");
     old.exec("DROP TABLE mate_turn_evidence");
+    old.exec("DROP TABLE service_cursor");
     old.prepare("UPDATE schema_version SET version = ?").run(version);
     old.close();
   };
@@ -99,7 +100,7 @@ describe("v64 Telegram result images", () => {
     }
 
     store = openStore(file);
-    expect(SCHEMA_VERSION).toBe(69);
+    expect(SCHEMA_VERSION).toBe(70);
     expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(SCHEMA_VERSION);
     const after = store.handle.prepare("SELECT * FROM telegram_conversation_part ORDER BY ordinal").all() as Record<string, unknown>[];
     expect(after.map(v63Columns)).toEqual(before.parts.map(v63Columns));

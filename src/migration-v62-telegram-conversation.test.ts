@@ -36,6 +36,7 @@ describe("v62 Telegram conversation queue", () => {
       old.prepare("INSERT INTO run_stop (run, task_ref, requested_by, requested_via, requested_at, settled_at, settlement, resumed_at, resumed_by, resumed_via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .run(row["run"], row["task_ref"], row["requested_by"], row["requested_via"], row["requested_at"], row["settled_at"], row["settlement"], row["resumed_at"], row["resumed_by"], row["resumed_via"]);
     }
+    old.exec("DROP TABLE service_cursor");
     old.prepare("UPDATE schema_version SET version = ?").run(version);
     old.close();
     return stops;
@@ -65,7 +66,7 @@ describe("v62 Telegram conversation queue", () => {
     expect(before).toHaveLength(1);
 
     store = openStore(file);
-    expect(SCHEMA_VERSION).toBe(69);
+    expect(SCHEMA_VERSION).toBe(70);
     expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(SCHEMA_VERSION);
     expect(store.handle.prepare("SELECT * FROM run_stop ORDER BY run").all()).toEqual(before);
     expect(String(store.handle.prepare("SELECT sql FROM sqlite_master WHERE name = 'run_stop'").get()?.["sql"])).toContain("'cli','web','telegram'");
@@ -95,6 +96,7 @@ describe("v62 Telegram conversation queue", () => {
     db.exec("DROP TABLE run_stop");
     // Every column of v52, but a CHECK list no build ever wrote: plausible, and unknown.
     db.exec(V52_RUN_STOP.replace("requested_via IN ('cli','web')", "requested_via IN ('cli')"));
+    db.exec("DROP TABLE service_cursor");
     db.prepare("UPDATE schema_version SET version = 61").run();
     db.close();
     expect(() => openStore(file)).toThrow(/run_stop table's DDL is not a shape this migration knows/);

@@ -51,6 +51,7 @@ describe("v63 Telegram durable replies", () => {
       old.exec("DROP TABLE run_stop");
       old.exec(V52_RUN_STOP);
     }
+    old.exec("DROP TABLE service_cursor");
     old.prepare("UPDATE schema_version SET version = ?").run(version);
     old.close();
   };
@@ -66,7 +67,7 @@ describe("v63 Telegram durable replies", () => {
     const fromV62 = Math.abs(version) === 62;
 
     store = openStore(file);
-    expect(SCHEMA_VERSION).toBe(69);
+    expect(SCHEMA_VERSION).toBe(70);
     expect(store.handle.prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(SCHEMA_VERSION);
     expect(store.handle.prepare("SELECT * FROM telegram_conversation ORDER BY id").all()).toEqual(fromV62 ? before.conversation : []);
     expect(store.handle.prepare("SELECT * FROM telegram_proposal_action ORDER BY token").all()).toEqual(fromV62 ? before.actions : []);

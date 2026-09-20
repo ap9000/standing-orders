@@ -52,6 +52,7 @@ describe("v67 Slack audit and durable delivery", () => {
     db.prepare(
       "INSERT INTO decision(run,urgency,state,recap,question,options,recommendation,created_at,answered_via) VALUES(?,'blocking','answered','recap','question','[]','one','2026-09-17','telegram')",
     ).run(run);
+    db.exec("DROP TABLE service_cursor");
     db.prepare("UPDATE schema_version SET version=?").run(version);
     const stops = db.prepare("SELECT * FROM run_stop").all(),
       decisions = db.prepare("SELECT * FROM decision").all();

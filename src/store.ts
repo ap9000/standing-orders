@@ -104,7 +104,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
-export const SCHEMA_VERSION = 69;
+export const SCHEMA_VERSION = 70;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -1403,6 +1403,14 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_version (
   version INTEGER NOT NULL
+);
+
+-- Restart-safe position of bounded maintenance reads. These offsets confer
+-- no execution, approval, delivery or evidence authority.
+CREATE TABLE IF NOT EXISTS service_cursor (
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL CHECK (value >= 0),
+  updated_at TEXT NOT NULL
 );
 
 -- The built-in task store.
@@ -3845,6 +3853,9 @@ function initializeStore(db: Database, file: string): Store {
   // with the file untouched, rather than running this build's DDL over a
   // shape it cannot name.
   const preflight = schemaVersionPreflight(db, file);
+  if (preflight !== null && Math.abs(preflight) >= 70 && !tableExists(db, "service_cursor")) {
+    throw new Error(`${file}: service progress is missing; refusing to silently reset worker cursors`);
+  }
   // Check existing authority metadata before even stamping a migration.
   if (preflight !== null && Math.abs(preflight) >= 54) {
     for (const table of ["approver", "invite"]) {
@@ -9359,6 +9370,19 @@ export class Store {
     const row = this.db.prepare("INSERT INTO action_ledger(at,actor,repo,task_id,run_id,action,outcome,source) VALUES (?,?,?,?,?,?,?,?)")
       .run(entry.at, entry.actor, entry.repo, entry.taskId, entry.runId, entry.action, entry.outcome, entry.source);
     return Number(row.lastInsertRowid);
+  }
+
+  serviceCursor(key: string): number {
+    const row = this.db.prepare("SELECT value FROM service_cursor WHERE key = ?").get(key);
+    const value = row === undefined ? 0 : Number(row["value"]);
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error("Worker cursor is invalid");
+    return value;
+  }
+
+  setServiceCursor(key: string, value: number, now: Date): void {
+    if (!/^[a-z0-9:-]{1,180}$/.test(key) || !Number.isSafeInteger(value) || value < 0) throw new Error("Worker cursor is invalid");
+    this.db.prepare("INSERT INTO service_cursor(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
+      .run(key, value, now.toISOString());
   }
 
   actionLedger(query: { repos: readonly string[] | null; actor?: string; outcome?: string; source?: string; taskId?: string; before?: number; limit?: number }): LedgerEntry[] {

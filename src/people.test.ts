@@ -191,7 +191,7 @@ describe("the severing revocation (D7)", () => {
           "  created_at  TEXT NOT NULL\n" +
           ", lifted_at TEXT, lifted_by TEXT)",
       );
-      raw.raw().exec("UPDATE schema_version SET version = 28");
+      raw.raw().exec("DROP TABLE service_cursor; UPDATE schema_version SET version = 28");
       raw.close();
     }
     const reopened = openStore(file);
