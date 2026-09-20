@@ -24,6 +24,8 @@ Carry this check into Standing Orders task acceptance criteria and review feedba
 
 ## Lean verification
 
+- Routine tasks hand their result and recorded check status to the lead for review. Missing optional proof reports, screenshots or model-review metadata are visible limitations, not a reason to start another agent turn or require a manually assembled evidence package. Use explicit feedback for revisions. Prepared release candidates still require their approved release checks.
+
 - During implementation, run typecheck and tests for the affected behavior. Add a small regression for each reproduced bug; reuse existing tests instead of adding overlapping suites.
 - For UI work, use one end-to-end journey at desktop and one phone viewport: open the result, inspect changes, leave feedback, and create a revision. Include affected empty, long-content, and failure states. Add other viewport checks only for a concrete risk or explicit acceptance requirement.
 - After a small copy or CSS repair, rerun the affected visual checks, not every browser script. Behavioral changes also require their focused tests.
