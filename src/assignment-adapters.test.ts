@@ -171,6 +171,24 @@ describe("assignment adapters preserve scope and acknowledgment authority", () =
     }
   });
 
+  test("real CLI entry point parses the inbox, acknowledgment and brief flags", async () => {
+    const tokenFile = join(directory, "entry-point.token"); writeFileSync(tokenFile, token, { mode: 0o600 });
+    async function entry(args: string[]) {
+      const lines: string[] = [];
+      const code = await main(["assignment", ...args, "--json", "--token-file", tokenFile], line => lines.push(line), { operate: { databaseFile: file, now: NOW } });
+      return { code, body: JSON.parse(lines.join("\n")) };
+    }
+    expect((await entry(["claim", "mine"])).code).toBe(0);
+    const inbox = await entry(["inbox", "--consumer", "cli-entry", "--limit", "1"]);
+    expect(inbox.code).toBe(0);
+    expect(inbox.body.result.batch.events).toHaveLength(1);
+    expect((await entry(["ack", "--consumer", "cli-entry", "--batch", inbox.body.result.batch.id])).code).toBe(0);
+    const brief = await entry(["brief", "--repo", REPO, "--limit", "1"]);
+    expect(brief.code).toBe(0);
+    expect(brief.body.result.assignments[0].rootId).toBe("mine");
+    expect((await entry(["inbox", "--consumer", "cli-entry"])).body.result.batch.events).toEqual([]);
+  });
+
   test.each([
     ["brief", { limit: 26 }], ["brief", { repo: "\n" }],
     ["inbox", {}], ["inbox", { consumer: "../escape" }], ["inbox", { consumer: "lead", after: 99 }],
