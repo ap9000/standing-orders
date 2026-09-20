@@ -1,0 +1,30 @@
+Fresh focused workflow execution; native final-candidate full gate remains separate.
+{"executionId":"bc8240af-e073-4fdc-af5f-b960ba68de1b","sourceCommit":"af4acd906edbd1876a563dcbd16551ca11278f26","worktree":"/Users/alekseypelletier/Developer/standing-orders-workflow-current-evidence-release","startedAt":"2026-09-20T09:26:55.716613+00:00","inputGitObjects":{"src":"8f257a44395bf30af57e36594d2b0f9493fa597c","test":"821dc35d0cbef21d04949b50bc5f7e8a202bc805","scripts":"80be74c1e956f6a09c7a74eb4c838a654101a567","package.json":"fc6468ca6fd366286e3a00bc8e182624159494c5","package-lock.json":"998b1a6a107fb119558a6c6286963fd31c057de6","tsconfig.json":"812569d19bcea8f773618fda978d0a2d6f1a9ab9","tsconfig.build.json":"af54537358d02dd49c10e6c67b38eec4c4a02bf1","vitest.config.ts":"ca8cf10ecc24dd0d775ece2349a45a8d25001e07"},"inputFileCount":445,"inputFilesSha256":"6d4d453e9c3b56ab739b6c38709686173941d8999bba5863d929c8159755a365","checks":[{"name":"typecheck","argv":["npm","run","typecheck"],"exitCode":0,"seconds":1.16,"log":"output/workflow-current-evidence/typecheck.log"},{"name":"focused","argv":["npx","vitest","run","src/assignment.test.ts","src/assignment-adapters.test.ts","src/service-cursor.test.ts","src/workspace-ui.test.ts","--reporter=dot"],"exitCode":0,"seconds":8.47,"log":"output/workflow-current-evidence/focused.log"}],"completedAt":"2026-09-20T09:27:14.664423+00:00","inputsUnchanged":true,"inputFilesAfterSha256":"6d4d453e9c3b56ab739b6c38709686173941d8999bba5863d929c8159755a365"}
+
+# typecheck
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+# focused
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-workflow-current-evidence-release
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+···················(node:38976) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·························(node:38974) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+······(node:38975) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  4 passed (4)
+      Tests  51 passed (51)
+   Start at  02:26:57
+   Duration  7.56s (transform 3.16s, setup 64ms, import 5.31s, tests 8.64s, environment 1ms)
+
