@@ -137,6 +137,7 @@ describe("operating the queue from the command line", () => {
         code: "needs-project",
         action: "place-task",
       });
+      expect(payload().work).toMatchObject({ taskId: "t-place", status: { token: "needs-project" }, primaryAction: { code: "place-task", target: { taskId: "t-place", runId: null, decisionId: null }, access: "operator-control", retry: "refresh-before-acting" } });
     });
 
     test("says bad usage with its own code, not as a refusal", async () => {

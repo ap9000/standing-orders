@@ -1,1 +1,29 @@
-{"version":1,"screenshots":[{"path":"evidence/coding-web/screenshots/code-desktop-empty-final.png","caption":"Desktop: project form with explicit native file and independent MCP access terms before consent."},{"path":"evidence/coding-web/screenshots/code-phone-screenshot-error-final.png","caption":"Phone viewport: missing committed screenshots preserve review terms and give a clear next action."},{"path":"evidence/coding-web/screenshots/code-desktop-ready-final.png","caption":"Desktop: real cart demo after same-thread resume; session rendering is unchanged by the consent correction."},{"path":"evidence/coding-web/screenshots/code-phone-consent-final.png","caption":"Phone viewport, scrolled: explicit MCP access terms before password and keyboard-focused Start coding."},{"path":"evidence/coding-web/screenshots/code-phone-changes-final.png","caption":"Phone viewport: bounded two-file diff and reachable Review for shipping."},{"path":"evidence/coding-web/screenshots/code-phone-shipping-final.png","caption":"Phone viewport: explicit outcome, observable checks and saved-commit review handoff."},{"path":"evidence/coding-web/screenshots/code-phone-closed-final.png","caption":"Phone synthetic closed-startup fixture: one keyboard-accessible New session action, no unusable composer."},{"path":"evidence/coding-web/screenshots/code-desktop-closed-final.png","caption":"Desktop synthetic closed-startup fixture: one New session action; saved request and checkout remain."}]}
+{
+  "version": 1,
+  "screenshots": [
+    {
+      "path": "evidence/interface-ui/screenshots/desktop-review.png",
+      "caption": "Summary: exact build8, one Review evidence action, neutral current-list note, original outcome and prior-version warning retained."
+    },
+    {
+      "path": "evidence/interface-ui/screenshots/desktop-changes.png",
+      "caption": "Changes: exact build8, source diff remains in its own horizontal scroller; tabs and feedback controls fit the page."
+    },
+    {
+      "path": "evidence/interface-ui/screenshots/desktop-revision.png",
+      "caption": "Existing revision2: full262-character feedback appears once before the empty password and exact approval terms; approval still required, no attempt."
+    },
+    {
+      "path": "evidence/interface-ui/screenshots/phone-approval-feedback.png",
+      "caption": "Existing revision1: full482-character feedback visible once beneath its source build6; exact terms and empty password remain below."
+    },
+    {
+      "path": "evidence/interface-ui/screenshots/phone-review-changes.png",
+      "caption": "Exact build6 Changes: evidence caveat visible once, two files, View/Annotate44px; diff text scrolls within its own area."
+    },
+    {
+      "path": "evidence/interface-ui/screenshots/phone-revision-history.png",
+      "caption": "Existing revision2: original/build6 and both revisions shown, current revision awaits approval; earlier pending work remains explicit."
+    }
+  ]
+}

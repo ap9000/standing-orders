@@ -272,6 +272,27 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(parseWorkView("running")).toBe("running");
     expect(parseWorkView("completed")).toBe("completed");
   });
+
+  test("an unanswered question leads over a disconnected builder while stop, approval, failure, and uncertain ownership stay visible", () => {
+    const question = { id: 12, runId: 9, question: "Which retry policy should we use?", overdue: false };
+    const disconnected = facts({ openDecision: question, dispatch: diagnosis({ code: "no-worker-online", summary: "Builder disconnected", action: "start-worker" }) });
+    expect(workStatusOf(disconnected)).toMatchObject({
+      token: "waiting-decision", label: "Waiting on your answer", detail: question.question,
+      action: { label: "Answer question", kind: "open-task" }, views: ["all", "needs-you"], rank: 0,
+      diagnostics: [{ token: "no-worker-online", label: "Builder disconnected" }],
+    });
+    expect(workStatusOf({ ...disconnected, openDecision: null })).toMatchObject({ token: "no-worker-online", action: { label: "Check connection" } });
+    for (const code of ["needs-approval", "waiting-incident", "vanished-run", "stopped", "held"] as const) {
+      expect(workStatusOf(facts({ openDecision: question, dispatch: diagnosis({ code }) })).token, code).toBe(code);
+    }
+    expect(workStatusOf(facts({ openDecision: question, state: "failed", dispatch: diagnosis({ code: "failed" }) })).token).toBe("failed");
+    expect(workStatusOf(facts({ openDecision: question, state: "cancelled" }))).toMatchObject({ token: "cancelled", views: ["all"], action: null });
+    expect(workStatusOf(facts({ openDecision: question, state: "done", result: built({ verdict: "refuted", reasons: ["the repository's approved verification command exited 1"] }) })).token).toBe("checks-failed");
+    const stop = { run: 9, role: "builder" as const, stop: {} as import("./store.js").RunStop };
+    expect(workStatusOf({ ...disconnected, control: { ...stop, kind: "stopping", unsettledRun: true } }).token).toBe("stopping");
+    expect(workStatusOf({ ...disconnected, control: { ...stop, kind: "paused", outcome: "interrupted", committed: false, worktree: null } }).token).toBe("stopped");
+    expect(workStatusOf(facts({ openDecision: question, state: "running", liveRunId: 9, dispatch: diagnosis({ code: "running", condition: "running" }) }))).toMatchObject({ token: "waiting-decision", views: ["all", "needs-you", "running"] });
+  });
 });
 
  test("saved evidence awaiting assessment has one clear review action", () => {

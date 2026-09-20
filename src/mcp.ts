@@ -221,7 +221,7 @@ const TOOLS: Tool[] = [
     handle: (ctx, args) => {
       const ref = str(args, "ref", 64);
       if (ref === null) return { ok: false, message: "ref is a task id, 1-64 characters" };
-      const detail = taskDetailFor(ctx.store, ctx.who, ref, ctx.evidenceRoot);
+      const detail = taskDetailFor(ctx.store, ctx.who, ref, ctx.evidenceRoot, ctx.now);
       if (detail === null) return { ok: false, message: `not-found: no task \`${ref}\` in your repositories` };
       return { ok: true, body: detail as unknown as Json };
     },

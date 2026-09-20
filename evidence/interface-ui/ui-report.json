@@ -1,0 +1,130 @@
+{
+  "version": 2,
+  "source": {
+    "src/serve.ts": "3f5d48fb7507012ac39468ef60df97a70fe524c5e4ffa412415e9069379e04ca",
+    "src/workspace-ui.ts": "e16cde7dc203ec59dee8fe403ba33a2a6172ff87130d062dc8d557b2052c4fb8",
+    "src/result-review.ts": "dfd8db57958c2b9b3526ba8cca2728bf4926b5a7410053e890787c4d8485c8fe",
+    "src/work-summary.ts": "57d25f3d1e45d447a68e2dca15f68b090ca89bf2582b760afeb640303955c955",
+    "src/result-actions.ts": "f5eccd0f6f85a4caca6a7a3a8add226338d24d9bbe5b3cb4193498dfeaacfd1c",
+    "src/demo.ts": "78e7a944e5019b5570db7f5d14daa78c84b3f5f3fe974447d6feb46e518838e8"
+  },
+  "sourceCommitAtInspection": "037d809f7a97ee965e24f0d4f1f2bf771be875b8",
+  "checks": [
+    {
+      "id": "desktop-1",
+      "ok": true,
+      "detailReport": "desktop.json",
+      "observation": "exact-result-summary"
+    },
+    {
+      "id": "desktop-2",
+      "ok": true,
+      "detailReport": "desktop.json",
+      "observation": "changes"
+    },
+    {
+      "id": "desktop-3",
+      "ok": true,
+      "detailReport": "desktop.json",
+      "observation": "review-before-consent"
+    },
+    {
+      "id": "desktop-4",
+      "ok": true,
+      "detailReport": "desktop.json",
+      "observation": "completed-empty"
+    },
+    {
+      "id": "desktop-5",
+      "ok": true,
+      "detailReport": "desktop.json",
+      "observation": "stale-result"
+    },
+    {
+      "id": "phone-1",
+      "ok": true,
+      "detailReport": "phone.json",
+      "observation": "Saved long feedback before approval"
+    },
+    {
+      "id": "phone-2",
+      "ok": true,
+      "detailReport": "phone.json",
+      "observation": "Exact result and changes"
+    },
+    {
+      "id": "phone-3",
+      "ok": true,
+      "detailReport": "phone.json",
+      "observation": "Existing revision2 history and status"
+    },
+    {
+      "id": "phone-4",
+      "ok": true,
+      "detailReport": "phone.json",
+      "observation": "Completed empty view and repair"
+    },
+    {
+      "id": "phone-5",
+      "ok": true,
+      "detailReport": "phone.json",
+      "observation": "Stale exact-result failure"
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "screenshots/desktop-review.png",
+      "sha256": "32c44ea692b6103b35433b3b1b779bfcc898bc1716d8a6dc503b5715f996144c",
+      "inspectedBy": [
+        "navigation_repair",
+        "root"
+      ]
+    },
+    {
+      "path": "screenshots/desktop-changes.png",
+      "sha256": "5c5d8b8b95ec84ad3be889d5a5bddf0d7d9fdf3a81d1e876592c4b4c399d03a5",
+      "inspectedBy": [
+        "navigation_repair",
+        "root"
+      ]
+    },
+    {
+      "path": "screenshots/desktop-revision.png",
+      "sha256": "919353fa2b33429bbf3b89974739e296e108e6bb03d81c441f895c6fd3a5ad89",
+      "inspectedBy": [
+        "navigation_repair",
+        "root"
+      ]
+    },
+    {
+      "path": "screenshots/phone-approval-feedback.png",
+      "sha256": "251afd8caf709af2dfce8e73e2f7371755232ac728a4e719cad8f7289a318d68",
+      "inspectedBy": [
+        "navigation_repair",
+        "root"
+      ]
+    },
+    {
+      "path": "screenshots/phone-review-changes.png",
+      "sha256": "3f6bb13afbc888477282f2f62dbe35d8f161e297f27e60f267792a0aff03ad88",
+      "inspectedBy": [
+        "navigation_repair",
+        "root"
+      ]
+    },
+    {
+      "path": "screenshots/phone-revision-history.png",
+      "sha256": "096682f42d0c51d50b20d8e18a0ca4eaeeb4fbfd3ea8afe9e6e9b9cdb6128c30",
+      "inspectedBy": [
+        "navigation_repair",
+        "root"
+      ]
+    }
+  ],
+  "limitations": [
+    "Chromium desktop and phone viewport emulation only; no physical-device, software-keyboard, touch-gesture or screen-reader audit.",
+    "Earlier keyboard feedback submission/revision creation is retained as separately labelled evidence; this refresh did not repeat creation.",
+    "No installed-runtime acceptance or native session/assignment behavior is claimed.",
+    "The synthetic build6 intentionally retains this evidence failure and exact detailed warning. No claim that its evidence passes or all diagnostic wording was simplified."
+  ]
+}

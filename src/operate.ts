@@ -204,6 +204,7 @@ import { propose, approve, addApprover, authenticateApprover, describeScope, app
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
 import { requestTaskStop, resumeTaskStop, taskControlOf } from "./task-control.js";
+import { taskWorkSummaryOf } from "./work-summary.js";
 import {
   approveRoutine,
   describeRoutine,
@@ -9977,6 +9978,7 @@ function showTask(positional: readonly string[], context: Context): number {
   const readiness = store.readinessLookupFor(ref.repo, ref.assignedRunner, now);
   const detail = {
     task,
+    work: taskWorkSummaryOf(store, id, now, { principal: "operator", repos: null, includeUnplaced: true }),
     ref: ref.id,
     blockedBy: store.blockers(id),
     position: store.queuePosition(id),
@@ -10011,6 +10013,10 @@ function showTask(positional: readonly string[], context: Context): number {
   return succeed(write, json, "task show", detail, () => [
     `${task.id}  ${task.state}${ref.deliverable === "report" ? "  (scout — delivers a report)" : ""}`,
     `  ${task.title}`,
+    ...(detail.work === null ? [] : [
+      `  status: ${detail.work.status.label}`,
+      ...(detail.work.primaryAction === null ? [] : [`  next: ${detail.work.primaryAction.label}${detail.work.primaryAction.target.decisionId === null ? "" : ` — decision #${detail.work.primaryAction.target.decisionId}`}`]),
+    ]),
     // The closed machine-authored verdict (Priority 2), computed once at
     // completion — never re-derived here. Same words `verdictWords`
     // gives every other surface, so the CLI and the console agree.

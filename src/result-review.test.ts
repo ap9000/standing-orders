@@ -177,6 +177,9 @@ describe("result-first review (workspace package 3): the pure presentation rules
 
   test("a form's way back is one of three exact shapes — never an open redirect, never another run's result view", () => {
     expect(resultReturnTarget("/review?result=t-1", 5)).toBe("/review?result=t-1");
+    expect(resultReturnTarget("/review?result=t-1&run=5", 5)).toBe("/review?result=t-1&run=5");
+    expect(resultReturnTarget("/review?result=t-1&run=6", 5)).toBe("/r/5");
+    expect(resultReturnTarget("/review?result=t-1&run=5&run=6", 5)).toBe("/r/5");
     expect(resultReturnTarget("/chat?task=t-1&result=5", 5)).toBe("/chat?task=t-1&result=5");
     expect(resultReturnTarget("/chat?task=t-1&result=6", 5)).toBe("/r/5");
     expect(resultReturnTarget("/chat?task=t-1&result=5&tab=checks", 5)).toBe("/r/5");

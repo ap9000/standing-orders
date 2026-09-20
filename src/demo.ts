@@ -631,7 +631,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     now: hoursAgo(9),
     ...(doneRoute === null ? {} : { route: { routeDigest: routeDigestOf(doneRoute), phase: "build" as const, provider: legOf(doneRoute, "build").provider, model: legOf(doneRoute, "build").model, chosen: legOf(doneRoute, "build").chosen } }),
   });
-  store.stampRun(doneRun, { baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
+  store.stampRun(doneRun, { baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904", scopeDigest: doneProposed.digest });
   storeEvidence(
     store,
     evidenceRoot,
@@ -801,7 +801,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     now: hoursAgo(4),
     ...presentedRoute(store, store.refFor("built-in", copyReview).id, "builder"),
   });
-  store.stampRun(copyReviewRun, { baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
+  store.stampRun(copyReviewRun, { baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904", scopeDigest: copyReviewProposed.digest });
   storeEvidence(
     store,
     evidenceRoot,

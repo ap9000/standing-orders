@@ -1,0 +1,222 @@
+{
+  "status": "Historical unchanged UI journey; not a current screenshot or native-gate claim.",
+  "commit": "5e02e4bc78daae91222371f956d6772cbc13f56f",
+  "reports": {
+    "desktop": {
+      "version": 1,
+      "capturedAt": "2026-09-20T06:48:47.693087+00:00",
+      "sourceCommitAtInspection": "fd20f8c5c93721017c6cd8d5f71c72baefa9f630",
+      "source": {
+        "src/serve.ts": "10b9897476ddc2dff31d40a0eab834f2b4b7a5740a1d57c9022c9a4a22bdac4b",
+        "src/workspace-ui.ts": "e16cde7dc203ec59dee8fe403ba33a2a6172ff87130d062dc8d557b2052c4fb8",
+        "src/result-review.ts": "dfd8db57958c2b9b3526ba8cca2728bf4926b5a7410053e890787c4d8485c8fe",
+        "src/work-summary.ts": "57d25f3d1e45d447a68e2dca15f68b090ca89bf2582b760afeb640303955c955",
+        "src/result-actions.ts": "f5eccd0f6f85a4caca6a7a3a8add226338d24d9bbe5b3cb4193498dfeaacfd1c",
+        "src/demo.ts": "78e7a944e5019b5570db7f5d14daa78c84b3f5f3fe974447d6feb46e518838e8"
+      },
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "browser": "Chromium Playwright CLI"
+      },
+      "fixture": "Synthetic fenced demo with realistic operator feedback; no production task output.",
+      "checks": [
+        {
+          "id": "desktop-exact-result",
+          "ok": true,
+          "observation": "Work opened the selected revision; its source link opened build8. Exact /review?result=confirm-empty-state-copy&run=8 opened the saved original without changing selected-project state. Final neutral list copy inspected; one primary Review evidence action."
+        },
+        {
+          "id": "desktop-feedback-journey",
+          "ok": true,
+          "observation": "Changes tab displayed the original diff. Filled262characters, Tab through attachment disclosure to Request changes, Enter created revision2 of the same task. The saved result and native evidence were preserved.",
+          "feedback": "Keep the empty state to one short sentence and give View all work as the next action. Check the revised copy with the long project name shown here. Preserve the separate approval and decision labels so someone returning to the page can find what needs attention.",
+          "sourceRun": 8,
+          "createdRevision": "revise-confirm-empty-state-copy-from-1-annotation-on-bui-2"
+        },
+        {
+          "id": "desktop-review-before-consent",
+          "ok": true,
+          "observation": "Expanded Review plan shows exact feedback once with source lineage before empty password. Needs your approval and no attempt yet remain visible. The prior pending revision warning remains available. No approval submitted."
+        },
+        {
+          "id": "desktop-layout-and-states",
+          "ok": true,
+          "observation": "No horizontal document overflow across result, Changes, revision, Completed empty and stale-result409 screens. One visible Work tools group. Stale-result Review results control44px; Completed empty says No completed work in this view. Captures after navigation with zero running animations."
+        }
+      ],
+      "limits": [
+        "No installed-runtime or remote acceptance; preview is isolated and synthetic.",
+        "Text contrast and layout inspected visually; no exhaustive accessibility or screen-reader audit.",
+        "Original complete Work-to-result journey was performed on d3c0053; integrated same-family/history/feedback/revision journey and final affected views were rechecked here."
+      ]
+    },
+    "phone": {
+      "kind": "synthetic-preview-phone-acceptance",
+      "capturedAt": "2026-09-20T06:43:14.653295+00:00",
+      "sourceCommitAtInspection": "fd20f8c5c93721017c6cd8d5f71c72baefa9f630",
+      "source": {
+        "src/serve.ts": "10b9897476ddc2dff31d40a0eab834f2b4b7a5740a1d57c9022c9a4a22bdac4b",
+        "src/workspace-ui.ts": "e16cde7dc203ec59dee8fe403ba33a2a6172ff87130d062dc8d557b2052c4fb8",
+        "src/result-review.ts": "dfd8db57958c2b9b3526ba8cca2728bf4926b5a7410053e890787c4d8485c8fe",
+        "src/work-summary.ts": "57d25f3d1e45d447a68e2dca15f68b090ca89bf2582b760afeb640303955c955",
+        "src/result-actions.ts": "f5eccd0f6f85a4caca6a7a3a8add226338d24d9bbe5b3cb4193498dfeaacfd1c",
+        "src/demo.ts": "78e7a944e5019b5570db7f5d14daa78c84b3f5f3fe974447d6feb46e518838e8"
+      },
+      "sourceNote": "Final frozen preview supplied by parent as fd20f8c. Hashes cover inspected UI source files only; parent owns integrated process/build identity. Unchanged evidence reused in this same agent session is explicitly listed.",
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "browser": "Chromium headed Playwright CLI",
+        "physicalDevice": false
+      },
+      "preview": "http://127.0.0.1:4194",
+      "browserSession": "interfaces-phone",
+      "synthetic": true,
+      "identity": {
+        "project": "payments-api",
+        "task": "fix-payout-rounding",
+        "run": 6,
+        "existingRevision": "revise-fix-payout-rounding-from-1-annotation-on-build-6",
+        "createdRevision": "revise-fix-payout-rounding-from-1-annotation-on-build-6-2"
+      },
+      "checks": [
+        {
+          "name": "Existing revision approval feedback",
+          "result": "passed",
+          "url": "http://127.0.0.1:4194/t/fix-payout-rounding",
+          "exactFeedback": "On the phone, keep the payout total and the cent-precision explanation together so readers can check the result without horizontal scrolling. Add a regression covering a half-cent boundary and several small settlements in the same batch. Show the expected ledger total beside the calculated amount, and keep the rounding note concise. Please also attach the dashboard evidence to its exact acceptance criterion so reviewers can distinguish fixture coverage from production behavior.",
+          "characters": 482,
+          "visibleOccurrences": 1,
+          "beforePassword": true,
+          "passwordEmpty": true,
+          "overflowPixels": 0
+        },
+        {
+          "name": "Work to selected family, original build and changes",
+          "result": "passed",
+          "urls": [
+            "http://127.0.0.1:4194/work",
+            "http://127.0.0.1:4194/t/fix-payout-rounding",
+            "http://127.0.0.1:4194/r/6?tab=changes"
+          ],
+          "observation": "Work Review plan opened correct current revision; its build6 link opened exact original; two-file diff inspected."
+        },
+        {
+          "name": "Exact review warning and changes",
+          "result": "passed",
+          "url": "http://127.0.0.1:4194/review?result=fix-payout-rounding&run=6&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-demo-jMkFSu%2Fpayments-api&tab=changes",
+          "visibleWarningOccurrences": 1,
+          "overflowPixels": 0,
+          "diffModeHeight": 44,
+          "agentCaveats": "No separate disclosure rendered for this fixture because the caveat repeats the visible proof warning; Summary also has one warning.",
+          "currentListIntro": "This result is not in the current review list.",
+          "emptyReviewQueue": "No results in this review list.",
+          "recapturedOnFinalCandidate": true
+        },
+        {
+          "name": "Feedback and revision creation",
+          "result": "passed",
+          "feedback": "For the mobile review, add an expected ledger total beside each rounding example and keep the note visible without sideways scrolling. Include a half-cent boundary case in the regression checks.",
+          "characters": 194,
+          "inputMethod": "Fill feedback, Tab to attachment disclosure, Tab to Request changes, Enter",
+          "requestButtonHeight": 44,
+          "url": "http://127.0.0.1:4194/t/fix-payout-rounding?version=revise-fix-payout-rounding-from-1-annotation-on-build-6-2",
+          "created": true,
+          "approved": false,
+          "attemptStarted": false,
+          "visibleFeedbackOccurrencesInPlan": 1,
+          "feedbackBeforePassword": true,
+          "overflowPixels": 0,
+          "observation": "Earlier pending revision is identified in History; new current revision awaits approval."
+        },
+        {
+          "name": "Stale exact result failure",
+          "result": "passed",
+          "url": "http://127.0.0.1:4194/review?result=phone-unknown-result&run=999999",
+          "httpStatus": 409,
+          "heading": "Result changed",
+          "recoveryAction": "Review results",
+          "recoveryHeight": 44,
+          "overflowPixels": 0
+        },
+        {
+          "name": "Empty completed work and fixed navigation",
+          "result": "passed",
+          "url": "http://127.0.0.1:4194/work?view=completed",
+          "resultCount": 0,
+          "overflowPixels": 0,
+          "bottomNavigation": {
+            "labels": [
+              "code",
+              "work",
+              "projects"
+            ],
+            "controlHeight": 48,
+            "top": 787,
+            "bottom": 844
+          },
+          "observation": "No control overlap in inspected screens; content remains scrollable above the fixed navigation.",
+          "emptyCopy": "No completed work in this view.",
+          "copyRefreshed": true
+        }
+      ],
+      "findings": [
+        {
+          "severity": "copy",
+          "state": "fixed-and-verified",
+          "finding": "Historical results excluded by pending revisions now use neutral current-review and empty-view wording, without claiming they are older than100 completions or never finished."
+        }
+      ],
+      "screenshots": [
+        {
+          "path": "screenshots/phone-approval.png",
+          "sha256": "debfc5abea4b9352f2b9ea2279f9ff722b902e5be8a56598f1661c184eb65a76",
+          "inspected": true
+        },
+        {
+          "path": "screenshots/phone-changes.png",
+          "sha256": "a20da977a3f95e569916f534e61328afc71222d7071ed373beb4984c04b252d8",
+          "inspected": true
+        },
+        {
+          "path": "screenshots/phone-revision.png",
+          "sha256": "096682f42d0c51d50b20d8e18a0ca4eaeeb4fbfd3ea8afe9e6e9b9cdb6128c30",
+          "inspected": true
+        }
+      ],
+      "limitations": [
+        "Synthetic preview only; no installed-runtime, physical-phone, software-keyboard, touch-gesture or screen-reader verification.",
+        "No approval, agent execution, publication, production mutations, browser credential state or trace recording.",
+        "Detailed generic proof diagnostic remains visible; this pass verifies duplicate removal and preserved safeguards, not a complete rewrite of diagnostic wording."
+      ],
+      "priorSourceForUnchangedEvidence": {
+        "commit": "f39397a4cba2f7e9e760edd94c18523579bd294c",
+        "source": {
+          "src/serve.ts": "4a0e8f0a9e888d3325a9b857baa53bbb15518fcf39981669b5f3ee8ce4b2d7eb",
+          "src/workspace-ui.ts": "c9ddac2bc79392e4615227392c14a39a3d057e1f8de49455dc2c61ac9d37f7e5",
+          "src/result-review.ts": "dfd8db57958c2b9b3526ba8cca2728bf4926b5a7410053e890787c4d8485c8fe",
+          "src/work-summary.ts": "57d25f3d1e45d447a68e2dca15f68b090ca89bf2582b760afeb640303955c955",
+          "src/result-actions.ts": "f5eccd0f6f85a4caca6a7a3a8add226338d24d9bbe5b3cb4193498dfeaacfd1c",
+          "src/demo.ts": "78e7a944e5019b5570db7f5d14daa78c84b3f5f3fe974447d6feb46e518838e8"
+        },
+        "screenshots": [
+          "screenshots/phone-approval.png",
+          "screenshots/phone-revision.png"
+        ],
+        "reason": "Same browser and agent session; later UI changes touched only three current-review and empty-view copy strings. Approval feedback and revision-history behavior are unchanged.",
+        "filesystemHashesObservedDuringCopyEdit": {
+          "src/serve.ts": "26365db0dc3b3fdc937d50cb85d84d2dc2bed838f6dcf2b6dcf9d847f3753919",
+          "src/workspace-ui.ts": "e16cde7dc203ec59dee8fe403ba33a2a6172ff87130d062dc8d557b2052c4fb8",
+          "src/result-review.ts": "dfd8db57958c2b9b3526ba8cca2728bf4926b5a7410053e890787c4d8485c8fe",
+          "src/work-summary.ts": "57d25f3d1e45d447a68e2dca15f68b090ca89bf2582b760afeb640303955c955",
+          "src/result-actions.ts": "f5eccd0f6f85a4caca6a7a3a8add226338d24d9bbe5b3cb4193498dfeaacfd1c",
+          "src/demo.ts": "78e7a944e5019b5570db7f5d14daa78c84b3f5f3fe974447d6feb46e518838e8"
+        },
+        "filesystemHashesNote": "These filesystem hashes were observed during an in-progress copy edit; they do not identify the loaded prior preview build.",
+        "buildIdentity": "Parent confirmed that committed f39397a was the loaded preview UI for the approval-feedback and revision-created captures."
+      }
+    }
+  },
+  "reuseReason": "Historical desktop and phone feedback/revision journeys from the same continuing agent/browser work; verified20cc native/web integration preserves result-review, workspace-ui, work-summary, result-actions and demo source byte-for-byte. Current focused entry suites passed after integration; current six screenshots and empty/failure checks refresh all affected views after CSS44px recovery repair. This record does not establish current screenshot hashes or a current native gate."
+}

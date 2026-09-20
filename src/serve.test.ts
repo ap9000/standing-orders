@@ -1080,7 +1080,7 @@ describe("the operations console", () => {
     expect(drafted.status).toBe(303);
     expect(store.getScope("t-strict-ci-103")).toMatchObject({ riskLevel: "high", qualityMode: "strict", budgetMicrousd: 2_000_000, approvedAt: null });
     const ciPage = await (await fetch(url("/t/t-strict-ci-103"), { headers: { cookie } })).text();
-    expect(ciPage).toContain("the CI repair");
+    expect(ciPage).toContain("CI repair");
     expect(ciPage).toContain(lineage);
     expect(ciPage).toContain("inherited terms, as they stand now: High risk · Strict / release quality · auto permissions · $2.00 attempt cap");
     expect(ciPage).toContain("quality · <strong>Strict / release</strong>");
@@ -1261,7 +1261,7 @@ describe("the operations console", () => {
     expect(taskView).toContain(`<details class="task-status-details" id="task-diagnostics"><summary>Task options</summary><p class="meta task-identity">Task ID <span class="mono">${child.taskId}</span>`);
     expect(taskView).toContain(`href="/r/${run}">build #${run}</a>`);
     if (mode === "mixed") expect(taskView).toContain("Keep the project name visible.");
-    expect(taskView).toContain("the review batch");
+    expect(taskView).toContain("Revision feedback");
     expect(taskView).toContain("tighten the guard here");
     expect(taskView).toContain("t-rev");
     expect(taskView).toContain("approve");
@@ -2884,7 +2884,7 @@ describe("the rolled-up board — every project, one ceiling", () => {
     // the opener — the roll-up is the only project-less board.
     const bare = await fetch(url("/board"), { headers: { cookie }, redirect: "manual" });
     expect(bare.status).toBe(303);
-    expect(bare.headers.get("location")).toBe("/projects");
+    expect(bare.headers.get("location")).toBe("/projects?return=%2Fboard");
   });
 
   test("a blocker beyond the ceiling keeps its name but never its state", async () => {
@@ -9872,7 +9872,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
       expect((await fetch(`${twoBase}/chat/mate/status`, { headers: { authorization: `Bearer alex:${approverToken}` }, redirect: "manual" })).status).toBe(403);
       const bounced = await fetch(`${twoBase}/board`, { headers: { cookie }, redirect: "manual" });
       expect(bounced.status).toBe(303);
-      expect(bounced.headers.get("location")).toBe("/projects");
+      expect(bounced.headers.get("location")).toBe("/projects?return=%2Fboard");
       // Choosing a project afterwards keeps polling (the earlier behaviour).
       const chosen = await fetch(`${twoBase}/projects/select`, { method: "POST", headers: { cookie, origin: twoBase }, body: new URLSearchParams({ csrf, path: repoTwo, return: "/chat" }), redirect: "manual" });
       expect(chosen.status).toBe(303);
@@ -10578,6 +10578,10 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
       // Every builds view lights the Work destination (workspace package 1).
       expect(html).toContain('<a href="/work" aria-label="work" title="work" class="active" aria-current="page"');
       const strip = /<p class="meta board-view">(.*?)<\/p>/s.exec(html)?.[1] ?? "";
+      if (current === "review") {
+        expect(strip).toBe(""); // Work tools retain these routes; review has one focused result view.
+        continue;
+      }
       expect(strip).toContain(`<strong>${current}</strong>`);
       for (const other of ["builds", "done", "review", "activity"].filter(one => one !== current)) {
         expect(strip).toContain(`>${other}</a>`);
@@ -10894,7 +10898,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
 
     // Empty, honestly.
     const empty = await (await fetch(url("/review"), { headers: { cookie } })).text();
-    expect(empty).toContain("No finished tasks yet.");
+    expect(empty).toContain("No results in this review list.");
     expect(empty).toContain("Nothing to review yet.");
     expect(empty).toContain('<a href="/work" aria-label="work" title="work" class="active" aria-current="page"');
 
@@ -10925,12 +10929,14 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(html).not.toContain("<b>title</b>");
     // The first-ranked row is selected by default and marked current.
     expect(html).toContain('data-review-task="t-older"');
-    expect(queue).toContain('class="cockpit-row current" href="/review?result=t-older" aria-current="page"');
+    const olderRun = store.runsFor(store.lookupRef("t-older")!.id)[0]!.id;
+    expect(queue).toContain(`class="cockpit-row current" href="/review?result=t-older&amp;run=${olderRun}&amp;project=%2Frepo%2Fmain" aria-current="page"`);
 
     // A stable deep link selects, and the row it names is current.
     const picked = await (await fetch(url("/review?result=t-ours"), { headers: { cookie } })).text();
     expect(picked).toContain('data-review-task="t-ours"');
-    expect(queueOf(picked)).toContain('class="cockpit-row current" href="/review?result=t-ours"');
+    const oursRun = store.runsFor(store.lookupRef("t-ours")!.id)[0]!.id;
+    expect(queueOf(picked)).toContain(`class="cockpit-row current" href="/review?result=t-ours&amp;run=${oursRun}&amp;project=%2Frepo%2Fmain"`);
     expect(picked).not.toContain("is in view here");
 
     // A hidden result and a nonexistent one read identically: a note, and
@@ -11331,7 +11337,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(before).toContain("Accept with exception");
     // Annotation and its return road, and no revision seal before a comment.
     expect(before).toContain(`<form method="post" action="/r/${run}/comment" class="diff-comment-form" id="comment-form">`);
-    expect(before).toContain('<input type="hidden" name="return" value="/review?result=t-act">');
+    expect(before).toContain(`<input type="hidden" name="return" value="/review?result=t-act&amp;run=${run}">`);
     // Follow-up on build 1540: this form advertises the server's 500-character limit too, with the same helper.
     expect(before).toContain('maxlength="500" placeholder="Describe the change…" aria-label="review comment" aria-describedby="comment-note-limit"></textarea><span class="meta diff-comment-limit" id="comment-note-limit">up to 500 characters</span>');
     expect(before).not.toContain('maxlength="2000"');
@@ -11370,7 +11376,10 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     // A message or form for a different run never accepts the current build.
     const staleLink = await fetch(url(`/review?result=t-act&run=${run + 1}&tab=checks`), { headers: { cookie } });
     expect(staleLink.status).toBe(409);
-    expect(await staleLink.text()).toContain("Result changed");
+    const staleHtml = await staleLink.text();
+    expect(staleHtml).toContain("Result changed");
+    expect(staleHtml).toContain('<p class="refusal-back"><a class="button-link" href="/review">Review results</a></p>');
+    expect(await stylesOf(staleHtml, base)).toContain('.refusal-back a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }');
     expect((await fetch(url(`/review?result=t-act&run=${run}&tab=checks`), { headers: { cookie } })).status).toBe(200);
     expect((await post(cookie, "/t/t-act/accept-proof", { csrf, run: String(run + 1), note: "wrong result" })).status).toBe(409);
     expect((await post(cookie, "/t/t-act/accept-proof", { csrf, note: "missing result" })).status).toBe(409);
@@ -11425,7 +11434,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
 
     // The queue is bounded to the newest 100 and says so.
     const html = await (await fetch(url("/review"), { headers: { cookie } })).text();
-    expect(queueOf(html).match(/<li>/g)?.length).toBe(100);
+    expect(queueOf(html).match(/<li data-review-priority=/g)?.length).toBe(100);
     expect(queueOf(html)).not.toContain("t-old");
     expect(html).toContain("Showing the newest 100; older results still open from their task");
     expect(html).not.toContain('data-cockpit-beyond="1"');
@@ -11435,7 +11444,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const old = await (await fetch(url("/review?result=t-old"), { headers: { cookie } })).text();
     expect(old).toContain('data-review-task="t-old"');
     expect(old).toContain('data-cockpit-beyond="1"');
-    expect(old).toContain('Opened directly: <span class="mono">t-old</span> finished earlier than the newest 100 completions the queue lists');
+    expect(old).toContain('This result is not in the current review list.');
     expect(old).not.toContain("is in view here");
     expect(old).not.toContain('class="cockpit-row current"');
     expect(old).toContain("Result saved — checks reported by the agent");
@@ -11821,6 +11830,39 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     } finally { await win.happyDOM.close(); }
   });
 
+  test("result simplicity: a failed caveat is explained once in the open without hiding another caveat", async () => {
+    const caveat = "The dashboard screenshot used ledger fixtures, not production data.";
+    const other = "Only the USD path was exercised.";
+    const reason = `Caveat 1 names no criterion: ${caveat}`;
+    const ref = seed("t-caveat", "Review the rounding evidence", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
+    const run = build("t-caveat", ref, {
+      ...RICH,
+      proof: { ...RICH.proof, caveats: [caveat, other] },
+      verdict: { ...RICH.verdict, verdict: "refuted", reasons: [reason] },
+    });
+    await boot();
+    const cookie = await login();
+    for (const path of [`/r/${run}`, `/chat?task=t-caveat&result=${run}`, "/review?result=t-caveat"]) {
+      const html = await (await fetch(url(path), { headers: { cookie } })).text();
+      const win = new Window();
+      try {
+        win.document.body.innerHTML = html;
+        const attention = win.document.querySelector('.result-attention')!;
+        expect([...attention.querySelectorAll('li')].map(one => one.textContent)).toEqual([reason, other]);
+        expect(attention.closest('details')).toBeNull();
+        expect(html.indexOf('class="result-attention"')).toBeLessThan(html.indexOf('class="result-tabs"'));
+        expect(win.document.querySelector('.cockpit-next')?.textContent ?? '').not.toContain(caveat);
+        const originalCaveats = win.document.querySelector('details[data-cockpit-source="caveats"]');
+        expect(originalCaveats?.hasAttribute('open')).toBe(false);
+        expect(originalCaveats?.textContent).toContain(caveat);
+        if (path.startsWith('/review')) {
+          expect(win.document.querySelector('[data-open-evidence]')?.getAttribute('href')).toBe(`/review?result=t-caveat&run=${run}&tab=checks#result`);
+          expect(html).toContain('Why is this safe to accept?');
+        }
+      } finally { await win.happyDOM.close(); }
+    }
+  });
+
   test("package 3 c2: a tampered screenshot, a shortened check log, a failed change-summary capture, and an unverifiable report are named in the open, never rendered, never called validated; an investigation's report is escaped text", async () => {
     const ref = seed("t-damaged", "evidence damaged after sealing", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
     const run = build("t-damaged", ref, { ...RICH, checkLog: "x".repeat(170 * 1024), stat: undefined });
@@ -11920,7 +11962,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const cookie = await login();
     for (const id of ["broken-result", "cross-result", "no-build-history"]) {
       const html = await (await fetch(url(`/review?result=${id}`), { headers: { cookie } })).text();
-      expect(html).toContain(`class="cockpit-row current" href="/review?result=${id}"`);
+      const selectedRun = store.runsFor(store.lookupRef(id)!.id)[0]?.id;
+      expect(html).toContain(`class="cockpit-row current" href="/review?result=${id}${selectedRun === undefined ? "" : `&amp;run=${selectedRun}`}&amp;project=%2Frepo%2Fmain"`);
       expect(html).toContain(`data-review-task="${id}"`);
       expect(html).toContain("History unavailable");
       expect(html).toContain("This task is shown separately.");
@@ -12194,11 +12237,12 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(request).toMatch(/^[a-f0-9]{32}$/);
     expect(detail).toContain(`<input type="hidden" name="return" value="/chat?task=t-loop&amp;result=${run}">`);
     // A plain note, from the chat's result view: back to that view, receipt named.
-    const noted = await post(cookie, `/r/${run}/comment`, { csrf, note: "Also round the footer.", request, return: `/chat?task=t-loop&result=${run}` });
+    const feedbackNote = "On the phone, keep the payout total and the cent-precision explanation together so readers can check the result without horizontal scrolling. Add a regression covering a half-cent boundary and several small settlements in the same batch. Show the expected ledger total beside the calculated amount, and keep the rounding note concise. Please also attach the dashboard evidence to its exact acceptance criterion so reviewers can distinguish fixture coverage from production behavior.";
+    const noted = await post(cookie, `/r/${run}/comment`, { csrf, note: feedbackNote, request, return: `/chat?task=t-loop&result=${run}` });
     expect(noted.status).toBe(303);
     expect(noted.headers.get("location")).toBe(`/chat?task=t-loop&result=${run}&noted=${request}#request-changes`);
     // The same submission again (a double click, a replayed POST): the same receipt, no second note.
-    const replayed = await post(cookie, `/r/${run}/comment`, { csrf, note: "Also round the footer.", request, return: `/chat?task=t-loop&result=${run}` });
+    const replayed = await post(cookie, `/r/${run}/comment`, { csrf, note: feedbackNote, request, return: `/chat?task=t-loop&result=${run}` });
     expect(replayed.status).toBe(303);
     expect(replayed.headers.get("location")).toBe(noted.headers.get("location"));
     expect(store.liveDiffComments(run)).toHaveLength(1);
@@ -12236,6 +12280,14 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(store.revisionLineageOf(revisionId, T0)).toMatchObject({ sourceTask: "t-loop", sourceRun: run });
     expect(store.liveDiffComments(run)).toHaveLength(0);
     expect(store.allDiffComments(run).every(one => one.consumedBy === revisionId)).toBe(true);
+    // A pending revision removes its old result from the current queue even
+    // when that result is recent. Do not invent an age-based explanation.
+    const earlierResult = await read(`/review?result=t-loop&run=${run}`);
+    expect(earlierResult).toContain('This result is not in the current review list.');
+    expect(earlierResult).not.toContain('finished earlier than the newest');
+    expect(earlierResult).toContain('No results in this review list.');
+    expect(earlierResult).not.toContain('No finished tasks yet.');
+    expect(await read('/work?view=completed')).toContain('No completed work in this view.');
     // Replays of the seal: the SAME revision, never a twin.
     const again = await post(cookie, `/r/${run}/revise`, { csrf, return: `/chat?task=t-loop&result=${run}`, ...seal });
     expect(again.status).toBe(303);
@@ -12250,9 +12302,21 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(after).not.toContain(`action="/r/${run}/revise"`);
     const revisionTask = await read(`/t/${revisionId}`);
     expect(revisionTask).toContain(`href="/r/${run}">build #${run}</a>`);
-    expect(revisionTask).toContain("Also round the footer.");
+    expect(revisionTask).toContain(feedbackNote);
     expect(revisionTask).toContain("Name the helper.");
     expect(revisionTask).toContain('type="password"');
+    const revisionWindow = new Window();
+    try {
+      revisionWindow.document.body.innerHTML = revisionTask;
+      const reviewPlan = revisionWindow.document.querySelector('.task-plan-review')!;
+      const feedback = reviewPlan.querySelector('[data-revision-feedback]')!;
+      expect(feedback?.textContent).toContain(feedbackNote);
+      expect(feedback?.textContent).toContain("Name the helper.");
+      expect(feedback?.textContent).toContain("src/a.ts:2");
+      expect(feedback?.closest('details')).toBe(reviewPlan);
+      expect(reviewPlan.innerHTML.indexOf(feedbackNote)).toBeLessThan(reviewPlan.innerHTML.indexOf('type="password"'));
+      expect(revisionWindow.document.querySelectorAll('[data-revision-feedback]')).toHaveLength(1);
+    } finally { await revisionWindow.happyDOM.close(); }
     const revisionChat = await read(`/chat?task=${revisionId}`);
     expect(revisionChat).toContain(`href="/chat?task=t-loop&amp;result=${run}" data-revision-source>Original result: build #${run} →</a>`);
     // Looks good never became a publication or an approval.
@@ -12330,7 +12394,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const refusal = await edited.text();
     expect(refusal).toContain("this request identity already recorded a different note on this result");
     expect(refusal).toContain("&quot;Note A&quot;");
-    expect(refusal).toContain(`<a href="${back.replace(/&/g, "&amp;")}&amp;conflict=${token}#request-changes">`);
+    expect(refusal).toContain(`<a href="${back.replace(/&/g, "&amp;")}&amp;conflict=${token}#request-changes">← Back</a>`);
+    expect(refusal).toContain('<p class="meta refusal-back">');
+    expect(await stylesOf(refusal, base)).toContain(".refusal-back a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }");
     expect(store.liveDiffComments(run).map(one => one.note)).toEqual(["Note A"]);
     // The same identity pinned to a file: a different note too.
     const repinned = await post(cookie, `/r/${run}/comment`, { csrf, note: "Note A", path: "src/a.ts", line: "2", request: token, return: back });
@@ -13057,6 +13123,104 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     rmSync(root, { recursive: true, force: true });
   });
 
+  test("an unanswered question stays primary in Work and the task page when the builder disconnects", async () => {
+    const ref = seedTask("t-question", "Choose a retry policy", alpha);
+    sealScopeFixture(store, "t-question", approverToken, "Choose a retry policy");
+    const earlier = new Date(now.getTime() - 3_600_000);
+    register(store, { name: "worker", host: "test", repos: [alpha], capacity: 1, now: earlier });
+    const run = store.startRun({ taskRef: ref, leaseId: "question-lease", runner: "worker", branch: "task/question", worktree: "/pool/question", now: earlier, ...presented(store, ref, "builder") });
+    const decision = store.saveDecision({ run, urgency: "blocking", recap: "Set a limit for failed webhook deliveries.", question: "Should failed webhooks retry three times?", options: [{ id: "three", label: "Three retries", consequence: "Keeps the existing idempotency key.", reversible: true }], recommendation: "three", deadline: null }, earlier);
+    store.finishRun(run, { outcome: "parked", now: earlier });
+    const cookie = await login();
+    const work = await page(cookie, "/work");
+    expect(work).toContain(`class="work-action" href="/d/${decision}">Answer question →</a>`);
+    expect(work).toContain('data-work-status="waiting-decision"');
+    expect(work).toContain('data-work-diagnostic="no-worker-online"');
+    const task = await page(cookie, "/t/t-question");
+    expect(task).toContain('href="/t/t-question#task-questions" data-primary-action>Answer question</a>');
+    expect(task).toContain('id="task-questions"');
+  });
+
+  test("All projects opens the exact review result without changing the selected project", async () => {
+    const reasons = ['criterion "c1" requires manual-review evidence — an operator must accept it before this can verify'];
+    const { run } = finished("t-navigation", "Confirm empty-state copy", beta, { verdict: "short", reasons });
+    store.saveProofVerdict(run, "short", reasons, now, [{ id: "c1", statement: "Empty state is clear", requiredEvidence: ["manual-review"], state: "manual-review", detail: [], answered: [], review: null }]);
+    const cookie = await login();
+    const work = await page(cookie, "/work");
+    const row = /<article class="work-row" data-task="t-navigation"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
+    const link = /class="work-action" href="([^"]+)"/.exec(row)?.[1]?.replaceAll("&amp;", "&") ?? "";
+    expect(link).toBe(`/review?result=t-navigation&run=${run}&project=${encodeURIComponent(beta)}`);
+    expect(row).toContain(">Review for acceptance →</a>");
+    const signedOut = await fetch(url(link), { redirect: "manual" });
+    expect(signedOut.headers.get("location")).toBe(`/login?return=${encodeURIComponent(link)}`);
+    const signIn = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken, return: link }), redirect: "manual" });
+    expect(signIn.headers.get("location")).toBe(link);
+    const response = await fetch(url(link), { headers: { cookie }, redirect: "manual" });
+    expect(response.status).toBe(200);
+    const review = await response.text();
+    expect(review).toContain(`data-result-run="${run}"`);
+    expect(review).not.toContain("Check completed builds against their approved scope and evidence.");
+    expect(review).not.toContain(`<span class="eyebrow">Build #${run}</span>`);
+    expect(review).toContain(`build #${run}`);
+    expect(review).toContain(`name="return" value="/review?result=t-navigation&amp;run=${run}"`);
+    expect(review).not.toContain('<p class="meta board-view">');
+    expect(review).not.toContain('class="badge badge-manual-review review-priority"');
+    expect(review).not.toContain('human review needed');
+    expect(review).not.toContain('Review before accepting');
+    expect(review).not.toContain('Inspect the saved screenshots and requirements.');
+    expect(review).toContain(`<p class="cockpit-primary" data-next-action="accept-proof"><a class="button-link" href="/review?result=t-navigation&amp;run=${run}&amp;tab=checks#result" data-open-evidence>Review evidence</a></p>`);
+    expect(review).toContain('Empty state is clear');
+    expect(review).toContain('Acceptance does not merge or deploy it.');
+    expect(review).toContain('aria-label="review note" required');
+    const queueLink = /class="cockpit-row current" href="([^"]+)"/.exec(review)?.[1]?.replaceAll("&amp;", "&");
+    expect(queueLink).toBe(link);
+    const reviewCss = await stylesOf(review, base);
+    expect(reviewCss).toContain('.result-panel .pick-file, .result-panel .pick-line, .diff-modes button { min-height: 44px; min-width: 44px; white-space: nowrap; }');
+    expect(await page(cookie, "/work")).toContain('<span class="name">all projects');
+    // Old task-only links also resolve their authorized project without a switch.
+    const old = await fetch(url("/review?result=t-navigation"), { headers: { cookie }, redirect: "manual" });
+    expect(old.status).toBe(200);
+    expect(await old.text()).toContain('data-review-task="t-navigation"');
+    await openProject(cookie, alpha);
+    expect((await fetch(url(link), { headers: { cookie }, redirect: "manual" })).status).toBe(200);
+    expect(await page(cookie, "/work")).toContain('<summary class="name">alpha');
+    // A stale run or a mismatched project must never silently select another result.
+    expect((await fetch(url(link.replace(`run=${run}`, `run=${run + 1}`)), { headers: { cookie } })).status).toBe(409);
+    expect((await fetch(url(link.replace(encodeURIComponent(beta), encodeURIComponent(alpha))), { headers: { cookie } })).status).toBe(404);
+    const invite = store.mintInvite("approver", "alex", now, undefined, [alpha]);
+    expect(store.consumeInviteAndCreateAccount({ tokenValue: invite.token, name: "member", credentialHash: hashPassword(memberPassword) }, now).ok).toBe(true);
+    const member = await login("member", memberPassword);
+    const denied = await fetch(url(link), { headers: { cookie: member } });
+    expect(denied.status).toBe(404);
+    expect(await denied.text()).not.toContain("Confirm empty-state copy");
+  });
+
+  test("project selection preserves the requested destination and rejects unsafe return paths", async () => {
+    const cookie = await login();
+    const pending = await fetch(url("/tasks?state=done"), { headers: { cookie }, redirect: "manual" });
+    expect(pending.status).toBe(303);
+    expect(pending.headers.get("location")).toBe("/projects?return=%2Ftasks%3Fstate%3Ddone");
+    const picker = await page(cookie, pending.headers.get("location")!);
+    const window = new Window();
+    try {
+      window.document.body.innerHTML = picker;
+      const button = [...window.document.querySelectorAll('button.project-name')].find(one => one.textContent === "beta")!;
+      const form = button.closest("form")!;
+      expect(form.querySelector('input[name="return"]')?.getAttribute("value")).toBe("/tasks?state=done");
+      const csrf = csrfOf(picker);
+      const invalid = await fetch(url("/projects/open"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf, path: "/no/such/project", return: "/tasks?state=done" }) });
+      expect(invalid.status).toBe(400);
+      expect(await invalid.text()).toContain('name="return" value="/tasks?state=done"');
+      const selected = await fetch(url(form.getAttribute("action")!), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf, path: beta, return: "/tasks?state=done" }), redirect: "manual" });
+      expect(selected.headers.get("location")).toBe("/tasks?state=done");
+      for (const bad of ["https://evil.example/", "//evil.example/", "/\\evil.example/", "/%2f%2fevil.example/"]) {
+        const unsafe = await page(cookie, `/projects?return=${encodeURIComponent(bad)}`);
+        window.document.body.innerHTML = unsafe;
+        expect(window.document.querySelector('button.project-name')?.closest("form")?.querySelector('input[name="return"]')?.getAttribute("value")).toBe("/");
+      }
+    } finally { await window.happyDOM.close(); }
+  });
+
   test("code, work, and projects are the only primary destinations on desktop and phone; every old page lights Work; tools and settings stay reachable and role-bounded", async () => {
     seedTask("t-a", "alpha work", alpha);
     const cookie = await login();
@@ -13122,7 +13286,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // pages still require a selection, including after returning from Settings.
     const tasks = await get("/tasks");
     expect(tasks.status).toBe(303);
-    expect(tasks.headers.get("location")).toBe("/projects");
+    expect(tasks.headers.get("location")).toBe("/projects?return=%2Ftasks");
     await selectProject(cookie, alpha);
     expect((await get("/menu")).status).toBe(200);
     expect((await get("/tasks")).status).toBe(200);
@@ -13447,8 +13611,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(all).not.toContain("Deployed");
     expect(all).toContain("Deployment is not confirmed by any record here.");
     // The next action names the act: the failed check, the exception, the PR.
-    expect(all).toContain('href="/review?result=t-checks">Review the failed check →</a>');
-    expect(all).toContain('href="/review?result=t-accepted">Review the recorded exception →</a>');
+    expect(all).toContain(`href="/review?result=t-checks&amp;run=${store.runsFor(store.lookupRef("t-checks")!.id)[0]!.id}&amp;project=${encodeURIComponent(alpha)}">Review the failed check →</a>`);
+    expect(all).toContain(`href="/review?result=t-accepted&amp;run=${store.runsFor(store.lookupRef("t-accepted")!.id)[0]!.id}&amp;project=${encodeURIComponent(alpha)}">Review the recorded exception →</a>`);
     expect(all).toContain('href="https://github.com/owner/repo/pull/482">Open the pull request →</a>');
     // Bad view values fall back to All; an unknown view is never an error.
     expect(await page(cookie, "/work?view=bogus")).toMatch(/<a href="\/work" class="active" aria-current="page"[^>]*>All/);
@@ -13462,7 +13626,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     }
     expect(await page(cookie, "/work?view=running")).toContain("Nothing is building right now.");
     expect(await page(cookie, "/work?view=needs-you")).toContain("Nothing needs you right now.");
-    expect(await page(cookie, "/work?view=completed")).toContain("No finished work yet.");
+    expect(await page(cookie, "/work?view=completed")).toContain("No completed work in this view.");
   });
 
   test("the same run's status agrees across Work, the task page, the focused chat, and the review cockpit — and never calls failed, missing, or agent-attested evidence verified, or local changes shipped", async () => {
@@ -13580,7 +13744,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // Project-bound pages still defer to the opener exactly as before.
     const tasks = await fetch(url("/tasks"), { headers: { cookie }, redirect: "manual" });
     expect(tasks.status).toBe(303);
-    expect(tasks.headers.get("location")).toBe("/projects");
+    expect(tasks.headers.get("location")).toBe("/projects?return=%2Ftasks");
     // A project-scoped account gets 404 for the other project's run — the
     // same answer as before, whatever project its session holds.
     const minted = store.mintInvite("approver", "alex", now, undefined, [alpha]);
@@ -13625,7 +13789,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(running).not.toContain("Nothing is building right now.");
     const completed = await page(cookie, "/work?view=completed");
     expect(completed).toContain("Nothing among the newest 200 tasks in view has finished.");
-    expect(completed).not.toContain("No finished work yet.");
+    expect(completed).not.toContain("No completed work in this view.");
     // Exactly at the cap: no bound, no "+", the ordinary empty copy.
     store.cancelTask("alpha-000", now);
     await openProject(cookie, beta);
@@ -13633,7 +13797,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(rowsOf(small).map(row => row.id)).toEqual(["beta-newest"]);
     expect(small).not.toContain("data-work-bound");
     expect(small).toContain('<span class="count">1</span>');
-    expect(await page(cookie, "/work?view=completed")).toContain("No finished work yet.");
+    expect(await page(cookie, "/work?view=completed")).toContain("No completed work in this view.");
 
     // 501 newer tasks in a repository outside the ceiling: the roll-up's
     // window belongs to admitted tasks, so the page is full and honest —
@@ -13860,7 +14024,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // The row: the status line, then the next act, then the diagnosis behind a native disclosure — never dropped.
     const row = /<article class="work-row" data-task="t-checks"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
     expect(row).toMatch(/^<div class="work-row-main"><a class="work-title" href="\/t\/t-checks">Escape quotes<\/a><p class="work-meta"><span>[^<]+<\/span><\/p><\/div>/);
-    expect(row).toMatch(/<div class="work-row-status"><span class="status-line" data-work-status="checks-failed"[^>]*>.*?<span class="status-label">Changes saved, but checks failed<\/span><\/span><a class="work-action" href="\/review\?result=t-checks">Review the failed check →<\/a><details class="work-details"><summary>Details<\/summary><p class="work-detail">The repository&#39;s approved check failed against this build \(exit 1\), so the result is not verified\.<\/p><p class="work-meta work-id">Task <span class="mono">t-checks<\/span><\/p><\/details><\/div>$/);
+    expect(row).toMatch(/<div class="work-row-status"><span class="status-line" data-work-status="checks-failed"[^>]*>.*?<span class="status-label">Changes saved, but checks failed<\/span><\/span><a class="work-action" href="\/review\?result=t-checks&amp;run=\d+&amp;project=[^"]+">Review the failed check →<\/a><details class="work-details"><summary>Details<\/summary><p class="work-detail">The repository&#39;s approved check failed against this build \(exit 1\), so the result is not verified\.<\/p><p class="work-meta work-id">Task <span class="mono">t-checks<\/span><\/p><\/details><\/div>$/);
     expect(work).not.toContain("<p class=\"work-detail\">The repository&#39;s approved check failed against this build (exit 1), so the result is not verified.</p></div>");
     // A row with no next act still discloses its reason; every row has exactly one disclosure.
     const queued = /<article class="work-row" data-task="t-queued"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
@@ -13898,6 +14062,9 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const css = await stylesOf(work, base);
     expect(css).toContain(".work-tools-menu {\n    position: absolute; right: 0; top: calc(100% + .375rem); z-index: 20; min-width: 11rem; max-width: calc(100vw - 2rem);");
     expect(css).not.toContain(".work-tools-menu { right: auto; left: 0; }");
+    expect(css).toContain(".work-tools { display: none; position:");
+    expect(css).toContain(".app.sidebar-collapsed .work-tools { display: block; }");
+    expect(css).toContain("    .work-tools { display: block; }");
     expect(css).not.toMatch(/\.work-tools-menu\s*\{[^}]*left:/);
     expect(work).toContain('<details class="work-tools"><summary>Work tools');
     expect([...work.matchAll(/<nav class="work-tools-menu">([\s\S]*?)<\/nav>/g)][0]?.[1]?.match(/<a href="/g)).toHaveLength(8);
@@ -13911,7 +14078,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(row).toContain('<details class="work-details"><summary>Details</summary><p class="work-detail">');
     expect(row).toContain('<p class="work-meta work-id">Task <span class="mono">t-checks</span></p></details>');
     expect(row).toContain('<span class="status-label">Changes saved, but checks failed</span>');
-    expect(row).toContain('<a class="work-action" href="/review?result=t-checks">Review the failed check →</a>');
+    expect(row).toContain(`<a class="work-action" href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}">Review the failed check →</a>`);
     for (const id of ["t-rev", "t-queued"]) expect(work).toContain(`<p class="work-meta work-id">Task <span class="mono">${id}</span></p></details>`);
     // The task page: the status box leads with the result's words, the
     // receipt agrees, and the title is the bare title — the words appear

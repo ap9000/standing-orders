@@ -302,6 +302,7 @@ describe("the MCP stdio server", () => {
     const detail = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
     expect(detail["deliverable"]).toBe("report");
     expect(detail["report"]).toBeNull();
+    expect(detail["work"]).toMatchObject({ taskId: body["ref"], primaryAction: { code: "select-agent", access: "operator-handoff", retry: "refresh-before-acting" } });
     // An unknown deliverable is a protocol error (the schema is the parser).
     h.send({
       jsonrpc: "2.0", id: 3, method: "tools/call",

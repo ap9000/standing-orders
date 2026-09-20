@@ -30,7 +30,7 @@ export const WORK_VIEWS: readonly { key: WorkView; label: string; hint: string; 
   { key: "all", label: "All", hint: "Every task in view, most urgent first.", empty: "Nothing is in progress. Describe work in chat or add a task, and it appears here." },
   { key: "needs-you", label: "Needs you", hint: "Tasks waiting on a decision, an approval, a repair, or a review.", empty: "Nothing needs you right now. Queued and running work continues on its own." },
   { key: "running", label: "Running", hint: "Attempts a builder owns right now, and reviews in progress.", empty: "Nothing is building right now. Approved tasks start when a builder with capacity is connected." },
-  { key: "completed", label: "Completed", hint: "Finished tasks with their evidence status — problems stay visible here.", empty: "No finished work yet. A task appears here when its build finishes, whatever its evidence says." },
+  { key: "completed", label: "Completed", hint: "Finished tasks with their evidence status — problems stay visible here.", empty: "No completed work in this view." },
 ];
 
 export function parseWorkView(raw: string | null): WorkView {
@@ -403,7 +403,12 @@ export type WorkFacts = {
   result: ResultFacts | null;
   publication: PublicationFacts;
   liveRunId: number | null;
+  /** The unfinished recorded attempt, even if its claim disappeared. */
+  unfinishedRunId?: number | null;
   control?: TaskControlView;
+  /** An unanswered question on this exact task, read from the decision
+   * owner. An elapsed attention deadline does not close a question. */
+  openDecision?: { id: number; runId: number; question: string; overdue: boolean } | null;
 };
 
 export type WorkStatus = DisplayStatus & {
@@ -412,7 +417,17 @@ export type WorkStatus = DisplayStatus & {
   /** The rank All sorts by: what needs a person first, then live work,
    * then queued and waiting, then finished, then cancelled. */
   rank: number;
+  /** Facts that remain visible when a more useful next action leads. */
+  diagnostics?: readonly Pick<DisplayStatus, "token" | "label" | "detail" | "tone">[];
 };
+
+/** These dispatch states may yield the headline to an unanswered
+ * question. Failure, uncertain process ownership, holds, approvals and
+ * stop settlement deliberately do not yield. This never alters dispatch. */
+const QUESTION_FIRST = new Set<DispatchDiagnosis["code"]>([
+  "running", "waiting-decision", "no-worker-online", "no-worker-registered",
+  "worker-at-capacity", "ready", "planning-ready", "scouting-ready",
+]);
 
 /** Needs you: the existing diagnosis semantics — waiting on a person with a
  * concrete act — never every queued task indiscriminately. */
@@ -450,7 +465,8 @@ export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): W
   const dispatch = facts.dispatch;
   const result = facts.state === "done" ? resultDisplay ?? resultStatusOf(facts.result, facts.publication) : null;
   const running = facts.liveRunId !== null || dispatch?.condition === "running" || result?.token === "reviewing";
-  const needs = needsPerson(dispatch);
+  const question = (facts.state === "queued" || facts.state === "running") ? facts.openDecision ?? null : null;
+  const needs = needsPerson(dispatch) || question !== null;
   const views: WorkView[] = ["all"];
   if (needs) views.push("needs-you");
   if (running) views.push("running");
@@ -488,6 +504,15 @@ export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): W
   }
   if (facts.state === "cancelled") {
     return { token: "cancelled", label: "Cancelled", detail: dispatch?.detail ?? "Nothing else will run for this task.", tone: "muted", action: null, views, rank: 4 };
+  }
+  if (question !== null && facts.state !== "failed" && dispatch !== null && QUESTION_FIRST.has(dispatch.code)) {
+    return {
+      token: "waiting-decision", label: "Waiting on your answer", detail: question.question,
+      tone: "attention", action: { label: "Answer question", kind: "open-task" }, views, rank: 0,
+      ...(dispatch.code === "waiting-decision" ? {} : {
+        diagnostics: [{ token: dispatch.code, label: dispatch.summary, detail: dispatch.detail, tone: dispatch.condition === "running" ? "live" as const : "attention" as const }],
+      }),
+    };
   }
   if (running) {
     return dispatchWords("live", 1, { label: "Watch the build", kind: facts.liveRunId === null ? "open-task" : "open-run" });
