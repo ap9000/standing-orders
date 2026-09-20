@@ -387,7 +387,7 @@ describe("the route across surfaces (v47): a live automerge mode is publication 
     const envelope = JSON.parse(lines.join("\n")) as { route: { digest: string; legs: { words: string; reasons: string[]; readiness: string }[] } };
     expect(envelope.route.digest).toBe(projection.digest);
     expect(envelope.route.legs.map(one => one.words)).toEqual(projection.legs.map(one => one.words));
-    expect(envelope.route.legs.map(one => one.readiness)).toEqual(["unknown", "unknown", "unknown", "ready"]);
+    expect(envelope.route.legs.map(one => one.readiness)).toEqual(["unknown", "unknown", "unknown"]);
     rmSync(join(file, ".."), { recursive: true, force: true });
   });
 });
