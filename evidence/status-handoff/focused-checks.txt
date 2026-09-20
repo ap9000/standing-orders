@@ -1,0 +1,74 @@
+FILE direct-assignment-typecheck-final.log
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+
+FILE direct-assignment-handled-tests-final.log
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+(node:77441) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:77436) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  2 passed (2)
+      Tests  47 passed (47)
+   Start at  14:19:56
+   Duration  7.99s (transform 2.44s, setup 49ms, import 3.87s, tests 9.44s, environment 0ms)
+
+
+
+FILE retire-review-root-typecheck.log
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+
+FILE retire-review-context-focused.log
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+(node:91130) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  14:16:31
+   Duration  4.74s (transform 1.98s, setup 22ms, import 2.90s, tests 1.70s, environment 0ms)
+
+
+
+FILE retire-review-routing-ui-final.log
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+(node:48219) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+--------------------------------------------------------------------------------------------------·----·------------------------------------------------------------------------------------------------------------------------------------------------·------------------------------------------------------------------------·······-----------------
+
+ Test Files  1 passed (1)
+      Tests  10 passed | 335 skipped (345)
+   Start at  14:19:25
+   Duration  3.62s (transform 1.81s, setup 23ms, import 2.42s, tests 1.08s, environment 0ms)
+
+
+
+FILE direct-handoff-agentconfig-final.log
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+·················(node:92564) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  1 passed (1)
+      Tests  18 passed (18)
+   Start at  14:21:59
+   Duration  2.61s (transform 945ms, setup 39ms, import 1.18s, tests 1.23s, environment 0ms)
+
+
