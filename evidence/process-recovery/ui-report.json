@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
-  "sourceTree": "685512ad6ed8f62e3705571d9e8b54a7f69073c1",
+  "sourceCommit": "3977ae76df8b3c1d6a02173faa2d72906cab4700",
+  "sourceTree": "16555c7a2a5ea8d4942f5ff22a5722657210d907",
   "source": {
     "src/serve.ts": "44d1a38d653597e02efdd614a64ab27fa53d4590fc2f05a2fc1b2ab830f874bc",
     "src/assignment-ui.ts": "303f99a49c7a6f7604fa26f4cdd4ec3e98ea16aab06f436f9663c0af9f9ea5dc",
@@ -9,12 +9,12 @@
     "src/workspace-ui.ts": "dfa3f0164496beccdf037a9b435f2b2cf313b9a675f36127e666a29cf633b838",
     "src/work-summary.ts": "509ad69a9be56ca1002dfb5336e9eefc9b273fc41cd6764a907d6a5dd349a8b1",
     "src/modes.ts": "8436845e0f847ac5c2db1d27f9e7de2d822a029b611ca5b89f32645ec28f387e",
-    "src/store.ts": "45f60333e5656de36a3595d9f3aaed44372e14f4fdd251bdef1ffd94cbce069b",
+    "src/store.ts": "48c1db6981f76028f4250658483926f5c45f9d923501a443dd0a62094506a797",
     "src/result-review.ts": "dfd8db57958c2b9b3526ba8cca2728bf4926b5a7410053e890787c4d8485c8fe",
     "src/demo.ts": "78e7a944e5019b5570db7f5d14daa78c84b3f5f3fe974447d6feb46e518838e8",
-    "src/evidence.ts": "35924f17c2e81e88fbd637efb2320a1ecedc532948341e8df023e4738ab8fb80",
+    "src/evidence.ts": "d13984068ef2e0bdd446caabe020cea1fb7173ae8d2927939e00c4378bc74ea4",
     "src/review-context.ts": "3a2d74d91d57721361bf423ccb36edce50964598bf75efdc1a675d0d9d346c25",
-    "src/verification-evidence.ts": "e18c303e0847fbeef913b95d65f0cd7fffb8bc5987a005b56bc4804fc4e81dce"
+    "src/verification-evidence.ts": "91046e7f44862362eb3145922e6a95afa99ab960d0557584db9ee89382893819"
   },
   "loadedRuntime": {
     "schemaVersion": 70,
@@ -25,12 +25,12 @@
       "dist/workspace-ui.js": "cdb6d457530e17452724041e120e4a2baa7b438725ca0b2a5b2690db546e74f8",
       "dist/work-summary.js": "f3bcbd1a92dc6828cbaca34645119370228bb263eceeebec2e23da8662de360a",
       "dist/modes.js": "54c2f2d4ea25dadf2e44f70be0c07f83b4de5a6b799240635283ca02d15a74a6",
-      "dist/store.js": "f30d432644f4b264c12eebfe84b11b85486b0b4cdde082ff3a1e8bf97995cebb",
+      "dist/store.js": "2f280039386a4d94416f4022ed836123882b3aa547bf629e748ca9bc67b67b80",
       "dist/result-review.js": "cd7aa603edebd00b5b29364ac9a7366bb757c2275159c208288d3bd00f494a74",
       "dist/demo.js": "5e30f4fc3c5f4bd1b59bc552f7396609bb32a95d2d57109a081eec9e38852a83",
-      "dist/evidence.js": "a856b4f98dce11bca490d4d66729abc0d28a4e10a861e5177c0a123e9730e2ad",
+      "dist/evidence.js": "8ab38d8d3c218929c2204600d44c0ad42767c1f88a983c76e3527e1c1e0a16f6",
       "dist/review-context.js": "1655deb2fbcae844a0d82f65e70bcbde230a927d1200284947b156c53bc27f3a",
-      "dist/verification-evidence.js": "d73779c86e3059e7fae5f8882ecf7150f98c878f02128c6e27b34f773e61566c"
+      "dist/verification-evidence.js": "32e0ca06fc0917f050c588c441c661fe957088f0029bbf095d15f8fbe2c4eb20"
     }
   },
   "fixture": "Fresh owned demo; original task confirm-empty-state-copy/run8. Native passing check receipt is synthetically sealed, machine+semantic verdict set short with missing goal-review metadata. This is sample evidence, not a real project test or provider run. No bytes were damaged. Independent review unrequested, no repair chain. No installed DB/runtime used.",
@@ -38,7 +38,7 @@
     {
       "name": "desktop passing-check / missing-metadata handoff",
       "ok": true,
-      "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+      "sourceCommit": "3977ae76df8b3c1d6a02173faa2d72906cab4700",
       "observed": {
         "url": "http://127.0.0.1:4202/t/confirm-empty-state-copy",
         "assignment": "Ready for review\nReview result\n\nChecks passed.\n\nThe saved source inventory is incomplete; a screenshot is missing.\n\nAttempts 1",
@@ -55,7 +55,7 @@
     {
       "name": "phone passing-check / missing-metadata handoff",
       "ok": true,
-      "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+      "sourceCommit": "3977ae76df8b3c1d6a02173faa2d72906cab4700",
       "observed": {
         "url": "http://127.0.0.1:4202/t/confirm-empty-state-copy",
         "assignment": "Ready for review\nReview result\n\nChecks passed.\n\nThe saved source inventory is incomplete; a screenshot is missing.\n\nAttempts 1",
@@ -72,7 +72,7 @@
     {
       "name": "Read-only views do not create extra work or change proof authority",
       "ok": true,
-      "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+      "sourceCommit": "3977ae76df8b3c1d6a02173faa2d72906cab4700",
       "observed": {
         "checks": {
           "proof": true,
@@ -99,7 +99,7 @@
       "sha256": "8cfb39834377bd9f84bb45475d1e7eb411ea8258536a1bc600ccd1bd599fa18a",
       "width": 1440,
       "height": 900,
-      "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+      "sourceCommit": "3977ae76df8b3c1d6a02173faa2d72906cab4700",
       "inspected": true
     },
     {
@@ -107,7 +107,7 @@
       "sha256": "1dbc9a46c8966219d79a1cb99a5c1c80adf0afd92ee53e8f709eaf8c819cd44b",
       "width": 390,
       "height": 844,
-      "sourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+      "sourceCommit": "3977ae76df8b3c1d6a02173faa2d72906cab4700",
       "inspected": true
     }
   ],
@@ -232,12 +232,21 @@
     },
     "inspection": "Both viewport empty/error images inspected locally: clear44px recovery controls, no overflow. Project selected through normal switcher."
   },
-  "reuse": "Earlier current-base desktop/phone feedback\u2192unsigned revision journeys and empty/error checks are reused with their original e0/659 source pins. They were not rerun on bee; final screenshots and the missing-metadata read check are current. Initial9a evidence is excluded. Prior489 report remains preserved locally.",
+  "reuse": "Earlier desktop/phone feedback\u2192unsigned revision journeys and empty/error checks are preserved with their original e0/659 source pins. They were not rerun on3977. Final screenshots and missing-metadata read check are current. Initial9a evidence excluded. Previous bee/489 reports preserved locally.",
   "limits": [
     "Chromium1440x900 and390x844 simulation; no physical phone/Safari/touch keyboard/screen-reader validation.",
     "This read-only browser check proves no new work from these reads. No background worker/provider was started, so scheduler/automatic-repair guarantees rely on separate focused code tests.",
     "No lead acknowledgment, approval signature, proof acceptance or deployment performed. Native release/strict verification is outside this synthetic UI check.",
     "Earlier desktop diff toggles28px; phone44px. Earlier long-feedback475characters, keyboard revision, unsigned/password-empty and44px recovery checks retain their original source attribution."
   ],
-  "cleanup": "Both owned browsers closed and preview16915/session16861 exited0; fresh demo and prior journey histories preserved."
+  "cleanup": "Owned lead-review-desktop/phone closed; preview63113/session73033 exited0; owned synthetic DB and prior journey histories preserved.",
+  "originalHistory": {
+    "previousSourceCommit": "bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a",
+    "priorReportPreserved": "output/playwright/lead-review-metadata/prior-ui-report-bee.json",
+    "note": "Earlier behaviorStage, priorJourneys and priorStateChecks retain their original source attribution unchanged."
+  },
+  "refresh": {
+    "sourceCommit": "3977ae76df8b3c1d6a02173faa2d72906cab4700",
+    "scope": "Same owned missing-metadata fixture, desktop and phone read-only saved task views only. Current12source/12dist hashes captured;2screens refreshed and3checks passed. No feedback/revision/provider/test-suite repeat."
+  }
 }
