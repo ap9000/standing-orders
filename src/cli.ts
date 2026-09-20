@@ -213,6 +213,7 @@ export const OPERATE_COMMANDS = new Set([
   "up",
   "ready",
   "task",
+  "assignment",
   "claim",
   "heartbeat",
   "release",

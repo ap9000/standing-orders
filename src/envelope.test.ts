@@ -128,6 +128,7 @@ describe("the machine envelope", () => {
       up: ["--for", "not-a-number", "--json"],
       ready: ["--json"],
       task: ["list", "--json"],
+      assignment: ["show", "no-such-task", "--json"],
       claim: ["--json"],
       heartbeat: ["--json"],
       release: ["--json"],
