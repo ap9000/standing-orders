@@ -12424,7 +12424,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(store.liveDiffComments(run).map(one => one.id)).toEqual([e]);
   });
 
-  test("repair c9: a check log whose bytes no longer verify is damaged evidence — the shared facts count it, every surface names it and drops the readiness word, its output and download are withheld; shortened logs and diffs say their download is the stored part only", async () => {
+  test("repair c9: damaged check bytes stay visible and withheld while the saved result remains available to handle; shortened downloads describe the stored part only", async () => {
     const ref = seed("t-log", "a corrupted log", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
     const run = build("t-log", ref, RICH);
     const shortRef = seed("t-short", "shortened records", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
@@ -12447,7 +12447,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       expect(html).toContain("The check log no longer verifies (");
       expect(html).toContain('data-work-status="evidence-damaged"');
       expect(html).toContain("Result saved, but some evidence is unavailable");
-      expect(html).not.toContain("Ready to review");
+      // Historical attempt labels remain recorded; current evidence health
+      // must not be presented as a successful verification.
+      expect(html).not.toContain('class="status-label">Ready to review</span>');
       expect(html).not.toContain("0 passed, 12 failed");
       expect(html).not.toContain("Open the full check log");
       // The result panel and the receipt offer no download of the damaged
@@ -12485,20 +12487,26 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const shortTask = await read("/t/t-short");
     expect(shortTask).toContain("2 stored records were shortened at storage; their downloads hold only the stored part.");
     expect(shortTask).toContain('data-work-status="ready-to-review"');
-    // The damaged result's task page box says the same as its receipt: a problem, never "ok".
-    // An existing exception permits deliberately shortened evidence, but
-    // never damaged stored bytes. The acceptance and verdict remain visible.
+    // Existing acceptance stays recorded when bytes change. The saved result
+    // remains ready to handle, but its current checks become unavailable.
     store.stampRun(shortRun, { scopeDigest: store.getScope("t-short")!.digest });
+    store.setVerifyCommand({ repo: "/repo/main", command: "npm test", timeoutMs: 300_000, approvedBy: "alex" }, new Date(T0.getTime() - 120_000));
+    sealVerificationReceipt(store, evidenceRoot, shortRun, "b".repeat(40), store.liveVerifyCommand("/repo/main")!, { configured: true, ran: true, exitCode: 0 }, T0);
     store.acceptProof(shortRun, "alex", "Inspected the stored part and accepted its limits.", T0);
     const acceptedTask = await read("/t/t-short");
     expect(acceptedTask).toContain('data-work-status="assignment-ready-to-check"');
     expect(acceptedTask).toContain('data-work-status="accepted-exception"');
     writeFileSync(join(evidenceRoot, shortLog.key), "changed after acceptance");
     const acceptedDamagedTask = await read("/t/t-short");
-    expect(acceptedDamagedTask).toContain('data-work-status="assignment-needs-decision"');
-    expect(acceptedDamagedTask).not.toContain('data-work-status="assignment-ready-to-check"');
+    expect(acceptedDamagedTask).toContain('data-work-status="assignment-ready-to-check"');
+    expect(acceptedDamagedTask).not.toContain('data-work-status="assignment-needs-decision"');
     expect(acceptedDamagedTask).toContain('data-work-status="accepted-exception"');
-    expect(acceptedDamagedTask).toContain("The saved evidence no longer verifies.");
+    expect(acceptedDamagedTask).toContain(`Saved check-log #${shortLog.id} (run ${shortRun}) is unavailable or changed.`);
+    const acceptedDamagedResult = await read(`/review?result=t-short&run=${shortRun}`);
+    expect(acceptedDamagedResult).toContain('data-actual-checks="unavailable"');
+    expect(acceptedDamagedResult).toContain("The retained verification log no longer verifies.");
+    expect(acceptedDamagedResult).toContain('Mark complete</button>');
+    expect(acceptedDamagedResult).not.toContain('data-actual-checks="passed"');
     expect(store.proofAcceptance(shortRun)?.approver).toBe("alex");
     const damagedTask = await read("/t/t-log");
     expect(damagedTask).toContain('data-dispatch-status="evidence-damaged"');
@@ -12543,8 +12551,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
         expect(html).toContain("data-result-attention=");
         if (sample.kind !== "shortened") {
           expect(html).toContain('data-work-status="evidence-damaged"');
-          expect(html).not.toContain("Ready to review");
-          expect(html).not.toContain("Report ready");
+          expect(html).not.toContain('class="status-label">Ready to review</span>');
+          expect(html).not.toContain('class="status-label">Report ready</span>');
         }
         if (sample.kind === "shortened") expect(html).toContain("The report was shortened when it was stored; its download holds only the stored part.");
         if (sample.kind === "cut-json") expect(html).toContain("the report was shortened at storage and cannot be read; the missing part was never captured");
@@ -12552,6 +12560,15 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       if (sample.kind === "shortened") {
         expect(texts[0]).toContain(`href="/r/${sample.run}/evidence/${sample.artifactId}">Download the stored part of the report (shortened at storage — not the full report)</a>`);
         expect(texts[0]).not.toContain(">Download the report</a>");
+      }
+      if (sample.kind === "log" || sample.kind === "diff") {
+        store.stampRun(sample.run, { scopeDigest: store.getScope(sample.id)!.digest });
+        const currentResult = await read(`/review?result=${sample.id}&run=${sample.run}`);
+        expect(currentResult).toContain('data-work-status="assignment-ready-to-check"');
+        expect(currentResult).toContain('data-actual-checks="unavailable"');
+        expect(currentResult).toContain('data-result-attention=');
+        expect(currentResult).toContain('Mark complete</button>');
+        expect(currentResult).not.toContain('data-actual-checks="passed"');
       }
     }
   });
@@ -13235,7 +13252,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(live).toContain('<a href="/runs">1 live</a><a href="/board?view=order">0 queued</a>');
     expect(live).toContain('data-history-version="newest-sibling"');
     expect(live).toContain("1 earlier task version is still active");
-    expect(await page(cookie, "/projects")).not.toContain('>1 running</a>');
+    expect(await page(cookie, "/projects")).toContain('>1 running</a>');
     expect(countsOf(await page(cookie, "/work"))["Running"]).toBe(1);
     // A released or exactly expired lease cannot keep an orphaned run live.
     release(store, claim.claim.leaseId, now);
