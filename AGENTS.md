@@ -24,6 +24,8 @@ Carry this check into Standing Orders task acceptance criteria and review feedba
 
 ## Lean verification
 
+- Routine tasks hand their result and recorded check status to the lead for review. Missing optional proof reports, screenshots or model-review metadata are visible limitations, not a reason to start another agent turn or require a manually assembled evidence package. Use explicit feedback for revisions. Prepared release candidates still require their approved release checks.
+
 - During implementation, run typecheck and tests for the affected behavior. Add a small regression for each reproduced bug; reuse existing tests instead of adding overlapping suites.
 - For UI work, use one end-to-end journey at desktop and one phone viewport: open the result, inspect changes, leave feedback, and create a revision. Include affected empty, long-content, and failure states. Add other viewport checks only for a concrete risk or explicit acceptance requirement.
 - After a small copy or CSS repair, rerun the affected visual checks, not every browser script. Behavioral changes also require their focused tests.
@@ -33,6 +35,7 @@ Carry this check into Standing Orders task acceptance criteria and review feedba
 
 ## Keep the installed tool current
 
+- Always use the latest verified Standing Orders build for new live work. Check the running UI, background worker and resolved CLI before dispatch; deploy an available newer verified build first. If the update is blocked, resolve the update instead of continuing ordinary tasks on the old runtime. A source commit, passing build or merge does not count as deployment.
 - Deployment means the running UI and background worker use the same verified build and compatible database format, not merely that source was merged or a package was built.
 - Check running build identity before real end-to-end work. Report version drift and update through the normal drain, backup, compatibility and health checks; never replace a runtime underneath active work.
 - Prefer the latest verified candidate. Never bypass signing, approvals, process-exit checks or evidence requirements to install a newer build. Report a blocked update plainly instead of claiming the installation is current.

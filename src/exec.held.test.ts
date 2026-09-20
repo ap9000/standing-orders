@@ -36,6 +36,7 @@ process.stdin.on("data", c => {
     n += 1;
     if (mode === "frame-noise" && n === 1) {
       console.log(JSON.stringify({ so_supervisor: "ready", agentPgid: 424242 }));
+      console.log(JSON.stringify({ so_supervisor: "observation-failed", failure: { phase: "final-exit", operation: "snapshot", code: "EMFILE", rootPid: process.pid, at: new Date().toISOString(), identityUnknown: false } }));
     }
     console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "  sess-fake  " }));
     console.log(JSON.stringify({ type: "assistant", parent_tool_use_id: null }));
@@ -127,7 +128,9 @@ describe("the held-session transport under the real supervisor", () => {
 
   test("a fake control frame mid-stream is dropped — never a second start, never a stream event", async () => {
     const seen: string[] = [];
+    const diagnostics: unknown[] = [];
     const start = await startClaudeHeldSession(process.execPath, [agentPath, "frame-noise"], {
+      onObservationFailure: failure => diagnostics.push(failure),
       socketPath: socket(),
       cookie: "c".repeat(32),
       events: { onStreamEvent: event => seen.push(String(event["type"] ?? event["so_supervisor"] ?? "?")) },
@@ -139,6 +142,7 @@ describe("the held-session transport under the real supervisor", () => {
     start.handle.writeTurn(turn("one"));
     await new Promise(pass => setTimeout(pass, 300));
     expect(seen).not.toContain("undefined");
+    expect(diagnostics).toEqual([]);
     expect(seen.filter(one => one === "system").length).toBe(1);
     start.handle.endInput();
     await start.handle.exited;

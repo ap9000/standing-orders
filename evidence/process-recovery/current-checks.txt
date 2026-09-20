@@ -1,0 +1,394 @@
+Complete focused preparation output. Separate checkpoints and counts; do not add overlapping runs.
+No final native verification or independent review is claimed.
+
+# typecheck
+$ npm run typecheck
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+---
+
+# native-and-app-services-prior
+$ npx vitest run src/process-recovery-services.test.ts src/process-recovery-native.test.ts
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-process-recovery
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+
+ Test Files  2 passed (2)
+      Tests  58 passed (58)
+   Start at  10:59:50
+   Duration  1.31s (transform 145ms, setup 35ms, import 175ms, tests 43ms, environment 0ms)
+
+
+---
+
+# app-services-current
+$ npx vitest run src/process-recovery-services.test.ts
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-process-recovery
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+
+ Test Files  1 passed (1)
+      Tests  42 passed (42)
+   Start at  11:24:55
+   Duration  1.08s (transform 63ms, setup 15ms, import 74ms, tests 22ms, environment 0ms)
+
+
+---
+
+# policy-provenance-settlement
+$ npx vitest run src/process-recovery-coalition.test.ts src/process-recovery-provenance.test.ts src/process-recovery-settlement.test.ts --reporter=dot
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-process-recovery
+
+···················································································(node:75298) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  3 passed (3)
+      Tests  84 passed (84)
+   Start at  11:32:18
+   Duration  2.57s (transform 911ms, setup 46ms, import 1.11s, tests 1.53s, environment 0ms)
+
+
+---
+
+# integration-build
+$ npm run build
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+
+---
+
+== lead-typecheck; source checkpoint 9a82f80e55e8dbe6df45d8a165dccf27b494b0c6; preparation only ==
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+== lead-review; source checkpoint 9a82f80e55e8dbe6df45d8a165dccf27b494b0c6; preparation only ==
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-lead-review
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+·······································································(node:60061) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··································(node:60063) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···················································(node:60064) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··············(node:60062) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···························································
+
+ Test Files  4 passed (4)
+      Tests  229 passed (229)
+   Start at  12:46:52
+   Duration  13.12s (transform 5.02s, setup 573ms, import 7.12s, tests 23.43s, environment 0ms)
+
+
+
+== current-correct-base-checks; source checkpoint e0f2d016a3eeeb0ef2d844e5da69ee9235c6aeb6; typecheck, 230 tests in 4 files, build; prior lead9a checks above are historical ==
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+····································································(node:71375) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·········································(node:71376) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···············································(node:71377) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·············(node:71374) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·····························································
+
+ Test Files  4 passed (4)
+      Tests  230 passed (230)
+   Start at  13:01:32
+   Duration  10.37s (transform 4.48s, setup 66ms, import 6.51s, tests 19.24s, environment 0ms)
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"e0f2d016a3eeeb0ef2d844e5da69ee9235c6aeb6","tree":"07d247ec3eab6d6b0073f3801e86ee14644f6081","trackedClean":true}
+
+
+== ancestor-regression-before-fix; checkpoint e0f2d016a3eeeb0ef2d844e5da69ee9235c6aeb6 ==
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+-------------------·(node:44365) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+x------
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/assignment.test.ts > continuous assignments over existing task families > a checked-build revision refuses damaged ancestor evidence before handoff acknowledgment
+AssertionError: expected 'ready-to-check' to be 'needs-decision' // Object.is equality
+
+Expected: "needs-decision"
+Received: "ready-to-check"
+
+ ❯ src/assignment.test.ts:413:67
+    411|     expect(approve(store, revision.id, "operator", NOW, store.getScope…
+    412|     const run = built(revision.id); if (kind === "verified-build") rev…
+    413|     expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe…
+       |                                                                   ^
+    414|     revisionContext(run, original);
+    415|     const ready = assignmentOf(store, "retry", NOW, access, dir)!;
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed | 25 skipped (27)
+   Start at  13:04:29
+   Duration  1.52s (transform 820ms, setup 13ms, import 992ms, tests 387ms, environment 0ms)
+
+
+
+== ancestor-custody-fixed; checkpoint 659860de3d33d9927ee6f79401704da4ec32e24c ==
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"659860de3d33d9927ee6f79401704da4ec32e24c","tree":"dd2589dd65c7a99c419526608bc79f7ca1d0678c","trackedClean":true}
+····································(node:76215) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·····(node:76210) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  2 passed (2)
+      Tests  42 passed (42)
+   Start at  13:05:01
+   Duration  7.86s (transform 2.50s, setup 31ms, import 3.95s, tests 8.48s, environment 0ms)
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"659860de3d33d9927ee6f79401704da4ec32e24c","tree":"dd2589dd65c7a99c419526608bc79f7ca1d0678c","trackedClean":true}
+
+
+== concise-handoff-build; checkpoint 489224255d8fe849083ac3cbb44880a193b0c734; copy-only duplicate sentence removal ==
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"489224255d8fe849083ac3cbb44880a193b0c734","tree":"7ce79680048a7bd6984ffe117a1131e78b3599c9","trackedClean":true}
+
+
+== builder-routine-typecheck; checkpoint 7e644f169360e135c6bf36c072e91b4aff195370 ==
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+
+== builder-routine-corrections; checkpoint 7e644f169360e135c6bf36c072e91b4aff195370 ==
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: unavailable (no clean Git checkout)
+(node:29184) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  1 passed (1)
+      Tests  32 passed | 121 skipped (153)
+   Start at  13:14:40
+   Duration  4.87s (transform 1.10s, setup 16ms, import 1.32s, tests 2.49s, environment 0ms)
+
+
+
+== ordinary-flow-prior-failed-assertion; checkpoint 7e644f169360e135c6bf36c072e91b4aff195370 ==
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"7e644f169360e135c6bf36c072e91b4aff195370","tree":"5e3cd7e9ff724087745171c0883a75691f75c446","trackedClean":true}
+····································(node:77978) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···x···(node:77977) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/assignment.test.ts > continuous assignments over existing task families > failed proof and an active earlier version never inherit an acknowledgment
+AssertionError: expected 'ready-to-check' to be 'needs-decision' // Object.is equality
+
+Expected: "needs-decision"
+Received: "ready-to-check"
+
+ ❯ src/assignment.test.ts:457:67
+    455|     const ready = assignmentOf(store, "retry", NOW, access, dir)!;
+    456|     store.saveProofVerdict(run, "refuted", ["The retry can be sent twi…
+    457|     expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe…
+       |                                                                   ^
+    458|     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead…
+    459|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  1 failed | 43 passed (44)
+   Start at  13:17:17
+   Duration  8.32s (transform 2.44s, setup 31ms, import 3.96s, tests 8.93s, environment 0ms)
+
+
+
+== ordinary-flow-current; checkpoint 671128936a9fdb8e5661a3796591366c57b9b23b ==
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+···································(node:29035) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+········(node:29034) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  2 passed (2)
+      Tests  44 passed (44)
+   Start at  13:18:14
+   Duration  7.17s (transform 2.41s, setup 34ms, import 3.86s, tests 8.66s, environment 0ms)
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"671128936a9fdb8e5661a3796591366c57b9b23b","tree":"229be559e185863f36bf073239bbea339545135f","trackedClean":true}
+
+
+== recovered-prompt-current; checkpoint dd1db384f5fb40cb2b8ce4aa847b2a6dc3143be7 ==
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+(node:55753) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+-------------------------·-------------------------------------------------------------------------------------------------------------------------------
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 152 skipped (153)
+   Start at  13:18:43
+   Duration  1.51s (transform 1.08s, setup 16ms, import 1.29s, tests 80ms, environment 0ms)
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"dd1db384f5fb40cb2b8ce4aa847b2a6dc3143be7","tree":"aa1e45d74a69b808c092e404819c6e62583caf8e","trackedClean":true}
+
+
+== final-documented-build; checkpoint f4f6b87978ddc577133b3857db3e98489822e042 ==
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"f4f6b87978ddc577133b3857db3e98489822e042","tree":"98b88cec57fb379962de61b38332898b909a271a","trackedClean":true}
+
+
+== metadata-ui-before-assertion-fix; checkpoint d4dc372337cd74c769af45e7abfe24544abf911a ==
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"d4dc372337cd74c769af45e7abfe24544abf911a","tree":"b88d186406872428d7e615cf9f1b9b4d567cb5c9","trackedClean":true}
+····x·······················(node:53143) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/assignment.test.ts > continuous assignments over existing task families > a short goal-review record cannot force another build when the native check passed
+AssertionError: expected '<section class="card assignment-summa…' not to contain 'Result saved — verification needed'
+
+Expected: "Result saved — verification needed"
+Received: "<section class="card assignment-summary" aria-label="assignment progress" data-assignment="retry" data-work-status="assignment-ready-to-check" data-tone="ready" data-task-status><h2 class="assignment-state">Ready for review</h2><a class="button-link" href="/review?result=retry&amp;run=1&amp;project=%2Frepos%2Fassignment" data-primary-action>Review result</a><p class="meta assignment-detail">Checks passed.</p><p class="problem">The saved source inventory is truncated; a screenshot is missing.</p><details class="assignment-attempts"><summary>Attempts <span class="meta">1</span></summary><ol><li data-attempt-task="retry" data-history-version="retry"><a href="/t/retry?version=retry">Original · Result saved — verification needed</a> <a href="/r/1">Run #1</a><p class="meta">Required evidence is missing, so this result is not verified.</p></li></ol><p class="meta">Lead: lead</p><p class="work-meta work-id">Task <span class="mono">retry</span></p></details></section>"
+
+ ❯ src/assignment.test.ts:181:22
+    179|     expect(html).toContain('class="meta assignment-detail">Checks pass…
+    180|     expect(html).toContain("The saved source inventory is truncated; a…
+    181|     expect(html).not.toContain("Result saved — verification needed");
+       |                      ^
+    182|     const before = store.proofVerdictFor(run), runs = store.runsFor(st…
+    183|     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 28 passed (29)
+   Start at  13:22:14
+   Duration  9.82s (transform 888ms, setup 16ms, import 1.07s, tests 7.63s, environment 0ms)
+
+
+
+== metadata-ui-current; checkpoint bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a ==
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+····························(node:70013) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  1 passed (1)
+      Tests  29 passed (29)
+   Start at  13:22:36
+   Duration  7.14s (transform 917ms, setup 15ms, import 1.11s, tests 5.89s, environment 0ms)
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a","tree":"685512ad6ed8f62e3705571d9e8b54a7f69073c1","trackedClean":true}

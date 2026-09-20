@@ -2,14 +2,24 @@ import { execFileSync, type ChildProcess } from "node:child_process";
 import { processMayBeAlive } from "./process-liveness.js";
 
 type ProcessRow = { pid: number; parent: number; group: number };
+export type ProcessObservationFailure = {
+  phase: "sample" | "periodic" | "final-exit" | "stop" | "supervisor";
+  operation: "snapshot" | "descendant-write" | "exit-write" | "signal" | "diagnostic-read";
+  code: string;
+  rootPid: number | null;
+  at: string;
+  identityUnknown: boolean;
+};
 export type ProcessTreeObserver = {
   onDescendant?: (pid: number, group: boolean) => void;
   /** An observed PID (and its group, when recorded) is now proven absent.
    * This never follows merely from reparenting or the root's exit. */
   onDescendantExit?: (pid: number, group: boolean) => void;
+  /** Diagnostics never establish exit or erase a custody witness. */
+  onObservationFailure?: (failure: ProcessObservationFailure) => void;
   onUnknown?: () => void;
 };
-const observed = new Map<ChildProcess, { observer: ProcessTreeObserver; seen: Map<string, { pid: number; group: boolean }> }>();
+const observed = new Map<ChildProcess, { observer: ProcessTreeObserver; seen: Map<string, { pid: number; group: boolean }>; failures: Set<string> }>();
 let timer: ReturnType<typeof setInterval> | null = null;
 
 /** Read identifiers only: command lines can contain private provider inputs. */
@@ -17,8 +27,8 @@ function snapshot(): ProcessRow[] {
   return execFileSync("/bin/ps", ["-axo", "pid=,ppid=,pgid="], { encoding: "utf8", timeout: 2000, maxBuffer: 4 * 1024 * 1024 })
     .trim().split("\n").map(line => {
       const [pid, parent, group] = line.trim().split(/\s+/).map(Number);
-      if (!pid || !Number.isSafeInteger(pid) || parent === undefined || group === undefined) throw new Error("unreadable process ancestry");
-      return { pid, parent, group };
+      if (!pid || !Number.isSafeInteger(pid) || !Number.isSafeInteger(parent) || parent! < 0 || !Number.isSafeInteger(group) || group! < 0 || line.trim().split(/\s+/).length !== 3) throw Object.assign(new Error("unreadable process ancestry"), { code: "MALFORMED_SNAPSHOT" });
+      return { pid, parent: parent!, group: group! };
     });
 }
 function descendants(rows: ProcessRow[], root: number): ProcessRow[] {
@@ -56,10 +66,43 @@ function recordExits(child: ChildProcess, rows: ProcessRow[]): void {
     tracked.seen.delete(key); // The same number can later identify a NEW child.
   }
 }
-function uncertain(child: ChildProcess): void {
-  // A failed observation must not become an uncaught timer exception. The
-  // persistent witness is attempted once by custody; the run remains fenced.
-  try { observed.get(child)?.observer.onUnknown?.(); } catch {}
+// Only fixed error codes survive; error messages/output can contain private data.
+const observationCodes = new Set(["EAGAIN", "EMFILE", "ENFILE", "ETIMEDOUT", "ENOBUFS", "ENOENT", "EPERM", "EACCES", "EIO", "ESRCH", "MALFORMED_SNAPSHOT", "SUPERVISOR_DIAGNOSTIC"]);
+/** Private supervisor pipe input. Keep only validated identifier diagnostics. */
+export function readProcessObservationFailure(value: unknown): ProcessObservationFailure | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  const { phase, operation, code, rootPid, at, identityUnknown } = row;
+  if (!["sample", "periodic", "final-exit", "stop", "supervisor"].includes(String(phase)) || !["snapshot", "descendant-write", "exit-write", "signal", "diagnostic-read"].includes(String(operation)) || typeof code !== "string" || (code !== "UNKNOWN" && !observationCodes.has(code)) || (rootPid !== null && (!Number.isSafeInteger(rootPid) || Number(rootPid) <= 0)) || typeof at !== "string" || !Number.isFinite(Date.parse(at)) || new Date(at).toISOString() !== at || typeof identityUnknown !== "boolean") return null;
+  return { phase: phase as ProcessObservationFailure["phase"], operation: operation as ProcessObservationFailure["operation"], code, rootPid: rootPid as number | null, at, identityUnknown };
+}
+function failed(child: ChildProcess, phase: ProcessObservationFailure["phase"], operation: ProcessObservationFailure["operation"], error: unknown): void {
+  const tracked = observed.get(child);
+  if (!tracked) return;
+  const rawCode = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+  const code = typeof rawCode === "string" && observationCodes.has(rawCode) ? rawCode : "UNKNOWN";
+  // Exit-only checks retire already-durable identities; they discover no
+  // children. Any failure leaves those witnesses intact for later OS probes.
+  // Discovery and descendant persistence failures can lose an identity.
+  const identityUnknown = phase !== "final-exit" && operation !== "exit-write";
+  const key = `${phase}:${operation}:${code}`;
+  if (!tracked.failures.has(key)) {
+    try {
+      tracked.observer.onObservationFailure?.({ phase, operation, code, rootPid: child.pid ?? null, at: new Date().toISOString(), identityUnknown });
+      tracked.failures.add(key);
+    } catch { /* No diagnostic, but no witness was retired by this callback. */ }
+  }
+  if (identityUnknown) {
+    // A failed persistence callback never becomes an uncaught timer error or
+    // permission to release custody. The existing unknown road stays closed.
+    try { tracked.observer.onUnknown?.(); } catch {}
+  }
+}
+function observeRows(child: ChildProcess, rows: ProcessRow[], phase: "sample" | "periodic"): void {
+  try { recordExits(child, rows); }
+  catch (error) { failed(child, phase, "exit-write", error); }
+  try { remember(child, descendants(rows, child.pid!)); }
+  catch (error) { failed(child, phase, "descendant-write", error); }
 }
 
 /** Capture current descendants before asking an owned process to exit.
@@ -67,8 +110,10 @@ function uncertain(child: ChildProcess): void {
  * a killed tool can retain its PID briefly after its process group is gone. */
 export function sampleProcessTree(child: ChildProcess): void {
   if (!live(child) || !observed.has(child)) return;
-  try { const rows = snapshot(); recordExits(child, rows); remember(child, descendants(rows, child.pid!)); }
-  catch { uncertain(child); }
+  let rows: ProcessRow[];
+  try { rows = snapshot(); }
+  catch (error) { failed(child, "sample", "snapshot", error); return; }
+  observeRows(child, rows, "sample");
 }
 
 /** Observe escaped process groups while their ancestry is still provable.
@@ -76,25 +121,27 @@ export function sampleProcessTree(child: ChildProcess): void {
  * shell. They never grant permission to send a signal after worker recovery. */
 export function observeProcessTree(child: ChildProcess, observer: ProcessTreeObserver): void {
   if (process.platform === "win32" || observer.onDescendant === undefined) return;
-  observed.set(child, { observer, seen: new Map() });
+  observed.set(child, { observer, seen: new Map(), failures: new Set() });
   child.once("close", () => {
     if (observed.get(child)?.seen.size) {
-      try { recordExits(child, snapshot()); } catch { uncertain(child); }
+      let rows: ProcessRow[] | null = null;
+      try { rows = snapshot(); } catch (error) { failed(child, "final-exit", "snapshot", error); }
+      if (rows !== null) {
+        try { recordExits(child, rows); } catch (error) { failed(child, "final-exit", "exit-write", error); }
+      }
     }
     observed.delete(child);
     if (observed.size === 0 && timer !== null) { clearInterval(timer); timer = null; }
   });
   if (timer !== null) return;
   timer = setInterval(() => {
-    try {
-      const rows = snapshot();
-      for (const [one] of observed) if (live(one)) {
-        recordExits(one, rows);
-        remember(one, descendants(rows, one.pid!));
-      }
-    } catch {
-      for (const [one] of observed) if (live(one)) uncertain(one);
+    let rows: ProcessRow[];
+    try { rows = snapshot(); }
+    catch (error) {
+      for (const [one] of observed) if (live(one)) failed(one, "periodic", "snapshot", error);
+      return;
     }
+    for (const [one] of observed) if (live(one)) observeRows(one, rows, "periodic");
   }, 500);
   timer.unref();
 }
@@ -107,11 +154,15 @@ export function observeProcessTree(child: ChildProcess, observer: ProcessTreeObs
 export function stopProcessTree(child: ChildProcess): boolean {
   if (process.platform === "win32" || !live(child)) return false;
   const stopped = new Set<number>();
+  let operation: ProcessObservationFailure["operation"] = "signal";
   try {
     if (!child.kill("SIGSTOP")) return false;
     for (let pass = 0; pass < 8; pass++) {
+      operation = "snapshot";
       const rows = descendants(snapshot(), child.pid!);
+      operation = "descendant-write";
       remember(child, rows);
+      operation = "signal";
       const fresh = rows.filter(row => !stopped.has(row.pid));
       if (fresh.length === 0) {
         // Parents are frozen, so none can fork between this seal and kill.
@@ -125,8 +176,8 @@ export function stopProcessTree(child: ChildProcess): boolean {
       }
     }
     throw new Error("process ancestry did not settle");
-  } catch {
-    uncertain(child);
+  } catch (error) {
+    failed(child, "stop", operation, error);
     // Do not leave any process frozen after a failed observation. The caller
     // can still stop its known group; unresolved custody prevents Resume.
     for (const pid of stopped) { try { process.kill(pid, "SIGCONT"); } catch {} }

@@ -2345,6 +2345,10 @@ async function correctProofReceipt(
   const { store, request, git, worktree, branch, root, proof: file, clock, effective } = captured;
   const provider = effective.profile.provider;
   const unchanged = { read: original, integrityFailure: null };
+  // Routine work returns its result and limitations to the lead. Preserve an
+  // optional receipt as submitted; formatting it never buys another agent turn.
+  // Explicit strict work retains the bounded correction of its signed receipt.
+  if (captured.scope?.qualityMode !== "strict") return unchanged;
   if (!original.ok) return unchanged;
   const normalized = normalizeStructuredJson(original.raw.toString("utf8"));
   const initial = parseProof(normalized.text);
@@ -3326,7 +3330,7 @@ function brief(
       ? []
       : [
           fence(
-            "Acceptance criteria — your proof must answer EVERY one of these below, by its exact id, restating its statement verbatim:",
+            "Acceptance criteria — implement these exact signed requirements; the machine captures evidence for review:",
           ),
           ...JSON.stringify(scope.acceptance.map(({ id, statement, evidence }) => ({ id, statement, evidence })), null, 2).split("\n").map(fence),
         ]),
@@ -3441,7 +3445,7 @@ function brief(
           `#${recoveredDraftRun} after its runner stopped before settlement. Its old`,
           "handoff was quarantined and grants no authority to this attempt.",
           "Start by reviewing the existing changes, preserve sound work, run the required checks,",
-          "repair anything short, and write this attempt's own handoff and proof.",
+          "repair anything short, and write this attempt's own handoff with its outcome and limitations.",
           "Do not discard and recreate sound work without evidence that it is wrong.",
           "",
         ]),

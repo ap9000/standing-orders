@@ -37,9 +37,9 @@ export function assignmentArgumentProblem(operation: AssignmentOperation, args: 
   return null;
 }
 
-function readAssignment(store: Store, operation: "show" | "updates", args: Args, now: Date, access: AssignmentAccess) {
-  if (operation === "updates") return { ok: true as const, body: assignmentUpdates(store, now, access, { after: Number(args["after"] ?? 0), limit: Number(args["limit"] ?? 50) }) };
-  const assignment = assignmentOf(store, String(args["ref"]), now, access);
+function readAssignment(store: Store, operation: "show" | "updates", args: Args, now: Date, access: AssignmentAccess, root?: string) {
+  if (operation === "updates") return { ok: true as const, body: assignmentUpdates(store, now, access, { after: Number(args["after"] ?? 0), limit: Number(args["limit"] ?? 50) }, root) };
+  const assignment = assignmentOf(store, String(args["ref"]), now, access, root);
   return assignment === null ? failure("not-found", "No assignment with that task id is available in your projects.") : { ok: true as const, body: assignment };
 }
 
@@ -52,10 +52,10 @@ export function assignmentForCoordinator(store: Store, token: string, operation:
     const authenticated = authenticateCoordinator(store, token);
     if (!authenticated.ok) return failure("unauthenticated", "The coordinator credential is unavailable or revoked.");
     const { who } = authenticated;
-    if (operation === "show" || operation === "updates") return readAssignment(store, operation, args, now, { principal: "coordinator", repos: who.repos });
+    if (operation === "show" || operation === "updates") return readAssignment(store, operation, args, now, { principal: "coordinator", repos: who.repos }, evidenceRoot);
     const owner = { kind: "coordinator" as const, id: who.cid, label: who.name };
     const result = operation === "claim"
-      ? claimAssignment(store, String(args["ref"]), owner, now)
+      ? claimAssignment(store, String(args["ref"]), owner, now, evidenceRoot)
       : checkAssignment(store, String(args["ref"]), String(args["digest"]), owner, now, evidenceRoot);
     return result.ok ? { ok: true as const, body: result.assignment } : result;
   });
@@ -79,7 +79,7 @@ function assignmentLines(assignment: AssignmentSnapshot): string[] {
     `Lead: ${assignment.owner === null ? "unclaimed" : `${assignment.owner.label}${assignment.owner.active ? "" : " (no longer has access)"}`}`,
     ...(receipt === null ? [] : [
       `Result: ${receipt.taskId} · run ${receipt.runId}`,
-      `Result type: ${receipt.completionKind === "verified-build" ? "verified build" : receipt.completionKind === "research-report" ? "research report" : receipt.completionKind === "accepted-exception" ? "accepted exception" : "verification pending"}`,
+      `Result type: ${receipt.completionKind === "verified-build" ? "verified build" : receipt.completionKind === "checked-build" ? "checks passed; lead review" : receipt.completionKind === "research-report" ? "research report" : receipt.completionKind === "accepted-exception" ? "accepted exception" : "verification pending"}`,
       ...(receipt.proofAcceptance === null ? [] : [`Recorded acceptance: ${receipt.proofAcceptance.approver}${receipt.proofAcceptance.note === null ? "" : ` · ${receipt.proofAcceptance.note}`}`]),
       `Candidate: ${receipt.head ?? "not recorded"} (base ${receipt.base ?? "not recorded"})`,
       `Proof: ${receipt.proof?.verdict ?? "not recorded"} · evidence ${receipt.evidence}`,
@@ -155,5 +155,5 @@ export function runAssignmentCommand(positional: readonly string[], flags: Map<s
   if ("ok" in credential) return emit(credential);
   if (credential.token !== null) return emit(assignmentForCoordinator(context.store, credential.token, operation, args, context.now, context.evidenceRoot));
   if (operation === "claim" || operation === "check") return emit(failure("unauthenticated", "Use --token-env NAME or --token-file PATH with your coordinator credential to claim or acknowledge an assignment."));
-  return emit(readAssignment(context.store, operation, args, context.now, { principal: "operator", repos: null, includeUnplaced: true }));
+  return emit(readAssignment(context.store, operation, args, context.now, { principal: "operator", repos: null, includeUnplaced: true }, context.evidenceRoot));
 }

@@ -147,6 +147,7 @@ describe("the invocation gateway", () => {
       env: { STANDING_ORDERS_DB: "/operator/live/orders.db" },
       starter: async (_file, _args, options) => {
         childDb = options.env?.["STANDING_ORDERS_DB"];
+        options.onObservationFailure?.({ phase: "final-exit", operation: "snapshot", code: "EMFILE", rootPid: 1, at: T0.toISOString(), identityUnknown: false });
         return {
           ok: true,
           handle: {
@@ -163,6 +164,8 @@ describe("the invocation gateway", () => {
     });
 
     expect(started.ok).toBe(true);
+    const observation = store.actionLedger({ repos: null }).find(one => one.action === "process observation failed");
+    expect(JSON.parse(observation!.outcome)).toMatchObject({ phase: "final-exit", code: "EMFILE", rootPid: 1 });
     expect(childDb).toBeDefined();
     expect(childDb).not.toBe("/operator/live/orders.db");
     expect(existsSync(dirname(childDb!))).toBe(true);

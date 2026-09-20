@@ -16,7 +16,7 @@ export type AssignmentReceipt = {
   digest: string; rootId: string; taskId: string; runId: number;
   base: string | null; head: string | null; scopeDigest: string | null;
   proof: ProofVerdictRow | null;
-  completionKind: "verified-build" | "research-report" | "accepted-exception" | null;
+  completionKind: "verified-build" | "checked-build" | "research-report" | "accepted-exception" | null;
   proofAcceptance: ProofAcceptanceRow | null;
   artifacts: { id: number; kind: string; sha256: string; bytes: number; complete: boolean }[];
   caveats: string[]; agentReport: string | null; evidence: "recorded";
@@ -64,7 +64,18 @@ function ownerOf(store: Store, rootId: string, repo: string | null): AssignmentS
     active: credential !== undefined && credential["revoked_at"] === null && repo !== null && Array.isArray(repos) && repos.includes(repo) };
 }
 
-export function assignmentOf(store: Store, taskId: string, now: Date, access: AssignmentAccess): AssignmentSnapshot | null {
+// Goal-review evidence and actual check execution answer different questions.
+// A missing screenshot, inventory or model assessment must not force a rebuild.
+function passingNativeCheck(store: Store, root: string | undefined, runId: number): boolean {
+  if (root === undefined) return false;
+  try {
+    const gate = verificationEvidence(store, root, runId);
+    const receipt = gate.ok && gate.bytes !== null ? JSON.parse(gate.bytes) : null;
+    return receipt?.result?.ran === true && receipt.result.exitCode === 0;
+  } catch { return false; }
+}
+
+export function assignmentOf(store: Store, taskId: string, now: Date, access: AssignmentAccess, root?: string): AssignmentSnapshot | null {
   const family = store.taskFamilyOf(taskId, access.repos, access.principal === "operator" && access.includeUnplaced === true);
   if (family === null) return null;
   const current = family.current;
@@ -100,11 +111,17 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     scope !== null && scope.acceptance.length > 0 && proof.matrix.length === scope.acceptance.length &&
     scope.acceptance.every(criterion => proof.matrix.some(row => row.id === criterion.id && row.statement === criterion.statement)) &&
     proof.matrix.every(row => row.state === "pass" && row.review?.judgement === "upholds") && review?.state === "succeeded";
+  // A completed, machine-checked result is ready for its lead's review.
+  // Independent semantic review is a separate, optionally requested result;
+  // it must not become a prerequisite for showing the work to its owner.
+  const checkedBuild = result?.role === "builder" && (result.outcome === "built" || result.outcome === "no-change") &&
+    /^[a-f0-9]{40}$/.test(result.headRevision ?? "") &&
+    scope?.qualityMode !== "strict" && passingNativeCheck(store, root, result.id);
   const completionKind: AssignmentReceipt["completionKind"] = result?.role === "scout" && result.outcome === "built" &&
       reports.length === 1 && !reports[0]!.truncated && reports[0]!.captureStatus !== "failed" ? "research-report"
     : result?.role === "builder" && (result.outcome === "built" || result.outcome === "no-change") &&
       /^[a-f0-9]{40}$/.test(result.headRevision ?? "") && acceptance !== null ? "accepted-exception"
-    : verifiedBuild ? "verified-build" : null;
+    : verifiedBuild ? "verified-build" : checkedBuild ? "checked-build" : null;
   const receiptBody = result === null ? null : {
     rootId: family.root.id, taskId: current.id, runId: result.id, base: result.baseRevision,
     head: result.headRevision, scopeDigest: result.scopeDigest ?? null, proof, completionKind, proofAcceptance: acceptance,
@@ -124,18 +141,25 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   let primaryAction = work.primaryAction;
   const live = work.liveRunId !== null || work.status.token === "running";
   const checking = review?.state === "queued" || review?.state === "running" || work.status.token === "reviewing";
+  const processProblem = result === null ? null : store.stopQuiescenceProblem(result.id);
   // The exact completed result, scope, family and custody fences apply to
   // every deliverable. Human acceptance remains its own recorded authority;
   // it never changes a machine verdict or supplies a missing report.
   const ready = current.state === "done" && result !== null && completionKind !== null &&
     scope !== null && scope.termsProblem == null && approvalOf(scope).approved && scope.digest === result.scopeDigest &&
     store.activeHolds(current.refId, now).length === 0 && store.applicableStopFor(result.id) === null &&
+    processProblem === null &&
     family.problem === null && earlierActive.length === 0 && unfinished === null && store.currentLiveLease(current.refId, now) === null && questions.length === 0;
   if (family.problem !== null) state = "needs-decision";
   else if (current.state === "cancelled") {
     state = "cancelled";
     detail = "This assignment was cancelled.";
     primaryAction = { code: "inspect-task", label: "View assignment", target: { taskId: current.id, runId: null, decisionId: null }, access: "read", retry: "read-again" };
+  }
+  else if (!live && processProblem !== null && result !== null) {
+    state = "needs-decision";
+    detail = processProblem;
+    primaryAction = { code: "inspect-run", label: "Inspect run", target: { taskId: current.id, runId: result.id, decisionId: null }, access: "read", retry: "read-again" };
   }
   else if (current.state === "done" && questions.length > 0 && work.status.tone !== "problem" &&
     !["stopping", "stopped", "review-failed", "review-exhausted"].includes(work.status.token) &&
@@ -153,14 +177,15 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     state = "ready-to-check";
     detail = completionKind === "research-report" ? "The research report is ready for the lead to read."
       : completionKind === "accepted-exception" ? "An operator accepted this result with its recorded limitations. The lead can inspect that decision; the recorded checks are unchanged."
-      : "Checks and independent review passed. The lead can inspect the saved result.";
+      : completionKind === "checked-build" ? "Checks passed."
+      : "Checks and independent review passed.";
     primaryAction = { code: "open-result", label: completionKind === "research-report" ? "Read report" : completionKind === "accepted-exception" ? "Review acceptance" : "Review result", target: { taskId: current.id, runId: result!.id, decisionId: null }, access: "read", retry: "read-again" };
     if (owner?.active && store.handle.prepare("SELECT 1 FROM action_ledger WHERE task_id = ? AND run_id = ? AND actor = ? AND action = ? AND outcome = ? AND source = 'work' LIMIT 1")
       .get(family.root.id, result!.id, actorOf(owner), CHECK_ACTION, receipt.digest)) {
       state = "complete";
       detail = completionKind === "research-report" ? `Research report checked by ${owner.label}. No code change or deployment is implied.`
         : completionKind === "accepted-exception" ? `Recorded acceptance checked by ${owner.label}. The recorded checks and limitations are unchanged.`
-        : `Checked by ${owner.label}. Deployment is tracked separately.`;
+        : `Reviewed by ${owner.label}. Deployment is tracked separately.`;
     }
   } else if (work.status.rank === 0 || (!live && (current.state === "done" || current.state === "failed" || work.status.views.includes("needs-you")))) {
     state = "needs-decision";
@@ -180,7 +205,18 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
       };
     }
   }
+  // A saved verdict/acknowledgment never substitutes for today's saved bytes.
+  // Do this before deriving the handoff so all readers and notices agree.
+  if ((state === "ready-to-check" || state === "complete") && receipt !== null &&
+    (root === undefined || !assignmentEvidenceIntact(store, root, receipt))) {
+    state = "needs-decision";
+    detail = "The saved evidence no longer verifies. Review its files and recorded limitations before checking this result.";
+    primaryAction = { code: "open-result", label: "Review evidence", target: { taskId: current.id, runId: receipt.runId, decisionId: null }, access: "read", retry: "read-again" };
+    const attempt = attempts.find(one => one.taskId === current.id && one.runId === receipt.runId);
+    if (attempt) { attempt.label = "Evidence unavailable"; attempt.detail = detail; }
+  }
   if (state === "needs-decision") attention.push(detail);
+  if (completionKind === "checked-build" && proof?.verdict !== "verified") attention.push(...(proof?.reasons ?? []));
   if (current.state !== "cancelled") attention.push(...questions.map(question => question.decision.question));
   if (owner !== null && !owner.active) attention.push("The previous lead no longer has access. Another lead can claim this assignment.");
   const handoff = state === "ready-to-check" || state === "complete" ? { kind: "result" as const, digest: receipt!.digest, acknowledged: state === "complete" }
@@ -197,17 +233,17 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
 }
 
 type MutationResult = { ok: true; assignment: AssignmentSnapshot } | { ok: false; reason: string; message: string };
-function admittedOwner(store: Store, taskId: string, owner: AssignmentOwner, now: Date): AssignmentSnapshot | null {
+function admittedOwner(store: Store, taskId: string, owner: AssignmentOwner, now: Date, root?: string): AssignmentSnapshot | null {
   const row = store.handle.prepare("SELECT repos, revoked_at FROM coordinator_credential WHERE cid = ?").get(owner.id);
   if (row === undefined || row["revoked_at"] !== null) return null;
   let repos: unknown;
   try { repos = JSON.parse(String(row["repos"])); } catch { return null; }
   if (!Array.isArray(repos) || repos.some(r => typeof r !== "string")) return null;
-  return assignmentOf(store, taskId, now, { principal: "coordinator", repos });
+  return assignmentOf(store, taskId, now, { principal: "coordinator", repos }, root);
 }
-export function claimAssignment(store: Store, taskId: string, owner: AssignmentOwner, now: Date): MutationResult {
+export function claimAssignment(store: Store, taskId: string, owner: AssignmentOwner, now: Date, root?: string): MutationResult {
   return store.transact(() => {
-    const current = admittedOwner(store, taskId, owner, now);
+    const current = admittedOwner(store, taskId, owner, now, root);
     if (current === null) return { ok: false, reason: "not-found", message: "No assignment is available in your projects." };
     if (current.owner?.active && current.owner.id !== owner.id) return { ok: false, reason: "owned", message: "Another lead already owns this assignment." };
     if (current.owner?.id !== owner.id) {
@@ -215,7 +251,7 @@ export function claimAssignment(store: Store, taskId: string, owner: AssignmentO
         taskId: current.rootId, runId: null, action: OWNER_ACTION, outcome: "owner", source: "work" });
       store.bumpWake();
     }
-    const assignment = admittedOwner(store, current.rootId, owner, now)!;
+    const assignment = admittedOwner(store, current.rootId, owner, now, root)!;
     noteAssignmentHandoff(store, assignment, now);
     return { ok: true, assignment };
   });
@@ -237,30 +273,47 @@ export function assignmentEvidenceIntact(store: Store, root: string, receipt: As
       // proof and shortened captures stay visible; no new acceptance or
       // passing gate is manufactured by the lead's acknowledgment.
       return savedBytesIntact && receipt.proofAcceptance !== null;
-    } else if (receipt.completionKind === "verified-build") {
-      const proof = readVerifiedProofForRun(store, root, receipt.runId);
+    } else if (receipt.completionKind === "checked-build" || receipt.completionKind === "verified-build") {
       const gate = verificationEvidence(store, root, receipt.runId);
-      const result = gate.ok && gate.bytes !== null ? JSON.parse(gate.bytes).result : null;
+      const verification = gate.ok && gate.bytes !== null ? JSON.parse(gate.bytes) : null;
+      const result = verification?.result;
+      const readOne = (kind: typeof artifacts[number]["kind"]) => {
+        const found = artifacts.filter(a => a.kind === kind);
+        if (found.length !== 1 || found[0]!.truncated || (found[0]!.redacted && kind !== "review-context") || found[0]!.captureStatus === "failed") return null;
+        const read = readVerifiedArtifact(root, found[0]!);
+        return read.ok ? read.content.toString("utf8") : null;
+      };
+      const source = store.getRun(receipt.runId)!;
+      const context = readOne("review-context");
+      const parsed = context === null ? null : parseReviewContext(context);
+      // A current proof covers its own saved bytes. A revision also retains
+      // its ancestors' sealed evidence; recheck that custody before handoff.
+      const needsContext = store.revisionSourceOf(source.taskRef) !== null || artifacts.some(a => a.kind === "review-context");
+      const contextIntact = parsed?.ok === true && parsed.inventory.run === receipt.runId &&
+        reviewContextCustodyProblem(store, root, parsed.inventory) === null;
+      if (receipt.completionKind === "checked-build") {
+        // Lead review reads the durable assignment history directly. It does
+        // not need a separate model-review manifest, but damaged saved history
+        // still cannot be acknowledged as intact.
+        const family = store.taskFamilyOf(receipt.taskId, null, true);
+        const historyIntact = family !== null && family.problem === null && family.root.id === receipt.rootId &&
+          family.versions.every(version => store.runsFor(version.refId).every(run =>
+            store.artifactsFor(run.id).every(artifact => readVerifiedArtifact(root, artifact).ok)));
+        return savedBytesIntact && historyIntact && verification?.head === receipt.head && result?.ran === true &&
+          result.exitCode === 0;
+      }
+      if (needsContext && !contextIntact) return false;
+      const proof = readVerifiedProofForRun(store, root, receipt.runId);
       let goalEvidence = proof?.ok === true;
       if (proof === null && receipt.proof!.matrix.length > 0 && receipt.proof!.matrix.every(row =>
         row.assessment?.evidenceState === "pass" && row.state === "pass" && row.review?.judgement === "upholds")) {
         // Native direct assessments have no builder proof. Re-prove their
         // original complete inputs and existing context custody instead.
-        const readOne = (kind: typeof artifacts[number]["kind"]) => {
-          const found = artifacts.filter(a => a.kind === kind);
-          // Native review permits redacted context with its explicit gaps;
-          // the parsed inventory and custody still prove every retained byte.
-          if (found.length !== 1 || found[0]!.truncated || (found[0]!.redacted && kind !== "review-context") || found[0]!.captureStatus === "failed") return null;
-          const read = readVerifiedArtifact(root, found[0]!);
-          return read.ok ? read.content.toString("utf8") : null;
-        };
-        const context = readOne("review-context"), stat = readOne("diff-stat");
-        const parsed = context === null ? null : parseReviewContext(context);
-        const source = store.getRun(receipt.runId)!;
+        const stat = readOne("diff-stat");
         const base = source.branch ? store.firstBuilderBase(source.taskRef, source.branch) ?? source.baseRevision : source.baseRevision;
         const inventory = stat === null ? null : JSON.parse(stat);
         goalEvidence = readOne("terminal-diff") !== null && readOne("handoff") !== null && parsed?.ok === true &&
-          parsed.inventory.run === receipt.runId && reviewContextCustodyProblem(store, root, parsed.inventory) === null &&
+          contextIntact &&
           (parsed.inventory.source.run !== parsed.inventory.run || parsed.inventory.ancestry.verified) &&
           inventory?.schema === 1 && inventory.head === source.headRevision && inventory.base === base && inventory.filesTruncated === false &&
           Array.isArray(inventory.files) && inventory.fileCount === inventory.files.length &&
@@ -283,22 +336,22 @@ export function assignmentEvidenceIntact(store: Store, root: string, receipt: As
 
 export function checkAssignment(store: Store, taskId: string, receiptDigest: string, owner: AssignmentOwner, now: Date, root = evidenceRoot(homedir())): MutationResult {
   return store.transact(() => {
-    const current = admittedOwner(store, taskId, owner, now);
+    const current = admittedOwner(store, taskId, owner, now, root);
     if (current === null) return { ok: false, reason: "not-found", message: "No assignment is available in your projects." };
     if (current.owner?.id !== owner.id || !current.owner.active) return { ok: false, reason: "not-owner", message: "Claim this assignment before checking its handoff." };
     if (!/^[a-f0-9]{64}$/.test(receiptDigest) || current.receipt?.digest !== receiptDigest) return { ok: false, reason: "stale", message: "The result changed. Read the current assignment before checking it." };
-    if (current.state !== "ready-to-check" && current.state !== "complete") return { ok: false, reason: "not-ready", message: "This assignment still has unresolved work or verification." };
     const receipt = current.receipt;
     const intact = assignmentEvidenceIntact(store, root, receipt);
     if (!intact) {
       return { ok: false, reason: "evidence-unavailable", message: "The saved evidence no longer verifies. Restore or refresh it before checking this handoff." };
     }
+    if (current.state !== "ready-to-check" && current.state !== "complete") return { ok: false, reason: "not-ready", message: "This assignment still has unresolved work or verification." };
     if (current.state !== "complete") {
       store.recordAction({ at: now.toISOString(), actor: actorOf(owner), repo: current.repo,
         taskId: current.rootId, runId: receipt.runId, action: CHECK_ACTION, outcome: receiptDigest, source: "work" });
       store.bumpWake();
     }
-    return { ok: true, assignment: admittedOwner(store, current.rootId, owner, now)! };
+    return { ok: true, assignment: admittedOwner(store, current.rootId, owner, now, root)! };
   });
 }
 
@@ -307,13 +360,13 @@ function noteAssignmentHandoff(store: Store, assignment: AssignmentSnapshot, now
   const ref = store.lookupRef(assignment.rootId);
   if (!ref || !ref.repo) return;
   store.enqueueNotification({ dedupeKey: `assignment:${ref.id}:${assignment.owner.id}:${assignment.handoff.digest}`,
-    kind: "assignment-handoff", source: { taskRef: ref.id }, subject: assignment.state === "cancelled" ? "Assignment cancelled" : assignment.state === "ready-to-check" ? "Ready for the lead to check" : "Assignment needs a decision",
+    kind: "assignment-handoff", source: { taskRef: ref.id }, subject: assignment.state === "cancelled" ? "Assignment cancelled" : assignment.state === "ready-to-check" ? "Ready for review" : "Assignment needs a decision",
     body: assignment.detail, link: `/t/${encodeURIComponent(assignment.rootId)}` }, now);
 }
 
 /** The ordinary worker reconciles at most 50 owned roots per pass. A lost
  * wakeup is recovered after restart; immutable notification keys dedupe it. */
-export function syncAssignmentHandoffs(store: Store, now: Date, repos: readonly string[]): void {
+export function syncAssignmentHandoffs(store: Store, now: Date, repos: readonly string[], root?: string): void {
   if (repos.length === 0) return;
   store.transact(() => {
   const key = `assignment-handoff:${digest([...new Set(repos)].sort())}`;
@@ -323,14 +376,14 @@ export function syncAssignmentHandoffs(store: Store, now: Date, repos: readonly 
     AND (t.coordinator_cid IS NOT NULL OR EXISTS (SELECT 1 FROM action_ledger a WHERE a.task_id = t.external_id AND a.action = ?))
     ORDER BY t.id LIMIT 50`).all(JSON.stringify(repos), cursor, OWNER_ACTION);
   for (const row of rows) {
-    const assignment = assignmentOf(store, String(row["external_id"]), now, { principal: "operator", repos });
+    const assignment = assignmentOf(store, String(row["external_id"]), now, { principal: "operator", repos }, root);
     if (assignment !== null) noteAssignmentHandoff(store, assignment, now);
   }
   store.setServiceCursor(key, rows.length < 50 ? 0 : Number(rows.at(-1)!["id"]), now);
   });
 }
 
-export function assignmentUpdates(store: Store, now: Date, access: AssignmentAccess, query: { after: number; limit: number }) {
+export function assignmentUpdates(store: Store, now: Date, access: AssignmentAccess, query: { after: number; limit: number }, root?: string) {
   const after = Number.isSafeInteger(query.after) && query.after >= 0 ? query.after : 0;
   const limit = Math.max(1, Math.min(100, Math.floor(query.limit) || 50));
   const rows = store.handle.prepare(`SELECT n.id,n.task_id,n.dedupe_key,n.created_at FROM notification n
@@ -340,7 +393,7 @@ export function assignmentUpdates(store: Store, now: Date, access: AssignmentAcc
     .all(after, access.repos === null ? 1 : 0, JSON.stringify(access.repos ?? []), limit + 1);
   const page = rows.slice(0, limit);
   const events = page.flatMap(row => {
-    const assignment = assignmentOf(store, String(row["task_id"]), now, access);
+    const assignment = assignmentOf(store, String(row["task_id"]), now, access, root);
     if (assignment === null) return [];
     const parts = String(row["dedupe_key"]).split(":");
     const receiptDigest = parts.at(-1)!;

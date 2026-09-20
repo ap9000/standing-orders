@@ -4184,7 +4184,7 @@ async function tickCommand(
   }
 
   // Existing worker pass owns durable lead handoffs; reads never create events.
-  syncAssignmentHandoffs(store, clock(), auth.runner.repos);
+  syncAssignmentHandoffs(store, clock(), auth.runner.repos, context.evidenceRoot);
 
   const summary = () => {
     const lines = [`Considered ${considered}, built ${built}, parked ${parked}, broke ${broke}.`];
@@ -10006,7 +10006,7 @@ function showTask(positional: readonly string[], context: Context): number {
   const detail = {
     task,
     work: taskWorkSummaryOf(store, id, now, { principal: "operator", repos: null, includeUnplaced: true }),
-    assignment: assignmentBrief(assignmentOf(store, id, now, { principal: "operator", repos: null, includeUnplaced: true })),
+    assignment: assignmentBrief(assignmentOf(store, id, now, { principal: "operator", repos: null, includeUnplaced: true }, context.evidenceRoot)),
     ref: ref.id,
     blockedBy: store.blockers(id),
     position: store.queuePosition(id),

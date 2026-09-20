@@ -18,7 +18,7 @@ import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS } from "./knowledge-
 import { learningHtml } from "./workspace-ui.js";
 import { createSessionEndpoint } from './session-server.js';
 import { openWorkDecisionOf } from "./work-summary.js";
-import { assignmentOf, assignmentEvidenceIntact, type AssignmentSnapshot } from './assignment.js';
+import { assignmentOf, type AssignmentSnapshot } from './assignment.js';
 import { assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, reviewRetryChoiceHtml, ASSIGNMENT_CSS } from './assignment-ui.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -3527,18 +3527,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       return one !== undefined && runnerAlive(one, clock());
     });
 
-  /** Reuse the receipt's detailed damage finding, then validate only a
-   * recorded ready handoff. Accepted limitations remain valid; changed
-   * saved bytes can never keep an assignment ready or complete. */
+  /** Keep detailed receipt diagnostics; shared assignment reads own readiness. */
   function freshAssignment(assignment: AssignmentSnapshot | null, receipt: CompletionReceiptView | null): AssignmentSnapshot | null {
-    if (assignment === null) return null;
-    const shown = assignmentWithEvidence(assignment, receipt === null ? null : receiptStatusOf(receipt), receipt?.runId ?? null);
-    if (!['ready-to-check', 'complete'].includes(shown.state) || shown.receipt === null || assignmentEvidenceIntact(store, evidenceRoot, shown.receipt)) return shown;
-    return assignmentWithEvidence(shown, {
-      token: 'evidence-damaged', label: 'Evidence unavailable',
-      detail: 'The saved evidence no longer verifies. Review its files and recorded limitations before checking this result.',
-      tone: 'problem', action: null,
-    }, shown.receipt.runId);
+    return assignment === null ? null : assignmentWithEvidence(assignment, receipt === null ? null : receiptStatusOf(receipt), receipt?.runId ?? null);
   }
 
   /**
@@ -3594,9 +3585,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     const earlierLive = task.family === undefined ? [] : earlierLiveVersions(task.family, now);
     if (earlierLive.length > 0 && !status.views.includes("running")) status.views = [...status.views, "running"];
     const otherActive = new Set([...(task.family?.otherActive.map(one => one.id) ?? []), ...earlierLive]).size;
-    const recordedAssignment = task.family === undefined ? null : assignmentOf(store, task.id, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) });
+    const recordedAssignment = task.family === undefined ? null : assignmentOf(store, task.id, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
     const assignment = freshAssignment(recordedAssignment, result ?? null);
-    const assignmentStatus = assignment === null ? status : assignmentStatusOf(assignment);
+    const assignmentStatus = assignment === null ? status : assignmentStatusOf(assignment, status);
     if (status.views.includes("running") && !assignmentStatus.views.includes("running")) assignmentStatus.views = [...assignmentStatus.views, "running"];
     return { ...facts, executionId: task.id, id: task.family?.root.id ?? task.id, title: task.family?.root.title ?? task.title,
       familyNotice: task.family?.problem ?? (otherActive ? `${otherActive} earlier version${otherActive === 1 ? " is" : "s are"} still waiting or running. Open History.` : null),
@@ -3839,7 +3830,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const planRevisions = ref === null ? null : revisionLedgerOf(ref.id);
     const milestoneProgress = ref === null ? null : progressOf(ref.id, planRevisions?.current?.document ?? null);
     const family = familyOf(taskId);
-    const recordedAssignment = family?.current.id !== taskId ? null : assignmentOf(store, taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) });
+    const recordedAssignment = family?.current.id !== taskId ? null : assignmentOf(store, taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
     const assignment = freshAssignment(recordedAssignment, completion?.receipt ?? null);
     return {
         assignment,
@@ -15075,7 +15066,7 @@ function workPage(
       // disclosure that works without script and by keyboard — never
       // removed, never shrunk. The label itself names a failed check, a
       // needed approval, or an exception, so nothing critical folds away.
-      (row.assignment != null ? `<div class="work-row-status">${assignmentSummaryHtml(row.assignment, { compact: true, problem: row.assignmentProblem === true, diagnostics: row.status.diagnostics })}</div>` :
+      (row.assignment != null ? `<div class="work-row-status">${assignmentSummaryHtml(row.assignment, { compact: true, workStatus: row.status, problem: row.assignmentProblem === true, diagnostics: row.status.diagnostics })}</div>` :
       `<div class="work-row-status">${statusLineHtml(row.status)}${action}${row.familyNotice == null ? "" : `<p class="problem">${escape(row.familyNotice)}</p>`}` +
       `<details class="work-details"><summary>Details</summary><p class="work-detail">${escape(row.status.detail)}</p>` +
       workDiagnosticsHtml(row.status.diagnostics) +
@@ -18056,7 +18047,7 @@ function taskBody(data: {
     data.versionLabel == null ? "" : `<p class="meta">${escape(data.versionLabel)} · <a href="${taskHref(data.rootId ?? task.id)}">Current work</a></p>`,
     data.history ?? "",
     // The result takes over from the task status as soon as it is ready.
-    data.assignment != null ? assignmentSummaryHtml(data.assignment, { hideAction: approveForm !== "" && data.dispatch?.action === "approve-scope", problem: status.tone === "problem", diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] }) : receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope"),
+    data.assignment != null ? assignmentSummaryHtml(data.assignment, { workStatus: status, hideAction: approveForm !== "" && data.dispatch?.action === "approve-scope", problem: status.tone === "problem", diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] }) : receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope"),
     // The exact-run control (v52), directly under the scheduler's answer:
     // the one place a person stops or resumes THIS attempt.
     taskControlDetailsHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task"),

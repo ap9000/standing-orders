@@ -14,6 +14,7 @@
  *   env: SO_HELD_SOCKET  — unix socket path for the control channel
  *        SO_HELD_COOKIE  — 128-bit hex cookie; every socket verb must carry it
  *        SO_HELD_GRACE_MS — EOF→SIGKILL grace (default 10s)
+ *        SO_HELD_DIAGNOSTIC_FD — private observer diagnostic pipe (optional)
  *
  * Protocol, in order:
  *   1. The control socket is created FIRST (mode 0600), so a fencer can
@@ -43,7 +44,7 @@ const { stopProcessTree, observeProcessTree, sampleProcessTree } = await import(
 });
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { chmodSync, unlinkSync } from "node:fs";
+import { chmodSync, unlinkSync, writeSync } from "node:fs";
 
 const socketPath = process.env["SO_HELD_SOCKET"] ?? "";
 const cookie = process.env["SO_HELD_COOKIE"] ?? "";
@@ -216,7 +217,15 @@ server.listen(socketPath, () => {
     process.exit(1);
   });
 
-  observeProcessTree(child, { onDescendant: pid => descendantPids.add(pid), onUnknown: () => { treeUnknown = true; } });
+  observeProcessTree(child, {
+    onDescendant: pid => descendantPids.add(pid),
+    onObservationFailure: failure => {
+      // A dedicated pipe, never the untrusted agent's stdout/stderr. The
+      // agent gets exactly three stdio descriptors and cannot inherit it.
+      if (process.env["SO_HELD_DIAGNOSTIC_FD"] === "3") writeSync(3, `${JSON.stringify(failure)}\n`);
+    },
+    onUnknown: () => { treeUnknown = true; },
+  });
   child.on("spawn", () => {
     frame({ so_supervisor: "ready", agentPgid: child.pid, supervisorPid: process.pid });
     // Relay AFTER the frame: agent bytes buffered meanwhile flow next.

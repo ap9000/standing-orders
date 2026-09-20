@@ -916,7 +916,7 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("completed source draft");
     expect(prompt).toContain("#42");
     expect(prompt).toContain("reviewing the existing changes");
-    expect(prompt).toContain("write this attempt's own handoff and proof");
+    expect(prompt).toContain("write this attempt's own handoff with its outcome and limitations");
     expect(prompt).toContain("Do not discard and recreate sound work");
   });
 
@@ -3022,9 +3022,9 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     return read.content.toString("utf8");
   };
 
-  test.each(["correct", "unchanged", "rewrite-checks", "rewrite-code", "throw-after-write"])("proof-only correction: %s", async behavior => {
+  test.each(["default", "correct", "unchanged", "rewrite-checks", "rewrite-code", "throw-after-write"])("proof-only correction: %s", async behavior => {
     const criterion = { id: "c1", statement: "the guard exists", evidence: ["check", "changed-path"] as ("check" | "changed-path")[] };
-    propose(store, { taskId: "t-1", goal: "add a guard", acceptance: [criterion], now: T0 });
+    propose(store, { taskId: "t-1", goal: "add a guard", acceptance: [criterion], qualityMode: behavior === "default" ? "default" : "strict", now: T0 });
     expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
     claimIt();
     store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 5_000, approvedBy: "alex" }, T0);
@@ -3042,6 +3042,12 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       options?.onSpawn?.(10_000 + calls);
       if (calls === 1) {
         await agentWithProof(wrong)(file, args, options);
+        if (behavior === "default") {
+          const prompt = args[args.indexOf("-p") + 1]!;
+          expect(prompt).toContain("You do not need to write STANDING-ORDERS-PROOF-");
+          expect(prompt).not.toContain("your proof must answer EVERY");
+          expect(prompt).not.toContain("restating its statement verbatim");
+        }
       } else {
         expect(args).toContain("--resume");
         const prompt = args[args.indexOf("-p") + 1]!;
@@ -3067,11 +3073,19 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     });
     expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
     expect(commits).toBe(1);
-    expect(calls).toBe(behavior === "unchanged" || behavior === "rewrite-checks" ? 3 : 2);
+    expect(calls).toBe(behavior === "default" ? 1 : behavior === "unchanged" || behavior === "rewrite-checks" ? 3 : 2);
     expect(pids).toEqual(Array.from({ length: calls }, (_, i) => 10_001 + i));
     expect(checks).toBe(moved ? 0 : 1);
     expect(store.proofVerdictFor(req.runId)).toMatchObject({ verdict: behavior === "correct" ? "verified" : "refuted" });
     const attempts = store.artifactsFor(req.runId).filter(one => one.kind === "structured-output" && !isVerificationReceipt(one));
+    if (behavior === "default") {
+      expect(attempts).toHaveLength(0);
+      expect(store.runsFor(taskRef).filter(one => one.role === "repair")).toHaveLength(0);
+      const proof = store.artifactsFor(req.runId).find(one => one.kind === "proof")!;
+      const retained = readVerifiedArtifact(join2(wt, ".evidence"), proof);
+      expect(retained.ok && JSON.parse(retained.content.toString("utf8")).criteria[0].statement).toBe(wrong.criteria[0]!.statement);
+      return;
+    }
     expect(attempts.length).toBe(calls);
     const original = readVerifiedArtifact(join2(wt, ".evidence"), attempts.find(one => one.key.endsWith("builder-proof-response-0.txt"))!);
     expect(original.ok && original.content.toString("utf8")).toContain("requires evidence:");
@@ -3129,7 +3143,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       return { agent, prompts, calls: () => calls };
     };
     const arrange = () => {
-      propose(store, { taskId: "t-1", goal: "add a guard", acceptance: [criterion], now: T0 });
+      propose(store, { taskId: "t-1", goal: "add a guard", acceptance: [criterion], qualityMode: "strict", now: T0 });
       expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
       claimIt();
       store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 5_000, approvedBy: "alex" }, T0);
@@ -3955,7 +3969,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       changed,
     });
     const arrange = () => {
-      propose(store, { taskId: "t-1", goal: "move the smoke script", acceptance: [criterion], now: T0 });
+      propose(store, { taskId: "t-1", goal: "move the smoke script", acceptance: [criterion], qualityMode: "strict", now: T0 });
       expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
       claimIt();
       store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 5_000, approvedBy: "alex" }, T0);

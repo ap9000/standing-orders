@@ -558,7 +558,7 @@ export function taskDetailFor(
   return {
     ref: String(row["tid"]),
     work: taskWorkSummaryOf(store, taskId, now, { principal: "coordinator", repos: who.repos }),
-    assignment: assignmentBrief(assignmentOf(store, taskId, now, { principal: "coordinator", repos: who.repos })),
+    assignment: assignmentBrief(assignmentOf(store, taskId, now, { principal: "coordinator", repos: who.repos }, evidenceRoot)),
     title: String(row["title"]),
     state: String(row["state"]),
     repo: String(row["repo"]),

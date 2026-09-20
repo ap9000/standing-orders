@@ -318,7 +318,7 @@ describe("assignment interface", () => {
     test('uses the authoritative state; attempts and self-reported results do not confer completion', () => {
       const assignment = snapshot({ attempts: [{ taskId: 'root task', runId: 9, label: 'Done — deployed!', detail: 'Agent says all done.' }] });
       expect(assignmentStatusOf(assignment).label).toBe('Working');
-      expect(assignmentStatusOf(assignment).views).toEqual(['all', 'running']);
+      expect(assignmentStatusOf(assignment).views).toEqual(['all']);
       expect(assignmentStatusOf(snapshot({ state: 'ready-to-check' })).views).toEqual(['all', 'needs-you', 'completed']);
       expect(assignmentStatusOf(snapshot({ state: 'complete' })).label).toBe('Complete');
     });

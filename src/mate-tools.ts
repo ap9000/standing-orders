@@ -702,7 +702,7 @@ export const MATE_TOOLS: MateTool[] = [
           title: task.title,
           state: task.state,
           work: taskWorkSummaryOf(ctx.store, taskId, ctx.now, { principal: "coordinator", repos: ctx.who.repos }),
-          assignment: assignmentBrief(assignmentOf(ctx.store, taskId, ctx.now, { principal: "coordinator", repos: ctx.who.repos })),
+          assignment: assignmentBrief(assignmentOf(ctx.store, taskId, ctx.now, { principal: "coordinator", repos: ctx.who.repos }, ctx.evidenceRoot)),
           dispatch: diagnoseTaskDispatch(ctx.store, taskId, ctx.now),
           control: (() => {
             const control = taskControlOf(ctx.store, ref.id, ctx.now);
