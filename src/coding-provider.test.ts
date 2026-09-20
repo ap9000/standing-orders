@@ -122,6 +122,22 @@ describe("native coding transport", () => {
     }
   });
 
+  it("retains a final exit diagnostic without fabricating unknown child identity", async () => {
+    let observer: processTree.ProcessTreeObserver | undefined;
+    vi.spyOn(processTree, "observeProcessTree").mockImplementation((_child, hooks) => { observer = hooks; });
+    const test = fixture();
+    const snapshots: CodingCustody[] = [];
+    test.provider.subscribe(event => { if (event.kind === "custody") snapshots.push(event.custody); });
+    await test.provider.request("read", {});
+    const failure = { phase: "final-exit" as const, operation: "snapshot" as const, code: "EPERM", rootPid: test.provider.processId(), at: new Date().toISOString(), identityUnknown: false };
+    observer!.onObservationFailure!(failure);
+    expect(snapshots.at(-1)!.observationFailures).toEqual([failure]);
+    const copy = test.provider.custody(); copy.observationFailures![0]!.code = "mutated";
+    expect(test.provider.custody().observationFailures![0]!.code).toBe("EPERM");
+    expect(test.provider.custody().observationUnknown).toBe(false);
+    await test.provider.close();
+  });
+
   it("publishes an observation failure and cannot clear that uncertainty with root exit", async () => {
     let observer: processTree.ProcessTreeObserver | undefined;
     vi.spyOn(processTree, "observeProcessTree").mockImplementation((_child, hooks) => { observer = hooks; });

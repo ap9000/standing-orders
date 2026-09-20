@@ -80,6 +80,26 @@ describe("operator review: cancellation cannot cross custody boundaries", () => 
     expect(f.store.stopOf(f.id)?.settledAt).not.toBeNull();
   });
 
+  test("a final observation diagnostic keeps known custody and later positive exit probes settle it", async () => {
+    const f = fixture();
+    const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"] }); children.push(child);
+    await new Promise<void>(resolve => child.once("spawn", resolve));
+    const transport = witnessedRunner(f.store, f.id, () => new Date(), async (_file, _args, options) => {
+      options?.beforeSpawn?.(); options?.onSpawn?.(child.pid!);
+      options?.onObservationFailure?.({ phase: "final-exit", operation: "snapshot", code: "EPERM", rootPid: child.pid!, at: new Date().toISOString(), identityUnknown: false });
+      return { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+    });
+    await transport("unused", [], { processGroup: false });
+    const witnesses = () => f.store.raw().prepare("SELECT pid,exited_at FROM run_process WHERE run=?").all(f.id);
+    expect(witnesses()).toEqual([{ pid: child.pid, exited_at: null }]);
+    const event = f.store.actionLedger({ repos: null }).find(one => one.action === "process observation failed");
+    expect(event).toMatchObject({ runId: f.id, taskId: "draft", repo: f.root });
+    expect(JSON.parse(event!.outcome)).toMatchObject({ phase: "final-exit", code: "EPERM", rootPid: child.pid, identityUnknown: false });
+    const exited = new Promise<void>(resolve => child.once("close", resolve)); child.stdin!.end(); await exited;
+    expect(f.store.recordRunProcessExits(f.id, new Date())).toBe(1);
+    expect(witnesses()[0]!.exited_at).not.toBeNull();
+  });
+
   test("all unspawned transient retries settle when their transport returns", async () => {
     const f = fixture();
     const transport = witnessedRunner(f.store, f.id, () => new Date(), async (_file, _args, options) => {

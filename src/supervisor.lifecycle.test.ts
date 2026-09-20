@@ -26,7 +26,7 @@ function ask(path: string, verb: string): Promise<Record<string, unknown>> {
   });
 }
 
-async function fixture(observeAtFence = false) {
+async function fixture(observeAtFence = false, diagnostic = false) {
   const dir = mkdtempSync(join(tmpdir(), "so-drain-")); paths.push(dir);
   copyFileSync(new URL("./supervisor.mjs", import.meta.url), join(dir, "supervisor.mjs"));
   // Control the descendant observation boundary, not the supervisor. This
@@ -37,15 +37,17 @@ async function fixture(observeAtFence = false) {
   const descendantExit = new Promise<void>(resolve => descendant.once("close", () => resolve()));
   writeFileSync(join(dir, "process-tree.js"), `
 let observer;
-export function observeProcessTree(child, value) { observer = value; ${observeAtFence ? "" : `observer.onDescendant(${descendant.pid});`} }
+export function observeProcessTree(child, value) { observer = value; ${observeAtFence ? "" : `observer.onDescendant(${descendant.pid});`} ${diagnostic ? `child.once('close',()=>observer.onObservationFailure({phase:'final-exit',operation:'snapshot',code:'EPERM',rootPid:child.pid,at:new Date().toISOString(),identityUnknown:false}));` : ""} }
 export function sampleProcessTree() { observer.onDescendant(${descendant.pid}); }
 export function stopProcessTree(child) { return child.kill("SIGKILL"); }
 `);
   const socket = join(dir, "control.sock");
   const supervisor = spawn(process.execPath, [join(dir, "supervisor.mjs"), process.execPath, "-e", "process.stdin.resume()"], {
-    env: { ...process.env, SO_HELD_SOCKET: socket, SO_HELD_COOKIE: "test" }, stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, SO_HELD_SOCKET: socket, SO_HELD_COOKIE: "test", SO_HELD_DIAGNOSTIC_FD: "3" }, stdio: ["pipe", "pipe", "pipe", "pipe"],
   });
   children.push(supervisor);
+  let diagnostics = "";
+  supervisor.stdio[3]!.on("data", (chunk: Buffer) => { diagnostics += chunk.toString(); });
   const exited = new Promise<number | null>(resolve => supervisor.once("close", code => resolve(code)));
   await new Promise<void>((resolve, reject) => {
     supervisor.once("error", reject);
@@ -59,7 +61,7 @@ export function stopProcessTree(child) { return child.kill("SIGKILL"); }
     await new Promise(resolve => setTimeout(resolve, 10));
   } while (Date.now() < deadline);
   expect(status?.exitCode).toBe(0);
-  return { supervisor, descendant, descendantExit, exited, socket, status };
+  return { supervisor, descendant, descendantExit, exited, socket, status, diagnostics: () => diagnostics };
 }
 
 describe.skipIf(process.platform === "win32")("supervisor drain ownership", () => {
@@ -73,6 +75,15 @@ describe.skipIf(process.platform === "win32")("supervisor drain ownership", () =
     expect(f.supervisor.exitCode).toBeNull();
     f.descendant.stdin!.end(); await f.descendantExit;
     expect(await reply).toMatchObject({ ok: true, killed: false, settled: true });
+    expect(await f.exited).toBe(0);
+  }, 12000);
+
+  test("exit-only diagnostics use the private pipe and do not waive live descendant custody", async () => {
+    const f = await fixture(false, true);
+    expect(f.status).toMatchObject({ alive: true, groupAlive: false });
+    expect(JSON.parse(f.diagnostics())).toMatchObject({ phase: "final-exit", operation: "snapshot", code: "EPERM", identityUnknown: false });
+    expect(f.supervisor.exitCode).toBeNull();
+    f.descendant.stdin!.end(); await f.descendantExit;
     expect(await f.exited).toBe(0);
   }, 12000);
 

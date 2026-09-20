@@ -1,0 +1,509 @@
+Exact complete functions from installed runtime20cc. Source/ranges/hashes: runtime-audit.json.
+Not executable: referenced imports and unrelated functions remain in the lossless archive.
+
+===== operate.js :: upCommand (lines 7169-7673; complete function) =====
+async function upCommand(flags, context) {
+    const { store, write, json, clock } = context;
+    const demoFence = refuseDemo(context, "up");
+    if (demoFence !== null)
+        return demoFence;
+    // 1. Validation, before anything at all.
+    const portGiven = text(flags, "port");
+    const port = Number(portGiven ?? 4180);
+    if (portGiven !== undefined && (!Number.isInteger(port) || port < 1 || port >= 65536)) {
+        return fail(write, json, "up", "usage", "--port is a whole number under 65536", EXIT.usage);
+    }
+    const editorGiven = text(flags, "editor");
+    if (editorGiven !== undefined && editorGiven !== "vscode") {
+        return fail(write, json, "up", "usage", "--editor supports: vscode", EXIT.usage);
+    }
+    const forGiven = text(flags, "for");
+    if (forGiven !== undefined && (!Number.isInteger(Number(forGiven)) || Number(forGiven) <= 0)) {
+        return fail(write, json, "up", "usage", "--for takes a positive whole number of milliseconds", EXIT.usage);
+    }
+    const runnerFlag = text(flags, "runner");
+    if (runnerFlag !== undefined && !validRunnerName(runnerFlag)) {
+        return fail(write, json, "up", "usage", `a worker name is 1–${RUNNER_NAME_MAX} characters with no control characters`, EXIT.usage);
+    }
+    // --host / --allow-host (setup review): `up` reaches a phone over a
+    // tailnet exactly as `serve` does, so one process is the whole install.
+    const hostFlag = text(flags, "host") ?? "127.0.0.1";
+    if (!/^[A-Za-z0-9.:-]{1,253}$/.test(hostFlag)) {
+        return fail(write, json, "up", "usage", "--host is an address or a name", EXIT.usage);
+    }
+    const allowFlag = text(flags, "allow-host");
+    const progress = (line) => {
+        if (json)
+            process.stderr.write(`${line}\n`);
+        else
+            write(line);
+    };
+    // 2. Load the machine's durable project registry. Repositories and the
+    // folders they may be added from are installation state, not arguments a
+    // person must repeat on every start.
+    const registryPath = registryPathOf(context);
+    const loadedRegistry = await loadProjectRegistry(registryPath);
+    if ("error" in loadedRegistry) {
+        return fail(write, json, "up", "registry", loadedRegistry.error, EXIT.refused);
+    }
+    let sweptHeldOrphans = false;
+    const gitRun = context.gitRunner ?? ((file, args, opts) => run(file, [...args], { ...(opts?.cwd === undefined ? {} : { cwd: opts.cwd }), timeoutMs: 10_000 }));
+    const rootInputs = (text(flags, "project-root") ?? "")
+        .split(",")
+        .map(one => one.trim())
+        .filter(one => one !== "");
+    const explicitRoots = [];
+    for (const input of rootInputs) {
+        const canonical = canonicalProject(input);
+        if (canonical === null) {
+            return fail(write, json, "up", "project-root", `${input} is not a directory this machine can use`, EXIT.refused);
+        }
+        if (!explicitRoots.includes(canonical))
+            explicitRoots.push(canonical);
+    }
+    const projectRoots = [...resolveCeiling([], addRepos(loadedRegistry.roots, explicitRoots)).ceiling.roots];
+    // Every saved repository reconnects automatically. Explicit --repo paths
+    // still work for first use; with none, a Git working directory joins the
+    // saved list for backwards compatibility. Starting elsewhere is valid as
+    // soon as a projects folder or saved repository exists.
+    const repos = [];
+    const proveRepo = async (input) => {
+        const top = await gitRun("git", ["rev-parse", "--show-toplevel"], { cwd: resolve(input) });
+        if (top.code !== 0)
+            return null;
+        try {
+            return realpathSync(top.stdout.trim());
+        }
+        catch {
+            return null;
+        }
+    };
+    for (const input of loadedRegistry.repos) {
+        const root = await proveRepo(input);
+        if (root === null) {
+            progress(`saved project unavailable — skipped ${input}`);
+        }
+        else if (!repos.includes(root)) {
+            repos.push(root);
+        }
+    }
+    const explicitRepos = context.repoList ?? [];
+    if (explicitRepos.length > 0) {
+        for (const input of explicitRepos) {
+            const root = await proveRepo(input);
+            if (root === null) {
+                return fail(write, json, "up", "not-a-repository", `${input} is not inside a git repository — choose a repository, set a projects folder once with \`--project-root <dir>\`, or try the sandbox with \`standing-orders demo\``, EXIT.refused);
+            }
+            if (!repos.includes(root))
+                repos.push(root);
+        }
+    }
+    else if (context.inferProjectFromCwd !== false) {
+        const cwdRepo = await proveRepo(process.cwd());
+        if (cwdRepo !== null && !repos.includes(cwdRepo))
+            repos.push(cwdRepo);
+    }
+    if (repos.length === 0 && projectRoots.length === 0) {
+        return fail(write, json, "up", "no-projects", "choose where your projects live once: `standing-orders up --project-root <dir>`", EXIT.refused);
+    }
+    for (const repo of repos)
+        progress(`repository  ${repo}`);
+    for (const root of projectRoots)
+        progress(`projects    ${root}`);
+    // 3. Reserve the port BEFORE any identity or enrollment mutation
+    // (finding 7/19): a busy port must refuse while the world is untouched.
+    const probe = createNetServer();
+    const reserved = await new Promise(resolveProbe => {
+        probe.once("error", () => resolveProbe(false));
+        probe.listen(port, "127.0.0.1", () => resolveProbe(true));
+    });
+    if (!reserved) {
+        return fail(write, json, "up", "port-busy", `port ${port} is taken — another \`up\` or \`serve\` may already be running; stop it, or pick a different --port`, EXIT.refused);
+    }
+    const canPrompt = !json && process.stdin.isTTY === true && process.stdout.isTTY === true;
+    let runnerName = "";
+    let runnerToken = "";
+    let approver = null;
+    try {
+        // 4. The approver (findings 2/8/17/21/27/29/32).
+        const approverPlan = await resolveUpApprover(context, flags, canPrompt);
+        if ("refusal" in approverPlan) {
+            return fail(write, json, "up", "login", approverPlan.refusal, EXIT.refused);
+        }
+        approver = approverPlan;
+        for (const note of approverPlan.notes)
+            progress(note);
+        // The verified gate (MCP spec v6, Codex round-3 finding 2): minting or
+        // recovering runner authority on an UNVERIFIED operator identity was a
+        // registration road around the ceremony. No verified password, no
+        // runner — the login file or another approver restores the road.
+        if (!approverPlan.verified) {
+            return fail(write, json, "up", "login", `${approverPlan.approver}'s password could not be verified — a runner only registers under a proven operator. Type it correctly, restore ${UP_LOGIN_FILE}, or have another approver re-add you.`, EXIT.refused);
+        }
+        // 5. The runner, through the atomic door (findings 1/16/26/31), with
+        // the suffix budget (finding 24) for generated names only.
+        const base = runnerFlag ?? normalizeRunnerName(hostname());
+        let doorAnswer = null;
+        for (let attempt = 1; attempt <= 5; attempt += 1) {
+            const suffix = attempt === 1 ? "" : `-${attempt}`;
+            const name = attempt === 1 ? base : `${base.slice(0, RUNNER_NAME_MAX - suffix.length)}${suffix}`;
+            // The held orphan fence runs BEFORE any recovery road (v6 W6): a
+            // crashed predecessor's held session is seized, killed through its
+            // supervisor, and settled — or paged — before registration's
+            // recovery may touch its run or worktree.
+            if (!sweptHeldOrphans) {
+                sweptHeldOrphans = true;
+                const swept = await sweepHeldOrphans(store, `up:${hostname()}:${process.pid}`, clock);
+                if (swept.fenced > 0)
+                    progress(`fenced ${swept.fenced} orphaned held session(s) from a previous up`);
+                if (swept.paged > 0)
+                    progress(`${swept.paged} held session(s) could not be stopped — see the inbox`);
+            }
+            // The runner's authority is BOUND to the canonical roots this up
+            // serves (MCP spec v6): the claim gate enforces membership, so an
+            // unbound registration would deny-all its own dispatches.
+            const answer = registerRunnerIfIdle(store, { name, host: hostname(), repos, now: clock() });
+            if (answer.ok) {
+                runnerName = name;
+                runnerToken = answer.token;
+                if (answer.recoveredRuns > 0)
+                    progress(`recovered ${answer.recoveredRuns} interrupted attempt(s) left by the previous ${name}`);
+                doorAnswer = answer;
+                break;
+            }
+            doorAnswer = answer;
+            if (runnerFlag !== undefined)
+                break; // an explicit name is never suffixed around
+        }
+        if (runnerName === "") {
+            const detail = doorAnswer !== null && !doorAnswer.ok ? doorAnswer.detail : "no worker name could be taken";
+            return fail(write, json, "up", "runner-alive", `${detail} — that worker looks alive; stop the other \`up\` or watch, or name a different worker with --runner`, EXIT.refused);
+        }
+        // 6. Enrollment: repositories and project roots are one atomic machine
+        // registry. A later `up` reconnects all of them without cwd or flags.
+        {
+            // The locked registry primitive (onboarding findings 9/17/25): a
+            // refusal here also retires the runner this start just registered —
+            // never today's silent empty-registry fallback.
+            const enrolled = await updateProjectRegistry(registryPath, current => ({
+                repos: addRepos(current.repos, repos),
+                roots: addRepos(current.roots, projectRoots),
+            }));
+            if (!enrolled.ok) {
+                retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
+                return fail(write, json, "up", "registry", `${enrolled.message} — nothing started`, EXIT.refused);
+            }
+        }
+    }
+    finally {
+        await new Promise(done => probe.close(() => done()));
+    }
+    // 6b. The held-session coordinator (Phase 2): one per up process, shared
+    // by the console and every watch loop through the context. Its socket
+    // directory is deliberately SHORT and flat — sun_path is unforgiving.
+    const heldDir = join(homedir(), ".standing-orders", "held");
+    try {
+        mkdirSync(heldDir, { recursive: true, mode: 0o700 });
+    }
+    catch {
+        // The launch's own path check refuses with words if this failed.
+    }
+    context.heldCoordinator = new HeldSessionCoordinator();
+    context.upIncarnation = randomUUID();
+    context.heldSocketDir = heldDir;
+    // v28: sessions are unbounded unless the operator caps them.
+    const heldCap = text(flags, "max-held-sessions");
+    if (heldCap !== undefined) {
+        const cap = Number(heldCap);
+        if (!Number.isInteger(cap) || cap < 1) {
+            return fail(write, json, "up", "usage", "--max-held-sessions is a whole number of concurrent attended sessions, at least 1", EXIT.usage);
+        }
+        context.maxHeldSessions = cap;
+    }
+    // 7. The console, on the just-released port. The tiny window between the
+    // probe closing and this bind can lose a race; that failure tears down
+    // cleanly below instead of leaving identities half-claimed silently.
+    const pool = join(dirname(context.databaseFile), "worktrees");
+    // Mutated only by the registry supervisor below. The console reads this
+    // proved set on each request, so its project rail and unified chat move
+    // with the live builder instead of freezing at process start.
+    const activeRepos = new Set(repos);
+    let console_;
+    try {
+        console_ = await startConsole({
+            context,
+            host: hostFlag,
+            port,
+            ...(allowFlag === undefined ? {} : { allowedHosts: allowFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
+            localRunner: runnerName,
+            poolRoot: pool,
+            repos,
+            currentRepos: () => [...activeRepos],
+            upConsole: true,
+            attended: {
+                runner: runnerName,
+                coordinator: context.heldCoordinator,
+                headOf: async (repo) => {
+                    const answer = await gitRun("git", ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: repo });
+                    return answer.code === 0 ? answer.stdout.trim() : null;
+                },
+            },
+            registryPath,
+            projectRoots,
+            ...(text(flags, "public-url") === undefined ? {} : { publicUrl: text(flags, "public-url") }),
+            ...(text(flags, "editor") === undefined ? {} : { editorLinks: "vscode" }),
+        });
+    }
+    catch (error) {
+        retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
+        return fail(write, json, "up", "port-busy", `${describe(error)} — the port was taken while starting; try again`, EXIT.refused);
+    }
+    // 8. The project supervisor: one watch loop per proved repository, plus a
+    // tiny registry poll that can add more while this process stays up. The
+    // poll is deliberately plain filesystem I/O (portable across macOS,
+    // Linux, and Windows) and never invokes an agent while nothing changed.
+    let stopping = false;
+    let fatal = null;
+    let graceTimer;
+    let runTimer;
+    const followControllers = [];
+    let resolveStopped = () => { };
+    const stopped = new Promise(resolveStop => (resolveStopped = resolveStop));
+    const stopGraceMs = Number(text(flags, "stop-grace") ?? 30_000);
+    const hardStop = () => {
+        const terminated = terminateLiveProviders();
+        if (terminated > 0)
+            progress(`Hard stop: ${terminated} provider process group(s) terminated.`);
+    };
+    const stop = () => {
+        if (stopping) {
+            hardStop();
+            return;
+        }
+        stopping = true;
+        resolveStopped();
+        for (const controller of followControllers)
+            controller.abort();
+        graceTimer = setTimeout(hardStop, stopGraceMs);
+        graceTimer.unref?.();
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+    if (forGiven !== undefined) {
+        runTimer = setTimeout(stop, Number(forGiven));
+        runTimer.unref?.();
+    }
+    const loopFlagsFor = (repo) => {
+        const copy = new Map();
+        copy.set("runner", runnerName);
+        copy.set("token", runnerToken);
+        copy.set("repo", repo);
+        copy.set("pool", pool);
+        // The co-hosted console's stated origin rides into each loop's follower:
+        // a phone link must name THIS console, or not exist.
+        const publicUrl = text(flags, "public-url");
+        if (publicUrl !== undefined)
+            copy.set("public-url", publicUrl);
+        return copy;
+    };
+    const prefix = (repo) => (activeRepos.size > 1 ? `[${projectName(repo)}] ` : "");
+    const loopResults = new Map();
+    const launchRepo = async (repo, bind) => {
+        if (loopResults.has(repo) || stopping)
+            return;
+        if (bind) {
+            const bound = addRunnerReposAuthed(store, { name: runnerName, token: runnerToken, repos: [repo] }, clock());
+            if (!bound.ok) {
+                fatal = `the builder identity changed while adding ${repo} (${bound.reason})`;
+                stop();
+                return;
+            }
+            activeRepos.add(repo);
+            if (!store.listProjects().some(one => one.path === repo)) {
+                store.upsertProject(repo, projectName(repo), clock());
+            }
+        }
+        let markReady = () => { };
+        const ready = new Promise(resolveReady => (markReady = resolveReady));
+        const loop = runWatchLoop({
+            flags: loopFlagsFor(repo),
+            context,
+            runner: runnerName,
+            token: runnerToken,
+            repo,
+            progress: line => progress(`${prefix(repo)}${line}`),
+            isStopping: () => stopping,
+            onFollowController: controller => followControllers.push(controller),
+            onReady: () => {
+                markReady();
+                if (bind)
+                    progress(`${prefix(repo)}builder connected — queued work can start`);
+            },
+        }).then(result => ({ repo, result }), error => ({ repo, result: { ok: false, reason: "loop-failed", detail: describe(error), ticks: 0, built: 0, broke: 0 } }));
+        loopResults.set(repo, loop);
+        void loop.then(({ repo: endedRepo, result }) => {
+            // A loop that dies while its siblings live must not leave a partial
+            // cockpit standing silently (finding 5).
+            if (!result.ok && !stopping) {
+                fatal = `${prefix(endedRepo)}${result.detail}`;
+                stop();
+            }
+            markReady(); // acquisition failures must not strand startup readiness
+        });
+        await ready;
+    };
+    await Promise.all(repos.map(repo => launchRepo(repo, false)));
+    const dynamicCeiling = resolveCeiling(repos, projectRoots).ceiling;
+    const rejected = new Set();
+    const registrySupervisor = (async () => {
+        const sleep = (ms) => new Promise(resolveSleep => setTimeout(resolveSleep, ms));
+        while (!stopping) {
+            const loaded = await loadProjectRegistry(registryPath);
+            if ("error" in loaded) {
+                fatal = loaded.error;
+                stop();
+                break;
+            }
+            for (const candidate of loaded.repos) {
+                if (stopping)
+                    break;
+                const canonical = canonicalProject(candidate);
+                if (canonical !== null && activeRepos.has(canonical))
+                    continue;
+                const approvedAdditions = context.additionalProjectRepos?.() ?? [];
+                const admittedCeiling = resolveCeiling([...dynamicCeiling.repos, ...approvedAdditions], dynamicCeiling.roots).ceiling;
+                const allowed = canonical !== null && (await authorizedProject(admittedCeiling, canonical)) && (await proveRepo(canonical)) === canonical;
+                if (!allowed) {
+                    if (!rejected.has(candidate)) {
+                        rejected.add(candidate);
+                        progress(`project not connected — ${candidate} is not a Git repository inside a saved projects folder`);
+                    }
+                    continue;
+                }
+                rejected.delete(candidate);
+                await launchRepo(canonical, true);
+            }
+            if (!stopping)
+                await sleep(500);
+        }
+    })().catch(error => {
+        fatal = `the project registry stopped (${describe(error)})`;
+        stop();
+    });
+    // A runner with no projects still stays visibly alive while the UI waits
+    // for the first addition. Watch loops heartbeat during their passes; this
+    // machine-level pulse also covers the intentionally empty state.
+    // Provider readiness (v47): this machine's non-spending observations,
+    // recorded under its own runner name ONCE at start — so every route
+    // projection can say ready / unavailable / unknown per provider, and
+    // the dispatch gate can halt a leg this machine cannot run. There is no
+    // periodic readiness daemon: startup, an explicit `providers --report`,
+    // and the narrow pre-dispatch observation are the roads. Production
+    // only: a test's injected agent runner is a fake, and its readiness
+    // would be a fiction.
+    const observeReadiness = () => {
+        if (context.agentRunner !== undefined)
+            return;
+        void observeProviderReadiness((file, args, options) => run(file, args, { timeoutMs: options?.timeoutMs ?? 5_000, ...(options?.omitEnv === undefined ? {} : { omitEnv: options.omitEnv }) }))
+            .then(observed => {
+            if (!stopping)
+                reportProviderReadinessAuthed(store, { name: runnerName, token: runnerToken, observations: observed }, clock());
+        })
+            .catch(() => {
+            // A probe that cannot run leaves readiness unknown — never a fiction.
+        });
+    };
+    observeReadiness();
+    const runnerHeartbeat = setInterval(() => {
+        const beat = heartbeatRunner(store, runnerName, runnerToken, clock());
+        if (!beat.ok && !stopping) {
+            fatal = `the builder identity changed (${beat.reason})`;
+            stop();
+        }
+    }, 60_000);
+    runnerHeartbeat.unref?.();
+    // 9. Readiness, then the ONE startup envelope / greeting (finding 11/20).
+    const approverPlan2 = approver;
+    const url = console_.url;
+    if (fatal === null) {
+        if (json) {
+            write(envelopeJson({
+                ok: true,
+                command: "up",
+                url,
+                repos,
+                runner: runnerName,
+                approver: approverPlan2.approver,
+                approvers: approverPlan2.approvers,
+                approverVerified: approverPlan2.verified,
+                ...(approverPlan2.passwordFile === null ? {} : { passwordFile: approverPlan2.passwordFile }),
+            }));
+        }
+        else {
+            write("");
+            write(`The console is on ${url}`);
+            if (approverPlan2.mintedPassword !== null && canPrompt) {
+                write(`  login     ${approverPlan2.approver} / ${approverPlan2.mintedPassword}`);
+                write(`  (also saved to ${approverPlan2.passwordFile})`);
+            }
+            else if (approverPlan2.passwordFile !== null) {
+                write(`  login     ${approverPlan2.approver} — the password is in ${approverPlan2.passwordFile}`);
+            }
+            else if (approverPlan2.approver !== null) {
+                write(`  login     ${approverPlan2.approver} — with your password`);
+            }
+            else {
+                write(`  login     one of: ${approverPlan2.approvers.join(", ")}`);
+            }
+            write(repos.length === 0
+                ? `  builder   ${runnerName} is ready — add a local folder or GitHub repository in Projects`
+                : `  builder   ${runnerName} is watching ${repos.length === 1 ? repos[0] : `${repos.length} repositories`}`);
+            if (projectRoots.length > 0)
+                write(`  projects  new repositories under ${projectRoots.length === 1 ? projectRoots[0] : `${projectRoots.length} saved folders`} connect automatically`);
+            write("  The inbox checklist shows what remains before approved work builds unattended.");
+            write("  Ctrl-C stops Standing Orders on this machine.");
+        }
+        if (!json && !flags.has("no-open") && process.stdout.isTTY === true)
+            openBrowser(url);
+    }
+    // 10. Supervise to the end.
+    await stopped;
+    await registrySupervisor;
+    const results = await Promise.all([...loopResults.values()]);
+    clearInterval(runnerHeartbeat);
+    if (runTimer !== undefined)
+        clearTimeout(runTimer);
+    if (graceTimer !== undefined)
+        clearTimeout(graceTimer);
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+    // Held sessions fence before the runner retires (v2 S0f): bounded, and
+    // every controller settles conservatively or is paged.
+    if (context.heldCoordinator !== undefined) {
+        const unsettled = await context.heldCoordinator.close();
+        for (const runId of unsettled) {
+            // The shutdown deadline won: say so durably — the orphan sweep of
+            // the NEXT up owns the cleanup, and silence would contradict
+            // "settled conservatively or paged".
+            store.enqueueNotification({
+                source: { run: runId },
+                dedupeKey: `held-shutdown-unsettled:${runId}`,
+                kind: "attended-unsettled",
+                subject: `an attended session did not settle before shutdown (run #${runId})`,
+                body: `The shutdown deadline passed before run #${runId}'s session finished fencing. The next \`standing-orders up\` will fence and settle it; its worktree is preserved.`,
+            }, clock());
+        }
+    }
+    retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
+    await new Promise(done => console_.server.close(() => done()));
+    if (fatal !== null) {
+        // The startup envelope (when json) already went out; the exit code is
+        // the health signal (finding 11/20) — never a second envelope.
+        process.stderr.write(`up: ${fatal}\n`);
+        return EXIT.failed;
+    }
+    const ticks = results.reduce((sum, one) => sum + one.result.ticks, 0);
+    const built = results.reduce((sum, one) => sum + one.result.built, 0);
+    progress(`up: stopped cleanly — ${ticks} pass(es), ${built} with work. Run \`standing-orders up\` anywhere on this machine to reconnect every saved project.`);
+    return EXIT.ok;
+}

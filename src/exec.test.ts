@@ -1,4 +1,4 @@
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, vi } from "vitest";
 import { realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -7,6 +7,7 @@ import {
   JSONL_EVENT_HARD_CAP,
   retryTransientSpawn, isTransientSpawnFailure, type SpawnAttempt,
 } from "./exec.js";
+import * as processTree from "./process-tree.js";
 import { adapterFor } from "./provider.js";
 
 /** node itself is the one binary guaranteed to exist wherever these tests run. */
@@ -46,6 +47,17 @@ describe("run", () => {
     expect(pid).not.toBeNull();
     expect(() => process.kill(pid!, 0)).toThrow();
   });
+  test.each([run, runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl])("forwards exit-only observation diagnostics without an unknown spawn (%#)", async transport => {
+    const diagnostic = vi.fn(), unknown = vi.fn();
+    const observer = vi.spyOn(processTree, "observeProcessTree").mockImplementation((child, hooks) => {
+      child.once("close", () => hooks.onObservationFailure?.({ phase: "final-exit", operation: "snapshot", code: "EMFILE", rootPid: child.pid ?? null, at: new Date().toISOString(), identityUnknown: false }));
+    });
+    try {
+      await transport(NODE, ["-e", "process.exit(0)"], { processGroup: true, onObservationFailure: diagnostic, onUnknown: unknown });
+      expect(diagnostic).toHaveBeenCalledOnce(); expect(unknown).not.toHaveBeenCalled();
+    } finally { observer.mockRestore(); }
+  });
+
   test("returns stdout and a zero code for a successful command", async () => {
     // Arrange / Act
     const result = await run(NODE, ["-e", "process.stdout.write('hello')"]);
