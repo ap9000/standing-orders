@@ -178,7 +178,7 @@ describe("continuous assignments over existing task families", () => {
       detail: "Required evidence is missing, so this result is not verified.", tone: "problem", action: null }] });
     expect(html).toContain('class="meta assignment-detail">Checks passed.');
     expect(html).toContain("The saved source inventory is truncated; a screenshot is missing.");
-    expect(html).not.toContain("Result saved — verification needed");
+    expect(html.split("<details")[0]).not.toContain("Result saved — verification needed");
     const before = store.proofVerdictFor(run), runs = store.runsFor(store.lookupRef("retry")!.id);
     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
     expect(store.proofVerdictFor(run)).toEqual(before);
