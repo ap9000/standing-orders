@@ -18625,10 +18625,6 @@ function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boole
   if (detail.comments.length > 0 && csrf !== "") {
     return card("revise", `${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these notes. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}">${revisionSealFields(detail.comments, detail.sourceDigest)}<button type="submit">Revise</button></form>`);
   }
-  const prUrl = detail.publication === null ? null : safePrUrl(detail.publication.prUrl);
-  if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) {
-    return card("publication", `Review PR #${detail.publication.prNumber} on GitHub`, "The evidence below matches the recorded result. The pull request was last seen open; no merge is recorded here.", `<a class="button-link" href="${escape(prUrl)}">Open the pull request</a>`);
-  }
   return "";
 }
 
@@ -19972,7 +19968,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const tabCounts: Record<ResultTab, string> = {
     summary: "",
     changes: statOk ? (stat.fileCount === 0 ? "none" : `${stat.fileCount} file${stat.fileCount === 1 ? "" : "s"}`) : terminal === null ? "none" : "",
-    checks: facts.checks === null ? (proof === null ? "none" : "") : `${facts.checks.passed}/${facts.checks.total}`,
+    checks: "",
   };
   const tabs =
     `<nav class="result-tabs" role="tablist" aria-label="result views">` +

@@ -1358,7 +1358,7 @@ describe("the operations console", () => {
     const quiet = await (await fetch(url("/review?result=t-pr1"), { headers: { cookie } })).text();
     expect(quiet).toContain('data-review-task="t-pr1"');
     expect(quiet).toContain("CI passing, observed");
-    expect(quiet).toContain('data-next-action="publication"');
+    expect(quiet).not.toContain('data-next-action="publication"');
     expect(quiet).not.toContain("draft-repair");
 
     // The failing run's page carries the draft button; the quiet one does not.
