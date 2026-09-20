@@ -19,6 +19,7 @@ import { OPERATE_COMMANDS, TOP_LEVEL_COMMANDS, SKILLS_ACTIONS, SKILLS_FLAGS, CON
 import { DOCUMENTED_REASONS } from "./envelope.js";
 import { SESSION_CLI_ACTIONS, sessionCliFlags } from './session-cli.js';
 import { sessionDescriptor } from './session-contract.js';
+import { ASSIGNMENT_ACTIONS } from './assignment-adapters.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rootOf = (invocation: string): string => invocation.split(" ")[0] as string;
@@ -56,6 +57,7 @@ describe("the declared command guide, held to the code", () => {
     expect([...subs("keys")].sort()).toEqual([...KEYS_ACTIONS].sort());
     expect([...subs("skills")].sort()).toEqual([...SKILLS_ACTIONS].sort());
     expect([...subs('session')].sort()).toEqual([...SESSION_CLI_ACTIONS].sort());
+    expect([...subs('assignment')].sort()).toEqual([...ASSIGNMENT_ACTIONS].sort());
   });
 
   test("every declared flag lives in its parser's vocabulary with the declared arity", () => {

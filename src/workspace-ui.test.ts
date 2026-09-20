@@ -1,3 +1,6 @@
+import { Window } from 'happy-dom';
+import { assignmentActionHref, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, reviewRetryChoiceHtml } from './assignment-ui.js';
+import type { AssignmentSnapshot } from './assignment.js';
 import { describe, expect, test } from "vitest";
 import { GOAL_ASSESSMENT_PENDING } from "./proof.js";
 import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
@@ -96,6 +99,9 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(reviewStatusOf(review({}))).toMatchObject({ token: "review-pending", label: "Waiting for review", tone: "attention", action: { kind: "open-result" } });
     expect(reviewStatusOf(review({ attempt: 2, attempts: 1, retriesRemaining: 1 }))).toMatchObject({ token: "review-pending", label: "Review retry queued (attempt 2 of 3)" });
     expect(reviewStatusOf(review({ attempt: 2, attempts: 1, retriesRemaining: 1 }))?.detail).toContain("asked by operator");
+    const automatic = reviewStatusOf(review({ attempt: 2, attempts: 1, retriesRemaining: 1, queuedOrigin: "automatic", queuedBy: "alex" }));
+    expect(automatic?.detail).toContain("The signed mode queued this retry");
+    expect(automatic?.detail).not.toMatch(/explicit|asked by/);
     expect(reviewStatusOf(review({ state: "running", attempts: 1, reviewerAlive: true }))).toMatchObject({ token: "reviewing", label: "Reviewing", tone: "live" });
     expect(reviewStatusOf(review({ state: "running", attempt: 2, attempts: 2, reviewerAlive: true }))).toMatchObject({ token: "reviewing", label: "Reviewing (retry 1 of 2)" });
     expect(reviewStatusOf(review({ state: "running", attempts: 1, reviewerAlive: false }))).toMatchObject({ token: "review-failed", label: "Review interrupted", tone: "attention" });
@@ -129,7 +135,7 @@ describe("the shared status projection (workspace package 1)", () => {
     const running = reviewFactsOf({ cap: 3, attempts: [attempt], openRequest: null, live: attempt, latest: attempt, succeeded: null, state: "running", retriesUsed: 0, retriesRemaining: 2, nextAttempt: null }, runner => runner === "reviewer-1");
     expect(running).toMatchObject({ state: "running", attempt: 1, attempts: 1, reviewerAlive: true, queuedBy: null });
     const queued = reviewFactsOf({ cap: 3, attempts: [], openRequest: { id: 5, requestedBy: "alex", basis: "human", origin: "operator", requestedAt: "2026-09-13T12:00:00.000Z" }, live: null, latest: null, succeeded: null, state: "queued", retriesUsed: 0, retriesRemaining: 2, nextAttempt: 1 }, () => true);
-    expect(queued).toMatchObject({ state: "queued", attempt: 1, queuedBy: "alex", reviewerAlive: false });
+    expect(queued).toMatchObject({ state: "queued", attempt: 1, queuedBy: "alex", queuedOrigin: "operator", reviewerAlive: false });
     expect(reviewFactsOf(null, () => true)).toBeNull();
     expect(reviewFactsOf({ cap: 3, attempts: [], openRequest: null, live: null, latest: null, succeeded: null, state: "unrequested", retriesUsed: 0, retriesRemaining: 2, nextAttempt: 1 }, () => true)).toBeNull();
 
@@ -297,4 +303,110 @@ describe("the shared status projection (workspace package 1)", () => {
 
  test("saved evidence awaiting assessment has one clear review action", () => {
   expect(resultStatusOf(built({ verdict: "short", reasons: [GOAL_ASSESSMENT_PENDING] }))).toMatchObject({ token: "review-pending", label: "Ready for goal review", action: { label: "Review result", kind: "open-review" } });
+});
+
+// Assignment rendering shares the same work-status contract.
+describe("assignment interface", () => {
+  function snapshot(changes: Partial<AssignmentSnapshot> = {}): AssignmentSnapshot {
+    return { version: 1, rootId: 'root task', activeTaskId: 'correction/2', repo: '/project one', title: 'Keep the total correct',
+      state: 'working', detail: 'The correction is running.', primaryAction: { code: 'inspect-run', label: 'View progress', target: { taskId: 'correction/2', runId: 18, decisionId: null }, access: 'read', retry: 'read-again' },
+      attention: [], attempts: [{ taskId: 'root task', runId: 9, label: 'Checks failed', detail: 'The total did not match.' }, { taskId: 'correction/2', runId: 18, label: 'Building', detail: 'The correction is running.' }],
+      owner: null, receipt: null, handoff: null, publication: null, deployment: { status: 'not-recorded' }, ...changes };
+  }
+
+  describe('assignment presentation', () => {
+    test('uses the authoritative state; attempts and self-reported results do not confer completion', () => {
+      const assignment = snapshot({ attempts: [{ taskId: 'root task', runId: 9, label: 'Done — deployed!', detail: 'Agent says all done.' }] });
+      expect(assignmentStatusOf(assignment).label).toBe('Working');
+      expect(assignmentStatusOf(assignment).views).toEqual(['all']);
+      expect(assignmentStatusOf(snapshot({ state: 'ready-to-check' })).views).toEqual(['all', 'needs-you', 'completed']);
+      expect(assignmentStatusOf(snapshot({ state: 'complete' })).label).toBe('Complete');
+    });
+
+    test('links exact results, decisions, attempts, and explicit historical versions', async () => {
+      const assignment = snapshot({ primaryAction: { code: 'open-result', label: 'Review result', target: { taskId: 'correction/2', runId: 18, decisionId: null }, access: 'read', retry: 'read-again' } });
+      const url = new URL(assignmentActionHref(assignment)!, 'https://example.test');
+      expect(url.pathname).toBe('/review');
+      expect(Object.fromEntries(url.searchParams)).toEqual({ result: 'correction/2', run: '18', project: '/project one' });
+      expect(assignmentActionHref(snapshot({ primaryAction: { ...assignment.primaryAction!, code: 'answer-decision', target: { taskId: 'correction/2', runId: 18, decisionId: 24 } } }))).toBe('/d/24');
+      const window = new Window();
+      try {
+        window.document.body.innerHTML = assignmentSummaryHtml(assignment);
+        const details = window.document.querySelector('details')!;
+        expect(details.open).toBe(false);
+        expect(details.querySelector('a')?.getAttribute('href')).toBe('/t/root%20task?version=root%20task');
+        expect([...details.querySelectorAll('a')].map(a => a.getAttribute('href'))).toContain('/r/18');
+        expect(window.document.querySelectorAll('[data-primary-action]')).toHaveLength(1);
+        expect(window.document.querySelector('form')).toBeNull();
+      } finally { await window.happyDOM.close(); }
+    });
+
+    test('keeps blocking detail visible once and escapes untrusted content', async () => {
+      const window = new Window();
+      try {
+        const detail = 'The provider stopped <script>alert(1)</script>.';
+        window.document.body.innerHTML = assignmentSummaryHtml(snapshot({ state: 'needs-decision', detail, attention: [detail, 'An earlier task is still active.'] }), { hideAction: true, problem: true });
+        const summary = window.document.querySelector('section')!;
+        expect(summary.querySelector('script')).toBeNull();
+        expect(summary.querySelectorAll(':scope > .problem')).toHaveLength(2);
+        expect(summary.querySelector('.assignment-detail')?.closest('details')).toBeNull();
+        expect(summary.querySelector('[data-primary-action]')).toBeNull();
+        window.document.body.innerHTML = assignmentSummaryHtml(snapshot(), { diagnostics: [
+          { token: 'report-ready', label: 'Report ready', detail: 'Read the report.', tone: 'ready' },
+          { token: 'evidence-damaged', label: 'Evidence unavailable', detail: 'The saved diff is unreadable.', tone: 'problem' },
+        ] });
+        expect(window.document.querySelector('[data-work-diagnostic=report-ready]')?.className).toBe('meta');
+        expect(window.document.querySelector('[data-work-diagnostic=evidence-damaged]')?.className).toBe('problem');
+        expect(window.document.body.textContent).toContain('Read the report.');
+        expect(window.document.body.textContent).toContain('The saved diff is unreadable.');
+      } finally { await window.happyDOM.close(); }
+    });
+
+    test('fresh evidence damage suppresses saved readiness without changing the authoritative snapshot', () => {
+      const assignment = snapshot({ state: 'complete' });
+      const damaged = { token: 'evidence-damaged', label: 'Evidence unavailable', detail: 'The saved diff is unreadable.', tone: 'problem' as const, action: null };
+      const shown = assignmentWithEvidence(assignment, damaged);
+      expect(shown.state).toBe('needs-decision');
+      expect(shown.attention).toContain(damaged.detail);
+      expect(assignment.state).toBe('complete');
+      expect(assignmentWithEvidence(snapshot(), null).state).toBe('working');
+      const blocked = snapshot({ state: 'needs-decision', detail: 'An earlier task is still active.', attempts: [{ taskId: 'correction/2', runId: 18, label: 'Ready to review', detail: 'Previously passed.' }] });
+      const fresh = assignmentWithEvidence(blocked, damaged, 18);
+      expect(fresh.state).toBe('needs-decision');
+      expect(fresh.detail).toBe(blocked.detail);
+      expect(fresh.primaryAction).toEqual(blocked.primaryAction);
+      expect(fresh.attempts[0]).toMatchObject({ taskId: 'correction/2', runId: 18, label: 'Evidence unavailable', detail: damaged.detail });
+      expect(assignmentSummaryHtml(fresh)).not.toContain('Ready to review');
+      expect(assignmentWithEvidence(blocked, damaged, 9).attempts).toEqual(blocked.attempts);
+    });
+  });
+
+  describe('assignment controls', () => {
+    test('review service retries require an explicit checkbox opt-in', async () => {
+      const window = new Window();
+      try {
+        window.document.body.innerHTML = `<form>${reviewRetryChoiceHtml()}</form>`;
+        const form = window.document.querySelector('form')!;
+        const checkbox = form.querySelector('input')!;
+        expect(checkbox.type).toBe('checkbox');
+        expect(checkbox.checked).toBe(false);
+        expect(new window.FormData(form).get('review-retry-auto')).toBeNull();
+        checkbox.click();
+        expect(new window.FormData(form).get('review-retry-auto')).toBe('1');
+        expect(checkbox.closest('label')?.textContent).toContain('Retry review service failures');
+        expect(form.textContent).toContain('Up to two retries. Stopped reviews and completed verdicts never retry.');
+      } finally { await window.happyDOM.close(); }
+    });
+
+    test('an explicitly selected retry choice survives rendering without adding a submit action', async () => {
+      const window = new Window();
+      try {
+        window.document.body.innerHTML = `<form>${reviewRetryChoiceHtml(true)}</form>`;
+        const form = window.document.querySelector('form')!;
+        expect(new window.FormData(form).get('review-retry-auto')).toBe('1');
+        expect(form.querySelector('button')).toBeNull();
+        expect(form.querySelector('input[type=password]')).toBeNull();
+      } finally { await window.happyDOM.close(); }
+    });
+  });
 });

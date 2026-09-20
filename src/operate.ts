@@ -4,6 +4,7 @@ import {loadDiscordCredentials} from "./discord-api.js";
 import { loadSlackCredentials } from "./slack-api.js";
 import { followSlack } from "./slack.js";
 import { validateScopeText } from "./task-text.js";
+import { runAssignmentCommand } from "./assignment-adapters.js";
 /**
  * The commands that actually move work: authoring tasks, and the claim loop.
  *
@@ -205,6 +206,7 @@ import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords,
 import { WorktreePool } from "./worktree.js";
 import { requestTaskStop, resumeTaskStop, taskControlOf } from "./task-control.js";
 import { taskWorkSummaryOf } from "./work-summary.js";
+import { assignmentOf, assignmentBrief, syncAssignmentHandoffs } from "./assignment.js";
 import {
   approveRoutine,
   describeRoutine,
@@ -298,6 +300,12 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task add <title>          queue work
   standing-orders task list [--state <s>]   everything, or one state
   standing-orders task show <id>
+  standing-orders assignment show <task>    root, current work and exact handoff
+  standing-orders assignment updates        durable updates (--after <cursor>)
+  standing-orders assignment claim <task>   record your lead ownership
+  standing-orders assignment check <task> --digest <receipt>
+      claim/check use --token-env NAME or --token-file PATH for a coordinator;
+      checking a receipt never approves work, accepts proof or deploys it
   standing-orders task state <id> <state> [--reason <text>]   queued|running|done|failed|cancelled
   standing-orders task block <id> --on <id> <id> waits for <on>
   standing-orders task unblock <id> --on <id>  stop waiting for <on>
@@ -621,12 +629,13 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   "phase", "risk", "tier", "clear-phase",
   "run", "containment",
+  "token-env", "after", "repair-max-attempts",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
   "no-open", "no-verify", "end", "report", "off", "tmux",
-  "self-heal", "plan-auto",
+  "self-heal", "plan-auto", "repair-auto", "review-retry-auto",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -885,6 +894,8 @@ async function dispatch(
       return readyCommand(flags, context);
     case "task":
       return taskCommand(positional, flags, context);
+    case "assignment":
+      return runAssignmentCommand(positional, flags, context);
     case "claim":
       return claimCommand(positional, flags, context);
     case "heartbeat":
@@ -4172,6 +4183,9 @@ async function tickCommand(
     }
   }
 
+  // Existing worker pass owns durable lead handoffs; reads never create events.
+  syncAssignmentHandoffs(store, clock(), auth.runner.repos, context.evidenceRoot);
+
   const summary = () => {
     const lines = [`Considered ${considered}, built ${built}, parked ${parked}, broke ${broke}.`];
     for (const entry of routines) {
@@ -5748,6 +5762,19 @@ async function modeCommand(
   if (flag(flags, "auto-approve")) terms.autoApproveFiling = true;
   if (flag(flags, "review-auto")) terms.reviewAuto = true;
   if (flag(flags, "plan-auto")) terms.planAuto = true;
+  if (flag(flags, "review-retry-auto")) terms.reviewRetryAuto = true;
+  if (terms.reviewRetryAuto && !terms.reviewAuto) {
+    return fail(write, json, "mode set", "invalid", "--review-retry-auto requires agent reviews", EXIT.refused);
+  }
+  const repairCap = text(flags, "repair-max-attempts");
+  if (flag(flags, "repair-auto")) {
+    const cap = Number(repairCap ?? "0");
+    if (!Number.isInteger(cap) || cap < 1 || cap > 3) return fail(write, json, "mode set", "invalid", "--repair-auto requires --repair-max-attempts from 1 to 3", EXIT.refused);
+    terms.repairAuto = true;
+    terms.repairMaxAttempts = cap;
+  } else if (repairCap !== undefined) {
+    return fail(write, json, "mode set", "invalid", "--repair-max-attempts requires --repair-auto", EXIT.refused);
+  }
   if (terms.planAuto && (!terms.autoApproveFiling || !terms.reviewAuto)) {
     return fail(write, json, "mode set", "invalid", "--plan-auto requires automatic filing approval and agent reviews", EXIT.refused);
   }
@@ -9979,6 +10006,7 @@ function showTask(positional: readonly string[], context: Context): number {
   const detail = {
     task,
     work: taskWorkSummaryOf(store, id, now, { principal: "operator", repos: null, includeUnplaced: true }),
+    assignment: assignmentBrief(assignmentOf(store, id, now, { principal: "operator", repos: null, includeUnplaced: true }, context.evidenceRoot)),
     ref: ref.id,
     blockedBy: store.blockers(id),
     position: store.queuePosition(id),

@@ -1,4 +1,1 @@
-{
-  "version": 1,
-  "screenshots": []
-}
+{"version":1,"screenshots":[{"path":"evidence/continuous-assignment/desktop-question.png","caption":"Fresh synthetic desktop1440x900: exact build8 Changes view, inspected before submitting feedback."},{"path":"evidence/continuous-assignment/desktop-assignment.png","caption":"Fresh synthetic desktop1440x900: revision created from build8; all486 feedback characters available before approval."},{"path":"evidence/continuous-assignment/phone-question.png","caption":"Fresh synthetic phone390x844: exact build6 Changes view;44px View/Annotate controls and one visible evidence warning."},{"path":"evidence/continuous-assignment/phone-feedback.png","caption":"Fresh synthetic phone390x844: newly created revision preserves493 feedback characters before approval; no approval submitted."}]}

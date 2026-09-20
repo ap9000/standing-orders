@@ -286,6 +286,8 @@ export type ProofView =
   | { ok: true; run: number; proof: ParsedProof }
   | { ok: false; run: number; problem: string };
 
+/** Verifies this run's proof bytes and format. A handoff that relies on a
+ * revision's ancestors must also recheck its saved review-context custody. */
 export function readVerifiedProofForRun(store: Store, root: string, runId: number): ProofView | null {
   const artifact = store.artifactsFor(runId).find(one => one.kind === "proof") ?? null;
   if (artifact === null) return null;

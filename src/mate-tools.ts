@@ -4,6 +4,7 @@ import { conversationSkills, skillsView } from "./project-skills.js";
 import { readAcceptanceEvidence } from "./chat-acceptance.js";
 import { taskControlOf } from "./task-control.js";
 import { taskWorkSummaryOf } from "./work-summary.js";
+import { assignmentOf, assignmentBrief } from "./assignment.js";
 import { validateScopeText, validateTaskText, TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
 import { conversationKnowledge } from "./project-knowledge.js";
 import { readChatResult, reviewInputProblem, type ReviewSnapshot } from "./chat-review.js";
@@ -701,6 +702,7 @@ export const MATE_TOOLS: MateTool[] = [
           title: task.title,
           state: task.state,
           work: taskWorkSummaryOf(ctx.store, taskId, ctx.now, { principal: "coordinator", repos: ctx.who.repos }),
+          assignment: assignmentBrief(assignmentOf(ctx.store, taskId, ctx.now, { principal: "coordinator", repos: ctx.who.repos }, ctx.evidenceRoot)),
           dispatch: diagnoseTaskDispatch(ctx.store, taskId, ctx.now),
           control: (() => {
             const control = taskControlOf(ctx.store, ref.id, ctx.now);
