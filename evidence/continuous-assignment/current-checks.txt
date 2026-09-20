@@ -1,0 +1,29 @@
+Preserved failed native history (complete captured bytes remain archived; original capture was truncated):
+{"run":1938,"input":"e64d5ad12076e6dc3f80bf977468413e8828bef0","nativeHead":"f66412501853113568bc53abd18e986178f9f2e0","base":"82ae6aade7283b704b57f67a2abbd6538db5daaf","passed":3910,"failed":1,"skipped":23,"files":208,"nativeLogTruncated":true,"capturedBytes":34193,"capturedSha256":"eebf3f1ddbfaefb6848823d82bc0514f892031af2ff8d2115683fa888fafcf4e","reason":"serve.test.ts repair c10 expected Working; shared live revision status was Revising. No independent review; not a verified base."}
+
+Fresh focused preparation after native1938 failed one stale assertion. Final native gate remains required.
+{"sourceCommit":"b8578fa8d3abd73c5a52fb94b291fb6b7235405e","tree":"986df50061bd5bef3550c142df1715a2652d9075","inputObjects":{"src":"a580879ccddeae4dcd75b224d0b009ef5656083a","scripts":"0aee8bf67929fd741598dc8dfe1e520b1ffbc44a","test":"821dc35d0cbef21d04949b50bc5f7e8a202bc805","package.json":"fc6468ca6fd366286e3a00bc8e182624159494c5","package-lock.json":"998b1a6a107fb119558a6c6286963fd31c057de6","tsconfig.json":"812569d19bcea8f773618fda978d0a2d6f1a9ab9","tsconfig.build.json":"af54537358d02dd49c10e6c67b38eec4c4a02bf1","vitest.config.ts":"ca8cf10ecc24dd0d775ece2349a45a8d25001e07"}}
+
+Command: ["npm", "run", "typecheck"]
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+Exit: 0
+
+Command: ["npx", "vitest", "run", "src/serve.test.ts", "-t", "repair c10: a revision|Work.s All, Needs you|review in flight|pilot 2: approval"]
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-assignment-review-correction
+
+(node:2044) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  1 passed (1)
+      Tests  4 passed | 340 skipped (344)
+   Start at  10:52:04
+   Duration  4.87s (transform 1.82s, setup 15ms, import 2.43s, tests 2.30s, environment 0ms)
+
+
+Exit: 0
+All input objects unchanged before/after. Only docs/evidence packaging follows.

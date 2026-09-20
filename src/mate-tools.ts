@@ -3,6 +3,8 @@ import { CHAT_ACTIONS, CHAT_ACTION_FIELDS, isChatAction, prepareSharedAction, sh
 import { conversationSkills, skillsView } from "./project-skills.js";
 import { readAcceptanceEvidence } from "./chat-acceptance.js";
 import { taskControlOf } from "./task-control.js";
+import { taskWorkSummaryOf } from "./work-summary.js";
+import { assignmentOf, assignmentBrief } from "./assignment.js";
 import { validateScopeText, validateTaskText, TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
 import { conversationKnowledge } from "./project-knowledge.js";
 import { readChatResult, reviewInputProblem, type ReviewSnapshot } from "./chat-review.js";
@@ -379,7 +381,7 @@ export function agentsOver(store: Store, taskId: string, now: Date): Record<stri
   };
   if (routed === null) return { ...base, standing: "no agents yet", summary: null, agents: [], choices: {} };
   if (routed.kind === "legacy") {
-    return { ...base, standing: routed.approved ? "approved before agent routing" : "not approved", summary: `${routed.profile.provider} · ${routed.profile.model} builds and repairs; the planner and reviewer come from configuration at run time`, agents: [], choices: {} };
+    return { ...base, standing: routed.approved ? "approved before agent routing" : "not approved", summary: `${routed.profile.provider} · ${routed.profile.model} builds and repairs; the planner comes from configuration at run time`, agents: [], choices: {} };
   }
   if (routed.kind === "unreadable") return { ...base, standing: "cannot be read", summary: null, problem: routed.problem, agents: [], choices: {} };
   const route: PhaseRoute = routed.route;
@@ -389,13 +391,13 @@ export function agentsOver(store: Store, taskId: string, now: Date): Record<stri
     standing: routed.source === "approved" ? "approved" : routed.source === "proposed" ? "awaiting approval" : "recommended",
     summary: agentsSummary(route),
     posture: postureWords(route),
-    demands: route.demands,
-    agents: route.legs.map(leg => ({ role: ROLE_WORD[leg.phase], provider: leg.provider, model: leg.model, chosen: chosenWords(leg), reasons: leg.reasons, problem: leg.problem })),
+    demands: route.demands.filter(reason => !/review/i.test(reason)),
+    agents: route.legs.filter(leg => leg.phase !== "review").map(leg => ({ role: ROLE_WORD[leg.phase], provider: leg.provider, model: leg.model, chosen: chosenWords(leg), reasons: leg.reasons.map(reason => reason.replace("builder and reviewer", "builder")), problem: leg.problem })),
     problems: routeProblems(route),
     // Only SELECTABLE choices are offered to the mate: a current agent the
     // configuration no longer names appears under `agents` (what runs
     // today) and nowhere a proposal could pick it.
-    choices: Object.fromEntries(PHASES.map(phase => [ROLE_WORD[phase], choices[phase].filter(one => one.selectable).map(one => ({ provider: one.provider, model: one.model, current: one.current }))])),
+    choices: Object.fromEntries(PHASES.filter(phase => phase !== "review").map(phase => [ROLE_WORD[phase], choices[phase].filter(one => one.selectable).map(one => ({ provider: one.provider, model: one.model, current: one.current }))])),
   };
 }
 
@@ -415,12 +417,12 @@ export const MATE_TOOLS: MateTool[] = [
     name: "get_actions",
     description: "List shared actions and required inputs. All channels use the same approvals.",
     inputSchema: schema({}),
-    handle: () => ({ok:true,body:{actions:Object.entries(CHAT_ACTIONS).map(([operation,value])=>({operation,label:value.label,secureReview:value.protected,inputs:CHAT_ACTION_FIELDS[operation as keyof typeof CHAT_ACTIONS].filter(field=>field!=='nonce'&&field!=='files')})),notice:'Passwords and credentials never belong in a tool call or conversation. Secure review links complete protected actions.'}}),
+    handle: () => ({ok:true,body:{actions:Object.entries(CHAT_ACTIONS).filter(([operation])=>operation!=="result_review").map(([operation,value])=>({operation,label:value.label,secureReview:value.protected,inputs:CHAT_ACTION_FIELDS[operation as keyof typeof CHAT_ACTIONS].filter(field=>field!=='nonce'&&field!=='files')})),notice:'Passwords and credentials never belong in a tool call or conversation. Secure review links complete protected actions.'}}),
   },
   {
     name: "propose_action",
     description: "Read get_actions and relevant skills/evidence first. Save an exact-state proposal only; protected or long terms require full secure review.",
-    inputSchema: schema({operation:{type:'string',enum:Object.keys(CHAT_ACTIONS)},repo:{type:'string'},task:TASK_ARG,version:{type:'string'},restore:{type:'integer',minimum:1},sample:{type:'string',maxLength:800},content:{type:'string',maxLength:12000},instructions:{type:'string',maxLength:4000},title:{type:'string',maxLength:120},id:{type:'string'},run:{type:'integer',minimum:1},note:{type:'string',maxLength:2000}},['operation']),
+    inputSchema: schema({operation:{type:'string',enum:Object.keys(CHAT_ACTIONS).filter(operation=>operation!=="result_review")},repo:{type:'string'},task:TASK_ARG,version:{type:'string'},restore:{type:'integer',minimum:1},sample:{type:'string',maxLength:800},content:{type:'string',maxLength:12000},instructions:{type:'string',maxLength:4000},title:{type:'string',maxLength:120},id:{type:'string'},run:{type:'integer',minimum:1},note:{type:'string',maxLength:2000}},['operation']),
     handle:(ctx,args)=>{
       const operation=args['operation'];if(!isChatAction(operation))return {ok:false,message:'Choose an action from get_actions.'};
       const input={...args};delete input['operation'];
@@ -699,6 +701,8 @@ export const MATE_TOOLS: MateTool[] = [
           versions: family?.versions.map(one => ({ task: one.id, state: one.state })) ?? [],
           title: task.title,
           state: task.state,
+          work: taskWorkSummaryOf(ctx.store, taskId, ctx.now, { principal: "coordinator", repos: ctx.who.repos }),
+          assignment: assignmentBrief(assignmentOf(ctx.store, taskId, ctx.now, { principal: "coordinator", repos: ctx.who.repos }, ctx.evidenceRoot)),
           dispatch: diagnoseTaskDispatch(ctx.store, taskId, ctx.now),
           control: (() => {
             const control = taskControlOf(ctx.store, ref.id, ctx.now);
@@ -977,7 +981,7 @@ export const MATE_TOOLS: MateTool[] = [
       {
         task: TASK_ARG,
         risk: { type: "string", enum: ["routine", "elevated", "high"] },
-        role: { type: "string", enum: ["planner", "builder", "repair", "reviewer"] },
+        role: { type: "string", enum: ["planner", "builder", "repair"] },
         agent: schema({ provider: { type: "string", maxLength: 20 }, model: { type: "string", maxLength: 120 } }, ["provider", "model"]),
         clear: { type: "boolean" },
         why: { type: "string", maxLength: 400 },
@@ -993,7 +997,7 @@ export const MATE_TOOLS: MateTool[] = [
       if (risk !== undefined && !isRiskLevel(risk)) return { ok: false, message: "risk is routine, elevated, or high" };
       const roleWord = args["role"];
       const phase = roleWord === undefined ? null : typeof roleWord === "string" ? ROLE_OF_WORD[roleWord] ?? null : null;
-      if (roleWord !== undefined && phase === null) return { ok: false, message: "role is planner, builder, repair, or reviewer" };
+      if (roleWord !== undefined && (phase === null || phase === "review")) return { ok: false, message: "role is planner, builder, or repair" };
       const clear = args["clear"] === true;
       const agent = args["agent"];
       if (risk === undefined && phase === null) return { ok: false, message: "say what changes: a risk, or a role with an agent (or clear: true)" };

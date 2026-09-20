@@ -11,9 +11,20 @@ const T0 = new Date("2026-08-27T12:00:00.000Z");
 const expiry = new Date(T0.getTime() + 24 * 60 * 60_000).toISOString();
 
 describe("mode terms: digest, rehydration, words", () => {
-  test("planner authority is explicit and legacy modes inherit none; new presets retain review", () => {
+  test("review retries require an explicit new signed term and legacy modes grant none", () => {
+    for (const name of ["standard", "hands-off"] as const) expect(presetTerms(name, expiry).reviewRetryAuto).toBe(false);
+    const terms = presetTerms("standard", expiry), legacy = JSON.parse(modeTermsJson(terms));
+    delete legacy.reviewRetryAuto;
+    expect(modeTermsFromJson(JSON.stringify(legacy))?.reviewRetryAuto).toBe(false);
+    expect(modeTermsFromJson(JSON.stringify({ ...legacy, reviewRetryAuto: "true" }))).toBeNull();
+    expect(modeTermsFromJson(modeTermsJson({ ...terms, reviewRetryAuto: true }))?.reviewRetryAuto).toBe(true);
+    expect(modeDigestOf({ ...terms, reviewRetryAuto: true })).not.toBe(modeDigestOf(terms));
+    expect(modeWords({ ...terms, reviewRetryAuto: true }).join(" ")).toContain("historical review grants are retained on record");
+    expect(modeWords({ ...terms, reviewRetryAuto: true, reviewAuto: false }).join(" ")).toContain("no separate model review runs");
+  });
+  test("planner authority is explicit and legacy modes inherit none; new presets return work to the lead", () => {
     const terms = presetTerms("hands-off", expiry);
-    expect(terms.reviewAuto).toBe(true);
+    expect(terms.reviewAuto).toBe(false);
     expect(terms.planAuto).toBe(false);
     const legacy = JSON.parse(modeTermsJson(terms)); delete legacy.planAuto;
     expect(modeTermsFromJson(JSON.stringify(legacy))?.planAuto).toBe(false);
@@ -85,10 +96,9 @@ describe("mode terms: digest, rehydration, words", () => {
 
     test("modeWords states the authority plainly, off by default", () => {
       const off = modeWords(presetTerms("standard", expiry)).join(" ");
-      expect(off).toContain("grants no automatic repair");
+      expect(off).not.toContain("automatic repair");
       const on = modeWords({ ...presetTerms("standard", expiry), repairAuto: true, repairMaxAttempts: 2 }).join(" ");
-      expect(on).toContain("auto-approves its own drafted repair");
-      expect(on).toContain("2 attempt(s)");
+      expect(on).toContain("historical automatic repair grants are retained on record but no longer schedule work");
     });
   });
 

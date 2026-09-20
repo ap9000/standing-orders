@@ -67,6 +67,7 @@ describe("schema v51: the planner's source and plan-contract record are evidence
     expect(() =>
       raw.prepare("INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, sha256, capture, created_at) VALUES (?, 'plan-contract', ?, 2, 2, 'x', 'x', ?)").run(run, `${run}/planner-source.json`, "2026-09-11T00:00:02.000Z"),
     ).toThrow();
+    raw.exec("DROP TABLE service_cursor");
     raw.prepare("UPDATE schema_version SET version = ?").run(version);
     store.close();
     store = null;

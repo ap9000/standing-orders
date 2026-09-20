@@ -205,12 +205,18 @@ describe("read-only phone status", () => {
     expect(phoneTask(store, [REPO], "accepted", NOW)).toContain("Merge observed on GitHub");
   });
 
-  test("an independent review waiting for a worker is not a finished result or a new approval request", () => {
-    const { run } = result("review-me");
+  test("a historical pending model review does not queue finished work or request approval", () => {
+    const { ref, run } = result("review-me");
+    const status = phoneStatus(store, [REPO], NOW);
+    const detail = phoneTask(store, [REPO], "review-me", NOW);
+    const runs = store.runsFor(ref);
+    expect(status).toContain("Finished · 1");
     store.raw().prepare("INSERT INTO review_request (run, requested_by, basis, requested_at) VALUES (?, 'operator', 'human', ?)").run(run, NOW.toISOString());
-    expect(phoneStatus(store, [REPO], NOW)).toContain("Waiting / next up · 1");
-    expect(phoneStatus(store, [REPO], NOW)).not.toContain("Finished ·");
-    expect(phoneTask(store, [REPO], "review-me", NOW)).toContain("The review is already requested");
+    expect(phoneStatus(store, [REPO], NOW)).toBe(status);
+    expect(phoneTask(store, [REPO], "review-me", NOW)).toBe(detail);
+    expect(detail).not.toMatch(/The review is already requested|approve its scope/i);
+    expect(store.runsFor(ref)).toEqual(runs);
+    expect(store.reviewRetryStateOf(run)?.state).toBe("queued"); // Historical request remains recorded.
   });
 
   test("known backoff is visible without claiming the task will definitely run then", () => {

@@ -1,0 +1,55 @@
+Foundation preparation only. Source checkpoint 853248427b5f3078eb61d23b40499ada3d2d2a18; base e64d5ad is unverified.
+No full suite, native dispatch, provider turn or installed-state action.
+
+COMMAND ["npm", "run", "typecheck"]
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+EXIT 0
+
+COMMAND ["npx", "vitest", "run", "src/coding-provider.test.ts", "src/exec.held.test.ts", "src/exec.test.ts", "src/invoke.test.ts", "src/process-recovery-anchor.test.ts", "src/process-recovery-eligibility.test.ts", "src/process-recovery-native.test.ts", "src/process-recovery.test.ts", "src/process-tree.test.ts", "src/supervisor.lifecycle.test.ts", "src/task-control-adversarial.test.ts", "--reporter=dot"]
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-process-foundation
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"853248427b5f3078eb61d23b40499ada3d2d2a18","tree":"67909b6bd3ceff437abd7c403bc64148b94d7d46","trackedClean":true}
+············································(node:42074) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·························(node:42063) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+····································································(node:45754) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·································(node:46547) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+················································································(node:45864) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+ Test Files  11 passed (11)
+      Tests  250 passed (250)
+   Start at  10:58:13
+   Duration  21.29s (transform 4.84s, setup 797ms, import 5.84s, tests 51.26s, environment 1ms)
+
+
+EXIT 0
+
+SETUP performed before source checks: npm ci; complete output follows.
+
+added 96 packages, and audited 97 packages in 3s
+
+27 packages are looking for funding
+  run `npm fund` for details
+
+2 moderate severity vulnerabilities
+
+To address all issues, run:
+  npm audit fix
+
+Run `npm audit` for details.
+
+END OF SETUP OUTPUT

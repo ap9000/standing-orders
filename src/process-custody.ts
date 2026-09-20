@@ -1,5 +1,15 @@
+import type { ProcessObservationFailure } from "./process-tree.js";
 import type { Store } from "./store.js";
 import type { ExecResult, RunOptions } from "./exec.js";
+
+/** Existing append-only ledger; a diagnostic is not exit evidence. */
+export function recordProcessObservationFailure(store: Store, runId: number, now: Date, failure: ProcessObservationFailure): void {
+  const run = store.getRun(runId);
+  const ref = run === null ? null : store.refById(run.taskRef);
+  store.recordAction({ at: now.toISOString(), actor: run?.runner ?? "system", repo: ref?.repo ?? null,
+    taskId: ref?.externalId ?? null, runId, action: "process observation failed", source: "work",
+    outcome: JSON.stringify(failure) });
+}
 
 type Runner = (file: string, args: readonly string[], options?: RunOptions) => Promise<ExecResult>;
 
@@ -23,6 +33,10 @@ export function witnessedRunner(store: Store, runId: number, clock: () => Date, 
       onDescendantExit: (pid, group) => {
         store.recordRunProcessExits(runId, clock(), { pid, group });
         options.onDescendantExit?.(pid, group);
+      },
+      onObservationFailure: failure => {
+        recordProcessObservationFailure(store, runId, clock(), failure);
+        options.onObservationFailure?.(failure);
       },
       onUnknown: () => {
         if (!native && !unknown) { store.reserveRunProcess(runId, clock(), true); unknown = true; }

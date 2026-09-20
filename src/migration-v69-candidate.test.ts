@@ -20,6 +20,7 @@ describe("v69 prepared candidate on the scope", () => {
     const db = new DatabaseSync(file);
     db.exec("PRAGMA foreign_keys=OFF");
     db.exec("ALTER TABLE task_scope DROP COLUMN candidate");
+    db.exec("DROP TABLE service_cursor");
     db.prepare("UPDATE schema_version SET version=?").run(version);
     const rows = db.prepare("SELECT task_id, goal, digest FROM task_scope").all();
     db.close();

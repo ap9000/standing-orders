@@ -28,9 +28,9 @@ export type WorkView = "all" | "needs-you" | "running" | "completed";
 
 export const WORK_VIEWS: readonly { key: WorkView; label: string; hint: string; empty: string }[] = [
   { key: "all", label: "All", hint: "Every task in view, most urgent first.", empty: "Nothing is in progress. Describe work in chat or add a task, and it appears here." },
-  { key: "needs-you", label: "Needs you", hint: "Tasks waiting on a decision, an approval, a repair, or a review.", empty: "Nothing needs you right now. Queued and running work continues on its own." },
-  { key: "running", label: "Running", hint: "Attempts a builder owns right now, and reviews in progress.", empty: "Nothing is building right now. Approved tasks start when a builder with capacity is connected." },
-  { key: "completed", label: "Completed", hint: "Finished tasks with their evidence status — problems stay visible here.", empty: "No finished work yet. A task appears here when its build finishes, whatever its evidence says." },
+  { key: "needs-you", label: "Needs you", hint: "Tasks waiting on an answer, approval, or your inspection.", empty: "Nothing needs you right now. Queued and running work continues on its own." },
+  { key: "running", label: "Running", hint: "Attempts a builder owns right now.", empty: "Nothing is building right now. Approved tasks start when a builder with capacity is connected." },
+  { key: "completed", label: "Completed", hint: "Finished tasks with their evidence status — problems stay visible here.", empty: "No completed work in this view." },
 ];
 
 export function parseWorkView(raw: string | null): WorkView {
@@ -70,6 +70,7 @@ export type ReviewFacts = {
   interrupted: boolean;
   /** Who asked for the open (queued) request, when one is open. */
   queuedBy: string | null;
+  queuedOrigin?: "operator" | "automatic" | null;
   /** Whether the live attempt's reviewer worker is answering. */
   reviewerAlive: boolean;
 };
@@ -89,6 +90,7 @@ export function reviewFactsOf(retry: ReviewRetryState | null, reviewerAlive: (ru
     latestReason: retry.latest?.reason ?? null,
     interrupted: retry.latest !== null && (retry.latest.outcome === "interrupted" || retry.latest.reason === "interrupted"),
     queuedBy: retry.openRequest?.requestedBy ?? null,
+    queuedOrigin: retry.openRequest?.origin ?? null,
     reviewerAlive: retry.live !== null && reviewerAlive(retry.live.runner),
   };
 }
@@ -96,7 +98,7 @@ export function reviewFactsOf(retry: ReviewRetryState | null, reviewerAlive: (ru
 /** The tokens a review in flight wears — the dispatch codes, unchanged. */
 export const REVIEW_TOKENS: ReadonlySet<string> = new Set(["reviewing", "review-pending", "review-failed", "review-exhausted"]);
 
-const retriesLeft = (count: number): string => (count === 1 ? "1 explicit retry" : `${count} explicit retries`);
+const retriesLeft = (count: number, explicit = true): string => `${count}${explicit ? " explicit" : ""} ${count === 1 ? "retry" : "retries"}`;
 
 /**
  * A review that is queued, running, failed with a retry left, or
@@ -118,7 +120,7 @@ export function reviewStatusOf(review: ReviewFacts | null): DisplayStatus | null
   if (review.state === "queued") {
     return review.attempt === 1
       ? { token: "review-pending", label: "Waiting for review", detail: "The build finished and its requested independent review is waiting for a worker.", tone: "attention", action: open }
-      : { token: "review-pending", label: `Review retry queued (${ordinal})`, detail: `The explicit review retry${review.queuedBy === null ? "" : `, asked by ${review.queuedBy},`} is waiting for a worker; ${retriesLeft(review.retriesRemaining)} would remain after it.`, tone: "attention", action: open };
+      : { token: "review-pending", label: `Review retry queued (${ordinal})`, detail: `${review.queuedOrigin === "automatic" ? "The signed mode queued this retry. It" : `The review retry${review.queuedBy === null ? "" : `, asked by ${review.queuedBy},`}`} is waiting for a worker; ${retriesLeft(review.retriesRemaining, review.queuedOrigin !== "automatic")} would remain after it.`, tone: "attention", action: open };
   }
   if (review.state === "retryable") {
     const what = review.interrupted ? "was interrupted" : "failed";
@@ -233,23 +235,7 @@ export function publicationStatusOf(publication: PublicationFacts): { token: str
  * the detail).
  */
 export function resultStatusOf(result: ResultFacts | null, publication: PublicationFacts = null): DisplayStatus {
-  const stored = storedResultStatusOf(result, publication);
-  // A review in flight (queued, running, failed with a retry, exhausted)
-  // leads on every surface; an operator's acceptance closes the matter,
-  // and a scout's report is never reviewed. The earlier verdict stays in
-  // the detail as history, never as the main wording.
-  if (result === null || result.runId === null || result.role === "scout" || result.accepted) return stored;
-  const review = reviewStatusOf(result.review ?? null);
-  if (review === null && result.verdict === "short" && result.reasons.includes(GOAL_ASSESSMENT_PENDING)) {
-    return { token: "review-pending", label: "Ready for goal review", detail: "The saved evidence needs independent assessment against the approved goal.", tone: "attention", action: { label: "Review result", kind: "open-review" } };
-  }
-  if (review === null) return stored;
-  return { ...review, detail: `${review.detail} ${priorVerdictWords(stored)}` };
-}
-
-/** The earlier verdict as history under a review in flight. */
-function priorVerdictWords(stored: DisplayStatus): string {
-  return `Until the review settles, the earlier verdict — "${stored.label}" — stays on record as history.`;
+  return storedResultStatusOf(result, publication);
 }
 
 /** What the machine itself recorded about a result, in a clause. */
@@ -403,7 +389,12 @@ export type WorkFacts = {
   result: ResultFacts | null;
   publication: PublicationFacts;
   liveRunId: number | null;
+  /** The unfinished recorded attempt, even if its claim disappeared. */
+  unfinishedRunId?: number | null;
   control?: TaskControlView;
+  /** An unanswered question on this exact task, read from the decision
+   * owner. An elapsed attention deadline does not close a question. */
+  openDecision?: { id: number; runId: number; question: string; overdue: boolean } | null;
 };
 
 export type WorkStatus = DisplayStatus & {
@@ -412,7 +403,17 @@ export type WorkStatus = DisplayStatus & {
   /** The rank All sorts by: what needs a person first, then live work,
    * then queued and waiting, then finished, then cancelled. */
   rank: number;
+  /** Facts that remain visible when a more useful next action leads. */
+  diagnostics?: readonly Pick<DisplayStatus, "token" | "label" | "detail" | "tone">[];
 };
+
+/** These dispatch states may yield the headline to an unanswered
+ * question. Failure, uncertain process ownership, holds, approvals and
+ * stop settlement deliberately do not yield. This never alters dispatch. */
+const QUESTION_FIRST = new Set<DispatchDiagnosis["code"]>([
+  "running", "waiting-decision", "no-worker-online", "no-worker-registered",
+  "worker-at-capacity", "ready", "planning-ready", "scouting-ready",
+]);
 
 /** Needs you: the existing diagnosis semantics — waiting on a person with a
  * concrete act — never every queued task indiscriminately. */
@@ -449,8 +450,9 @@ export function dispatchActionLabel(dispatch: DispatchDiagnosis | null): string 
 export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): WorkStatus {
   const dispatch = facts.dispatch;
   const result = facts.state === "done" ? resultDisplay ?? resultStatusOf(facts.result, facts.publication) : null;
-  const running = facts.liveRunId !== null || dispatch?.condition === "running" || result?.token === "reviewing";
-  const needs = needsPerson(dispatch);
+  const running = facts.liveRunId !== null || (dispatch?.condition === "running" && !REVIEW_TOKENS.has(dispatch.code));
+  const question = (facts.state === "queued" || facts.state === "running" || facts.state === "done") ? facts.openDecision ?? null : null;
+  const needs = (dispatch !== null && !REVIEW_TOKENS.has(dispatch.code) && needsPerson(dispatch)) || question !== null;
   const views: WorkView[] = ["all"];
   if (needs) views.push("needs-you");
   if (running) views.push("running");
@@ -476,18 +478,26 @@ export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): W
   }
 
   if (facts.state === "done" && result !== null) {
-    // A review in flight or waiting outranks the stored verdict: the
-    // machine is still deciding, and the row says so in the projection's
-    // own words. A caller that never read the review facts still gets
-    // the dispatch diagnosis's words for the same codes.
-    if (REVIEW_TOKENS.has(result.token)) return { ...result, views, rank: needs ? 0 : running ? 1 : 3 };
-    if (facts.result?.review === undefined && dispatch !== null && REVIEW_TOKENS.has(dispatch.code)) {
-      return dispatchWords(dispatch.condition === "running" ? "live" : "attention", needs ? 0 : running ? 1 : 3, { label: "Open the result", kind: "open-result" });
+    // A saved result or an ongoing review cannot answer a question. Keep
+    // failures primary; the shared summary retains the answer action too.
+    if (question !== null && result.tone !== "problem") {
+      return { token: "waiting-decision", label: "Waiting on your answer", detail: question.question,
+        tone: "attention", action: { label: "Answer question", kind: "open-task" }, views, rank: 0,
+        diagnostics: [{ token: result.token, label: result.label, detail: result.detail, tone: result.tone }] };
     }
     return { ...result, views, rank: needs ? 0 : 3 };
   }
   if (facts.state === "cancelled") {
     return { token: "cancelled", label: "Cancelled", detail: dispatch?.detail ?? "Nothing else will run for this task.", tone: "muted", action: null, views, rank: 4 };
+  }
+  if (question !== null && facts.state !== "failed" && dispatch !== null && QUESTION_FIRST.has(dispatch.code)) {
+    return {
+      token: "waiting-decision", label: "Waiting on your answer", detail: question.question,
+      tone: "attention", action: { label: "Answer question", kind: "open-task" }, views, rank: 0,
+      ...(dispatch.code === "waiting-decision" ? {} : {
+        diagnostics: [{ token: dispatch.code, label: dispatch.summary, detail: dispatch.detail, tone: dispatch.condition === "running" ? "live" as const : "attention" as const }],
+      }),
+    };
   }
   if (running) {
     return dispatchWords("live", 1, { label: "Watch the build", kind: facts.liveRunId === null ? "open-task" : "open-run" });

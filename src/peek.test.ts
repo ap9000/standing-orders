@@ -402,7 +402,7 @@ describe("the v17 migration", () => {
       raw.exec("INSERT INTO artifact_old SELECT * FROM artifact");
       raw.exec("DROP TABLE artifact");
       raw.exec("ALTER TABLE artifact_old RENAME TO artifact");
-      raw.exec("UPDATE schema_version SET version = 16");
+      raw.exec("DROP TABLE service_cursor; UPDATE schema_version SET version = 16");
       raw.close();
 
       store = openStore(file);

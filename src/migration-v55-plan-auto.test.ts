@@ -21,7 +21,7 @@ test("v54 keeps scopes, access grants and signed mode bytes; it grants no planne
     store.signMode({ repo: root, name: "hands-off", termsJson: JSON.stringify(legacy), digest: "legacy-digest", signedBy: "owner", absoluteExpiry: String(legacy.absoluteExpiry), publication: "notify" }, now);
     store.close();
     const old = new DatabaseSync(file);
-    old.exec("DROP TABLE plan_authorization; UPDATE schema_version SET version=54;");
+    old.exec("DROP TABLE service_cursor; DROP TABLE plan_authorization; UPDATE schema_version SET version=54;");
     const accounts = old.prepare("SELECT * FROM approver").all();
     const modes = old.prepare("SELECT * FROM operating_mode").all();
     const ledger = old.prepare("SELECT * FROM action_ledger").all();
@@ -36,7 +36,7 @@ test("v54 keeps scopes, access grants and signed mode bytes; it grants no planne
     upgraded.close();
     const before = readFileSync(file); openStore(file).close(); expect(readFileSync(file)).toEqual(before);
     const damaged = new DatabaseSync(file);
-    damaged.exec("UPDATE schema_version SET version=54; ALTER TABLE approver DROP COLUMN projects_json");
+    damaged.exec("DROP TABLE service_cursor; UPDATE schema_version SET version=54; ALTER TABLE approver DROP COLUMN projects_json");
     damaged.close();
     const broken = readFileSync(file);
     expect(() => openStore(file)).toThrow("refusing to widen access");

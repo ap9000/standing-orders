@@ -1,0 +1,153 @@
+{
+  "sourceCommit": "d90677790c6342b9d1a2deff20fd95ee3a6ad2a0",
+  "checks": [
+    {
+      "name": "typecheck",
+      "argv": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "exitCode": 0,
+      "seconds": 1.16,
+      "log": "output/assignment-foundation/typecheck.log"
+    },
+    {
+      "name": "affected-tests",
+      "argv": [
+        "npx",
+        "vitest",
+        "run",
+        "src/chat-schema.test.ts",
+        "src/migration-v39.test.ts",
+        "src/migration-v45.test.ts",
+        "src/migration-v46.test.ts",
+        "src/migration-v47.test.ts",
+        "src/migration-v50-review-retries.test.ts",
+        "src/migration-v51-plan-contract.test.ts",
+        "src/migration-v53-process-custody.test.ts",
+        "src/migration-v54-project-access.test.ts",
+        "src/migration-v55-plan-auto.test.ts",
+        "src/migration-v56-recipes.test.ts",
+        "src/migration-v58-project-learning.test.ts",
+        "src/migration-v61-telegram.test.ts",
+        "src/migration-v62-telegram-conversation.test.ts",
+        "src/migration-v63-telegram-delivery.test.ts",
+        "src/migration-v64-telegram-images.test.ts",
+        "src/migration-v66-chat-actions.test.ts",
+        "src/migration-v67-slack.test.ts",
+        "src/migration-v68-discord.test.ts",
+        "src/migration-v69-candidate.test.ts",
+        "src/migration-watch-ownership.test.ts",
+        "src/peek.test.ts",
+        "src/people.test.ts",
+        "src/project-knowledge.test.ts",
+        "src/project-skills.test.ts",
+        "src/pushstore.test.ts",
+        "src/quality.test.ts",
+        "src/recipe-creator.test.ts",
+        "src/review-context.test.ts",
+        "src/routine.test.ts",
+        "src/service-cursor.test.ts",
+        "src/steer.test.ts",
+        "src/store.test.ts",
+        "src/task-control.test.ts",
+        "src/tournament.test.ts"
+      ],
+      "exitCode": 0,
+      "seconds": 88.56,
+      "log": "output/assignment-foundation/affected-tests.log"
+    }
+  ]
+}
+
+# npm run typecheck
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+# npx vitest run src/chat-schema.test.ts src/migration-v39.test.ts src/migration-v45.test.ts src/migration-v46.test.ts src/migration-v47.test.ts src/migration-v50-review-retries.test.ts src/migration-v51-plan-contract.test.ts src/migration-v53-process-custody.test.ts src/migration-v54-project-access.test.ts src/migration-v55-plan-auto.test.ts src/migration-v56-recipes.test.ts src/migration-v58-project-learning.test.ts src/migration-v61-telegram.test.ts src/migration-v62-telegram-conversation.test.ts src/migration-v63-telegram-delivery.test.ts src/migration-v64-telegram-images.test.ts src/migration-v66-chat-actions.test.ts src/migration-v67-slack.test.ts src/migration-v68-discord.test.ts src/migration-v69-candidate.test.ts src/migration-watch-ownership.test.ts src/peek.test.ts src/people.test.ts src/project-knowledge.test.ts src/project-skills.test.ts src/pushstore.test.ts src/quality.test.ts src/recipe-creator.test.ts src/review-context.test.ts src/routine.test.ts src/service-cursor.test.ts src/steer.test.ts src/store.test.ts src/task-control.test.ts src/tournament.test.ts
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-foundation-verified-release
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+(node:88523) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:88536) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:88520) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:88526) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:16069) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:5246) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:18265) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:12572) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:23299) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:23793) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:27004) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:27100) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:25204) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:28141) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:29020) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:29339) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:30469) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:31671) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:31097) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:32140) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:31386) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:32367) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:33170) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:32947) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:34049) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:33622) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:34192) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:35020) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:34525) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:35083) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:35327) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:35742) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:35877) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:35760) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:36072) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  35 passed (35)
+      Tests  485 passed (485)
+   Start at  01:43:07
+   Duration  87.55s (transform 5.12s, setup 307ms, import 12.81s, tests 177.78s, environment 2ms)
+

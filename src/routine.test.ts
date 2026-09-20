@@ -381,6 +381,7 @@ describe("firing, inside one proving transaction", () => {
       v47.raw().prepare("UPDATE routine SET approved_at = ?, approved_by = 'alex', approved_digest = digest, approved_profile_json = profile_json, next_fire_at = ? WHERE id = ?").run(T0.toISOString(), later(HOUR).toISOString(), created.id);
       v47.raw().exec("ALTER TABLE routine DROP COLUMN route_json");
       v47.raw().exec("ALTER TABLE routine DROP COLUMN approved_route_json");
+      v47.raw().exec("DROP TABLE service_cursor");
       v47.raw().prepare("UPDATE schema_version SET version = 47").run();
       v47.close();
 

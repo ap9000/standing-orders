@@ -115,6 +115,7 @@ describe("two quality modes", () => {
       legacy.raw().exec("ALTER TABLE task_scope DROP COLUMN quality_mode");
       legacy.raw().exec("ALTER TABLE task_ref DROP COLUMN quality_mode");
       legacy.raw().exec("DROP TABLE quality_default");
+      legacy.raw().exec("DROP TABLE service_cursor");
       legacy.raw().prepare("UPDATE schema_version SET version = 40").run();
       legacy.close();
       legacy = null;

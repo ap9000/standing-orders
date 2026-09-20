@@ -227,7 +227,7 @@ describe("the v21 → v22 migration", () => {
       const require = createRequire(import.meta.url);
       const { DatabaseSync } = require("node:sqlite");
       const raw = new DatabaseSync(file);
-      raw.exec("DROP INDEX IF EXISTS task_steer_pending; DROP TABLE IF EXISTS task_steer; UPDATE schema_version SET version = 21;");
+      raw.exec("DROP TABLE service_cursor; DROP INDEX IF EXISTS task_steer_pending; DROP TABLE IF EXISTS task_steer; UPDATE schema_version SET version = 21;");
       raw.close();
 
       openStore(file).close(); // reopened once — migrates

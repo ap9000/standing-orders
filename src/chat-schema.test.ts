@@ -20,7 +20,7 @@ test("v59 chat migration preserves cards, sequence and foreign keys, and reopens
     db.exec("INSERT INTO old_proposal SELECT * FROM mate_proposal; DROP TABLE mate_proposal; ALTER TABLE old_proposal RENAME TO mate_proposal");
     db.prepare("UPDATE sqlite_sequence SET seq=100 WHERE name='mate_proposal'").run();
     expect(String(db.prepare("SELECT sql FROM sqlite_master WHERE name='mate_proposal'").get()!.sql)).not.toContain("'action'");
-    db.exec("UPDATE schema_version SET version=59; COMMIT");
+    db.exec("DROP TABLE service_cursor; UPDATE schema_version SET version=59; COMMIT");
     db.close();
     store = openStore(file);
     expect(store.getMateProposal(id)).toMatchObject({ kind: "hold", state: "drafting", payload: { task: "a", reason: "keep" } });

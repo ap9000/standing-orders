@@ -23,6 +23,7 @@ describe("v49 review watch ownership migration", () => {
       for (const index of ["root_review_attempt_ordinal", "one_live_root_review_per_source", "one_successful_root_review_per_source", "one_correction_per_reviewer"]) raw.exec(`DROP INDEX IF EXISTS ${index}`);
       raw.exec("ALTER TABLE run DROP COLUMN review_attempt");
       raw.exec("ALTER TABLE run DROP COLUMN watch_incarnation");
+      raw.exec("DROP TABLE service_cursor");
       raw.prepare("UPDATE schema_version SET version = ?").run(epoch);
       const before = raw.prepare("SELECT * FROM run").all();
       raw.close();

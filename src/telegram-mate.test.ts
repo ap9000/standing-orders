@@ -927,20 +927,20 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(store.getTask("e")?.state).toBe("queued");
       expect(outcome(repair.id).outcome).toMatchObject({ ok: true, via: "telegram" });
       // Agents: a configured, role-valid choice drafted by the real tool, confirmed through the authenticated route edit.
-      store.setPhaseTierConfig("installation", "review", "strong", "codex", "gpt-5-codex", "ops", now);
+      store.setPhaseTierConfig("installation", "build", "strong", "codex", "gpt-5-codex", "ops", now);
       task("f");
       propose(store, { taskId: "f", goal: "Harden the flow", acceptance: [{ id: "c1", statement: "It holds", how: null, evidence: ["check"] }], now });
       let drafted: Record<string, unknown> | null = null;
       const ctx = { store, who: who(), now, step: 2, readDecisions: new Map<number, number>(), draft: (_kind: string, payload: Record<string, unknown>) => { drafted = payload; return 1; } };
       expect(executeMateTool({ ...ctx, step: 1 }, "get_agents", { task: "f" })).toMatchObject({ ok: true });
-      expect(executeMateTool(ctx, "propose_agents", { task: "f", role: "reviewer", agent: { provider: "codex", model: "gpt-5-codex" } })).toMatchObject({ ok: true });
+      expect(executeMateTool(ctx, "propose_agents", { task: "f", role: "builder", agent: { provider: "codex", model: "gpt-5-codex" } })).toMatchObject({ ok: true });
       const agents = card("agents", drafted!);
-      expect(agents.preview.text).toContain("Change agents for work f: reviewer: codex gpt-5-codex");
+      expect(agents.preview.text).toContain("Change agents for work f: builder: codex gpt-5-codex");
       expect(agents.preview.text).toContain("renewed approval before work starts");
       expect(await tapPass(agents.confirm, agents.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
-      expect(store.refForId(store.lookupRef("f")!.id)?.routeOverrides).toEqual([expect.objectContaining({ phase: "review", provider: "codex", model: "gpt-5-codex" })]);
+      expect(store.refForId(store.lookupRef("f")!.id)?.routeOverrides).toEqual([expect.objectContaining({ phase: "build", provider: "codex", model: "gpt-5-codex" })]);
       // The route change staled f's approval: the recorded scope waits again, and the card says so once, unlinked here.
-      expect(script.edits().at(-1)).toBe(`✓ Agents changed for work f: the reviewer is now codex · gpt-5-codex\n\nApprove it in Standing Orders on the computer.\n\n${NO_PHONE_LINK}`);
+      expect(script.edits().at(-1)).toBe(`✓ Agents changed for work f: the builder is now codex · gpt-5-codex\n\nApprove it in Standing Orders on the computer.\n\n${NO_PHONE_LINK}`);
       expect(store.getScope("f")?.approvedDigest ?? null).not.toBe(store.getScope("f")?.digest);
       expect(urlButtons(lastEdit())).toEqual([]);
       // Scope: rewritten through the guarded proposal; approval is the password ceremony, reached by one precise button under a trusted origin.

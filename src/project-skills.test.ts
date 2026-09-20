@@ -516,7 +516,7 @@ describe("managed project skills", () => {
       "skill_package",
     ])
       store.handle.exec(`DROP TABLE ${table}`);
-    store.handle.exec("UPDATE schema_version SET version=64");
+    store.handle.exec("DROP TABLE service_cursor; UPDATE schema_version SET version=64");
     store.close();
     store = openStore(db);
     expect(view().library).toEqual([]);

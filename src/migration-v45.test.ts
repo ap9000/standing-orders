@@ -61,6 +61,7 @@ describe("schema v45: verification self-healing is explicit authority", () => {
       T0,
     );
     store.raw().exec("ALTER TABLE verify_command DROP COLUMN recovery_setup_digest");
+    store.raw().exec("DROP TABLE service_cursor");
     store.raw().prepare("UPDATE schema_version SET version = 44").run();
     store.close();
     store = null;

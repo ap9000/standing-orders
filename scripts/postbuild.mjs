@@ -9,6 +9,8 @@
  */
 
 import { chmod, copyFile, stat } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,4 +33,17 @@ if (process.platform !== "win32") {
     const wanted = stats.mode | EXECUTABLE_BITS;
     if (wanted !== stats.mode) await chmod(file, wanted);
   }
+}
+
+// The final gate retains this build's tree identity. Commit metadata can differ
+// after a prepared tree is materialized; compare trees to identify its contents.
+try {
+  const git = (...args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  if (realpathSync(git("rev-parse", "--show-toplevel")) !== realpathSync(root)) throw Error("outside checkout");
+  const head = git("rev-parse", "--verify", "HEAD"), tree = git("rev-parse", "--verify", "HEAD^{tree}");
+  if (![head, tree].every(value => /^[a-f0-9]{40,64}$/.test(value))) throw Error("unknown identity");
+  git("diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--");
+  console.log(`Build source: ${JSON.stringify({ head, tree, trackedClean: true })}`);
+} catch {
+  console.log("Build source: unavailable (no clean Git checkout)");
 }

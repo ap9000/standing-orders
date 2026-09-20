@@ -12,6 +12,7 @@ import { changeKnowledge, knowledgeView } from './project-knowledge.js';
 import { CodingWorkspace } from './coding-workspace.js';
 import type { CodingProvider, CodingProviderEvent } from './coding-provider.js';
 import type { CodingSnapshot } from './coding-types.js';
+import { runSessionCommand } from './session-cli.js';
 
 /** HTTP tests use a real catalog and isolated Git worktrees. Only the model
  * transport is replaced, so authentication cannot bypass session ownership. */
@@ -135,6 +136,47 @@ describe('coding console HTTP boundaries', () => {
     const bearer = { authorization: `Bearer alex:${passwords.get('alex')}` };
     expect((await fetch(`${base}/code`, { headers: bearer })).status).toBe(403);
     expect((await fetch(`${base}/code/start`, { method: 'POST', headers: bearer, body: new URLSearchParams({ repo, prompt: 'Change welcome', requestId: 'anonymous-request-0001', password: passwords.get('alex')! }), redirect: 'manual' })).status).toBe(403);
+    expect(providerStarts).toBe(0); expect(provider.calls).toEqual([]);
+  });
+
+  test('the installed HTTP server shares one native session between explicit CLI credentials and the cookie UI', async () => {
+    const cli = async (args: string[]) => {
+      const lines: string[] = [];
+      const code = await runSessionCommand([...args, '--url', base, '--as', 'alex', '--token-env', 'SESSION_TEST_TOKEN', '--json'], line => lines.push(line), {
+        env: { SESSION_TEST_TOKEN: passwords.get('alex') }, readStdin: async () => 'Make the welcome clearer.',
+      });
+      return { code, body: JSON.parse(lines.join('\n')) };
+    };
+    const created = await cli(['start', '--project', repo, '--title', 'Improve welcome', '--stdin', '--key', 'cli-browser-start-0001']);
+    expect(created.code).toBe(0);
+    const id = created.body.result.session.id;
+    const user = await login(), saved = await state(id, user);
+    expect(saved.session.nativeThreadId).toBe(created.body.result.session.nativeThreadId);
+    const page = await fetch(`${base}/code/${id}`, { headers: { cookie: user.cookie } });
+    expect(page.status).toBe(200); expect(await page.text()).toContain('Improve welcome');
+    expect((await post(`/code/${id}/send`, user, { prompt: 'Use one short sentence.', requestId: 'browser-cli-send-0001' })).status).toBe(200);
+    provider.note(saved.session.nativeThreadId!, 'item/completed', { item: { id: 'browser-cli-send-0001', type: 'userMessage', content: [{ type: 'text', text: 'Use one short sentence.' }] } });
+    const shown = await cli(['show', id]);
+    expect(shown.code).toBe(0); expect(shown.body.result.brief.summary).toContain('Use one short sentence.');
+    expect(shown.body.result.session.nativeThreadId).toBe(saved.session.nativeThreadId);
+    const current = shown.body.result.session;
+    const controls = [id, '--revision', String(current.revision), '--thread', current.nativeThreadId, '--turn', current.turnId];
+    expect((await cli(['stop', ...controls, '--key', 'cli-browser-stop-0001'])).code).toBe(0);
+    expect((await state(id, user)).session.status).toBe('interrupted');
+    expect(providerStarts).toBe(1);
+    expect(provider.calls.map(call => call.method)).toEqual(['thread/start', 'turn/start', 'turn/steer', 'turn/interrupt']);
+  });
+
+  test('the session API requires explicit operator bearer authority and rejects browser cookies before native work', async () => {
+    const user = await login();
+    const request = (headers: Record<string, string>, method = 'POST') => fetch(`${base}/api/sessions/list`, { method, headers: { 'content-type': 'application/json', ...headers }, ...(method === 'POST' ? { body: JSON.stringify({ version: 1 }) } : {}) });
+    for (const headers of [{ cookie: user.cookie }, { authorization: `Bearer bob:${passwords.get('bob')}` }, { authorization: `Bearer vera:${passwords.get('vera')}` }, { authorization: `Bearer alex:${passwords.get('alex')}`, origin: base }]) {
+      const response = await request(headers);
+      expect([401, 403]).toContain(response.status);
+      expect(await response.json()).toMatchObject({ ok: false, delivery: 'not-sent', status: 'rejected' });
+    }
+    const read = await request({ authorization: `Bearer alex:${passwords.get('alex')}` }, 'GET');
+    expect(read.status).toBe(405);
     expect(providerStarts).toBe(0); expect(provider.calls).toEqual([]);
   });
 

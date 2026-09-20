@@ -4,7 +4,7 @@ import { hostname } from "node:os";
 import { currentBootId } from "./boot-identity.js";
 import { createContainer, currentContainment, type Container } from "./containment.js";
 import { processMayBeAlive } from "./process-liveness.js";
-import { observeProcessTree, sampleProcessTree, stopProcessTree } from "./process-tree.js";
+import { observeProcessTree, sampleProcessTree, stopProcessTree, type ProcessObservationFailure } from "./process-tree.js";
 
 /** Read-only recovery witnesses, never authority to signal historical PIDs.
  * macOS ancestry is observational; a missed/failed observation stays fenced.
@@ -14,6 +14,7 @@ export type CodingCustody = {
   group: boolean;
   descendants: { pid: number; group: boolean }[];
   observationUnknown: boolean;
+  observationFailures?: ProcessObservationFailure[];
   host: string;
   bootId: string | null;
   container?: { backend: string; id: string; identity?: string };
@@ -105,6 +106,7 @@ export function createCodexCodingProvider(options: { cwd?: string; command?: str
   const incoming = new Set<number | string>();
   const descendants = new Map<string, { pid: number; group: boolean }>();
   let ancestryUnknown = false;
+  const observationFailures: ProcessObservationFailure[] = [];
   const host = hostname();
   // Bind the boot at creation, not when an old snapshot is requested later.
   const bootId = currentBootId();
@@ -119,6 +121,7 @@ export function createCodexCodingProvider(options: { cwd?: string; command?: str
       pid, group: pid !== null && process.platform !== "win32",
       descendants: [...descendants.values()].map(one => ({ ...one })),
       observationUnknown: ancestryUnknown, host, bootId,
+      ...(observationFailures.length === 0 ? {} : { observationFailures: observationFailures.map(one => ({ ...one })) }),
       ...(container === null ? {} : { container: { backend: container.backend, id: container.id, ...(container.identity === undefined ? {} : { identity: container.identity }) } }),
     };
   }
@@ -273,6 +276,7 @@ export function createCodexCodingProvider(options: { cwd?: string; command?: str
       observeProcessTree(child, {
         onDescendant: (pid, group) => { descendants.set(`${pid}:${group}`, { pid, group }); custodyChanged(); },
         onDescendantExit: (pid, group) => { descendants.delete(`${pid}:${group}`); custodyChanged(); },
+        onObservationFailure: failure => { observationFailures.push({ ...failure }); custodyChanged(); },
         onUnknown: () => { if (!ancestryUnknown) { ancestryUnknown = true; custodyChanged(); } },
       });
     }

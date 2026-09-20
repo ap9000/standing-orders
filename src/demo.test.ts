@@ -7,6 +7,8 @@ import { seedDemo, makeDemoRepos, createDemoSandbox } from "./demo.js";
 import { runOperate, EXIT } from "./operate.js";
 import { classify } from "./board.js";
 import { readVerifiedArtifact } from "./evidence.js";
+import { requestResultChanges } from './result-actions.js';
+import { revisionSourceOf } from './result-review.js';
 
 const T0 = new Date("2026-08-14T12:00:00.000Z");
 
@@ -100,6 +102,35 @@ describe("the demo sandbox", () => {
       expect(lanes.has("building")).toBe(true);
       // Completed work rides the snapshot's own done list, not the lanes.
       expect(snapshot.done.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      store.close();
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  test('reviewable sample results retain their approved terms and can seal one feedback revision', () => {
+    const { sandbox, store, evidenceRoot } = createDemoSandbox(T0);
+    try {
+      for (const [index, task] of ['fix-payout-rounding', 'confirm-empty-state-copy'].entries()) {
+        const ref = store.refFor('built-in', task);
+        const run = store.runsFor(ref.id).find(one => one.role === 'builder')!;
+        const scope = store.getScope(task)!;
+        expect(run.scopeDigest).toBe(scope.digest);
+        const input = { run: run.id, batch: '', source: revisionSourceOf(scope.digest), actor: 'demo', repos: [ref.repo!],
+          note: 'Keep the explanation concise and make the next action clear on a phone.', path: '', line: '', request: String(index + 1).repeat(32) };
+        const revision = requestResultChanges(store, evidenceRoot, input, T0);
+        expect(revision).toMatchObject({ ok: true });
+        if (!revision.ok) throw Error(revision.message);
+        expect(store.revisionSourceOf(store.lookupRef(revision.id)!.id)).toMatchObject({ sourceTask: task, sourceRun: run.id });
+        expect(store.getScope(revision.id)?.approvedBy).toBeNull();
+        expect(requestResultChanges(store, evidenceRoot, input, T0)).toEqual(revision);
+        expect(store.allDiffComments(run.id)).toHaveLength(1);
+      }
+      // The intended manual-review state remains unaccepted: a revision is
+      // still a new task requiring its own approval, not a proof exception.
+      const manual = store.runsFor(store.refFor('built-in', 'confirm-empty-state-copy').id)[0]!;
+      expect(store.proofVerdictFor(manual.id)?.verdict).toBe('short');
+      expect(store.proofAcceptance(manual.id)).toBeNull();
     } finally {
       store.close();
       rmSync(sandbox, { recursive: true, force: true });

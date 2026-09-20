@@ -19,7 +19,7 @@
  * selected tab, and the reading position in this tab's sessionStorage,
  * keyed by the server-named account, the task, and the run. */
 
-import { resultStatusOf, reviewStatusOf, type ResultFacts, type PublicationFacts, type DisplayStatus } from "./workspace-ui.js";
+import { resultStatusOf, type ResultFacts, type PublicationFacts, type DisplayStatus } from "./workspace-ui.js";
 
 /** Add re-read evidence health to the existing result/review projection.
  * This is presentation only: the recorded verdict and acceptance stay intact. */
@@ -37,11 +37,7 @@ export function evidenceResultStatusOf(result: ResultFacts, publication: Publica
   }
   const shortened = evidenceShortenedWords(evidence);
   if (shortened) stored = { ...stored, detail: `${stored.detail} ${shortened}` };
-  const review = result.role === "scout" || result.accepted ? null : reviewStatusOf(result.review ?? null);
-  if (review === null) return stored;
-  const reviewing = resultStatusOf(result, publication);
-  const healthDetail = stored.token === recorded.token ? shortened : stored.detail;
-  return healthDetail === "" ? reviewing : { ...reviewing, detail: `${reviewing.detail} ${healthDetail}` };
+  return stored;
 }
 
 export function evidenceShortenedWords(evidence: EvidenceHealth): string {
@@ -215,7 +211,8 @@ export function resultFactsFromHtml(html: string): Record<string, string>[] {
  * lands on the run page. Matched exactly — never a bare open redirect. */
 export function resultReturnTarget(raw: string | null | undefined, runId: number): string {
   if (raw !== null && raw !== undefined) {
-    if (/^\/review\?result=[A-Za-z0-9._~%-]{1,200}$/.test(raw)) return raw;
+    const review = /^\/review\?result=[A-Za-z0-9._~%-]{1,200}(?:&run=([0-9]{1,15}))?$/.exec(raw);
+    if (review !== null && (review[1] === undefined || Number(review[1]) === runId)) return raw;
     const chat = /^\/chat\?task=([A-Za-z0-9._~%-]{1,200})&result=([0-9]{1,15})$/.exec(raw);
     if (chat !== null && Number(chat[2]) === runId) return raw;
   }

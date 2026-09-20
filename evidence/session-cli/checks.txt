@@ -1,0 +1,35 @@
+$ npm run typecheck
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+$ npx vitest run src/coding-console.test.ts src/coding-workspace.test.ts src/session-server.test.ts src/session-http.test.ts src/session-cli.test.ts src/session-brief.test.ts src/serve.test.ts src/surface.test.ts src/envelope.test.ts src/cli.test.ts --reporter=dot
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-session-release-prep
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+(node:35982) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···(node:35976) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··(node:35983) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·································(node:35984) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+······················································(node:40695) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+······························································(node:44160) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·····························(node:47489) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+······················································································································································································································································································································································
+
+ Test Files  10 passed (10)
+      Tests  525 passed (525)
+   Start at  01:28:01
+   Duration  51.04s (transform 6.83s, setup 141ms, import 12.77s, tests 87.26s, environment 1ms)
+

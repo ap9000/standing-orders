@@ -57,6 +57,7 @@ describe("schema v39: acceptance_json is additive, and a v38 approval survives b
     // final re-derivation check below, against the ACTUAL stored profile.
 
     // Roll the marker back to v38 — a real upgrade candidate.
+    seeded.raw().exec("DROP TABLE service_cursor");
     seeded.raw().prepare("UPDATE schema_version SET version = 38").run();
     seeded.close();
 

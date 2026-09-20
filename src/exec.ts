@@ -10,7 +10,7 @@
 import { execFile, spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { observeProcessTree, stopProcessTree, type ProcessTreeObserver } from "./process-tree.js";
+import { observeProcessTree, stopProcessTree, readProcessObservationFailure, type ProcessTreeObserver } from "./process-tree.js";
 import { jsonlDiscriminants } from "./jsonl-discriminants.js";
 import { createContainer, currentContainment, type AttachOutcome, type Container, type ContainmentBackendId } from "./containment.js";
 import type { Store } from "./store.js";
@@ -329,6 +329,8 @@ export function runOwnerTag(store: Store, runId: number): string {
 }
 
 /** How many live children this process still tracks under an owner tag. */
+// Zero is local to this process registry. Recovery must also inspect durable
+// witnesses and its authenticated OS census; this count is not an absence proof.
 export function ownedProcessCount(owner: string): number {
   return ownedChildren.get(owner)?.size ?? 0;
 }
@@ -614,6 +616,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         ...(options.onDescendant === undefined ? {} : { onDescendant: options.onDescendant }),
         ...(options.onDescendantExit === undefined ? {} : { onDescendantExit: options.onDescendantExit }),
         ...(options.onUnknown === undefined ? {} : { onUnknown: options.onUnknown }),
+        ...(options.onObservationFailure === undefined ? {} : { onObservationFailure: options.onObservationFailure }),
         ...(options.onContainer === undefined ? {} : { onContainer: options.onContainer }),
         ...(options.onContainerEmpty === undefined ? {} : { onContainerEmpty: options.onContainerEmpty }),
       }),
@@ -1734,8 +1737,9 @@ export function startClaudeHeldSession(
             SO_HELD_SOCKET: options.socketPath,
             SO_HELD_COOKIE: options.cookie,
             SO_HELD_GRACE_MS: String(options.graceMs ?? 10_000),
+            SO_HELD_DIAGNOSTIC_FD: currentContainment().mode === "observed" ? "3" : "",
           },
-          stdio: ["pipe", "pipe", "pipe"],
+          stdio: currentContainment().mode === "observed" ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
           detached: false,
         },
         options.owner ?? "held",
@@ -1761,6 +1765,37 @@ export function startClaudeHeldSession(
         killGroup(left);
       }
       return;
+    }
+
+    // This pipe belongs to the supervisor, not the agent's relayed stream.
+    // Native containment uses its existing attachment descriptors instead.
+    if (container === null) {
+      const diagnostics = supervisor.stdio[3];
+      let buffer = "", reportedFault = false;
+      const diagnosticFault = (): void => {
+        if (reportedFault) return;
+        reportedFault = true;
+        // This channel carries diagnostics only. Its failure cannot invent
+        // lost child identity; genuine supervisor uncertainty still exits126.
+        try { options.onObservationFailure?.({ phase: "supervisor", operation: "diagnostic-read", code: "SUPERVISOR_DIAGNOSTIC", rootPid: supervisor.pid ?? null, at: new Date().toISOString(), identityUnknown: false }); } catch {}
+      };
+      if (diagnostics !== null && diagnostics !== undefined && "on" in diagnostics) {
+        diagnostics.on("data", (chunk: Buffer) => {
+          buffer += chunk.toString("utf8");
+          if (buffer.length > 16_384) { buffer = ""; diagnosticFault(); return; }
+          let cut: number;
+          while ((cut = buffer.indexOf("\n")) !== -1) {
+            const line = buffer.slice(0, cut); buffer = buffer.slice(cut + 1);
+            let failure = null;
+            try { failure = readProcessObservationFailure(JSON.parse(line)); } catch {}
+            if (failure === null) { diagnosticFault(); continue; }
+            try { options.onObservationFailure?.(failure); }
+            catch { /* No diagnostic can certify exit or clear an existing witness. */ }
+          }
+        });
+        diagnostics.on("error", diagnosticFault);
+        diagnostics.on("end", () => { if (buffer !== "") diagnosticFault(); });
+      }
     }
 
     heldSupervisors.set(supervisor, "fresh");

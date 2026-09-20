@@ -16,6 +16,10 @@ import { changeLearning, learningView } from "./project-learning.js";
 import { changeKnowledge, knowledgeView, knowledgeVersion, readKnowledgeSnapshot, type KnowledgeDraft } from "./project-knowledge.js";
 import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS } from "./knowledge-ui.js";
 import { learningHtml } from "./workspace-ui.js";
+import { createSessionEndpoint } from './session-server.js';
+import { openWorkDecisionOf } from "./work-summary.js";
+import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
+import { assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
@@ -488,7 +492,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   if (coding === null && options.localRunner !== undefined && !store.isDemo()) {
     const database = store.handle.prepare('PRAGMA database_list').all().find(row => row['name'] === 'main')?.['file'];
     if (typeof database === 'string' && database !== '') {
-      try { coding = new CodingWorkspace({ database: `${database}.coding.sqlite`, worktreeRoot: join(dirname(database), 'coding-worktrees'), admissionPaused: () => updateAdmissionPaused(store.raw()), authorize: (actor, repo) => codingActorAllowed(actor) && rowVisible(liveCeiling(), repo), context: input => prepareCodingContext(store, { ...input, root: join(dirname(database), 'coding-context') }) }); }
+      try { coding = new CodingWorkspace({ database: `${database}.coding.sqlite`, worktreeRoot: join(dirname(database), 'coding-worktrees'), admissionPaused: () => updateAdmissionPaused(store.raw()), authorize: (actor, repo) => codingActorAllowed(actor) && codingProjectAllowed(repo), context: input => prepareCodingContext(store, { ...input, root: join(dirname(database), 'coding-context') }) }); }
       catch (error) { codingProblem = error instanceof Error ? error.message : 'The coding workspace could not open.'; }
     }
   }
@@ -583,6 +587,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     return repos;
   };
+  const codingProjects = (): string[] => [...new Set([...managedRepos(), ...store.listProjects().map(project => project.path)])].filter(repo => rowVisible(liveCeiling(), repo));
+  function codingProjectAllowed(repo: string): boolean { return codingProjects().includes(repo); }
+  const sessionEndpoint = createSessionEndpoint({ store, workspace: coding, projects: codingProjects, projectAllowed: repo => rowVisible(liveCeiling(), repo) });
   /** The enumerable admission list for roll-up SQL: repos-only ceilings
    * enumerate themselves; root ceilings enumerate the STORED repos that
    * pass the ceiling (Codex roll-up review, finding 11); unscoped = null. */
@@ -735,6 +742,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     const method = request.method ?? "GET";
+    if (await sessionEndpoint(request, response)) return;
     // Exact, content-addressed application CSS only. Session-bearing
     // pages and fragments still use no-store and are never compressed.
     if ((method === "GET" || method === "HEAD") && url.pathname === WORKSPACE_STYLE.path) {
@@ -1032,7 +1040,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const read = new Set(["/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
     const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
-    const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
+    const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path)
       : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
@@ -1061,9 +1069,22 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   async function handleGet(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): Promise<void> {
     const now = clock();
-    const project = projectOf(who, request);
+    let project = projectOf(who, request);
     if (project === undefined) {
       return refuse(response, who, 403, "that project is outside what this server was configured to show");
+    }
+    // Exact result links carry their own read context. Check the stored
+    // placement against both account and instance access before using it;
+    // viewing a result never changes the session's selected project.
+    if (url.pathname === "/review" && url.searchParams.has("result")) {
+      const wanted = url.searchParams.get("result") ?? "";
+      const ref = wanted.length > 0 && wanted.length <= 64 && !hasForbiddenControls(wanted) ? store.lookupRef(wanted) : null;
+      const namedProject = url.searchParams.get("project");
+      if (url.searchParams.getAll("result").length !== 1 || url.searchParams.getAll("run").length > 1 || url.searchParams.getAll("project").length > 1 ||
+          (namedProject !== null && (ref === null || !visible(ref.repo) || namedProject !== ref.repo))) {
+        return refuse(response, who, 404, "No such result in your projects.", "/work");
+      }
+      if (who.via === "cookie" && ref !== null && visible(ref.repo)) project = ref.repo;
     }
 
     if (url.pathname === '/code' || url.pathname.startsWith('/code/')) {
@@ -1072,7 +1093,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const match = /^\/code\/([a-f0-9]{32})(?:\/(state|changes|ship))?$/.exec(url.pathname);
       try {
         const selected = match && coding ? coding.get(match[1]!, actor) : null;
-        if (selected && !visible(selected.repo)) return refuse(response, who, 403, 'That project is outside your access.', '/projects');
+        if (selected && !codingProjectAllowed(selected.repo)) return refuse(response, who, 403, 'That project is outside your access.', '/projects');
         if (match?.[2] === 'ship' && selected) {
           const preview = codingHandoffPreview(store, { sessionId: selected.id, actor: who.name });
           return sendScreen(response, 200, screen('Review for shipping', codingShippingHtml(preview, who.session.csrf), { chrome: chromeFor(selected.repo, 'code') }));
@@ -1081,7 +1102,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           if (!selected || !coding) throw Error('The coding session is unavailable.');
           if (match[2] === 'state' && url.searchParams.get('revision') === String(coding.revision(selected.id, actor))) return respond(response, 200, 'application/json', JSON.stringify({ unchanged: true }));
           const result = match[2] === 'changes' ? await coding.changes(selected.id, actor) : coding.snapshot(selected.id, actor);
-          if (!codingActorAllowed(actor) || !visible(selected.repo)) return respond(response, 403, 'application/json', JSON.stringify({ ok: false, error: 'Your access changed. Sign in again.' }));
+          if (!codingActorAllowed(actor) || !codingProjectAllowed(selected.repo)) return respond(response, 403, 'application/json', JSON.stringify({ ok: false, error: 'Your access changed. Sign in again.' }));
           return respond(response, 200, 'application/json', JSON.stringify(result));
         }
         if (url.pathname !== '/code' && !match) return refuse(response, who, 404, 'Coding session not found.', '/code');
@@ -1089,7 +1110,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (requestedProject !== null && (!visible(requestedProject) || ![...managedRepos(), ...store.listProjects().map(p => p.path)].includes(requestedProject))) return refuse(response, who, 403, 'That project is outside your access.', '/projects');
         const codeProject = selected?.repo ?? requestedProject ?? project;
         const chrome = chromeFor(codeProject, 'code');
-        const content = codingWorkspaceHtml({ owner: who.name, projects: chrome.projects ?? [], sessions: coding?.list(actor).filter(s => visible(s.repo)) ?? [], selected: selected && coding ? coding.snapshot(selected.id, actor) : null, csrf: who.session.csrf, project: codeProject, available: coding !== null, ...(codingProblem ? { error: codingProblem } : {}) });
+        const content = codingWorkspaceHtml({ owner: who.name, projects: chrome.projects ?? [], sessions: coding?.list(actor).filter(s => codingProjectAllowed(s.repo)) ?? [], selected: selected && coding ? coding.snapshot(selected.id, actor) : null, csrf: who.session.csrf, project: codeProject, available: coding !== null, ...(codingProblem ? { error: codingProblem } : {}) });
         return sendScreen(response, 200, screen('Code', content, { chrome, functional: { script: codingWorkspaceScript(), fetches: true } }));
       } catch (error) {
         if (!codingActorAllowed(actor)) return match?.[2] && match[2] !== 'ship'
@@ -1121,6 +1142,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const needsProject =
       who.via === "cookie" && project === null && !unscopedMode &&
       url.pathname !== "/" && url.pathname !== "/work" &&
+      !(url.pathname === "/review" && url.searchParams.has("result")) &&
       url.pathname !== "/menu" &&
       url.pathname !== "/recipes" &&
       !/^\/t\/[^/]+$/.test(url.pathname) &&
@@ -1133,7 +1155,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       !/^\/chat\/action\/[0-9]{1,15}$/.test(url.pathname) &&
       !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
-    if (needsProject) return redirect(response, "/projects");
+    if (needsProject) return redirect(response, `/projects?return=${encodeURIComponent(safeReturn(url.pathname + url.search))}`);
 
     if (url.pathname === "/projects/browse") {
       // The filesystem browser (operator request): pick a project folder by
@@ -1267,7 +1289,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/projects") {
-      return void projectsScreen(response, who, url.searchParams.get("said"), 200);
+      return void projectsScreen(response, who, url.searchParams.get("said"), 200, safeReturn(url.searchParams.get("return")));
     }
 
     if (url.pathname === "/") {
@@ -1664,7 +1686,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       const expectedRun = url.searchParams.get("run");
       if (expectedRun !== null && (!/^[1-9]\d*$/.test(expectedRun) || selectedRow?.runId !== Number(expectedRun))) {
-        return sendScreen(response, 409, screen("Result changed", '<h1>Result changed</h1><p>This acceptance link no longer matches the current result. Review the current task before accepting.</p><a class="button-link" href="/review">Review results</a>', { chrome: chromeFor(project, "runs") }));
+        return sendScreen(response, 409, screen("Result changed", '<h1>Result changed</h1><p>This acceptance link no longer matches the current result. Review the current task before accepting.</p><p class="refusal-back"><a class="button-link" href="/review">Review results</a></p>', { chrome: chromeFor(project, "runs") }));
       }
       const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who, now);
       return sendScreen(
@@ -1798,7 +1820,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               `<h2 style="margin-top:0">${live === null ? "sign a mode" : "replace it — a renewal is a new signature"}</h2>`,
               `<form method="post" action="/mode/confirm">`,
               `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-              `<label>preset<select name="name"><option value="standard">standard — safe defaults, reviews on</option><option value="hands-off">hands-off — your filings auto-approve, full permissions</option></select></label>`,
+              `<label>preset<select name="name"><option value="standard">standard — approvals stay with me</option><option value="hands-off">hands-off — your filings auto-approve, full permissions</option></select></label>`,
               `<label>days <span class="meta">(1\u2013${MODE_MAX_DAYS})</span><input type="number" name="days" value="1" min="1" max="${MODE_MAX_DAYS}"></label>`,
               `<label>merges<select name="publication">` +
                 `<option value="notify">wait for me — even under a merge grant</option>` +
@@ -1813,21 +1835,11 @@ export function createDecisionServer(options: ServeOptions): Server {
               `<label>planner approval<select name="plan-auto">` +
                 `<option value="0">wait for my approval</option>` +
                 `<option value="1">auto-approve plans that preserve my filed contract</option>` +
-                `</select><span class="meta">Requires automatic filing approval and reviews. File the goal, paths, and acceptance criteria upfront. Changed scope and unanswered questions still pause.</span></label>`,
-              `<label>reviews<select name="review-auto">` +
-                `<option value="">the preset's default (on)</option>` +
-                `<option value="1">agent-review every finished build</option>` +
-                `<option value="0">only when I ask</option>` +
-                `</select></label>`,
+                `</select><span class="meta">Requires automatic filing approval. File the goal, paths, and acceptance criteria upfront. Changed scope and unanswered questions still pause.</span></label>`,
               `<label>if a subscription runs out<select name="allow-paid-fallback">` +
                 `<option value="">never switch to a paid API key on its own (the default, every preset)</option>` +
                 `<option value="1">allow the approved fallback — spend moves to that account</option>` +
                 `</select></label>`,
-              `<label>a short or refuted run's drafted repair<select name="repair-auto">` +
-                `<option value="">wait for my approval (the default, every preset)</option>` +
-                `<option value="1">auto-approve it, within the attempt cap below</option>` +
-                `</select></label>`,
-              `<label>repair attempt cap <span class="meta">(0–3, only while repair auto-approves)</span><input type="number" name="repair-max-attempts" value="1" min="0" max="3"></label>`,
               `<button type="submit">read the full terms</button>`,
               `</form>`,
               `</div>`,
@@ -1835,7 +1847,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        screen("mode", [`<h1>operating mode</h1><p>Authorize this project's automatic approvals once, for up to ${MODE_MAX_DAYS} days. Select the touchpoints below; the signature covers the exact choices. Existing modes keep their original terms.</p><p class="meta">Quality evidence, scope changes, agent questions, and review comments that require a revision retain their existing checks. Automatic merging also needs a publication grant.</p>`, current, signForm].join("\n"), { chrome: chromeFor(project, "mode") }),
+        screen("mode", [`<h1>operating mode</h1><p>Authorize this project's automatic approvals once, for up to ${MODE_MAX_DAYS} days. Select the touchpoints below; the signature covers the exact choices. Existing modes keep their original terms.</p><p class="meta">Scope changes, agent questions, and requested revisions still require your attention. Automatic merging also needs a publication grant.</p>`, current, signForm].join("\n"), { chrome: chromeFor(project, "mode") }),
       );
     }
 
@@ -3504,6 +3516,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       return one !== undefined && runnerAlive(one, clock());
     });
 
+  /** Keep detailed receipt diagnostics; shared assignment reads own readiness. */
+  function freshAssignment(assignment: AssignmentSnapshot | null, receipt: CompletionReceiptView | null): AssignmentSnapshot | null {
+    return assignment === null ? null : assignmentWithEvidence(assignment, receipt === null ? null : receiptStatusOf(receipt), receipt?.runId ?? null);
+  }
+
   /**
    * One Work row's facts (workspace package 1), from the records the task
    * page already reads: the dispatch diagnosis, the latest finished
@@ -3544,6 +3561,8 @@ export function createDecisionServer(options: ServeOptions): Server {
               },
       publication: latest === null ? null : publicationFactsOf(store.publicationForRun(latest.id)),
       liveRunId: live === null ? null : live.id,
+      openDecision: ref === null ? null : openWorkDecisionOf(store, ref.id, now),
+      unfinishedRunId: runs.find(one => one.outcome === null && one.role !== "reviewer")?.id ?? null,
       control: ref === null ? { kind: "none" } : taskControlOf(store, ref.id, now),
     };
     // Read the same evidence-health projection as the receipt, including
@@ -3555,9 +3574,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     const earlierLive = task.family === undefined ? [] : earlierLiveVersions(task.family, now);
     if (earlierLive.length > 0 && !status.views.includes("running")) status.views = [...status.views, "running"];
     const otherActive = new Set([...(task.family?.otherActive.map(one => one.id) ?? []), ...earlierLive]).size;
+    const recordedAssignment = task.family === undefined ? null : assignmentOf(store, task.id, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+    const assignment = freshAssignment(recordedAssignment, result ?? null);
+    const assignmentStatus = assignment === null ? status : assignmentStatusOf(assignment, status);
+    if (status.views.includes("running") && !assignmentStatus.views.includes("running")) assignmentStatus.views = [...assignmentStatus.views, "running"];
     return { ...facts, executionId: task.id, id: task.family?.root.id ?? task.id, title: task.family?.root.title ?? task.title,
       familyNotice: task.family?.problem ?? (otherActive ? `${otherActive} earlier version${otherActive === 1 ? " is" : "s are"} still waiting or running. Open History.` : null),
-      status, resultRunId: latest === null ? null : latest.id };
+      status: assignment === null ? status : { ...assignmentStatus, diagnostics: [...(status.diagnostics ?? []), ...(status.tone === "problem" && status.detail !== assignment.detail ? [status] : [])] }, assignment, assignmentProblem: status.tone === "problem", resultRunId: latest === null ? null : latest.id };
   }
 
   /** The compact task list for the master pane, the current row marked. */
@@ -3628,6 +3651,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     who: Who,
     problem: string | null,
     status: number,
+    returnTo = "/",
   ): Promise<void> {
     const now = clock();
     const recent = store.listProjects().filter(one => visible(one.path));
@@ -3672,7 +3696,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return sendScreen(
       response,
       status,
-      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, !restricted() && unscopedMode, !restricted() && (ceiling.roots.length > 0 || unscopedMode), onboardState, peeks),
+      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, !restricted() && unscopedMode, !restricted() && (ceiling.roots.length > 0 || unscopedMode), onboardState, peeks, returnTo),
     );
   }
 
@@ -3794,7 +3818,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     // focused chat always render identical facts (c2).
     const planRevisions = ref === null ? null : revisionLedgerOf(ref.id);
     const milestoneProgress = ref === null ? null : progressOf(ref.id, planRevisions?.current?.document ?? null);
+    const family = familyOf(taskId);
+    const recordedAssignment = family?.current.id !== taskId ? null : assignmentOf(store, taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+    const assignment = freshAssignment(recordedAssignment, completion?.receipt ?? null);
     return {
+        assignment,
         task: found,
         status: workRowOf({ ...found, repo: ref?.repo ?? null }, now, completion?.receipt).status,
         dispatch: diagnoseTaskDispatch(store, taskId, now),
@@ -4104,7 +4132,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (data === null) return refuse(response, who, 404, "no such task", "/tasks");
     const family = familyOf(taskId);
     const presentedData = { ...data, rootId: family?.root.id ?? taskId, rootTitle: family?.root.title ?? data.task.title,
-      history: family === null ? "" : familyHistory(family),
+      history: family === null || data.assignment != null ? "" : familyHistory(family),
       versionLabel: family !== null && family.current.id !== taskId ? `Viewing ${family.versions.findIndex(one => one.id === taskId) === 0 ? "Original" : `Revision ${family.versions.findIndex(one => one.id === taskId)}`} · ${family.current.state === "running" ? "A newer revision is running" : "A newer revision is current"}` : null };
     if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
     if (cancelDraft !== undefined) presentedData.cancelDraft = cancelDraft;
@@ -4613,7 +4641,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!coding) return fail(409, codingProblem || 'Open Standing Orders on the machine with your installed coding agent.');
       if ([...new Set(body.keys())].some(key => body.getAll(key).length !== 1)) return fail(400, 'Submit one value for each field.');
       const actor = { name: who.name, generation: who.session.generation };
-      const permitted = (repo: string): boolean => visible(repo) && [...managedRepos(), ...store.listProjects().map(p => p.path)].includes(repo);
+      const permitted = (repo: string): boolean => visible(repo) && codingProjectAllowed(repo);
       try {
         let id: string;
         if (url.pathname === '/code/start') {
@@ -4996,17 +5024,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       const asked = (body.get("path") ?? "").trim();
       const canonical = asked === "" ? null : canonicalProject(asked);
       if (canonical === null) {
-        return void projectsScreen(response, who, "that path does not exist on this server", 400);
+        return void projectsScreen(response, who, "that path does not exist on this server", 400, safeReturn(body.get("return")));
       }
       // Authorization is the ceiling, then the path must actually be a git
       // repository — validation with direct argv and a bound, never a shell.
       // Both checks apply even to configured repos: naming a directory in
       // config authorizes it; only being a repository makes it openable.
       if (!(await authorizedProject(liveCeiling(), canonical))) {
-        return void projectsScreen(response, who, "that path is outside what this server was configured to serve", 403);
+        return void projectsScreen(response, who, "that path is outside what this server was configured to serve", 403, safeReturn(body.get("return")));
       }
       if (!(await isGitRepo(canonical))) {
-        return void projectsScreen(response, who, "that path is not a git repository", 400);
+        return void projectsScreen(response, who, "that path is not a git repository", 400, safeReturn(body.get("return")));
       }
       // Opening an allowed repository enrolls it in this machine's durable
       // project list. A co-located `up` notices that list and connects its
@@ -5014,7 +5042,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (options.registryPath !== undefined) {
         const enrolled = await updateRepos(options.registryPath, repos => addRepos(repos, [canonical]));
         if (!enrolled.ok) {
-          return void projectsScreen(response, who, `that project is valid, but it could not be added — ${enrolled.message}`, 400);
+          return void projectsScreen(response, who, `that project is valid, but it could not be added — ${enrolled.message}`, 400, safeReturn(body.get("return")));
         }
       }
       store.upsertProject(canonical, projectName(canonical), now);
@@ -5310,19 +5338,23 @@ export function createDecisionServer(options: ServeOptions): Server {
         ...preset,
         autoApproveFiling: body.get("auto-approve") === "" || body.get("auto-approve") === null ? preset.autoApproveFiling : body.get("auto-approve") === "1",
         planAuto: body.get("plan-auto") === "1",
-        reviewAuto: body.get("review-auto") === "" || body.get("review-auto") === null ? preset.reviewAuto : body.get("review-auto") === "1",
+        reviewAuto: false,
+        reviewRetryAuto: false,
         // The paid-fallback grant is NEVER a preset default (R8): unchecked
         // stays false on every preset — only the explicit box grants it.
         allowPaidFallback: body.get("allow-paid-fallback") === "1",
         // The repair-auto grant is the SAME rule (v40): unchecked stays
         // false on every preset — only the explicit box grants it, and the
         // attempt cap it carries is meaningless without it.
-        repairAuto: body.get("repair-auto") === "1",
-        repairMaxAttempts: body.get("repair-auto") === "1" ? Math.max(0, Math.min(3, Math.floor(Number(body.get("repair-max-attempts") ?? "0")) || 0)) : 0,
+        repairAuto: false,
+        repairMaxAttempts: 0,
         publication: body.get("publication") === "automerge" ? "automerge" : "notify",
       };
-      if (terms.planAuto && (!terms.autoApproveFiling || !terms.reviewAuto)) {
-        return refuse(response, who, 400, "Automatic planner approval requires automatic filing approval and agent reviews.", "/mode");
+      if (["review-auto", "review-retry-auto", "repair-auto"].some(field => body.get(field) === "1")) {
+        return refuse(response, who, 400, "Review scheduling and automatic revisions are no longer available. Reload the mode form.", "/mode");
+      }
+      if (terms.planAuto && !terms.autoApproveFiling) {
+        return refuse(response, who, 400, "Automatic planner approval requires automatic filing approval.", "/mode");
       }
       if (terms.publication === "automerge" && !store.hasMergeCapableGrant(project, now)) {
         return refuse(response, who, 409, "self-merging needs a merge-capable publication grant first — grant one, then sign", "/mode");
@@ -5334,12 +5366,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         // signs exactly this digest — a drifted form refuses at /mode/sign.
         const nonce = mintApprovalNonce(who.name, "mode-sign", `${project}:${digest}`);
         const bodyHtml =
-          `<h1>sign the ${escape(name)} mode for ${escape(project)}</h1>` +
+          `<h1 style="overflow-wrap:anywhere">sign the ${escape(name)} mode for ${escape(project)}</h1>` +
           `<form method="post" action="/mode/sign" class="card approve-form">` +
           `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">` +
           `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
           `<input type="hidden" name="digest" value="${escape(digest)}">` +
-          ["name", "days", "publication", "auto-approve", "plan-auto", "review-auto", "allow-paid-fallback", "repair-auto", "repair-max-attempts"]
+          ["name", "days", "publication", "auto-approve", "plan-auto", "allow-paid-fallback"]
             .map(field => `<input type="hidden" name="${field}" value="${escape(body.get(field) ?? "")}">`)
             .join("") +
           `<input type="hidden" name="expiry" value="${escape(expiry)}">` +
@@ -5608,7 +5640,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route|retry-review|stop|resume-arm|resume)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -7248,7 +7280,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const sawDigest = body.get("sawDigest");
         if (riskGiven !== null && !isRiskLevel(riskGiven)) return taskScreen(response, who, taskId, "risk is routine, elevated, or high", 400);
         const phase = phaseGiven ?? clearGiven;
-        if (phase !== null && !(ROUTE_PHASES as readonly string[]).includes(phase)) return taskScreen(response, who, taskId, "the role is planner, builder, repair, or reviewer", 400);
+        if (phase !== null && !(ROUTE_PHASES as readonly string[]).includes(phase)) return taskScreen(response, who, taskId, "the role is planner, builder, or revision", 400);
         if (riskGiven === null && phase === null) return taskScreen(response, who, taskId, "nothing to change about the agents", 400);
         if (phaseGiven !== null) {
           if (providerGiven === null || !isProviderId(providerGiven)) return taskScreen(response, who, taskId, "provider is claude, codex, openrouter, or gemini", 400);
@@ -7575,48 +7607,22 @@ export function createDecisionServer(options: ServeOptions): Server {
         store.acceptProof(latest.id, verifiedAuthor(who.name), note, now);
         return redirect(response, taskHref(taskId));
       }
+      case "complete": {
+        if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Only an approver can mark a result complete.");
+        const principal = matePrincipal(who);
+        if (principal === null) return refuse(response, who, 403, "Your access changed. Sign in again.");
+        const digest = body.get("receipt") ?? "";
+        const namedRun = body.get("run") ?? "";
+        const current = assignmentOf(store, taskId, now, { principal: "operator", repos: principal.repos }, evidenceRoot);
+        if (current === null || current.receipt?.taskId !== taskId || !/^[0-9]{1,15}$/.test(namedRun) || current.receipt.runId !== Number(namedRun)) {
+          return taskScreen(response, who, taskId, "This result changed. Open the current result before marking it complete.", 409);
+        }
+        const completed = checkAssignmentAsOperator(store, taskId, digest, principal, now, evidenceRoot);
+        if (!completed.ok) return taskScreen(response, who, taskId, completed.message, 409);
+        return redirect(response, reviewHref(taskId, Number(namedRun), taskRepoOf(ref.id)));
+      }
       case "retry-review": {
-        // The explicit review retry (v50): the console's road to the SAME
-        // door `task review` uses — an approver's browser session asks,
-        // the store's one transaction decides against live rows (no
-        // successful review, no live root, nothing queued, fewer than
-        // REVIEW_ROOT_ATTEMPTS roots), and every refusal is words on the
-        // page with no run opened. Nothing here retries by itself.
-        if (who.via !== "cookie") {
-          return refuse(response, who, 403, "asking for a review retry is a browser session's act");
-        }
-        if (who.role !== "approver") {
-          return taskScreen(response, who, taskId, "your login can watch — asking for a review retry is an approver's act", 403);
-        }
-        const latest = store.runsFor(ref.id).find(runIsTaskResult);
-        if (latest === undefined) {
-          return taskScreen(response, who, taskId, "this task has no finished attempt to review", 404);
-        }
-        // The form names the result it saw; a page rendered over an older
-        // result must not retry a newer one by accident.
-        const named = (body.get("run") ?? "").trim();
-        if (named !== "" && Number(named) !== latest.id) {
-          return taskScreen(response, who, taskId, `this page was rendered over build #${escape(named)}, but the task's latest result is build #${latest.id} — reload and decide again`, 409);
-        }
-        const asked = store.requestReview(latest.id, verifiedAuthor(who.name), now);
-        const back = body.get("return") ?? "";
-        const destination = REVIEW_RETURN.test(back) ? back : `${taskHref(taskId)}#run-status`;
-        if (!asked.ok) {
-          const state = store.reviewRetryStateOf(latest.id);
-          const cap = state?.cap ?? 3;
-          const words: Record<string, string> = {
-            "already-reviewed": `build #${latest.id} already has its review — a successful review is never retried`,
-            "review-running": `a review of build #${latest.id} is running right now (attempt ${state?.live?.attempt ?? "?"} of ${cap}) — one attempt at a time`,
-            "retries-exhausted": `build #${latest.id} has spent all ${cap} review attempts — nothing retries a fourth time; accept the result with an exception or file a revision`,
-            "already-requested": `a review of build #${latest.id} is already queued (attempt ${state?.nextAttempt ?? "?"} of ${cap})`,
-            "no-diff": `build #${latest.id} left no sealed diff to review`,
-            "diff-truncated": `build #${latest.id}'s diff was truncated at capture — a partial patch cannot be honestly reviewed`,
-            "diff-capture-failed": `build #${latest.id}'s diff capture failed — nothing verifiable to review`,
-            unfinished: `build #${latest.id} is still going`,
-          };
-          return taskScreen(response, who, taskId, words[asked.reason] ?? `${asked.reason}${asked.detail === undefined ? "" : `: ${asked.detail}`}`, 409);
-        }
-        return redirect(response, destination);
+        return taskScreen(response, who, taskId, "Separate agent reviews have retired. Open the saved result to mark it complete or request a revision.", 410);
       }
       case "stop": {
         // The exact-run stop (v52): a browser session's act, an approver's
@@ -8131,6 +8137,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       completedAt: row.completedAt,
       historyProblem: row.historyProblem ?? null,
       priority: row.priority,
+      assignment: (() => {
+        const value = assignmentOf(store, row.taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+        return run?.scopeDigest != null && value?.activeTaskId === row.taskId && value.receipt?.runId === run.id ? value : null;
+      })(),
       intent,
       plan,
       contest: contestOf(),
@@ -8363,7 +8373,7 @@ function refuse(
     shell("refused", [
       `<h1>request refused</h1>`,
       `<div class="problem">${escape(message)}</div>`,
-      `<p class="meta"><a href="${escape(backHref)}">\u2190 back</a></p>`,
+      `<p class="meta refusal-back"><a href="${escape(backHref)}">\u2190 Back</a></p>`,
     ].join("\n")),
   );
 }
@@ -8442,85 +8452,15 @@ function repairChainHtml(chain: RepairChainRow | null): string {
  * when no review was ever asked for.
  */
 function reviewRetryPanel(
-  taskId: string,
-  sourceRun: number,
+  _taskId: string,
+  _sourceRun: number,
   retry: ReviewRetryState | null,
-  options: { csrf: string; canAct: boolean; returnTo: string | null },
+  _options: { csrf: string; canAct: boolean; returnTo: string | null },
 ): string {
   if (retry === null || retry.state === "unrequested") return "";
-  const cap = retry.cap;
-  const latest = retry.latest;
-  const ordinal = (attempt: number | null): string => `attempt ${attempt ?? retry.attempts.length} of ${cap}`;
-  const retriesLeft = retry.retriesRemaining === 1 ? "1 explicit retry left" : `${retry.retriesRemaining} explicit retries left`;
-  const wasInterrupted = latest !== null && (latest.outcome === "interrupted" || latest.reason === "interrupted");
-  const latestWords = latest === null ? "" : wasInterrupted ? "was interrupted" : `failed${latest.reason === null ? "" : ` (${escape(latest.reason)})`}`;
-  const copy: Record<ReviewRetryState["state"], { title: string; detail: string }> = {
-    unrequested: { title: "Independent review", detail: "" },
-    queued: {
-      title: retry.attempts.length === 0 ? "Review queued" : `Review retry queued · ${ordinal(retry.nextAttempt)}`,
-      detail: retry.attempts.length === 0
-        ? "The requested independent review is waiting for a worker."
-        : `The explicit retry${retry.openRequest === null ? "" : ` asked by ${escape(retry.openRequest.requestedBy)}`} is waiting for a worker; ${latest === null ? "" : `${ordinal(latest.attempt)} ${latestWords}. `}${retriesLeft} after it.`,
-    },
-    running: {
-      title: `Reviewing · ${ordinal(retry.live?.attempt ?? null)}`,
-      detail: "An independent reviewer is checking the sealed evidence right now. The build is preserved whatever it says.",
-    },
-    succeeded: {
-      title: `Reviewed · ${ordinal(retry.succeeded?.attempt ?? null)}`,
-      detail: retry.retriesUsed === 0 ? "The independent review landed on its first attempt." : `The independent review landed after ${retry.retriesUsed} explicit ${retry.retriesUsed === 1 ? "retry" : "retries"}; a successful review is never retried.`,
-    },
-    retryable: {
-      title: `Review ${wasInterrupted ? "interrupted" : "failed"} · ${ordinal(latest?.attempt ?? null)}`,
-      detail: `Review ${ordinal(latest?.attempt ?? null)} ${latestWords}. The build and its evidence are untouched; a retry admits a fresh reviewer under the current sealed route and re-verifies every input. ${retriesLeft}.`,
-    },
-    exhausted: {
-      title: `Review retries exhausted · ${cap} of ${cap}`,
-      detail: `All ${cap} review attempts ended without a review${latest === null ? "" : ` (latest: ${latestWords})`}. Nothing retries a fourth time — accept the result with an exception or file a revision.`,
-    },
-  };
-  const { title, detail } = copy[retry.state];
-  const attempts =
-    retry.attempts.length === 0
-      ? ""
-      : `<ol class="review-attempts" aria-label="review attempts">` +
-        retry.attempts
-          .map(one => {
-            const ended = one.outcome === null ? "running" : one.outcome === "no-change" ? "reviewed" : `${one.reason === "interrupted" ? "interrupted" : one.outcome}${one.reason === null || one.reason === "interrupted" ? "" : ` · ${escape(one.reason)}`}`;
-            return `<li data-review-attempt="${one.attempt}" data-review-outcome="${escape(one.outcome ?? "open")}"><span class="review-attempt-ordinal">attempt ${one.attempt}</span> <a href="/r/${one.runId}">run #${one.runId}</a> <span class="meta">${ended}</span></li>`;
-          })
-          .join("") +
-        `</ol>`;
-  const control = (() => {
-    if (options.csrf === "") return "";
-    if (retry.state === "retryable" && options.canAct) {
-      return (
-        `<form method="post" action="${taskHref(taskId)}/retry-review" class="inline review-retry-form">` +
-        `<input type="hidden" name="csrf" value="${escape(options.csrf)}">` +
-        `<input type="hidden" name="run" value="${sourceRun}">` +
-        (options.returnTo === null ? "" : `<input type="hidden" name="return" value="${escape(options.returnTo)}">`) +
-        `<button type="submit" class="review-retry-button">Retry review · attempt ${retry.nextAttempt ?? retry.attempts.length + 1} of ${cap}</button></form>`
-      );
-    }
-    const label =
-      retry.state === "retryable"
-        ? "Retry review · approvers only"
-        : retry.state === "queued"
-          ? "Retry queued"
-          : retry.state === "running"
-            ? "Reviewing…"
-            : retry.state === "exhausted"
-              ? "No retries left"
-              : "Reviewed";
-    return `<button type="button" class="review-retry-button" disabled aria-disabled="true">${escape(label)}</button>`;
-  })();
-  return (
-    `<div class="${retry.state === "retryable" || retry.state === "exhausted" ? "problem" : "answered"} dispatch-status review-retry" data-review-state="${escape(retry.state)}" data-review-attempts="${retry.attempts.length}" data-review-cap="${cap}" data-review-remaining="${retry.retriesRemaining}">` +
-    `<div class="dispatch-copy"><strong>${escape(title)}</strong><span class="meta">${detail}</span></div>` +
-    attempts +
-    (control === "" ? "" : `<div class="review-retry-actions">${control}</div>`) +
-    `</div>`
-  );
+  const attempts = retry.attempts.map(one =>
+    `<li data-review-attempt="${one.attempt}" data-review-outcome="${escape(one.outcome ?? "open")}"><a href="/r/${one.runId}">Run #${one.runId}</a> · ${escape(one.outcome ?? "unfinished")}${one.reason === null ? "" : ` · ${escape(one.reason)}`}</li>`).join("");
+  return `<details class="review-history" data-review-state="${escape(retry.state)}"><summary>Previous assessments</summary><p class="meta">Saved history; no separate review will be started.</p>${attempts === "" ? "" : `<ol aria-label="previous assessments">${attempts}</ol>`}</details>`;
 }
 
 /** A one-line summary of the matrix for list rows too dense for the full
@@ -8588,7 +8528,7 @@ function criterionMatrixHtml(
     const state = row.state;
     const awaitingAssessment = row.assessment?.evidenceState === "pass" && row.review === null;
     const confirmed = row.assessment !== undefined && state === "pass";
-    const label = awaitingAssessment ? "Review pending" : confirmed ? "Confirmed" : state === "pass" ? "Evidence checks passed" : state === "manual-review" ? "Human review" : state === "missing" ? "Evidence missing" : "Evidence failed";
+    const label = awaitingAssessment ? "Not assessed" : confirmed ? "Confirmed" : state === "pass" ? "Evidence checks passed" : state === "manual-review" ? "Human review" : state === "missing" ? "Evidence missing" : "Evidence failed";
     const cls = awaitingAssessment ? "" : state === "pass" ? "badge-done" : state === "manual-review" ? "badge-manual-review" : "badge-failed";
     const warnings: string[] = [];
     // Only replace the known boilerplate. Other recorded failure details
@@ -8608,7 +8548,7 @@ function criterionMatrixHtml(
       const refs = answered.filter(one => one.kind === kind);
       return refs.length === 0 ? [] : [`<div class="requirement-evidence-group"><strong>${name} · ${refs.length}</strong><ul>${refs.map(ref => `<li>${evidenceLink(ref)}</li>`).join("")}</ul></div>`];
     }).join("");
-    const reviewDetails = review === null ? "" : `<div class="requirement-evidence-group"><strong>Independent review</strong><p>${review.judgement === "upholds" ? `${escape(review.note)} ` : ""}<span class="meta">${escape(review.author)}</span></p></div>`;
+    const reviewDetails = review === null ? "" : `<div class="requirement-evidence-group"><strong>Previous assessment</strong><p>${review.judgement === "upholds" ? `${escape(review.note)} ` : ""}<span class="meta">${escape(review.author)}</span></p></div>`;
     return `<li class="requirement" data-criterion-id="${escape(row.id)}">` +
       `<div class="requirement-heading"><span>Requirement ${index + 1}</span><span class="badge ${cls}" data-matrix-state="${escape(state)}">${label}</span></div>` +
       `<p class="requirement-statement">${escape(row.statement)}</p>` +
@@ -8702,16 +8642,9 @@ function planContractHtml(view: PlanContractView | null, mode: "full" | "ceremon
 /** One policy summary beneath the requirements. Per-requirement concerns
  * are already visible in the matrix; do not repeat their full text here. */
 function semanticCoverageHtml(matrix: readonly CriterionMatrixRow[], qualityMode: "default" | "strict"): string {
+  if (!matrix.some(row => row.review != null || row.assessment !== undefined)) return "";
   const coverage = semanticCoverage(matrix, qualityMode);
-  if (coverage.total === 0) return "";
-  const outcome = coverage.satisfied === null
-    ? "No independent review is recorded."
-    : `Independent review confirmed ${coverage.upheld.length} of ${coverage.total} requirements.`;
-  if (matrix.some(row => row.assessment !== undefined)) return `<div class="result-section semantic-coverage" data-semantic-coverage="${coverage.satisfied === true ? "satisfied" : coverage.satisfied === null ? "unsettled" : "unsatisfied"}" data-coverage-policy="${coverage.policy}"><p class="meta">Independent review confirmed ${coverage.upheld.length} of ${coverage.total} requirements.</p></div>`;
-  const policy = coverage.required
-    ? coverage.satisfied ? "Required review is complete." : "Required review is incomplete."
-    : "Independent review is optional for this scope.";
-  return `<div class="result-section semantic-coverage" data-semantic-coverage="${coverage.satisfied === null ? "unsettled" : coverage.satisfied ? "satisfied" : "unsatisfied"}" data-coverage-policy="${coverage.policy}"><p class="${coverage.required && !coverage.satisfied ? "requirement-warning" : "meta"}">${outcome} ${policy}</p></div>`;
+  return `<details class="result-section semantic-coverage" data-semantic-coverage="${coverage.satisfied === true ? "satisfied" : coverage.satisfied === null ? "unsettled" : "unsatisfied"}" data-coverage-policy="${coverage.policy}"><summary>Previous assessment</summary><p class="meta">The saved assessment confirmed ${coverage.upheld.length} of ${coverage.total} requirements.</p></details>`;
 }
 
 /** The exact path limits, one per line (UI polish 2026-09-13): a long
@@ -8772,7 +8705,7 @@ function consentDoorOf(scope: Scope | null, route: RouteView | null | undefined)
       return { open: false, title: "The provider’s auth mode can’t be read", why: `${authority.problem} — restate it, then approve`, road: "agents" };
     }
     if (authority.reason === "unrouted") {
-      return { open: false, title: "This scope predates agent routing", why: "its approval no longer stands, and an approval now must name exactly which agent plans, builds, repairs, and reviews — re-file the scope (edit and save it) to route it under today’s agents, then approve it", road: "scope" };
+      return { open: false, title: "This scope predates agent routing", why: "its approval no longer stands, and an approval now must name exactly which agent plans, builds, and revises — re-file the scope (edit and save it) to route it under today’s agents, then approve it", road: "scope" };
     }
     return { open: false, title: "The agents on file can’t be read", why: `${authority.problem} — re-file the scope (edit and save it) so it is routed again under today’s agents`, road: "scope" };
   }
@@ -8781,7 +8714,7 @@ function consentDoorOf(scope: Scope | null, route: RouteView | null | undefined)
     return { open: false, title: "The agents on file can’t be read", why: `${route.problem} — re-file the scope (edit and save it) so it is routed again under today’s agents`, road: "scope" };
   }
   if (route.kind === "legacy") {
-    return { open: false, title: "This scope predates agent routing", why: "its approval no longer stands, and an approval now must name exactly which agent plans, builds, repairs, and reviews — re-file the scope (edit and save it) to route it under today’s agents, then approve it", road: "scope" };
+    return { open: false, title: "This scope predates agent routing", why: "its approval no longer stands, and an approval now must name exactly which agent plans, builds, and revises — re-file the scope (edit and save it) to route it under today’s agents, then approve it", road: "scope" };
   }
   if (route.projection !== null && route.projection.problems.length > 0) {
     return { open: false, title: "The agents on file can’t run", why: `${route.projection.problems.join("; ")} — change the agents, then approve`, road: "agents" };
@@ -8846,7 +8779,7 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
 }
 
 /** The Agents view every console surface renders (v47): the SAME
- * projection the CLI prints — who plans, builds, repairs, and reviews,
+ * projection the CLI prints — who plans, builds, and revises,
  * whether each was recommended, overridden, or pinned, its reasons, and
  * the readiness the task's runners have reported (ready / unavailable /
  * unknown — an unknown is said, never upgraded). Readiness is volatile and
@@ -9027,7 +8960,7 @@ function agentsCardHtml(taskId: string, view: RouteView | null | undefined, csrf
   // pick from. Nothing is typed free-hand, no command line is quoted; the
   // reasons above already say why the current agents were chosen.
   const riskGuide = `<dl class="agents-risk-guide">${RISK_CHOICES.map(one => `<div><dt>${escape(one.title)}</dt><dd>${escape(one.consequence)}</dd></div>`).join("")}</dl>`;
-  const roleForms = ROUTE_PHASES.map(phase => {
+  const roleForms = ROUTE_PHASES.filter(phase => phase !== "review").map(phase => {
     // Selectable choices are the role's own configured agents; a current
     // agent the configuration no longer names is DISPLAY-ONLY — said
     // beside the control, never an option the form could re-pick.
@@ -9614,7 +9547,9 @@ const STYLE = `
   .cockpit-row-head strong { min-width: 0; overflow-wrap: anywhere; font-size: .8125rem; font-weight: 550; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
   .cockpit-row-meta { display: block; color: var(--muted-foreground); font-size: .68rem; overflow-wrap: anywhere; }
   .cockpit-why { display: block; color: var(--muted-foreground); font-size: .7rem; line-height: 1.35; overflow-wrap: anywhere; }
-  .review-priority { flex: none; white-space: nowrap; }
+  .refusal-back a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
+  .cockpit-primary { margin: .85rem 0 1rem; }
+  .cockpit-primary .button-link { white-space: nowrap; }
   .cockpit-detail { min-width: 0; }
   .cockpit-head h2 { margin: .2rem 0 .55rem; color: var(--foreground); font-size: clamp(1.2rem, 2vw, 1.45rem); font-weight: 600; line-height: 1.3; letter-spacing: -.025em; overflow-wrap: anywhere; }
   .cockpit-head .eyebrow { margin: 0; }
@@ -10417,7 +10352,8 @@ const STYLE = `
      surface renders for a run — a small dot in the tone, neutral words. */
   .work-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .work-head h1 { margin-bottom: .25rem; }
-  .work-tools { position: relative; flex: none; margin: .25rem 0 0; border: 0; padding: 0; background: none; border-radius: 0; }
+  .work-tools { display: none; position: relative; flex: none; margin: .25rem 0 0; border: 0; padding: 0; background: none; border-radius: 0; }
+  .app.sidebar-collapsed .work-tools { display: block; }
   .work-tools > summary {
     list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: .3rem;
     min-height: 2.25rem; padding: 0 .75rem; border: 1px solid var(--border); border-radius: 999px;
@@ -10484,7 +10420,7 @@ const STYLE = `
   .result-files li, .result-files .mono { overflow-wrap: anywhere; white-space: normal; }
   .result-files li { min-width: 0; }
   .result-section[data-cockpit-source="reviewer"] li { overflow-wrap: anywhere; }
-  @media (max-width: 760px) { .result-panel .pick-file, .result-panel .pick-line { min-height: 44px; min-width: 44px; white-space: nowrap; } }
+  @media (max-width: 760px) { .result-panel .pick-file, .result-panel .pick-line, .diff-modes button { min-height: 44px; min-width: 44px; white-space: nowrap; } }
   .result-files-lead { margin: .25rem 0 .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
   .result-report h3 { margin: .2rem 0 .3rem; font-size: 1rem; }
   .result-report .plan-doc { max-height: 28rem; overflow: auto; }
@@ -10581,6 +10517,7 @@ const STYLE = `
   .work-empty { padding: 2rem 0 1rem; max-width: 34rem; }
   .work-empty p { margin: 0 0 .75rem; color: var(--muted-foreground); line-height: 1.5; }
   .work-empty .row { display: flex; align-items: center; gap: 1rem; }
+  .work-empty .row > a { display: inline-flex; align-items: center; min-height: 44px; }
   .work-bound { margin-top: .75rem; }
   .status-line { display: inline-flex; align-items: center; gap: .45rem; min-width: 0; font-size: .875rem; font-weight: 600; color: var(--foreground); }
   .status-line .status-label { min-width: 0; overflow-wrap: anywhere; }
@@ -11373,6 +11310,7 @@ const STYLE = `
     html[data-mobile-keyboard] main:has(.chat-workspace) :is(input, textarea, button, summary, a) { scroll-margin-block: 6rem calc(var(--keyboard-inset, 0px) + var(--composer-height, 4rem) + 1.5rem); }
     html[data-mobile-keyboard] .chat-new-update-holder { bottom: calc(var(--keyboard-inset, 0px) + var(--composer-height, 4rem) + 1rem); }
     html[data-mobile-keyboard] .sticky-actions { bottom: .5rem; }
+    .work-tools { display: block; }
     .work-tools > summary, .work-tools-menu a, .work-views a { min-height: 2.75rem; }
     .work-tools-menu a { display: flex; align-items: center; }
     main :is(input, textarea, button, summary, a) { scroll-margin-block: 6rem calc(var(--composer-height, 4rem) + 5rem); }
@@ -11724,7 +11662,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -12984,7 +12922,7 @@ function donePage(
   return screen("done", [
     `<h1>done</h1>`,
     buildsViews("done"),
-    `<p class="hint">completed work in order of completion \u2014 each with its final build, the agent's conclusion, usage, and its pull request; <a href="/review">review</a> ranks the same work by what needs a reviewer first</p>`,
+    `<p class="hint">completed work in order of completion \u2014 each with its final build, the agent's conclusion, usage, and its pull request; <a href="/review">review</a> opens the same saved work and its checks</p>`,
     list,
   ].join("\n"), { chrome });
 }
@@ -13203,9 +13141,9 @@ const stopWhen = (iso: string): string => iso.replace("T", " ").replace(/\.\d{3}
  */
 /** Presentation only: the same projected words and action on all task
  * surfaces. Approval keeps its action on the exact-terms disclosure. */
-function taskStatusCard(status: DisplayStatus, taskId: string, dispatch: DispatchDiagnosis | null, runId: number | null, approvalAction = false): string {
+function taskStatusCard(status: DisplayStatus & { diagnostics?: WorkStatus["diagnostics"] }, taskId: string, dispatch: DispatchDiagnosis | null, runId: number | null, approvalAction = false): string {
   const task = taskHref(taskId);
-  const recovery = status.token === "stopping" || status.token === "stopped"
+  const recovery = status.token === "waiting-decision" ? `${task}#task-questions` : status.token === "stopping" || status.token === "stopped"
     ? `${task}#task-control`
     : taskRecoveryHref(taskId, dispatch);
   const href = status.action?.kind === "open-task"
@@ -13214,7 +13152,7 @@ function taskStatusCard(status: DisplayStatus, taskId: string, dispatch: Dispatc
   return `<section class="card task-journey" aria-label="task progress" data-work-status="${escape(status.token)}" data-task-status>` +
     `<h2>${escape(status.label)}</h2>` +
     (!approvalAction && status.action !== null && href !== null ? `<a class="button-link task-journey-action" href="${escape(href)}" data-primary-action>${escape(status.action.label)}</a>` : "") +
-    `<details class="task-status-reason"><summary>Status details</summary><p class="meta">${escape(status.detail)}</p></details></section>`;
+    `<details class="task-status-reason"><summary>Status details</summary><p class="meta">${escape(status.detail)}</p>${workDiagnosticsHtml(status.diagnostics)}</details></section>`;
 }
 
 function taskControlDetailsHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false): string {
@@ -13268,15 +13206,7 @@ function taskControlHtml(control: TaskControlView, taskId: string, csrf: string,
       `</section>`
     );
   }
-  return (
-    `<section class="card task-control" id="task-control" data-task-control="review-stopped" data-control-run="${control.run}" aria-label="stopped review">` +
-    `<div class="task-control-copy"><span class="eyebrow">review stopped</span><strong>review #${control.run} was stopped by <span class="mono">${escape(control.stop.requestedBy)}</span></strong>` +
-    `<span class="meta">The build it reviewed stands. A stopped review is retried explicitly through <strong>Review again</strong>, which keeps the same bounded attempt allowance.</span></div>` +
-    (guarded && control.sourceRun !== null
-      ? `<form method="post" action="${taskHref(taskId)}/retry-review" class="inline task-control-form review-retry-form"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${control.sourceRun}"><button type="submit" class="task-control-button review-retry-button">Review again</button></form>`
-      : "") +
-    `</section>`
-  );
+  return `<details class="card task-control" id="task-control" data-task-control="review-stopped"><summary>Previous assessment stopped</summary><p>Run #${control.run} was stopped by ${escape(control.stop.requestedBy)}. The saved result is unchanged.</p></details>`;
 }
 
 /** The resume confirmation (v52): the exact run restated, what resuming
@@ -14930,7 +14860,7 @@ function taskComposerHtml(data: {
 /** A task list page's ceiling: the newest rows, the bound printed. */
 const WORK_PAGE = 200;
 
-type WorkRow = WorkFacts & { executionId?: string; familyNotice?: string | null; status: WorkStatus; resultRunId: number | null };
+type WorkRow = WorkFacts & { assignment?: AssignmentSnapshot | null; assignmentProblem?: boolean; executionId?: string; familyNotice?: string | null; status: WorkStatus; resultRunId: number | null };
 
 function publicationFactsOf(publication: Publication | null): PublicationFacts {
   return publication === null
@@ -14939,13 +14869,13 @@ function publicationFactsOf(publication: Publication | null): PublicationFacts {
 }
 
 /** Where a status's next act lives, for a row that links out. */
-function statusActionHref(status: DisplayStatus, taskId: string, runId: number | null, prUrl: string | null): string | null {
+function statusActionHref(status: DisplayStatus, taskId: string, runId: number | null, prUrl: string | null, repo?: string | null): string | null {
   if (status.action === null) return null;
   switch (status.action.kind) {
     case "open-result": return runId === null ? taskHref(taskId) : `/r/${runId}`;
-    case "open-review": return reviewHref(taskId);
+    case "open-review": return repo === undefined ? reviewHref(taskId) : reviewHref(taskId, runId, repo);
     case "open-run": return runId === null ? taskHref(taskId) : `/r/${runId}`;
-    case "open-pr": return safePrUrl(prUrl) ?? reviewHref(taskId);
+    case "open-pr": return safePrUrl(prUrl) ?? (repo === undefined ? reviewHref(taskId) : reviewHref(taskId, runId, repo));
     case "open-task":
     default: return taskHref(taskId);
   }
@@ -14955,6 +14885,10 @@ function statusActionHref(status: DisplayStatus, taskId: string, runId: number |
  * label, and the `data-work-status` token tests and CSS key off. */
 function statusLineHtml(status: DisplayStatus, extra = ""): string {
   return `<span class="status-line" data-work-status="${escape(status.token)}" data-tone="${escape(status.tone)}"><i class="status-dot" aria-hidden="true"></i><span class="status-label">${escape(status.label)}</span>${extra}</span>`;
+}
+
+function workDiagnosticsHtml(diagnostics: WorkStatus["diagnostics"]): string {
+  return (diagnostics ?? []).map(one => `<p class="work-detail" data-work-diagnostic="${escape(one.token)}"><strong>${escape(one.label)}</strong> · ${escape(one.detail)}</p>`).join("");
 }
 
 function workPage(
@@ -14997,7 +14931,7 @@ function workPage(
     }
   })();
   const rowHtml = (row: WorkRow): string => {
-    const actionHref = row.executionId !== row.id && row.status.action?.kind === "open-result" && row.resultRunId !== null ? chatResultHref(row.id, row.resultRunId) : statusActionHref(row.status, row.id, row.status.action?.kind === "open-run" && row.liveRunId !== null ? row.liveRunId : row.resultRunId, row.publication?.prUrl ?? null);
+    const actionHref = row.status.token === "waiting-decision" && row.openDecision ? `/d/${row.openDecision.id}` : row.executionId !== row.id && row.status.action?.kind === "open-result" && row.resultRunId !== null ? chatResultHref(row.id, row.resultRunId) : statusActionHref(row.status, row.status.action?.kind === "open-review" || row.status.action?.kind === "open-pr" ? row.executionId ?? row.id : row.id, row.status.action?.kind === "open-run" && row.liveRunId !== null ? row.liveRunId : row.resultRunId, row.publication?.prUrl ?? null, row.repo);
     const action = row.status.action === null || actionHref === null ? "" : `<a class="work-action" href="${escape(actionHref)}">${escape(row.status.action.label)} →</a>`;
     // The human-readable title leads; the project label appears when rows
     // span projects (or the row is unplaced); the age stays beside it. The
@@ -15013,9 +14947,11 @@ function workPage(
       // disclosure that works without script and by keyboard — never
       // removed, never shrunk. The label itself names a failed check, a
       // needed approval, or an exception, so nothing critical folds away.
+      (row.assignment != null ? `<div class="work-row-status">${assignmentSummaryHtml(row.assignment, { compact: true, workStatus: row.status, problem: row.assignmentProblem === true, diagnostics: row.status.diagnostics })}</div>` :
       `<div class="work-row-status">${statusLineHtml(row.status)}${action}${row.familyNotice == null ? "" : `<p class="problem">${escape(row.familyNotice)}</p>`}` +
       `<details class="work-details"><summary>Details</summary><p class="work-detail">${escape(row.status.detail)}</p>` +
-      `<p class="work-meta work-id">Task <span class="mono">${escape(row.id)}</span></p></details></div>` +
+      workDiagnosticsHtml(row.status.diagnostics) +
+      `<p class="work-meta work-id">Task <span class="mono">${escape(row.id)}</span></p></details></div>`) +
       `</article>`
     );
   };
@@ -15038,8 +14974,8 @@ function workPage(
     ].map(([href, label]) => `<a href="${href}">${label}</a>`).join("") +
     `</nav></details>`;
   return screen("work", [
-    // One compact line: the title and the tools control. The view's own
-    // words ride the active tab's title rather than a paragraph above it.
+    // The tools shortcut appears only when the sidebar tools are hidden.
+    // The view's words ride the active tab's title rather than a paragraph.
     `<div class="work-head"><h1>work</h1>${tools}</div>`,
     tabs,
     list,
@@ -15929,6 +15865,7 @@ function projectsPage(
   browsable = false,
   onboard: OnboardCardState | null = null,
   peeks: Record<string, ProjectPeek | null> = {},
+  returnTo = "/",
 ): Screen {
   // The onboarding card (repo onboarding, findings 1-39): preview first,
   // then a password-confirmed clone into a configured root. Disabled
@@ -15972,12 +15909,12 @@ function projectsPage(
   // Opening a project is a POST (the session's scope changes); a card's
   // name and counts are the same form, returning to the screen that count
   // names — so every number on this page is a road, not a fact to admire.
-  const openForm = (path: string, label: string, returnTo = "/", className?: string): string =>
+  const openForm = (path: string, label: string, destination = returnTo, className?: string): string =>
     [
       `<form method="post" action="/projects/open" class="inline">`,
       `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
       `<input type="hidden" name="path" value="${escape(path)}">`,
-      `<input type="hidden" name="return" value="${escape(returnTo)}">`,
+      `<input type="hidden" name="return" value="${escape(destination)}">`,
       `<button type="submit"${className === undefined ? "" : ` class="${className}"`}>${escape(label)}</button>`,
       `</form>`,
     ].join("");
@@ -16003,8 +15940,8 @@ function projectsPage(
       `<div class="card project-card">`,
       `<div class="row">${
         open !== null && open === one.path
-          ? `<a class="project-name" href="/"><strong>${escape(one.name)}</strong></a>`
-          : openForm(one.path, one.name, "/", "project-name")
+          ? `<a class="project-name" href="${escape(returnTo)}"><strong>${escape(one.name)}</strong></a>`
+          : openForm(one.path, one.name, returnTo, "project-name")
       }`,
       `<span class="right">${
         open !== null && open === one.path ? `<span class="badge badge-done">open now</span>` : openForm(one.path, "open \u2192")
@@ -16053,6 +15990,7 @@ function projectsPage(
     `<details class="project-add-more"><summary>Enter an exact path instead</summary>`,
     `<form method="post" action="/projects/open" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<input type="hidden" name="return" value="${escape(returnTo)}">`,
     `<label>path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,
     `<button type="submit">open project</button>`,
     `</form></details>`,
@@ -16095,6 +16033,10 @@ function safeReturn(raw: string | null | undefined): string {
   if (raw === null || raw === undefined) return "/";
   // A backslash is a slash to a browser's URL parser (`/\evil` → `//evil`), so it is refused too (v3 review, finding 10).
   if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\") || /[\r\n\t\u0000-\u001f]/.test(raw) || raw.length > 512) return "/";
+  try {
+    const path = decodeURIComponent(new URL(raw, "http://standing-orders.local").pathname);
+    if (path.startsWith("//") || path.includes("\\") || /[\u0000-\u001f\u007f]/.test(path)) return "/";
+  } catch { return "/"; }
   return raw;
 }
 
@@ -16110,7 +16052,7 @@ function safeReturn(raw: string | null | undefined): string {
  * button can name. Nothing here is a second redirect framework: one
  * same-site path, or "/".
  */
-const LOGIN_RETURN_PAGES = /^\/(t\/[^/]+|r\/[1-9]\d*|code(?:\/[a-f0-9]{32}(?:\/ship)?)?|chat|work|board|projects|routines|recipes|fleet|settings(\/[a-z-]+)?|mode)$/;
+const LOGIN_RETURN_PAGES = /^\/(t\/[^/]+|r\/[1-9]\d*|code(?:\/[a-f0-9]{32}(?:\/ship)?)?|review|chat|work|board|projects|routines|recipes|fleet|settings(\/[a-z-]+)?|mode)$/;
 function loginReturn(raw: string | null | undefined): string {
   const safe = safeReturn(raw);
   if (safe === "/") return "/";
@@ -16782,6 +16724,7 @@ function revisionLineageHtml(lineage: RevisionLineage | null): string {
 }
 
 function taskBody(data: {
+  assignment?: AssignmentSnapshot | null;
   rootId?: string;
   rootTitle?: string;
   history?: string;
@@ -17391,10 +17334,8 @@ function taskBody(data: {
       : "problem" in data.revision
         ? `<div class="card"><p><strong>revision brief</strong></p><p class="meta">${escape(data.revision.problem)}</p></div>`
         : [
-            `<div class="card revision-card">`,
-            `<p><strong>${data.revision.kind === "ci-repair" ? "the CI repair" : data.revision.kind === "criterion-repair" ? "the criterion repair" : "the review batch"}</strong> <span class="meta">this task revises ` +
-              `<a href="${taskHref(data.revision.sourceTask)}" class="mono">${escape(data.revision.sourceTask)}</a>` +
-              ` after review of <a href="/r/${data.revision.sourceRun}">build #${data.revision.sourceRun}</a> — ${data.revision.kind === "annotations" ? "approving the scope approves applying exactly these" : "approving the scope approves exactly the repair the brief names"}</span></p>`,
+            `<div class="revision-card" data-revision-feedback>`,
+            `<p><strong>${data.revision.kind === "ci-repair" ? "CI repair" : data.revision.kind === "criterion-repair" ? "Criterion repair" : "Revision feedback"}</strong> <span class="meta">from <a href="/r/${data.revision.sourceRun}">build #${data.revision.sourceRun}</a></span></p>`,
             ...data.revision.comments.map(
               one =>
                 `<p class="row"><span class="meta">${escape(one.author)}</span> ` +
@@ -17424,6 +17365,9 @@ function taskBody(data: {
           ? approvalProfile.approvalArgv === "yolo" ? "Full access" : "Auto permissions"
           : approvalProfile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
   const consentDoor = consentDoorOf(scope, data.route);
+  const revisionInApproval = scope !== null && !approval.approved && data.plan !== "requested" &&
+    scope.profileState !== "unresolved" && consentDoor.open && data.dispatch?.action !== "repair-dependency" &&
+    (data.revision == null || !("problem" in data.revision));
   const approveForm =
     scope === null || approval.approved || data.plan === "requested"
       ? ""
@@ -17460,6 +17404,7 @@ function taskBody(data: {
             : `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAgo === null ? "" : ` \u00b7 ${escape(data.coordinator.filedAgo)}`} — an agent asked for this; nothing plans, claims, or runs until you sign, and your signature runs THEIR request</p>`,
           `<p class="approval-label">goal</p><p class="approval-goal">${escape(scope.goal)}</p>`,
           scope.candidate ? `<p class="approval-label">Saved commit</p><p style="overflow-wrap:anywhere"><code>${escape(scope.candidate)}</code></p>` : "",
+          revisionCard,
           `<div class="approval-boundaries">`,
           `<div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>`,
           `<div class="approval-boundary"><p class="approval-label">touches</p>${approvalPathsHtml(scope.touches)}</div>`,
@@ -17472,11 +17417,8 @@ function taskBody(data: {
           `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
             (approvalPermission === null ? "" : `<span class="approval-chip">${escape(approvalPermission)}</span>`) +
             `</div>`,
-          // A revision's lineage INSIDE the ceremony (contract handoff task
-          // 2): the yes is given knowing which source these terms came
-          // from, which were carried, which were re-resolved for THIS
-          // approval, and that none of the source's grants came along.
-          data.revision === null || data.revision === undefined || "problem" in data.revision ? "" : revisionLineageHtml(data.revision.lineage),
+          // The revision feedback above includes its lineage: the source,
+          // carried terms, re-resolved terms, and grants that never inherit.
           // The AGENTS inside the ceremony (v47/v48): who plans, builds,
           // repairs, and reviews, and why — said where the yes is given, in
           // the same block chat and /next show. Availability is volatile and
@@ -17603,7 +17545,7 @@ function taskBody(data: {
       const selected: QualityMode = data.scopeDraft?.get("quality-mode") === "strict" ? "strict" : data.scopeDraft?.get("quality-mode") === "default" ? "default" : scope?.qualityMode ?? data.qualityMode ?? data.qualityDefault ?? "default";
       return `<fieldset class="permission-field"><legend>quality</legend>` +
         qualityModeChoices("quality-mode", selected) +
-        `<p class="meta permission-note">This choice is signed into the scope. Strict / release automatically sends a completed diff through the isolated reviewer; repair remains bounded by your operating-mode authorization.</p></fieldset>`;
+        `<p class="meta permission-note">This choice is signed into the scope. Inspect the saved work and actual check results when it is ready. Publication and deployment need their own authorization.</p></fieldset>`;
     })(),
     (() => {
       // The tournament controls (operator request): how many agents compete,
@@ -17785,7 +17727,7 @@ function taskBody(data: {
   const decisionRail =
     openDecisions.length === 0
       ? ""
-      : `<p><strong>waits on you</strong></p>` +
+      : `<p id="task-questions"><strong>Questions</strong></p>` +
         openDecisions
           .map(decision =>
             degraded
@@ -17967,7 +17909,7 @@ function taskBody(data: {
       : `<details class="section" id="${title.replace(/\s+/g, "-")}"${open ? " open" : ""}><summary><h2>${title}${count === undefined ? "" : ` <span class="lane-count">${count}</span>`}</h2></summary>` +
         html.replace(`<h2>${title}</h2>`, "") + `</details>`;
 
-  const receiptLeads = task.state === "done" && data.completion?.receipt != null;
+  const receiptLeads = data.assignment == null && task.state === "done" && data.completion?.receipt != null;
   // Exact identity stays available in Task options; failures stay in the
   // status and property rail, and approval provenance stays in the ceremony.
   const identity = `<p class="meta task-identity">Task ID <span class="mono">${escape(task.id)}</span>` +
@@ -17986,11 +17928,11 @@ function taskBody(data: {
     data.versionLabel == null ? "" : `<p class="meta">${escape(data.versionLabel)} · <a href="${taskHref(data.rootId ?? task.id)}">Current work</a></p>`,
     data.history ?? "",
     // The result takes over from the task status as soon as it is ready.
-    receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope"),
+    data.assignment != null ? assignmentSummaryHtml(data.assignment, { workStatus: status, hideAction: approveForm !== "" && data.dispatch?.action === "approve-scope", problem: status.tone === "problem", diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] }) : receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope"),
     // The exact-run control (v52), directly under the scheduler's answer:
     // the one place a person stops or resumes THIS attempt.
     taskControlDetailsHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task"),
-    data.completion?.receipt == null || receiptLeads ? "" : `<details class="task-previous-result"><summary>Previous result</summary>${completionReceiptCard(data.completion.receipt, task.id, "task")}</details>`,
+    data.completion?.receipt == null || receiptLeads ? "" : `<details class="task-previous-result"${data.completion.receipt.facts.evidenceProblems.length > 0 || data.completion.receipt.caveats.length > 0 ? " open" : ""}><summary>${data.assignment != null && task.state === "done" ? "Result" : "Previous result"}</summary>${completionReceiptCard(data.completion.receipt, task.id, "task")}</details>`,
     progressCard,
     revisionLedgerCard,
     planCard,
@@ -18084,14 +18026,14 @@ function taskBody(data: {
             : " · no checks observed"
         }</span></p>`,
     section("report", reportCard, true),
-    section("attempts", runs, true, data.runs.length),
+    data.assignment == null ? section("attempts", runs, true, data.runs.length) : section("Build activity", runs.replace("<h2>attempts</h2>", ""), false, data.runs.length).replace('id="Build-activity"', 'id="attempts"'),
     section("usage", spendCard, false),
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
     section(
       "scope",
       // The recipe road rides with the scope it reuses (UI polish
       // 2026-09-13), off the title-to-action path.
-      ["<h2>scope</h2>", scopeCard, data.repo !== null && data.scope !== null ? `<p class="meta"><a href="/recipes/from-task?task=${encodeURIComponent(task.id)}">Reuse this scope as a recipe →</a></p>` : "", agentsCardHtml(task.id, data.route, data.csrf, data.canEditRoute === true), revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
+      ["<h2>scope</h2>", scopeCard, data.repo !== null && data.scope !== null ? `<p class="meta"><a href="/recipes/from-task?task=${encodeURIComponent(task.id)}">Reuse this scope as a recipe →</a></p>` : "", agentsCardHtml(task.id, data.route, data.csrf, data.canEditRoute === true), revisionInApproval ? "" : revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
       data.scopeDraft !== undefined || (data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan)),
     ),
     dependencyChoiceNeeded ? "" : section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
@@ -18337,6 +18279,7 @@ type ReviewCockpitView = {
   completedAt: string;
   historyProblem: string | null;
   priority: ReviewPriority;
+  assignment: AssignmentSnapshot | null;
   /** null = no scope was ever filed (a task marked done by hand). */
   intent: {
     goal: string;
@@ -18373,12 +18316,8 @@ type ReviewCockpitView = {
   notes: { id: number; author: string; note: string; createdAt: string }[];
 };
 
-const reviewHref = (taskId: string): string => `/review?result=${encodeURIComponent(taskId)}`;
-
-function priorityChip(priority: ReviewPriority): string {
-  const cls = priority.band === 0 ? "badge-failed" : priority.band === 1 ? "badge-manual-review" : "badge-done";
-  return `<span class="badge ${cls} review-priority" data-review-priority="${priority.band}">${escape(priority.label)}</span>`;
-}
+const reviewHref = (taskId: string, runId: number | null = null, repo: string | null = null): string =>
+  `/review?result=${encodeURIComponent(taskId)}${runId === null ? "" : `&run=${runId}`}${repo === null ? "" : `&project=${encodeURIComponent(repo)}`}`;
 
 /** The receipt's own proof-state word, so the cockpit and the task page
  * never disagree on the state's name or its precedence: the stored
@@ -18392,7 +18331,9 @@ function cockpitStatusOf(view: ReviewCockpitView): DisplayStatus {
   // The receipt's own status (package 3): the same projection the chat
   // receipt and the run page print, read from the shared detail.
   if (view.run === null || view.detail === null) return resultStatusOf(null, null);
-  return receiptStatusOf(view.detail.receipt);
+  const receiptStatus = receiptStatusOf(view.detail.receipt);
+  if (view.assignment !== null) return assignmentStatusOf(assignmentWithEvidence(view.assignment, receiptStatus, view.run.id));
+  return receiptStatus;
 }
 
 /** Turn verifier records into one sentence a project owner can act on.
@@ -18518,15 +18459,18 @@ function reviewCockpitPage(
   const elevated = queue.filter(one => one.priority.band < 2).length;
   const queueRows =
     queue.length === 0
-      ? `<p class="meta">No finished tasks yet. Completed work appears here the moment a build finishes or a task is marked done.</p>`
+      ? `<p class="meta">No results in this review list.</p>`
       : `<ol class="cockpit-queue-list">` +
         queue
           .map(row => {
             const current = selected !== null && selected.taskId === row.taskId;
-            const why = row.priority.reasons.length === 0 ? "" : `<span class="cockpit-why">${escape(row.priority.reasons[0] as string)}${row.priority.reasons.length > 1 ? ` · +${row.priority.reasons.length - 1} more` : ""}</span>`;
+            // The selected result already states that human review is due.
+            // Keep concrete failure and history diagnostics in the queue.
+            const reasons = row.priority.reasons.filter(reason => !current || reason !== "human review needed");
+            const why = reasons.length === 0 ? "" : `<span class="cockpit-why">${escape(reasons[0] as string)}${reasons.length > 1 ? ` · +${reasons.length - 1} more` : ""}</span>`;
             return (
-              `<li><a class="cockpit-row${current ? " current" : ""}" href="${reviewHref(row.taskId)}"${current ? ` aria-current="page"` : ""}>` +
-              `<span class="cockpit-row-head"><strong>${escape(row.title)}</strong>${priorityChip(row.priority)}</span>` +
+              `<li data-review-priority="${row.priority.band}"><a class="cockpit-row${current ? " current" : ""}" href="${escape(reviewHref(row.taskId, row.runId, row.repo))}"${current ? ` aria-current="page"` : ""}>` +
+              `<span class="cockpit-row-head"><strong>${escape(row.title)}</strong></span>` +
               `<span class="cockpit-row-meta">${escape(when(row.completedAt))}${row.runId === null ? " · no build" : row.outcome === "no-change" ? " · no change" : ""}${row.prNumber === null ? "" : ` · PR #${row.prNumber}`}</span>` +
               (row.historyProblem ? `<span class="cockpit-why" data-history-problem>History unavailable</span>` : why) +
               `</a></li>`
@@ -18535,8 +18479,8 @@ function reviewCockpitPage(
           .join("\n") +
         `</ol>`;
   const queuePane =
-    `<aside class="cockpit-queue" aria-label="review queue"><h2>review queue <span class="lane-count">${queue.length}</span></h2>` +
-    `<p class="meta cockpit-queue-hint">${queue.length === 0 ? "" : `${elevated} ${elevated === 1 ? "needs" : "need"} attention · highest priority first${queue.length >= data.queueCap ? `. Showing the newest ${data.queueCap}; older results still open from their task` : ""}`}</p>` +
+    `<aside class="cockpit-queue" aria-label="review queue"><h2>Results <span class="lane-count">${queue.length}</span></h2>` +
+    (queue.length > 1 ? `<p class="meta cockpit-queue-hint">${elevated} ${elevated === 1 ? "needs" : "need"} attention · highest priority first${queue.length >= data.queueCap ? `. Showing the newest ${data.queueCap}; older results still open from their task` : ""}</p>` : "") +
     queueRows +
     `</aside>`;
   const missingNote =
@@ -18546,12 +18490,10 @@ function reviewCockpitPage(
   const beyondNote =
     !data.beyondQueue || selected === null
       ? ""
-      : `<p class="meta cockpit-beyond" data-cockpit-beyond="1">Opened directly: <span class="mono">${escape(selected.taskId)}</span> finished earlier than the newest ${data.queueCap} completions the queue lists, so it has no row there.</p>`;
+      : `<p class="meta cockpit-beyond" data-cockpit-beyond="1">This result is not in the current review list.</p>`;
   const detail = selected === null ? `<section class="cockpit-detail"><p class="meta">Nothing to review yet.</p></section>` : reviewCockpitDetail(selected, csrf, data.noted, data.canRetryReview, data.tab, data.user);
   return screen("review", [
-    `<h1>review</h1>`,
-    buildsViews("review"),
-    `<p class="hint">Check completed builds against their approved scope and evidence.</p>`,
+    `<h1>Results</h1>`,
     missingNote,
     beyondNote,
     `<div class="cockpit">${queuePane}${detail}</div>`,
@@ -18621,15 +18563,12 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
   // chat's result view render — Summary / Changes / Checks with Request
   // changes beside it. The cockpit adds its own acts under Checks: the
   // v50 review-retry panel and the accept-with-exception form.
-  const humanReview = manualReviewOnly(proof === null ? null : { ...proof, verdict: proof?.verdict ?? "", reasons: proof?.reasons ?? [], matrix: proof?.matrix ?? [] });
-  const extraChecks =
-    reviewRetryPanel(view.taskId, run.id, view.reviewRetry, { csrf, canAct: canRetryReview, returnTo: reviewHref(view.taskId) }) +
-    ((proof?.verdict === "short" || proof?.verdict === "refuted") && proof?.accepted === null && csrf !== ""
-      ? `<details class="cockpit-accept"><summary>${humanReview ? "Accept result" : "Accept with an exception"}</summary><p class="meta">${humanReview ? "Record what you verified for this result. Acceptance does not merge or deploy it." : "Use this only if you verified the result another way. The reason becomes part of the record."}</p>` +
-        `<form method="post" action="${taskHref(view.taskId)}/accept-proof" class="cockpit-accept-form"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${run.id}">` +
-        `<input type="text" name="note" maxlength="500" placeholder="${humanReview ? "What did you verify?" : "Why is this safe to accept?"}" aria-label="${humanReview ? "review note" : "exception reason"}" required><button type="submit">${humanReview ? "Accept result" : "Accept with exception"}</button></form></details>`
-      : "");
+  const extraChecks = reviewRetryPanel(view.taskId, run.id, view.reviewRetry, { csrf, canAct: false, returnTo: null });
   const here = reviewHref(view.taskId);
+  const assignment = view.assignment === null ? null : assignmentWithEvidence(view.assignment, receiptStatusOf(view.detail.receipt), run.id);
+  const checks = assignment?.receipt?.checks;
+  if (checks !== undefined) parts.push(`<p class="${checks.status === "failed" || checks.status === "unavailable" ? "problem" : "meta"}" data-actual-checks="${checks.status}">${escape(checks.detail)}${checks.logArtifactId === null ? "" : ` <a href="/r/${run.id}/evidence/${checks.logArtifactId}">Open check output</a>`}</p>`);
+  if (assignment?.completion != null) parts.push(`<p class="meta" data-result-completed>Marked complete by ${escape(assignment.completion.actor.replace(/^operator:/, ""))}. Check results are unchanged.</p>`);
   parts.push(
     `<div id="verification" data-cockpit-section="result">` +
       resultPanelHtml(view.detail, {
@@ -18640,7 +18579,7 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
         noted,
         requestToken: randomBytes(16).toString("hex"),
         hrefFor: one => `${here}&run=${run.id}${one === "summary" ? "" : `&tab=${one}`}`,
-        returnTo: here,
+        returnTo: `${here}&run=${run.id}`,
         back: null,
         extraChecks,
         headStatus: false,
@@ -18649,6 +18588,10 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
       (view.contest === null ? "" : `<p class="row"><a href="/contest/${view.contest.id}">${view.contest.state === "pick-wait" ? `compare the ${contestNoun(view.contest.kind)} and pick →` : `the ${contestNoun(view.contest.kind)} (${escape(view.contest.state)}) →`}</a></p>`) +
       `</div>`,
   );
+
+  if (assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== "") {
+    parts.push(`<form method="post" action="${taskHref(view.taskId)}/complete" class="card result-complete"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="receipt" value="${assignment.receipt.digest}"><input type="hidden" name="run" value="${run.id}"><p class="meta">Mark this saved result complete after inspecting its work and checks. This does not change check results, approve execution, publish, or deploy.</p><button type="submit" style="min-height:44px">Mark complete</button></form>`);
+  }
 
   if (view.notes.length > 0) {
     parts.push(
@@ -18673,15 +18616,6 @@ function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boole
   if (run === null || detail === null) {
     return card("inspect-task", "No build to review", "This task was marked complete without a build record.", `<a class="button-link" href="${taskHref(view.taskId)}">Open the task</a>`);
   }
-  const verdict = detail.proof?.verdict ?? null;
-  if ((verdict === "short" || verdict === "refuted") && !accepted) {
-    return card(
-      "accept-proof",
-      "Review before accepting",
-      manualReviewOnly(detail.proof === null ? null : { ...detail.proof, verdict: detail.proof.verdict ?? "" }) ? "Inspect the saved screenshots and requirements." : verificationExplanation(verdict, detail.proof?.reasons ?? []),
-      `<a class="button-link" href="${escape(`${reviewHref(view.taskId)}&run=${run.id}&tab=checks#result`)}" data-open-evidence>Review evidence</a>`,
-    );
-  }
   if (view.contest !== null && view.contest.state === "pick-wait") {
     return card("compare-contest", `Compare the ${contestNoun(view.contest.kind)}`, `${view.contest.agents} agents finished — compare their results side by side and pick one.`, `<a class="button-link" href="/contest/${view.contest.id}">Compare results</a>`);
   }
@@ -18691,14 +18625,7 @@ function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boole
   if (detail.comments.length > 0 && csrf !== "") {
     return card("revise", `${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these notes. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}">${revisionSealFields(detail.comments, detail.sourceDigest)}<button type="submit">Revise</button></form>`);
   }
-  const prUrl = detail.publication === null ? null : safePrUrl(detail.publication.prUrl);
-  if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) {
-    return card("publication", `Review PR #${detail.publication.prNumber} on GitHub`, "The evidence below matches the recorded result. The pull request was last seen open; no merge is recorded here.", `<a class="button-link" href="${escape(prUrl)}">Open the pull request</a>`);
-  }
-  if (canAnnotate) {
-    return card("annotate", "Review the changes", "Nothing needs your attention. Add a note, or annotate a line, to request a revision.", `<a class="button-link" href="${escape(`${reviewHref(view.taskId)}&tab=changes#result`)}">Review changes</a>`);
-  }
-  return card("inspect-run", "Review the build", "Nothing needs your attention. Open the full history and evidence if you want the details.", `<a class="button-link" href="/r/${run.id}">Open the build</a>`);
+  return "";
 }
 
 /**
@@ -19159,7 +19086,7 @@ function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], ro
           },
     screenshots: proof?.screenshots ?? [],
     caveats: proof?.proof?.caveats ?? [],
-    coverage: coverageWords(coverage),
+    coverage: coverage.contextGaps.length > 0 || (proof?.matrix ?? []).some(row => row.review != null || row.assessment !== undefined) ? coverageWords(coverage) : [],
     coverageSecondary: coverage.contextGaps.length === 0 && (coverage.satisfied === true || (coverage.satisfied === null && !coverage.required)),
     report,
     facts: sharedResultFactsOf(run, proof, terminal, handoff, report, publication),
@@ -19629,8 +19556,8 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     view.coverage.length === 0
       ? ""
       : view.coverageSecondary
-        ? `<details class="receipt-coverage" data-semantic-coverage="secondary"><summary>Independent review</summary><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></details>`
-        : `<div class="receipt-coverage" data-semantic-coverage=""><strong>Independent review</strong><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+        ? `<details class="receipt-coverage" data-semantic-coverage="secondary"><summary>Previous assessment</summary><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></details>`
+        : `<div class="receipt-coverage" data-semantic-coverage=""><strong>Previous assessment</strong><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
   const resultHref = status.token === "review-failed" ? reviewHref(taskId) : place === "chat" ? chatResultHref(taskId, view.runId, status.action?.kind === "open-review" ? "checks" : "summary") : statusActionHref(status, taskId, view.runId, view.publication?.prUrl ?? null) ?? `/r/${view.runId}`;
   return (
     `<section class="card completion-receipt" data-card-kind="result-receipt"${resultFactsAttributes(facts)}>` +
@@ -19662,7 +19589,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
       ? `<a href="${taskChatHref(taskId)}">Discuss in chat →</a>`
       : `<a href="/r/${view.runId}">Full build record →</a>`) +
     // The cockpit (Priority 5): the same records, arranged for a reviewer.
-    `<a href="${reviewHref(taskId)}">Open in the review cockpit →</a>` +
+    `<a href="${reviewHref(taskId)}">Open result →</a>` +
     `</div></details></section>`
   );
 }
@@ -19775,7 +19702,9 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   if (!humanReview && !awaitingGoalReview && (!directAssessment || physicalReasons.length > 0) && !missingVerdictNamed && stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, physicalReasons));
   attention.push(...facts.evidenceProblems);
   if (detail.outsideTouches.length > 0) attention.push(`${detail.outsideTouches.length} changed file${detail.outsideTouches.length === 1 ? "" : "s"} outside the approved paths: ${detail.outsideTouches.join(", ")}.`);
-  attention.push(...receipt.caveats);
+  // A failed caveat can already be quoted in full by its verification
+  // reason. Keep that explanation once and retain every other caveat.
+  attention.push(...receipt.caveats.filter(caveat => !attention.some(problem => problem.includes(caveat))));
   attention.push(...(handoff?.followUps ?? []).map(one => `Follow-up: ${one}`));
   // Publication risks stay in the open (repair 2026-09-14); the routine
   // publication fact lives with the build details below.
@@ -19856,7 +19785,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const agent = runAgentWords(detail.route);
   const links: string[] = [];
   if (o.place !== "run") links.push(`<a href="/r/${runId}">Full build record →</a>`);
-  if (o.place !== "review") links.push(`<a href="${reviewHref(detail.taskId)}">Review cockpit →</a>`);
+  if (o.place !== "review") links.push(`<a href="${reviewHref(detail.taskId)}">Open result →</a>`);
   if (o.place !== "chat") links.push(`<a href="${taskChatHref(detail.rootId ?? detail.taskId)}">Discuss in chat →</a>`);
   links.push(`<a href="${taskHref(detail.rootId ?? detail.taskId)}">Task overview →</a>`);
   // Technical facts on demand: build, agent, exact commits, evidence
@@ -19927,7 +19856,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   // ---- checks --------------------------------------------------------------
   const checkParts: string[] = [];
   const reviewerNotes = detail.reviewerFindings.map(one => `<li><span class="badge${one.severity === "problem" ? " badge-failed" : ""}">${escape(one.severity ?? "note")}</span> ${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span>${!isRevisionFeedback(one) && detail.canAnnotate && o.csrf !== "" ? ` <button type="button" class="pick-file" data-path="${escape(one.path ?? "")}" data-line="${one.line ?? ""}" data-review-note="${escape(one.note)}">Request change</button>` : ""}</li>`).join("");
-  if (proof === null && reviewerNotes !== "") checkParts.push(`<div class="result-section" data-cockpit-source="reviewer"><strong>Independent review</strong><ul>${reviewerNotes}</ul></div>`);
+  if (proof === null && reviewerNotes !== "") checkParts.push(`<div class="result-section" data-cockpit-source="reviewer"><strong>Previous assessment</strong><ul>${reviewerNotes}</ul></div>`);
   if (run.outcome === "no-change" && !directAssessment) checkParts.push(`<p class="meta">The build concluded that no repository change was needed. A no-change conclusion owes no proof — its handoff and machine-captured diff are the record.</p>`);
   if (proof === null) {
     if (run.outcome !== "no-change") checkParts.push(`<p class="meta" data-proof-verdict="none">This build has no verification result or captured evidence. Review its recorded changes yourself.</p>`);
@@ -19977,7 +19906,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     checkParts.push(
       receipt.caveats.length === 0
         ? directAssessment ? "" : `<p class="meta" data-cockpit-source="caveats">No caveats were reported.</p>`
-        : `<div class="receipt-caveats" data-cockpit-source="caveats"><strong>Caveats · ${receipt.caveats.length}</strong><ul>${receipt.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`,
+        : `<details class="cockpit-proof-group" data-cockpit-source="caveats"><summary>Agent caveats · ${receipt.caveats.length}</summary><ul>${receipt.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></details>`,
     );
   }
   // The handoff's own account of its checks — the agent's words, labeled
@@ -20039,7 +19968,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const tabCounts: Record<ResultTab, string> = {
     summary: "",
     changes: statOk ? (stat.fileCount === 0 ? "none" : `${stat.fileCount} file${stat.fileCount === 1 ? "" : "s"}`) : terminal === null ? "none" : "",
-    checks: facts.checks === null ? (proof === null ? "none" : "") : `${facts.checks.passed}/${facts.checks.total}`,
+    checks: "",
   };
   const tabs =
     `<nav class="result-tabs" role="tablist" aria-label="result views">` +
@@ -20052,7 +19981,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.rootId ?? detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
       (o.back === null ? "" : `<p class="result-back"><a href="${escape(o.back.href)}" data-result-back>← ${escape(o.back.label)}</a></p>`) +
       (detail.history ?? "") +
-      `<header class="result-head"><div><span class="eyebrow">Build #${runId}</span><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" && !directAssessment ? { ...status, label: "Verification needed" } : status)}</header>` +
+      `<header class="result-head"><div>${o.place === "review" ? "" : `<span class="eyebrow">Build #${runId}</span>`}<h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" && !directAssessment ? { ...status, label: "Verification needed" } : status)}</header>` +
       `<p class="result-summary">${escape(outcome)}</p>` +
       action +
       (REVIEW_TOKENS.has(status.token) ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
@@ -20089,7 +20018,7 @@ function resultPrimaryAction(detail: ResultDetail, o: ResultPanelOptions, prUrl:
   }
   if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="result-feedback-link" href="#request-changes">Review saved notes</a>`);
   if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) return wrap("open-pr", `<a class="button-link" href="${escape(prUrl)}">Open PR #${detail.publication.prNumber}</a>`);
-  if (detail.proof?.matrix.some(row => row.assessment !== undefined) && detail.proof.reasons.includes(GOAL_ASSESSMENT_PENDING)) return wrap("review-goal", `<a class="button-link" href="${reviewHref(detail.taskId)}">Review goal</a>`);
+  if (detail.proof?.matrix.some(row => row.assessment !== undefined) && detail.proof.reasons.includes(GOAL_ASSESSMENT_PENDING)) return wrap("open-result", `<a class="button-link" href="${reviewHref(detail.taskId)}">Open result</a>`);
   if (detail.proof?.matrix.some(row => row.assessment !== undefined && row.review?.judgement === "cannot-tell")) return wrap("review-evidence", `<a class="button-link" href="${escape(o.hrefFor("checks"))}">Review evidence</a>`);
   if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="result-feedback-link" href="#request-changes">Suggest changes</a>`);
   return "";
@@ -20605,7 +20534,7 @@ function settingsPage(
               `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
               `<p><strong>default for new tasks</strong></p>` +
               qualityModeChoices("quality-mode", qualityDefault.mode) +
-              `<p class="meta permission-note">Strict / release adds the isolated semantic reviewer after deterministic proof. Repair still obeys the separately approved operating-mode terms.</p>` +
+              `<p class="meta permission-note">Inspect the saved work and actual check results when it is ready. Publication and deployment need their own authorization.</p>` +
               `<button type="submit">save default</button></form>`
             : `<div class="card"><p><strong>${escape(qualityModeTitle(qualityDefault.mode))}</strong></p><p class="meta">an approver can change this default</p></div>`,
           qualityDefault.updatedAt === null

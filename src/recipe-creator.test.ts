@@ -117,10 +117,10 @@ describe("saved recipe creation and repeated use", () => {
     const p = prepareRecipeRun(store, "owner", repo, recipe.id, 1, new Map(), now);
     const made = launchWorkflow(store, "owner", repo, p.token, now, false);
     const rows = ["workflow_recipe", "workflow_preview"].map(table => store.handle.prepare(`SELECT * FROM ${table}`).all());
-    store.close(); const old = new DatabaseSync(file); old.exec("DROP INDEX workflow_preview_source; UPDATE schema_version SET version=56"); old.close();
+    store.close(); const old = new DatabaseSync(file); old.exec("DROP TABLE service_cursor; DROP INDEX workflow_preview_source; UPDATE schema_version SET version=56"); old.close();
     expect(openStoreNoMigrate(file)).toMatchObject({ ok: false, reason: "version" });
     store = openStore(file);
-    expect(SCHEMA_VERSION).toBe(69);
+    expect(SCHEMA_VERSION).toBe(70);
     expect(["workflow_recipe", "workflow_preview"].map(table => store.handle.prepare(`SELECT * FROM ${table}`).all())).toEqual(rows);
     expect(recipeDigest(findRecipe(store, "owner", repo, recipe.id)!.document)).toBe(digest);
     expect(exportRecipe(findRecipe(store, "owner", repo, recipe.id)!.document)).toBe(exportRecipe(d));

@@ -11,7 +11,7 @@ test("v55 migration preserves every historical row and refuses missing authority
   try {
     const store = openStore(file); const now = new Date("2026-09-12T22:00:00Z"); addApprover(store, "owner", now);
     store.createTask({ id: "retained", title: "Keep this task" }, now); store.placeTask(store.lookupRef("retained")!.id, root); store.close();
-    const old = new DatabaseSync(file); old.exec("DROP TABLE workflow_preview; DROP TABLE workflow_recipe; UPDATE schema_version SET version=55;");
+    const old = new DatabaseSync(file); old.exec("DROP TABLE service_cursor; DROP TABLE workflow_preview; DROP TABLE workflow_recipe; UPDATE schema_version SET version=55;");
     const tables = old.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version','sqlite_sequence') ORDER BY name").all().map(row => String(row.name));
     const before = tables.map(table => old.prepare(`SELECT * FROM "${table}"`).all()); old.close();
     expect(openStoreNoMigrate(file)).toMatchObject({ ok: false, reason: "version" });
@@ -23,7 +23,7 @@ test("v55 migration preserves every historical row and refuses missing authority
     upgraded.close(); const stable = readFileSync(file); openStore(file).close(); expect(readFileSync(file).equals(stable)).toBe(true);
     const broken = new DatabaseSync(file); broken.exec("DROP TABLE workflow_preview"); broken.close(); const bytes = readFileSync(file);
     expect(() => openStore(file)).toThrow("refusing to recreate launch history"); expect(readFileSync(file).equals(bytes)).toBe(true);
-    const missing = new DatabaseSync(file); missing.exec("UPDATE schema_version SET version=55; DROP TABLE plan_authorization"); missing.close(); const missingBytes = readFileSync(file);
+    const missing = new DatabaseSync(file); missing.exec("DROP TABLE service_cursor; UPDATE schema_version SET version=55; DROP TABLE plan_authorization"); missing.close(); const missingBytes = readFileSync(file);
     expect(() => openStore(file)).toThrow("refusing to recreate authority"); expect(readFileSync(file).equals(missingBytes)).toBe(true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

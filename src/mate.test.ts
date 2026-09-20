@@ -787,6 +787,10 @@ describe("the mate's turn", () => {
     expect(executeMateTool(ctx, "recap", { since: "yesterday" })).toMatchObject({ ok: false });
     // Decisions are the task's own: in-2 shares the repo with in-1's decision and reports none.
     expect(executeMateTool(ctx, "get_task", { task: "in-1" })).toMatchObject({ ok: true, body: { repo: "r1", scope: "none", decisionsOpen: 1 } });
+    expect(executeMateTool(ctx, "get_task", { task: "in-1" })).toMatchObject({ ok: true, body: { work: { taskId: "in-1", nextActions: [
+      { code: "write-scope", access: "proposal-only" },
+      { code: "answer-decision", access: "proposal-only", target: { taskId: "in-1", decisionId: 1 } },
+    ] } } });
     expect(executeMateTool(ctx, "get_task", { task: "in-2" })).toMatchObject({ ok: true, body: { decisionsOpen: 0 } });
     const decisions = executeMateTool(ctx, "list_decisions", {});
     expect(decisions).toMatchObject({ ok: true, body: { decisions: [{ decision: 1, task: "in-1", options: [{ id: "open", reversible: true }, { id: "closed", reversible: false }], ageHours: 0 }] } });

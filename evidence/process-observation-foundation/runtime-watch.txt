@@ -1,0 +1,337 @@
+Exact complete functions from installed runtime20cc. Source/ranges/hashes: runtime-audit.json.
+Not executable: referenced imports and unrelated functions remain in the lossless archive.
+
+===== operate.js :: runWatchLoop (lines 6605-6897; complete function) =====
+async function runWatchLoop(args) {
+    const { context, flags, runner, token, repo, progress } = args;
+    const { store } = context;
+    const tickEveryMs = Number(text(flags, "tick-every") ?? 60_000);
+    const bridgeEveryMs = Number(text(flags, "bridge-every") ?? 45_000);
+    const reconcileEveryMs = Number(text(flags, "reconcile-every") ?? 5 * 60_000);
+    const runFor = text(flags, "for") === undefined ? null : Number(text(flags, "for"));
+    if (!Number.isSafeInteger(reconcileEveryMs) || reconcileEveryMs < 1 || reconcileEveryMs > 2_147_483_647) {
+        throw new Error("--reconcile-every must be an integer from 1 to 2147483647 milliseconds");
+    }
+    const incarnation = randomUUID();
+    const lease = acquireWatchLeaseAuthed(store, { runner, token, repo, owner: incarnation, ttlMs: WATCH_LEASE_MS }, new Date());
+    if (!lease.ok) {
+        return {
+            ok: false,
+            reason: "watch-busy",
+            detail: lease.reason === "watch-busy"
+                ? `another watch holds ${runner} on ${repo} until ${lease.until} — one watch per runner and repo; cron ticks may coexist, watches may not`
+                : describeAuth(lease.reason, runner),
+            ticks: 0,
+            built: 0,
+            broke: 0,
+        };
+    }
+    if (lease.superseded !== null && lease.recovered > 0) {
+        progress(`Recovered ${lease.recovered} claim(s) from the previous watch (${lease.superseded.slice(0, 8)}…) before dispatching anything.`);
+    }
+    // What this runner's spawns actually get, in one honest line: native
+    // and which backend, observed, or a required policy that will refuse.
+    progress(`watch: ${describeContainment(currentContainment())}`);
+    // The night is a row, not "the last 24 hours": everything this watch does
+    // attributes to this episode by runner and window, and `brief
+    // --latest-watch` bounds itself to exactly it.
+    store.startWatchEpisode({ repo, runner, incarnation }, new Date());
+    args.onReady?.();
+    // A false renewal is FATAL (arc 2 finding 15): the lease or the
+    // credential is gone, and admitting one more pass would be work done for
+    // an authority this process no longer holds.
+    let leaseLost = false;
+    const followController = new AbortController();
+    args.onFollowController?.(followController);
+    const stopping = () => args.isStopping() || leaseLost;
+    const heartbeat = setInterval(() => {
+        let renewed = false;
+        let problem = "the lease or credential was taken";
+        try {
+            renewed = heartbeatWatchLeaseAuthed(store, { runner, token, repo, owner: incarnation, ttlMs: WATCH_LEASE_MS }, new Date());
+        }
+        catch (error) {
+            problem = `renewal could not be proved: ${describe(error)}`;
+        }
+        if (!renewed && !leaseLost) {
+            leaseLost = true;
+            followController.abort();
+            progress(`watch: ${runner} on ${repo}: ${problem} — stopping without admitting more work`);
+        }
+    }, WATCH_HEARTBEAT_MS);
+    heartbeat.unref?.();
+    // The follower rides along when Telegram is configured: taps apply the
+    // moment they arrive, and answering bumps the wake sequence, so the very
+    // loop below wakes and resumes the freed task — phone to build, seconds.
+    // The poll lease keeps this the only live poller; a cron `bridge
+    // telegram` overlapping it loses the lease race and reports busy.
+    let follower = null;
+    const followSource = loadBotToken(process.env, context.telegramTokenFile);
+    if (followSource !== null) {
+        const transport = context.telegramTransport ?? createTransport(followSource.token);
+        const publicUrl = text(flags, "public-url");
+        follower = followBridge(store, {
+            readProjects: telegramReadProjects(context),
+            canDeliver: telegramCanDeliver(context, followSource.token),
+            conversation: telegramConversation(context, publicUrl === undefined ? {} : { serverOrigin: publicUrl }),
+            botId: followSource.botId,
+            transport,
+            signal: followController.signal,
+            onCycle: cycle => {
+                // progress(), not write(): under --json this line went to stdout
+                // BESIDE the final envelope — the one stdout contamination in the
+                // watch (round-4 finding 12).
+                progress(`watch: bridge sent ${cycle.sent}, answered ${cycle.answered}, paired ${cycle.paired}` +
+                    ((cycle.statusReplies ?? 0) > 0 ? `, status replies ${cycle.statusReplies}` : "") +
+                    ((cycle.chatQueued ?? 0) > 0 ? `, chat received ${cycle.chatQueued}` : "") +
+                    ((cycle.chatAnswered ?? 0) > 0 ? `, chat replied ${cycle.chatAnswered}` : "") +
+                    ((cycle.chatConfirmed ?? 0) > 0 ? `, chat confirmed ${cycle.chatConfirmed}` : "") +
+                    (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s)` : ""));
+            },
+        }).catch(error => {
+            progress(`watch: the telegram follower died — ${describe(error)}; taps wait for the next watch`);
+            return null;
+        });
+    }
+    const slackFollower = followSlack({ store, dir: dirname(context.databaseFile), signal: followController.signal,
+        readProjects: telegramReadProjects(context), evidenceRoot: context.evidenceRoot,
+        ...(context.mateSeams?.subscriptionRunner ? { subscriptionRunner: context.mateSeams.subscriptionRunner } : {}),
+        ...(context.heldCoordinator ? { held: context.heldCoordinator } : {}),
+        origin: () => phoneOrigin(process.env, dirname(context.databaseFile), { serverOrigin: text(flags, "public-url") ?? null }),
+        notifications: () => effectivePrimary(process.env, dirname(context.databaseFile), loadBotToken(process.env, context.telegramTokenFile) !== null).channel === "slack",
+    }).catch(() => progress("watch: Slack stopped. Check Slack settings before reconnecting."));
+    const discordFollower = followDiscord({ store, dir: dirname(context.databaseFile), signal: followController.signal,
+        readProjects: telegramReadProjects(context), evidenceRoot: context.evidenceRoot,
+        ...(context.mateSeams?.subscriptionRunner ? { subscriptionRunner: context.mateSeams.subscriptionRunner } : {}),
+        ...(context.heldCoordinator ? { held: context.heldCoordinator } : {}),
+        origin: () => phoneOrigin(process.env, dirname(context.databaseFile), { serverOrigin: text(flags, "public-url") ?? null }),
+        notifications: () => effectivePrimary(process.env, dirname(context.databaseFile), loadBotToken(process.env, context.telegramTokenFile) !== null).channel === "discord",
+    }).catch(() => progress("watch: Discord stopped. Check Discord settings before reconnecting."));
+    // Passes reuse the tested commands with a quiet sink; watch narrates one
+    // line per pass that did something instead of streaming their reports.
+    const quiet = [];
+    const sink = line => quiet.push(line);
+    const passFlags = (extra = {}) => {
+        const copy = new Map(flags);
+        copy.set("json", true);
+        copy.set("incarnation", incarnation);
+        for (const [key, value] of Object.entries(extra))
+            copy.set(key, value);
+        return copy;
+    };
+    let reconciliationReady = false;
+    let reconciliationFailure = null;
+    const paused = () => !reconciliationReady || updateAdmissionPaused(store.raw()) || context.shouldPauseAdmission?.() === true;
+    const admissionStopped = () => stopping() || paused();
+    const quietContext = { ...context, write: sink, json: true, shouldStop: stopping, shouldPauseAdmission: paused };
+    const startedAt = Date.now();
+    const deadline = runFor === null ? null : startedAt + runFor;
+    let lastTick = 0;
+    let lastBridge = 0;
+    let lastPush = 0;
+    let ticks = 0;
+    let built = 0;
+    let brokeCount = 0;
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    // Reconciliation has its own cadence and sink. Sharing tick's sink would
+    // interleave envelopes while a build awaits its provider or project check.
+    const maintenance = startMaintenance({
+        intervalMs: reconcileEveryMs,
+        shouldStop: stopping,
+        onError: error => {
+            reconciliationReady = false;
+            const detail = describe(error);
+            if (detail !== reconciliationFailure)
+                progress(`watch: reconciliation failed — ${detail}; new work is paused until a recovery pass succeeds`);
+            reconciliationFailure = detail;
+        },
+        run: async () => {
+            const maintenanceLines = [];
+            const maintenanceContext = { ...quietContext, write: line => maintenanceLines.push(line) };
+            const code = await reconcileCommand(passFlags(), maintenanceContext);
+            if (code !== EXIT.ok)
+                throw new Error(maintenanceLines.join(" "));
+            if (reconciliationFailure !== null)
+                progress("watch: reconciliation recovered — new work may resume");
+            reconciliationFailure = null;
+            reconciliationReady = true;
+            if (!stopping() && store.openedPublications().length > 0) {
+                try {
+                    const checks = await observeChecks(store, {
+                        ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
+                    });
+                    if (checks.failing > 0)
+                        progress(`watch: CI is red on ${checks.failing} published PR(s) — the outbox has it`);
+                }
+                catch (error) {
+                    progress(`watch: CI observation failed — ${describe(error)}; retrying on its next interval`);
+                }
+            }
+        },
+    });
+    try {
+        // Startup recovery still precedes the first dispatch.
+        await maintenance.runNow();
+        while (!stopping() && (deadline === null || Date.now() < deadline)) {
+            if (paused()) {
+                await sleep(250);
+                continue;
+            }
+            const seqBefore = store.wakeSeq();
+            const now = Date.now();
+            // The tick pass runs whenever the loop spins — and the loop only
+            // spins when the sequence moved, a timer came due, or work just
+            // finished, so this IS the schedule.
+            let tickDidWork = false;
+            let tickBroke = false;
+            {
+                lastTick = now;
+                quiet.length = 0;
+                store.expireOverdueDecisions(new Date());
+                const code = await tickCommand(passFlags(), quietContext);
+                ticks++;
+                if (code === EXIT.ok) {
+                    tickDidWork = true;
+                    built++;
+                    progress(`watch: pass ${ticks} did work (${new Date().toISOString()})`);
+                }
+                else if (code === EXIT.failed) {
+                    // A broken pass is NOT work (setup review): it must not re-spin
+                    // the loop — the next look waits for the tick cadence or a wake,
+                    // and the line says WHAT broke, from the pass's own envelope.
+                    brokeCount++;
+                    tickBroke = true;
+                    progress(`watch: pass ${ticks} — ${brokenWords(quiet)}`);
+                }
+            }
+            // Built work goes out in the same window it was built: the pass is one
+            // SELECT when nothing is owed, and each phase is durable if we crash.
+            // Except under a stop (audit IV-1): once the signal lands, nothing
+            // more is published this incarnation — the durable intent keeps the
+            // work safe for the successor.
+            if (!admissionStopped() && store.pendingPublications().length > 0) {
+                const published = await publishPass(store, {
+                    repo,
+                    ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
+                });
+                if (published.pushed + published.opened + published.adopted + published.failed > 0) {
+                    progress(`watch: published — pushed ${published.pushed}, opened ${published.opened}, adopted ${published.adopted}` +
+                        (published.failed > 0 ? `, gave up on ${published.failed}` : ""));
+                }
+            }
+            // Push rides its OWN cadence, whether or not Telegram holds the wire
+            // (arc 3 finding 8): the pair ledger's claims fence concurrent loops.
+            if (now - lastPush >= 45_000) {
+                lastPush = now;
+                try {
+                    await pushPass(context.store, { configDir: dirname(context.databaseFile), clock: () => new Date() });
+                }
+                catch {
+                    // Push is additive; a broken pass never stops the watch.
+                }
+            }
+            // The embedded follower owns the wire while it lives; the timer-driven
+            // pass is the fallback shape for a watch started before a token existed.
+            if (follower === null && now - lastBridge >= bridgeEveryMs) {
+                lastBridge = now;
+                const source = loadBotToken(process.env, context.telegramTokenFile);
+                const dir = dirname(context.databaseFile);
+                // Exactly ONE service carries the pages — the chosen primary, or
+                // the sensible implicit one. Telegram keeps draining taps and
+                // replies even when another service is primary: answering is its
+                // job whether or not paging is.
+                const primary = effectivePrimary(process.env, dir, source !== null);
+                if (source !== null) {
+                    quiet.length = 0;
+                    await bridgeCommand(["telegram"], passFlags(primary.channel === "telegram" ? {} : { "inbound-only": "1" }), quietContext);
+                }
+                if (primary.channel !== null && primary.channel !== "telegram") {
+                    const targets = loadWebhookTargets(process.env, dir).filter(one => one.kind === primary.channel && (one.kind !== "slack" || loadSlackCredentials(dir) === null) && (one.kind !== "discord" || loadDiscordCredentials(dir) === null));
+                    if (targets.length > 0) {
+                        await webhookPass(store, { targets, consoleUrl: loadConsoleUrl(process.env, dir), clock: context.clock });
+                    }
+                }
+            }
+            // Work-conserving: if the world moved while we worked — or we just
+            // finished something that may have freed a dependent — go again now.
+            // A BROKEN pass moves the sequence itself (it claimed and handed back)
+            // and must not count as the world moving, or the loop spins on its own
+            // failure without a pause (2026-09-04: 331,000 passes on one dirty
+            // checkout). The next look waits for the cadence or a real wake.
+            if (tickDidWork || (!tickBroke && store.wakeSeq() !== seqBefore))
+                continue;
+            // Idle: doze in short steps until the sequence moves, a timer comes
+            // due, a signal lands, or the trial window (--for) ends. Reading one
+            // integer from SQLite twice a second is the entire idle cost — no
+            // token has anywhere to be spent from here.
+            const idleUntil = Math.min(lastTick + tickEveryMs, lastBridge + bridgeEveryMs, deadline ?? Number.MAX_SAFE_INTEGER) - Date.now();
+            // Doze for the WHOLE idle window, waking early only for a signal or a
+            // sequence move — not for one 500ms step and then another pass
+            // (2026-09-05: that read as two ticks a second, all night, with
+            // nothing to do). The 50ms poll is what keeps a stop prompt.
+            const seqIdle = store.wakeSeq();
+            const dozeUntil = Date.now() + Math.max(idleUntil, 0);
+            while (!stopping() && Date.now() < dozeUntil && store.wakeSeq() === seqIdle) {
+                await sleep(50);
+            }
+        }
+    }
+    finally {
+        await maintenance.stop();
+        clearInterval(heartbeat);
+        followController.abort();
+        if (follower !== null)
+            await follower;
+        await slackFollower;
+        await discordFollower;
+        store.endWatchEpisode(incarnation, { ticks, built, broke: brokeCount }, new Date());
+        store.releaseWatchLease(runner, repo, incarnation, new Date());
+    }
+    if (leaseLost) {
+        return { ok: false, reason: "lease-lost", detail: `the watch lease for ${runner} on ${repo} stopped renewing — another process may have taken this worker over`, ticks, built, broke: brokeCount };
+    }
+    if (reconciliationFailure !== null) {
+        return { ok: false, reason: "reconciliation-failed", detail: reconciliationFailure, ticks, built, broke: brokeCount };
+    }
+    return { ok: true, ticks, built, broke: brokeCount, incarnation };
+}
+
+===== operate.js :: startConsole (lines 4209-4244; complete function) =====
+async function startConsole(options) {
+    const { context } = options;
+    const server = createDecisionServer({
+        store: context.store,
+        ...(context.desktopIdentity === undefined ? {} : { desktopIdentity: context.desktopIdentity }),
+        ...(context.additionalProjectRepos === undefined || options.currentRepos === undefined ? {} : { additionalProjectRepos: options.currentRepos }),
+        evidenceRoot: context.evidenceRoot,
+        clock: context.clock,
+        telegramTokenFile: context.telegramTokenFile,
+        configDir: dirname(context.databaseFile),
+        ...(options.localRunner === undefined ? {} : { localRunner: options.localRunner }),
+        poolRoot: options.poolRoot,
+        ...(options.allowedHosts === undefined ? {} : { allowedHosts: options.allowedHosts }),
+        ...(options.setupCode === undefined ? {} : { setupCode: options.setupCode }),
+        ...(options.repos === undefined ? {} : { repos: options.repos }),
+        ...(options.projectRoots === undefined ? {} : { projectRoots: options.projectRoots }),
+        ...(options.currentRepos === undefined ? {} : { currentRepos: options.currentRepos }),
+        ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
+        ...(options.registryPath === undefined ? {} : { registryPath: options.registryPath }),
+        ...(options.upConsole === undefined ? {} : { upConsole: options.upConsole }),
+        ...(options.editorLinks === undefined ? {} : { editorLinks: options.editorLinks }),
+        ...(options.attended === undefined ? {} : { attended: options.attended }),
+    });
+    await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(options.port, options.host, () => resolve());
+    }).catch(error => {
+        throw new Error(`could not listen on ${options.host}:${options.port} — ${describe(error)}`);
+    });
+    const bound = server.address();
+    const port = typeof bound === "object" && bound !== null ? bound.port : options.port;
+    // A bind-everywhere address is not a place a browser can go: the URL
+    // we print and open names localhost, which the console always admits.
+    const shown = options.host === "0.0.0.0" || options.host === "::" ? "localhost" : options.host;
+    return { server, port, url: `http://${shown}:${port}/` };
+}
+
+Current recovery review context: The recovery anchor relies on a fresh closure-owned watch identity and authenticated lease renewal; the complete functions above establish that behavior. This annotation grants no process-exit or settlement authority.

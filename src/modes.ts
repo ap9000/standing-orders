@@ -33,8 +33,10 @@ export type ModeTerms = {
   planAuto: boolean;
   /** Attended mint without the per-mint password — signer only (D8). */
   quickMint: boolean;
-  /** The reviewer runs on every built-with-changes outcome (R3). */
+  /** Historical signed field; new modes leave it false and no worker consumes it. */
   reviewAuto: boolean;
+  /** Historical signed retry term, retained for digest and audit compatibility. */
+  reviewRetryAuto: boolean;
   /** Stamped into filings that name no budget of their own. */
   perAttemptBudgetMicrousd: number | null;
   /** SOFT rail: new admissions stop once the day's MEASURED spend has
@@ -80,7 +82,8 @@ export function presetTerms(name: ModeName, absoluteExpiry: string): ModeTerms {
         autoApproveFiling: false,
         planAuto: false,
         quickMint: true,
-        reviewAuto: true,
+        reviewAuto: false,
+        reviewRetryAuto: false,
         perAttemptBudgetMicrousd: null,
         dailyMeasuredCapMicrousd: null,
         dailyRunCap: null,
@@ -96,7 +99,8 @@ export function presetTerms(name: ModeName, absoluteExpiry: string): ModeTerms {
         autoApproveFiling: true,
         planAuto: false,
         quickMint: true,
-        reviewAuto: true,
+        reviewAuto: false,
+        reviewRetryAuto: false,
         perAttemptBudgetMicrousd: null,
         dailyMeasuredCapMicrousd: null,
         dailyRunCap: null,
@@ -156,6 +160,7 @@ export function modeTermsFromJson(json: string | null): ModeTerms | null {
     (t["planAuto"] === undefined || typeof t["planAuto"] === "boolean") &&
     typeof t["quickMint"] === "boolean" &&
     typeof t["reviewAuto"] === "boolean" &&
+    (t["reviewRetryAuto"] === undefined || typeof t["reviewRetryAuto"] === "boolean") &&
     budget !== undefined &&
     measured !== undefined &&
     runs !== undefined &&
@@ -183,6 +188,7 @@ export function modeTermsFromJson(json: string | null): ModeTerms | null {
       planAuto: t["planAuto"] === true,
       quickMint: t["quickMint"],
       reviewAuto: t["reviewAuto"],
+      reviewRetryAuto: t["reviewRetryAuto"] === true,
       perAttemptBudgetMicrousd: budget,
       dailyMeasuredCapMicrousd: measured,
       dailyRunCap: runs,
@@ -212,9 +218,9 @@ export function modeWords(terms: ModeTerms): string[] {
     terms.planAuto
       ? "plans for your pre-authorized filings auto-approve only when the goal, exclusions, paths, acceptance criteria, risk, budget, and agent route remain exactly unchanged; provide a goal, paths and acceptance criteria upfront; amendments and unresolved questions still wait for you"
       : "planner-generated plans wait for your approval",
-    terms.reviewAuto
-      ? "every finished build gets an agent review; the comments land for you to seal"
-      : "reviews run only when you ask",
+    "finished work and saved checks go to the lead or user; no separate model review runs",
+    ...(terms.reviewAuto || terms.reviewRetryAuto
+      ? ["historical review grants are retained on record but no longer schedule work"] : []),
     terms.perAttemptBudgetMicrousd === null
       ? "filings carry no default dollar cap"
       : `filings that name no budget get a $${(terms.perAttemptBudgetMicrousd / 1_000_000).toFixed(2)} per-attempt cap`,
@@ -230,9 +236,8 @@ export function modeWords(terms: ModeTerms): string[] {
     terms.allowPaidFallback
       ? "when a subscription is exhausted mid-build, an approved fallback that spends (an API key) may run automatically — spend moves to that account"
       : "automatic fallback never switches to a paid API key on its own; a subscription that runs out stops and waits for you",
-    terms.repairAuto
-      ? `a short or refuted run with named unmet criteria auto-approves its own drafted repair, up to ${terms.repairMaxAttempts} attempt(s) — it stops on no progress, an integrity refusal, or the existing spend and run rails, whichever comes first`
-      : "a short or refuted run's drafted repair waits for your approval — this mode grants no automatic repair",
+    ...(terms.repairAuto
+      ? ["historical automatic repair grants are retained on record but no longer schedule work"] : []),
     `everything above ends at ${terms.absoluteExpiry.slice(0, 16).replace("T", " ")} — revoking it earlier is one click, and every act it covered falls back to its own ceremony`,
   ];
 }

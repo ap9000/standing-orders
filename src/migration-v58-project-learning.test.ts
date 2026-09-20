@@ -13,6 +13,7 @@ describe('v58 learning migration on disposable files only',()=>{
       let store=openStore(file); store.createTask({id:'retained',title:'Keep prior work'},new Date());
       // Exact predecessor shape for the additive migration: no learning objects.
       for(const name of ['learning_snapshot','learning_event','project_lesson','learning_policy','learning_capture']) store.handle.exec(`DROP TABLE ${name}`);
+      store.handle.exec("DROP TABLE service_cursor");
       store.handle.prepare('UPDATE schema_version SET version=57').run();store.close();
       const old=new DatabaseSync(file);const oldReaderCurrent=()=>old.prepare('SELECT version FROM schema_version').get()?.['version']===57;
       expect(oldReaderCurrent()).toBe(true);expect(openStoreNoMigrate(file)).toMatchObject({ok:false,reason:'version'});
@@ -23,7 +24,7 @@ describe('v58 learning migration on disposable files only',()=>{
           db.exec(sql);
         }};
       }});
-      expect(beforeDdl).toBe(-57);expect(SCHEMA_VERSION).toBe(69);expect(oldReaderCurrent()).toBe(false);old.close();
+      expect(beforeDdl).toBe(-57);expect(SCHEMA_VERSION).toBe(70);expect(oldReaderCurrent()).toBe(false);old.close();
       expect(store.getTask('retained')?.title).toBe('Keep prior work');expect(store.handle.prepare('PRAGMA foreign_key_check').all()).toEqual([]);store.close();
       store=openStore(file);expect(store.getTask('retained')).not.toBeNull();expect(store.handle.prepare('SELECT * FROM learning_event').all()).toEqual([]);store.close();
       const current=openStoreNoMigrate(file);expect(current.ok).toBe(true);if(current.ok)current.store.close();

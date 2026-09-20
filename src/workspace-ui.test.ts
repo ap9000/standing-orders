@@ -1,3 +1,6 @@
+import { Window } from 'happy-dom';
+import { assignmentActionHref, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence } from './assignment-ui.js';
+import type { AssignmentSnapshot } from './assignment.js';
 import { describe, expect, test } from "vitest";
 import { GOAL_ASSESSMENT_PENDING } from "./proof.js";
 import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
@@ -96,6 +99,9 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(reviewStatusOf(review({}))).toMatchObject({ token: "review-pending", label: "Waiting for review", tone: "attention", action: { kind: "open-result" } });
     expect(reviewStatusOf(review({ attempt: 2, attempts: 1, retriesRemaining: 1 }))).toMatchObject({ token: "review-pending", label: "Review retry queued (attempt 2 of 3)" });
     expect(reviewStatusOf(review({ attempt: 2, attempts: 1, retriesRemaining: 1 }))?.detail).toContain("asked by operator");
+    const automatic = reviewStatusOf(review({ attempt: 2, attempts: 1, retriesRemaining: 1, queuedOrigin: "automatic", queuedBy: "alex" }));
+    expect(automatic?.detail).toContain("The signed mode queued this retry");
+    expect(automatic?.detail).not.toMatch(/explicit|asked by/);
     expect(reviewStatusOf(review({ state: "running", attempts: 1, reviewerAlive: true }))).toMatchObject({ token: "reviewing", label: "Reviewing", tone: "live" });
     expect(reviewStatusOf(review({ state: "running", attempt: 2, attempts: 2, reviewerAlive: true }))).toMatchObject({ token: "reviewing", label: "Reviewing (retry 1 of 2)" });
     expect(reviewStatusOf(review({ state: "running", attempts: 1, reviewerAlive: false }))).toMatchObject({ token: "review-failed", label: "Review interrupted", tone: "attention" });
@@ -110,11 +116,11 @@ describe("the shared status projection (workspace package 1)", () => {
     // Inside the result projection: the review is primary, the stored
     // verdict is the secondary history — for a verified AND a refuted result.
     const pendingVerified = resultStatusOf(built({ review: review({}) }));
-    expect(pendingVerified).toMatchObject({ token: "review-pending", label: "Waiting for review", tone: "attention" });
-    expect(pendingVerified.detail).toContain('Until the review settles, the earlier verdict — "Ready to review" — stays on record as history.');
+    expect(pendingVerified).toEqual(resultStatusOf(built()));
+
     const runningRefuted = resultStatusOf(built({ verdict: "refuted", reasons: ["the repository's approved verification command exited 1"], review: review({ state: "running", attempts: 1, reviewerAlive: true }) }));
-    expect(runningRefuted).toMatchObject({ token: "reviewing", label: "Reviewing" });
-    expect(runningRefuted.detail).toContain('the earlier verdict — "Changes saved, but checks failed" — stays on record');
+    expect(runningRefuted).toMatchObject({ token: "checks-failed", label: "Changes saved, but checks failed" });
+
     // A review that never was, or already succeeded, changes nothing.
     expect(resultStatusOf(built({ review: null })).token).toBe("ready-to-review");
     expect(resultStatusOf(built({ review: review({ state: "succeeded", attempt: 1, attempts: 1 }) })).token).toBe("ready-to-review");
@@ -122,23 +128,23 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(resultStatusOf(built({ accepted: true, review: review({}) })).token).toBe("accepted-exception");
     expect(resultStatusOf(built({ role: "scout", review: review({}) })).token).toBe("report-ready");
     // A published result under review still leads with the review.
-    expect(resultStatusOf(built({ review: review({}) }), { state: "opened", prNumber: 12, prUrl: "https://github.com/o/r/pull/12", remoteState: null, lastCheckState: null }).token).toBe("review-pending");
+    expect(resultStatusOf(built({ review: review({}) }), { state: "opened", prNumber: 12, prUrl: "https://github.com/o/r/pull/12", remoteState: null, lastCheckState: null }).token).toBe("pr-opened");
 
     // The facts come from the store's retry projection, read per run.
     const attempt = { runId: 30, attempt: 1, outcome: null, reason: null, runner: "reviewer-1", provider: "claude", model: null, startedAt: "2026-09-13T12:00:00.000Z", finishedAt: null, requestId: 5 };
     const running = reviewFactsOf({ cap: 3, attempts: [attempt], openRequest: null, live: attempt, latest: attempt, succeeded: null, state: "running", retriesUsed: 0, retriesRemaining: 2, nextAttempt: null }, runner => runner === "reviewer-1");
     expect(running).toMatchObject({ state: "running", attempt: 1, attempts: 1, reviewerAlive: true, queuedBy: null });
     const queued = reviewFactsOf({ cap: 3, attempts: [], openRequest: { id: 5, requestedBy: "alex", basis: "human", origin: "operator", requestedAt: "2026-09-13T12:00:00.000Z" }, live: null, latest: null, succeeded: null, state: "queued", retriesUsed: 0, retriesRemaining: 2, nextAttempt: 1 }, () => true);
-    expect(queued).toMatchObject({ state: "queued", attempt: 1, queuedBy: "alex", reviewerAlive: false });
+    expect(queued).toMatchObject({ state: "queued", attempt: 1, queuedBy: "alex", queuedOrigin: "operator", reviewerAlive: false });
     expect(reviewFactsOf(null, () => true)).toBeNull();
     expect(reviewFactsOf({ cap: 3, attempts: [], openRequest: null, live: null, latest: null, succeeded: null, state: "unrequested", retriesUsed: 0, retriesRemaining: 2, nextAttempt: 1 }, () => true)).toBeNull();
 
     // Work rows: the review's own token, running only while a reviewer is
     // live; the dispatch fallback stays for callers that read no review facts.
     const pendingRow = workStatusOf(facts({ state: "done", result: built({ review: review({}) }), dispatch: diagnosis({ condition: "waiting", code: "review-pending", summary: "Waiting for review", action: "open-result" }) }));
-    expect(pendingRow).toMatchObject({ token: "review-pending", label: "Waiting for review", views: ["all", "needs-you", "completed"] });
+    expect(pendingRow).toMatchObject({ token: "ready-to-review", views: ["all", "completed"] });
     const reviewingRow = workStatusOf(facts({ state: "done", result: built({ review: review({ state: "running", attempts: 1, reviewerAlive: true }) }), dispatch: diagnosis({ condition: "running", code: "reviewing", summary: "Reviewing", action: "open-result" }) }));
-    expect(reviewingRow).toMatchObject({ token: "reviewing", tone: "live", views: ["all", "running", "completed"], rank: 1 });
+    expect(reviewingRow).toMatchObject({ token: "ready-to-review", views: ["all", "completed"], rank: 3 });
     const olderRow = workStatusOf(facts({ state: "done", result: built({ review: null }), dispatch: diagnosis({ condition: "terminal", code: "complete", action: "open-result" }) }));
     expect(olderRow.token).toBe("ready-to-review");
   });
@@ -248,11 +254,11 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(verified).toMatchObject({ token: "ready-to-review", views: ["all", "completed"] });
     // A review in flight outranks the stored verdict and is running.
     const reviewing = workStatusOf(facts({ state: "done", result: built(), dispatch: diagnosis({ condition: "running", code: "reviewing", summary: "Reviewing", action: "open-result" }) }));
-    expect(reviewing).toMatchObject({ token: "reviewing", label: "Reviewing", tone: "live", views: ["all", "running", "completed"] });
+    expect(reviewing).toMatchObject({ token: "ready-to-review", tone: "ready", views: ["all", "completed"] });
     // Unknown dispatch never crashes a row.
     expect(workStatusOf(facts({}))).toMatchObject({ token: "unknown", label: "Status unknown", views: ["all"] });
 
-    expect(workCounts([approval, queued, running, failed, cancelled, checksFailed, accepted, verified, reviewing])).toEqual({ all: 9, "needs-you": 3, running: 2, completed: 4 });
+    expect(workCounts([approval, queued, running, failed, cancelled, checksFailed, accepted, verified, reviewing])).toEqual({ all: 9, "needs-you": 3, running: 1, completed: 4 });
     // All's order: what needs a person, then live, then queued, then done, then cancelled; ties newest first.
     const sorted = [cancelled, verified, queued, running, approval].map(status => ({ rank: status.rank, updatedAt: "2026-09-13T12:00:00.000Z", token: status.token })).sort(compareWorkRows).map(one => one.token);
     expect(sorted).toEqual(["needs-approval", "running", "ready", "ready-to-review", "cancelled"]);
@@ -272,8 +278,113 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(parseWorkView("running")).toBe("running");
     expect(parseWorkView("completed")).toBe("completed");
   });
+
+  test("an unanswered question leads over a disconnected builder while stop, approval, failure, and uncertain ownership stay visible", () => {
+    const question = { id: 12, runId: 9, question: "Which retry policy should we use?", overdue: false };
+    const disconnected = facts({ openDecision: question, dispatch: diagnosis({ code: "no-worker-online", summary: "Builder disconnected", action: "start-worker" }) });
+    expect(workStatusOf(disconnected)).toMatchObject({
+      token: "waiting-decision", label: "Waiting on your answer", detail: question.question,
+      action: { label: "Answer question", kind: "open-task" }, views: ["all", "needs-you"], rank: 0,
+      diagnostics: [{ token: "no-worker-online", label: "Builder disconnected" }],
+    });
+    expect(workStatusOf({ ...disconnected, openDecision: null })).toMatchObject({ token: "no-worker-online", action: { label: "Check connection" } });
+    for (const code of ["needs-approval", "waiting-incident", "vanished-run", "stopped", "held"] as const) {
+      expect(workStatusOf(facts({ openDecision: question, dispatch: diagnosis({ code }) })).token, code).toBe(code);
+    }
+    expect(workStatusOf(facts({ openDecision: question, state: "failed", dispatch: diagnosis({ code: "failed" }) })).token).toBe("failed");
+    expect(workStatusOf(facts({ openDecision: question, state: "cancelled" }))).toMatchObject({ token: "cancelled", views: ["all"], action: null });
+    expect(workStatusOf(facts({ openDecision: question, state: "done", result: built({ verdict: "refuted", reasons: ["the repository's approved verification command exited 1"] }) })).token).toBe("checks-failed");
+    const stop = { run: 9, role: "builder" as const, stop: {} as import("./store.js").RunStop };
+    expect(workStatusOf({ ...disconnected, control: { ...stop, kind: "stopping", unsettledRun: true } }).token).toBe("stopping");
+    expect(workStatusOf({ ...disconnected, control: { ...stop, kind: "paused", outcome: "interrupted", committed: false, worktree: null } }).token).toBe("stopped");
+    expect(workStatusOf(facts({ openDecision: question, state: "running", liveRunId: 9, dispatch: diagnosis({ code: "running", condition: "running" }) }))).toMatchObject({ token: "waiting-decision", views: ["all", "needs-you", "running"] });
+  });
 });
 
  test("saved evidence awaiting assessment has one clear review action", () => {
-  expect(resultStatusOf(built({ verdict: "short", reasons: [GOAL_ASSESSMENT_PENDING] }))).toMatchObject({ token: "review-pending", label: "Ready for goal review", action: { label: "Review result", kind: "open-review" } });
+  expect(resultStatusOf(built({ verdict: "short", reasons: [GOAL_ASSESSMENT_PENDING] }))).toMatchObject({ token: "verification-needed" });
+});
+
+// Assignment rendering shares the same work-status contract.
+describe("assignment interface", () => {
+  function snapshot(changes: Partial<AssignmentSnapshot> = {}): AssignmentSnapshot {
+    return { version: 1, rootId: 'root task', activeTaskId: 'correction/2', repo: '/project one', title: 'Keep the total correct',
+      state: 'working', detail: 'The correction is running.', primaryAction: { code: 'inspect-run', label: 'View progress', target: { taskId: 'correction/2', runId: 18, decisionId: null }, access: 'read', retry: 'read-again' },
+      attention: [], attempts: [{ taskId: 'root task', runId: 9, label: 'Checks failed', detail: 'The total did not match.' }, { taskId: 'correction/2', runId: 18, label: 'Building', detail: 'The correction is running.' }],
+      owner: null, receipt: null, completion: null, handoff: null, publication: null, deployment: { status: 'not-recorded' }, ...changes };
+  }
+
+  describe('assignment presentation', () => {
+    test('uses the authoritative state; attempts and self-reported results do not confer completion', () => {
+      const assignment = snapshot({ attempts: [{ taskId: 'root task', runId: 9, label: 'Done — deployed!', detail: 'Agent says all done.' }] });
+      expect(assignmentStatusOf(assignment).label).toBe('Working');
+      expect(assignmentStatusOf(assignment).views).toEqual(['all']);
+      expect(assignmentStatusOf(snapshot({ state: 'ready-to-check' })).views).toEqual(['all', 'needs-you', 'completed']);
+      expect(assignmentStatusOf(snapshot({ state: 'complete' })).label).toBe('Complete');
+    });
+
+    test('links exact results, decisions, attempts, and explicit historical versions', async () => {
+      const assignment = snapshot({ primaryAction: { code: 'open-result', label: 'Review result', target: { taskId: 'correction/2', runId: 18, decisionId: null }, access: 'read', retry: 'read-again' } });
+      const url = new URL(assignmentActionHref(assignment)!, 'https://example.test');
+      expect(url.pathname).toBe('/review');
+      expect(Object.fromEntries(url.searchParams)).toEqual({ result: 'correction/2', run: '18', project: '/project one' });
+      expect(assignmentActionHref(snapshot({ primaryAction: { ...assignment.primaryAction!, code: 'answer-decision', target: { taskId: 'correction/2', runId: 18, decisionId: 24 } } }))).toBe('/d/24');
+      const window = new Window();
+      try {
+        window.document.body.innerHTML = assignmentSummaryHtml(assignment);
+        const details = window.document.querySelector('details')!;
+        expect(details.open).toBe(false);
+        expect(details.querySelector('a')?.getAttribute('href')).toBe('/t/root%20task?version=root%20task');
+        expect([...details.querySelectorAll('a')].map(a => a.getAttribute('href'))).toContain('/r/18');
+        expect(window.document.querySelectorAll('[data-primary-action]')).toHaveLength(1);
+        expect(window.document.querySelector('form')).toBeNull();
+      } finally { await window.happyDOM.close(); }
+    });
+
+    test('keeps blocking detail visible once and escapes untrusted content', async () => {
+      const window = new Window();
+      try {
+        const detail = 'The provider stopped <script>alert(1)</script>.';
+        window.document.body.innerHTML = assignmentSummaryHtml(snapshot({ state: 'needs-decision', detail, attention: [detail, 'An earlier task is still active.'] }), { hideAction: true, problem: true });
+        const summary = window.document.querySelector('section')!;
+        expect(summary.querySelector('script')).toBeNull();
+        expect(summary.querySelectorAll(':scope > .problem')).toHaveLength(2);
+        expect(summary.querySelector('.assignment-detail')?.closest('details')).toBeNull();
+        expect(summary.querySelector('[data-primary-action]')).toBeNull();
+        window.document.body.innerHTML = assignmentSummaryHtml(snapshot(), { diagnostics: [
+          { token: 'report-ready', label: 'Report ready', detail: 'Read the report.', tone: 'ready' },
+          { token: 'evidence-damaged', label: 'Evidence unavailable', detail: 'The saved diff is unreadable.', tone: 'problem' },
+        ] });
+        expect(window.document.querySelector('[data-work-diagnostic=report-ready]')?.className).toBe('meta');
+        expect(window.document.querySelector('[data-work-diagnostic=evidence-damaged]')?.className).toBe('problem');
+        expect(window.document.body.textContent).toContain('Read the report.');
+        expect(window.document.body.textContent).toContain('The saved diff is unreadable.');
+      } finally { await window.happyDOM.close(); }
+    });
+
+    test('fresh evidence damage remains visible without inventing a retry or changing readiness', () => {
+      const assignment = snapshot({ state: 'complete' });
+      const damaged = { token: 'evidence-damaged', label: 'Evidence unavailable', detail: 'The saved diff is unreadable.', tone: 'problem' as const, action: null };
+      const shown = assignmentWithEvidence(assignment, damaged);
+      expect(shown.state).toBe('complete');
+      expect(shown.attention).toContain(damaged.detail);
+      expect(assignment.state).toBe('complete');
+      expect(assignmentWithEvidence(snapshot(), null).state).toBe('working');
+      const blocked = snapshot({ state: 'needs-decision', detail: 'An earlier task is still active.', attempts: [{ taskId: 'correction/2', runId: 18, label: 'Ready to review', detail: 'Previously passed.' }] });
+      const fresh = assignmentWithEvidence(blocked, damaged, 18);
+      expect(fresh.state).toBe('needs-decision');
+      expect(fresh.detail).toBe(blocked.detail);
+      expect(fresh.primaryAction).toEqual(blocked.primaryAction);
+      expect(fresh.attempts[0]).toMatchObject({ taskId: 'correction/2', runId: 18, label: 'Ready to review', detail: damaged.detail });
+      expect(assignmentSummaryHtml(fresh)).toContain(damaged.detail);
+      expect(assignmentWithEvidence(blocked, damaged, 9).attempts).toEqual(blocked.attempts);
+    });
+  });
+
+  test('Ready is a state and does not introduce a review queue or approval form', () => {
+    const html = assignmentSummaryHtml(snapshot({ state: 'ready-to-check', detail: 'Checks failed (exit 1).' }));
+    expect(html).toContain('>Ready</h2>');
+    expect(html).toContain('Checks failed (exit 1).');
+    expect(html).not.toMatch(/review-retry-auto|retry-review|<form/);
+  });
 });

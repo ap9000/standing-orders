@@ -5,17 +5,18 @@
 //
 // Run it from the candidate's own checkout (the builder's worktree). It stages
 // the packed runtime beside the installed ones, proves the candidate against
-// the plane's own records — verified machine proof, a settled independent
-// review that upheld every signed criterion, the exact approved command — and
+// the plane's own records — the exact approved check passed and the lead or
+// user marked that saved result complete — and
 // then drains, backs up, rehearses, swaps the launchd service, migrates, and
 // re-opens admission, journaling every phase so a crash resumes or restores.
 //
 // Phases: stage → prepare → rehearse → swap → finish (default: all). A journal
 // in the staging directory records progress; rerun with --stage <dir> and
 // --phase <name> to resume one. Nothing here weakens an approval: the candidate
-// must already read verified and reviewed, or the script stops before touching
+// must already be checked and marked complete, or the script stops before touching
 // the service.
 import { DatabaseSync, backup } from "node:sqlite";
+import { deploymentCandidate } from "./deploy-candidate.mjs";
 import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, openSync, closeSync, fsyncSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { randomUUID, createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -49,6 +50,7 @@ const publicUrl = (livePlist.match(/<string>--public-url<\/string>\s*<string>([^
 const load = async (root, name) => import(pathToFileURL(join(root, name)).href);
 const oldRt = { store: await load(priorDist, "store.js"), gate: await load(priorDist, "desktop-update-gate.js"), evidence: await load(priorDist, "verification-evidence.js"), update: await load(priorDist, "desktop-update.js") };
 oldRt.coding = await loadCodingDeploymentRuntime(priorDist);
+const candidateAssignment = await load(join(source, "dist"), "assignment.js");
 const candidateHead = execFileSync("git", ["-C", source, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const short = candidateHead.slice(0, 7);
 const stageDir = flag("stage") ?? join(stateDir, "staged-upgrades", `browser-${short}-${randomUUID().slice(0, 6)}`);
@@ -60,8 +62,9 @@ const save = (r, phase) => { r.phase = phase; r.updatedAt = new Date().toISOStri
 const loadPhase = phase => {
   // The plane's records are re-read before every phase, not only at entry:
   // a revoked approval or a changed command between phases stops the swap.
-  { const db = new DatabaseSync(database, { readOnly: true }); try { facts(db); } finally { db.close(); } }
+  const current = (() => { const db = new DatabaseSync(database, { readOnly: true }); try { return facts(db); } finally { db.close(); } })();
   const r = readJournal();
+  requireTrue(current.completion.digest === r.completion?.digest && current.gateDigest === r.gateDigest, "The completed result or its passing check changed since staging.");
   requireTrue(r.phase === phase && r.candidate === candidateHead && r.database === database, `Journal is at ${r.phase} for ${r.candidate?.slice(0, 7)}, expected ${phase} for ${short}.`);
   requireTrue(r.builder === runId && r.nextRuntime === nextDist, "The journal belongs to a different run or staging directory.");
   const packed = readdirSync(stageDir).find(f => f.endsWith(".tgz"));
@@ -73,27 +76,11 @@ const loadPhase = phase => {
 // ---- the plane's own records for this candidate -----------------------------
 function facts(db) {
   const store = new oldRt.store.Store(db);
-  const run = store.getRun(runId);
-  requireTrue(run && run.outcome === "built" && run.headRevision === candidateHead, `Run ${runId} is not a built attempt at ${short}.`);
-  const ref = store.refById(run.taskRef);
-  const taskId = ref.externalId;
-  const scope = store.getScope(taskId);
-  requireTrue(scope && scope.approvedDigest === scope.digest && scope.digest === run.scopeDigest, "The run's signed scope is no longer the approved one.");
-  const proof = store.proofVerdictFor(runId);
-  const criteria = scope.acceptance.length;
-  requireTrue(proof && (proof.machineVerdict ?? proof.verdict) === "verified", `Run ${runId} does not read verified (${proof?.verdict ?? "no verdict"}).`);
-  const reviewId = store.reviewRetryStateOf(runId)?.succeeded?.runId ?? null;
-  const review = reviewId ? store.getRun(reviewId) : null;
-  requireTrue(review && review.parentRun === runId && review.outcome === "no-change", "No settled independent review for this run.");
-  const judged = store.criterionReviewsFor(runId);
-  requireTrue(judged.length === criteria && new Set(judged.map(c => c.criterionId)).size === criteria && judged.every(c => c.judgement === "upholds" && c.headSha === candidateHead && c.scopeDigest === scope.digest), "The review did not uphold every signed criterion on this exact candidate.");
-  const evidence = oldRt.evidence.verificationEvidence(store, evidenceRoot, runId);
-  requireTrue(evidence.ok && evidence.bytes, `Native gate evidence unavailable: ${evidence.problem ?? "no receipt"}.`);
-  const gate = JSON.parse(evidence.bytes);
-  const live = store.liveVerifyCommand(ref.repo);
-  requireTrue(gate.head === candidateHead && gate.result.exitCode === 0 && live && gate.command.command === live.command, "The native gate did not pass this candidate under the currently approved command.");
-  requireTrue(resolve(run.worktree) === source || execFileSync("git", ["-C", run.worktree, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() === candidateHead, "Run this from the builder's worktree for this run.");
-  return { taskId, repo: ref.repo, scopeDigest: scope.digest, reviewer: reviewId, proofVerdict: proof.verdict, acceptance: store.proofAcceptance(runId), criteria, worktree: run.worktree, gate };
+  const result = deploymentCandidate(store, { runId, head: candidateHead, evidenceRoot, now: new Date() }, {
+    assignmentOf: candidateAssignment.assignmentOf, verificationEvidence: oldRt.evidence.verificationEvidence,
+  });
+  requireTrue(resolve(result.worktree) === source || execFileSync("git", ["-C", result.worktree, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() === candidateHead, "Run this from the builder's worktree for this run.");
+  return result;
 }
 function quiet(db) {
   const work = oldRt.gate.activeUpdateWork(db);
@@ -252,7 +239,7 @@ async function prepare(staged) {
     const nextSchema = (await load(nextDist, "store.js")).SCHEMA_VERSION;
     const f = facts(db);
     writeFileSync(join(stageDir, "release.json"), JSON.stringify({ ...f, run: runId, head: candidateHead, at: new Date().toISOString(), ...staged }, null, 1));
-    const r = { id: randomUUID(), candidate: candidateHead, database, phase: "preparing", schema, nextSchema, createdAt: new Date().toISOString(), backup: join(stageDir, "orders.backup.db"), priorRuntime: priorDist, nextRuntime: nextDist, builder: runId, reviewer: f.reviewer, task: f.taskId, repo: f.repo, scopeDigest: f.scopeDigest, ...staged, proofVerdict: f.proofVerdict, manualAcceptance: f.acceptance, publicUrl };
+    const r = { id: randomUUID(), candidate: candidateHead, database, phase: "preparing", schema, nextSchema, createdAt: new Date().toISOString(), backup: join(stageDir, "orders.backup.db"), priorRuntime: priorDist, nextRuntime: nextDist, builder: runId, completion: f.completion, gateDigest: f.gateDigest, task: f.taskId, repo: f.repo, scopeDigest: f.scopeDigest, ...staged, proofVerdict: f.proofVerdict, manualAcceptance: f.acceptance, publicUrl };
     observeCodingDeployment(oldRt.coding, database, r);
     quiet(db);
     r.oldService = service(priorDist);
@@ -415,11 +402,11 @@ async function finish() {
 
 // Every entry point — the whole run or one resumed phase — proves the
 // candidate against the plane's records first. Nothing is staged, and no
-// service is touched, for a run that does not read verified and reviewed.
+// service is touched, until its approved check passed and its exact result is complete.
 const phases = { stage, prepare, rehearse, swap, finish };
 requireTrue(phaseWanted === "all" || phases[phaseWanted], "Use --phase stage|prepare|rehearse|swap|finish, or omit it for all.");
 const proven = (() => { const db = new DatabaseSync(database, { readOnly: true }); try { return facts(db); } finally { db.close(); } })();
-say(`Candidate ${short} — task ${proven.taskId}, run ${runId}, review ${proven.reviewer}, proof ${proven.proofVerdict}, ${proven.criteria} criteria upheld.`);
+say(`Candidate ${short} — task ${proven.taskId}, run ${runId}, checks passed, marked complete by ${proven.completion.actor}.`);
 say(`Installed runtime: ${priorDist}`);
 say(`Staging directory: ${stageDir}`);
 if (phaseWanted === "all") {

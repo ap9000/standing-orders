@@ -1,4 +1,5 @@
 import { TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
+import { ASSIGNMENT_TOOLS, assignmentForCoordinator } from "./assignment-adapters.js";
 /**
  * `standing-orders mcp` — the MCP stdio server (MCP gateway spec v6).
  *
@@ -102,13 +103,14 @@ type Tool = {
 
 const CONTRACT_GUIDE = [
   "standing-orders MCP contract.",
-  "You hold a coordinator credential: you may READ the plane inside your repo allowlist, and FILE proposals — nothing else.",
+  "You hold a coordinator credential: you may read inside your repo allowlist, file proposals, and record assignment ownership and receipt checks. Ownership and receipt checks grant no execution or approval authority.",
   "A filed proposal is an ordinary unapproved task: it is quarantined from planning, claiming, and running until the operator signs its scope in a password ceremony that shows them who asked. Modes never auto-admit coordinator filings.",
   "file_proposal requires an idempotency_key (8-64 printable chars, unique per request): replaying the same key+request returns the original task; the same key with a different request refuses. deliverable 'report' files a scout task: a read-only investigation whose only output is a report on the task page, never a branch.",
   "You are rate-limited per hour and capped on outstanding unapproved filings. Refusals say the limit and the road in words.",
   "recap, list_decisions, get_decision, and queue are the plane's own read queries (shared with the operator's mate). get_decision shows each option's consequence, never the builder's recommendation.",
   "propose_next, propose_reserve, propose_hold, propose_unhold, propose_scope, propose_cancel, and propose_answer write a PROPOSAL row and nothing else: an approver confirms it on the console or the CLI, and a stale one refuses there. Proposals share your hourly filing rate and hold at most 20 pending per credential; they expire after seven days.",
   "Approve, steer, answer, pick, mint, configure, merge: those verbs do not exist on this surface, by construction.",
+  "Claim one assignment, then follow list_assignment_updates with a saved cursor; inspect get_assignment when a current result or decision needs attention. claim_assignment records its lead; acknowledge_assignment records that lead's check of an exact ready receipt. Neither operation grants authority, accepts proof, answers decisions, approves work, publishes, or deploys.",
 ].join("\n");
 
 /** The descriptor's inputSchema IS the runtime parser (review finding 2):
@@ -160,6 +162,8 @@ function invalidArgs(schema: Json, args: Record<string, unknown>): string | null
       const max = rule["maxLength"];
       if (typeof min === "number" && value.length < min) return "`" + key + "` is shorter than " + String(min);
       if (typeof max === "number" && value.length > max) return "`" + key + "` is longer than " + String(max);
+      const pattern = rule["pattern"];
+      if (typeof pattern === "string" && !new RegExp(pattern).test(value)) return "`" + key + "` does not match its required format";
       const allowed = rule["enum"];
       if (Array.isArray(allowed) && !allowed.includes(value)) return "`" + key + "` must be one of " + allowed.join(", ");
     }
@@ -181,6 +185,13 @@ function str(args: Record<string, unknown>, name: string, max: number): string |
 }
 
 const TOOLS: Tool[] = [
+  ...ASSIGNMENT_TOOLS.map(spec => ({
+    name: spec.name, description: spec.description, inputSchema: spec.inputSchema as unknown as Json,
+    handle: (ctx: ToolContext, args: Record<string, unknown>) => {
+      const result = assignmentForCoordinator(ctx.store, ctx.token, spec.operation, args, ctx.now, ctx.evidenceRoot);
+      return result.ok ? { ok: true as const, body: result.body as unknown as Json } : { ok: false as const, message: `${result.reason}: ${result.message}` };
+    },
+  })),
   {
     name: "status",
     description: "The plane's liveness facts over your repo allowlist: what waits on the operator, what runs, what finished in the last 24h.",
@@ -221,7 +232,7 @@ const TOOLS: Tool[] = [
     handle: (ctx, args) => {
       const ref = str(args, "ref", 64);
       if (ref === null) return { ok: false, message: "ref is a task id, 1-64 characters" };
-      const detail = taskDetailFor(ctx.store, ctx.who, ref, ctx.evidenceRoot);
+      const detail = taskDetailFor(ctx.store, ctx.who, ref, ctx.evidenceRoot, ctx.now);
       if (detail === null) return { ok: false, message: `not-found: no task \`${ref}\` in your repositories` };
       return { ok: true, body: detail as unknown as Json };
     },

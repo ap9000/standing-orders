@@ -22,6 +22,7 @@ import { GUIDES, guideNamed } from "./guides.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, isLargeRepo } from "./onboard.js";
 import { run as execRun } from "./exec.js";
 import { COMMAND_GUIDE, SURFACE_NOTES, SURFACE_SCHEMA_VERSION } from "./surface.js";
+import { runSessionCommand, SESSION_CLI_ACTIONS, type SessionCliOptions } from "./session-cli.js";
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { readPulls } from "./pulls.js";
 import {
@@ -92,6 +93,7 @@ Usage
   standing-orders skills get <name>  print one guide (version-matched, never stale)
   standing-orders demo             a seeded throwaway sandbox — see it working in 90 seconds
   standing-orders up               app + builder for every saved project — the normal start
+  standing-orders session          native coding sessions through the running service
 
 Operating the queue — \`standing-orders task\` prints the whole surface,
 and any queue command + --help prints it too
@@ -204,12 +206,14 @@ export function parseArgs(argv: readonly string[]): ParseResult {
 export const TOP_LEVEL_COMMANDS: readonly string[] = [
   "", "pulls", "graph", "repos", "repos add", "repos remove", "repos add-from-github",
   "link", "unlink", "contract", "skills list", "skills get", "skills install", "demo",
+  ...SESSION_CLI_ACTIONS.map(action => `session ${action}`),
 ];
 
 export const OPERATE_COMMANDS = new Set([
   "up",
   "ready",
   "task",
+  "assignment",
   "claim",
   "heartbeat",
   "release",
@@ -252,6 +256,7 @@ export const OPERATE_COMMANDS = new Set([
 export type MainOptions = {
   binSource?: string;
   operate?: OperateOptions;
+  session?: SessionCliOptions;
   /** Injected by tests: the gh-facing halves of `repos add-from-github` —
    * the verb's parsing, gating, and enrollment are what CLI tests prove;
    * gh itself is proved by onboard.test.ts. */
@@ -392,6 +397,7 @@ async function dispatch(
     return runLinkCommand(first, rest, write, mainOptions.binSource);
   }
   if (first === "contract") return runContractCommand(rest, write);
+  if (first === "session") return runSessionCommand(rest, write, mainOptions.session);
   if (first === "demo") return runDemoCommand(rest, write);
   if (first === "skills") return runSkillsCommand(rest, write);
   if (first === "repos") return runReposCommand(rest, write, mainOptions.onboard);

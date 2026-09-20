@@ -99,6 +99,7 @@ describe("schema v46: structured output attempts are evidence", () => {
         "INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, sha256, capture, created_at) VALUES (?, 'structured-output', ?, 2, 2, 'x', 'x', ?)",
       ).run(run, `${run}/not-yet.txt`, "2026-09-10T00:00:02.000Z"),
     ).toThrow();
+    store.raw().exec("DROP TABLE service_cursor");
     store.raw().prepare("UPDATE schema_version SET version = 45").run();
     store.close();
     store = null;

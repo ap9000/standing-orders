@@ -21,6 +21,8 @@ import { fileTaskProposal } from "./proposal.js";
 import { describeScope } from "./scope.js";
 import { reportSummaryFor } from "./mate-tools.js";
 import type { Store } from "./store.js";
+import { taskWorkSummaryOf, type WorkSummary } from "./work-summary.js";
+import { assignmentOf, assignmentBrief } from "./assignment.js";
 
 declare const verifiedCoordinatorBrand: unique symbol;
 export type VerifiedCoordinator = {
@@ -475,8 +477,11 @@ export function taskDetailFor(
   who: VerifiedCoordinator,
   taskId: string,
   evidenceRoot?: string,
+  now: Date = new Date(),
 ): {
   ref: string; title: string; state: string; repo: string;
+  work: WorkSummary | null;
+  assignment: ReturnType<typeof assignmentBrief>;
   deliverable: "branch" | "report";
   /** A finished scout's report (mate arc §10); null when there is none. */
   report: { title: string; summary: string; followUps: { title: string; goal: string }[] } | { problem: string } | null;
@@ -552,6 +557,8 @@ export function taskDetailFor(
   const deliverable = store.refForId(rid)?.deliverable ?? "branch";
   return {
     ref: String(row["tid"]),
+    work: taskWorkSummaryOf(store, taskId, now, { principal: "coordinator", repos: who.repos }),
+    assignment: assignmentBrief(assignmentOf(store, taskId, now, { principal: "coordinator", repos: who.repos }, evidenceRoot)),
     title: String(row["title"]),
     state: String(row["state"]),
     repo: String(row["repo"]),

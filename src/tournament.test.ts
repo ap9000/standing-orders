@@ -69,7 +69,7 @@ describe("the v14 migration", () => {
       raw.exec("INSERT INTO hold_old SELECT * FROM hold");
       raw.exec("DROP TABLE hold");
       raw.exec("ALTER TABLE hold_old RENAME TO hold");
-      raw.exec("UPDATE schema_version SET version = 13");
+      raw.exec("DROP TABLE service_cursor; UPDATE schema_version SET version = 13");
       raw.close();
 
       store = openStore(file);

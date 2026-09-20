@@ -286,6 +286,8 @@ export type ProofView =
   | { ok: true; run: number; proof: ParsedProof }
   | { ok: false; run: number; problem: string };
 
+/** Verifies this run's proof bytes and format. A handoff that relies on a
+ * revision's ancestors must also recheck its saved review-context custody. */
 export function readVerifiedProofForRun(store: Store, root: string, runId: number): ProofView | null {
   const artifact = store.artifactsFor(runId).find(one => one.kind === "proof") ?? null;
   if (artifact === null) return null;
@@ -440,6 +442,8 @@ export function storeEvidence(
  * decide whether a shortened representation or failed capture is usable;
  * a verified failure log is still a failure, not successful evidence.
  */
+// Recovery uses this read boundary for retained receipts and handoffs: inspecting
+// bytes must never reseal a missing artifact or turn a saved failure into a pass.
 export function readVerifiedArtifact(
   root: string,
   artifact: Artifact,

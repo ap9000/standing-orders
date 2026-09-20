@@ -126,6 +126,7 @@ function windBackToV49(file: string, version: number): void {
   raw.exec("ALTER TABLE review_request_v49 RENAME TO review_request");
   raw.exec("CREATE UNIQUE INDEX one_open_review_request ON review_request (run) WHERE consumed_at IS NULL");
   raw.exec("COMMIT");
+  raw.exec("DROP TABLE service_cursor");
   raw.prepare("UPDATE schema_version SET version = ?").run(version);
   raw.close();
 }
@@ -492,7 +493,7 @@ describe("schema 62 compatibility without manual refresh", () => {
     const root = mkdtempSync(join(tmpdir(), "refresh-migration-")), file = join(root, "test.db");
     try {
       let store = openStore(file); seed(store, join(root, "evidence"));
-      expect(SCHEMA_VERSION).toBe(69);
+      expect(SCHEMA_VERSION).toBe(70);
       expect(store.raw().prepare("PRAGMA table_info(run)").all().some(row => row["name"] === "review_refresh")).toBe(false);
       expect(store.raw().prepare("PRAGMA table_info(review_request)").all().some(row => row["name"] === "refresh_json")).toBe(false);
       // The retired schema-62 draft (a refresh request ledger, a second
@@ -526,6 +527,7 @@ describe("schema 62 compatibility without manual refresh", () => {
         for (const table of V61_TABLES) raw.exec(`DROP TABLE ${table}`);
         for (const column of V61_COLUMNS) raw.exec(`ALTER TABLE notification DROP COLUMN ${column}`);
       }
+      raw.exec("DROP TABLE service_cursor");
       raw.prepare("UPDATE schema_version SET version = ?").run(version);
       raw.close();
       store = openStore(file);
@@ -541,7 +543,7 @@ describe("schema 62 compatibility without manual refresh", () => {
       expect(store.criterionReviewsFor(1)).not.toEqual([]); store.close();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
-  test.each([70, -70])("schema %s refuses before every write and preserves bytes — the fence an older reader applies to this v69 file", version => {
+  test.each([SCHEMA_VERSION + 1, -(SCHEMA_VERSION + 1)])("schema %s refuses before every write and preserves bytes — the fence an older reader applies to this current file", version => {
     const root = mkdtempSync(join(tmpdir(), "refresh-refusal-")), file = join(root, "test.db");
     try {
       const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(version); store.close();
@@ -552,7 +554,7 @@ describe("schema 62 compatibility without manual refresh", () => {
       expect(readFileSync(file)).toEqual(before);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
-  test("-69 is an impossible marker: an upgrade never begins at the version it upgrades to", () => {
+  test("the negative current version is an impossible marker: an upgrade never begins at the version it upgrades to", () => {
     const root = mkdtempSync(join(tmpdir(), "refresh-refusal-")), file = join(root, "test.db");
     try {
       const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(-SCHEMA_VERSION); store.close();

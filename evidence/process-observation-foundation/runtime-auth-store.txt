@@ -1,0 +1,387 @@
+Exact complete functions from installed runtime20cc. Source/ranges/hashes: runtime-audit.json.
+Not executable: referenced imports and unrelated functions remain in the lossless archive.
+
+===== runner.js :: register (lines 41-82; complete function) =====
+export function register(store, options) {
+    const { name, host, capacity = 1, repos = [], agents = [], now, newToken = mintToken, mutation = {}, } = options;
+    const token = newToken();
+    /**
+     * Anything the previous holder of this name still had is taken back first.
+     *
+     * Registering under a name is a new process saying it exists; whatever the
+     * last one was holding, it is not holding now. Skipping this is worse than
+     * it sounds: the fresh `heartbeat_at` makes the old identity look alive
+     * again, so the reaper walks straight past its abandoned claims and
+     * worktrees and they are stranded for good.
+     */
+    const previous = store.getRunner(name);
+    const reclaimed = previous === null
+        ? null
+        : {
+            runner: name,
+            claims: store.releaseClaimsOf(name, now),
+            worktrees: store.releaseWorktreesOf(name, now),
+        };
+    const proposed = {
+        name,
+        host,
+        capacity,
+        repos: canonicalRepos(repos),
+        agents: [...agents],
+        registeredAt: now.toISOString(),
+        heartbeatAt: now.toISOString(),
+        retiredAt: null,
+    };
+    // The store assigns the incarnation while holding its write transaction.
+    // Doing it from the `previous` snapshot above is racy: two registrars can
+    // read the same predecessor and otherwise mint the same generation.
+    const runner = store.saveRunner(proposed, hashToken(token), mutation);
+    return {
+        runner,
+        token,
+        reclaimed: reclaimed !== null && (reclaimed.claims.length > 0 || reclaimed.worktrees.length > 0)
+            ? reclaimed
+            : null,
+    };
+}
+
+===== runner.js :: authenticate (lines 91-100; complete function) =====
+export function authenticate(store, name, token) {
+    const found = store.getRunner(name);
+    if (found === null)
+        return { ok: false, reason: "unknown" };
+    if (found.runner.retiredAt !== null)
+        return { ok: false, reason: "retired" };
+    return sameDigest(found.credentialHash, hashToken(token))
+        ? { ok: true, runner: found.runner }
+        : { ok: false, reason: "bad-token" };
+}
+
+===== runner.js :: registerRunnerIfIdle (lines 175-201; complete function) =====
+export function registerRunnerIfIdle(store, options) {
+    const { name, now } = options;
+    return store.transact(() => {
+        const existing = store.getRunner(name);
+        if (existing !== null && existing.runner.retiredAt === null && isAlive(existing.runner, now)) {
+            return {
+                ok: false,
+                reason: "runner-alive",
+                detail: `${name} heartbeated ${existing.runner.heartbeatAt} — it looks alive`,
+            };
+        }
+        const lease = store.liveWatchLeaseOf(name, now);
+        if (lease !== null) {
+            return {
+                ok: false,
+                reason: "watch-live",
+                detail: `${name} holds a live watch lease on ${lease.repo} until ${lease.until}`,
+            };
+        }
+        // Recovery BEFORE reclaim (finding 16): the open-run evidence must be
+        // read while it still exists; register()'s releaseClaimsOf would
+        // otherwise hide it from every later recovery.
+        const recoveredRuns = existing === null ? 0 : store.recoverRunnerWork(name, now).runs.length;
+        const registration = register(store, options);
+        return { ok: true, ...registration, recoveredRuns };
+    });
+}
+
+===== runner.js :: acquireWatchLeaseAuthed (lines 210-227; complete function) =====
+export function acquireWatchLeaseAuthed(store, args, now) {
+    return store.transact(() => {
+        const auth = authenticate(store, args.runner, args.token);
+        if (!auth.ok)
+            return { ok: false, reason: auth.reason };
+        // Watching a repo is a runner road like any other (MCP spec v6,
+        // round-4 finding 1): membership is proven in the same transaction
+        // as the lease, before any repo activity rides it.
+        if (!auth.runner.repos.includes(canonicalProject(args.repo) ?? resolve(args.repo))) {
+            return { ok: false, reason: "unauthorized-repo" };
+        }
+        const got = store.acquireWatchLease(args.runner, args.repo, args.owner, args.ttlMs, now);
+        if (!got.ok)
+            return { ok: false, reason: "watch-busy", holder: got.holder, until: got.until };
+        const recovered = got.superseded === null ? 0 : store.recoverIncarnation(args.runner, got.superseded, now);
+        return { ok: true, generation: got.generation, superseded: got.superseded, recovered };
+    });
+}
+
+===== runner.js :: heartbeatWatchLeaseAuthed (lines 231-241; complete function) =====
+export function heartbeatWatchLeaseAuthed(store, args, now) {
+    return store.transact(() => {
+        const auth = authenticate(store, args.runner, args.token);
+        if (!auth.ok)
+            return false;
+        const renewed = store.heartbeatWatchLease(args.runner, args.repo, args.owner, args.ttlMs, now);
+        if (renewed)
+            store.touchRunner(args.runner, now);
+        return renewed;
+    });
+}
+
+===== runner.js :: mintToken (lines 323-325; complete function) =====
+function mintToken() {
+    return randomBytes(32).toString("base64url");
+}
+
+===== runner.js :: hashToken (lines 326-328; complete function) =====
+export function hashToken(token) {
+    return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+===== runner.js :: sameDigest (lines 329-336; complete function) =====
+function sameDigest(left, right) {
+    const a = Buffer.from(left, "utf8");
+    const b = Buffer.from(right, "utf8");
+    // timingSafeEqual throws on a length mismatch, which is itself a leak of
+    // sorts; equal-length hex digests make that unreachable in practice, and the
+    // guard keeps it from throwing if one is ever malformed.
+    return a.length === b.length && timingSafeEqual(a, b);
+}
+
+===== runner.js :: isAlive (lines 256-263; complete function) =====
+export function isAlive(runner, now, livenessMs = DEFAULT_LIVENESS_MS) {
+    if (runner.retiredAt !== null)
+        return false;
+    const last = Date.parse(runner.heartbeatAt);
+    if (Number.isNaN(last))
+        return false;
+    return now.getTime() - last < livenessMs;
+}
+
+===== store.js :: transact (lines 6199-6216; complete function) =====
+    transact(body) {
+        if (this.transacting)
+            return body();
+        beginWriteWithin(this.db, CONCURRENT_WRITER_WAIT_MS);
+        this.transacting = true;
+        try {
+            const result = body();
+            this.db.exec("COMMIT");
+            return result;
+        }
+        catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+        finally {
+            this.transacting = false;
+        }
+    }
+
+===== store.js :: saveRunner (lines 7830-7878; complete function) =====
+    saveRunner(runner, credentialHash, mutation = {}) {
+        return this.once(mutation, "saveRunner", () => this.transact(() => {
+            const current = this.db
+                .prepare("SELECT registered_at FROM runner WHERE name = ?")
+                .get(runner.name);
+            const latestReviewer = this.db
+                .prepare(`SELECT MAX(root.started_at) AS started_at
+               FROM run AS root
+               JOIN run AS source ON source.id = root.parent_run
+              WHERE root.runner = ? AND root.role = 'reviewer' AND source.role != 'reviewer'`)
+                .get(runner.name);
+            const proposedMs = Date.parse(runner.registeredAt);
+            if (!Number.isFinite(proposedMs))
+                throw new Error(`runner ${runner.name}'s registration timestamp is invalid`);
+            const lowerBounds = [proposedMs];
+            if (current !== undefined) {
+                const currentMs = Date.parse(current.registered_at);
+                if (!Number.isFinite(currentMs))
+                    throw new Error(`runner ${runner.name}'s stored registration timestamp is invalid`);
+                lowerBounds.push(currentMs + 1);
+            }
+            // Historical review admission remains a fence even if a damaged or
+            // manually repaired database lost the runner row before re-register.
+            const reviewerMs = latestReviewer?.started_at == null ? Number.NaN : Date.parse(latestReviewer.started_at);
+            if (Number.isFinite(reviewerMs))
+                lowerBounds.push(reviewerMs + 1);
+            const registeredAt = new Date(Math.max(...lowerBounds)).toISOString();
+            const saved = {
+                ...runner,
+                registeredAt,
+                // Registration supplies equal timestamps. Preserve an explicitly
+                // different heartbeat for fixture callers, but move the ordinary
+                // registration heartbeat with its atomically assigned generation.
+                heartbeatAt: runner.heartbeatAt === runner.registeredAt ? registeredAt : runner.heartbeatAt,
+                retiredAt: null,
+            };
+            this.db
+                .prepare(`INSERT INTO runner
+               (name, host, credential_hash, capacity, repos, agents, registered_at, heartbeat_at, retired_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+             ON CONFLICT (name) DO UPDATE SET
+               host = excluded.host, credential_hash = excluded.credential_hash,
+               capacity = excluded.capacity, repos = excluded.repos, agents = excluded.agents,
+               registered_at = excluded.registered_at, heartbeat_at = excluded.heartbeat_at,
+               retired_at = NULL`)
+                .run(saved.name, saved.host, credentialHash, saved.capacity, JSON.stringify(saved.repos), JSON.stringify(saved.agents), saved.registeredAt, saved.heartbeatAt);
+            return saved;
+        }));
+    }
+
+===== store.js :: getRunner (lines 7902-7907; complete function) =====
+    getRunner(name) {
+        const row = this.db.prepare("SELECT * FROM runner WHERE name = ?").get(name);
+        if (row === undefined)
+            return null;
+        return { runner: readRunner(row), credentialHash: String(row["credential_hash"]) };
+    }
+
+===== store.js :: touchRunner (lines 7911-7915; complete function) =====
+    touchRunner(name, now) {
+        this.db
+            .prepare("UPDATE runner SET heartbeat_at = ? WHERE name = ? AND retired_at IS NULL")
+            .run(now.toISOString(), name);
+    }
+
+===== store.js :: acquireWatchLease (lines 17192-17227; complete function) =====
+    acquireWatchLease(runner, repo, owner, ttlMs, now) {
+        return this.transact(() => {
+            const stamp = now.toISOString();
+            const expires = new Date(now.getTime() + ttlMs).toISOString();
+            const row = this.db
+                .prepare("SELECT * FROM watch_lease WHERE runner = ? AND repo = ?")
+                .get(runner, repo);
+            if (row === undefined) {
+                this.db
+                    .prepare(`INSERT INTO watch_lease (runner, repo, owner, generation, started_at, expires_at, heartbeat_at)
+             VALUES (?, ?, ?, 1, ?, ?, ?)`)
+                    .run(runner, repo, owner, stamp, expires, stamp);
+                return { ok: true, generation: 1, superseded: null };
+            }
+            const holder = String(row["owner"]);
+            const live = String(row["expires_at"]) > stamp;
+            if (live && holder !== owner) {
+                return {
+                    ok: false,
+                    reason: "watch-busy",
+                    holder,
+                    until: String(row["expires_at"]),
+                };
+            }
+            const generation = live && holder === owner ? Number(row["generation"]) : Number(row["generation"]) + 1;
+            this.db
+                .prepare(`UPDATE watch_lease SET owner = ?, generation = ?, expires_at = ?, heartbeat_at = ?
+            WHERE runner = ? AND repo = ?`)
+                .run(owner, generation, expires, stamp, runner, repo);
+            return {
+                ok: true,
+                generation,
+                superseded: holder === owner ? null : holder,
+            };
+        });
+    }
+
+===== store.js :: heartbeatWatchLease (lines 17228-17234; complete function) =====
+    heartbeatWatchLease(runner, repo, owner, ttlMs, now) {
+        const { changes } = this.db
+            .prepare(`UPDATE watch_lease SET expires_at = ?, heartbeat_at = ?
+          WHERE runner = ? AND repo = ? AND owner = ? AND expires_at > ?`)
+            .run(new Date(now.getTime() + ttlMs).toISOString(), now.toISOString(), runner, repo, owner, now.toISOString());
+        return Number(changes) > 0;
+    }
+
+===== store.js :: releaseWatchLease (lines 17235-17239; complete function) =====
+    releaseWatchLease(runner, repo, owner, now) {
+        this.db
+            .prepare("UPDATE watch_lease SET expires_at = ? WHERE runner = ? AND repo = ? AND owner = ?")
+            .run(now.toISOString(), runner, repo, owner);
+    }
+
+===== store.js :: liveWatchLeaseOf (lines 17242-17249; complete function) =====
+    liveWatchLeaseOf(runner, now) {
+        const row = this.db
+            .prepare("SELECT repo, owner, expires_at FROM watch_lease WHERE runner = ? AND expires_at > ? LIMIT 1")
+            .get(runner, now.toISOString());
+        return row === undefined
+            ? null
+            : { repo: String(row["repo"]), owner: String(row["owner"]), until: String(row["expires_at"]) };
+    }
+
+===== store.js :: startWatchEpisode (lines 17145-17150; complete function) =====
+    startWatchEpisode(episode, now) {
+        const inserted = this.db
+            .prepare("INSERT INTO watch_episode (repo, runner, incarnation, started_at) VALUES (?, ?, ?, ?)")
+            .run(episode.repo, episode.runner, episode.incarnation, now.toISOString());
+        return Number(inserted.lastInsertRowid);
+    }
+
+===== store.js :: once (lines 18661-18677; complete function) =====
+    once(mutation, operation, body, worthRecording = () => true) {
+        const { idempotencyKey, actor = DEFAULT_ACTOR, at = new Date() } = mutation;
+        if (idempotencyKey === undefined)
+            return body();
+        const seen = this.db
+            .prepare("SELECT result FROM mutation WHERE idempotency_key = ?")
+            .get(idempotencyKey);
+        if (seen !== undefined)
+            return JSON.parse(String(seen["result"]));
+        const result = body();
+        if (!worthRecording(result))
+            return result;
+        this.db
+            .prepare("INSERT INTO mutation (idempotency_key, operation, result, actor, created_at) VALUES (?, ?, ?, ?, ?)")
+            .run(idempotencyKey, operation, JSON.stringify(result ?? null), actor, at.toISOString());
+        return result;
+    }
+
+===== store.js :: readRunner (lines 19879-19891; complete function) =====
+function readRunner(row) {
+    return {
+        name: String(row["name"]),
+        host: String(row["host"]),
+        capacity: Number(row["capacity"]),
+        repos: readJsonArray(row["repos"]),
+        agents: readJsonArray(row["agents"]),
+        registeredAt: String(row["registered_at"]),
+        heartbeatAt: String(row["heartbeat_at"]),
+        retiredAt: row["retired_at"] === null ? null : String(row["retired_at"]),
+        queueNote: row["queue_note"] === null || row["queue_note"] === undefined ? null : String(row["queue_note"]),
+    };
+}
+
+===== store.js :: readJsonArray (lines 19995-20003; complete function) =====
+function readJsonArray(value) {
+    try {
+        const parsed = JSON.parse(String(value));
+        return Array.isArray(parsed) ? parsed.filter((one) => typeof one === "string") : [];
+    }
+    catch {
+        return [];
+    }
+}
+
+===== store.js :: beginWriteWithin (lines 2596-2614; complete function) =====
+function beginWriteWithin(db, budgetMs) {
+    const deadline = performance.now() + budgetMs;
+    db.exec(`PRAGMA busy_timeout = ${WRITE_WAIT_SLICE_MS}`);
+    try {
+        for (;;) {
+            try {
+                db.exec("BEGIN IMMEDIATE");
+                return;
+            }
+            catch (error) {
+                if (!isDatabaseBusy(error) || performance.now() >= deadline)
+                    throw error;
+            }
+        }
+    }
+    finally {
+        waitForConcurrentWriter(db);
+    }
+}
+
+===== store.js :: isDatabaseBusy (lines 2565-2568; complete function) =====
+function isDatabaseBusy(error) {
+    const code = error?.errcode;
+    return typeof code === "number" && (code & 0xff) === 5;
+}
+
+===== store.js :: waitForConcurrentWriter (lines 2556-2558; complete function) =====
+function waitForConcurrentWriter(db) {
+    db.exec(`PRAGMA busy_timeout = ${CONCURRENT_WRITER_WAIT_MS}`);
+}
+
+Current recovery review context: The recovery anchor relies on atomic credential authentication, registration and lease updates; the complete functions above establish those transaction boundaries. This annotation grants no process-exit or settlement authority.

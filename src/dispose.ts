@@ -1,3 +1,4 @@
+// Assignment tracking grants no repair authority or attempts.
 import { originalTaskBase, focusedTestCommandSupported } from "./observations.js";
 /**
  * The build disposition service (Parity II Phase 2, v4 Q2 / v6 W1): the
@@ -28,7 +29,7 @@ import { modeTermsFromJson } from "./modes.js";
 import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
 import type { BuildResult } from "./builder.js";
 import type { Store } from "./store.js";
-import { manualReviewOnly, type ProofVerdict, type VerifyCommandFacts } from "./proof.js";
+import { type ProofVerdict, type VerifyCommandFacts } from "./proof.js";
 import { verificationEvidence, failedVerificationEvidence } from "./verification-evidence.js";
 import { classifyGateFailure, describeGateFailure, gateFailureSummary, type GateFailureClass } from "./gate-failure.js";
 import { propose, approve } from "./scope.js";
@@ -60,7 +61,7 @@ export type DisposeContext = {
   model: string | null;
   /** Where the attempt's tree lives — failure records name it. */
   worktreePath: string;
-  /** The same evidence root the builder used; required for automatic repair. */
+  /** The same evidence root the builder used. */
   evidenceRoot?: string;
   clock: () => Date;
 };
@@ -122,68 +123,9 @@ const STANDALONE_BROKE_REASONS = new Set([
   "git",
 ]);
 
-/**
- * Queue the semantic pass when either authority asked for it:
- * - v41 Strict / release is signed into this run's approved scope, so the
- *   approver who sealed those exact bytes is the requester;
- * - the older reviewAuto operating-mode term stays intact and is re-proved
- *   at dispatch as before.
- *
- * Both roads queue, never run inline, and both are ONE-SHOT (v50,
- * explicit-only retries): they declare themselves automatic, so the store
- * refuses them 'explicit-only' once the run carries any root review
- * attempt or any earlier ask — a replayed disposition (crash recovery, a
- * re-dispose, a second tick over the same outcome) never queues a retry,
- * and a stale automatic row is spent unrun at admission. Only a fresh
- * operator act (`task review`, the Retry review button) retries.
- * Refusals are silently fine here: no diff, a truncated capture, or an
- * existing request means there is nothing honest to review (and the run
- * page keeps that evidence visible).
- */
-export function maybeRequestAutoReview(store: Store, repo: string, runId: number, committed: boolean, noChange: boolean, now: Date): void {
-  const run = store.getRun(runId);
-  const ref = run === null ? null : store.refForId(run.taskRef);
-  const proof = store.proofVerdictFor(runId);
-  const direct = (proof?.matrix.length ?? 0) > 0 && proof!.matrix.every(row => row.assessment !== undefined);
-  // A diagnostic repair may establish that no code change was needed. Its
-  // fresh machine gate and inherited review context still need review.
-  const unchangedRepair = noChange && ref !== null && store.repairChainForDraft(ref.externalId) !== null;
-  if ((!committed || noChange) && !unchangedRepair && !(noChange && direct)) return;
-  const scope = ref === null ? null : store.getScope(ref.externalId);
-  // A diagnostic review of failed checks remains available explicitly. The
-  // automatic path waits for the machine gate, before spending a review ask.
-  const command = store.liveVerifyCommand(repo);
-  if (command !== null && (run === null || command.approvedAt > run.startedAt || proof === null ||
-      ((proof.machineVerdict ?? proof.verdict) !== "verified" && !manualReviewOnly(proof)))) return;
-  if (direct && proof!.machineVerdict !== "verified" && proof!.machineVerdict !== "attested") return;
-  if (!direct && proof?.matrix.some(row => row.requiredEvidence.includes("check") && row.state !== "pass" && !manualReviewOnly(proof))) return;
-  if (
-    run?.qualityMode === "strict" &&
-    scope?.qualityMode === "strict" &&
-    scope.approvedBy !== null &&
-    scope.approvedDigest === scope.digest &&
-    run.scopeDigest === scope.digest
-  ) {
-    store.requestReview(runId, scope.approvedBy, now, undefined, "automatic");
-    return;
-  }
-  const mode = store.activeMode(repo, now);
-  if (mode === null) return;
-  const terms = modeTermsFromJson(mode.termsJson);
-  if (terms === null || !terms.reviewAuto) return;
-  store.requestReview(runId, `mode ${mode.name}`, now, { kind: "mode", digest: mode.digest });
-}
-
-/** One follow-up after fenced completion: diagnose a failed machine gate or
- * request the ordinary independent review. No inline retry or extra reviewer. */
-function followUpBuild(context: DisposeContext, committed: boolean, noChange: boolean): void {
-  const { store, repo, runId, clock } = context;
-  const verdict = store.proofVerdictFor(runId);
-  if (context.evidenceRoot !== undefined && verdict !== null) {
-    maybeTriggerRepair(store, repo, context.evidenceRoot, runId, verdict.machineVerdict ?? verdict.verdict, clock(), "verification");
-  }
-  maybeRequestAutoReview(store, repo, runId, committed, noChange, clock());
-}
+/** Compatibility for historical integrations: finished work is handed to the
+ * lead. No model review is requested and no signed history is rewritten. */
+export function maybeRequestAutoReview(_store: Store, _repo: string, _runId: number, _committed: boolean, _noChange: boolean, _now: Date): void {}
 
 export function disposeBuildOutcome(context: DisposeContext, result: BuildResult): Disposition {
   // Stop and every terminal side effect compete under the same SQLite
@@ -288,7 +230,6 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
       });
       store.clearQuota(runner, provider, model ?? "");
       if (sealed.disowned) return { kind: "disowned" };
-      followUpBuild(context, result.committed, result.noChange === true);
       return { kind: "built", committed: result.committed, noChange: result.noChange === true };
     }
     if (policy === "standalone") {
@@ -371,9 +312,6 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
       // proves the credential, clearing any quota stamp.
       store.resetStrikes(taskRef);
       store.clearQuota(runner, provider, model ?? "");
-      // The standalone road deliberately stays out: its historical shape
-      // touches nothing beyond run records, and `task review` covers it.
-      followUpBuild(context, result.committed, result.noChange === true);
       return { kind: "built", committed: result.committed, noChange: result.noChange === true };
     }
     store.transact(() => {
@@ -708,8 +646,8 @@ export type RepairTrigger =
   | { kind: "none" };
 
 /**
- * The bounded repair loop's trigger: fired after a failed machine gate or a
- * review pass identifies unmet criteria. Composes at
+ * An explicitly requested repair from saved check or historical review findings.
+ * Automatic calls are retired. Composes at
  * most one durable revision draft naming exactly the unmet criterion ids,
  * inheriting the source scope and rubric verbatim — or settles the chain
  * at one of its four independent stops (integrity, no-progress, attempts
@@ -721,8 +659,11 @@ export type RepairTrigger =
  * the ordinary rails and strikes — this function only ever composes a
  * task and, at most, one scope approval.
  */
-export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: string, sourceRunId: number, verdict: ProofVerdict, now: Date, cause: "review" | "verification" = "review"): RepairTrigger {
+export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: string, sourceRunId: number, verdict: ProofVerdict, now: Date, cause: "review" | "verification" = "review", automatic = false): RepairTrigger {
   if (verdict !== "short" && verdict !== "refuted") return { kind: "none" };
+  // Findings go to the lead. Explicit repair/revision actions remain available.
+  // Historical mode signatures remain intact; no automatic follow-up spends.
+  if (automatic) return { kind: "none" };
   // One attempt per source run, ever (source_run UNIQUE) — checked first so
   // a re-fired trigger is a silent no-op, never a duplicate.
   if (store.repairChainFor(sourceRunId) !== null) return { kind: "none" };

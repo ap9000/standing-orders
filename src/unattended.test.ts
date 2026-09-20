@@ -25,6 +25,7 @@ import { runOperate, EXIT } from "./operate.js";
 import { run as exec, type ExecResult, type RunOptions } from "./exec.js";
 import { openStore } from "./store.js";
 import { register } from "./runner.js";
+import { assignmentOf, assignmentEvidenceIntact } from "./assignment.js";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -380,7 +381,7 @@ describe("v40: a drafted, unapproved repair moves the idle-spend invariant not a
     expect(afterApproval).toBe(EXIT.ok);
     expect(spawns).toBe(1); // one dispatch — the approved draft, and only it
   });
-  test("missing observation → unchanged follow-up → review completes with one full gate", async () => {
+  test("missing observation hands one checked build to the lead without an evidence follow-up", async () => {
     const { addApprover, propose, approve } = await import("./scope.js");
     const { presetTerms, modeTermsJson, modeDigestOf } = await import("./modes.js");
     const log = join(base, "gate-count.txt");
@@ -403,31 +404,18 @@ describe("v40: a drafted, unapproved repair moves the idle-spend invariant not a
     const terms = { ...presetTerms("standard", at(60).toISOString()), repairAuto: true, repairMaxAttempts: 3, reviewAuto: true };
     store.signMode({ repo, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, T0);
     store.close();
-    let builds = 0, reviews = 0, sourceRun = 0;
+    let builds = 0, reviews = 0;
     const provider: Runner = async (_file, args, options) => {
       const cwd = options!.cwd!, prompt = args[args.indexOf("-p") + 1]!;
-      if (prompt.includes("You are a REVIEWER")) {
-        reviews++;
-        if (reviews === 2) {
-          const observations = JSON.parse(await readFile(join(cwd, "REVIEW-OBSERVATIONS.json"), "utf8"));
-          expect(observations.sourceRun).toBe(sourceRun);
-          expect(observations.observations.map((o: { exitCode: number }) => o.exitCode)).toEqual([1, 0]);
-          expect(observations.observations[0].testSha256).toBe(observations.observations[1].testSha256);
-          expect(JSON.parse(await readFile(join(cwd, "REVIEW-VERIFICATION.json"), "utf8"))).toMatchObject({ version: 2, executedHere: false, reusedFrom: { run: sourceRun } });
-        }
-        return { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: reviews === 1 ? "cannot-tell" : "upholds", note: reviews === 1 ? "Run the saved regression on the original base and candidate" : "REVIEW-OBSERVATIONS.json shows the same regression failing on the original and passing on the saved candidate" }], learningAssessment: { decision: "none", reason: "Synthetic regression covers this flow" }, learning: [] }) }) };
-      }
+      if (prompt.includes("You are a REVIEWER")) reviews++;
+      expect(prompt).not.toContain("You are a REVIEWER");
       builds++;
+      expect(builds).toBe(1); // No proof repair, evidence follow-up or resubmission.
       if (!existsSync(join(cwd, "node_modules"))) symlinkSync(realpathSync(resolve("node_modules")), join(cwd, "node_modules"), "junction");
-      if (builds === 1) {
-        await writeFile(join(cwd, "value.ts"), "export const value = 'augment_draft';\n");
-        await writeFile(join(cwd, "value.test.ts"), "import {test,expect} from 'vitest'; import {value} from './value'; test('restored reward opens draft',()=>expect(value).toBe('augment_draft'));\n");
-      } else {
-        expect(prompt).toContain("STANDING-ORDERS-OBSERVATIONS.json");
-        await writeFile(join(cwd, "STANDING-ORDERS-OBSERVATIONS.json"), JSON.stringify({ version: 1, observations: ["base", "head"].map(at => ({ criterion: "c1", at, testPath: "value.test.ts", testName: "restored reward opens draft" })) }));
-      }
+      await writeFile(join(cwd, "value.ts"), "export const value = 'augment_draft';\n");
+      await writeFile(join(cwd, "value.test.ts"), "import {test,expect} from 'vitest'; import {value} from './value'; test('restored reward opens draft',()=>expect(value).toBe('augment_draft'));\n");
       const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)![0];
-      await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: builds === 1 ? "completed" : "no-change", conclusion: "Synthetic original/candidate regression" }));
+      await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: "completed", conclusion: "Synthetic candidate regression; original-base control was not run" }));
       return { ...OK, stdout: JSON.stringify({ result: "Synthetic original/candidate regression" }) };
     };
     const tick = async (now: Date, expected: number = EXIT.ok) => {
@@ -437,30 +425,37 @@ describe("v40: a drafted, unapproved repair moves the idle-spend invariant not a
     };
     await tick(at(1));
     const first = openStore(db);
-    const chain = first.repairChainForRoot("t-observe");
-    expect(chain).toHaveLength(1);
-    expect(chain[0]).toMatchObject({ draftTask: "t-observe-evidence-1", outcome: "drafted" });
-    sourceRun = chain[0]!.sourceRun;
-    const oldProof = first.proofVerdictFor(sourceRun), oldReview = first.reviewRetryStateOf(sourceRun), head = first.getRun(sourceRun)!.headRevision;
+    const runs = first.runsFor(first.lookupRef("t-observe")!.id);
+    expect(runs).toHaveLength(1);
+    const result = runs[0]!;
+    expect(result).toMatchObject({ role: "builder", outcome: "built" });
+    const proof = first.proofVerdictFor(result.id);
+    // Passing the candidate check does not invent the missing base comparison.
+    expect(proof).toMatchObject({ verdict: "short", machineVerdict: "verified", matrix: [{ state: "missing" }] });
+    expect(assignmentOf(first, "t-observe", at(1), { principal: "operator", repos: [repo] }, evidenceRoot)).toMatchObject({
+      state: "ready-to-check", handoff: { kind: "result", acknowledged: false },
+      receipt: { runId: result.id, completionKind: "checked-build", checks: { status: "passed", exitCode: 0 } },
+    });
+    expect(first.repairChainForRoot("t-observe")).toHaveLength(0);
+    expect(first.reviewRetryStateOf(result.id)?.state).toBe("unrequested");
+    expect(first.openReviewRequests()).toHaveLength(0);
     first.close();
-    await tick(at(2));
+    expect((await tick(at(2), EXIT.refused)).dispatched).toHaveLength(0);
+    expect((await tick(at(3), EXIT.refused)).dispatched).toHaveLength(0);
     const final = openStore(db);
-    const result = final.runsFor(final.lookupRef("t-observe-evidence-1")!.id).find(r => r.role === "builder")!;
-    expect(result, result.handoff ?? "").toMatchObject({ outcome: "no-change", headRevision: head, baseRevision: head });
-    expect(final.proofVerdictFor(result.id)).toMatchObject({ verdict: "verified", machineVerdict: "verified" });
-    expect(final.repairChainForRoot("t-observe")).toMatchObject([{ outcome: "resolved" }]);
-    expect(final.proofVerdictFor(sourceRun)).toEqual(oldProof);
-    expect(final.reviewRetryStateOf(sourceRun)).toEqual(oldReview);
+    expect(final.runsFor(final.lookupRef("t-observe")!.id)).toEqual(runs);
+    expect(final.proofVerdictFor(result.id)).toEqual(proof);
+    expect(final.repairChainForRoot("t-observe")).toHaveLength(0);
     expect(final.proofAcceptance(result.id)).toBeNull();
     expect(final.openReviewRequests()).toHaveLength(0);
     final.close();
-    expect((await tick(at(3), EXIT.refused)).dispatched).toHaveLength(0);
-    expect({ builds, reviews, fullGates: await readFile(log, "utf8") }).toEqual({ builds: 2, reviews: 2, fullGates: "1" });
+    expect({ builds, reviews, fullGates: await readFile(log, "utf8") }).toEqual({ builds: 1, reviews: 0, fullGates: "1" });
   });
 
   // Synthetic providers, real CLI dispatch, Git worktrees, verification command,
-  // receipts and revision queue. This tests the product loop without model spend.
-  test.each(["fix", "no-change", "changed-evidence", "no-proof-fix", "no-proof-no-change", "evidence-missing", "goal-fails"])("failed gate → automatic repair → fresh gate → one review (%s)", scenario => {
+  // receipts and lead handoff. Historical automatic mode terms must not revive
+  // the retired review/repair loop, even when another gate might pass.
+  test.each(["fix", "no-change", "changed-evidence", "no-proof-fix", "no-proof-no-change", "evidence-missing", "goal-fails"])("failed checks reach the lead once without automatic repair or review (%s)", scenario => {
     const direct = ["no-proof-fix", "no-proof-no-change", "evidence-missing", "goal-fails"].includes(scenario);
     const noChange = ["no-change", "no-proof-no-change", "evidence-missing", "goal-fails"].includes(scenario);
     return (async () => {
@@ -495,83 +490,64 @@ if (!passed) { console.error('balance probe timed out; 163 passed, 1 failed'); p
       const provider: Runner = async (_file, args, options) => {
         const cwd = options!.cwd!;
         const prompt = args[args.indexOf("-p") + 1]!;
-        if (prompt.includes("You are a REVIEWER")) {
-          reviews++;
-          if (direct) {
-            const state = openStore(db);
-            const pending = state.runsFor(state.lookupRef("t-check-fix-1")!.id).find(r => r.role === "builder")!;
-            expect(state.proofVerdictFor(pending.id)).toMatchObject({ verdict: "short", machineVerdict: "verified", matrix: [{ state: "missing" }] });
-            expect(state.repairChainForRoot("t-check")[0]?.outcome).toBe("drafted");
-            expect(state.artifactsFor(pending.id).some(a => a.kind === "proof")).toBe(false);
-            state.close();
-            expect(await readFile(join(cwd, "REVIEW-BUILDER-NOTES.json"), "utf8")).toContain("Synthetic recovery result");
-            expect(prompt).toContain("name the observation needed next");
-          }
-          const receipt = JSON.parse(await readFile(join(cwd, "REVIEW-VERIFICATION.json"), "utf8"));
-          expect(receipt.result).toMatchObject({ ran: true, exitCode: 0 });
-          return { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: scenario === "goal-fails" ? "contradicts" : scenario === "evidence-missing" ? "cannot-tell" : "upholds", note: scenario === "goal-fails" ? "REVIEW-CONTEXT-ctx-1.txt retains a broken value despite green checks" : scenario === "evidence-missing" ? "Capture the saved result after reloading at a phone viewport" : "REVIEW-VERIFICATION.json and REVIEW-CHECK-LOG.txt show the exact candidate passed" }], learningAssessment: { decision: "none", reason: "Synthetic loop already covered by this regression" }, learning: [] }) }) };
-        }
+        if (prompt.includes("You are a REVIEWER")) reviews++;
+        expect(prompt).not.toContain("You are a REVIEWER");
         builds++;
-        const repairing = builds === 2;
-        if (repairing) {
-          expect(prompt).toContain("balance probe timed out; 163 passed, 1 failed");
-          expect(prompt).toContain("rerun only the failing test once");
-        }
-        const unchanged = repairing && noChange;
-        if (!unchanged) await writeFile(join(cwd, "value.txt"), repairing ? "fixed" : "broken");
+        expect(builds).toBe(1); // No provider call may repair the failed check or optional proof.
+        await writeFile(join(cwd, "value.txt"), "broken");
         expect((await exec(process.execPath, ["--check", "check.cjs"], { cwd })).code).toBe(0);
         const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)![0];
         const proof = /STANDING-ORDERS-PROOF-[0-9a-f]{16}\.json/.exec(prompt)![0];
-        await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: unchanged ? "no-change" : "completed", conclusion: "Synthetic recovery result" }));
-        if (!direct) await writeFile(join(cwd, proof), JSON.stringify({ version: 1, criteria: [{ id: "c1", statement, verdict: "pending-verification", how: "Awaiting the native check", evidence: [{ kind: "check", ref: "node --check check.cjs" }] }], checks: [{ command: "node --check check.cjs", exitCode: 0, summary: "Syntax checked" }], changed: unchanged ? [] : ["value.txt"], caveats: [], screenshots: [] }));
+        await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: "completed", conclusion: "Synthetic saved result; project check still needs attention" }));
+        if (!direct) await writeFile(join(cwd, proof), JSON.stringify({ version: 1, criteria: [{ id: "c1", statement, verdict: "pending-verification", how: "Awaiting the native check", evidence: [{ kind: "check", ref: "node --check check.cjs" }] }], checks: [{ command: "node --check check.cjs", exitCode: 0, summary: "Syntax checked" }], changed: ["value.txt"], caveats: [], screenshots: [] }));
         return { ...OK, stdout: JSON.stringify({ result: "Synthetic recovery result" }) };
       };
-      const tick = async (now: Date) => {
+      const tick = async (now: Date, expected: number = EXIT.ok) => {
         const output: string[] = [];
         const code = await runOperate("tick", ["--runner", "builder-1", "--token", "tok-builder-1", "--repo", repo, "--pool", pool, "--max", "1", "--json"], line => output.push(line), { databaseFile: db, evidenceRoot, now, agentRunner: provider });
-        expect(code, output.join("\n")).toBe(EXIT.ok);
+        expect(code, output.join("\n")).toBe(expected);
+        return JSON.parse(output.join("\n"));
       };
       await tick(at(1));
       const first = openStore(db);
-      const chain = first.repairChainForRoot("t-check");
-      expect(chain).toHaveLength(1);
-      expect(chain[0]).toMatchObject({ draftTask: "t-check-fix-1", basis: "mode", outcome: "drafted" });
+      const runs = first.runsFor(ref.id);
+      expect(runs).toHaveLength(1);
+      const result = runs[0]!;
+      expect(result).toMatchObject({ role: "builder", outcome: "built" });
+      const proof = first.proofVerdictFor(result.id);
+      // Older authored receipts retain their raw verdict shape; the handoff
+      // reads the native check receipt instead of inferring a check from it.
+      expect(proof).toMatchObject({ verdict: "refuted", machineVerdict: direct ? "refuted" : null });
+      const ready = assignmentOf(first, "t-check", at(1), { principal: "operator", repos: [repo] }, evidenceRoot)!;
+      expect(ready).toMatchObject({ state: "ready-to-check", detail: "Checks failed (exit 1).",
+        handoff: { kind: "result", acknowledged: false },
+        receipt: { runId: result.id, completionKind: "finished-build", checks: { status: "failed", exitCode: 1, command: "node check.cjs" } } });
+      expect(first.artifactsFor(result.id).some(a => a.kind === "proof")).toBe(!direct);
+      expect(first.repairChainForRoot("t-check")).toHaveLength(0);
+      expect(first.reviewRetryStateOf(result.id)?.state).toBe("unrequested");
       expect(first.openReviewRequests()).toHaveLength(0);
-      const failedRun = chain[0]!.sourceRun;
-      const failedHead = first.getRun(failedRun)!.headRevision;
-      const failedLog = first.artifactsFor(failedRun).find(a => a.kind === "check-log")!;
+      const failedLog = first.artifactsFor(result.id).find(a => a.kind === "check-log")!;
       first.close();
       if (scenario === "changed-evidence") {
-        await writeFile(join(evidenceRoot, failedLog.key), "changed after the repair was approved");
-        const output: string[] = [];
-        await runOperate("tick", ["--runner", "builder-1", "--token", "tok-builder-1", "--repo", repo, "--pool", pool, "--max", "1", "--json"], line => output.push(line), { databaseFile: db, evidenceRoot, now: at(2), agentRunner: provider });
-        expect(JSON.parse(output.join("\n")).dispatched).toMatchObject([{ outcome: "failed" }]);
-        const refused = openStore(db);
-        expect(refused.runsFor(refused.lookupRef("t-check-fix-1")!.id).find(r => r.role === "builder")?.handoff).toContain("failed-check evidence is no longer current and complete");
-        refused.close();
-        expect(builds).toBe(1);
-        expect(reviews).toBe(0);
-        expect(await readFile(log, "utf8")).toBe("1");
-        return;
+        await writeFile(join(evidenceRoot, failedLog.key), "changed after the failed check was saved");
+        const damaged = openStore(db);
+        const current = assignmentOf(damaged, "t-check", at(2), { principal: "operator", repos: [repo] }, evidenceRoot)!;
+        expect(current).toMatchObject({ state: "ready-to-check", receipt: { checks: { status: "unavailable" } } });
+        expect(current.attention).toContainEqual(expect.stringContaining("unavailable or changed"));
+        expect(assignmentEvidenceIntact(damaged, evidenceRoot, current.receipt!)).toBe(false);
+        damaged.close();
       }
-      await tick(at(2));
+      expect((await tick(at(2), EXIT.refused)).dispatched).toHaveLength(0);
       const final = openStore(db);
-      const result = final.runsFor(final.lookupRef("t-check-fix-1")!.id).find(r => r.role === "builder")!;
-      expect(final.proofVerdictFor(result.id)?.verdict).toBe(scenario === "goal-fails" ? "refuted" : scenario === "evidence-missing" ? "short" : "verified");
-      expect(final.repairChainForRoot("t-check")[0]?.outcome).toBe(["goal-fails", "evidence-missing"].includes(scenario) ? "drafted" : "resolved");
-      if (scenario === "evidence-missing") {
-        expect(final.repairChainForRoot("t-check")).toHaveLength(1);
-        expect(final.raw().prepare("SELECT body FROM notification WHERE dedupe_key = ?").get(`assessment-evidence:${result.id}`)).toMatchObject({ body: expect.stringContaining("phone viewport") });
-      }
-      if (scenario === "goal-fails") expect(final.repairChainForRoot("t-check")).toHaveLength(2);
+      expect(final.runsFor(ref.id)).toEqual(runs);
+      expect(final.proofVerdictFor(result.id)).toEqual(proof);
+      expect(final.repairChainForRoot("t-check")).toHaveLength(0);
+      expect(final.lookupRef("t-check-fix-1")).toBeNull();
       expect(final.openReviewRequests()).toHaveLength(0);
-      expect(final.reviewRetryStateOf(result.id)?.state).toBe("succeeded");
-      expect(final.proofVerdictFor(failedRun)?.verdict).toBe("refuted");
-      if (noChange) expect(result.headRevision).toBe(failedHead);
+      expect(final.proofAcceptance(result.id)).toBeNull();
       final.close();
-      expect(builds).toBe(2);
-      expect(reviews).toBe(1);
-      expect(await readFile(log, "utf8")).toBe("2");
+      expect({ builds, reviews, fullGates: await readFile(log, "utf8") }).toEqual({ builds: 1, reviews: 0, fullGates: "1" });
+
     })();
   });
 
