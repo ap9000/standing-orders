@@ -45,6 +45,13 @@ describe("Darwin recovery census facts", () => {
       expect(changedDarwinProcessIdentities([processRow(42)], [processRow(42, difference)])).toEqual([42]);
     }
   });
+  it("binds current exec version separately from unchanged original-parent version", () => {
+    const first = parseDarwinNativeSnapshot(native([processRow(1), processRow(42, { pidVersion: 123 })]));
+    expect(first.processes[1]!.pidVersion).toBe(123);
+    expect(changedDarwinProcessIdentities(first.processes, [processRow(1), processRow(42, { pidVersion: 124 })])).toEqual([42]);
+    expect(changedDarwinProcessIdentities(first.processes, [processRow(1), processRow(42)])).toEqual([42]);
+    expect(() => parseDarwinNativeSnapshot(native([processRow(1), processRow(42, { pidVersion: -1 })]))).toThrow();
+  });
   it("reports disappeared and newly born PIDs instead of declaring a stable intersection", () => {
     expect(changedDarwinProcessIdentities([processRow(1), processRow(42)], [processRow(1), processRow(43)])).toEqual([42, 43]);
     expect(changedDarwinProcessIdentities([processRow(1), processRow(42)], [processRow(42), processRow(1)])).toEqual([]);

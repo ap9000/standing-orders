@@ -215,16 +215,16 @@ describe("project access and the action ledger", () => {
     const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
     const send = (path: string, input: Record<string, string> | URLSearchParams) => fetch(base + path, { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf, ...Object.fromEntries(input instanceof URLSearchParams ? input : Object.entries(input)) }), redirect: "manual" });
     await send("/projects/select", { path: alpha });
-    const terms = { name: "standard", days: "1", "auto-approve": "1", "plan-auto": "1", "review-auto": "1", "review-retry-auto": "1" };
+    const terms = { name: "standard", days: "1", "auto-approve": "1", "plan-auto": "1" };
     expect((await send("/mode/confirm", { ...terms, "auto-approve": "0" })).status).toBe(400);
-    expect((await send("/mode/confirm", { ...terms, "review-auto": "0" })).status).toBe(400);
-    expect((await send("/mode/confirm", { ...terms, "plan-auto": "0", "review-auto": "0" })).status).toBe(400);
+    expect((await send("/mode/confirm", { ...terms, "review-auto": "1" })).status).toBe(400);
+    expect((await send("/mode/confirm", { ...terms, "review-retry-auto": "1" })).status).toBe(400);
     const confirm = async () => {
       const response = await send("/mode/confirm", terms);
       expect(response.status).toBe(200);
       const html = await response.text();
       expect(html).toContain("unresolved questions still wait");
-      expect(html).toContain("up to twice, within three total independent review attempts");
+      expect(html).not.toContain("review-retry-auto");
       return new URLSearchParams([...html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map(one => [one[1]!, one[2]!]));
     };
     const wrongProject = await confirm(); wrongProject.set("token", ownerToken);
@@ -234,12 +234,12 @@ describe("project access and the action ledger", () => {
     await send("/projects/select", { path: alpha });
     const changed = await confirm(); changed.set("token", ownerToken); changed.set("plan-auto", "0");
     expect((await send("/mode/sign", changed)).status).toBe(409);
-    const retryChanged = await confirm(); retryChanged.set("token", ownerToken); retryChanged.set("review-retry-auto", "0");
-    expect((await send("/mode/sign", retryChanged)).status).toBe(409);
+    const retryChanged = await confirm(); retryChanged.set("token", ownerToken); retryChanged.set("review-retry-auto", "1");
+    expect((await send("/mode/sign", retryChanged)).status).toBe(400);
     const signed = await confirm(); signed.set("token", ownerToken);
     expect((await send("/mode/sign", signed)).status).toBe(303);
     expect(JSON.parse(store.activeMode(alpha, now)!.termsJson).planAuto).toBe(true);
-    expect(JSON.parse(store.activeMode(alpha, now)!.termsJson).reviewRetryAuto).toBe(true);
+    expect(JSON.parse(store.activeMode(alpha, now)!.termsJson).reviewRetryAuto).toBe(false);
   });
 
   test("console filings defer planning approval to the signed mode; bearer filings cannot spend it", async () => {

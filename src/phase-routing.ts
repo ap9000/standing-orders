@@ -79,6 +79,8 @@ export const ROUTE_VERSION = 1;
  * and no readable route is corrupt and fails closed. */
 export const ROUTE_ERA = ROUTE_VERSION;
 export const PHASES: readonly Phase[] = ["plan", "build", "repair", "review"];
+/** The review leg remains readable in signed history but is no longer scheduled. */
+export const ACTIVE_PHASES: readonly Phase[] = ["plan", "build", "repair"];
 
 export type RiskLevel = "routine" | "elevated" | "high";
 export const RISK_LEVELS: readonly RiskLevel[] = ["routine", "elevated", "high"];
@@ -98,8 +100,8 @@ export function riskTitle(risk: RiskLevel): string {
  * every surface: the task page's risk control, the chat's answer, the CLI.
  */
 export function riskConsequence(risk: RiskLevel): string {
-  if (risk === "high") return "every role — planner, builder, repair, and reviewer — uses the strongest agent you have configured";
-  if (risk === "elevated") return "the review runs on the strongest configured reviewer; planning and building keep the everyday agents unless the work itself asks for more (strict quality or screenshots)";
+  if (risk === "high") return "every active role — planner, builder, and repair — uses the strongest agent you have configured";
+  if (risk === "elevated") return "planning and building keep the everyday agents unless the work itself asks for more (strict quality or screenshots)";
   return "every role uses the everyday configured agent unless the work itself asks for more (strict quality, screenshots, or a self-merging mode)";
 }
 
@@ -461,7 +463,7 @@ export function legOf(route: PhaseRoute, phase: Phase): RouteLeg {
 /** Every stated problem on the route, in phase order — a non-empty list
  * means the scope files unresolved with these words. */
 export function routeProblems(route: PhaseRoute): string[] {
-  return route.legs.flatMap(leg => (leg.problem === null ? [] : [`${leg.phase}: ${leg.problem}`]));
+  return route.legs.filter(leg => leg.phase !== "review").flatMap(leg => (leg.problem === null ? [] : [`${leg.phase}: ${leg.problem}`]));
 }
 
 /** Whether two exact pairs are the same agent. */
@@ -536,6 +538,8 @@ function stringList(v: unknown): v is string[] {
 /** Strict rehydration of a stored route — every field type-proved, every
  * model an exact non-empty string; anything unexpected is null, never a
  * guess. A null from a row that carries a route era is a corrupt seal. */
+// Recovery and normal admission share this strict decoder; neither may replace
+// unreadable signed routing with a convenient current default.
 export function routeFromJson(json: string | null): PhaseRoute | null {
   if (json === null) return null;
   let parsed: unknown;
@@ -682,7 +686,7 @@ export type RouteProjection = {
 
 /** What actually runs: stronger agents only when a leg draws from one. */
 export function postureWords(route: Pick<PhaseRoute, "legs">): string {
-  return drawsStrong(route.legs) ? "stronger configured agents" : "everyday configured agents";
+  return drawsStrong(route.legs.filter(leg => leg.phase !== "review")) ? "stronger configured agents" : "everyday configured agents";
 }
 
 export function readinessWords(state: ReadinessState, reason: string | null): string {
@@ -703,7 +707,7 @@ export function chosenWords(leg: Pick<RouteLeg, "chosen" | "tier">): string {
  */
 export function agentsSummary(route: Pick<PhaseRoute, "legs">): string {
   const groups: { spec: string; verbs: string[] }[] = [];
-  for (const leg of route.legs) {
+  for (const leg of route.legs.filter(leg => leg.phase !== "review")) {
     const spec = specWords(leg);
     const group = groups.find(one => one.spec === spec);
     if (group === undefined) groups.push({ spec, verbs: [PHASE_VERB[leg.phase]] });
@@ -719,11 +723,12 @@ export function legLine(leg: RouteLegProjection): string {
 
 /** The one projection CLI, task page, and chat all render from. */
 export function projectRoute(route: PhaseRoute, readiness: ReadinessLookup): RouteProjection {
-  const legs = route.legs.map(leg => {
+  const legs = route.legs.filter(leg => leg.phase !== "review").map(leg => {
     const seen = readiness(leg.provider);
     const state: ReadinessState = seen === null ? "unknown" : seen.state;
     const projected: RouteLegProjection = {
       ...leg,
+      reasons: leg.reasons.map(reason => reason.replace("builder and reviewer", "builder")),
       readiness: state,
       readinessReason: seen === null ? "no runner has reported this provider yet" : seen.reason,
       readinessRunner: seen === null ? null : seen.runner,
@@ -737,9 +742,9 @@ export function projectRoute(route: PhaseRoute, readiness: ReadinessLookup): Rou
     digest: routeDigestOf(route),
     risk: route.risk,
     riskTitle: riskTitle(route.risk),
-    posture: route.posture,
+    posture: drawsStrong(legs) ? "strong" : "economy",
     postureWords: postureWords(route),
-    demands: route.demands,
+    demands: route.demands.filter(reason => !/review/i.test(reason)),
     legs,
     summary: agentsSummary(route),
     halted: legs.some(leg => leg.readiness === "unavailable"),

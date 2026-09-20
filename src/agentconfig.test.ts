@@ -245,6 +245,15 @@ describe("route candidates and the task route (v47)", () => {
     expect(exact.candidates.review.strong).toBeNull();
   });
 
+  test("retired reviewer settings cannot block a new task or offer an active reviewer choice", () => {
+    exactInstall();
+    store.setPhaseConfig(INSTALLATION_SCOPE, "review", "gemini", "gemini-2.5-pro", "alex", T0);
+    store.setPhaseTierConfig(INSTALLATION_SCOPE, "review", "strong", "claude", null, "alex", T0);
+    expect(resolveRouteCandidates(store, "/repo")).toMatchObject({ ok: true });
+    expect(agentChoicesFor(store, "/repo", null).review).toEqual([]);
+    expect(store.phaseConfig(INSTALLATION_SCOPE, "review")?.provider).toBe("gemini");
+  });
+
   test("agent choices (v48): role-specific — only the pairs the active configuration names FOR that role are selectable; gemini never reviews, repair stays on the build provider; a stale current agent is display-only; a bare configuration offers nothing", () => {
     expect(agentChoicesFor(store, "/repo", null)).toEqual({ plan: [], build: [], repair: [], review: [] });
     exactInstall();
@@ -256,7 +265,7 @@ describe("route candidates and the task route (v47)", () => {
     // Each role offers ITS configured agents, not every role's pooled together.
     expect(pairs(bare.plan)).toEqual(["claude · sonnet"]);
     expect(pairs(bare.build)).toEqual(["claude · sonnet", "gemini · gemini-2.5-pro"]);
-    expect(pairs(bare.review)).toEqual(["claude · sonnet", "codex · gpt-5-codex"]);
+    expect(pairs(bare.review)).toEqual([]);
     // Repair: the configured repair row and the build role's agents, on the build provider.
     expect(pairs(bare.repair)).toEqual(["claude · haiku", "claude · sonnet"]);
     expect(Object.values(bare).flat().every(one => one.selectable)).toBe(true);
@@ -273,7 +282,7 @@ describe("route candidates and the task route (v47)", () => {
     expect(pairs(withRoute.repair)).toEqual(["gemini · gemini-2.5-pro"]);
     expect(withRoute.build.find(one => one.provider === "gemini")).toMatchObject({ current: true, selectable: true });
     expect(withRoute.review.every(one => one.provider !== "gemini")).toBe(true);
-    expect(withRoute.review.find(one => one.model === "gpt-5-codex")).toMatchObject({ current: true, selectable: true });
+    expect(withRoute.review).toEqual([]);
     // A current leg the configuration no longer names (an override typed
     // on the CLI) is shown for what runs today — never offered again.
     store.editTaskRoute(ref.id, { by: "alex", authenticate: () => ({ ok: true }), override: { phase: "plan", provider: "codex", model: "o3" } }, T0);
@@ -286,7 +295,7 @@ describe("route candidates and the task route (v47)", () => {
     ]);
     // …and the configured proof inside the edit refuses it, mutating nothing.
     const before = store.getScope("t")!.digest;
-    expect(store.editTaskRoute(ref.id, { by: "alex", authenticate: () => ({ ok: true }), override: { phase: "review", provider: "codex", model: "o3" }, configured: true }, T0)).toMatchObject({ ok: false, reason: "not-configured", choices: [{ provider: "claude", model: "sonnet" }, { provider: "codex", model: "gpt-5-codex" }] });
+    expect(store.editTaskRoute(ref.id, { by: "alex", authenticate: () => ({ ok: true }), override: { phase: "review", provider: "codex", model: "o3" }, configured: true }, T0)).toMatchObject({ ok: false, reason: "not-configured", choices: [] });
     expect(store.getScope("t")!.digest).toBe(before);
     expect(store.refFor(BUILT_IN, "t").routeOverrides?.map(one => one.phase)).toEqual(["plan"]);
   });

@@ -81,8 +81,7 @@ import {
   validateScreenshotBytes,
   imageDimensions,
   SCREENSHOT_BYTE_CAP, boundStreamHeadTail } from "./evidence.js";
-import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, artifactManifestOnly, proofSubmissionProblems, changedListProblems, frozenCriterionProblems, sameDiffStatFacts, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
-import { storeStructuredAttempt, normalizeStructuredJson } from "./structured-output.js";
+import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, artifactManifestOnly, sameDiffStatFacts, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
 import { captureReviewContext } from "./review-context.js";
 import {
   authoritySnapshotDigest,
@@ -1389,9 +1388,8 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // below, mirroring store.firstBuilderBase's own doc). Null on a first
   // attempt — there is nothing earlier to be cumulative WITH, so the
   // ordinary instructions already suffice. Non-null only when the branch
-  // already carries a prior builder attempt's commits, which is exactly
-  // when a proof's self-reported "changed" must widen past this attempt
-  // alone or it undercounts the sealed diff and reads short.
+  // already carries a prior builder attempt's commits. The machine captures
+  // the whole branch; the agent never needs to recreate its file inventory.
   const pinnedBase = store.firstBuilderBase(taskRef, branch);
   const retryBase = pinnedBase !== null && pinnedBase !== baseRevision ? pinnedBase : null;
   const lessonContext = learningContext(store, root, request.runId, "build", clock());
@@ -1416,7 +1414,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     milestones.length === 0 || planRevisionHash === null
       ? null
       : { revision: planRevisionNumber, hash: planRevisionHash, milestones, progress, proposal },
-  ) + `\nCanonical signed rubric: ${rubric}. Its statement fields are exact; evidence requirements are separate fields. Do not edit this input.${(scope?.acceptance.length ?? 0) === 0 ? ` When using scripts/proof-preflight.mjs, pass --rubric ${rubric} with --proof ${proof}. Preflight checks the submission; the worker still checks the committed result.` : " The independent reviewer reads these criteria directly; no restatement is needed."}\n`;
+  ) + `\nCanonical signed rubric: ${rubric}. Its statement fields are exact; evidence requirements are separate fields. Do not edit this input. The lead or user reads these criteria directly; no restatement is needed.\n`;
 
   // THE HELD BRANCH (Phase 2, v2 S0d + v6 W8): ownership transfers to the
   // coordinator at the spawn point. Everything build() armed that its
@@ -2324,148 +2322,6 @@ function settleRevisionProposal(captured: CapturedBuild, binding: PlanBinding): 
  * ends in `store.saveProofVerdict`, never in a thrown error that could
  * reach the caller and be mistaken for a build failure.
  */
-/** Correct only a receipt for an already committed tree. Checks,
- * screenshots and caveats are immutable inputs to the correction, and so
- * is every criterion id/verdict pair the agent submitted (comment 397):
- * a statement or reference may be corrected against the exact rubric, an
- * answer may not move, be dropped or be added. The
- * changed list is immutable too, with one exception the sealed diff-stat
- * itself establishes (comment 396, run 1642): when every discrepancy is
- * the old name of a move git paired or a sealed path left out, the agent
- * is handed the exact sealed inventory and may set `changed` to exactly
- * that — never to anything else. A claimed path the diff never had stays
- * as submitted, visible, for adjudication to refute by name. The full
- * project gate runs once afterwards, against the preserved commit. */
-async function correctProofReceipt(
-  captured: CapturedBuild,
-  original: ReturnType<typeof readMailbox>,
-  sealedHead: string,
-  sealedStat: DiffStatFacts | null,
-): Promise<{ read: ReturnType<typeof readMailbox>; integrityFailure: string | null }> {
-  const { store, request, git, worktree, branch, root, proof: file, clock, effective } = captured;
-  const provider = effective.profile.provider;
-  const unchanged = { read: original, integrityFailure: null };
-  if (!original.ok) return unchanged;
-  const normalized = normalizeStructuredJson(original.raw.toString("utf8"));
-  const initial = parseProof(normalized.text);
-  // Without a parsed original there is no trustworthy inventory of checks
-  // to freeze. Preserve it for inspection rather than manufacture evidence.
-  if (!initial.ok) return unchanged;
-  if (artifactManifestOnly(initial.proof) && (captured.preparedEvidence || (store.getScope(request.taskId)?.acceptance.length ?? 0) > 0)) return unchanged;
-  const rubric = captured.scope?.acceptance ?? [];
-  // The changed-list review against the sealed stat: only a recoverable
-  // review (every discrepancy explained by the stat) asks for a turn, and
-  // then the one admissible answer is the sealed inventory exactly.
-  const inventory = changedListProblems(initial.proof.changed, sealedStat);
-  // No receipt can represent more paths than the schema permits. Preserve the
-  // original evidence and let adjudication report the gap, without asking an
-  // agent to produce an impossible correction (or shrinking the real diff).
-  if (inventory.sealed !== null && inventory.sealed.length > PROOF_LIMITS.changed) return unchanged;
-  const changedProblems = (proof: import("./proof.js").ParsedProof): string[] => {
-    const sameList = JSON.stringify(proof.changed) === JSON.stringify(initial.proof.changed);
-    if (!inventory.recoverable) return sameList ? [] : ["The changed list must stay exactly as submitted; the sealed diff does not explain a different one."];
-    return JSON.stringify([...proof.changed].sort()) === JSON.stringify(inventory.sealed)
-      ? []
-      : [`The changed list must be exactly the sealed diff's paths: ${JSON.stringify(inventory.sealed)}`];
-  };
-  let problems = [...proofSubmissionProblems(initial.proof, rubric), ...(inventory.recoverable ? inventory.problems : [])];
-  if (problems.length === 0 && !normalized.changed) return unchanged;
-  storeStructuredAttempt(store, root, request.runId, {
-    phase: "builder-proof", attempt: 0, authoredRunId: request.runId,
-    raw: original.raw, accepted: problems.length === 0,
-    normalized: normalized.changed, now: clock(),
-  });
-  if (problems.length === 0) return { read: { ...original, raw: Buffer.from(normalized.text) }, integrityFailure: null };
-  const parent = store.getRun(request.runId);
-  const sessionId = parent?.sessionId;
-  if (!sessionId || auditOf(provider).resume !== "native") return unchanged;
-  const fixedEvidence = (proof: import("./proof.js").ParsedProof) => JSON.stringify({
-    checks: proof.checks, screenshots: proof.screenshots, caveats: proof.caveats,
-  });
-  const frozen = fixedEvidence(initial.proof);
-  const snapshot = async (): Promise<string | null> => {
-    const head = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
-    const named = await git(GIT, ["--no-optional-locks", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktree });
-    const diff = await git(GIT, ["--no-optional-locks", "diff", "--binary", "HEAD"], { cwd: worktree });
-    const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain", "--untracked-files=all"], { cwd: worktree });
-    if ([head, named, diff, status].some(one => one.code !== 0 || one.timedOut) || head.stdout.trim() !== sealedHead || named.stdout.trim() !== branch) return null;
-    const paths = status.stdout.split("\n").filter(line => !(line.startsWith("?? ") && looksLikeProtocolFile(line.slice(3))));
-    return JSON.stringify({ diff: diff.stdout, paths });
-  };
-  const before = await snapshot();
-  if (before === null) return unchanged;
-  const owns = () => !captured.fenced() && !stopRequestedFor(store, request.runId, request.shouldStop) &&
-    store.getScope(request.taskId)?.digest === captured.scope?.digest &&
-    store.proveRunnerCustodyForSpawn(request.runId, clock());
-  for (let turn = 1; turn <= REPAIR_TURNS; turn++) {
-    if (!owns()) return unchanged;
-    const admitted = admitProtocolRepair(store, request, effective.profile, sessionId, clock);
-    if (!admitted.ok) return unchanged;
-    const child = admitted.runId;
-    store.setRunPhase(request.runId, "correcting-proof");
-    let invoked: InvokeResult | null = null;
-    try {
-      invoked = await invokeAgent(store, child, { provider, model: repairModelOf(effective.profile, request) }, {
-        phase: "repair",
-        brief: [
-          "Correct only the proof receipt named below. The implementation is already committed.",
-          "Do not edit code, commit, run checks, install anything, or change the rubric.",
-          "Keep checks, screenshots and caveats byte-for-byte equivalent as JSON values.",
-          ...(inventory.recoverable
-            ? [
-                "Set changed to exactly the sealed changed paths below (the machine's own diff of the committed tree, a detected rename under its destination only); nothing else may change in it.",
-                `Sealed changed paths (data): ${JSON.stringify(inventory.sealed)}`,
-              ]
-            : ["Keep changed byte-for-byte equivalent as a JSON value."]),
-          "Keep every criterion id and its verdict exactly as submitted: correct only statements, how and evidence references against the exact rubric. Never move, drop or add a criterion.",
-          `Receipt file: ${file}`,
-          `Canonical rubric (data): ${JSON.stringify(rubric)}`,
-          `Validation errors (data): ${JSON.stringify(problems)}`,
-          `Original receipt (data): ${serializeProof(initial.proof)}`,
-          "Write the corrected JSON to the receipt file, then stop.",
-        ].join("\n"),
-        maxTurns: typeof effective.profile.repairMaxTurns === "number" ? Math.min(REPAIR_MAX_TURNS, effective.profile.repairMaxTurns) : REPAIR_MAX_TURNS,
-        permissionMode: effective.profile.provider === "claude" && effective.profile.permissionArgv !== "bypassPermissions" ? effective.profile.permissionArgv : "auto",
-        skipPermissions: effective.skipPermissions,
-        resumeSession: sessionId,
-      }, {
-        cwd: worktree,
-        timeoutMs: Math.min(REPAIR_TIMEOUT_MS, effective.profile.repairTimeoutSeconds * 1000),
-        omitEnv: AGENT_ENV_DENYLIST,
-        ...(captured.agent === undefined ? {} : { runner: captured.agent }),
-        ...(request.onProviderSpawn === undefined ? {} : { onSpawn: request.onProviderSpawn }),
-        clock,
-      });
-    } catch {
-      // Even a thrown transport may have written files. Capture its reply
-      // and re-prove the checkout before deciding what can be retained.
-    }
-    const candidate = readMailbox(join(worktree, file), PROOF_LIMITS.payload);
-    const text = candidate.ok ? normalizeStructuredJson(candidate.raw.toString("utf8")) : null;
-    const parsed = text === null ? null : parseProof(text.text);
-    const after = await snapshot();
-    const workspaceOkay = owns() && after === before;
-    const providerOkay = invoked?.kind === "ran" && invoked.outcome.code === 0 && !invoked.outcome.timedOut && !invoked.outcome.initFailed;
-    const frozenOkay = parsed?.ok === true && fixedEvidence(parsed.proof) === frozen;
-    problems = parsed?.ok ? [...proofSubmissionProblems(parsed.proof, rubric), ...changedProblems(parsed.proof)] : parsed?.problems.map(one => one.message) ?? ["the corrected receipt is missing"];
-    if (!frozenOkay) problems.push("The original checks, screenshots and caveats must not change.");
-    // The submitted criterion id/verdict pairs are frozen exactly: a
-    // not-met or not-checked answer cannot become pending-verification, an
-    // extra negative criterion cannot be dropped, nothing can be added.
-    if (parsed?.ok) problems.push(...frozenCriterionProblems(initial.proof, parsed.proof));
-    const accepted = providerOkay && workspaceOkay && frozenOkay && problems.length === 0;
-    if (candidate.ok) storeStructuredAttempt(store, root, request.runId, {
-      phase: "builder-proof", attempt: turn, authoredRunId: child, raw: candidate.raw,
-      accepted, normalized: text?.changed ?? false, now: clock(),
-    });
-    store.finishRun(child, { outcome: accepted ? "no-change" : "failed", reason: accepted ? "proof-corrected" : "proof-correction-rejected", now: clock() });
-    if (!workspaceOkay) return { read: original, integrityFailure: "Proof correction changed the committed checkout or lost its approved custody; the original work and receipt are preserved." };
-    if (!providerOkay) return unchanged;
-    if (accepted && candidate.ok && text !== null) return { read: { ...candidate, raw: Buffer.from(text.text) }, integrityFailure: null };
-  }
-  return unchanged;
-}
-
 /** The sealed diff-stat artifact restated as facts: whether it captured
  * and verified, whether its file list was cut, the paths it names, and the
  * old name of every rename git paired (provenance, never a path). Anything
@@ -2505,23 +2361,21 @@ async function settleProof(
   // git-add pathspec already excludes every STANDING-ORDERS-* name).
   const original = readMailbox(join(worktree, proofFile), PROOF_LIMITS.payload);
   if (captured.preparedEvidence && (!original.ok || !original.raw.equals(Buffer.from(serializeProof(captured.preparedEvidence.proof))))) {
-    store.saveProofVerdict(runId, "refuted", ["The prepared screenshot receipt changed before capture. Restore the saved candidate and retry review."], now());
+    store.saveProofVerdict(runId, "refuted", ["The prepared screenshot receipt changed before capture. Inspect the saved candidate and capture the required images again."], now());
     return;
   }
-  // The sealed diff-stat, restated for the correction boundary and for
-  // adjudication — read once, here; a truncated or failed capture cannot
-  // prove a claimed path absent and offers no correction either.
+  // A truncated or failed sealed diff cannot prove a claimed path absent.
   const diffStat = sealedDiffStatFacts(store, root, statArtifactId);
   // Re-read and re-verify the sealed stat after every later step that
-  // spends time or spawns a process (the receipt correction, the final
-  // gate): facts cached before that step are adjudicated only when the
+  // spends time or spawns a process (the final gate): facts cached before
+  // that step are adjudicated only when the
   // artifact on disk still states exactly them (comment 397).
   const sealedStatAltered = (after: string): string | null =>
     sameDiffStatFacts(diffStat, sealedDiffStatFacts(store, root, statArtifactId))
       ? null
       : `the sealed diff-stat no longer reads as it did before ${after}; the machine refuses to adjudicate the facts it cached`;
-  const correction = await correctProofReceipt(captured, original, sealedHead, diffStat);
-  const read = correction.read;
+  // Receipts are retained as submitted. Packaging never starts another agent.
+  const read = original;
   try {
     unlinkSync(join(worktree, proofFile));
   } catch {
@@ -2530,10 +2384,6 @@ async function settleProof(
 
   let proofParse: ReturnType<typeof parseProof> | null = null;
   const proofArtifactPresent = read.ok;
-  if (correction.integrityFailure !== null) {
-    store.saveProofVerdict(runId, "refuted", [correction.integrityFailure], now());
-    return;
-  }
   if (read.ok) {
     proofParse = parseProof(read.raw.toString("utf8"));
     if (proofParse.ok) {
@@ -2588,14 +2438,14 @@ async function settleProof(
       : [];
 
   if (captured.preparedEvidence && screenshots.some(shot => !shot.ok)) {
-    store.saveProofVerdict(runId, "short", ["The committed screenshots could not be captured. Restore the saved candidate and retry review."], now());
+    store.saveProofVerdict(runId, "short", ["The committed screenshots could not be captured. Inspect the saved candidate and capture the required images again."], now());
     return;
   }
 
   // The receipt and its screenshots are stored above whatever follows; a
-  // sealed stat that changed while the receipt was being corrected refuses
+  // sealed stat that changed while saving the receipt refuses
   // the run before any approved command spends against the checkout.
-  const alteredBeforeGate = sealedStatAltered("the receipt correction");
+  const alteredBeforeGate = sealedStatAltered("receipt capture");
   if (alteredBeforeGate !== null) {
     store.saveProofVerdict(runId, "refuted", [alteredBeforeGate], now());
     return;
@@ -3326,7 +3176,7 @@ function brief(
       ? []
       : [
           fence(
-            "Acceptance criteria — your proof must answer EVERY one of these below, by its exact id, restating its statement verbatim:",
+            "Acceptance criteria — implement these exact signed requirements; the machine captures evidence for review:",
           ),
           ...JSON.stringify(scope.acceptance.map(({ id, statement, evidence }) => ({ id, statement, evidence })), null, 2).split("\n").map(fence),
         ]),
@@ -3441,7 +3291,7 @@ function brief(
           `#${recoveredDraftRun} after its runner stopped before settlement. Its old`,
           "handoff was quarantined and grants no authority to this attempt.",
           "Start by reviewing the existing changes, preserve sound work, run the required checks,",
-          "repair anything short, and write this attempt's own handoff and proof.",
+          "repair anything short, and write this attempt's own handoff with its outcome and limitations.",
           "Do not discard and recreate sound work without evidence that it is wrong.",
           "",
         ]),
@@ -3466,7 +3316,7 @@ function brief(
       "  Finish with no-change. The machine captures output and reuses the original",
       "  passing gate only for the unchanged candidate. If the observation requires",
       "  another runner, new access, a new test, UI interaction or judgment, park with",
-      "  that specific need. A new review assesses the observations, never the old review.",
+      "  that specific need. The lead inspects the new observations alongside the saved result.",
       "- For failed project checks, inspect the saved command, candidate and complete log",
       "  before editing. Distinguish a code failure from missing setup or a timeout.",
       "  For a suspected transient failure, rerun only the failing test once to diagnose",
@@ -3476,7 +3326,7 @@ function brief(
       "  approved full command to the machine gate once for the final candidate.",
       "  Do not skip tests, weaken assertions, raise timeouts or change acceptance",
       "  terms to get green. Report no-change if no code fix is warranted; the machine",
-      "  still verifies a repair result. Independent review follows a passing gate.",
+      "  still verifies a repair result. Return the result and limitations to the lead or user.",
     ]),
     "- If the goal needs work outside the scope above, or you reach a judgement",
     "  call somebody else must make — an irreversible choice, a tradeoff the",
@@ -3508,170 +3358,22 @@ function brief(
     "  completed = you made the changes; no-change = the goal needs no change",
     "  and the conclusion says why; failed = you could not do it. Write to a",
     "  temporary name first, then rename it into place.",
-    ...(scope.acceptance.length > 0 ? [
-      "- The machine captures the exact changes, approved checks and source context.",
-      "  One independent reviewer assesses that evidence against the signed goal.",
-      `  You do not need to write ${proof} or repeat the acceptance criteria,`,
-      "  changed-file inventory or final check results. This applies to no-change",
-      "  results too. Put useful caveats in the short handoff; do not invent evidence.",
-      "  Run focused checks for your edits. The machine runs the approved full check.",
-      "  If screenshots are required, capture the actual candidate and list them in",
-      `  ${proof}: { "version": 1, "screenshots": [`,
-      '    { "path": "<repository-relative PNG or JPEG>", "caption": "<what it shows>" } ] }.',
-      `  List at most ${PROOF_LIMITS.screenshots} screenshots, with paths/captions under ${PROOF_LIMITS.evidenceRef} UTF-8 bytes,`,
-      "  on one line each; no absolute paths or dot segments. Images must be real,",
-      "  at least 320 by 200 pixels. A list is optional; missing required images",
-      "  remain an evidence gap. Do not add completion claims to this inventory.",
-    ] : [
-    "- If you completed the task, you may additionally write ONE file named",
-    `  exactly ${proof} in the worktree root — your proof. It is not required,`,
-    "  but a completed task with no proof reads as needing verification, not",
-    "  done. JSON object:",
-    '    { "version": 1,',
-    '      "criteria": [ { "id": "<the EXACT id of an acceptance criterion',
-    '        above, or a new id for something you found worth recording>",',
-    '        "statement": "<restate that criterion\'s statement VERBATIM — an',
-    '        answer that alters the signed wording is refuted, not verified>",',
-    '        "verdict": "met" | "not-met" | "not-checked" | "pending-verification", "how": "<how you',
-    '        checked it>", "evidence": [ { "kind": "check" | "screenshot" |',
-    '        "changed-path" | "manual-review", "ref": "<for check: the exact',
-    '        command string from checks below; for screenshot: the exact path',
-    '        from screenshots below; for changed-path: an exact path from',
-    '        changed below; for manual-review: a short note>" }, ... ] },',
-    "        ... up to 12 ],",
-    '      "checks": [ { "command": "<the command you ran>", "exitCode":',
-    '        <0-255>, "summary": "<what it reported>" }, ... up to 12 ],',
-    '      "changed": ["<repository-relative path you changed>", ... up to 64],',
-    '      "caveats": ["<anything left undone or uncertain>", ... up to 8],',
-    '      "screenshots": [ { "path": "<repository-relative path to a PNG or',
-    '        JPEG file in the worktree>", "caption": "<what it shows>" },',
-    "        ... up to 8 ] }",
-    "  If all your work for a signed criterion is met and ONLY the machine's",
-    "  final repository check remains, use pending-verification. Its signed",
-    "  evidence must include check. Cite checks you actually ran for your part;",
-    "  never invent the final command's exit code or run it a second time.",
-    "  The machine resolves that explicit state only after its approved check",
-    "  succeeds for this candidate and all other required evidence passes.",
-    "  Use not-met for unfinished work and not-checked for untested behavior;",
-    "  those states never become success just because the final check passes.",
-    "  Record this expected wait in the verdict/how, not as a caveat or a",
-    "  follow-up. Caveats are real unresolved exceptions and still block.",
-    ...(scope.acceptance.length === 0
-      ? []
-      : [
-          "  A rubric was signed above: answer EVERY one of its criteria, by",
-          "  exact id, with the evidence kind(s) it names — an unanswered",
-          "  criterion, one whose evidence does not resolve, or one whose",
-          "  statement you changed reads as short or refuted, never verified.",
-          "  Default to exactly the signed criteria above and nothing more:",
-          "  add an extra criterion only when something you found is genuinely",
-          "  worth recording. An extra criterion is judged by the exact same",
-          "  rules as a signed one, and it cannot turn a signed criterion's",
-          "  failure into a pass.",
-        ]),
-    `  Each criterion's "how" has a hard cap of ${PROOF_LIMITS.criterionHow} bytes UTF-8 — one`,
-    "  byte over and the entire proof is refused, not just that criterion.",
-    "  Target 350 bytes or fewer so you have margin; before you finalize the",
-    "  file, measure every \"how\" string's UTF-8 byte length and shorten any",
-    "  that run long.",
-    `  Each criterion's evidence array — signed or extra — has a hard cap of`,
-    `  ${PROOF_LIMITS.evidencePerCriterion} entries: a 5th entry refuses the ENTIRE proof, including your`,
-    "  answers for every signed id, not just that one criterion's evidence.",
-    "  Every evidence ref must exactly match its source: a check ref is the",
-    "  exact command string from checks above, a changed-path ref is an",
-    "  exact path from changed above, and a screenshot ref is an exact path",
-    "  from screenshots above — a ref that does not resolve fails that",
-    "  criterion.",
-    // The changed-list contract (comment 396, run 1642): the machine seals
-    // `git diff --numstat` between the base and ITS OWN commit of the final
-    // tree, with git's rename detection between those two trees. Run 1642's
-    // proof listed both names of a move and was refuted. An earlier draft of
-    // this paragraph told agents to read the unstaged tree — `diff
-    // --name-only HEAD` plus `ls-files --others` — which for an uncommitted
-    // `mv` yields the old path as deleted and the new one as untracked:
-    // both names, the same overclaim again. State what is sealed, never a
-    // recipe that disagrees with it; the machine hands back the exact
-    // sealed list itself when the diff explains the difference.
-    "  The changed list must equal the machine's sealed diff exactly. The",
-    "  machine commits your whole final tree (git add -A, leaving out the",
-    `  STANDING-ORDERS-* protocol files and ${LEASE_MARKER}) and seals`,
-    `  \`git diff --numstat ${retryBase ?? "HEAD"} <that commit>\`, with git's own rename`,
-    '  detection between those two trees. "changed" is every',
-    "  repository-relative path in that diff, once each, and nothing else.",
-    "  A file git pairs as a rename or move is ONE path, its destination:",
-    "  never also the old path, which that diff does not contain. A move",
-    "  git does not pair is a delete plus an add, and then both paths are",
-    "  in the diff. Do not read the list off an unstaged tree: for an",
-    "  uncommitted move, `git diff --name-only HEAD` shows the old path as",
-    "  deleted and `git ls-files --others` shows the new one as untracked,",
-    "  and listing both is an overclaim. If your list differs from the",
-    "  sealed diff only in ways that diff itself explains — a move listed",
-    "  under both names, a sealed path left out — the machine hands you the",
-    "  exact sealed list once, in this same session, for a receipt-only",
-    "  correction. A path the sealed diff never had refutes the proof.",
-    "  Check evidence for a met criterion is a durable current-tree command",
-    "  that exited zero: one anybody can re-run from the checkout exactly as",
-    "  you leave it. It must not rely on temporary files, and it must not",
-    "  mutate the checkout. A negative control — a command that has to FAIL",
-    "  to make its point — belongs in a durable test, or in the criterion's",
-    "  how narrative, never as a failing check ref: a met criterion that",
-    "  cites a check which exited nonzero is refused, not verified.",
-    `  Each caveat has a hard cap of ${PROOF_LIMITS.caveat} bytes UTF-8 — one`,
-    "  byte over and the entire proof is refused, not just that caveat.",
-    "  Target 180 bytes or fewer so you have margin; before you finalize the",
-    "  file, measure every caveat string's UTF-8 byte length and shorten any",
-    "  that run long.",
-    "  EVERY caveat is an exception to a signed criterion and names that",
-    "  criterion's exact id as a standalone token (for example `c1: …`);",
-    "  a caveat that names no criterion, or whose leading tag is an id",
-    "  nobody signed, is unattributed and refutes the whole proof — an",
-    "  idea that is not an exception to any criterion belongs in the",
-    "  handoff's followUps, never in caveats. A named criterion must then",
-    "  be marked not-met: a criterion marked met while a caveat names it is",
-    "  a blocking caveat — the proof contradicts itself and is refuted",
-    "  whole, never verified. Never name a met criterion's id inside a",
-    "  caveat.",
-    "  Screenshot evidence must be a real PNG or JPEG, at least 320 by 200",
-    "  pixels, of meaningful byte size — the machine reads the actual file at",
-    "  each claimed path, checks its signature and dimensions, and stores it",
-    "  as evidence; a placeholder image fails verification. changed-path",
-    "  evidence is checked against the machine's own sealed diff — an",
-    "  unavailable or truncated diff cannot verify it. A repository's",
-    "  approved verification command, if one is configured, is re-run by the",
-    "  machine itself — never by you. Write it to a temporary name first,",
-    "  then rename it into place.",
-    // EVERY remaining cap the parser holds the proof to (raw authority
-    // repair): a proof refused for a limit the brief never named is a
-    // machine that lied about its contract.
-    `  The remaining hard caps, every one of which refuses the ENTIRE proof:`,
-    `  the whole file under ${PROOF_LIMITS.payload} bytes; at most ${PROOF_LIMITS.criteria} criteria, ${PROOF_LIMITS.checks} checks, ${PROOF_LIMITS.changed} changed`,
-    `  paths, ${PROOF_LIMITS.caveats} caveats, and ${PROOF_LIMITS.screenshots} screenshots; each criterion id at most ${PROOF_LIMITS.criterionId} bytes`,
-    `  UTF-8 and each statement at most ${PROOF_LIMITS.criterionStatement}; each evidence ref, check command,`,
-    `  check summary, changed path, screenshot path, and screenshot caption at`,
-    `  most ${PROOF_LIMITS.evidenceRef} bytes UTF-8; every string ONE line of plain text with no control`,
-    "  characters; every path repository-relative — no leading slash, drive",
-    "  letter, backslash, or `.`/`..` segment; and every field that says",
-    "  \"required\" above present and non-empty.",
-    ]),
-    ...(scope.acceptance.length > 0 ? [
-      "- Re-read the handoff and any screenshot inventory before you exit.",
-      "  Confirm valid JSON, the stated size limits, and that every named image",
-      "  exists. No criterion answers or self-reported file list are required.",
-    ] : [
-    "- Preflight every protocol file before you exit. After you write the",
-    "  handoff, the proof, or a park file: re-read it from disk, parse it as",
-    "  JSON, and measure every capped string's UTF-8 byte length (for",
-    "  example with `node -e` and `Buffer.byteLength`) against the caps",
-    "  above; count the list lengths; confirm every evidence ref resolves to",
-    "  an exact entry in checks, changed, or screenshots; confirm no",
-    "  criterion marked met cites a check that exited nonzero; confirm every",
-    "  caveat names a signed criterion's exact id and no caveat names a",
-    "  criterion marked met; and confirm every",
-    "  signed criterion is answered by its exact id with its statement",
-    "  verbatim. Fix anything short, rewrite through a temporary name, and",
-    "  only then end. A file that does not parse, or that breaks one cap, is",
-    "  refused whole — the machine never repairs it for you.",
-    ]),
+    "- The machine captures the exact changes, approved checks and source context.",
+    "  Return the result and limitations to the lead or user for review.",
+    `  You do not need to write ${proof} or repeat the acceptance criteria,`,
+    "  changed-file inventory or final check results. This applies to no-change",
+    "  results too. Put useful caveats in the short handoff; do not invent evidence.",
+    "  Run focused checks for your edits. The machine runs the approved full check.",
+    "  If screenshots are required, capture the actual candidate and list them in",
+    `  ${proof}: { "version": 1, "screenshots": [`,
+    '    { "path": "<repository-relative PNG or JPEG>", "caption": "<what it shows>" } ] }.',
+    `  List at most ${PROOF_LIMITS.screenshots} screenshots, with paths/captions under ${PROOF_LIMITS.evidenceRef} UTF-8 bytes,`,
+    "  on one line each; no absolute paths or dot segments. Images must be real,",
+    "  at least 320 by 200 pixels. A list is optional; missing required images",
+    "  remain an evidence gap. Do not add completion claims to this inventory.",
+    "- Re-read the handoff and any screenshot inventory before you exit.",
+    "  Confirm valid JSON, the stated size limits, and that every named image",
+    "  exists. No criterion answers or self-reported file list are required.",
     // The two adaptive-execution-plan files. Both are optional to the
     // machine and neither can widen anything: one reports where the work
     // has got to, the other says the road itself was wrong.
@@ -3720,15 +3422,10 @@ function brief(
       ? []
       : [
           `- This branch already carries earlier attempts' committed work,`,
-          `  starting from revision ${retryBase}. The machine's sealed diff for`,
-          "  this proof spans the WHOLE branch from that revision to the commit",
-          '  of your final tree, not just what you touch now — so "changed" must',
-          "  equal every repo-relative path that differs from that revision",
-          "  under the changed-list contract above, including paths only an",
-          `  earlier attempt touched (\`git diff --name-only ${retryBase} HEAD\` lists`,
-          "  the ones already committed; your own uncommitted work comes on",
-          `  top under the same rename rule), capped at ${PROOF_LIMITS.changed} paths — never`,
-          "  just the files you personally edited this attempt.",
+          `  starting from revision ${retryBase}.`,
+          "  The machine captures the whole branch from that revision to the",
+          "  commit of your final tree, including work from earlier attempts.",
+          "  Report the result and limitations in your handoff; do not recreate that inventory.",
         ]),
     ...(answers.length === 0
       ? []

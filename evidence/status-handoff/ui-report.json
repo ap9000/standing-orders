@@ -1,0 +1,207 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "sourceCommit": "68cb15ab74a1d6318e9e7edc703c5966f09debec",
+  "sourceTree": "311545aefd5cd623441da972b543356c14d7c67f",
+  "source": {
+    "src/serve.ts": "147880384317001ba107a52efe9125d01d06dfe65aff5cd5d22c5fe6c0247a44",
+    "src/assignment-ui.ts": "f0a01df42a135a37d66a28b3366897fadc6dffbe9700456649595a5549d346d6",
+    "src/assignment.ts": "5e6a405774fc0d6c28026f79328d338b9428643ec79520e6b62eb2f72b02b880",
+    "src/workspace-ui.ts": "4fb11d5d90d3910667c188c8115c804e3c8ca89776ad4958fe91b21aa2a18b44",
+    "src/work-summary.ts": "509ad69a9be56ca1002dfb5336e9eefc9b273fc41cd6764a907d6a5dd349a8b1",
+    "src/modes.ts": "d35ec20e00bc4aa11e45607d8edb57ad61b6167bd853dc4155cb4c6213b82c02",
+    "src/store.ts": "48c1db6981f76028f4250658483926f5c45f9d923501a443dd0a62094506a797",
+    "src/result-review.ts": "cdc7befdbc7f8aba88de288a41debfa5b25d2efa7982f8ca263317eda04b7a81",
+    "src/demo.ts": "78e7a944e5019b5570db7f5d14daa78c84b3f5f3fe974447d6feb46e518838e8",
+    "src/evidence.ts": "d13984068ef2e0bdd446caabe020cea1fb7173ae8d2927939e00c4378bc74ea4",
+    "src/review-context.ts": "3a2d74d91d57721361bf423ccb36edce50964598bf75efdc1a675d0d9d346c25",
+    "src/verification-evidence.ts": "91046e7f44862362eb3145922e6a95afa99ab960d0557584db9ee89382893819"
+  },
+  "loadedRuntime": {
+    "schema": 70,
+    "startedAt": "2026-09-20T21:25:52.543Z",
+    "sha256": {
+      "dist/serve.js": "6c6a559a71f783d4143cbbf91f104bfbd75a2cf06b3a1cc6f9e43f50569e1ef7",
+      "dist/assignment-ui.js": "0d34b1726f32e00c9b1bf9ba658575f82cb109b3b508a62195b65e4628bcca12",
+      "dist/assignment.js": "3ffe6fb102c3e2de4ab0e6791e6f903bca1c0065bbb3750fba3bf643a5a12037",
+      "dist/workspace-ui.js": "c319fe29bd91bf162f5eeb08622f37a152d9550afe8103c453da8dbe2e1cdea7",
+      "dist/work-summary.js": "f3bcbd1a92dc6828cbaca34645119370228bb263eceeebec2e23da8662de360a",
+      "dist/modes.js": "24012d1e8412d259a16ec280d461221c41766575299cfcc18525643afd1a136e",
+      "dist/store.js": "2f280039386a4d94416f4022ed836123882b3aa547bf629e748ca9bc67b67b80",
+      "dist/result-review.js": "feb266465d75a1c386171e53883014380c280baab006ab2ef6eb0b8f7e8ff91c",
+      "dist/demo.js": "5e30f4fc3c5f4bd1b59bc552f7396609bb32a95d2d57109a081eec9e38852a83",
+      "dist/evidence.js": "8ab38d8d3c218929c2204600d44c0ad42767c1f88a983c76e3527e1c1e0a16f6",
+      "dist/review-context.js": "1655deb2fbcae844a0d82f65e70bcbde230a927d1200284947b156c53bc27f3a",
+      "dist/verification-evidence.js": "32e0ca06fc0917f050c588c441c661fe957088f0029bbf095d15f8fbe2c4eb20"
+    }
+  },
+  "screenshots": [
+    {
+      "path": "desktop-ready.png",
+      "sha256": "b13a7ac3d57777f63093ee2681275423c8611cf737cdcb3fb6173ee55ecae043",
+      "width": 1440,
+      "height": 1309,
+      "caption": "Synthetic desktop, 1440×900 viewport: Ready with passing machine checks, supporting-material limitation, and exact Mark complete action.",
+      "inspected": true
+    },
+    {
+      "path": "phone-revision.png",
+      "sha256": "e45226719b6e2e2cdf394aa082f7254856326707acdec0ac4854891b3d12ab43",
+      "width": 390,
+      "height": 844,
+      "caption": "Synthetic phone, 390×844 viewport: all 488 characters of requested revision feedback are readable before unsigned execution terms.",
+      "inspected": true
+    }
+  ],
+  "checks": [
+    {
+      "name": "Desktop result → changes → completion → feedback → unsigned revision",
+      "ok": true,
+      "viewport": [
+        1440,
+        900
+      ],
+      "detail": "Original run8 Ready, sealed checks passed. Mark complete produced Complete without altering proof. Request changes created exactly one unsigned revision; the exact note is visible in expanded Review plan.",
+      "metrics": {
+        "width": 1440,
+        "scrollWidth": 1440,
+        "planOpen": [
+          "work tools",
+          "Review plan",
+          "Why these agents",
+          "Runtime limits"
+        ],
+        "passwordEmpty": true,
+        "noteVisible": true,
+        "history": [
+          "Original · Result saved — verification needed Run #8Required evidence is missing, so this result is not verified.",
+          "Correction 1 · Needs your approval"
+        ]
+      }
+    },
+    {
+      "name": "Phone failed check and long feedback",
+      "ok": true,
+      "viewport": [
+        390,
+        844
+      ],
+      "detail": "Original run6 Ready with Checks failed (exit1). Mark complete preserved failed outcome. All488 feedback characters survived completion and Request changes into one unsigned revision; no execution approval supplied.",
+      "resultMetrics": {
+        "width": 390,
+        "scrollWidth": 390,
+        "status": "Ready",
+        "checks": "Checks failed (exit 1). Open check output",
+        "note": 488,
+        "buttons": [
+          {
+            "text": "View",
+            "height": 44,
+            "width": 47.484375
+          },
+          {
+            "text": "Annotate",
+            "height": 44,
+            "width": 69.484375
+          },
+          {
+            "text": "Mark complete",
+            "height": 44,
+            "width": 320
+          }
+        ]
+      },
+      "revisionMetrics": {
+        "width": 390,
+        "scrollWidth": 390,
+        "feedbackVisible": true,
+        "passwordEmpty": true,
+        "approval": [
+          {
+            "height": 44,
+            "text": "Approve & start"
+          }
+        ],
+        "url": "/t/fix-payout-rounding?version=revise-fix-payout-rounding-from-1-annotation-on-build-6"
+      }
+    },
+    {
+      "name": "Empty and stale-result recovery",
+      "ok": true,
+      "empty": {
+        "width": 1440,
+        "scrollWidth": 1440,
+        "empty": true,
+        "recovery": [
+          {
+            "text": "See all work →",
+            "height": 44
+          }
+        ]
+      },
+      "error": {
+        "width": 390,
+        "scrollWidth": 390,
+        "error": true,
+        "back": [
+          {
+            "text": "Review results",
+            "height": 44,
+            "width": 118.40625
+          }
+        ]
+      },
+      "keyboard": {
+        "focused": "s·o",
+        "tag": "A"
+      }
+    }
+  ],
+  "journeyRecords": [
+    {
+      "task": "fix-payout-rounding",
+      "run": 6,
+      "sourceProofUnchanged": true,
+      "proofAcceptance": null,
+      "reviewState": "unrequested",
+      "repairChain": null,
+      "completionRecorded": 1,
+      "revisions": [
+        {
+          "id": "revise-fix-payout-rounding-from-1-annotation-on-build-6",
+          "state": "queued",
+          "approved": false,
+          "runs": 0
+        }
+      ]
+    },
+    {
+      "task": "confirm-empty-state-copy",
+      "run": 8,
+      "sourceProofUnchanged": true,
+      "proofAcceptance": null,
+      "reviewState": "unrequested",
+      "repairChain": null,
+      "completionRecorded": 1,
+      "revisions": [
+        {
+          "id": "revise-confirm-empty-state-copy-from-1-annotation-on-bui",
+          "state": "queued",
+          "approved": false,
+          "runs": 0
+        }
+      ]
+    }
+  ],
+  "provenance": {
+    "initialReadOnlyPreview": "d1066a47ea53f41ef9e115c1d35b2187883143a5 revealed two presentation issues; no journey mutation before restart.",
+    "currentJourney": "Both complete/feedback/revision journeys and nominated screenshots ran on loaded68cb15a after removing the model-rubric Checks badge and duplicate PR ribbon. Subsequent parent changes were docs/tests only; all12 production source hashes were rechecked.",
+    "priorJourneys": "Earlier lead-review and process-recovery journeys are historical only; none substitutes for this run."
+  },
+  "limits": [
+    "Synthetic demo and sealed sample check receipts; no provider, real project tests, installed database, publication, or deployment.",
+    "Desktop Chromium and emulated phone viewport only; physical phone, screen-reader and exhaustive keyboard behavior untested.",
+    "Historical assessment and proof words remain in saved records/Attempts; primary flow starts no separate reviewer or automatic revision.",
+    "Phone failed-check full-page image inspected locally but not nominated; the committed phone screenshot shows the exact long feedback before consent."
+  ]
+}

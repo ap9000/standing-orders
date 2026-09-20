@@ -32,6 +32,8 @@ export function sealVerificationReceipt(store: Store, root: string, runId: numbe
 /** Read and bind existing evidence, never backfill historical receipts. A legacy
  * single-attempt machine header is sufficient only with its exact approved grant
  * and sealed candidate endpoints. Recovery logs without a receipt stay explicit. */
+// Recovery reads this existing receipt binding, then requires an actually executed
+// v1 passing gate. This reader does not rerun checks or transfer a prior approval.
 export function verificationEvidence(store: Store, root: string, runId: number):
   { ok: true; bytes: string | null; digest: string } | { ok: false; problem: string } {
   const fail = (problem: string) => ({ ok: false as const, problem });

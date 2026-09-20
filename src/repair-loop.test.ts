@@ -138,6 +138,16 @@ describe("the bounded repair loop (v40, evidence-review-v1)", () => {
   };
   const repairGate = (run: number) => maybeTriggerRepair(store, REPO, evidenceRoot, run, store.proofVerdictFor(run)!.verdict, T0, "verification");
 
+  test("automatic review feedback creates no follow-up even with historical repair authority", () => {
+    signMode({ repairAuto: true, repairMaxAttempts: 3 });
+    seedTask("lead-review");
+    const run = seedRun("lead-review", "short", CRITERIA.map(c => row(c.id, "missing")));
+    expect(maybeTriggerRepair(store, REPO, evidenceRoot, run, "short", T0, "review", true)).toEqual({ kind: "none" });
+    expect(store.repairChainFor(run)).toBeNull();
+    expect(store.getTask("lead-review-fix-1")).toBeNull();
+    expect(maybeTriggerRepair(store, REPO, evidenceRoot, run, "short", T0)).toMatchObject({ kind: "drafted", approved: true });
+  });
+
   test("an exit failure repairs even when every criterion passed; replay and review share one draft", () => {
     signMode({ repairAuto: true, repairMaxAttempts: 3 });
     const run = failedGate("t-gate", { configured: true, ran: true, exitCode: 1 });

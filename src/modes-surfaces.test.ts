@@ -257,18 +257,15 @@ describe("the credentialed-CLI auto-approve road and the plan pins", () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  test("CLI signs bounded repair and review service retries only through explicit terms", async () => {
+  test("CLI refuses retired review and automatic revision flags and signs current defaults", async () => {
     const args = ["set", "--repo", REPO, "--name", "standard", "--as", "alex", "--token", token, "--json"];
     expect(await run("mode", [...args, "--repair-auto"])).not.toBe(0);
     expect(await run("mode", [...args, "--repair-max-attempts", "2"])).not.toBe(0);
     expect(await run("mode", [...args, "--repair-auto", "--repair-max-attempts", "4"])).not.toBe(0);
-    expect(await run("mode", [...args, "--repair-auto", "--repair-max-attempts", "2", "--review-retry-auto"])).toBe(0);
-    let saved = openStore(db);
-    expect(JSON.parse(saved.activeMode(REPO, T0)!.termsJson)).toMatchObject({ repairAuto: true, repairMaxAttempts: 2, reviewRetryAuto: true, reviewAuto: true });
-    saved.close();
+    expect(await run("mode", [...args, "--repair-auto", "--repair-max-attempts", "2", "--review-retry-auto"])).not.toBe(0);
     expect(await run("mode", args)).toBe(0);
-    saved = openStore(db);
-    expect(JSON.parse(saved.activeMode(REPO, T0)!.termsJson)).toMatchObject({ repairAuto: false, repairMaxAttempts: 0, reviewRetryAuto: false });
+    const saved = openStore(db);
+    expect(JSON.parse(saved.activeMode(REPO, T0)!.termsJson)).toMatchObject({ repairAuto: false, repairMaxAttempts: 0, reviewRetryAuto: false, reviewAuto: false });
     saved.close();
   });
 
@@ -390,7 +387,7 @@ describe("the route across surfaces (v47): a live automerge mode is publication 
     const envelope = JSON.parse(lines.join("\n")) as { route: { digest: string; legs: { words: string; reasons: string[]; readiness: string }[] } };
     expect(envelope.route.digest).toBe(projection.digest);
     expect(envelope.route.legs.map(one => one.words)).toEqual(projection.legs.map(one => one.words));
-    expect(envelope.route.legs.map(one => one.readiness)).toEqual(["unknown", "unknown", "unknown", "ready"]);
+    expect(envelope.route.legs.map(one => one.readiness)).toEqual(["unknown", "unknown", "unknown"]);
     rmSync(join(file, ".."), { recursive: true, force: true });
   });
 });

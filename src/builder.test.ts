@@ -493,6 +493,10 @@ describe("the builder's gates", () => {
     expect(built).toMatchObject({ ok: true });
     expect(agentCalls.some(args => args.includes("--resume") && args.includes("sess-park-1"))).toBe(true);
     expect(store.getRun(first.runId as number)).toMatchObject({ parentRun: parked, sessionId: "sess-park-1" });
+    const warmPrompt = agentCalls[0]![agentCalls[0]!.indexOf("-p") + 1]!;
+    expect(warmPrompt).toContain("No criterion answers or self-reported file list are required");
+    expect(warmPrompt).not.toContain("restate that criterion");
+    expect(warmPrompt).not.toContain("pass --rubric");
 
     // A second attempt at the same park goes cold: one warm try per park,
     // because a dead session must never fail its way into a stall.
@@ -638,7 +642,9 @@ describe("the builder's gates", () => {
     }
   });
 
-  test("a retry's brief names the pinned first base, so its own \"changed\" claim can be cumulative (run 1465)", async () => {
+  test.each([
+    ["default", false], ["default", true], ["strict", false], ["strict", true],
+  ] as const)("a retry's brief preserves the pinned base without inventing proof requirements: %s rubric=%s", async (qualityMode, hasRubric) => {
     // Run 1465's proof read short: the sealed diff-stat is already pinned to
     // the branch's first builder base (run 1461, above), but nothing ever
     // TOLD the agent that — so its self-reported proof.changed[] listed only
@@ -665,7 +671,12 @@ describe("the builder's gates", () => {
     };
 
     claimIt();
-    approveScope();
+    propose(store, {
+      taskId: "t-1", goal: "add a guard on the payout path", now: T0,
+      qualityMode,
+      acceptance: hasRubric ? [{ id: "c1", statement: "the guard rejects a negative payout", evidence: ["check"] }] : [],
+    });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
 
     const first = request({ git: statefulGit });
     await build(store, first);
@@ -675,7 +686,7 @@ describe("the builder's gates", () => {
     // name, so the ordinary instructions stand unchanged.
     expect(firstPrompt).not.toContain("already carries earlier attempts");
 
-    const second = request({ git: statefulGit });
+    const second = request({ git: statefulGit, recoveredDraftRun: first.runId, recoveredDraftKind: "partial" });
     await build(store, second);
     expect(agentCalls).toHaveLength(2);
     const secondPrompt = agentCalls[1]?.[agentCalls[1]!.indexOf("-p") + 1] ?? "";
@@ -684,16 +695,17 @@ describe("the builder's gates", () => {
     // this attempt's own base_revision ("mid-sha").
     expect(secondPrompt).toContain("orig-sha");
     expect(secondPrompt).not.toContain("mid-sha");
-    expect(secondPrompt).toContain("git diff --name-only orig-sha");
-    // The changed-list contract seals from the SAME pinned base on a retry,
-    // never the first-attempt HEAD shorthand; the retry paragraph defers to
-    // that contract instead of carrying its own unstaged recipe (comment 396).
-    expect(secondPrompt).toContain("`git diff --numstat orig-sha <that commit>`");
-    expect(secondPrompt).not.toContain("git diff --numstat HEAD");
-    expect(secondPrompt).toContain("under the changed-list contract above");
-    expect(secondPrompt).toContain("`git diff --name-only orig-sha HEAD` lists");
-    expect(secondPrompt).not.toContain("one ref, so it also covers your own uncommitted edits");
-    expect(firstPrompt).toContain("`git diff --numstat HEAD <that commit>`");
+    expect(secondPrompt).toContain("write this attempt's own handoff with its outcome and limitations");
+    for (const prompt of [firstPrompt, secondPrompt]) {
+      expect(prompt).toContain("No criterion answers or self-reported file list are required");
+      expect(prompt).not.toContain('"changed" must');
+      expect(prompt).not.toContain("under the changed-list contract above");
+      expect(prompt).not.toContain("restate that criterion");
+      expect(prompt).not.toContain("pass --rubric");
+      expect(prompt).toContain("Return the result and limitations to the lead or user for review");
+      expect(prompt).not.toContain("independent reviewer");
+    }
+    expect(secondPrompt).toContain("The machine captures the whole branch from that revision");
   });
 
   test("the phase vocabulary is closed, and a finished run's phase is history", () => {
@@ -893,6 +905,12 @@ describe("what the builder tells the agent", () => {
       ...over,
     });
 
+  const legacyProofBrief = async () => {
+    propose(store, { taskId: "t-1", goal: "add a guard on the payout path", qualityMode: "strict", now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    await build1();
+  };
+
   test("quotes the scope, including what it is not", async () => {
     // A brief that says only what to do invites the agent to decide how far to
     // go, and how far to go is the thing that was actually agreed.
@@ -916,8 +934,10 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("completed source draft");
     expect(prompt).toContain("#42");
     expect(prompt).toContain("reviewing the existing changes");
-    expect(prompt).toContain("write this attempt's own handoff and proof");
+    expect(prompt).toContain("write this attempt's own handoff with its outcome and limitations");
     expect(prompt).toContain("Do not discard and recreate sound work");
+    expect(prompt).toContain("No criterion answers or self-reported file list are required");
+    expect(prompt).not.toContain("restate that criterion");
   });
 
   test("an interrupted partial draft is continued without pretending it was complete", async () => {
@@ -930,17 +950,12 @@ describe("what the builder tells the agent", () => {
     expect(prompt).not.toContain("completed source draft");
   });
 
-  test("the brief states the hard 500-byte cap on a criterion's \"how\", a 350-byte target, and tells the agent to measure before finalizing", async () => {
-    // Run 1458 came back short only because every criteria[].how in the proof
-    // ran over PROOF_LIMITS.criterionHow (500 bytes) — the whole proof was
-    // refused. The brief must make the cap, a safe target, and the act of
-    // measuring explicit, not just describe the field.
-    await build1();
-
+  test("legacy strict work needs no authored criterion answers", async () => {
+    await legacyProofBrief();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
-    expect(prompt).toContain('Each criterion\'s "how" has a hard cap of 500 bytes UTF-8');
-    expect(prompt).toContain("Target 350 bytes or fewer");
-    expect(prompt).toContain('measure every "how" string\'s UTF-8 byte length');
+    expect(prompt).toContain("No criterion answers or self-reported file list are required");
+    expect(prompt).not.toContain('Each criterion\'s "how"');
+    expect(prompt).not.toContain("restate that criterion");
   });
 
   test("a signed goal uses a short handoff and captured evidence instead of duplicate criterion claims", async () => {
@@ -956,7 +971,7 @@ describe("what the builder tells the agent", () => {
     await build1();
 
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
-    expect(prompt).toContain("One independent reviewer assesses that evidence against the signed goal");
+    expect(prompt).toContain("Return the result and limitations to the lead or user for review");
     expect(prompt).toContain("No criterion answers or self-reported file list are required");
     expect(prompt).not.toContain("signed criterion is answered by its exact id");
     expect(prompt).not.toContain("pass --rubric");
@@ -964,115 +979,48 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("missing required images");
   });
 
-  test("the brief states the hard 300-byte cap on a caveat, a 180-byte target, and tells the agent to measure before finalizing", async () => {
-    // Run 1460 came back short only because two caveats ran over
-    // PROOF_LIMITS.caveat (300 bytes) — the whole proof was refused. The
-    // brief must make the cap, a safe target, and the act of measuring
-    // explicit, the same way it already does for a criterion's "how".
-    await build1();
-
+  test("legacy strict caveats belong in the result handoff", async () => {
+    await legacyProofBrief();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
-    expect(prompt).toContain("Each caveat has a hard cap of 300 bytes UTF-8");
-    expect(prompt).toContain("Target 180 bytes or fewer");
-    expect(prompt).toContain("measure every caveat string's UTF-8 byte length");
+    expect(prompt).toContain("Put useful caveats in the short handoff");
+    expect(prompt).not.toContain("measure every caveat");
   });
 
-  test("the brief states the blocking-caveat contract: a caveat naming a criterion's id is an exception the criterion must be marked not-met for, and the exit preflight checks it (atomic authority closure)", async () => {
-    // Run 1497's proof marked c1 and c4 met while its own caveats admitted
-    // the no-scope row and the routine page; the plane now refutes a
-    // met criterion a caveat names, so the brief must say how a caveat
-    // attaches to a criterion and that the preflight refuses the clash.
-    await build1();
+  test("the brief preserves limitations without inventing criterion claims", async () => {
+    await legacyProofBrief();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
-    expect(prompt).toContain("EVERY caveat is an exception to a signed criterion and names that");
-    expect(prompt).toContain("be marked not-met");
-    expect(prompt).toContain("Never name a met criterion's id inside a");
-    // Every caveat is attributed (final authority closure): the brief says
-    // an unassigned or unknown-tagged caveat refutes the proof, that
-    // unrelated ideas go to the handoff's followUps, and that the exit
-    // preflight checks attribution beside the blocking rule.
-    expect(prompt).toContain("a caveat that names no criterion, or whose leading tag is an id");
-    expect(prompt).toContain("handoff's followUps, never in caveats");
-    expect(prompt).toContain("caveat names a signed criterion's exact id and no caveat names a");
-    expect(prompt).toContain("criterion marked met; and confirm every");
+    expect(prompt).toContain("do not invent evidence");
+    expect(prompt).not.toContain("EVERY caveat is an exception");
+    expect(prompt).not.toContain("be marked not-met");
   });
 
-  test("the brief says in plain language what check evidence for a met criterion is: a durable current-tree command that exited zero, no temporary files, no checkout mutation, negative controls elsewhere (proof preflight closure)", async () => {
-    // A proof once cited a temp-file reproduction that exited 1 as check
-    // evidence for a met criterion — a negative control read as a failed
-    // check, and the plane failed the row. The brief must say what a
-    // check ref on a met criterion is, and where a negative control goes.
-    await build1();
+  test("the machine owns the final check and the builder runs focused checks", async () => {
+    await legacyProofBrief();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
-    expect(prompt).toContain("Check evidence for a met criterion is a durable current-tree command");
-    expect(prompt).toContain("that exited zero");
-    expect(prompt).toContain("It must not rely on temporary files, and it must not");
-    expect(prompt).toContain("mutate the checkout");
-    expect(prompt).toContain("belongs in a durable test, or in the criterion's");
-    expect(prompt).toContain("how narrative, never as a failing check ref");
-    expect(prompt).toContain("cites a check which exited nonzero is refused, not verified");
-    // And the exit preflight names the same rule beside the caveat rules.
-    expect(prompt).toContain("an exact entry in checks, changed, or screenshots; confirm no");
-    expect(prompt).toContain("criterion marked met cites a check that exited nonzero; confirm every");
+    expect(prompt).toContain("Run focused checks for your edits");
+    expect(prompt).toContain("The machine runs the approved full check");
+    expect(prompt).not.toContain("Check evidence for a met criterion");
   });
 
-  test("the brief states the changed-list contract: exactly the sealed diff's paths, a detected rename under its destination only, otherwise a delete plus an add (comment 396, run 1642)", async () => {
-    // Run 1642 moved scripts/claude-review-schema-smoke.mjs to src/fixtures/
-    // and its proof listed BOTH names. The sealed stat is `git diff
-    // --numstat` between the base and the machine's own commit, with rename
-    // detection, so the move was one destination entry and the old name was
-    // an overclaim — refuted, on a run whose tests and review criteria all
-    // passed. The brief must say exactly what the machine seals, on a first
-    // attempt (base HEAD), and must NOT hand out the unstaged recipe
-    // (`diff --name-only HEAD` + `ls-files --others`) that yields both names
-    // for an uncommitted `mv` — the steering's own repro.
-    await build1();
+  test("the machine captures changed paths without an agent inventory", async () => {
+    await legacyProofBrief();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
-    expect(prompt).toContain("The changed list must equal the machine's sealed diff exactly");
-    expect(prompt).toContain("machine commits your whole final tree (git add -A, leaving out the");
-    expect(prompt).toContain("STANDING-ORDERS-* protocol files and .standing-orders-lease) and seals");
-    expect(prompt).toContain("`git diff --numstat HEAD <that commit>`, with git's own rename");
-    expect(prompt).toContain('"changed" is every');
-    expect(prompt).toContain("repository-relative path in that diff, once each, and nothing else");
-    expect(prompt).toContain("A file git pairs as a rename or move is ONE path, its destination:");
-    expect(prompt).toContain("never also the old path, which that diff does not contain");
-    expect(prompt).toContain("git does not pair is a delete plus an add, and then both paths are");
-    // The unstaged trap is named as a trap, never offered as the recipe.
-    expect(prompt).toContain("Do not read the list off an unstaged tree");
-    expect(prompt).toContain("`git diff --name-only HEAD` shows the old path as");
-    expect(prompt).toContain("`git ls-files --others` shows the new one as untracked");
-    expect(prompt).not.toContain("plus every new file you created");
-    expect(prompt).not.toContain("`git ls-files --others --exclude-standard`");
-    expect(prompt).not.toContain("Only a move that rewrites most of a file");
-    // No brittle staging recipe: the machine owns the sealed list and hands
-    // it back once, in the same session, when the diff itself explains the
-    // difference — an unexplained path still refutes.
-    expect(prompt).not.toContain("stage that pair");
-    expect(prompt).toContain("If your list differs from the");
-    expect(prompt).toContain("under both names, a sealed path left out — the machine hands you the");
-    expect(prompt).toContain("exact sealed list once, in this same session, for a receipt-only");
-    expect(prompt).toContain("correction. A path the sealed diff never had refutes the proof.");
+    expect(prompt).toContain("The machine captures the exact changes");
+    expect(prompt).toContain("No criterion answers or self-reported file list are required");
+    expect(prompt).not.toContain('"changed" is every');
+    expect(prompt).not.toContain("receipt-only");
   });
 
-  test("the brief states EVERY proof and handoff cap the parsers hold the files to, and tells the agent to preflight each protocol file before it exits (raw authority repair)", async () => {
-    await build1();
+  test("the brief gives the handoff and optional image limits without proof ceremony", async () => {
+    await legacyProofBrief();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
-    // The proof: every remaining cap, named with the parser's own numbers.
-    expect(prompt).toContain(`the whole file under ${PROOF_LIMITS.payload} bytes; at most ${PROOF_LIMITS.criteria} criteria, ${PROOF_LIMITS.checks} checks, ${PROOF_LIMITS.changed} changed`);
-    expect(prompt).toContain(`paths, ${PROOF_LIMITS.caveats} caveats, and ${PROOF_LIMITS.screenshots} screenshots; each criterion id at most ${PROOF_LIMITS.criterionId} bytes`);
-    expect(prompt).toContain(`each statement at most ${PROOF_LIMITS.criterionStatement}`);
-    expect(prompt).toContain(`most ${PROOF_LIMITS.evidenceRef} bytes UTF-8; every string ONE line of plain text with no control`);
-    expect(prompt).toContain("every path repository-relative");
-    // The handoff: the whole-file cap and the one-line rule.
     expect(prompt).toContain(`The whole file must be under ${HANDOFF_PAYLOAD_CAP} bytes`);
     expect(prompt).toContain(`at most ${HANDOFF_LIST_CAP} items each`);
     expect(prompt).toContain("a newline or other control");
-    // The exit preflight.
-    expect(prompt).toContain("Preflight every protocol file before you exit");
-    expect(prompt).toContain("re-read it from disk, parse it as");
-    expect(prompt).toContain("Buffer.byteLength");
-    expect(prompt).toContain("confirm every evidence ref resolves to");
-    expect(prompt).toContain("refused whole — the machine never repairs it for you");
+    expect(prompt).toContain(`List at most ${PROOF_LIMITS.screenshots} screenshots`);
+    expect(prompt).toContain("Re-read the handoff and any screenshot inventory");
+    expect(prompt).toContain("Confirm valid JSON");
+    expect(prompt).not.toContain("Preflight every protocol file");
   });
 
   test("steering notes land fenced in the brief, and delivery settles only on the stream's receipt (arc 1)", async () => {
@@ -3022,9 +2970,9 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     return read.content.toString("utf8");
   };
 
-  test.each(["correct", "unchanged", "rewrite-checks", "rewrite-code", "throw-after-write"])("proof-only correction: %s", async behavior => {
+  test.each(["default", "correct", "unchanged", "rewrite-checks", "rewrite-code", "throw-after-write"])("proof packaging never starts a correction turn: %s", async behavior => {
     const criterion = { id: "c1", statement: "the guard exists", evidence: ["check", "changed-path"] as ("check" | "changed-path")[] };
-    propose(store, { taskId: "t-1", goal: "add a guard", acceptance: [criterion], now: T0 });
+    propose(store, { taskId: "t-1", goal: "add a guard", acceptance: [criterion], qualityMode: behavior === "default" ? "default" : "strict", now: T0 });
     expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
     claimIt();
     store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 5_000, approvedBy: "alex" }, T0);
@@ -3042,6 +2990,12 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       options?.onSpawn?.(10_000 + calls);
       if (calls === 1) {
         await agentWithProof(wrong)(file, args, options);
+        if (behavior === "default") {
+          const prompt = args[args.indexOf("-p") + 1]!;
+          expect(prompt).toContain("You do not need to write STANDING-ORDERS-PROOF-");
+          expect(prompt).not.toContain("your proof must answer EVERY");
+          expect(prompt).not.toContain("restating its statement verbatim");
+        }
       } else {
         expect(args).toContain("--resume");
         const prompt = args[args.indexOf("-p") + 1]!;
@@ -3067,15 +3021,16 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     });
     expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
     expect(commits).toBe(1);
-    expect(calls).toBe(behavior === "unchanged" || behavior === "rewrite-checks" ? 3 : 2);
+    expect(calls).toBe(1);
     expect(pids).toEqual(Array.from({ length: calls }, (_, i) => 10_001 + i));
     expect(checks).toBe(moved ? 0 : 1);
-    expect(store.proofVerdictFor(req.runId)).toMatchObject({ verdict: behavior === "correct" ? "verified" : "refuted" });
+    expect(store.proofVerdictFor(req.runId)).toMatchObject({ verdict: "refuted" });
     const attempts = store.artifactsFor(req.runId).filter(one => one.kind === "structured-output" && !isVerificationReceipt(one));
-    expect(attempts.length).toBe(calls);
-    const original = readVerifiedArtifact(join2(wt, ".evidence"), attempts.find(one => one.key.endsWith("builder-proof-response-0.txt"))!);
-    expect(original.ok && original.content.toString("utf8")).toContain("requires evidence:");
-    expect(store.runsFor(taskRef).filter(one => one.role === "repair").every(one => one.finishedAt !== null)).toBe(true);
+    expect(attempts).toHaveLength(0);
+    expect(store.runsFor(taskRef).filter(one => one.role === "repair")).toHaveLength(0);
+    const proof = store.artifactsFor(req.runId).find(one => one.kind === "proof")!;
+    const retained = readVerifiedArtifact(join2(wt, ".evidence"), proof);
+    expect(retained.ok && JSON.parse(retained.content.toString("utf8")).criteria[0].statement).toBe(wrong.criteria[0]!.statement);
   });
 
   describe("a receipt-only correction freezes every submitted criterion id/verdict pair (comment 397, run 1648)", () => {
@@ -3129,7 +3084,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       return { agent, prompts, calls: () => calls };
     };
     const arrange = () => {
-      propose(store, { taskId: "t-1", goal: "add a guard", acceptance: [criterion], now: T0 });
+      propose(store, { taskId: "t-1", goal: "add a guard", acceptance: [criterion], qualityMode: "strict", now: T0 });
       expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
       claimIt();
       store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 5_000, approvedBy: "alex" }, T0);
@@ -3145,14 +3100,13 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     /** The bounded budget spent, every turn refused by the frozen pair's
      * name, the original receipt stored and refuted for its own defect. */
     const expectFrozen = (run: number, ref: number, correcting: ReturnType<typeof correctingAgent>, behavior: Exclude<Behavior, "statement-only">, pairs: string[][]) => {
-      expect(correcting.calls()).toBe(3);
-      expect(correcting.prompts[0]).toContain("Keep every criterion id and its verdict exactly as submitted");
-      expect(correcting.prompts[1]).toContain(freezeMessage[behavior]);
+      expect(correcting.calls()).toBe(1);
+      expect(correcting.prompts).toEqual([]);
       const verdict = store.proofVerdictFor(run);
       expect(verdict).toMatchObject({ verdict: "refuted" });
       expect(verdict?.reasons[0]).toContain("was signed as");
       expect(pairsOf(run)).toEqual(pairs);
-      expect(store.runsFor(ref).filter(one => one.role === "repair").map(one => one.reason)).toEqual(["proof-correction-rejected", "proof-correction-rejected"]);
+      expect(store.runsFor(ref).filter(one => one.role === "repair").map(one => one.reason)).toEqual([]);
     };
 
     test.each<Exclude<Behavior, "statement-only">>(["not-met-to-pending", "not-checked-to-pending", "drop-extra-negative", "add-extra"])("%s is refused: the answers stay as submitted and the gate still runs once", async behavior => {
@@ -3167,19 +3121,17 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       expectFrozen(req.runId as number, taskRef, correcting, behavior, [["c1", submittedVerdict], ["x1", "not-met"]]);
     });
 
-    test("a statement-only correction that keeps every pair is accepted: the not-met answer and the extra finding survive into the stored receipt", async () => {
+    test("even a correctable statement stays as submitted for the lead without another turn", async () => {
       arrange();
       const submitted = submittedWith("not-met");
       const correcting = correctingAgent(submitted, corrected("statement-only", submitted));
       const req = request({ leaseId: "test-lease", agent: correcting.agent, verify: (async () => ({ ...OK })) as Runner });
       expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
-      expect(correcting.calls()).toBe(2);
-      const verdict = store.proofVerdictFor(req.runId as number);
-      expect(verdict).toMatchObject({ verdict: "short" });
-      expect(verdict?.reasons).toContain('criterion "the guard exists" is not met');
+      expect(correcting.calls()).toBe(1);
+      expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "refuted" });
       expect(pairsOf(req.runId as number)).toEqual([["c1", "not-met"], ["x1", "not-met"]]);
-      expect(storedProof(req.runId as number).criteria[0]?.statement).toBe(criterion.statement);
-      expect(store.runsFor(taskRef).filter(one => one.role === "repair").map(one => one.reason)).toEqual(["proof-corrected"]);
+      expect(storedProof(req.runId as number).criteria[0]?.statement).toBe(submitted.criteria[0]!.statement);
+      expect(store.runsFor(taskRef).filter(one => one.role === "repair")).toEqual([]);
     });
 
     test("a resumed attempt is frozen the same way, against the cumulative stat pinned to the first base (run 1461)", async () => {
@@ -3257,28 +3209,6 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
 
     describe("the sealed diff-stat is re-read after the correction and after the final gate; cached facts are never adjudicated once altered", () => {
       const statFileOf = (run: number) => join2(wt, ".evidence", store.artifactsFor(run).find(one => one.kind === "diff-stat")!.key);
-
-      test("altered while the receipt was being corrected: refuted by name before any gate spend, the accepted correction stays in the record", async () => {
-        arrange();
-        let run = 0;
-        const submitted = submittedWith("not-met");
-        const correcting = correctingAgent(submitted, corrected("statement-only", submitted), () => {
-          writeSync2(statFileOf(run), JSON.stringify({ schema: 1, base: "x", head: "y", files: [{ path: "src/index.ts", additions: 1, deletions: 0 }], filesTruncated: false }));
-        });
-        let checks = 0;
-        const req = request({ leaseId: "test-lease", agent: correcting.agent, verify: (async () => { checks++; return { ...OK }; }) as Runner });
-        run = req.runId as number;
-        expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
-        expect(correcting.calls()).toBe(2);
-        expect(checks).toBe(0);
-        expect(store.proofVerdictFor(run)).toMatchObject({
-          verdict: "refuted",
-          reasons: ["the sealed diff-stat no longer reads as it did before the receipt correction; the machine refuses to adjudicate the facts it cached"],
-        });
-        expect(store.runsFor(taskRef).filter(one => one.role === "repair").map(one => one.reason)).toEqual(["proof-corrected"]);
-        expect(storedProof(run).criteria[0]?.statement).toBe(criterion.statement);
-        expect(store.artifactsFor(run).some(isVerificationReceipt)).toBe(false);
-      });
 
       test("altered during the final gate: refuted by name after exactly one check, and the gate receipt it sealed stays", async () => {
         arrange();
@@ -3386,7 +3316,8 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     if (gate.ok) expect(JSON.parse(gate.bytes!)).toMatchObject({ head: store.getRun(req.runId!)!.headRevision, command: { command: "final-check" }, result: { ran: true, exitCode } });
     expect(store.artifactsFor(req.runId!).filter(isVerificationReceipt)).toHaveLength(1);
     expect(agentCalls).toHaveLength(1); // no extra model turn to restate success
-    expect(agentCalls[0]!.join(" ")).toContain("One independent reviewer assesses that evidence");
+    expect(agentCalls[0]!.join(" ")).toContain("Return the result and limitations to the lead or user for review");
+    expect(agentCalls[0]!.join(" ")).not.toContain("independent reviewer");
     expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: exitCode === 0 ? "verified" : "refuted" });
     const artifact = store.artifactsFor(req.runId as number).find(one => one.kind === "proof")!;
     const raw = readVerifiedArtifact(join2(wt, ".evidence"), artifact);
@@ -3398,16 +3329,9 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     const context = { store, policy: "tick" as const, leaseId: "test-lease", runId: req.runId!, taskId: "t-1", taskRef, runner: "builder-1", repo: REPO, branch: "feat/a", origin: "ours", provider: "claude", model: "sonnet", worktreePath: wt, evidenceRoot: join2(wt, ".evidence"), clock: () => T0 };
     const disposition = disposeBuildOutcome(context, { ok: true, committed: true, branch: "feat/a", summary: "Built" });
     expect(disposition.kind).toBe("built");
-    if (exitCode === 1) {
-      expect(store.repairChainFor(req.runId!)).toMatchObject({ draftTask: "t-1-fix-1", attempt: 1, basis: "mode" });
-      expect(store.getScope("t-1-fix-1")?.approvedAt).not.toBeNull();
-      const source = store.revisionSourceOf(store.lookupRef("t-1-fix-1")!.id)!;
-      const brief = readVerifiedArtifact(context.evidenceRoot, source.briefArtifact);
-      expect(brief.ok && JSON.parse(brief.content.toString("utf8")).verification.sourceRun).toBe(req.runId);
-      expect(store.openReviewRequests().filter(one => one.run === req.runId)).toHaveLength(0);
-    } else {
-      expect(store.repairChainFor(req.runId!)).toBeNull();
-    }
+    expect(store.repairChainFor(req.runId!)).toBeNull();
+    expect(store.getTask("t-1-fix-1")).toBeNull();
+    expect(store.openReviewRequests().filter(one => one.run === req.runId)).toHaveLength(0);
     expect(checks).toBe(1); // disposition never repeats the full gate
   });
 
@@ -3955,7 +3879,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       changed,
     });
     const arrange = () => {
-      propose(store, { taskId: "t-1", goal: "move the smoke script", acceptance: [criterion], now: T0 });
+      propose(store, { taskId: "t-1", goal: "move the smoke script", acceptance: [criterion], qualityMode: "strict", now: T0 });
       expect(approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken).ok).toBe(true);
       claimIt();
       store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 5_000, approvedBy: "alex" }, T0);
@@ -4015,7 +3939,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     };
     const attemptsOf = (run: number) => store.artifactsFor(run).filter(one => one.kind === "structured-output" && !isVerificationReceipt(one));
 
-    test("both names, then the same session is handed the exact sealed list and corrects the receipt: one commit, one check, verified", async () => {
+    test("a mistaken rename inventory stays visible with one build and one check, without correction turns", async () => {
       arrange();
       let commits = 0;
       let checks = 0;
@@ -4028,28 +3952,16 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
         verify: (async () => { checks++; return { ...OK }; }) as Runner,
       });
       expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
-      expect(correcting.calls()).toBe(2);
+      expect(correcting.calls()).toBe(1);
       expect(commits).toBe(1);
       expect(checks).toBe(1);
-      // Goose FinalOutputTool shape: the precise error AND the expected value.
-      const prompt = correcting.prompts[0]!;
-      expect(prompt).toContain("already committed");
-      expect(prompt).toContain('changed lists \\"scripts/smoke.mjs\\", the old name of a move the sealed diff records once as \\"src/fixtures/smoke.mjs\\" — list the destination only');
-      expect(prompt).toContain('Sealed changed paths (data): ["src/fixtures/smoke.mjs"]');
-      expect(prompt).toContain("Keep checks, screenshots and caveats byte-for-byte equivalent");
-      const verdict = store.proofVerdictFor(req.runId as number);
-      expect(verdict).toMatchObject({ verdict: "verified" });
-      expect(verdict?.matrix.find(row => row.id === "c1")).toMatchObject({ state: "pass" });
-      // Both the original submission and the correction stay in the audit
-      // record; the stored proof is the corrected one.
-      const attempts = attemptsOf(req.runId as number);
-      expect(attempts.map(one => one.key.replace(/^.*builder-proof-response-/, ""))).toEqual(["0.txt", "1.txt"]);
-      const original = readVerifiedArtifact(join2(wt, ".evidence"), attempts[0]!);
-      expect(original.ok && JSON.parse(original.content.toString("utf8")).changed).toEqual(["scripts/smoke.mjs", "src/fixtures/smoke.mjs"]);
+      expect(correcting.prompts).toEqual([]);
+      expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "refuted" });
+      expect(attemptsOf(req.runId as number)).toEqual([]);
       const proof = store.artifactsFor(req.runId as number).find(one => one.kind === "proof")!;
       const stored = readVerifiedArtifact(join2(wt, ".evidence"), proof);
-      expect(stored.ok && JSON.parse(stored.content.toString("utf8")).changed).toEqual(["src/fixtures/smoke.mjs"]);
-      expect(store.runsFor(taskRef).filter(one => one.role === "repair").map(one => one.reason)).toEqual(["proof-corrected"]);
+      expect(stored.ok && JSON.parse(stored.content.toString("utf8")).changed).toEqual(submitted.changed);
+      expect(store.runsFor(taskRef).filter(one => one.role === "repair")).toEqual([]);
     });
 
     test("an over-limit sealed inventory does not spend impossible proof-correction turns", async () => {
@@ -4067,7 +3979,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       expect(store.proofVerdictFor(req.runId as number)?.reasons.join(" ")).toContain(paths.at(-1));
     });
 
-    test("a sealed path the list left out is handed back the same way: the corrected inventory verifies", async () => {
+    test("an omitted sealed path remains a stated limitation without a correction turn", async () => {
       arrange();
       const twoFiles: Runner = async (file, args, options) => {
         if (args.includes("--numstat")) return { ...OK, stdout: "5\t2\t\0scripts/smoke.mjs\0src/fixtures/smoke.mjs\0" + "1\t0\tsrc/index.ts\0" };
@@ -4076,10 +3988,10 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       const correcting = correctingAgent(proofClaiming(["src/fixtures/smoke.mjs"], "src/fixtures/smoke.mjs"), sealed => sealed);
       const req = request({ leaseId: "test-lease", agent: correcting.agent, git: twoFiles, verify });
       expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
-      expect(correcting.calls()).toBe(2);
-      expect(correcting.prompts[0]).toContain('changed omits \\"src/index.ts\\", which the sealed diff contains');
-      expect(correcting.prompts[0]).toContain('Sealed changed paths (data): ["src/fixtures/smoke.mjs","src/index.ts"]');
-      expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "verified" });
+      expect(correcting.calls()).toBe(1);
+      expect(correcting.prompts).toEqual([]);
+      expect(store.proofVerdictFor(req.runId as number)?.verdict).not.toBe("verified");
+      expect(store.proofVerdictFor(req.runId as number)?.reasons.join(" ")).toContain("src/index.ts");
     });
 
     test.each<[string, (sealed: string[]) => string[] | null]>([
@@ -4092,13 +4004,13 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
       const correcting = correctingAgent(proofClaiming(["scripts/smoke.mjs", "src/fixtures/smoke.mjs"], "src/fixtures/smoke.mjs"), reply);
       const req = request({ leaseId: "test-lease", agent: correcting.agent, git: renameGit, verify });
       expect(await build(store, req)).toMatchObject({ ok: true, committed: true });
-      // Bounded: the same session gets the repair budget and no more.
-      expect(correcting.calls()).toBe(3);
-      expect(correcting.prompts[1]).toContain("The changed list must be exactly the sealed diff's paths: [\\\"src/fixtures/smoke.mjs\\\"]");
+      // No proof-repair turn runs, regardless of the reply it might produce.
+      expect(correcting.calls()).toBe(1);
+      expect(correcting.prompts).toEqual([]);
       const verdict = store.proofVerdictFor(req.runId as number);
       expect(verdict).toMatchObject({ verdict: "refuted" });
       expect(verdict?.reasons[0]).toBe("claimed changed path not in the sealed diff: scripts/smoke.mjs");
-      expect(store.runsFor(taskRef).filter(one => one.role === "repair").every(one => one.reason === "proof-correction-rejected")).toBe(true);
+      expect(store.runsFor(taskRef).filter(one => one.role === "repair")).toEqual([]);
     });
 
     test("an unexplained path beside the rename's old name: nothing is handed back, both are refuted by name", async () => {
