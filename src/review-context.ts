@@ -1,3 +1,4 @@
+// Assignment direct assessments reuse custody checks; gaps remain explicit.
 import { readObservationEvidence, OBSERVATION_CAPTURE, OBSERVATION_FILE, type ObservationEvidence } from "./observations.js";
 import { isVerificationReceipt } from "./verification-evidence.js";
 /**

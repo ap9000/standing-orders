@@ -34,13 +34,22 @@ export type WorkSummary = {
 
 /** Call only after admitting the task's project. Keep the question's
  * exact run and id; never substitute a family's newest attempt. Expiry
- * is attention metadata in the decision owner, so overdue stays open. */
+ * is attention metadata in the decision owner, so overdue stays open.
+ * Finishing a result does not answer its questions: only the normal
+ * decision operation settles them, including on earlier family versions. */
 export function openWorkDecisionOf(store: Store, taskRef: number, now: Date): Exclude<WorkFacts["openDecision"], undefined> {
   const decision = store.decisionsForTask(taskRef).find(one => one.state !== "answered" && one.answeredAt === null);
   return decision === undefined ? null : {
     id: decision.id, runId: decision.run, question: decision.question,
     overdue: decision.state === "expired" || (decision.deadline !== null && Date.parse(decision.deadline) <= now.getTime()),
   };
+}
+
+/** One exact answer target across task and family projections. This is
+ * still only a proposal for a coordinator, never approval authority. */
+export function workDecisionAction(taskId: string, decision: NonNullable<WorkFacts["openDecision"]>, principal: WorkPrincipal): WorkAction {
+  return { code: "answer-decision", label: "Answer question", target: { taskId, runId: decision.runId, decisionId: decision.id },
+    access: principal === "operator" ? "operator-control" : "proposal-only", retry: "refresh-before-acting" };
 }
 
 const PROPOSABLE = new Set<WorkAction["code"]>(["answer-decision", "write-scope", "unhold"]);
@@ -55,8 +64,8 @@ export function workSummaryOf(facts: WorkFacts, principal: WorkPrincipal, result
     access: READ_ACTIONS.has(code) ? "read" : principal === "operator" ? "operator-control" : PROPOSABLE.has(code) ? "proposal-only" : "operator-handoff",
     retry: code === "reconcile-run" ? "reconcile-before-retry" : READ_ACTIONS.has(code) ? "read-again" : "refresh-before-acting",
   });
-  const question = (facts.state === "queued" || facts.state === "running") ? facts.openDecision ?? null : null;
-  const questionAction = question === null ? null : make("answer-decision", "Answer question", { runId: question.runId, decisionId: question.id });
+  const question = (facts.state === "queued" || facts.state === "running" || facts.state === "done") ? facts.openDecision ?? null : null;
+  const questionAction = question === null ? null : workDecisionAction(facts.id, question, principal);
   let primary: WorkAction | null = null;
   if (status.action !== null) {
     if (facts.control?.kind === "stopping") primary = make("inspect-stop", status.action.label, { runId: facts.control.run });

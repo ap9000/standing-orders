@@ -70,6 +70,7 @@ export type ReviewFacts = {
   interrupted: boolean;
   /** Who asked for the open (queued) request, when one is open. */
   queuedBy: string | null;
+  queuedOrigin?: "operator" | "automatic" | null;
   /** Whether the live attempt's reviewer worker is answering. */
   reviewerAlive: boolean;
 };
@@ -89,6 +90,7 @@ export function reviewFactsOf(retry: ReviewRetryState | null, reviewerAlive: (ru
     latestReason: retry.latest?.reason ?? null,
     interrupted: retry.latest !== null && (retry.latest.outcome === "interrupted" || retry.latest.reason === "interrupted"),
     queuedBy: retry.openRequest?.requestedBy ?? null,
+    queuedOrigin: retry.openRequest?.origin ?? null,
     reviewerAlive: retry.live !== null && reviewerAlive(retry.live.runner),
   };
 }
@@ -96,7 +98,7 @@ export function reviewFactsOf(retry: ReviewRetryState | null, reviewerAlive: (ru
 /** The tokens a review in flight wears — the dispatch codes, unchanged. */
 export const REVIEW_TOKENS: ReadonlySet<string> = new Set(["reviewing", "review-pending", "review-failed", "review-exhausted"]);
 
-const retriesLeft = (count: number): string => (count === 1 ? "1 explicit retry" : `${count} explicit retries`);
+const retriesLeft = (count: number, explicit = true): string => `${count}${explicit ? " explicit" : ""} ${count === 1 ? "retry" : "retries"}`;
 
 /**
  * A review that is queued, running, failed with a retry left, or
@@ -118,7 +120,7 @@ export function reviewStatusOf(review: ReviewFacts | null): DisplayStatus | null
   if (review.state === "queued") {
     return review.attempt === 1
       ? { token: "review-pending", label: "Waiting for review", detail: "The build finished and its requested independent review is waiting for a worker.", tone: "attention", action: open }
-      : { token: "review-pending", label: `Review retry queued (${ordinal})`, detail: `The explicit review retry${review.queuedBy === null ? "" : `, asked by ${review.queuedBy},`} is waiting for a worker; ${retriesLeft(review.retriesRemaining)} would remain after it.`, tone: "attention", action: open };
+      : { token: "review-pending", label: `Review retry queued (${ordinal})`, detail: `${review.queuedOrigin === "automatic" ? "The signed mode queued this retry. It" : `The review retry${review.queuedBy === null ? "" : `, asked by ${review.queuedBy},`}`} is waiting for a worker; ${retriesLeft(review.retriesRemaining, review.queuedOrigin !== "automatic")} would remain after it.`, tone: "attention", action: open };
   }
   if (review.state === "retryable") {
     const what = review.interrupted ? "was interrupted" : "failed";
@@ -465,7 +467,7 @@ export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): W
   const dispatch = facts.dispatch;
   const result = facts.state === "done" ? resultDisplay ?? resultStatusOf(facts.result, facts.publication) : null;
   const running = facts.liveRunId !== null || dispatch?.condition === "running" || result?.token === "reviewing";
-  const question = (facts.state === "queued" || facts.state === "running") ? facts.openDecision ?? null : null;
+  const question = (facts.state === "queued" || facts.state === "running" || facts.state === "done") ? facts.openDecision ?? null : null;
   const needs = needsPerson(dispatch) || question !== null;
   const views: WorkView[] = ["all"];
   if (needs) views.push("needs-you");
@@ -492,6 +494,14 @@ export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): W
   }
 
   if (facts.state === "done" && result !== null) {
+    // A saved result or an ongoing review cannot answer a question. Keep
+    // failures primary; the shared summary retains the answer action too.
+    if (question !== null && result.tone !== "problem" && result.token !== "review-failed" && result.token !== "review-exhausted" &&
+      !(facts.result?.review === undefined && (dispatch?.code === "review-failed" || dispatch?.code === "review-exhausted"))) {
+      return { token: "waiting-decision", label: "Waiting on your answer", detail: question.question,
+        tone: "attention", action: { label: "Answer question", kind: "open-task" }, views, rank: 0,
+        diagnostics: [{ token: result.token, label: result.label, detail: result.detail, tone: result.tone }] };
+    }
     // A review in flight or waiting outranks the stored verdict: the
     // machine is still deciding, and the row says so in the projection's
     // own words. A caller that never read the review facts still gets
