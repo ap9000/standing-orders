@@ -608,7 +608,7 @@ export const KEYS_ACTIONS = ["status", "set", "clear", "verify", "auth"] as cons
 export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
   "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
-  "goal", "not", "touches", "acceptance", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
+  "goal", "not", "touches", "acceptance", "candidate", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
   "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
   "choose", "note", "max-open-decisions", "max-held-sessions", "name", "days", "publication", "auto-approve", "review-auto", "entries", "port", "host", "allow-host",
   "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",

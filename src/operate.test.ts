@@ -917,6 +917,30 @@ describe("agreeing to a scope from the command line", () => {
     } finally { store.close(); }
   });
 
+  test("the CLI entry point accepts and binds a prepared candidate, and invalid hashes leave the scope unchanged", async () => {
+    const originalDigest = await scopeIt();
+    const { main } = await import("./cli.js");
+    const candidate = "a".repeat(40);
+    const command = ["task", "scope", "pay", "--goal", "add a guard", "--acceptance", "It is fixed and verified.|manual-review", "--candidate", candidate, "--json"];
+    lines = [];
+    expect(await main(command, line => lines.push(line), { operate: { databaseFile: db, now: T0 } })).toBe(EXIT.ok);
+    const digest = payload().scope.digest as string;
+    expect(payload().scope.candidate).toBe(candidate);
+    expect(digest).not.toBe(originalDigest);
+    const readScope = () => {
+      const check = openStore(db);
+      try { return check.getScope("pay"); } finally { check.close(); }
+    };
+    expect(readScope()).toMatchObject({ candidate, digest, approvedAt: null });
+    for (const invalid of ["main", "a".repeat(39), "g".repeat(40)]) {
+      lines = [];
+      const rejected = [...command]; rejected[8] = invalid;
+      expect(await main(rejected, line => lines.push(line), { operate: { databaseFile: db, now: T0 } })).toBe(EXIT.usage);
+      expect(payload()).toMatchObject({ ok: false, message: expect.stringContaining("--candidate is the full 40-character commit hash") });
+      expect(readScope()).toMatchObject({ candidate, digest, approvedAt: null });
+    }
+  });
+
   test("new CLI goals and exclusions use the canonical text policy without rewriting on rejection", async () => {
     await scopeIt();
     for (const flag of ["--goal", "--not"]) {
