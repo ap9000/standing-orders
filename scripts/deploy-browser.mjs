@@ -22,6 +22,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped } from "./deploy-coding.mjs";
 
 const args = process.argv.slice(2);
 const flag = (name, fallback = undefined) => { const at = args.indexOf(`--${name}`); return at >= 0 ? args[at + 1] : fallback; };
@@ -47,6 +48,7 @@ requireTrue(priorDist && existsSync(priorDist), `The live service definition at 
 const publicUrl = (livePlist.match(/<string>--public-url<\/string>\s*<string>([^<]+)<\/string>/) ?? [])[1] ?? null;
 const load = async (root, name) => import(pathToFileURL(join(root, name)).href);
 const oldRt = { store: await load(priorDist, "store.js"), gate: await load(priorDist, "desktop-update-gate.js"), evidence: await load(priorDist, "verification-evidence.js"), update: await load(priorDist, "desktop-update.js") };
+oldRt.coding = await loadCodingDeploymentRuntime(priorDist);
 const candidateHead = execFileSync("git", ["-C", source, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const short = candidateHead.slice(0, 7);
 const stageDir = flag("stage") ?? join(stateDir, "staged-upgrades", `browser-${short}-${randomUUID().slice(0, 6)}`);
@@ -113,6 +115,11 @@ function service(dist) {
   return commands.some(c => c.includes(`${dist}/cli.js up --db ${database}`)) ? { supervisor: pid, children, command, commands } : null;
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function verifyServiceStopped(pids) {
+  for (let i = 0; i < 60; i++) { if (pids.every(pid => spawnSync("/bin/ps", ["-p", String(pid), "-o", "pid="], { encoding: "utf8" }).status === 1)) break; await sleep(1000); }
+  for (const pid of pids) requireTrue(spawnSync("/bin/ps", ["-p", String(pid), "-o", "pid="], { encoding: "utf8" }).status === 1, `Service process has not exited: ${pid}`);
+  requireTrue(spawnSync("/bin/launchctl", ["print", `gui/${uid}/${label}`], { encoding: "utf8" }).status !== 0, "The service is still loaded.");
+}
 function digest(db, name, columns) {
   const rows = db.prepare("SELECT " + columns.map(quote).join(",") + " FROM " + quote(name)).all().map(r => JSON.stringify(r)).sort();
   return { count: rows.length, hash: sha(rows.join("\n")) };
@@ -221,6 +228,20 @@ function proveStaged() {
   return { distFiles: built.files.length, dependencies: staged.length };
 }
 
+// Persist newly observed custody before the async SQLite snapshot. Every final
+// boundary verifies the retained bytes again after any intervening await.
+function verifyCodingBackup(runtime, r) {
+  try { verifyCodingDeploymentBackup(runtime, database, stageDir, r); }
+  finally { save(r, r.phase); }
+}
+async function ensureCodingBackup(runtime, r) {
+  try { observeCodingDeployment(runtime, database, r); }
+  finally { save(r, r.phase); }
+  try { await backupCodingDeployment(runtime, database, stageDir, r); }
+  finally { save(r, r.phase); }
+  verifyCodingBackup(runtime, r);
+}
+
 async function prepare(staged) {
   requireTrue(!existsSync(journalFile), "This staging directory already has a deployment; resume it with --phase.");
   requireTrue(lstatSync(database).isFile() && !lstatSync(database).isSymbolicLink(), "Unexpected database path.");
@@ -232,6 +253,7 @@ async function prepare(staged) {
     const f = facts(db);
     writeFileSync(join(stageDir, "release.json"), JSON.stringify({ ...f, run: runId, head: candidateHead, at: new Date().toISOString(), ...staged }, null, 1));
     const r = { id: randomUUID(), candidate: candidateHead, database, phase: "preparing", schema, nextSchema, createdAt: new Date().toISOString(), backup: join(stageDir, "orders.backup.db"), priorRuntime: priorDist, nextRuntime: nextDist, builder: runId, reviewer: f.reviewer, task: f.taskId, repo: f.repo, scopeDigest: f.scopeDigest, ...staged, proofVerdict: f.proofVerdict, manualAcceptance: f.acceptance, publicUrl };
+    observeCodingDeployment(oldRt.coding, database, r);
     quiet(db);
     r.oldService = service(priorDist);
     requireTrue(r.oldService, "The installed service is not running from the runtime its definition names.");
@@ -243,7 +265,7 @@ async function prepare(staged) {
     }
     oldRt.gate.installUpdateGate(db, r.id); save(r, "admission-paused");
     requireTrue(oldRt.gate.freezeUpdateGate(db, r.id), "Work raced admission; let it finish and rerun.");
-    quiet(db); save(r, "frozen");
+    quiet(db); observeCodingDeployment(oldRt.coding, database, r); save(r, "frozen");
     db.exec("BEGIN IMMEDIATE");
     const original = new DatabaseSync(database, { readOnly: true });
     let before;
@@ -251,6 +273,7 @@ async function prepare(staged) {
     chmodSync(r.backup, 0o600);
     const copied = new DatabaseSync(r.backup, { readOnly: true });
     try { assertPreserved(copied, before); } finally { copied.close(); }
+    await ensureCodingBackup(oldRt.coding, r);
     db.exec("COMMIT");
     const fd = openSync(r.backup, "r"); try { fsyncSync(fd); } finally { closeSync(fd); }
     r.backupSha256 = sha(readFileSync(r.backup)); r.snapshotSha256 = sha(JSON.stringify(before));
@@ -261,6 +284,7 @@ async function prepare(staged) {
 async function rehearse() {
   const r = loadPhase("backup-verified"), target = join(stageDir, "rehearsal.db");
   requireTrue(!existsSync(target) && sha(readFileSync(r.backup)) === r.backupSha256, "Rehearsal exists or the backup changed.");
+  await ensureCodingBackup(oldRt.coding, r);
   copyFileSync(r.backup, target); chmodSync(target, 0o600);
   const next = await load(nextDist, "store.js");
   let db = new DatabaseSync(target, { readOnly: true });
@@ -284,18 +308,20 @@ async function rehearse() {
 async function swap() {
   const r = loadPhase("rehearsed");
   requireTrue(sha(readFileSync(r.backup)) === r.backupSha256 && r.rehearsal.integrity === "ok", "The verified backup or rehearsal changed.");
+  await ensureCodingBackup(oldRt.coding, r);
   // Stop the installed service and prove every old process is gone.
+  r.stoppingService = service(priorDist);
+  requireTrue(r.stoppingService, "The current service identity could not be verified before shutdown. No runtime was replaced.");
   save(r, "stopping");
   spawnSync("/bin/launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf8" });
-  const oldPids = [r.oldService.supervisor, ...r.oldService.children];
-  for (let i = 0; i < 60; i++) { if (oldPids.every(pid => spawnSync("/bin/ps", ["-p", String(pid), "-o", "pid="], { encoding: "utf8" }).status === 1)) break; await sleep(1000); }
-  for (const pid of oldPids) requireTrue(spawnSync("/bin/ps", ["-p", String(pid), "-o", "pid="], { encoding: "utf8" }).status === 1, `Old process has not exited: ${pid}`);
-  requireTrue(spawnSync("/bin/launchctl", ["print", `gui/${uid}/${label}`], { encoding: "utf8" }).status !== 0, "The old service is still loaded.");
+  const oldPids = [...new Set([r.oldService.supervisor, ...r.oldService.children, r.stoppingService.supervisor, ...r.stoppingService.children])];
+  await verifyServiceStopped(oldPids);
+  await ensureCodingBackup(oldRt.coding, r);
   save(r, "stopped");
   // Migrate the live database with the new runtime (a no-op for a same-schema build).
   let db = new DatabaseSync(database); db.exec("PRAGMA busy_timeout=1000");
   let before;
-  try { requireTrue(db.prepare("SELECT version FROM schema_version").get().version === r.schema && oldRt.gate.updateGateOwned(db, r.id), "Expected the owned gate on the live database."); quiet(db); before = snapshot(db); } finally { db.close(); }
+  try { requireTrue(db.prepare("SELECT version FROM schema_version").get().version === r.schema && oldRt.gate.updateGateOwned(db, r.id), "Expected the owned gate on the live database."); quiet(db); assertCodingDeploymentStopped(oldRt.coding, database, db, r); before = snapshot(db); } finally { db.close(); }
   save(r, "migrating");
   (await load(nextDist, "store.js")).openStore(database).close();
   db = new DatabaseSync(database, { readOnly: true });
@@ -308,6 +334,12 @@ async function swap() {
   requireTrue(nextPlist.includes(`${nextDist}/cli.js`) && !nextPlist.includes(priorDist), "The new service definition does not name the new runtime.");
   writeFileSync(join(stageDir, "browser.next.plist"), nextPlist, { mode: 0o600 });
   writeFileSync(join(stageDir, "service.log"), "", { mode: 0o600, flag: "a" });
+  // Migration loads asynchronously; backup, service and native custody must still hold.
+  await ensureCodingBackup(oldRt.coding, r);
+  await verifyServiceStopped(oldPids);
+  verifyCodingBackup(oldRt.coding, r);
+  const beforeReplace = new DatabaseSync(database, { readOnly: true });
+  try { assertCodingDeploymentStopped(oldRt.coding, database, beforeReplace, r); } finally { beforeReplace.close(); }
   writeFileSync(plist, nextPlist);
   const booted = spawnSync("/bin/launchctl", ["bootstrap", `gui/${uid}`, plist], { encoding: "utf8" });
   requireTrue(booted.status === 0, `launchctl bootstrap failed: ${booted.stderr}`);
@@ -315,8 +347,23 @@ async function swap() {
   let live = null;
   for (let i = 0; i < 90 && live === null; i++) { await sleep(1000); live = service(nextDist); }
   if (live === null) {
-    // Restore the previous service rather than leave the plane down.
+    // A failed health check does not establish process exit. Capture the
+    // service's remaining processes before stopping it, and check native
+    // custody with the new runtime before restoring the previous definition.
+    const launch = spawnSync("/bin/launchctl", ["print", `gui/${uid}/${label}`], { encoding: "utf8" });
+    const failedPid = Number(launch.stdout.match(/\n\s*pid = (\d+)/)?.[1]);
+    requireTrue(launch.status !== 0 || failedPid > 1, "The failed service's process identity is unknown. The previous runtime was not restored.");
+    const failedChildren = failedPid > 1 ? spawnSync("/usr/bin/pgrep", ["-P", String(failedPid)], { encoding: "utf8" }) : null;
+    requireTrue(!failedChildren || failedChildren.status === 0 || failedChildren.status === 1, "The failed service's child processes could not be checked. The previous runtime was not restored.");
+    const failedPids = failedPid > 1 ? [failedPid, ...failedChildren.stdout.trim().split(/\s+/).filter(Boolean).map(Number)] : [];
     spawnSync("/bin/launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf8" });
+    await verifyServiceStopped(failedPids);
+    const coding = await loadCodingDeploymentRuntime(nextDist);
+    await ensureCodingBackup(coding, r);
+    await verifyServiceStopped(failedPids);
+    verifyCodingBackup(coding, r);
+    const stopped = new DatabaseSync(database, { readOnly: true });
+    try { assertCodingDeploymentStopped(coding, database, stopped, r); } finally { stopped.close(); }
     writeFileSync(plist, livePlist);
     spawnSync("/bin/launchctl", ["bootstrap", `gui/${uid}`, plist], { encoding: "utf8" });
     save(r, "restored");
@@ -324,12 +371,15 @@ async function swap() {
   }
   r.newService = live;
   save(r, "started");
+  await ensureCodingBackup(await loadCodingDeploymentRuntime(nextDist), r);
 }
 
 async function finish() {
   const phase = readJournal().phase;
   requireTrue(["started", "healthy"].includes(phase), `Unexpected finish phase: ${phase}.`);
   const r = loadPhase(phase);
+  const coding = await loadCodingDeploymentRuntime(nextDist);
+  await ensureCodingBackup(coding, r);
   const live = service(nextDist);
   requireTrue(live, "The new service is not running from the new runtime.");
   requireTrue(live.commands.some(c => c.includes("--host 127.0.0.1 --port 4180")) || !livePlist.includes("--host 127.0.0.1"), "The backend must remain on its configured loopback address.");
@@ -356,6 +406,8 @@ async function finish() {
     assertPreserved(db, []);
     r.leases = leases; r.remote = remote;
     r.uiCheck = `Machine checks only: local console answered, ${remote}, ${leases.length} project lease(s) fresh. Open the console and inspect a result page yourself.`;
+    await ensureCodingBackup(coding, r);
+    verifyCodingBackup(coding, r);
     save(r, "healthy"); oldRt.gate.removeUpdateGate(db, r.id); r.deployedAt = new Date().toISOString(); save(r, "deployed");
   } finally { db.close(); }
   say({ deployed: candidateHead, runtime: nextDist, at: r.deployedAt, projects: r.leases.length, remote });

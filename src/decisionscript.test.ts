@@ -8,6 +8,7 @@
  */
 import { describe, test, expect, vi, beforeEach } from "vitest";
 import { decisionAnswerScript } from "./serve.js";
+import { CodingWorkspace } from "./coding-workspace.js";
 
 const CARD = (id: number): string =>
   `<form class="card" id="capture"><input type="text" id="qc" name="title"></form>` +
@@ -23,6 +24,12 @@ const CARD = (id: number): string =>
 const flush = async (): Promise<void> => {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 };
+
+test("native session definitions remain importable by browser enhancements", () => {
+  // Importing a session definition must not eagerly load the native driver.
+  // The same real SQLite operations are exercised by the update fixtures.
+  expect(CodingWorkspace).toBeTypeOf("function");
+});
 
 describe("decisionAnswerScript, executed", () => {
   beforeEach(() => {

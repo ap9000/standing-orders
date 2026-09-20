@@ -1,3 +1,8 @@
+import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
+import { codingShippingHtml, CODING_SHIPPING_CSS } from './coding-shipping-ui.js';
+import { prepareCodingContext } from './coding-context.js';
+import { CodingWorkspace, CodingActionError } from './coding-workspace.js';
+import { codingWorkspaceHtml, codingWorkspaceScript, CODING_CSS } from './coding-ui.js';
 import {discordSettingsHtml} from "./discord-settings.js";
 import {checkDiscordCredentials,loadDiscordCredentials,saveDiscordCredentials,clearDiscordCredentials,DiscordError} from "./discord-api.js";
 import {ChatState} from "./chat-delivery-state.js";
@@ -83,7 +88,7 @@ import { requestTaskStop, resumeTaskStop, taskControlOf, type TaskControlView } 
 import { WorktreePool } from "./worktree.js";
 import { PLEX_SANS_400, PLEX_SANS_500, PLEX_SANS_600, PLEX_MONO_400, PLEX_MONO_500, PLEX_MONO_600 } from "./fonts.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { UPDATE_PAUSED } from "./desktop-update-gate.js";
+import { UPDATE_PAUSED, updateAdmissionPaused } from "./desktop-update-gate.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, opendirSync, readFileSync, readSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -224,6 +229,8 @@ import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { confirmCoordinatorProposal, confirmMateProposal, dismissCoordinatorProposal, dismissMateProposal } from "./mate-doors.js";
 
 export type ServeOptions = {
+  /** Native coding workspace injection for isolated integration tests. */
+  codingWorkspace?: CodingWorkspace;
   store: Store;
   evidenceRoot: string;
   clock?: () => Date;
@@ -476,6 +483,15 @@ type Who = { name: string; via: "cookie"; session: Session; role: "approver" | "
 
 export function createDecisionServer(options: ServeOptions): Server {
   const { store, evidenceRoot } = options;
+  let coding = options.codingWorkspace ?? null;
+  let codingProblem: string | undefined;
+  if (coding === null && options.localRunner !== undefined && !store.isDemo()) {
+    const database = store.handle.prepare('PRAGMA database_list').all().find(row => row['name'] === 'main')?.['file'];
+    if (typeof database === 'string' && database !== '') {
+      try { coding = new CodingWorkspace({ database: `${database}.coding.sqlite`, worktreeRoot: join(dirname(database), 'coding-worktrees'), admissionPaused: () => updateAdmissionPaused(store.raw()), authorize: (actor, repo) => codingActorAllowed(actor) && rowVisible(liveCeiling(), repo), context: input => prepareCodingContext(store, { ...input, root: join(dirname(database), 'coding-context') }) }); }
+      catch (error) { codingProblem = error instanceof Error ? error.message : 'The coding workspace could not open.'; }
+    }
+  }
   const clock = options.clock ?? (() => new Date());
   const providerHome = options.connectionHome ?? homedir();
   const connectionCheck = createConnectionChecker({ home: providerHome, clock, ...(options.connectionProbe === undefined ? {} : { probe: options.connectionProbe }) });
@@ -539,6 +555,12 @@ export function createDecisionServer(options: ServeOptions): Server {
   const unscopedMode = ceiling.repos.length === 0 && ceiling.roots.length === 0;
   /** Per-row visibility under the ceiling — the authorization question for reads. */
   const liveCeiling = () => ({ repos: [...ceiling.repos, ...(options.additionalProjectRepos?.() ?? [])], roots: ceiling.roots });
+  // Native tools share the installation's login and can read beyond a project.
+  // Account project membership cannot provide an OS read boundary.
+  function codingActorAllowed(actor: { name: string; generation: number }): boolean {
+    return store.isInstanceOperator(actor.name) && store.accountOf(actor.name)?.generation === actor.generation;
+  }
+
   const restricted = (): boolean => {
     const actor = requestContext.getStore()?.actor;
     return actor !== undefined && store.accountOf(actor)?.projects !== null;
@@ -753,7 +775,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return respond(response, 200, "application/json", JSON.stringify({ proof: createHmac("sha256", Buffer.from(options.desktopIdentity, "hex")).update(challenge).digest("hex") }));
     }
     const fragmentName = url.searchParams.get("fragment");
-    const touch = !(method === "GET" && fragmentName !== null && NO_TOUCH_FRAGMENTS.has(fragmentName));
+    const touch = !(method === "GET" && ((fragmentName !== null && NO_TOUCH_FRAGMENTS.has(fragmentName)) || /^\/code\/[a-f0-9]{32}\/state$/.test(url.pathname)));
     const who = identify(request, touch);
 
     if (url.pathname === "/login" && method === "GET") {
@@ -969,6 +991,14 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
   function actionTarget(url: URL, who: Who, request: IncomingMessage, body: URLSearchParams | null = null): { repo: string | null; taskId: string | null; runId: number | null; action: string } {
+    if (url.pathname === '/code' || url.pathname.startsWith('/code/')) {
+      let repo = body?.get('repo') ?? null;
+      const match = /^\/code\/([a-f0-9]{32})/.exec(url.pathname);
+      if (match && coding && who.via === 'cookie') {
+        try { repo = coding.get(match[1]!, { name: who.name, generation: who.session.generation }).repo; } catch { /* The route refuses unknown/foreign sessions. */ }
+      }
+      return { repo, taskId: null, runId: null, action: `coding ${body ? url.pathname.split('/').at(-1) : 'view'}` };
+    }
     const shared=/^\/chat\/(?:action\/([0-9]{1,15})|proposal\/([0-9]{1,15})\/(?:confirm|dismiss))$/.exec(url.pathname);
     if(shared){const proposal=store.getMateProposal(Number(shared[1]??shared[2])),action=proposal?.kind==='action'?sharedActionPayload(proposal.payload):null;if(action&&proposal&&store.getMateThread(proposal.thread)?.approver===who.name)return {repo:action.repo,taskId:typeof action.request['task']==='string'?action.request['task']:null,runId:typeof action.request['run']==='number'?action.request['run']:null,action:action.operation};}
     if (url.pathname.startsWith('/settings/skills')) return {repo:body?.get('repo')??url.searchParams.get('repo')??projectOf(who,request)??null,taskId:null,runId:null,action:body?'project skills change':'project skills view'};
@@ -993,6 +1023,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
     if (!restricted()) return true;
     const path = url.pathname;
+    // Coding routes require an instance operator, then prove saved ownership and project access.
+    if (path === "/code" || path.startsWith("/code/")) return true;
     if((request.method==='GET'&&/^\/chat\/action\/[0-9]{1,15}$/.test(path))||(request.method==='POST'&&/^\/chat\/proposal\/[0-9]{1,15}\/(confirm|dismiss)$/.test(path))){
       const proposal=store.getMateProposal(Number(path.split('/')[3])),action=proposal?.kind==='action'?sharedActionPayload(proposal.payload):null;
       if(action&&proposal&&store.getMateThread(proposal.thread)?.approver===who.name&&visible(action.repo)&&store.accountCanAccess(who.name,action.repo))return true;
@@ -1032,6 +1064,42 @@ export function createDecisionServer(options: ServeOptions): Server {
     const project = projectOf(who, request);
     if (project === undefined) {
       return refuse(response, who, 403, "that project is outside what this server was configured to show");
+    }
+
+    if (url.pathname === '/code' || url.pathname.startsWith('/code/')) {
+      if (who.via !== 'cookie' || !codingActorAllowed({ name: who.name, generation: who.session.generation })) return refuse(response, who, 403, 'Coding sessions require installation-wide operator access. You can manage project tasks in Work.', '/work');
+      const actor = { name: who.name, generation: who.session.generation };
+      const match = /^\/code\/([a-f0-9]{32})(?:\/(state|changes|ship))?$/.exec(url.pathname);
+      try {
+        const selected = match && coding ? coding.get(match[1]!, actor) : null;
+        if (selected && !visible(selected.repo)) return refuse(response, who, 403, 'That project is outside your access.', '/projects');
+        if (match?.[2] === 'ship' && selected) {
+          const preview = codingHandoffPreview(store, { sessionId: selected.id, actor: who.name });
+          return sendScreen(response, 200, screen('Review for shipping', codingShippingHtml(preview, who.session.csrf), { chrome: chromeFor(selected.repo, 'code') }));
+        }
+        if (match?.[2]) {
+          if (!selected || !coding) throw Error('The coding session is unavailable.');
+          if (match[2] === 'state' && url.searchParams.get('revision') === String(coding.revision(selected.id, actor))) return respond(response, 200, 'application/json', JSON.stringify({ unchanged: true }));
+          const result = match[2] === 'changes' ? await coding.changes(selected.id, actor) : coding.snapshot(selected.id, actor);
+          if (!codingActorAllowed(actor) || !visible(selected.repo)) return respond(response, 403, 'application/json', JSON.stringify({ ok: false, error: 'Your access changed. Sign in again.' }));
+          return respond(response, 200, 'application/json', JSON.stringify(result));
+        }
+        if (url.pathname !== '/code' && !match) return refuse(response, who, 404, 'Coding session not found.', '/code');
+        const requestedProject = url.searchParams.get('project');
+        if (requestedProject !== null && (!visible(requestedProject) || ![...managedRepos(), ...store.listProjects().map(p => p.path)].includes(requestedProject))) return refuse(response, who, 403, 'That project is outside your access.', '/projects');
+        const codeProject = selected?.repo ?? requestedProject ?? project;
+        const chrome = chromeFor(codeProject, 'code');
+        const content = codingWorkspaceHtml({ owner: who.name, projects: chrome.projects ?? [], sessions: coding?.list(actor).filter(s => visible(s.repo)) ?? [], selected: selected && coding ? coding.snapshot(selected.id, actor) : null, csrf: who.session.csrf, project: codeProject, available: coding !== null, ...(codingProblem ? { error: codingProblem } : {}) });
+        return sendScreen(response, 200, screen('Code', content, { chrome, functional: { script: codingWorkspaceScript(), fetches: true } }));
+      } catch (error) {
+        if (!codingActorAllowed(actor)) return match?.[2] && match[2] !== 'ship'
+          ? respond(response, 403, 'application/json', JSON.stringify({ ok: false, error: 'Your access changed. Sign in again.' }))
+          : refuse(response, who, 403, 'Your access changed. Sign in again.', '/work');
+        const message = error instanceof Error ? error.message : 'The coding workspace is unavailable.';
+        if (match?.[2] === 'ship') return sendScreen(response, 409, screen('Review for shipping', `<h1>Prepare this result</h1><p>${escape(message)}</p><a href="/code/${match[1]}">Back to coding</a>`, { chrome: chromeFor(project, 'code') }));
+        if (match?.[2]) return respond(response, 409, 'application/json', JSON.stringify({ ok: false, error: message }));
+        return sendScreen(response, 404, screen('Coding session unavailable', `<h1>Session unavailable</h1><p>${escape(message)}</p><a href="/code">Open coding workspace</a>`, { chrome: chromeFor(project, 'code') }));
+      }
     }
 
     // Nothing open and more than one thing to choose: land on the opener.
@@ -2113,7 +2181,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         `</div>`;
       return page(response, 200, shell("menu", [
         `<h1>tools and settings</h1>`,
-        section("work tools", workToolRows(chrome.projectScoped)),
+        section("work tools", workToolRows(chrome.projectScoped, chrome.chat)),
         section("settings", settingsRows(chrome.projectScoped, chrome.settings)),
       ].join("\n"), { chrome }));
     }
@@ -3313,6 +3381,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const facts = requestContext.getStore();
     return {
       active,
+      code: Boolean(facts?.csrf && actor && store.isInstanceOperator(actor)),
       project,
       projectScoped: restricted(),
       ...(projectPeek === undefined ? {} : { projectPeek }),
@@ -4535,6 +4604,63 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     const denied = authorizeMutation(request, who, body);
     if (denied !== null) return refuse(response, who, denied.status, denied.message);
+    if (url.pathname === '/code' || url.pathname.startsWith('/code/')) {
+      const wantsJson = request.headers.accept?.includes('application/json') === true;
+      const fail = (status: number, message: string, delivery: 'rejected' | 'pending' | 'unknown' = 'rejected', sessionId?: string): void => wantsJson
+        ? respond(response, status, 'application/json', JSON.stringify({ ok: false, error: message, delivery, ...(sessionId ? { sessionId } : {}) }))
+        : refuse(response, who, status, message, '/code');
+      if (who.via !== 'cookie' || !codingActorAllowed({ name: who.name, generation: who.session.generation }) || store.isDemo()) return fail(403, 'Coding sessions require installation-wide operator access. You can manage project tasks in Work.');
+      if (!coding) return fail(409, codingProblem || 'Open Standing Orders on the machine with your installed coding agent.');
+      if ([...new Set(body.keys())].some(key => body.getAll(key).length !== 1)) return fail(400, 'Submit one value for each field.');
+      const actor = { name: who.name, generation: who.session.generation };
+      const permitted = (repo: string): boolean => visible(repo) && [...managedRepos(), ...store.listProjects().map(p => p.path)].includes(repo);
+      try {
+        let id: string;
+        if (url.pathname === '/code/start') {
+          const repo = body.get('repo') ?? '';
+          if (!permitted(repo)) return fail(403, 'Choose a project available to your account.');
+          if (!authenticateApprover(store, who.name, body.get('password') ?? '').ok) return fail(403, 'Enter your Standing Orders password to authorize this coding session.');
+          const session = await coding.start(actor, { repo, title: body.get('title') ?? '', model: body.get('model')?.trim() || null, prompt: body.get('prompt') ?? '', requestId: body.get('requestId') ?? '' });
+          id = session.id;
+        } else {
+          const match = /^\/code\/([a-f0-9]{32})\/(send|stop|resume|recover|continue|ship|answer)$/.exec(url.pathname);
+          if (!match) return fail(404, 'Coding action not found.');
+          id = match[1]!;
+          const session = coding.get(id, actor);
+          if (!permitted(session.repo)) return fail(403, 'That project is outside your access.');
+          if (match[2] === 'ship') {
+            const made = createCodingHandoff(store, { sessionId: id, actor: who.name, repo: session.repo, base: body.get('base') ?? '', candidate: body.get('candidate') ?? '', title: body.get('title') ?? '', goal: body.get('goal') ?? '', acceptance: (body.get('acceptance') ?? '').split('\n').map(line => line.trim()).filter(Boolean).map((statement, index) => ({ id: `c${index + 1}`, statement, evidence: ['check', 'changed-path', ...(body.get('visual') === 'yes' ? ['screenshot'] : [])] })) });
+            return wantsJson ? respond(response, 200, 'application/json', JSON.stringify({ ok: true, taskId: made.taskId })) : redirect(response, `/t/${encodeURIComponent(made.taskId)}`);
+          }
+          if (match[2] === 'send') await coding.send(id, actor, body.get('prompt') ?? '', body.get('requestId') ?? '');
+          else if (match[2] === 'stop') await coding.stop(id, actor);
+          else if (match[2] === 'resume') await coding.resume(id, actor);
+          else if (match[2] === 'recover') await coding.recover(id, actor);
+          else if (match[2] === 'continue') await coding.continueSaved(id, actor);
+          else {
+            const token = body.get('requestId') ?? '';
+            const pending = coding.snapshot(id, actor).requests.find(r => r.id === token);
+            if (!pending) return fail(409, 'This request is no longer waiting for an answer.');
+            const decision = body.get('decision');
+            if (decision !== 'accept' && decision !== 'decline' && decision !== 'cancel') return fail(400, 'Choose an explicit decision for this request.');
+            if (pending.kind !== 'questions' && decision === 'accept' && !authenticateApprover(store, who.name, body.get('password') ?? '').ok) return fail(403, 'Enter your password to approve this additional access.');
+            const answers: unknown = body.has('answers') ? JSON.parse(body.get('answers')!) : Object.fromEntries(pending.questions.map(q => [q.id, { answers: [body.get(`question:${q.id}`) ?? ''] }]));
+            coding.answer(id, actor, token, decision, answers);
+          }
+        }
+        // Authorization is checked again after asynchronous startup/transport work.
+        if (!codingActorAllowed(actor)) return fail(403, 'Your access changed. Sign in again.', 'unknown', id);
+        return wantsJson ? respond(response, 200, 'application/json', JSON.stringify({ ok: true, id })) : redirect(response, `/code/${id}`);
+      } catch (error) {
+        if (!codingActorAllowed(actor)) return fail(403, 'Your access changed. Sign in again.', error instanceof CodingActionError ? error.delivery : 'rejected', error instanceof CodingActionError ? error.sessionId : undefined);
+        const message = error instanceof Error ? error.message : 'The coding action could not finish. Your draft is preserved.';
+        const ship = /^\/code\/([a-f0-9]{32})\/ship$/.exec(url.pathname);
+        if (ship && !wantsJson) {
+          try { const preview = codingHandoffPreview(store, { sessionId: ship[1]!, actor: who.name }); return sendScreen(response, 409, screen('Review for shipping', codingShippingHtml(preview, who.session.csrf, body, message), { chrome: chromeFor(preview.repo, 'code') })); } catch {}
+        }
+        return fail(409, message, error instanceof CodingActionError ? error.delivery : 'rejected', error instanceof CodingActionError ? error.sessionId : undefined);
+      }
+    }
     if (!projectRequestAllowed(url, who, request, response)) return;
     if (restricted()) {
       const repos = body.getAll("repo");
@@ -8103,6 +8229,16 @@ export function createDecisionServer(options: ServeOptions): Server {
     response.end(read.content);
   }
 
+  // Keep native process custody until shutdown has verified agent/tool exit.
+  const closeServer = server.close.bind(server);
+  server.close = ((callback?: (error?: Error) => void) => {
+    if (!coding) return closeServer(callback);
+    void coding.close().then(() => closeServer(callback)).catch(error => {
+      if (callback) callback(error instanceof Error ? error : Error('Coding session shutdown failed.'));
+      else server.emit('error', error);
+    });
+    return server;
+  }) as Server['close'];
   return server;
 }
 
@@ -11588,12 +11724,12 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
   projectScoped?: boolean;
-  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "recipes" | "projects" | "settings" | "chat" | "people" | "ledger" | "mode" | "menu" | "none";
+  active: "code" | "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "recipes" | "projects" | "settings" | "chat" | "people" | "ledger" | "mode" | "menu" | "none";
   project: string | null;
   /** The surface's scope for the scope bar — which rows this screen can
    * show. Derived from the ROUTE, not the session: portfolio and fleet are
@@ -11612,6 +11748,7 @@ type Chrome = {
   modeBanner?: { words: string; name: string };
   /** The chat tab renders only where chat could ever be allowed. */
   chat?: boolean;
+  code?: boolean;
   /** A rendered list pane makes the page master-detail. */
   listPane?: string;
   /** A compact pulse for the currently open workspace. Null in the
@@ -11997,7 +12134,7 @@ function shell(
   const chrome = options.chrome;
   const item = (key: Chrome["active"], href: string, label: string, count?: number): string =>
     `<a href="${href}" aria-label="${escape(label)}" title="${escape(label)}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
-    `${NAV_ICONS[key] === undefined ? "" : `<span class="glyph">${NAV_ICONS[key]}</span>`}${label}` +
+    `${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${key === "inbox" && chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
 
   // The scope bar (portfolio arc §1): ONE row naming which rows this screen
@@ -12007,7 +12144,7 @@ function shell(
   // switching projects stays the POST + CSRF /projects flow.
   const effectiveScope: "all" | "project" | "board-all" =
     chrome.scope ?? (chrome.project === null ? "all" : "project");
-  const peekCounts = chrome.projectPeek === null || chrome.projectPeek === undefined || effectiveScope !== "project" ? null : chrome.projectPeek;
+  const peekCounts = chrome.active === "code" || chrome.projectPeek === null || chrome.projectPeek === undefined || effectiveScope !== "project" ? null : chrome.projectPeek;
   const scopeCounts = peekCounts === null
     ? ""
     : (peekCounts.waiting > 0 ? `<span class="hot">${peekCounts.waiting} needs you</span>` : `<span>0 needs you</span>`) +
@@ -12064,8 +12201,8 @@ function shell(
   // Projects — every old page keeps its own active key and lights the
   // destination it now lives under. The count rides Work: it is the
   // saturated needs-you count, exactly as the inbox row wore it.
-  const primary = primaryDestinationOf(chrome.active);
-  const primaryItem = (key: "chat" | "work" | "projects", href: string, label: string, count?: number): string =>
+  const primary = chrome.active === "code" ? "code" : chrome.active === "chat" ? "work" : primaryDestinationOf(chrome.active);
+  const primaryItem = (key: "code" | "chat" | "work" | "projects", href: string, label: string, count?: number): string =>
     `<a href="${href}" aria-label="${escape(label)}" title="${escape(label)}"${primary === key ? ' class="active" aria-current="page"' : ""}${key === "work" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
     `<span class="glyph">${NAV_ICONS[key] ?? ""}</span>${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
@@ -12080,13 +12217,13 @@ function shell(
     // Chat is present only where the ceiling ever allows it (unchanged
     // gating); Work and Projects always. Every specialist tool is a dim
     // text row inside one of the two accordion groups below.
-    ...(chrome.chat === true && !chrome.projectScoped ? [primaryItem("chat", "/chat", "chat")] : []),
+    ...(chrome.code ? [primaryItem("code", "/code", "code")] : []),
     primaryItem("work", "/work", "work", chrome.inboxCount),
     primaryItem("projects", "/projects", "projects"),
     `</nav>`,
-    `<a class="new-task" href="/tasks/new" aria-label="new task">+ new task</a>`,
+    ...(chrome.active === "code" ? [] : [`<a class="new-task" href="/tasks/new" aria-label="new task">+ new task</a>`]),
     `<nav class="nav-groups">`,
-    navGroup("tools", "work tools", workToolRows(chrome.projectScoped), TOOL_KEYS.has(chrome.active)),
+    navGroup("tools", "work tools", workToolRows(chrome.projectScoped, chrome.chat), TOOL_KEYS.has(chrome.active)),
     navGroup("settings", "settings", settingsRows(chrome.projectScoped, chrome.settings), SETTINGS_KEYS.has(chrome.active)),
     `</nav>`,
     `<span class="grow"></span>`,
@@ -12132,7 +12269,7 @@ function shell(
       : `<a class="project-pill" href="/projects"><span class="name">${scopeName}</span>${
           scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`
         }</a>`,
-    `<a class="mobile-new" href="/tasks/new">+ task</a>`,
+    ...(chrome.active === "code" ? [] : [`<a class="mobile-new" href="/tasks/new">+ task</a>`]),
     // Settings and the specialist tools are a header action on a phone,
     // never a fourth primary tab (workspace package 1).
     `<a class="mobile-more" href="/menu" aria-label="tools and settings" title="tools and settings">${strokeIcon(`<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>`)}</a>`,
@@ -12143,6 +12280,7 @@ function shell(
   const icon = (paths: string): string =>
     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
   const TAB_ICONS = {
+    code: icon(`<path d="m8 6-6 6 6 6m8-12 6 6-6 6M14 4l-4 16"/>`),
     chat: icon(CHAT_PATHS),
     work: icon(WORK_PATHS),
     projects: icon(FOLDER_PATHS),
@@ -12156,7 +12294,7 @@ function shell(
   // work, projects. Tools and settings sit behind the header's menu action.
   const tabbar = [
     `<nav class="tabbar">`,
-    ...(chrome.chat === true ? [tab("chat", "/chat", "chat")] : []),
+    ...(chrome.code ? [tab("code", "/code", "code")] : []),
     tab("work", "/work", "work", chrome.inboxCount),
     tab("projects", "/projects", "projects"),
     `</nav>`,
@@ -15972,7 +16110,7 @@ function safeReturn(raw: string | null | undefined): string {
  * button can name. Nothing here is a second redirect framework: one
  * same-site path, or "/".
  */
-const LOGIN_RETURN_PAGES = /^\/(t\/[^/]+|r\/[1-9]\d*|chat|work|board|projects|routines|recipes|fleet|settings(\/[a-z-]+)?|mode)$/;
+const LOGIN_RETURN_PAGES = /^\/(t\/[^/]+|r\/[1-9]\d*|code(?:\/[a-f0-9]{32}(?:\/ship)?)?|chat|work|board|projects|routines|recipes|fleet|settings(\/[a-z-]+)?|mode)$/;
 function loginReturn(raw: string | null | undefined): string {
   const safe = safeReturn(raw);
   if (safe === "/") return "/";
@@ -16048,6 +16186,7 @@ const FOLDER_PATHS = `<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0
 const CHAT_PATHS = `<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`;
 const WORK_PATHS = `<path d="M9 6h11"/><path d="M9 12h11"/><path d="M9 18h11"/><path d="m4 6 1 1 2-2"/><path d="m4 12 1 1 2-2"/><path d="m4 18 1 1 2-2"/>`;
 const NAV_ICONS: Partial<Record<Chrome["active"], string>> = {
+  code: strokeIcon(`<path d="m8 6-6 6 6 6m8-12 6 6-6 6M14 4l-4 16"/>`),
   chat: strokeIcon(CHAT_PATHS),
   work: strokeIcon(WORK_PATHS),
   projects: strokeIcon(FOLDER_PATHS),
@@ -16068,8 +16207,9 @@ type NavRow = { key: Chrome["active"]; href: string; label: string; hint: string
  * never disagree, and a project-scoped login sees exactly the rows it
  * saw before: moving a link never widens role or project visibility.
  */
-function workToolRows(scoped = false): NavRow[] {
+function workToolRows(scoped = false, offersChat = false): NavRow[] {
   const rows: NavRow[] = [
+    ...(offersChat && !scoped ? [{key: "chat" as const, href: "/chat", label: "assistant", hint: "manage queued work through chat"}] : []),
     { key: "inbox", href: "/", label: "inbox", hint: "questions, approvals, and repairs to act on" },
     { key: "board", href: "/board", label: "board", hint: "lanes by state, with the order view" },
     { key: "tasks", href: "/tasks", label: "task list", hint: "everything, filterable by state" },
@@ -16092,7 +16232,7 @@ function settingsRows(scoped = false, offersSettings = false): NavRow[] {
   return scoped ? rows.filter(row => row.key === "people" || row.key === "settings") : rows;
 }
 /** Which accordion group opens by default for a given active page. */
-const TOOL_KEYS = new Set<Chrome["active"]>(["inbox", "board", "queue", "tasks", "workbench", "recipes", "routines", "ledger"]);
+const TOOL_KEYS = new Set<Chrome["active"]>(["chat", "inbox", "board", "queue", "tasks", "workbench", "recipes", "routines", "ledger"]);
 const SETTINGS_KEYS = new Set<Chrome["active"]>(["settings", "fleet", "caps", "people", "mode", "system"]);
 
 /** The builds screen's views (reduction pass §1): done, the review queue,
@@ -17319,6 +17459,7 @@ function taskBody(data: {
             ? ""
             : `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAgo === null ? "" : ` \u00b7 ${escape(data.coordinator.filedAgo)}`} — an agent asked for this; nothing plans, claims, or runs until you sign, and your signature runs THEIR request</p>`,
           `<p class="approval-label">goal</p><p class="approval-goal">${escape(scope.goal)}</p>`,
+          scope.candidate ? `<p class="approval-label">Saved commit</p><p style="overflow-wrap:anywhere"><code>${escape(scope.candidate)}</code></p>` : "",
           `<div class="approval-boundaries">`,
           `<div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>`,
           `<div class="approval-boundary"><p class="approval-label">touches</p>${approvalPathsHtml(scope.touches)}</div>`,

@@ -1,4 +1,5 @@
 import type { Database } from "./store.js";
+import { activeCodingUpdateWork, installCodingUpdateGate, removeCodingUpdateGate } from "./coding-update.js";
 
 export const UPDATE_PAUSED = "Standing Orders is updating. Current work can finish; new work will resume after the update. Open Update status in the desktop app.";
 const prefix = "so_desktop_update_";
@@ -25,6 +26,7 @@ export function installUpdateGate(db: Database, id: string): void {
     if (existing.length === 0) for (const statement of wanted) db.exec(statement);
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
+  installCodingUpdateGate(db, id);
 }
 
 export function removeUpdateGate(db: Database, id: string): void {
@@ -33,6 +35,7 @@ export function removeUpdateGate(db: Database, id: string): void {
   try {
     const existing = rows(db);
     if (existing.some(row => !wanted.includes(String(row.sql)))) throw Error("This update does not own the admission pause. Nothing was cleared.");
+    removeCodingUpdateGate(db, id);
     for (const row of existing) db.exec(`DROP TRIGGER "${String(row.name)}"`);
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
@@ -53,6 +56,7 @@ export function activeUpdateWork(db: Database): Record<string, number> {
     conversations: count("SELECT count(*) n FROM mate_turn WHERE state IN ('queued','running')") + count("SELECT count(*) n FROM chat_turn WHERE state IN ('queued','running')"),
     sessions: count("SELECT count(*) n FROM held_session WHERE ended_at IS NULL"),
     stopping: count("SELECT count(*) n FROM run_stop WHERE settled_at IS NULL"),
+    ...activeCodingUpdateWork(db),
   };
 }
 
@@ -62,6 +66,7 @@ export function freezeUpdateGate(db: Database, id: string): boolean {
   db.exec("BEGIN IMMEDIATE");
   try {
     if (!updateGateOwned(db, id)) throw Error("The update no longer owns admission.");
+    installCodingUpdateGate(db, id);
     const idle = Object.values(activeUpdateWork(db)).every(n => n === 0);
     if (idle) {
       for (const row of rows(db)) db.exec(`DROP TRIGGER "${String(row.name)}"`);
