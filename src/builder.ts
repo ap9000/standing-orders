@@ -1389,9 +1389,8 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // below, mirroring store.firstBuilderBase's own doc). Null on a first
   // attempt — there is nothing earlier to be cumulative WITH, so the
   // ordinary instructions already suffice. Non-null only when the branch
-  // already carries a prior builder attempt's commits, which is exactly
-  // when a proof's self-reported "changed" must widen past this attempt
-  // alone or it undercounts the sealed diff and reads short.
+  // already carries a prior builder attempt's commits. The machine captures
+  // the whole branch; only a legacy strict receipt needs an authored list.
   const pinnedBase = store.firstBuilderBase(taskRef, branch);
   const retryBase = pinnedBase !== null && pinnedBase !== baseRevision ? pinnedBase : null;
   const lessonContext = learningContext(store, root, request.runId, "build", clock());
@@ -1416,7 +1415,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     milestones.length === 0 || planRevisionHash === null
       ? null
       : { revision: planRevisionNumber, hash: planRevisionHash, milestones, progress, proposal },
-  ) + `\nCanonical signed rubric: ${rubric}. Its statement fields are exact; evidence requirements are separate fields. Do not edit this input.${(scope?.acceptance.length ?? 0) === 0 ? ` When using scripts/proof-preflight.mjs, pass --rubric ${rubric} with --proof ${proof}. Preflight checks the submission; the worker still checks the committed result.` : " The independent reviewer reads these criteria directly; no restatement is needed."}\n`;
+  ) + `\nCanonical signed rubric: ${rubric}. Its statement fields are exact; evidence requirements are separate fields. Do not edit this input.${scope?.qualityMode === "strict" && scope.acceptance.length === 0 ? ` When using scripts/proof-preflight.mjs, pass --rubric ${rubric} with --proof ${proof}. Preflight checks the submission; the worker still checks the committed result.` : ` The ${scope?.qualityMode === "strict" ? "independent reviewer" : "lead or user"} reads these criteria directly; no restatement is needed.`}\n`;
 
   // THE HELD BRANCH (Phase 2, v2 S0d + v6 W8): ownership transfers to the
   // coordinator at the spawn point. Everything build() armed that its
@@ -3305,6 +3304,7 @@ function brief(
    * is never offered a file it has nothing to say in. */
   planRevision: { revision: number; hash: string; milestones: readonly Milestone[]; progress: string; proposal: string } | null = null,
 ): string {
+  const legacyProof = scope.qualityMode === "strict" && scope.acceptance.length === 0;
   return [
     "You are building one task, unattended, in an isolated git worktree.",
     "",
@@ -3480,7 +3480,9 @@ function brief(
       "  approved full command to the machine gate once for the final candidate.",
       "  Do not skip tests, weaken assertions, raise timeouts or change acceptance",
       "  terms to get green. Report no-change if no code fix is warranted; the machine",
-      "  still verifies a repair result. Independent review follows a passing gate.",
+      scope.qualityMode === "strict"
+        ? "  still verifies a repair result. Independent review follows a passing gate."
+        : "  still verifies a repair result. Return the result and limitations to the lead or user.",
     ]),
     "- If the goal needs work outside the scope above, or you reach a judgement",
     "  call somebody else must make — an irreversible choice, a tradeoff the",
@@ -3512,9 +3514,11 @@ function brief(
     "  completed = you made the changes; no-change = the goal needs no change",
     "  and the conclusion says why; failed = you could not do it. Write to a",
     "  temporary name first, then rename it into place.",
-    ...(scope.acceptance.length > 0 ? [
+    ...(!legacyProof ? [
       "- The machine captures the exact changes, approved checks and source context.",
-      "  One independent reviewer assesses that evidence against the signed goal.",
+      scope.qualityMode === "strict"
+        ? "  One independent reviewer assesses that evidence against the signed goal."
+        : "  Return the result and limitations to the lead or user for review.",
       `  You do not need to write ${proof} or repeat the acceptance criteria,`,
       "  changed-file inventory or final check results. This applies to no-change",
       "  results too. Put useful caveats in the short handoff; do not invent evidence.",
@@ -3657,7 +3661,7 @@ function brief(
     "  letter, backslash, or `.`/`..` segment; and every field that says",
     "  \"required\" above present and non-empty.",
     ]),
-    ...(scope.acceptance.length > 0 ? [
+    ...(!legacyProof ? [
       "- Re-read the handoff and any screenshot inventory before you exit.",
       "  Confirm valid JSON, the stated size limits, and that every named image",
       "  exists. No criterion answers or self-reported file list are required.",
@@ -3724,15 +3728,18 @@ function brief(
       ? []
       : [
           `- This branch already carries earlier attempts' committed work,`,
-          `  starting from revision ${retryBase}. The machine's sealed diff for`,
-          "  this proof spans the WHOLE branch from that revision to the commit",
-          '  of your final tree, not just what you touch now — so "changed" must',
+          `  starting from revision ${retryBase}.`,
+          "  The machine captures the whole branch from that revision to the",
+          "  commit of your final tree, including work from earlier attempts.",
+          ...(legacyProof ? [
+          '  For the optional proof, "changed" must',
           "  equal every repo-relative path that differs from that revision",
           "  under the changed-list contract above, including paths only an",
           `  earlier attempt touched (\`git diff --name-only ${retryBase} HEAD\` lists`,
           "  the ones already committed; your own uncommitted work comes on",
           `  top under the same rename rule), capped at ${PROOF_LIMITS.changed} paths — never`,
           "  just the files you personally edited this attempt.",
+          ] : ["  Report the result and limitations in your handoff; do not recreate that inventory."]),
         ]),
     ...(answers.length === 0
       ? []
