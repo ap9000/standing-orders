@@ -402,18 +402,18 @@ describe("continuous assignments over existing task families", () => {
       limits: { itemBytes: 1024, aggregateBytes: 1024, items: 1 } })), "machine-captured review context", NOW, { captureStatus: "ok" });
   }
 
-  test("an ordinary verified revision refuses damaged ancestor evidence before any handoff acknowledgment", () => {
+  test.each(["verified-build", "checked-build"] as const)("a %s revision refuses damaged ancestor evidence before handoff acknowledgment", kind => {
     const original = built();
     storeEvidence(store, dir, original, "terminal-diff", "changes.patch", Buffer.from("diff --git a/src/retry.ts b/src/retry.ts\n"), "saved changes", NOW);
     const revision = requestResultChanges(store, dir, { run: original, batch: "", source: store.getScope("retry")!.digest,
       actor: "operator", repos: [REPO], note: "Keep the same key through one more retry.", path: "", line: "", request: "b".repeat(32) }, NOW);
     expect(revision.ok).toBe(true); if (!revision.ok) throw Error(revision.message);
     expect(approve(store, revision.id, "operator", NOW, store.getScope(revision.id)!.digest, token).ok).toBe(true);
-    const run = built(revision.id); reviewed(run); claimAssignment(store, "retry", lead, NOW, dir);
+    const run = built(revision.id); if (kind === "verified-build") reviewed(run); claimAssignment(store, "retry", lead, NOW, dir);
     expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision");
     revisionContext(run, original);
     const ready = assignmentOf(store, "retry", NOW, access, dir)!;
-    expect(ready).toMatchObject({ state: "ready-to-check", receipt: { runId: run, completionKind: "verified-build" } });
+    expect(ready).toMatchObject({ state: "ready-to-check", receipt: { runId: run, completionKind: kind } });
     const ancestorProof = store.artifactsFor(original).find(one => one.kind === "proof")!;
     writeFileSync(join(dir, ancestorProof.key), "changed ancestor proof");
     expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision");

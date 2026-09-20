@@ -262,18 +262,10 @@ export function assignmentEvidenceIntact(store: Store, root: string, receipt: As
       // proof and shortened captures stay visible; no new acceptance or
       // passing gate is manufactured by the lead's acknowledgment.
       return savedBytesIntact && receipt.proofAcceptance !== null;
-    } else if (receipt.completionKind === "checked-build") {
-      // Reviewing a result does not rewrite its semantic verdict, approve an
-      // exception or grant release authority. Still require the exact native
-      // passing check receipt and unchanged saved artifact bytes.
+    } else if (receipt.completionKind === "checked-build" || receipt.completionKind === "verified-build") {
       const gate = verificationEvidence(store, root, receipt.runId);
-      const result = gate.ok && gate.bytes !== null ? JSON.parse(gate.bytes) : null;
-      return savedBytesIntact && result?.head === receipt.head && result.result?.ran === true &&
-        result.result.exitCode === 0 && receipt.proof?.machineVerdict === "verified";
-    } else if (receipt.completionKind === "verified-build") {
-      const proof = readVerifiedProofForRun(store, root, receipt.runId);
-      const gate = verificationEvidence(store, root, receipt.runId);
-      const result = gate.ok && gate.bytes !== null ? JSON.parse(gate.bytes).result : null;
+      const verification = gate.ok && gate.bytes !== null ? JSON.parse(gate.bytes) : null;
+      const result = verification?.result;
       const readOne = (kind: typeof artifacts[number]["kind"]) => {
         const found = artifacts.filter(a => a.kind === kind);
         if (found.length !== 1 || found[0]!.truncated || (found[0]!.redacted && kind !== "review-context") || found[0]!.captureStatus === "failed") return null;
@@ -289,6 +281,13 @@ export function assignmentEvidenceIntact(store: Store, root: string, receipt: As
       const contextIntact = parsed?.ok === true && parsed.inventory.run === receipt.runId &&
         reviewContextCustodyProblem(store, root, parsed.inventory) === null;
       if (needsContext && !contextIntact) return false;
+      if (receipt.completionKind === "checked-build") {
+        // A lead review preserves semantic verdicts and release authority.
+        // Both handoff paths retain the exact native check and ancestor custody.
+        return savedBytesIntact && verification?.head === receipt.head && result?.ran === true &&
+          result.exitCode === 0 && receipt.proof?.machineVerdict === "verified";
+      }
+      const proof = readVerifiedProofForRun(store, root, receipt.runId);
       let goalEvidence = proof?.ok === true;
       if (proof === null && receipt.proof!.matrix.length > 0 && receipt.proof!.matrix.every(row =>
         row.assessment?.evidenceState === "pass" && row.state === "pass" && row.review?.judgement === "upholds")) {
