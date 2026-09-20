@@ -42,7 +42,7 @@ export function authorizePlanUnderMode(store: Store, taskId: string, actor: stri
     if (ref === null || ref.repo === null || ref.plan !== "requested" || !plainPlan(store, taskId) || store.hasLiveClaim(ref.id, now)) return false;
     const mode = store.activeMode(ref.repo, now);
     const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
-    if (mode === null || mode.signedBy !== actor || !terms?.planAuto || !terms.autoApproveFiling || !terms.reviewAuto || !store.accountCanAccess(actor, ref.repo)) return false;
+    if (mode === null || mode.signedBy !== actor || !terms?.planAuto || !terms.autoApproveFiling || !store.accountCanAccess(actor, ref.repo)) return false;
     const source = plannerContractOf(store, taskId);
     if (!source.ok || source.contract.scope === null || source.contract.revision !== null) return false;
     const scope = source.contract.scope;
@@ -64,7 +64,7 @@ export function planAutoPending(store: Store, taskId: string, now: Date): boolea
   const mode = store.activeMode(ref.repo, now);
   const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
   const source = plannerContractOf(store, taskId);
-  return mode !== null && terms?.planAuto === true && terms.autoApproveFiling && terms.reviewAuto && mode.digest === row["mode_digest"] && mode.signedBy === row["signed_by"] &&
+  return mode !== null && terms?.planAuto === true && terms.autoApproveFiling && mode.digest === row["mode_digest"] && mode.signedBy === row["signed_by"] &&
     store.accountCanAccess(mode.signedBy, ref.repo) && source.ok && plannerSourceDigest(source.contract) === row["source_digest"];
 }
 
@@ -82,7 +82,7 @@ export function sealUnchangedPlanUnderMode(store: Store, taskId: string, sourceD
   const by = String(authorization["signed_by"]);
   const covered = eligible && plainPlan(store, taskId) && sourceDigest === authorization["source_digest"] && scope?.digest === authorization["scope_digest"] &&
     mode !== null && mode.digest === authorization["mode_digest"] && mode.signedBy === by &&
-    terms?.planAuto === true && terms.autoApproveFiling && terms.reviewAuto && store.accountCanAccess(by, ref?.repo ?? null);
+    terms?.planAuto === true && terms.autoApproveFiling && store.accountCanAccess(by, ref?.repo ?? null);
   const approved = covered && store.sealScopeApproval(taskId, by, now, {}, { kind: "mode", modeDigest: mode!.digest });
   store.recordAction({ at: now.toISOString(), actor: by, repo: ref?.repo ?? null, taskId, runId, action: "plan auto-approval", outcome: approved ? "approved" : "needs approval", source: "work" });
   return approved;
