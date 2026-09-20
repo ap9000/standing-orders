@@ -35,6 +35,9 @@ export type ModeTerms = {
   quickMint: boolean;
   /** The reviewer runs on every built-with-changes outcome (R3). */
   reviewAuto: boolean;
+  /** Freshly signed opt-in to retry infrastructure-failed independent reviews
+   * within the existing three-root allowance. Legacy modes grant none. */
+  reviewRetryAuto: boolean;
   /** Stamped into filings that name no budget of their own. */
   perAttemptBudgetMicrousd: number | null;
   /** SOFT rail: new admissions stop once the day's MEASURED spend has
@@ -81,6 +84,7 @@ export function presetTerms(name: ModeName, absoluteExpiry: string): ModeTerms {
         planAuto: false,
         quickMint: true,
         reviewAuto: true,
+        reviewRetryAuto: false,
         perAttemptBudgetMicrousd: null,
         dailyMeasuredCapMicrousd: null,
         dailyRunCap: null,
@@ -97,6 +101,7 @@ export function presetTerms(name: ModeName, absoluteExpiry: string): ModeTerms {
         planAuto: false,
         quickMint: true,
         reviewAuto: true,
+        reviewRetryAuto: false,
         perAttemptBudgetMicrousd: null,
         dailyMeasuredCapMicrousd: null,
         dailyRunCap: null,
@@ -156,6 +161,7 @@ export function modeTermsFromJson(json: string | null): ModeTerms | null {
     (t["planAuto"] === undefined || typeof t["planAuto"] === "boolean") &&
     typeof t["quickMint"] === "boolean" &&
     typeof t["reviewAuto"] === "boolean" &&
+    (t["reviewRetryAuto"] === undefined || typeof t["reviewRetryAuto"] === "boolean") &&
     budget !== undefined &&
     measured !== undefined &&
     runs !== undefined &&
@@ -183,6 +189,7 @@ export function modeTermsFromJson(json: string | null): ModeTerms | null {
       planAuto: t["planAuto"] === true,
       quickMint: t["quickMint"],
       reviewAuto: t["reviewAuto"],
+      reviewRetryAuto: t["reviewRetryAuto"] === true,
       perAttemptBudgetMicrousd: budget,
       dailyMeasuredCapMicrousd: measured,
       dailyRunCap: runs,
@@ -215,6 +222,9 @@ export function modeWords(terms: ModeTerms): string[] {
     terms.reviewAuto
       ? "every finished build gets an agent review; the comments land for you to seal"
       : "reviews run only when you ask",
+    terms.reviewRetryAuto && terms.reviewAuto
+      ? "reviewer process failures, timeouts, or initialization failures may retry automatically up to twice, within three total independent review attempts; operator stops, withdrawn authority, integrity failures, and existing spend and run limits still stop retries"
+      : "failed independent reviews wait for you to retry; this mode grants no automatic review retry",
     terms.perAttemptBudgetMicrousd === null
       ? "filings carry no default dollar cap"
       : `filings that name no budget get a $${(terms.perAttemptBudgetMicrousd / 1_000_000).toFixed(2)} per-attempt cap`,

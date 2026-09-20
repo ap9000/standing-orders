@@ -98,7 +98,7 @@ describe("the MCP stdio server", () => {
     h.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: modernMeta } });
     const listed = h.last()["result"] as Record<string, unknown>;
     expect(listed["resultType"]).toBe("complete");
-    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(17);
+    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(21);
     // No outputSchema: it describes structuredContent, which these tools
     // do not return (round-2 finding 1).
     expect((listed["tools"] as { outputSchema?: unknown }[])[0]?.outputSchema).toBeUndefined();
@@ -420,6 +420,22 @@ describe("the MCP stdio server", () => {
     // whole line is pinned, byte-for-byte, against JSON.stringify of the
     // expected object.
     const tools = [
+      {
+        name: "get_assignment", description: "Read one assignment's root, current execution, owner, exact result and handoff receipt. Approval, proof and deployment remain separate facts.",
+        inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 } }, required: ["ref"], additionalProperties: false },
+      },
+      {
+        name: "list_assignment_updates", description: "Read durable assignment updates in your projects after a cursor. Save nextCursor after processing; repeated reads do not acknowledge or deliver anything.",
+        inputSchema: { type: "object", properties: { after: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, limit: { type: "integer", minimum: 1, maximum: 100 } }, required: [], additionalProperties: false },
+      },
+      {
+        name: "claim_assignment", description: "Record yourself as this assignment's lead. Repeating your claim is safe; another active owner cannot be replaced. This grants no approval or execution authority.",
+        inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 } }, required: ["ref"], additionalProperties: false },
+      },
+      {
+        name: "acknowledge_assignment", description: "Acknowledge the exact ready-to-check receipt as its lead, using the current receipt digest. This does not accept failed proof, answer decisions, approve work, publish or deploy.",
+        inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 }, digest: { type: "string", minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" } }, required: ["ref", "digest"], additionalProperties: false },
+      },
       {
         name: "status",
         description: "The plane's liveness facts over your repo allowlist: what waits on the operator, what runs, what finished in the last 24h.",

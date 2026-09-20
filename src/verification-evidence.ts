@@ -1,3 +1,4 @@
+// Verified-build assignment completion reuses these gate checks.
 import { observationBrief, readObservationEvidence } from "./observations.js";
 /** Machine verification receipts use the existing sealed artifact store (schema
  * 60). Verbose output is independently bounded; no agent-authored check claim
