@@ -1,5 +1,5 @@
 import { Window } from 'happy-dom';
-import { assignmentActionHref, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, reviewRetryChoiceHtml } from './assignment-ui.js';
+import { assignmentActionHref, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence } from './assignment-ui.js';
 import type { AssignmentSnapshot } from './assignment.js';
 import { describe, expect, test } from "vitest";
 import { GOAL_ASSESSMENT_PENDING } from "./proof.js";
@@ -116,11 +116,11 @@ describe("the shared status projection (workspace package 1)", () => {
     // Inside the result projection: the review is primary, the stored
     // verdict is the secondary history — for a verified AND a refuted result.
     const pendingVerified = resultStatusOf(built({ review: review({}) }));
-    expect(pendingVerified).toMatchObject({ token: "review-pending", label: "Waiting for review", tone: "attention" });
-    expect(pendingVerified.detail).toContain('Until the review settles, the earlier verdict — "Ready to review" — stays on record as history.');
+    expect(pendingVerified).toEqual(resultStatusOf(built()));
+
     const runningRefuted = resultStatusOf(built({ verdict: "refuted", reasons: ["the repository's approved verification command exited 1"], review: review({ state: "running", attempts: 1, reviewerAlive: true }) }));
-    expect(runningRefuted).toMatchObject({ token: "reviewing", label: "Reviewing" });
-    expect(runningRefuted.detail).toContain('the earlier verdict — "Changes saved, but checks failed" — stays on record');
+    expect(runningRefuted).toMatchObject({ token: "checks-failed", label: "Changes saved, but checks failed" });
+
     // A review that never was, or already succeeded, changes nothing.
     expect(resultStatusOf(built({ review: null })).token).toBe("ready-to-review");
     expect(resultStatusOf(built({ review: review({ state: "succeeded", attempt: 1, attempts: 1 }) })).token).toBe("ready-to-review");
@@ -128,7 +128,7 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(resultStatusOf(built({ accepted: true, review: review({}) })).token).toBe("accepted-exception");
     expect(resultStatusOf(built({ role: "scout", review: review({}) })).token).toBe("report-ready");
     // A published result under review still leads with the review.
-    expect(resultStatusOf(built({ review: review({}) }), { state: "opened", prNumber: 12, prUrl: "https://github.com/o/r/pull/12", remoteState: null, lastCheckState: null }).token).toBe("review-pending");
+    expect(resultStatusOf(built({ review: review({}) }), { state: "opened", prNumber: 12, prUrl: "https://github.com/o/r/pull/12", remoteState: null, lastCheckState: null }).token).toBe("pr-opened");
 
     // The facts come from the store's retry projection, read per run.
     const attempt = { runId: 30, attempt: 1, outcome: null, reason: null, runner: "reviewer-1", provider: "claude", model: null, startedAt: "2026-09-13T12:00:00.000Z", finishedAt: null, requestId: 5 };
@@ -142,9 +142,9 @@ describe("the shared status projection (workspace package 1)", () => {
     // Work rows: the review's own token, running only while a reviewer is
     // live; the dispatch fallback stays for callers that read no review facts.
     const pendingRow = workStatusOf(facts({ state: "done", result: built({ review: review({}) }), dispatch: diagnosis({ condition: "waiting", code: "review-pending", summary: "Waiting for review", action: "open-result" }) }));
-    expect(pendingRow).toMatchObject({ token: "review-pending", label: "Waiting for review", views: ["all", "needs-you", "completed"] });
+    expect(pendingRow).toMatchObject({ token: "ready-to-review", views: ["all", "completed"] });
     const reviewingRow = workStatusOf(facts({ state: "done", result: built({ review: review({ state: "running", attempts: 1, reviewerAlive: true }) }), dispatch: diagnosis({ condition: "running", code: "reviewing", summary: "Reviewing", action: "open-result" }) }));
-    expect(reviewingRow).toMatchObject({ token: "reviewing", tone: "live", views: ["all", "running", "completed"], rank: 1 });
+    expect(reviewingRow).toMatchObject({ token: "ready-to-review", views: ["all", "completed"], rank: 3 });
     const olderRow = workStatusOf(facts({ state: "done", result: built({ review: null }), dispatch: diagnosis({ condition: "terminal", code: "complete", action: "open-result" }) }));
     expect(olderRow.token).toBe("ready-to-review");
   });
@@ -254,11 +254,11 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(verified).toMatchObject({ token: "ready-to-review", views: ["all", "completed"] });
     // A review in flight outranks the stored verdict and is running.
     const reviewing = workStatusOf(facts({ state: "done", result: built(), dispatch: diagnosis({ condition: "running", code: "reviewing", summary: "Reviewing", action: "open-result" }) }));
-    expect(reviewing).toMatchObject({ token: "reviewing", label: "Reviewing", tone: "live", views: ["all", "running", "completed"] });
+    expect(reviewing).toMatchObject({ token: "ready-to-review", tone: "ready", views: ["all", "completed"] });
     // Unknown dispatch never crashes a row.
     expect(workStatusOf(facts({}))).toMatchObject({ token: "unknown", label: "Status unknown", views: ["all"] });
 
-    expect(workCounts([approval, queued, running, failed, cancelled, checksFailed, accepted, verified, reviewing])).toEqual({ all: 9, "needs-you": 3, running: 2, completed: 4 });
+    expect(workCounts([approval, queued, running, failed, cancelled, checksFailed, accepted, verified, reviewing])).toEqual({ all: 9, "needs-you": 3, running: 1, completed: 4 });
     // All's order: what needs a person, then live, then queued, then done, then cancelled; ties newest first.
     const sorted = [cancelled, verified, queued, running, approval].map(status => ({ rank: status.rank, updatedAt: "2026-09-13T12:00:00.000Z", token: status.token })).sort(compareWorkRows).map(one => one.token);
     expect(sorted).toEqual(["needs-approval", "running", "ready", "ready-to-review", "cancelled"]);
@@ -302,7 +302,7 @@ describe("the shared status projection (workspace package 1)", () => {
 });
 
  test("saved evidence awaiting assessment has one clear review action", () => {
-  expect(resultStatusOf(built({ verdict: "short", reasons: [GOAL_ASSESSMENT_PENDING] }))).toMatchObject({ token: "review-pending", label: "Ready for goal review", action: { label: "Review result", kind: "open-review" } });
+  expect(resultStatusOf(built({ verdict: "short", reasons: [GOAL_ASSESSMENT_PENDING] }))).toMatchObject({ token: "verification-needed" });
 });
 
 // Assignment rendering shares the same work-status contract.
@@ -311,7 +311,7 @@ describe("assignment interface", () => {
     return { version: 1, rootId: 'root task', activeTaskId: 'correction/2', repo: '/project one', title: 'Keep the total correct',
       state: 'working', detail: 'The correction is running.', primaryAction: { code: 'inspect-run', label: 'View progress', target: { taskId: 'correction/2', runId: 18, decisionId: null }, access: 'read', retry: 'read-again' },
       attention: [], attempts: [{ taskId: 'root task', runId: 9, label: 'Checks failed', detail: 'The total did not match.' }, { taskId: 'correction/2', runId: 18, label: 'Building', detail: 'The correction is running.' }],
-      owner: null, receipt: null, handoff: null, publication: null, deployment: { status: 'not-recorded' }, ...changes };
+      owner: null, receipt: null, completion: null, handoff: null, publication: null, deployment: { status: 'not-recorded' }, ...changes };
   }
 
   describe('assignment presentation', () => {
@@ -362,11 +362,11 @@ describe("assignment interface", () => {
       } finally { await window.happyDOM.close(); }
     });
 
-    test('fresh evidence damage suppresses saved readiness without changing the authoritative snapshot', () => {
+    test('fresh evidence damage remains visible without inventing a retry or changing readiness', () => {
       const assignment = snapshot({ state: 'complete' });
       const damaged = { token: 'evidence-damaged', label: 'Evidence unavailable', detail: 'The saved diff is unreadable.', tone: 'problem' as const, action: null };
       const shown = assignmentWithEvidence(assignment, damaged);
-      expect(shown.state).toBe('needs-decision');
+      expect(shown.state).toBe('complete');
       expect(shown.attention).toContain(damaged.detail);
       expect(assignment.state).toBe('complete');
       expect(assignmentWithEvidence(snapshot(), null).state).toBe('working');
@@ -375,38 +375,16 @@ describe("assignment interface", () => {
       expect(fresh.state).toBe('needs-decision');
       expect(fresh.detail).toBe(blocked.detail);
       expect(fresh.primaryAction).toEqual(blocked.primaryAction);
-      expect(fresh.attempts[0]).toMatchObject({ taskId: 'correction/2', runId: 18, label: 'Evidence unavailable', detail: damaged.detail });
-      expect(assignmentSummaryHtml(fresh)).not.toContain('Ready to review');
+      expect(fresh.attempts[0]).toMatchObject({ taskId: 'correction/2', runId: 18, label: 'Ready to review', detail: damaged.detail });
+      expect(assignmentSummaryHtml(fresh)).toContain(damaged.detail);
       expect(assignmentWithEvidence(blocked, damaged, 9).attempts).toEqual(blocked.attempts);
     });
   });
 
-  describe('assignment controls', () => {
-    test('review service retries require an explicit checkbox opt-in', async () => {
-      const window = new Window();
-      try {
-        window.document.body.innerHTML = `<form>${reviewRetryChoiceHtml()}</form>`;
-        const form = window.document.querySelector('form')!;
-        const checkbox = form.querySelector('input')!;
-        expect(checkbox.type).toBe('checkbox');
-        expect(checkbox.checked).toBe(false);
-        expect(new window.FormData(form).get('review-retry-auto')).toBeNull();
-        checkbox.click();
-        expect(new window.FormData(form).get('review-retry-auto')).toBe('1');
-        expect(checkbox.closest('label')?.textContent).toContain('Retry review service failures');
-        expect(form.textContent).toContain('Up to two retries. Stopped reviews and completed verdicts never retry.');
-      } finally { await window.happyDOM.close(); }
-    });
-
-    test('an explicitly selected retry choice survives rendering without adding a submit action', async () => {
-      const window = new Window();
-      try {
-        window.document.body.innerHTML = `<form>${reviewRetryChoiceHtml(true)}</form>`;
-        const form = window.document.querySelector('form')!;
-        expect(new window.FormData(form).get('review-retry-auto')).toBe('1');
-        expect(form.querySelector('button')).toBeNull();
-        expect(form.querySelector('input[type=password]')).toBeNull();
-      } finally { await window.happyDOM.close(); }
-    });
+  test('Ready is a state and does not introduce a review queue or approval form', () => {
+    const html = assignmentSummaryHtml(snapshot({ state: 'ready-to-check', detail: 'Checks failed (exit 1).' }));
+    expect(html).toContain('>Ready</h2>');
+    expect(html).toContain('Checks failed (exit 1).');
+    expect(html).not.toMatch(/review-retry-auto|retry-review|<form/);
   });
 });
