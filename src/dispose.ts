@@ -722,8 +722,15 @@ export type RepairTrigger =
  * the ordinary rails and strikes — this function only ever composes a
  * task and, at most, one scope approval.
  */
-export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: string, sourceRunId: number, verdict: ProofVerdict, now: Date, cause: "review" | "verification" = "review"): RepairTrigger {
+export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: string, sourceRunId: number, verdict: ProofVerdict, now: Date, cause: "review" | "verification" = "review", automatic = false): RepairTrigger {
   if (verdict !== "short" && verdict !== "refuted") return { kind: "none" };
+  // A review finding is feedback for the lead. Only an explicitly signed
+  // repair mode may turn an automatic review into another work item.
+  // The normal authenticated repair/revision actions remain available.
+  if (automatic) {
+    const mode = store.activeMode(repo, now);
+    if (mode === null || modeTermsFromJson(mode.termsJson)?.repairAuto !== true) return { kind: "none" };
+  }
   // One attempt per source run, ever (source_run UNIQUE) — checked first so
   // a re-fired trigger is a silent no-op, never a duplicate.
   if (store.repairChainFor(sourceRunId) !== null) return { kind: "none" };

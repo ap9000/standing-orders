@@ -79,7 +79,7 @@ function assignmentLines(assignment: AssignmentSnapshot): string[] {
     `Lead: ${assignment.owner === null ? "unclaimed" : `${assignment.owner.label}${assignment.owner.active ? "" : " (no longer has access)"}`}`,
     ...(receipt === null ? [] : [
       `Result: ${receipt.taskId} · run ${receipt.runId}`,
-      `Result type: ${receipt.completionKind === "verified-build" ? "verified build" : receipt.completionKind === "research-report" ? "research report" : receipt.completionKind === "accepted-exception" ? "accepted exception" : "verification pending"}`,
+      `Result type: ${receipt.completionKind === "verified-build" ? "verified build" : receipt.completionKind === "checked-build" ? "checks passed; lead review" : receipt.completionKind === "research-report" ? "research report" : receipt.completionKind === "accepted-exception" ? "accepted exception" : "verification pending"}`,
       ...(receipt.proofAcceptance === null ? [] : [`Recorded acceptance: ${receipt.proofAcceptance.approver}${receipt.proofAcceptance.note === null ? "" : ` · ${receipt.proofAcceptance.note}`}`]),
       `Candidate: ${receipt.head ?? "not recorded"} (base ${receipt.base ?? "not recorded"})`,
       `Proof: ${receipt.proof?.verdict ?? "not recorded"} · evidence ${receipt.evidence}`,

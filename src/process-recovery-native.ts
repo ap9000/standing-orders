@@ -8,7 +8,7 @@ export type PreparedDarwinProcessCensus = { sourcePath: string; executablePath: 
 export type DarwinProcessIdentity = {
   pid: number; ppid: number | null; uid: number | null; birthMs: number | null;
   uniqueId: string | null; parentUniqueId: string | null; traced: boolean | null;
-  executable: string | null; originalParentVersion: number | null;
+  executable: string | null; originalParentVersion: number | null; pidVersion?: number;
 };
 export type DarwinManagedService = { domain: string; label: string; pid: number; uniqueId: string; beforeUniqueId: string; afterUniqueId: string; identityBound: boolean };
 export type DarwinPidDomain = { pid: number; domain: string; readable: boolean; identityBound: boolean; uniqueId: string | null; type: string | null; handle: number | null; originator: string | null; creatorPid: number | null };
@@ -123,6 +123,7 @@ static void capture(void) {
       (r->kp_proc.p_flag & P_TRACED) ? "true" : "false");
     if (identified) printf("\"%" PRIu64 "\"", id.uniqueid); else printf("null");
     printf(",\"parentUniqueId\":"); if (identified) printf("\"%" PRIu64 "\"", id.parent_uniqueid); else printf("null");
+    printf(",\"pidVersion\":%" PRIu32, (uint32_t)id.idversion);
     printf(",\"originalParentVersion\":"); if (identified) printf("%" PRIu32, (uint32_t)id.original_parent_version); else printf("null");
     printf(",\"executable\":"); if (path_ok) quoted(path); else printf("null"); if (target_coalition) printf(",\"resourceCoalitionId\":\"%" PRIu64 "\"", row_resource); putchar('}');
   }
@@ -206,9 +207,9 @@ export function parseDarwinNativeSnapshot(text: string): NativeSnapshot {
   const processes: DarwinProcessIdentity[] = v.processes.map((r: unknown) => {
     if (!r || typeof r !== "object") throw new Error("malformed-process-identity");
     const p = r as Record<string, unknown>;
-    if (!isInt(p.pid, 1) || pids.has(p.pid) || !nullable(p.ppid, isInt) || !nullable(p.uid, isInt) || !nullable(p.birthMs, (n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0) || !nullable(p.uniqueId, isId) || p.uniqueId === "0" || (p.uniqueId !== null && ids.has(p.uniqueId)) || !nullable(p.parentUniqueId, isId) || (p.traced !== null && typeof p.traced !== "boolean") || !nullable(p.executable, safeText) || !nullable(p.originalParentVersion, (n): n is number => isInt(n) && n <= 0xffffffff)) throw new Error("malformed-process-identity");
+    if (!isInt(p.pid, 1) || pids.has(p.pid) || !nullable(p.ppid, isInt) || !nullable(p.uid, isInt) || !nullable(p.birthMs, (n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0) || !nullable(p.uniqueId, isId) || p.uniqueId === "0" || (p.uniqueId !== null && ids.has(p.uniqueId)) || !nullable(p.parentUniqueId, isId) || (p.traced !== null && typeof p.traced !== "boolean") || !nullable(p.executable, safeText) || !nullable(p.originalParentVersion, (n): n is number => isInt(n) && n <= 0xffffffff) || (p.pidVersion !== undefined && (!isInt(p.pidVersion) || p.pidVersion > 0xffffffff))) throw new Error("malformed-process-identity");
     pids.add(p.pid); if (p.uniqueId !== null) ids.add(p.uniqueId);
-    return { pid: p.pid, ppid: p.ppid, uid: p.uid, birthMs: p.birthMs, uniqueId: p.uniqueId, parentUniqueId: p.parentUniqueId, traced: p.traced, executable: p.executable, originalParentVersion: p.originalParentVersion };
+    return { pid: p.pid, ppid: p.ppid, uid: p.uid, birthMs: p.birthMs, uniqueId: p.uniqueId, parentUniqueId: p.parentUniqueId, traced: p.traced, executable: p.executable, originalParentVersion: p.originalParentVersion, ...(p.pidVersion === undefined ? {} : { pidVersion: p.pidVersion }) };
   });
   if (v.complete && (v.bootId === null || v.errors.length || !pids.has(1) || !pids.has(v.collectorPid) || processes.some(p => p.uniqueId === null))) throw new Error("incomplete-native-census");
   return { schema: 1, bootId: v.bootId, collectorPid: v.collectorPid, complete: v.complete, processes, errors: v.errors as string[] };
@@ -216,7 +217,7 @@ export function parseDarwinNativeSnapshot(text: string): NativeSnapshot {
 /** PID reuse, orphan exec, tracing, UID and birth changes all invalidate a seal. */
 export function changedDarwinProcessIdentities(before: DarwinProcessIdentity[], after: DarwinProcessIdentity[]): number[] {
   const old = new Map(before.map(p => [p.pid, p])), next = new Map(after.map(p => [p.pid, p]));
-  const keys: (keyof DarwinProcessIdentity)[] = ["uniqueId", "parentUniqueId", "ppid", "uid", "birthMs", "traced", "executable", "originalParentVersion"];
+  const keys: (keyof DarwinProcessIdentity)[] = ["uniqueId", "parentUniqueId", "ppid", "uid", "birthMs", "traced", "executable", "originalParentVersion", "pidVersion"];
   return [...new Set([...old.keys(), ...next.keys()])].filter(pid => {
     const a = old.get(pid), b = next.get(pid);
     return !a || !b || keys.some(key => a[key] !== b[key]);

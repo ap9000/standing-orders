@@ -131,10 +131,9 @@ describe("continuous assignments over existing task families", () => {
     expect(store.getScope(trigger.draftTaskId)?.approvedAt).not.toBeNull();
   });
 
-  test("a result is ready only after independent verification; checking binds exact evidence and changes no authority", () => {
+  test("a checked result reaches its lead before independent review; acknowledgment changes no authority", () => {
     const run = built();
-    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision");
-    reviewed(run);
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "ready-to-check", receipt: { completionKind: "checked-build" } });
     claimAssignment(store, "retry", lead, NOW, dir);
     const before = store.getScope("retry");
     const ready = assignmentOf(store, "retry", NOW, access, dir)!;
@@ -146,9 +145,49 @@ describe("continuous assignments over existing task families", () => {
     expect(store.getScope("retry")).toEqual(before);
     expect(store.proofAcceptance(run)).toBeNull();
     expect(store.publicationForRun(run)).toBeNull();
+    expect(store.reviewRetryStateOf(run)?.state).toBe("unrequested");
     store.recordOutcomeFacts(run, { headRevision: "c".repeat(40) });
     expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision"); // Gate still binds the old head.
     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
+  });
+
+  test("semantic evidence gaps reach the lead once without changing checks or the review verdict", () => {
+    const run = built();
+    store.saveProofVerdict(run, "short", ["The reviewer could not inspect the runtime reference."], NOW,
+      [{ id: "c1", statement: rubric[0]!.statement, requiredEvidence: ["check"], state: "missing", detail: ["Missing runtime reference."], answered: [],
+        review: { judgement: "cannot-tell", note: "Missing runtime reference." } }], "verified");
+    claimAssignment(store, "retry", lead, NOW, dir);
+    const ready = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(ready).toMatchObject({ state: "ready-to-check", attention: ["The reviewer could not inspect the runtime reference."], receipt: { completionKind: "checked-build" } });
+    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
+    expect(store.proofVerdictFor(run)?.verdict).toBe("short");
+    expect(store.proofAcceptance(run)).toBeNull();
+    expect(store.repairChainFor(run)).toBeNull();
+  });
+
+  test("failed machine checks cannot become a completed lead review", () => {
+    built(task(), false);
+    claimAssignment(store, "retry", lead, NOW, dir);
+    const result = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(result.state).toBe("needs-decision");
+    expect(result.receipt?.completionKind).toBeNull();
+    expect(checkAssignment(store, "retry", result.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
+    expect(store.actionLedger({ repos: null }).filter(a => a.action === "assignment handoff checked")).toHaveLength(0);
+  });
+
+  test("strict release keeps its requested independent review", () => {
+    store.setQualityDefault("strict", "operator", NOW);
+    const run = built();
+    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision");
+    reviewed(run);
+    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("ready-to-check");
+  });
+
+  test("passing checks do not hide unresolved process custody", () => {
+    const run = built();
+    vi.spyOn(store, "stopQuiescenceProblem").mockReturnValue("A process exit has not been observed.");
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "needs-decision", detail: "A process exit has not been observed.",
+      primaryAction: { code: "inspect-run", target: { runId: run } } });
   });
 
   test("missing artifact bytes refuse acknowledgment, including replay of an earlier checked receipt", () => {
@@ -420,7 +459,7 @@ describe("continuous assignments over existing task families", () => {
     const changed = assignmentUpdates(store, NOW, access, { after: 0, limit: 50 }, dir);
     expect(changed.events).toHaveLength(2);
     expect(changed.events[0]?.superseded).toBe(true);
-    expect(changed.events[1]?.assignment.state).toBe("needs-decision");
+    expect(changed.events[1]?.assignment).toMatchObject({ state: "ready-to-check", attention: ["More evidence is needed."] });
   });
 });
 

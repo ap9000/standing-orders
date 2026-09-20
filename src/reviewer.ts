@@ -1666,7 +1666,7 @@ export async function reviewPass(
       // verdict, never before. Composes at most one draft or settles the
       // chain at one of its independent stops; never dispatches anything.
       if (result.verdict !== null && request.repo !== null) {
-        maybeTriggerRepair(store, request.repo, options.evidenceRoot ?? evidenceRoot(homedir()), request.run, result.verdict, clock());
+        maybeTriggerRepair(store, request.repo, options.evidenceRoot ?? evidenceRoot(homedir()), request.run, result.verdict, clock(), "review", true);
       }
     } else if (store.applicableStopFor(admitted.reviewerRunId) !== null) {
       // An operator's stop (v52) won: the root ends as interrupted — the

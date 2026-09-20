@@ -6,7 +6,7 @@ import type { DisplayStatus, WorkStatus } from './workspace-ui.js';
 const escape = (value: string): string => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 const LABELS: Record<AssignmentSnapshot['state'], string> = {
   working: 'Working', checking: 'Checking', 'needs-decision': 'Needs your decision',
-  'ready-to-check': 'Ready to check', complete: 'Complete', cancelled: 'Cancelled',
+  'ready-to-check': 'Ready for review', complete: 'Complete', cancelled: 'Cancelled',
 };
 
 /** The existing verified receipt reader may discover damage after a verdict

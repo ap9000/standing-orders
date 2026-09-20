@@ -33,6 +33,7 @@ Carry this check into Standing Orders task acceptance criteria and review feedba
 
 ## Keep the installed tool current
 
+- Always use the latest verified Standing Orders build for new live work. Check the running UI, background worker and resolved CLI before dispatch; deploy an available newer verified build first. If the update is blocked, resolve the update instead of continuing ordinary tasks on the old runtime. A source commit, passing build or merge does not count as deployment.
 - Deployment means the running UI and background worker use the same verified build and compatible database format, not merely that source was merged or a package was built.
 - Check running build identity before real end-to-end work. Report version drift and update through the normal drain, backup, compatibility and health checks; never replace a runtime underneath active work.
 - Prefer the latest verified candidate. Never bypass signing, approvals, process-exit checks or evidence requirements to install a newer build. Report a blocked update plainly instead of claiming the installation is current.
