@@ -248,7 +248,7 @@ describe("route candidates and the task route (v47)", () => {
   test("retired reviewer settings cannot block a new task or offer an active reviewer choice", () => {
     exactInstall();
     store.setPhaseConfig(INSTALLATION_SCOPE, "review", "gemini", "gemini-2.5-pro", "alex", T0);
-    store.setPhaseTierConfig(INSTALLATION_SCOPE, "review", "strong", "unknown", null, "alex", T0);
+    store.setPhaseTierConfig(INSTALLATION_SCOPE, "review", "strong", "claude", null, "alex", T0);
     expect(resolveRouteCandidates(store, "/repo")).toMatchObject({ ok: true });
     expect(agentChoicesFor(store, "/repo", null).review).toEqual([]);
     expect(store.phaseConfig(INSTALLATION_SCOPE, "review")?.provider).toBe("gemini");
