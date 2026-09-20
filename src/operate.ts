@@ -300,6 +300,9 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task show <id>
   standing-orders assignment show <task>    root, current work and exact handoff
   standing-orders assignment updates        durable updates (--after <cursor>)
+  standing-orders assignment brief          catch up from the local database
+  standing-orders assignment inbox --consumer <name>  receive saved status changes
+  standing-orders assignment ack --consumer <name> --batch <id>  acknowledge delivery
   standing-orders assignment claim <task>   record your lead ownership
   standing-orders assignment check <task> --digest <receipt>
       claim/check use --token-env NAME or --token-file PATH for a coordinator;
@@ -627,7 +630,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   "phase", "risk", "tier", "clear-phase",
   "run", "containment",
-  "token-env", "after", "repair-max-attempts",
+  "token-env", "after", "repair-max-attempts", "consumer", "batch",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",

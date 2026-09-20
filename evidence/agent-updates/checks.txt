@@ -1,0 +1,36 @@
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-agent-updates
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"3d184922ac1e135f96595dea9b958c9e9956e392","tree":"f9a47074abd2a1f0c6c0c8d2893f5ecdb9915f77","trackedClean":true}
+··················(node:21351) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+····················(node:21354) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··············(node:22489) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···········································(node:22608) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···········(node:21350) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+················(node:23136) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·····(node:21349) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+····(node:23337) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  9 passed (9)
+      Tests  132 passed (132)
+   Start at  15:36:31
+   Duration  12.03s (transform 5.51s, setup 226ms, import 10.39s, tests 29.84s, environment 0ms)
+

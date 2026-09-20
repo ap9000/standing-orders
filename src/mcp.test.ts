@@ -98,7 +98,7 @@ describe("the MCP stdio server", () => {
     h.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: modernMeta } });
     const listed = h.last()["result"] as Record<string, unknown>;
     expect(listed["resultType"]).toBe("complete");
-    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(21);
+    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(24);
     // No outputSchema: it describes structuredContent, which these tools
     // do not return (round-2 finding 1).
     expect((listed["tools"] as { outputSchema?: unknown }[])[0]?.outputSchema).toBeUndefined();
@@ -435,6 +435,18 @@ describe("the MCP stdio server", () => {
       {
         name: "acknowledge_assignment", description: "Acknowledge the exact ready-to-check receipt as its lead, using the current receipt digest. This does not accept failed proof, answer decisions, approve work, publish or deploy.",
         inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 }, digest: { type: "string", minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" } }, required: ["ref", "digest"], additionalProperties: false },
+      },
+      {
+        name: "get_assignment_brief", description: "Catch up from the local database: current work, decisions, saved results and project knowledge. Bounded read only; no model call or task mutation.",
+        inputSchema: { type: "object", properties: { repo: { type: "string", minLength: 1, maxLength: 4096 }, limit: { type: "integer", minimum: 1, maximum: 25 } }, required: [], additionalProperties: false },
+      },
+      {
+        name: "get_assignment_inbox", description: "Receive a durable batch of your assignments' status changes. Use a stable consumer name. Until acknowledged, the same batch survives reconnects and restarts. Receiving never completes or reruns work.",
+        inputSchema: { type: "object", properties: { consumer: { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z0-9][a-z0-9-]{0,63}$" }, limit: { type: "integer", minimum: 1, maximum: 100 } }, required: ["consumer"], additionalProperties: false },
+      },
+      {
+        name: "acknowledge_assignment_delivery", description: "Acknowledge receipt of an inbox batch after handling its updates. This advances only your delivery cursor; it never marks work complete, answers a decision or starts a revision.",
+        inputSchema: { type: "object", properties: { consumer: { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z0-9][a-z0-9-]{0,63}$" }, batchId: { type: "string", minLength: 32, maxLength: 32, pattern: "^[a-f0-9]{32}$" } }, required: ["consumer", "batchId"], additionalProperties: false },
       },
       {
         name: "status",
