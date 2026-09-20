@@ -916,7 +916,7 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("completed source draft");
     expect(prompt).toContain("#42");
     expect(prompt).toContain("reviewing the existing changes");
-    expect(prompt).toContain("write this attempt's own handoff and proof");
+    expect(prompt).toContain("write this attempt's own handoff with its outcome and limitations");
     expect(prompt).toContain("Do not discard and recreate sound work");
   });
 
