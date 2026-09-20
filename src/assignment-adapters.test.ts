@@ -131,7 +131,7 @@ describe("assignment adapters preserve scope and acknowledgment authority", () =
       return JSON.parse(lines.at(-1)!);
     };
     const names = call("tools/list").result.tools.map((tool: { name: string }) => tool.name);
-    expect(names.filter((name: string) => name.includes("assignment"))).toEqual(["get_assignment", "list_assignment_updates", "claim_assignment", "acknowledge_assignment"]);
+    expect(names.filter((name: string) => name.includes("assignment"))).toEqual(["get_assignment", "list_assignment_updates", "claim_assignment", "acknowledge_assignment", "get_assignment_brief", "get_assignment_inbox", "acknowledge_assignment_delivery"]);
     expect(names).not.toContain("approve_assignment");
     expect(names).not.toContain("complete_assignment");
     const read = call("tools/call", { name: "get_assignment", arguments: { ref: "mine" } });
@@ -139,5 +139,43 @@ describe("assignment adapters preserve scope and acknowledgment authority", () =
     expect(call("tools/call", { name: "claim_assignment", arguments: { ref: "foreign" } }).result.isError).toBe(true);
     expect(call("tools/call", { name: "acknowledge_assignment", arguments: { ref: "mine", digest: "a".repeat(64), yes: true } }).error.code).toBe(-32602);
     expect(call("tools/call", { name: "acknowledge_assignment", arguments: { ref: "mine", digest: "G".repeat(64) } }).error.code).toBe(-32602);
+    expect(call("tools/call", { name: "get_assignment_brief", arguments: {} }).result.isError).not.toBe(true);
+    const inbox = call("tools/call", { name: "get_assignment_inbox", arguments: { consumer: "codex-main" } });
+    expect(inbox.result.isError).not.toBe(true);
+    expect(call("tools/call", { name: "acknowledge_assignment_delivery", arguments: { consumer: "codex-main", batchId: "invalid" } }).error.code).toBe(-32602);
+  });
+
+  test("database brief and durable delivery share CLI admission without executing work", () => {
+    const auth = { "token-env": "LEAD" }, env = { LEAD: token };
+    expect(cli(["inbox"], { consumer: "codex-main" }).body.reason).toBe("unauthenticated");
+    expect(cli(["claim", "mine"], auth, env).code).toBe(0);
+    const taskBefore = store.getTask("mine"), notificationsBefore = store.listNotifications("all");
+    const brief = cli(["brief"], auth, env);
+    expect(brief.code).toBe(0);
+    expect(brief.raw).toContain("mine");
+    expect(brief.raw).not.toContain("/repo/private");
+    const first = cli(["inbox"], { ...auth, consumer: "codex-main" }, env);
+    expect(first.code).toBe(0);
+    expect(first.body.result.batch.events.length).toBeGreaterThan(0);
+    expect(cli(["inbox"], { ...auth, consumer: "codex-main" }, env).body.result.batch).toEqual(first.body.result.batch);
+    const acknowledged = cli(["ack"], { ...auth, consumer: "codex-main", batch: first.body.result.batch.id }, env);
+    expect(acknowledged.code).toBe(0);
+    expect(cli(["inbox"], { ...auth, consumer: "codex-main" }, env).body.result.batch.events).toEqual([]);
+    expect(store.getTask("mine")).toEqual(taskBefore);
+    expect(store.runsFor(store.refFor("built-in", "mine").id)).toEqual([]);
+    expect(store.listNotifications("all")).toEqual(notificationsBefore);
+    revokeCoordinator(store, cid, "operator", NOW);
+    for (const op of ["inbox", "brief", "ack"]) {
+      const flags = op === "brief" ? auth : { ...auth, consumer: "codex-main", ...(op === "ack" ? { batch: first.body.result.batch.id } : {}) };
+      expect(cli([op], flags, env).body.reason).toBe("unauthenticated");
+    }
+  });
+
+  test.each([
+    ["brief", { limit: 26 }], ["brief", { repo: "\n" }],
+    ["inbox", {}], ["inbox", { consumer: "../escape" }], ["inbox", { consumer: "lead", after: 99 }],
+    ["ack", { consumer: "lead" }], ["ack", { consumer: "lead", batchId: "a".repeat(64), yes: true }],
+  ] as const)("%s rejects malformed delivery or brief arguments", (operation, args) => {
+    expect(assignmentArgumentProblem(operation, args)).not.toBeNull();
   });
 });

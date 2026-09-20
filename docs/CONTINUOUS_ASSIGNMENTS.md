@@ -39,6 +39,13 @@ never grants execution, acceptance, publication or deployment authority.
 
 ## Watching and revisions
 
+For reliable delivery, use `assignment inbox --consumer NAME` and acknowledge
+its exact batch with `assignment ack --consumer NAME --batch ID`. Both require
+the lead's credential. The database retains the pending batch and acknowledged
+position across restarts. `assignment brief` supplies current catch-up context
+from the database. The existing `updates --after` API remains available for
+clients that intentionally manage their own cursor. See [Agent updates](AGENT_UPDATES.md).
+
 The worker does not execute a separate model review or automatically retry it.
 Existing signed review and repair settings stay recorded as history, not as an
 instruction to resubmit finished work. Request a revision with concrete feedback
