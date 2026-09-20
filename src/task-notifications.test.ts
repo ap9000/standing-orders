@@ -480,7 +480,8 @@ describe("lifecycle facts through the Telegram transport", () => {
     store.signMode({ repo: ALPHA, name: "hands-off", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, now);
     const script = scriptedTransport();
     await pass(script);
-    expect(script.texts()[0]).toContain("○ Review pending");
+    expect(script.texts()[0]).toContain("○ Checks pending");
+    expect(script.texts()[0]).not.toContain("Review pending");
     store.recordOutcomeFacts(run, { handoff: "could not re-read the branch in /Users/alex/private/worktree" });
     store.finishRun(run, { outcome: "failed", reason: "retryable-infra", now });
     store.enqueueNotification({ source: { run }, dedupeKey: `run:${run}:failed`, kind: "build-failed", subject: "retryable-infra", body: "/Users/alex/private/worktree" }, now);
