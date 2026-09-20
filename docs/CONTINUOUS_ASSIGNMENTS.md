@@ -51,35 +51,11 @@ and adds no scheduler or automatic Codex-thread wakeup. A watcher reads updates,
 opens the saved result, then acknowledges it or asks explicitly for a revision.
 Publication is separate; merge never implies deployment.
 
-## Release boundary
+## Deployment
 
-Historical preparation below records the previous release policy; current
-handoff semantics above supersede its completion conditions.
-
-Verified base 82ae6aa (1920/1921) stays fixed. Attempts 1931/1933, 1934/1935
-and 1936/1937 remain preserved; their passing gates did not settle every review
-criterion. Gate 1938 then failed one stale assertion: the Work row correctly said
-Revising, not Working. This candidate fixes only that test expectation/comment;
-its four focused status cases pass. The saved native log remains truncated as
-captured, losslessly archived; neither 1938 nor its head is a verified base.
-
-The release excludes queued/dependency-blocked work and waiting
-reviews from Running, preserves precise shared status labels, and rechecks a
-verified revision's inherited evidence before handoff. Damaged or missing
-ancestor custody refuses acknowledgment; the own-run proof reader is explicit.
-
-Fresh desktop and phone journeys on source f149d76 opened exact results 8/6,
-inspected changes and created revisions with 486/493-character feedback. Their
-approval terms stayed visible and unsigned. `journeys.json` retains source/build
-hashes, observations, device limits and four inspected images. Older reports/logs
-remain losslessly framed in `checks.txt.gz`; prior screenshots remain in b859 Git
-history. They are historical, not evidence for this correction.
-
-`checks.json` indexes complete readable preparation output. The earlier 59 focused
-checks and verbose output remain archived. Current typecheck/four status tests
-cover the assertion correction. Production/build inputs and the fresh browser
-journeys are unchanged; no visual rerun was needed. Only native
-REVIEW-VERIFICATION and
-REVIEW-CHECK-LOG establish final execution. Compare sourceGitBlob to sealed
-identities[].blob; display hashes may cover redacted text. Preflight the entire
-committed candidate against 82ae6aa. No deployment or process recovery is claimed.
+Deploy the exact candidate only after its approved machine check passes and the
+lead or user marks the saved result complete. The running UI, worker and CLI must
+use that same build. Missing result packaging is a visible limitation, not a
+reason to start another agent; unavailable or failed machine checks cannot
+establish deployment readiness. Historical release records remain in Git and
+in the database.
