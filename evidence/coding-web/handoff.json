@@ -1,0 +1,41 @@
+{
+  "sample": "Isolated unapproved handoff; no machine run, review or publication",
+  "observedAt": "2026-09-20T06:21:14.412Z",
+  "taskId": "coding-review-4ce3c23fc63b743ac35e6d999fb4daf4",
+  "repo": "/private/tmp/so-standalone-native-ahxXo3/cart-demo",
+  "goal": "Show clear cart labels for empty, single-item and multiple-item carts. Review the committed result from this coding session.",
+  "candidate": "58be7063c6c5c58dad83071fd64f908c6444863a",
+  "scopeDigest": "bd56c54936ceb8c4986301f468bb2a23",
+  "approvedDigest": null,
+  "criteria": [
+    {
+      "id": "c1",
+      "statement": "Zero items displays Nothing in your cart yet.",
+      "how": null,
+      "evidence": [
+        "check",
+        "changed-path"
+      ]
+    },
+    {
+      "id": "c2",
+      "statement": "One item displays 1 item and two items displays 2 items.",
+      "how": null,
+      "evidence": [
+        "check",
+        "changed-path"
+      ]
+    },
+    {
+      "id": "c3",
+      "statement": "All three cart-label tests pass, and only cart.js and cart.test.js changed.",
+      "how": null,
+      "evidence": [
+        "check",
+        "changed-path"
+      ]
+    }
+  ],
+  "runCount": 0,
+  "replay": "Current screenshot-bridge source rejected missing required images without creating a task; replaying the original nonvisual terms returned this same sole unapproved task, still with zero runs."
+}
