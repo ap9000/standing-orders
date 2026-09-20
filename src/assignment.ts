@@ -166,8 +166,8 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     state = "ready-to-check";
     detail = completionKind === "research-report" ? "The research report is ready for the lead to read."
       : completionKind === "accepted-exception" ? "An operator accepted this result with its recorded limitations. The lead can inspect that decision; the recorded checks are unchanged."
-      : completionKind === "checked-build" ? "Checks passed. The result is ready for your review."
-      : "Checks and independent review passed. The result is ready for your review.";
+      : completionKind === "checked-build" ? "Checks passed."
+      : "Checks and independent review passed.";
     primaryAction = { code: "open-result", label: completionKind === "research-report" ? "Read report" : completionKind === "accepted-exception" ? "Review acceptance" : "Review result", target: { taskId: current.id, runId: result!.id, decisionId: null }, access: "read", retry: "read-again" };
     if (owner?.active && store.handle.prepare("SELECT 1 FROM action_ledger WHERE task_id = ? AND run_id = ? AND actor = ? AND action = ? AND outcome = ? AND source = 'work' LIMIT 1")
       .get(family.root.id, result!.id, actorOf(owner), CHECK_ACTION, receipt.digest)) {
