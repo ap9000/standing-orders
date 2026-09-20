@@ -430,7 +430,8 @@ test('an unknown startup checks custody, then closes explicitly and offers a new
   latest = snapshot({ session: { ...unknown, status: 'closed', deliveryReviewRequired: false }, items: [], revision: 3 });
   submit(window.document.querySelector('[data-coding-form="recover"]')!); await settle();
   expect(window.document.querySelector('#coding-state')?.textContent).toBe('Session closed');
-  expect(window.document.querySelector('#coding-controls a')?.textContent).toBe('New session');
+  expect(window.document.querySelector('#coding-controls')?.textContent).toBe('');
+  expect([...window.document.querySelectorAll('a')].filter(a => a.textContent === 'New session')).toHaveLength(1);
   expect(window.document.querySelector('[data-coding-form="resume"]')).toBeNull();
   expect(window.document.querySelector<HTMLButtonElement>('[data-coding-form="send"] button')?.disabled).toBe(true);
   expect(composer().hidden).toBe(true);
@@ -445,7 +446,8 @@ test('an unknown startup checks custody, then closes explicitly and offers a new
   expect(composer().hidden).toBe(true);
   expect(window.document.querySelector<HTMLElement>('#coding-conversation')!.hidden).toBe(true);
   expect(window.document.querySelector<HTMLElement>('#coding-shipping')!.hidden).toBe(true);
-  expect(window.document.querySelector('#coding-controls a')?.textContent).toBe('New session');
+  expect(window.document.querySelector('#coding-controls')?.textContent).toBe('');
+  expect([...window.document.querySelectorAll('a')].filter(a => a.textContent === 'New session')).toHaveLength(1);
   expect(window.document.querySelector('#coding-changes')).not.toBeNull();
 });
 
