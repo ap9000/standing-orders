@@ -309,7 +309,7 @@ describe("the exact-run control on the console (v52)", () => {
     expect(stale.status).toBe(409);
   });
 
-  test("c8: a stopped review shows Review again — the bounded explicit retry door — instead of Resume", async () => {
+  test("c8: a stopped historical review retains its stop and source result without offering retry or resume", async () => {
     const ref = seed("payouts");
     const { runId, leaseId } = live("payouts", ref);
     store.transact(() => {
@@ -327,11 +327,16 @@ describe("the exact-run control on the console (v52)", () => {
     expect(controlOf(html)).toContain("review #");
     expect((await post(alex, "/t/payouts/stop", { csrf: csrfOf(html), run: String(reviewRun) })).status).toBe(303);
     store.finishRun(reviewRun, { outcome: "failed", reason: "interrupted", now: new Date(), stopSettlement: "interrupted" });
-    const after = controlOf(await page(alex, "/t/payouts"));
+    const after = await page(alex, "/t/payouts");
     expect(after).toContain('data-task-control="review-stopped"');
-    expect(after).toContain(">Review again</button>");
-    expect(after).toContain(`<input type="hidden" name="run" value="${runId}">`);
-    expect(after).not.toContain(">Resume</button>");
+    expect(after).toContain('<summary>Previous assessment stopped</summary>');
+    expect(after).toContain(`Run #${reviewRun} was stopped by alex.`);
+    expect(after).not.toMatch(/Review again|action="[^"]*retry-review|>Resume<\/button>/);
+    expect(after).toContain(`href="/r/${runId}"`);
+    expect((await fetch(url(`/r/${runId}`), { headers: { cookie: alex } })).status).toBe(200);
+    expect(store.stopOf(reviewRun)).toMatchObject({ requestedBy: "alex", requestedVia: "web", settlement: "interrupted" });
+    expect(store.stopOf(reviewRun)?.settledAt).not.toBeNull();
+    expect(store.getRun(runId)?.outcome).toBe("built");
     expect((await post(alex, "/t/payouts/resume-arm", { csrf: csrfOf(html), run: String(reviewRun) })).status).toBe(409);
   });
 });

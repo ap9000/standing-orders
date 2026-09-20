@@ -127,7 +127,7 @@ describe("Never Stuck dispatch diagnosis", () => {
     expect(accepted?.detail).not.toMatch(/not passed by the machine|checks passed/i);
   });
 
-  test("a finished build shows pending, live, failed, queued-retry, exhausted, and succeeded review states with attempt counts (v50)", () => {
+  test("historical review states remain inspectable without queuing another review stage", () => {
     const ref = file(store, "t-review-state");
     enroll(store);
     expect(acquireIfReady(store, ref, "worker", { token: TOKEN, repo: REPO, now: T0, newLeaseId: () => "lease-review-state" }).ok).toBe(true);
@@ -146,38 +146,38 @@ describe("Never Stuck dispatch diagnosis", () => {
     };
     expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "terminal", code: "complete", review: null });
     const first = request();
-    expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "waiting", code: "review-pending", summary: "Waiting for review", action: "open-result", review: { state: "queued", attempt: 1, cap: 3, retriesRemaining: 2, queued: { requestedBy: "operator", origin: "operator" } } });
+    expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "terminal", code: "complete", summary: "Ready to review", action: "open-result", review: { state: "queued", attempt: 1, cap: 3, retriesRemaining: 2, queued: { requestedBy: "operator", origin: "operator" } } });
     const review = root(1, first);
-    expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "running", code: "reviewing", summary: "Reviewing", review: { state: "running", attempt: 1, retriesRemaining: 0 } });
-    expect(diagnoseTaskDispatch(store, "t-review-state", new Date(T0.getTime() + 60 * 60_000))).toMatchObject({ condition: "waiting", code: "review-failed", summary: "Review interrupted", action: "open-result", review: { state: "running", attempt: 1 } });
+    expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "terminal", code: "complete", summary: "Ready to review", review: { state: "running", attempt: 1, retriesRemaining: 0 } });
+    expect(diagnoseTaskDispatch(store, "t-review-state", new Date(T0.getTime() + 60 * 60_000))).toMatchObject({ condition: "terminal", code: "complete", summary: "Ready to review", action: "open-result", review: { state: "running", attempt: 1 } });
     store.finishRun(review, { outcome: "failed", reason: "reviewer-ingestion: database busy", now: T0 });
-    // The latest failure names its attempt, its reason, and the one explicit next act.
+    // Retain historical failure facts while opening the saved result.
     const failed = diagnoseTaskDispatch(store, "t-review-state", T0);
-    expect(failed).toMatchObject({ condition: "waiting", code: "review-failed", summary: "Review failed — retry available", action: "retry-review",
+    expect(failed).toMatchObject({ condition: "terminal", code: "complete", summary: "Ready to review", action: "open-result",
       review: { state: "retryable", attempt: 1, cap: 3, retriesUsed: 0, retriesRemaining: 2, latestRun: review, latestReason: "reviewer-ingestion: database busy", interrupted: false } });
-    expect(failed?.detail).toContain("attempt 1 of 3 failed (reviewer-ingestion: database busy)");
-    expect(failed?.detail).toContain("2 explicit retries left");
-    // A queued retry is NOT hidden behind the older failed run.
+    expect(failed?.action).not.toBe("retry-review");
+    expect(diagnosisIsDispatchable(failed)).toBe(false);
+    // A historical queued retry is visible as data, never the next work stage.
     const second = request();
     const queuedRetry = diagnoseTaskDispatch(store, "t-review-state", T0);
-    expect(queuedRetry).toMatchObject({ condition: "waiting", code: "review-pending", summary: "Review retry queued (attempt 2 of 3)", action: "open-result", review: { state: "queued", attempt: 2, retriesRemaining: 1, latestRun: review, queued: { requestedBy: "operator", origin: "operator" } } });
-    expect(queuedRetry?.detail).toContain("asked by operator");
+    expect(queuedRetry).toMatchObject({ condition: "terminal", code: "complete", summary: "Ready to review", action: "open-result", review: { state: "queued", attempt: 2, retriesRemaining: 1, latestRun: review, queued: { requestedBy: "operator", origin: "operator" } } });
+    expect(diagnosisIsDispatchable(queuedRetry)).toBe(false);
     // A retry is always an operator's ask (explicit-only): the typed view
     // names the asker and the origin, never 'automatic' past attempt 1.
     expect(store.raw().prepare("SELECT origin FROM review_request WHERE id = ?").get(second)).toEqual({ origin: "operator" });
     const retry = root(2, second);
-    expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "running", code: "reviewing", summary: "Reviewing (retry 1 of 2)", review: { state: "running", attempt: 2 } });
+    expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "terminal", code: "complete", summary: "Ready to review", review: { state: "running", attempt: 2 } });
     store.finishRun(retry, { outcome: "failed", reason: "interrupted", now: T0 });
     const interrupted = diagnoseTaskDispatch(store, "t-review-state", T0);
-    expect(interrupted).toMatchObject({ code: "review-failed", summary: "Review interrupted — retry available", action: "retry-review", review: { state: "retryable", attempt: 2, retriesUsed: 1, retriesRemaining: 1, latestRun: retry, interrupted: true } });
-    expect(interrupted?.detail).toContain("1 explicit retry left");
+    expect(interrupted).toMatchObject({ condition: "terminal", code: "complete", summary: "Ready to review", action: "open-result", review: { state: "retryable", attempt: 2, retriesUsed: 1, retriesRemaining: 1, latestRun: retry, interrupted: true } });
+    expect(diagnosisIsDispatchable(interrupted)).toBe(false);
     const third = request();
     const last = root(3, third);
     store.finishRun(last, { outcome: "failed", reason: "reviewer-agent", now: T0 });
-    // Exhausted: no retry action, the count and the latest reason stated.
+    // Even exhausted historical reviews keep the result available without a retry action.
     const exhausted = diagnoseTaskDispatch(store, "t-review-state", T0);
-    expect(exhausted).toMatchObject({ condition: "waiting", code: "review-exhausted", summary: "Review retries exhausted", action: "open-result", review: { state: "exhausted", attempt: 3, retriesUsed: 2, retriesRemaining: 0, latestRun: last, latestReason: "reviewer-agent" } });
-    expect(exhausted?.detail).toContain("All 3 review attempts ended without a review (latest: reviewer-agent)");
+    expect(exhausted).toMatchObject({ condition: "terminal", code: "complete", summary: "Ready to review", action: "open-result", review: { state: "exhausted", attempt: 3, retriesUsed: 2, retriesRemaining: 0, latestRun: last, latestReason: "reviewer-agent" } });
+    expect(exhausted?.action).not.toBe("retry-review");
     expect(diagnosisIsDispatchable(exhausted)).toBe(false);
     store.acceptProof(run, "operator", "Accepted the verified build after inspecting its result", T0);
     expect(diagnoseTaskDispatch(store, "t-review-state", T0)).toMatchObject({ condition: "terminal", code: "complete", review: { state: "exhausted" } });

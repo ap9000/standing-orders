@@ -1,7 +1,7 @@
 {
   "version": 1,
   "policy": "Saved-result handoff; no separate model review or automatic proof resubmission. Native deployment gate remains required.",
-  "sourceCheckpoint": "3d36665dad427397fbea3e81d3d79511368b5cc8",
+  "sourceCheckpoint": "5eda4295776a5937af71aa158a208b4edf7e45c9",
   "sourceGitBlob": {
     "scripts/deploy-browser.mjs": "a31c198da9a913dc5e2dbb171f641f9b424f07c6",
     "scripts/deploy-candidate.mjs": "7f9d57e4b3924fa854e51d4a80b0d8dfb54e64d1",
@@ -17,10 +17,12 @@
     "src/chat-actions.test.ts": "11b85ffbd3f1cf04d0dfe51c10454a5dd59b3ade",
     "src/chat-actions.ts": "85b800bd891069b291fc15dbe1404db51a633e6e",
     "src/deploy-candidate.test.ts": "03478106aeafdd1606407da21b36fb086e42ecb9",
+    "src/dispatch.test.ts": "af4a27a304f9d02e6db4395a62b6a83ae901dcef",
     "src/dispatch.ts": "bfa41c5d3b775fed28e8339a277dd7537e023ad5",
     "src/dispose.ts": "8a8fe02c59629bb5e361f7dd4134d62189957a69",
     "src/evidence.ts": "eeb9ff419ed41c8c370ac9ac3783456aee5c4f78",
     "src/exec.ts": "9962a72c001698cc8ee5201d9461f8d1846715e0",
+    "src/mate-doors.test.ts": "ffb7a89314ce175e6bfe6312ca627327d959fb7f",
     "src/mate-tools.ts": "58e6c39c4230a166842e6fe593e158120b9af8d7",
     "src/modes-surfaces.test.ts": "2bd3c5ac7de33e18b546b321394df6973d01aa87",
     "src/modes.test.ts": "fca2651979887a4094274292add85a6aef39ea47",
@@ -47,20 +49,31 @@
     "src/repair-loop.test.ts": "ad1133690f3de6e6837b4afd73a3beda5f2513ce",
     "src/result-review.ts": "ec2a4c79de696fbc6e026d31e5a4518555011831",
     "src/review-context-e2e.test.ts": "d75da171a5398764d9c11b18bbf675ff562a8d0e",
+    "src/review-context.test.ts": "6e9d387593ca1f2027db5c295ea30d1ff64a1f56",
     "src/reviewer.test.ts": "70cc6cbba9216be8710aca7b144bab2568cd60fa",
     "src/reviewer.ts": "4c01931feea860b5825c01f9c6271e4a3d9110ae",
+    "src/scope.test.ts": "a537a242400a883a78d2ade3dc0be0b60b4cae5b",
     "src/scope.ts": "2bf5c6ee92237a335ed1a2b45a361389832a4dcc",
-    "src/serve.test.ts": "ce4a534938bc4938a51157326310ad67895e6e5d",
+    "src/serve.test.ts": "f25aa2d6224a68ceb2f0fe623b48d26dd4b9b6d1",
     "src/serve.ts": "c646b747b3685a610657768c518fdc7c8ba75780",
     "src/store.ts": "0c471b1dc11659de689e33bc42956d2829134103",
+    "src/task-control-console.test.ts": "b344d9e12adaf48e68ed4d0ef22433187e57f1ca",
+    "src/task-notifications.test.ts": "2281f868285de23b87120b07ad7cecbe3f74b0cd",
+    "src/telegram-mate.test.ts": "49f23670b37c66f5e15de7cf333d9c3af373c947",
+    "src/telegram-status.test.ts": "b268230f30c17713b21eb2029218c62a4246b084",
     "src/tick.test.ts": "c44933b3509401df5abe2f135c5f5b0f8a32a089",
+    "src/unattended.test.ts": "991222f388786ad22a6fd4cc9aaf2b665f82528b",
     "src/verification-evidence.ts": "f9c0af690538873393c1c82e56948611338f47ef",
     "src/workspace-ui.test.ts": "7e9cf8aa4c8f62ccf2cd02ae59145dd392d9ba99",
     "src/workspace-ui.ts": "a3b694b2591f96c04064173bb3b10125a41c25b6"
   },
   "focusedTests": {
-    "log": "focused-checks.txt",
-    "note": "Complete selected focused check logs; not the full release gate. Filtered tests in targeted runs are not new test skips."
+    "log": "contract-checks.txt.gz",
+    "logEncoding": "gzip",
+    "logSha256": "964227ac5bfcac23e3e19d55848b87ee9cb86761e40af126a94a502946584a2d",
+    "decodedSha256": "e37caa4eaec4be78fd6379b1956666f7c3656601b0141d8ed0c658d7be191418",
+    "decodedBytes": 96132,
+    "note": "Includes failed old-contract assertions followed by passing focused corrections. All19 native1950 failures were in retained tests expecting removed review behavior; no production change. Original logs retained."
   },
   "uiReport": "ui-report.json",
   "browserChecks": 3,
@@ -68,5 +81,13 @@
   "limits": [
     "Earlier process-recovery material is historical. Current native full gate remains pending.",
     "Whole-task patch and changed-path capture may exceed installed legacy storage limits; do not truncate the source inventory or move the original base. Inspect full Git source and retain honest capture limitations."
-  ]
+  ],
+  "nativeFailure": {
+    "run": 1950,
+    "head": "d3a8698aeed4dbfc6740af0cae988b2da100cdb8",
+    "failed": 19,
+    "passed": 4135,
+    "files": 217,
+    "disposition": "Changed tests to verify direct handoff; original check remains failed. A fresh gate is required for this changed candidate."
+  }
 }
