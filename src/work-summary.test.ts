@@ -83,7 +83,9 @@ describe("shared task work summaries", () => {
     expect(workSummaryOf(facts, "coordinator")).toMatchObject({ status: { token: "vanished-run" }, primaryAction: { code: "reconcile-run", target: { taskId: "exact-version", runId: 42 }, access: "operator-handoff", retry: "reconcile-before-retry" }, nextActions: [{ code: "reconcile-run" }, { code: "answer-decision", target: { runId: 41, decisionId: 12 } }] });
     const finished: WorkFacts = { ...facts, state: "done", dispatch: null, result: { runId: 7, role: "builder", outcome: "built", verdict: "refuted", reasons: ["the repository's approved verification command exited 1"], accepted: false } };
     expect(workSummaryOf(finished, "coordinator")).toMatchObject({ status: { token: "checks-failed" }, primaryAction: { code: "open-result", target: { taskId: "exact-version", runId: 7 }, access: "read" }, evidence: "recorded" });
-    expect(workSummaryOf(finished, "coordinator").nextActions).toHaveLength(1);
+    expect(workSummaryOf(finished, "coordinator").nextActions).toMatchObject([
+      { code: "open-result" }, { code: "answer-decision", target: { taskId: "exact-version", runId: 41, decisionId: 12 }, access: "proposal-only" },
+    ]);
     expect(workSummaryOf({ ...facts, state: "queued", openDecision: null, dispatch: { ...facts.dispatch!, code: "waiting-decision", action: "answer-decision" } }, "coordinator")).toMatchObject({ primaryAction: { code: "inspect-decisions", access: "read", target: { decisionId: null } } });
   });
 });

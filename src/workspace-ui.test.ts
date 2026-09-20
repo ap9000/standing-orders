@@ -351,6 +351,14 @@ describe("assignment interface", () => {
         expect(summary.querySelectorAll(':scope > .problem')).toHaveLength(2);
         expect(summary.querySelector('.assignment-detail')?.closest('details')).toBeNull();
         expect(summary.querySelector('[data-primary-action]')).toBeNull();
+        window.document.body.innerHTML = assignmentSummaryHtml(snapshot(), { diagnostics: [
+          { token: 'report-ready', label: 'Report ready', detail: 'Read the report.', tone: 'ready' },
+          { token: 'evidence-damaged', label: 'Evidence unavailable', detail: 'The saved diff is unreadable.', tone: 'problem' },
+        ] });
+        expect(window.document.querySelector('[data-work-diagnostic=report-ready]')?.className).toBe('meta');
+        expect(window.document.querySelector('[data-work-diagnostic=evidence-damaged]')?.className).toBe('problem');
+        expect(window.document.body.textContent).toContain('Read the report.');
+        expect(window.document.body.textContent).toContain('The saved diff is unreadable.');
       } finally { await window.happyDOM.close(); }
     });
 

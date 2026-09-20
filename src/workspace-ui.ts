@@ -467,7 +467,7 @@ export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): W
   const dispatch = facts.dispatch;
   const result = facts.state === "done" ? resultDisplay ?? resultStatusOf(facts.result, facts.publication) : null;
   const running = facts.liveRunId !== null || dispatch?.condition === "running" || result?.token === "reviewing";
-  const question = (facts.state === "queued" || facts.state === "running") ? facts.openDecision ?? null : null;
+  const question = (facts.state === "queued" || facts.state === "running" || facts.state === "done") ? facts.openDecision ?? null : null;
   const needs = needsPerson(dispatch) || question !== null;
   const views: WorkView[] = ["all"];
   if (needs) views.push("needs-you");
@@ -494,6 +494,14 @@ export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): W
   }
 
   if (facts.state === "done" && result !== null) {
+    // A saved result or an ongoing review cannot answer a question. Keep
+    // failures primary; the shared summary retains the answer action too.
+    if (question !== null && result.tone !== "problem" && result.token !== "review-failed" && result.token !== "review-exhausted" &&
+      !(facts.result?.review === undefined && (dispatch?.code === "review-failed" || dispatch?.code === "review-exhausted"))) {
+      return { token: "waiting-decision", label: "Waiting on your answer", detail: question.question,
+        tone: "attention", action: { label: "Answer question", kind: "open-task" }, views, rank: 0,
+        diagnostics: [{ token: result.token, label: result.label, detail: result.detail, tone: result.tone }] };
+    }
     // A review in flight or waiting outranks the stored verdict: the
     // machine is still deciding, and the row says so in the projection's
     // own words. A caller that never read the review facts still gets

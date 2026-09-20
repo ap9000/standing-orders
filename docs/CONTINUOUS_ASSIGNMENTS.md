@@ -102,23 +102,21 @@ could starve assignments beyond the first page.
 
 ## Release boundary
 
-Start this corrective workflow from verified foundation
-`82ae6aade7283b704b57f67a2abbd6538db5daaf` (builder 1920; reviewer 1921 upheld
-all criteria), not failed workflow 1922/`3111152`. Prior attempts and complete
-historical records remain preserved; no existing task base moves.
+Start from verified foundation `82ae6aade7283b704b57f67a2abbd6538db5daaf`
+(builder 1920, reviewer 1921). Prior workflow attempts remain preserved;
+no existing task base moves. Review 1927 exposed completed results hiding open
+questions. This correction keeps current and earlier questions actionable until
+answered, blocks handoff checks, and preserves stop/failure and permission bounds.
 
-The 24 workflow files and UI remain identical to `96ccebe`; the envelope row is
-fixed. Run 1923 passed 3,906 tests, but review 1924 lacked three safeguard modules.
-Leading comments now document their assignment boundaries and include those files
-in normal capture. Their code is unchanged. Earlier focused logs retain c075 inputs.
-Two images and seven browser checks retain their stated reuse and Chromium-only
-limits: physical devices, software keyboards, screen readers and remote access
-are unverified. Complete reports and the UI1907 canary remain readable.
+Readable preparation logs distinguish the 57-case behavioral check from later
+presentation-only checks. Fresh synthetic desktop/phone reports name their actual
+source; unchanged feedback/revision journeys are explicitly reused. The older
+UI1907 canary and complete prior logs/manifests/reports are historical, not proof
+of this changed projection. Physical devices and assistive technologies remain
+unverified. Current evidence stays readable; archives preserve complete history.
 
-Focused logs record their preparation inputs. Final execution is established by
-the exact-candidate native `REVIEW-VERIFICATION.json` and `REVIEW-CHECK-LOG.txt`,
-not historical logs. All eight criteria and the full check command stay unchanged.
-
-This workflow is not yet verified. Preflight the complete committed package
-against the original verified base before dispatch. Its own native gate,
-independent review and matched UI/worker upgrade remain required.
+Only the exact-candidate native `REVIEW-VERIFICATION.json` and
+`REVIEW-CHECK-LOG.txt` establish final execution. All eight criteria and the full
+check command remain unchanged. This workflow is not yet verified. Preflight
+the complete committed package against the original verified base before dispatch;
+its native gate, independent review and matched UI/worker upgrade remain required.

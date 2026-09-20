@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openStore, type Store } from "./store.js";
+import { openStore, type Store, type RunStop } from "./store.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { mintCoordinator, revokeCoordinator } from "./coordinator.js";
 import { storeEvidence, readVerifiedArtifact } from "./evidence.js";
@@ -11,6 +11,9 @@ import { sealVerificationReceipt } from "./verification-evidence.js";
 import { reviewContextBindingOf, parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
 import { maybeTriggerRepair } from "./dispose.js";
 import { modeDigestOf, modeTermsJson, presetTerms } from "./modes.js";
+import { taskWorkSummaryOf } from "./work-summary.js";
+import { requestResultChanges } from "./result-actions.js";
+import * as taskControl from "./task-control.js";
 import { assignmentOf, assignmentBrief, assignmentEvidenceIntact, assignmentUpdates, checkAssignment, claimAssignment, syncAssignmentHandoffs, type AssignmentOwner } from "./assignment.js";
 
 const NOW = new Date("2026-09-20T10:00:00Z");
@@ -44,13 +47,19 @@ describe("continuous assignments over existing task families", () => {
     expect(approve(store, id, "operator", NOW, store.getScope(id)!.digest, token).ok).toBe(true);
     return id;
   }
-  function built(id = task(), verified = true, shortenedChecks = false) {
+  function question(run: number) {
+    return store.saveDecision({ run, urgency: "blocking", recap: "Keep the request policy explicit.", question: "Should retries keep the original request key?",
+      options: [{ id: "keep", label: "Keep the key", consequence: "Retries preserve request identity.", reversible: true }],
+      recommendation: "keep", deadline: new Date(NOW.getTime() - 1).toISOString() }, NOW);
+  }
+  function built(id = task(), verified = true, shortenedChecks = false, withQuestion = false) {
     const ref = store.lookupRef(id)!;
     const authority = store.routeAuthorityFor(ref.id, "builder");
     if (!authority?.ok) throw new Error("route fixture");
     const run = store.startRun({ taskRef: ref.id, leaseId: `lease-${id}`, runner: "builder", branch: `so/${id}`, worktree: `/pool/${id}`, route: authority.stamp, now: NOW });
     store.stampRun(run, { scopeDigest: store.getScope(id)!.digest, baseRevision: "b".repeat(40) });
     store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), handoff: "The retry preserves the request key." });
+    if (withQuestion) question(run);
     store.finishRun(run, { outcome: "built", committed: true, now: NOW });
     store.setTaskState(id, "done", NOW);
     store.saveProofVerdict(run, verified ? "verified" : "short", verified ? [] : ["The retry evidence is missing."], NOW,
@@ -69,6 +78,18 @@ describe("continuous assignments over existing task families", () => {
     vi.spyOn(store, "reviewRetryStateOf").mockImplementation(id => id === run ? {
       ...actual(id)!, state: "succeeded", succeeded: { runId: run + 100, requestId: 1, attempt: 1, runner: "reviewer", outcome: "no-change", reason: null, startedAt: NOW.toISOString(), finishedAt: NOW.toISOString() },
     } : actual(id));
+  }
+  function research(withQuestion = false) {
+    store.createTask({ id: "research", title: "Explain retry behavior", deliverable: "report" }, NOW);
+    const ref = store.lookupRef("research")!; store.placeTask(ref.id, REPO);
+    propose(store, { taskId: "research", goal: "Explain retry behavior", acceptance: rubric, now: NOW });
+    expect(approve(store, "research", "operator", NOW, store.getScope("research")!.digest, token).ok).toBe(true);
+    const route = store.routeAuthorityFor(ref.id, "scout"); if (!route?.ok) throw Error("scout route");
+    const run = store.startRun({ taskRef: ref.id, runner: "scout", leaseId: "research", branch: "so/research", worktree: "/pool/research", role: "scout", provider: "claude", model: "sonnet", route: route.stamp, now: NOW });
+    store.stampRun(run, { scopeDigest: store.getScope("research")!.digest });
+    if (withQuestion) question(run);
+    store.finishRun(run, { outcome: "built", reason: "report-delivered", now: NOW }); store.setTaskState("research", "done", NOW);
+    return { ref, run };
   }
 
   test("claim is durable, project scoped and exclusive; revoked identities cannot inherit or check", () => {
@@ -136,14 +157,7 @@ describe("continuous assignments over existing task families", () => {
   });
 
   test("a scoped research report can be checked without inventing a commit, proof or independent review", () => {
-    store.createTask({ id: "research", title: "Explain retry behavior", deliverable: "report" }, NOW);
-    const ref = store.lookupRef("research")!; store.placeTask(ref.id, REPO);
-    propose(store, { taskId: "research", goal: "Explain retry behavior", acceptance: rubric, now: NOW });
-    expect(approve(store, "research", "operator", NOW, store.getScope("research")!.digest, token).ok).toBe(true);
-    const route = store.routeAuthorityFor(ref.id, "scout"); if (!route?.ok) throw Error("scout route");
-    const run = store.startRun({ taskRef: ref.id, runner: "scout", leaseId: "research", branch: "so/research", worktree: "/pool/research", role: "scout", provider: "claude", model: "sonnet", route: route.stamp, now: NOW });
-    store.stampRun(run, { scopeDigest: store.getScope("research")!.digest });
-    store.finishRun(run, { outcome: "built", reason: "report-delivered", now: NOW }); store.setTaskState("research", "done", NOW);
+    const { ref, run } = research();
     const missing = assignmentOf(store, "research", NOW, access)!;
     expect(missing.state).toBe("needs-decision"); expect(missing.detail).toContain("report is missing or incomplete");
     const artifact = storeEvidence(store, dir, run, "report", "report.json", Buffer.from(JSON.stringify({ title: "Retries", summary: "Retries preserve identity.", report: "The request key remains unchanged.", followUps: [] })), "scout report", NOW, { captureStatus: "ok" });
@@ -159,6 +173,69 @@ describe("continuous assignments over existing task families", () => {
     writeFileSync(join(dir, store.getArtifact(artifact)!.key), "changed report");
     expect(assignmentEvidenceIntact(store, dir, ready.receipt!)).toBe(false);
     expect(checkAssignment(store, "research", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
+  });
+
+  test.each(["verified-build", "research-report", "accepted-exception"] as const)("an unresolved question blocks a completed %s until its normal answer", kind => {
+    const id = kind === "research-report" ? "research" : "retry";
+    const run = kind === "research-report" ? research(true).run : built(task(), kind === "verified-build", false, true);
+    if (kind === "research-report") storeEvidence(store, dir, run, "report", "report.json", Buffer.from(JSON.stringify({ title: "Retries", summary: "Keep request identity.", report: "The request key remains unchanged.", followUps: [] })), "scout report", NOW, { captureStatus: "ok" });
+    else if (kind === "verified-build") reviewed(run);
+    else store.acceptProof(run, "operator", "Inspected the recorded limitations", NOW);
+    claimAssignment(store, id, lead, NOW);
+    const decision = store.decisionForRun(run)!;
+    const scope = store.getScope(id), acceptance = store.proofAcceptance(run);
+    for (const state of ["open", "expired"]) {
+      if (state === "expired") store.expireOverdueDecisions(NOW);
+      expect(store.getDecision(decision.id)?.state).toBe(state);
+      const current = assignmentOf(store, id, NOW, access)!;
+      expect(current).toMatchObject({ state: "needs-decision", detail: decision.question,
+        receipt: { completionKind: kind }, handoff: { kind: "decision", acknowledged: false },
+        primaryAction: { code: "answer-decision", target: { taskId: id, runId: run, decisionId: decision.id }, access: "operator-control" } });
+      expect(assignmentOf(store, id, NOW, { principal: "coordinator", repos: [REPO] })?.primaryAction).toEqual({ ...current.primaryAction, access: "proposal-only" });
+      expect(taskWorkSummaryOf(store, id, NOW, access)?.primaryAction).toEqual(current.primaryAction);
+      expect(checkAssignment(store, id, current.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "not-ready" });
+    }
+    if (kind === "verified-build") {
+      const completed = store.reviewRetryStateOf(run)!;
+      const review = vi.spyOn(store, "reviewRetryStateOf").mockReturnValue({ ...completed, state: "queued" });
+      expect(assignmentOf(store, id, NOW, access)).toMatchObject({ state: "needs-decision", primaryAction: { code: "answer-decision" } });
+      expect(taskWorkSummaryOf(store, id, NOW, access)?.primaryAction?.code).toBe("answer-decision");
+      vi.spyOn(taskControl, "taskControlOf").mockReturnValueOnce({ kind: "paused", run, role: "builder", stop: {} as RunStop, outcome: "interrupted", committed: false, worktree: null });
+      expect(assignmentOf(store, id, NOW, access)).toMatchObject({ state: "needs-decision", primaryAction: { code: "resume-run" }, attention: [expect.stringContaining("stopped attempt"), decision.question] });
+      review.mockReturnValue(completed);
+    }
+    expect(store.actionLedger({ repos: null }).some(a => a.action === "assignment handoff checked")).toBe(false);
+    expect(store.answerDecision({ id: decision.id, choice: "keep", by: "operator", via: "cli" }, NOW).ok).toBe(true);
+    const ready = assignmentOf(store, id, NOW, access)!;
+    expect(ready.state).toBe("ready-to-check");
+    expect(taskWorkSummaryOf(store, id, NOW, access)?.nextActions.some(a => a.code === "answer-decision")).toBe(false);
+    expect(checkAssignment(store, id, ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
+    expect(store.getScope(id)).toEqual(scope); expect(store.proofAcceptance(run)).toEqual(acceptance);
+  });
+
+  test("an earlier version's overdue question blocks its completed correction and keeps the original answer target", () => {
+    const original = built(task(), false, false, true);
+    expect(taskWorkSummaryOf(store, "retry", NOW, access)?.primaryAction).toEqual(assignmentOf(store, "retry", NOW, access)?.primaryAction);
+    store.saveProofVerdict(original, "short", ['criterion "c1" requires manual-review evidence — an operator must accept it before this can verify'], NOW,
+      store.proofVerdictFor(original)!.matrix.map(row => ({ ...row, state: "manual-review" })), "short");
+    expect(taskWorkSummaryOf(store, "retry", NOW, access)?.primaryAction?.code).toBe("answer-decision");
+    expect(taskWorkSummaryOf(store, "retry", NOW, access)?.primaryAction).toEqual(assignmentOf(store, "retry", NOW, access)?.primaryAction);
+    storeEvidence(store, dir, original, "terminal-diff", "changes.patch", Buffer.from("diff --git a/src/retry.ts b/src/retry.ts\n"), "saved changes", NOW);
+    const revision = requestResultChanges(store, dir, { run: original, batch: "", source: store.getScope("retry")!.digest,
+      actor: "operator", repos: [REPO], note: "Keep the request key stable when retrying.", path: "", line: "", request: "a".repeat(32) }, NOW);
+    expect(revision.ok).toBe(true); if (!revision.ok) throw Error(revision.message);
+    expect(approve(store, revision.id, "operator", NOW, store.getScope(revision.id)!.digest, token).ok).toBe(true);
+    const result = built(revision.id); reviewed(result); claimAssignment(store, "retry", lead, NOW);
+    store.expireOverdueDecisions(NOW);
+    const decision = store.decisionForRun(original)!;
+    const current = assignmentOf(store, revision.id, NOW, access)!;
+    expect(current).toMatchObject({ activeTaskId: revision.id, state: "needs-decision", detail: decision.question,
+      receipt: { taskId: revision.id, runId: result },
+      primaryAction: { code: "answer-decision", target: { taskId: "retry", runId: original, decisionId: decision.id } } });
+    expect(checkAssignment(store, "retry", current.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "not-ready" });
+    expect(store.answerDecision({ id: decision.id, choice: "keep", by: "operator", via: "web" }, NOW).ok).toBe(true);
+    const ready = assignmentOf(store, "retry", NOW, access)!;
+    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
   });
 
   test.each(["missing", "truncated"])("an existing operator exception can be checked with %s proof, without accepting or verifying it again", missing => {

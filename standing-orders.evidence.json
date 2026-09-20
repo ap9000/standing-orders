@@ -2,12 +2,20 @@
   "version": 1,
   "screenshots": [
     {
+      "path": "evidence/continuous-assignment/desktop-question.png",
+      "caption": "Synthetic desktop1440x900: latest report13 stays blocked by overdue question3 from original run12, with its exact Answer question action."
+    },
+    {
+      "path": "evidence/continuous-assignment/phone-question.png",
+      "caption": "Synthetic phone390x844: completed report11 keeps open question2 actionable; report-ready detail stays neutral."
+    },
+    {
       "path": "evidence/continuous-assignment/desktop-assignment.png",
-      "caption": "Synthetic desktop 1440x900: one current action and exact prior task/run links in Attempts."
+      "caption": "Synthetic desktop1440x900: original run8 and its unapproved correction remain visible with exact history links."
     },
     {
       "path": "evidence/continuous-assignment/phone-feedback.png",
-      "caption": "Synthetic phone 390x844: full 492-character feedback before approval; no approval submitted."
+      "caption": "Synthetic phone390x844: complete492-character saved feedback remains visible before approval; password empty."
     }
   ]
 }

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import type { Store, ProofVerdictRow, ProofAcceptanceRow } from "./store.js";
 import { approvalOf } from "./scope.js";
-import { taskWorkSummaryOf, type WorkAction, type WorkSummaryAccess } from "./work-summary.js";
+import { openWorkDecisionOf, taskWorkSummaryOf, workDecisionAction, type WorkAction, type WorkSummaryAccess } from "./work-summary.js";
 import { evidenceRoot, readVerifiedArtifact, readVerifiedProofForRun, readVerifiedReport } from "./evidence.js";
 import { verificationEvidence } from "./verification-evidence.js";
 import { parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
@@ -77,6 +77,12 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   const review = result === null ? null : store.reviewRetryStateOf(result.id);
   const owner = ownerOf(store, family.root.id, current.repo);
   const attention: string[] = family.problem === null ? [] : [family.problem];
+  // Family admission above precedes question bodies. The newest result
+  // does not settle an unanswered question on any earlier version.
+  const questions = [current, ...family.versions.filter(version => version.id !== current.id)].flatMap(version => {
+    const decision = openWorkDecisionOf(store, version.refId, now);
+    return decision === null ? [] : [{ taskId: version.id, decision }];
+  });
   // A finished task label cannot hide a lease or an unfinished process record.
   const earlierActive = family.versions.filter(version => version.id !== current.id &&
     (version.state === "queued" || version.state === "running" || store.currentLiveLease(version.refId, now) !== null ||
@@ -124,14 +130,22 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   const ready = current.state === "done" && result !== null && completionKind !== null &&
     scope !== null && scope.termsProblem == null && approvalOf(scope).approved && scope.digest === result.scopeDigest &&
     store.activeHolds(current.refId, now).length === 0 && store.applicableStopFor(result.id) === null &&
-    family.problem === null && earlierActive.length === 0 && unfinished === null && store.currentLiveLease(current.refId, now) === null;
+    family.problem === null && earlierActive.length === 0 && unfinished === null && store.currentLiveLease(current.refId, now) === null && questions.length === 0;
   if (family.problem !== null) state = "needs-decision";
   else if (current.state === "cancelled") {
     state = "cancelled";
     detail = "This assignment was cancelled.";
     primaryAction = { code: "inspect-task", label: "View assignment", target: { taskId: current.id, runId: null, decisionId: null }, access: "read", retry: "read-again" };
   }
-  else if (checking && work.status.token !== "review-failed") {
+  else if (current.state === "done" && questions.length > 0 && work.status.tone !== "problem" &&
+    !["stopping", "stopped", "review-failed", "review-exhausted"].includes(work.status.token) &&
+    store.activeHolds(current.refId, now).length === 0 && (result === null || store.applicableStopFor(result.id) === null)) {
+    const question = questions[0]!;
+    state = "needs-decision";
+    detail = question.decision.question;
+    primaryAction = workDecisionAction(question.taskId, question.decision, access.principal);
+  }
+  else if (checking && !["review-failed", "stopping", "stopped"].includes(work.status.token)) {
     state = "checking";
     detail = review?.state === "queued" ? "Independent review is queued." : "Independent review is running.";
   }
@@ -167,6 +181,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     }
   }
   if (state === "needs-decision") attention.push(detail);
+  if (current.state !== "cancelled") attention.push(...questions.map(question => question.decision.question));
   if (owner !== null && !owner.active) attention.push("The previous lead no longer has access. Another lead can claim this assignment.");
   const handoff = state === "ready-to-check" || state === "complete" ? { kind: "result" as const, digest: receipt!.digest, acknowledged: state === "complete" }
     : state === "cancelled" ? { kind: "attention" as const, digest: digest({ root: family.root.id, current: current.id, state }), acknowledged: false }
