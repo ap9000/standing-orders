@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "sourceSha256": {
+    "docs/AGENT_UPDATES.md": "c17be20c8080c2e3dfed491ca1a0c3b904b5abafe5d4a308e1e18c6ed5f467e0",
+    "docs/CONTINUOUS_ASSIGNMENTS.md": "0578c96cf401bdb427d640655381866b899a749b6fd89dd6ef0880a371610da8",
+    "docs/LEAD_REVIEW_FLOW.md": "c59e046d278d00fc406ad90298b07d4353056c2401ec55a8928e9a7cadae3bd1",
+    "src/assignment-adapters.test.ts": "429f3a4c7e25dba0c95c78fc4cab0d6a63b575f26f032dc088a4a143066b2e5f",
+    "src/assignment-adapters.ts": "0b01dbcca0fa285d0fbe880747439bfb6ded972ab131274ef155889c639a1aeb",
+    "src/assignment-brief.test.ts": "b76b4ed988e8db9af61eed3537bddcf66c01af0e572ebceaef5711469856d687",
+    "src/assignment-brief.ts": "4605725b2cfa7661ede586e0e6a326aeaaf2a0ae1c1091f623f54f12f1701ccb",
+    "src/assignment-delivery.test.ts": "1a0c12f186ca288f4ab17b000d4ec299aeb7f52497b249ef5adb478fa4dd0937",
+    "src/assignment-delivery.ts": "d4ac4652ac0a5e6e4f3f5fea6e13bbbca03f54d1a97510695d429f575553b560",
+    "src/assignment-status.test.ts": "2f225244f55e2758fd470a5282f53de6280672571d576013d2ec0b9a6f7bb3ff",
+    "src/assignment-status.ts": "9c270f10a0a48dd96c52ed3d119aac1ca4e45be5e459c92279881a650b24f71d",
+    "src/assignment.ts": "fcdbaf21f8f9f7e6c48a9d53c683f3439f3bcf9f25b11198d6e0ab45798b20a9",
+    "src/mcp.test.ts": "0643ca402e1f382f5214573c55888b3e0a37da25e4f95717099254199c06dfed",
+    "src/operate.ts": "452cf50f4732cb88ba9383d21a7222bfb0cf60268eedf922d51c811fd47e3d13"
+  },
+  "focusedTests": {
+    "command": "npm run typecheck && npx vitest run src/assignment.test.ts src/assignment-adapters.test.ts src/assignment-brief.test.ts src/assignment-delivery.test.ts src/assignment-status.test.ts src/mcp.test.ts src/mcp-cli.test.ts src/mate-cli.test.ts src/subscription-chat.test.ts --reporter=dot",
+    "passed": 132,
+    "files": 9,
+    "log": "checks.txt"
+  },
+  "notes": [
+    "No browser layout or interaction changes. CLI and MCP entry points tested.",
+    "No model calls or database migration; full approved check belongs to the native final gate.",
+    "Delivery is at least once; saved database positions survive restart. Host wake remains separately scheduled."
+  ]
+}
