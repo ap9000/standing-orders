@@ -405,7 +405,7 @@ describe("inherited review context (v51)", () => {
     expect(f.store.openReviewRequests()).toEqual([]);
     const NO_REFRESH = /Refresh review|refresh review|refresh-review|refresh_review|data-refresh-state|evidence-refresh/i;
 
-    // CLI: no refresh verb, flag or help entry; the one review door refuses a second successful review.
+    // CLI: no refresh entry and no separate model-review door, including historical results.
     expect(TASK_ACTIONS.filter(one => /refresh/.test(one))).toEqual([]);
     expect([...OPERATE_VALUE_FLAGS, ...OPERATE_BOOLEAN_FLAGS].filter(one => /refresh/.test(one))).toEqual([]);
     expect(OPERATE_HELP).not.toMatch(NO_REFRESH);
@@ -419,8 +419,8 @@ describe("inherited review context (v51)", () => {
     const verb = await cli("refresh-review", String(f.sourceRun));
     expect(verb.code).toBe(EXIT.usage); expect(verb.envelope.ok).toBe(false);
     const again = await cli("review", String(f.sourceRun));
-    expect(again.code).toBe(EXIT.refused); expect(again.envelope).toMatchObject({ ok: false, reason: "already-reviewed" });
-    expect(JSON.stringify(again.envelope)).toContain("a successful review is never retried");
+    expect(again.code).toBe(EXIT.refused); expect(again.envelope).toMatchObject({ ok: false, reason: "model-review-retired" });
+    expect(JSON.stringify(again.envelope)).toContain("Separate model review has been removed");
 
     // Chat: no refresh action, control or proposal; the confirmed-action path refuses an unknown operation.
     expect(Object.keys(CHAT_TASK_ACTIONS).filter(one => /refresh/.test(one))).toEqual([]);
@@ -449,8 +449,9 @@ describe("inherited review context (v51)", () => {
       }
       expect(pages.chat.html).toContain(`data-result-run="${f.sourceRun}"`);
       for (const html of [pages.task.html, pages.cockpit.html]) {
-        expect(html).toContain('data-review-state="succeeded" data-review-attempts="1" data-review-cap="3" data-review-remaining="0"');
-        expect(html).toContain('<button type="button" class="review-retry-button" disabled aria-disabled="true">Reviewed</button>');
+        expect(html).toContain('data-review-state="succeeded"');
+        expect(html).toContain('Previous assessments');
+        expect(html).not.toContain('<button type="button" class="review-retry-button"');
       }
       const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(pages.task.html)?.[1] ?? "";
       expect(csrf).not.toBe("");
@@ -458,7 +459,7 @@ describe("inherited review context (v51)", () => {
       expect((await post("/t/feat/refresh-review", { run: String(f.sourceRun) })).status).toBe(404);
       expect((await post(`/r/${f.sourceRun}/refresh`, {})).status).toBe(404);
       const retried = await post("/t/feat/retry-review", { run: String(f.sourceRun) });
-      expect(retried.status).toBe(409); expect(await retried.text()).toContain("a successful review is never retried");
+      expect(retried.status).toBe(410); expect(await retried.text()).toContain("Separate agent reviews have retired");
     } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
     expect(f.ask()).toMatchObject({ ok: false, reason: "already-reviewed" });
     expect(reviewers()).toHaveLength(1); expect(f.store.openReviewRequests()).toEqual([]);
