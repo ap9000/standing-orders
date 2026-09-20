@@ -7762,6 +7762,8 @@ export class Store {
    * of the enclosing transaction. Reentrancy is handled by unique names.
    */
   private savepointCounter = 0;
+  // Recovery eligibility uses a savepoint for a consistent read; settlement nests
+  // its exact recheck/write here so an outer failure still rolls back both records.
   savepoint<T>(body: () => T): T {
     const name = `sp_${this.savepointCounter++}`;
     this.db.exec(`SAVEPOINT ${name}`);

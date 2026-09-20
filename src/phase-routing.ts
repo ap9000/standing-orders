@@ -536,6 +536,8 @@ function stringList(v: unknown): v is string[] {
 /** Strict rehydration of a stored route — every field type-proved, every
  * model an exact non-empty string; anything unexpected is null, never a
  * guess. A null from a row that carries a route era is a corrupt seal. */
+// Recovery and normal admission share this strict decoder; neither may replace
+// unreadable signed routing with a convenient current default.
 export function routeFromJson(json: string | null): PhaseRoute | null {
   if (json === null) return null;
   let parsed: unknown;
