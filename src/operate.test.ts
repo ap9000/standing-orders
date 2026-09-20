@@ -895,7 +895,7 @@ describe("agreeing to a scope from the command line", () => {
   test("a placeholder rubric under a planning mode asks the planner instead of building against it", async () => {
     await scopeIt();
     const expiry = new Date(T0.getTime() + 24 * 60 * 60_000).toISOString();
-    const terms = { ...presetTerms("standard", expiry), autoApproveFiling: true, planAuto: true, reviewAuto: true };
+    const terms = { ...presetTerms("standard", expiry), autoApproveFiling: true, planAuto: true, reviewAuto: false };
     {
       const store = openStore(db);
       store.signMode({ repo: process.cwd(), name: terms.name, termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, T0);
@@ -2061,7 +2061,6 @@ describe("explainable phase routing from the command line (v47)", () => {
 
   test("task route shows one projection with reasons; --risk and per-phase overrides are approver-only, recorded, and stale a sealed approval", async () => {
     await run(["config", "set", "build", "--tier", "strong", "--provider", "claude", "--model", "opus", "--as", "alex", "--token", token, "--json"]);
-    await run(["config", "set", "review", "--tier", "strong", "--provider", "codex", "--model", "gpt-5-codex", "--as", "alex", "--token", token, "--json"]);
     // Before a scope: a live recommendation.
     expect(await run(["task", "route", "payouts", "--json"])).toBe(0);
     expect(payload()).toMatchObject({ ok: true, source: "live", risk: "routine" });
@@ -2069,23 +2068,22 @@ describe("explainable phase routing from the command line (v47)", () => {
       ["plan", "claude", "sonnet"],
       ["build", "claude", "sonnet"],
       ["repair", "claude", "sonnet"],
-      ["review", "claude", "sonnet"],
     ]);
     // Filing with a declared risk routes the strong tier and says why.
     expect(await run(["task", "scope", "payouts", "--goal", "Harden the payouts flow", "--acceptance", "pay: never double-sends | check,screenshot", "--risk", "high", "--json"])).toBe(0);
     await run(["task", "route", "payouts"]);
     expect(text()).toContain("payouts: route proposed — the next approval seals it");
     expect(text()).toContain("route        high risk · stronger configured agents");
-    expect(text()).toContain("claude · sonnet plans; claude · opus builds and repairs; codex · gpt-5-codex reviews");
+    expect(text()).toContain("claude · sonnet plans; claude · opus builds and repairs");
     expect(text()).toContain("build  claude · opus  [recommended · strong] — readiness unknown");
     expect(text()).toContain("risk is high — every role uses the strongest configured agent");
     expect(text()).toContain("acceptance requires screenshots");
-    expect(text()).toContain("review codex · gpt-5-codex  [recommended · strong]");
+    expect(text()).not.toContain(" reviews");
     // Editing is an approver's act.
-    expect(await run(["task", "route", "payouts", "--phase", "review", "--provider", "claude", "--model", "opus", "--json"])).toBe(2);
-    expect(await run(["task", "route", "payouts", "--phase", "review", "--provider", "claude", "--model", "opus", "--as", "alex", "--token", "wrong", "--json"])).toBe(3);
+    expect(await run(["task", "route", "payouts", "--phase", "build", "--provider", "claude", "--model", "sonnet", "--json"])).toBe(2);
+    expect(await run(["task", "route", "payouts", "--phase", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", "wrong", "--json"])).toBe(3);
     expect(await run(["task", "route", "payouts", "--risk", "extreme", "--as", "alex", "--token", token, "--json"])).toBe(2);
-    expect(await run(["task", "route", "payouts", "--phase", "review", "--provider", "gemini", "--model", "g", "--as", "alex", "--token", token, "--json"])).toBe(2);
+    expect(await run(["task", "route", "payouts", "--phase", "review", "--provider", "gemini", "--model", "g", "--as", "alex", "--token", token, "--json"])).toBe(3);
     expect(await run(["task", "route", "payouts", "--phase", "build", "--provider", "codex", "--as", "alex", "--token", token, "--json"])).toBe(2);
     // Every override names an exact model — a planner or reviewer too.
     expect(await run(["task", "route", "payouts", "--phase", "plan", "--provider", "codex", "--as", "alex", "--token", token, "--json"])).toBe(2);
@@ -2098,27 +2096,27 @@ describe("explainable phase routing from the command line (v47)", () => {
     await run(["task", "route", "payouts", "--json"]);
     expect(payload().source).toBe("approved");
     // The digest-CAS: an edit against a digest you never read is refused.
-    expect(await run(["task", "route", "payouts", "--phase", "review", "--provider", "claude", "--model", "opus", "--digest", "0".repeat(32), "--as", "alex", "--token", token, "--json"])).toBe(3);
+    expect(await run(["task", "route", "payouts", "--phase", "build", "--provider", "claude", "--model", "sonnet", "--digest", "0".repeat(32), "--as", "alex", "--token", token, "--json"])).toBe(3);
     expect(payload()).toMatchObject({ ok: false, reason: "changed" });
-    expect(await run(["task", "route", "payouts", "--phase", "review", "--provider", "claude", "--model", "opus", "--digest", digest, "--as", "alex", "--token", token])).toBe(0);
-    expect(text()).toContain("review claude · opus  [overridden]");
-    expect(text()).toContain("overridden by alex to claude · opus (recommended codex · gpt-5-codex)");
+    expect(await run(["task", "route", "payouts", "--phase", "build", "--provider", "claude", "--model", "sonnet", "--digest", digest, "--as", "alex", "--token", token])).toBe(0);
+    expect(text()).toContain("build  claude · sonnet  [overridden]");
+    expect(text()).toContain("overridden by alex to claude · sonnet (recommended claude · opus)");
     expect(text()).toContain("the approval sealed under the previous route is now stale");
     await run(["task", "route", "payouts", "--json"]);
     expect(payload()).toMatchObject({ source: "proposed", approval: { approved: false, reason: "changed" } });
-    expect(payload().overrides).toEqual([expect.objectContaining({ phase: "review", provider: "claude", model: "opus", by: "alex", at: T0.toISOString() })]);
-    expect(payload().route.legs.find((leg: { phase: string }) => leg.phase === "review")).toMatchObject({ chosen: "override", recommended: { provider: "codex", model: "gpt-5-codex", tier: "strong" } });
+    expect(payload().overrides).toEqual([expect.objectContaining({ phase: "build", provider: "claude", model: "sonnet", by: "alex", at: T0.toISOString() })]);
+    expect(payload().route.legs.find((leg: { phase: string }) => leg.phase === "build")).toMatchObject({ chosen: "override", recommended: { provider: "claude", model: "opus", tier: "strong" } });
     // task show carries the same projection and the risk.
     await run(["task", "show", "payouts", "--json"]);
     expect(payload().risk).toBe("high");
-    expect(payload().route.legs.find((leg: { phase: string }) => leg.phase === "review").words).toContain("[overridden]");
+    expect(payload().route.legs.find((leg: { phase: string }) => leg.phase === "build").words).toContain("[overridden]");
     await run(["task", "show", "payouts"]);
     expect(text()).toContain("  risk         high");
-    expect(text()).toContain("review claude · opus  [overridden]");
+    expect(text()).toContain("build  claude · sonnet  [overridden]");
     // Clearing an override re-files again.
-    expect(await run(["task", "route", "payouts", "--clear-phase", "review", "--as", "alex", "--token", token, "--json"])).toBe(0);
+    expect(await run(["task", "route", "payouts", "--clear-phase", "build", "--as", "alex", "--token", token, "--json"])).toBe(0);
     expect(payload().overrides).toEqual([]);
-    expect(payload().route.legs.find((leg: { phase: string }) => leg.phase === "review")).toMatchObject({ provider: "codex", chosen: "recommended" });
+    expect(payload().route.legs.find((leg: { phase: string }) => leg.phase === "build")).toMatchObject({ provider: "claude", chosen: "recommended" });
     // Re-approval seals the current route.
     await run(["task", "show", "payouts", "--json"]);
     expect(await run(["task", "approve", "payouts", "--as", "alex", "--token", token, "--digest", payload().scope.digest, "--yes", "--json"])).toBe(0);
@@ -2160,12 +2158,12 @@ describe("explainable phase routing from the command line (v47)", () => {
     expect(payload().readiness).toContainEqual(expect.objectContaining({ provider: "codex", state: "unavailable" }));
     expect(payload().readiness).toContainEqual(expect.objectContaining({ provider: "claude", state: "unknown" }));
     await run(["task", "scope", "payouts", "--goal", "Harden the payouts flow", "--acceptance", "c1: guarded | check", "--json"]);
-    expect(await run(["task", "route", "payouts", "--phase", "review", "--provider", "codex", "--model", "gpt-5-codex", "--as", "alex", "--token", token])).toBe(0);
-    expect(text()).toContain("review codex · gpt-5-codex  [overridden] — UNAVAILABLE — `codex login status` says not logged in");
-    expect(text()).toContain("build  claude · sonnet  [recommended] — readiness unknown — installed (claude 1.2.3)");
+    expect(await run(["task", "route", "payouts", "--phase", "build", "--provider", "codex", "--model", "gpt-5-codex", "--as", "alex", "--token", token])).toBe(0);
+    expect(text()).toContain("build  codex · gpt-5-codex  [overridden] — UNAVAILABLE — `codex login status` says not logged in");
+    expect(text()).toContain("plan   claude · sonnet  [recommended] — readiness unknown — installed (claude 1.2.3)");
     expect(text()).toContain("HALTED: a provider on this route is reported unavailable");
     await run(["task", "route", "payouts", "--json"]);
     expect(payload().route.halted).toBe(true);
-    expect(payload().route.legs.find((leg: { phase: string }) => leg.phase === "review")).toMatchObject({ readiness: "unavailable", readinessRunner: "mac-mini" });
+    expect(payload().route.legs.find((leg: { phase: string }) => leg.phase === "build")).toMatchObject({ readiness: "unavailable", readinessRunner: "mac-mini" });
   });
 });

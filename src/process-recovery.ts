@@ -2,7 +2,7 @@ import { normalizeBootId } from "./boot-identity.js";
 import type { DarwinProcessRecoverySnapshot } from "./process-recovery-native.js";
 
 export type ProcessRecoveryAssessment =
-  | { ok: true; observedAt: string; external: { pid: number; basis: "predates-run" | "managed-service" | "ancestry" | "owned-probe"; anchor: number }[] }
+  | { ok: true; observedAt: string; external: { pid: number; basis: "predates-run" | "managed-service" | "pre-existing-app-service" | "ancestry" | "owned-probe"; anchor: number }[] }
   | { ok: false; problems: string[]; unresolved: number[] };
 
 export type ProcessRecoveryAnchor = { pid: number; uniqueId: string };

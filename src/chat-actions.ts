@@ -182,6 +182,7 @@ export function prepareSharedAction(
   now = new Date(),
 ): SharedAction {
   if (!isChatAction(operation)) throw Error("Choose an available action.");
+  if (operation === "result_review") throw Error("Separate model review has been removed. Open the saved result and mark it complete or request changes.");
   const allowed = CHAT_ACTION_FIELDS[operation];
   if (Object.keys(input).some((key) => !allowed.includes(key)))
     throw Error("This action contains an unsupported field.");
@@ -784,13 +785,7 @@ export function executeSharedAction(
           now,
         );
       else if (payload.operation === "result_review") {
-        const result = store.requestReview(
-          Number(req["run"]),
-          verifiedAuthor(actor),
-          now,
-        );
-        if (!result.ok)
-          throw Error(`Review was not requested: ${result.reason}.`);
+        throw Error("Separate model review has been removed. Inspect the saved result.");
       } else if (payload.operation === "task_cancel") {
         const result = store.cancelTask(task!, now);
         if (!result.ok)

@@ -878,8 +878,8 @@ describe("the phase route is a signed term (v47): the digest binds it, the seal 
     // The words in the approval card say the route and its reasons.
     const words = describeScope(refiled);
     expect(words).toContain("  risk         elevated");
-    expect(words.some(line => line.includes("review codex · gpt-5-codex  [recommended · strong]"))).toBe(true);
-    expect(words.some(line => line.includes("risk is elevated — the review runs on the strongest configured reviewer"))).toBe(true);
+    expect(words.some(line => line.includes("build  claude · sonnet  [recommended]"))).toBe(true);
+    expect(words.some(line => /review codex|strongest configured reviewer/.test(line))).toBe(false);
   });
 
   test("the seal refuses a routed row whose working profile and route disagree, or whose route is gone — nothing is approved that cannot be restated exactly", () => {

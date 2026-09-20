@@ -1,13 +1,6 @@
-/**
- * Inherited review context END TO END through the real tick (v51): a
- * feature is built by a stubbed builder in a real repository, its result
- * is revised by a second build that touches one file, the revision's
- * settlement seals the source context from git objects at its exact head,
- * an independent reviewer judges the inherited criteria by citing that
- * sealed provenance, and `task show` reports semantic coverage and every
- * context gap in the same words the console prints. No agent here ever
- * reads a checkout as evidence; the stubs only write what a builder writes.
- */
+/** Historical review-context compatibility: builds/revisions still retain
+ * exact source context. Direct legacy review ingestion below exercises saved
+ * records; the production tick no longer schedules this retired phase. */
 
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
@@ -20,7 +13,7 @@ import { openStore } from "./store.js";
 import { register } from "./runner.js";
 import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
 import { parseReviewContext, reviewContextManifest, reviewContextFileName } from "./review-context.js";
-import { REVIEW_CONTEXT_NAME } from "./reviewer.js";
+import { REVIEW_CONTEXT_NAME, reviewPass } from "./reviewer.js";
 import type { Runner } from "./builder.js";
 import { createHash } from "node:crypto";
 
@@ -33,7 +26,7 @@ const REPORT_TS = "export function report(): string {\n  return 'ok';\n}\n";
 const REPORT_TS_V2 = "export function report(): string {\n  return 'ok, revised';\n}\n";
 const STATEMENTS = ["The limiter caps retries at three.", "The guard refuses a fourth attempt.", "The report names the outcome."];
 
-describe("inherited review context through the tick (v51)", () => {
+describe("inherited review context and historical ingestion (v51)", () => {
   let base: string;
   let repo: string;
   let db: string;
@@ -47,6 +40,15 @@ describe("inherited review context through the tick (v51)", () => {
     return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now: T0, agentRunner: runner });
   };
   const payload = () => JSON.parse(lines.join("\n"));
+  const historicalReview = async (runId: number, runnerToken: string, agentRunner: Runner) => {
+    const store = openStore(db);
+    try {
+      expect(store.requestReview(runId, "alex", T0).ok).toBe(true);
+      const reports = await reviewPass(store, { runner: "builder-1", token: runnerToken,
+        now: T0, clock: () => T0, evidenceRoot: join(base, "evidence"), agent: agentRunner });
+      lines = [JSON.stringify({ dispatched: reports.map(report => ({ id: `review of run ${report.run}`, outcome: report.outcome })) })];
+    } finally { store.close(); }
+  };
   const nameIn = (args: readonly string[], prefix: string): string | undefined => {
     const prompt = args[args.indexOf("-p") + 1] ?? "";
     return new RegExp(`${prefix}[0-9a-f]{16}\\.json`).exec(prompt)?.[0];
@@ -104,7 +106,7 @@ describe("inherited review context through the tick (v51)", () => {
     await rm(base, { recursive: true, force: true });
   });
 
-  test("build → revise → build → review: the revision seals source context at its head, the reviewer cites it, and task show reports coverage", async () => {
+  test("build and revision retain exact context readable by historical review records", async () => {
     const runnerToken = "tok-builder-1";
     const none: Runner = async () => ({ ...OK, code: 1, stderr: "no agent should run here" });
     await run(["approver", "add", "alex", "--json"], none);
@@ -147,9 +149,9 @@ describe("inherited review context through the tick (v51)", () => {
       store.close();
     }
     // The first reviewer gets complete files before any revision exists.
-    await run(["task", "review", String(sourceRun), "--as", "alex", "--token", approverToken, "--json"], none);
+    expect(await run(["task", "review", String(sourceRun), "--as", "alex", "--token", approverToken, "--json"], none)).not.toBe(0);
     let firstReviewCalls = 0;
-    await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], async (_file, args, options) => {
+    await historicalReview(sourceRun, runnerToken, async (_file, args, options) => {
       firstReviewCalls++;
       const manifest = JSON.parse(readFileSync(join(options!.cwd!, REVIEW_CONTEXT_NAME), "utf8"));
       expect(manifest.head).toBe(sourceHead);
@@ -242,7 +244,6 @@ describe("inherited review context through the tick (v51)", () => {
 
     // 4. The independent review: asked explicitly, run by the tick, judged
     // by citing the sealed provenance — and bound to it at ingestion.
-    await run(["task", "review", String(revisionRun), "--as", "alex", "--token", approverToken, "--json"], none);
     let sawContextFile = false;
     let reviewPrompt = "";
     const reviewer: Runner = async (_file, args, options) => {
@@ -261,7 +262,7 @@ describe("inherited review context through the tick (v51)", () => {
       };
       return { ...OK, stdout: JSON.stringify({ result: JSON.stringify(review), session_id: "review-session" }) };
     };
-    await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], reviewer);
+    await historicalReview(revisionRun, runnerToken, reviewer);
     expect(payload().dispatched).toEqual(expect.arrayContaining([expect.objectContaining({ id: `review of run ${revisionRun}`, outcome: "reviewed" })]));
     expect(sawContextFile).toBe(true);
     expect(reviewPrompt).toContain("REVISES an earlier build");

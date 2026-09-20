@@ -329,6 +329,8 @@ export function runOwnerTag(store: Store, runId: number): string {
 }
 
 /** How many live children this process still tracks under an owner tag. */
+// Zero is local to this process registry. Recovery must also inspect durable
+// witnesses and its authenticated OS census; this count is not an absence proof.
 export function ownedProcessCount(owner: string): number {
   return ownedChildren.get(owner)?.size ?? 0;
 }

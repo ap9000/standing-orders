@@ -28,8 +28,8 @@ export type WorkView = "all" | "needs-you" | "running" | "completed";
 
 export const WORK_VIEWS: readonly { key: WorkView; label: string; hint: string; empty: string }[] = [
   { key: "all", label: "All", hint: "Every task in view, most urgent first.", empty: "Nothing is in progress. Describe work in chat or add a task, and it appears here." },
-  { key: "needs-you", label: "Needs you", hint: "Tasks waiting on a decision, an approval, a repair, or a review.", empty: "Nothing needs you right now. Queued and running work continues on its own." },
-  { key: "running", label: "Running", hint: "Attempts a builder owns right now, and reviews in progress.", empty: "Nothing is building right now. Approved tasks start when a builder with capacity is connected." },
+  { key: "needs-you", label: "Needs you", hint: "Tasks waiting on an answer, approval, or your inspection.", empty: "Nothing needs you right now. Queued and running work continues on its own." },
+  { key: "running", label: "Running", hint: "Attempts a builder owns right now.", empty: "Nothing is building right now. Approved tasks start when a builder with capacity is connected." },
   { key: "completed", label: "Completed", hint: "Finished tasks with their evidence status — problems stay visible here.", empty: "No completed work in this view." },
 ];
 
@@ -235,23 +235,7 @@ export function publicationStatusOf(publication: PublicationFacts): { token: str
  * the detail).
  */
 export function resultStatusOf(result: ResultFacts | null, publication: PublicationFacts = null): DisplayStatus {
-  const stored = storedResultStatusOf(result, publication);
-  // A review in flight (queued, running, failed with a retry, exhausted)
-  // leads on every surface; an operator's acceptance closes the matter,
-  // and a scout's report is never reviewed. The earlier verdict stays in
-  // the detail as history, never as the main wording.
-  if (result === null || result.runId === null || result.role === "scout" || result.accepted) return stored;
-  const review = reviewStatusOf(result.review ?? null);
-  if (review === null && result.verdict === "short" && result.reasons.includes(GOAL_ASSESSMENT_PENDING)) {
-    return { token: "review-pending", label: "Ready for goal review", detail: "The saved evidence needs independent assessment against the approved goal.", tone: "attention", action: { label: "Review result", kind: "open-review" } };
-  }
-  if (review === null) return stored;
-  return { ...review, detail: `${review.detail} ${priorVerdictWords(stored)}` };
-}
-
-/** The earlier verdict as history under a review in flight. */
-function priorVerdictWords(stored: DisplayStatus): string {
-  return `Until the review settles, the earlier verdict — "${stored.label}" — stays on record as history.`;
+  return storedResultStatusOf(result, publication);
 }
 
 /** What the machine itself recorded about a result, in a clause. */
@@ -466,9 +450,9 @@ export function dispatchActionLabel(dispatch: DispatchDiagnosis | null): string 
 export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): WorkStatus {
   const dispatch = facts.dispatch;
   const result = facts.state === "done" ? resultDisplay ?? resultStatusOf(facts.result, facts.publication) : null;
-  const running = facts.liveRunId !== null || dispatch?.condition === "running" || result?.token === "reviewing";
+  const running = facts.liveRunId !== null || (dispatch?.condition === "running" && !REVIEW_TOKENS.has(dispatch.code));
   const question = (facts.state === "queued" || facts.state === "running" || facts.state === "done") ? facts.openDecision ?? null : null;
-  const needs = needsPerson(dispatch) || question !== null;
+  const needs = (dispatch !== null && !REVIEW_TOKENS.has(dispatch.code) && needsPerson(dispatch)) || question !== null;
   const views: WorkView[] = ["all"];
   if (needs) views.push("needs-you");
   if (running) views.push("running");
@@ -496,19 +480,10 @@ export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): W
   if (facts.state === "done" && result !== null) {
     // A saved result or an ongoing review cannot answer a question. Keep
     // failures primary; the shared summary retains the answer action too.
-    if (question !== null && result.tone !== "problem" && result.token !== "review-failed" && result.token !== "review-exhausted" &&
-      !(facts.result?.review === undefined && (dispatch?.code === "review-failed" || dispatch?.code === "review-exhausted"))) {
+    if (question !== null && result.tone !== "problem") {
       return { token: "waiting-decision", label: "Waiting on your answer", detail: question.question,
         tone: "attention", action: { label: "Answer question", kind: "open-task" }, views, rank: 0,
         diagnostics: [{ token: result.token, label: result.label, detail: result.detail, tone: result.tone }] };
-    }
-    // A review in flight or waiting outranks the stored verdict: the
-    // machine is still deciding, and the row says so in the projection's
-    // own words. A caller that never read the review facts still gets
-    // the dispatch diagnosis's words for the same codes.
-    if (REVIEW_TOKENS.has(result.token)) return { ...result, views, rank: needs ? 0 : running ? 1 : 3 };
-    if (facts.result?.review === undefined && dispatch !== null && REVIEW_TOKENS.has(dispatch.code)) {
-      return dispatchWords(dispatch.condition === "running" ? "live" : "attention", needs ? 0 : running ? 1 : 3, { label: "Open the result", kind: "open-result" });
     }
     return { ...result, views, rank: needs ? 0 : 3 };
   }

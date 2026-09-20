@@ -26,7 +26,6 @@ import { HeldSessionCoordinator } from "./held.js";
 import { WorktreePool } from "./worktree.js";
 import { canonicalProfileJson, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import type { Runner } from "./builder.js";
-import { REVIEW_CONTEXT_NAME, REVIEW_PROOF_NAME } from "./reviewer.js";
 import { bridgePass, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
 
 
@@ -2336,107 +2335,38 @@ describe("watch — the loop, zero tokens idle", () => {
     } finally { adoption.mockRestore(); }
   });
 
-  test.each([true, false])("a review-only tick reports its actual success=%s instead of an empty queue", async succeeds => {
+  test("legacy queued reviews retire without agent calls, verdict changes or retry loops", async () => {
     const { runnerToken, approverToken } = await setup();
     await approved("t-reviewed", approverToken);
-    expect(await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool])).toBe(EXIT.ok);
+    const tickArgs = ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"];
+    expect(await run(tickArgs)).toBe(EXIT.ok);
     await run(["task", "show", "t-reviewed", "--json"]);
     const source = payload().runs.find((one: { role: string }) => one.role === "builder");
-    expect(await run(["task", "review", String(source.id), "--as", "alex", "--token", approverToken])).toBe(EXIT.ok);
-    // No builder proof is needed to validate captured source. The first
-    // reviewer receives the sealed patch context, while the signed human
-    // decision remains unfulfilled regardless of the review's execution result.
-    type Coverage = { id: string; state: string; inherited: boolean; gaps: string[] }[];
-    let sealed: { proof: boolean; coverage: Coverage; verified: boolean } | null = null;
-    const code = await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], async (_file, _args, options) => {
-      const manifest = JSON.parse(readFileSync(join(options?.cwd ?? "", REVIEW_CONTEXT_NAME), "utf8")) as { source: { run: number; verified: boolean }; run: number; coverage: Coverage };
-      expect(manifest.source.run).toBe(manifest.run);
-      sealed = { proof: existsSync(join(options?.cwd ?? "", REVIEW_PROOF_NAME)), coverage: manifest.coverage, verified: manifest.source.verified };
-      return succeeds
-        ? { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "cannot-tell", note: "Human judgement is required by the signed criterion." }] }) }) }
-        : { ...OK, code: 1, stderr: "simulated reviewer outage" };
-    });
-    expect(code, lines.join("\n")).toBe(succeeds ? EXIT.ok : EXIT.failed);
-    expect(sealed).toMatchObject({ proof: false, verified: true, coverage: [{ id: "c1", state: "patch", inherited: false, gaps: [] }] });
-    expect(payload().dispatched).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: succeeds ? "reviewed" : "review-failed" })]));
-    if (!succeeds) expect(payload().reason).toBe("review-failed");
-    await run(["task", "show", "t-reviewed", "--json"]);
-    expect(payload()).toMatchObject({ proofVerdict: "short", proofAccepted: false, proofMatrix: [{ id: "c1", state: "manual-review" }] });
-  });
-
-  test("explicit review retries through the CLI: a failed review is retried at most twice, every refusal is typed, and task show states the attempt truthfully (v50)", async () => {
-    const { runnerToken, approverToken } = await setup();
-    const auth = ["--as", "alex", "--token", approverToken];
-    const tick = (agent: Runner) => run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], agent);
-    const reviewer = (succeeds: boolean): Runner => async () => succeeds
-      ? { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "cannot-tell", note: "Human judgement is required by the signed criterion." }] }) }) }
-      : { ...OK, code: 1, stdout: JSON.stringify({ result: "…" }), stderr: "simulated reviewer outage" };
-    const show = async (id: string) => { await run(["task", "show", id, "--json"]); return payload(); };
-
-    // A build to review — then a first review that fails.
-    await approved("t-retry", approverToken);
-    expect(await tick(agent)).toBe(EXIT.ok);
-    const source = (await show("t-retry")).runs.find((one: { role: string }) => one.role === "builder");
-    expect(await run(["task", "review", String(source.id), ...auth, "--json"])).toBe(EXIT.ok);
-    expect(payload()).toMatchObject({ ok: true, run: source.id, attempt: 1, cap: 3, retriesRemaining: 2 });
-    expect(await run(["task", "review", String(source.id), ...auth, "--json"])).toBe(EXIT.refused);
-    expect(payload()).toMatchObject({ ok: false, reason: "already-requested" });
-    expect((await show("t-retry")).dispatch).toMatchObject({ code: "review-pending", summary: "Waiting for review", review: { state: "queued", attempt: 1 } });
-    expect(await tick(reviewer(false))).toBe(EXIT.failed);
-    expect(payload()).toMatchObject({ reason: "review-failed", dispatched: [expect.objectContaining({ outcome: "review-failed", attempt: 1, retriesRemaining: 2 })] });
-    let shown = await show("t-retry");
-    expect(shown.review).toMatchObject({ state: "retryable", retriesUsed: 0, retriesRemaining: 2, nextAttempt: 2 });
-    expect(shown.dispatch).toMatchObject({ code: "review-failed", action: "retry-review", summary: "Review failed — retry available", review: { attempt: 1, cap: 3, retriesRemaining: 2 } });
-    expect(await run(["task", "show", "t-retry"])).toBe(EXIT.ok);
-    expect(lines.join("\n")).toContain("review: failed on attempt 1 of 3 — 2 explicit retries left");
-
-    // The explicit retry: the same command, attempt 2 — queued, visible,
-    // not hidden behind the failed run.
-    expect(await run(["task", "review", String(source.id), ...auth, "--json"])).toBe(EXIT.ok);
-    expect(payload()).toMatchObject({ ok: true, attempt: 2, retriesRemaining: 1 });
-    shown = await show("t-retry");
-    expect(shown.dispatch).toMatchObject({ code: "review-pending", summary: "Review retry queued (attempt 2 of 3)", review: { state: "queued", attempt: 2, retriesRemaining: 1, queued: { requestedBy: "alex", origin: "operator" } } });
-    expect(shown.review.openRequest).toMatchObject({ requestedBy: "alex", origin: "operator" });
-    expect(await run(["task", "show", "t-retry"])).toBe(EXIT.ok);
-    expect(lines.join("\n")).toContain("review: retry queued — attempt 2 of 3 waits for a worker (asked by alex)");
-    expect(await tick(reviewer(true))).toBe(EXIT.ok);
-    expect(payload()).toMatchObject({ dispatched: [expect.objectContaining({ outcome: "reviewed", attempt: 2 })] });
-    shown = await show("t-retry");
-    expect(shown.review).toMatchObject({ state: "succeeded", retriesUsed: 1, retriesRemaining: 0 });
-    expect(shown.review.attempts.map((one: { attempt: number; outcome: string }) => [one.attempt, one.outcome])).toEqual([[1, "failed"], [2, "no-change"]]);
-    // The proof itself is still short (a cannot-tell on a manual-review
-    // criterion): the diagnosis says so, and carries the succeeded review.
-    expect(shown.dispatch).toMatchObject({ code: "needs-verification", review: { state: "succeeded", attempt: 2, retriesUsed: 1 } });
-    expect(await run(["task", "show", "t-retry"])).toBe(EXIT.ok);
-    expect(lines.join("\n")).toContain("review: succeeded on attempt 2 of 3");
-    // A successful review is never retried; the source build is untouched.
-    expect(await run(["task", "review", String(source.id), ...auth, "--json"])).toBe(EXIT.refused);
-    expect(payload()).toMatchObject({ ok: false, reason: "already-reviewed" });
-    expect(shown.runs.find((one: { id: number }) => one.id === source.id)).toMatchObject({ outcome: "built", headRevision: source.headRevision });
-    expect(shown.runs.filter((one: { role: string }) => one.role === "builder")).toHaveLength(1);
-
-    // Exhaustion: three failed attempts, then the fourth ask refuses and
-    // the tick has nothing to dispatch.
-    await approved("t-spent", approverToken);
-    expect(await tick(agent)).toBe(EXIT.ok);
-    const spent = (await show("t-spent")).runs.find((one: { role: string }) => one.role === "builder");
-    for (const attempt of [1, 2, 3]) {
-      expect(await run(["task", "review", String(spent.id), ...auth, "--json"])).toBe(EXIT.ok);
-      expect(payload()).toMatchObject({ attempt, retriesRemaining: 3 - attempt });
-      expect(await tick(reviewer(false))).toBe(EXIT.failed);
-      expect(payload().dispatched).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: "review-failed", attempt, retriesRemaining: 3 - attempt })]));
-    }
-    expect(await run(["task", "review", String(spent.id), ...auth, "--json"])).toBe(EXIT.refused);
-    expect(payload()).toMatchObject({ ok: false, reason: "retries-exhausted" });
-    expect(await run(["task", "review", String(spent.id), ...auth])).toBe(EXIT.refused);
-    expect(lines.join("\n")).toContain("spent all 3 review attempts");
-    shown = await show("t-spent");
-    expect(shown.review).toMatchObject({ state: "exhausted", retriesUsed: 2, retriesRemaining: 0, nextAttempt: null });
-    expect(shown.dispatch).toMatchObject({ code: "review-exhausted", action: "open-result", review: { state: "exhausted", attempt: 3, retriesRemaining: 0 } });
-    expect(shown.runs.filter((one: { role: string }) => one.role === "reviewer")).toHaveLength(3);
-    expect(await tick(reviewer(true))).toBe(EXIT.refused);
-    expect(payload().dispatched.filter((one: { id: string }) => one.id.startsWith("review of run"))).toEqual([]);
-    expect((await show("t-spent")).runs.filter((one: { role: string }) => one.role === "reviewer")).toHaveLength(3);
+    const saved = openStore(db);
+    const originalProof = saved.proofVerdictFor(source.id);
+    const originalRun = saved.getRun(source.id);
+    const asked = saved.requestReview(source.id, "alex", T0);
+    expect(asked.ok).toBe(true);
+    if (!asked.ok) throw new Error(asked.reason);
+    saved.close();
+    let calls = 0;
+    const unexpectedAgent: Runner = async () => { calls++; throw new Error("no model review may start"); };
+    expect(await run(["tick", "--runner", "builder-1", "--token", "invalid", "--repo", repo, "--pool", pool, "--json"], unexpectedAgent)).toBe(EXIT.refused);
+    let check = openStore(db);
+    expect(check.openReviewRequests().map(one => one.id)).toContain(asked.id);
+    check.close();
+    await run(tickArgs, unexpectedAgent);
+    await run(tickArgs, unexpectedAgent);
+    expect(calls).toBe(0);
+    check = openStore(db);
+    expect(check.openReviewRequests()).toEqual([]);
+    expect(check.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(asked.id)).toMatchObject({ consumed_reason: "model-review-retired" });
+    expect(check.proofVerdictFor(source.id)).toEqual(originalProof);
+    expect(check.getRun(source.id)).toEqual(originalRun);
+    expect(check.runsFor(source.taskRef).filter(one => one.role === "reviewer")).toEqual([]);
+    check.close();
+    expect(await run(["task", "review", String(source.id), "--as", "alex", "--token", approverToken, "--json"])).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ reason: "model-review-retired" });
   });
 
   test("a watch is an episode, and the brief can bound itself to exactly one night", async () => {

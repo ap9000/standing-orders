@@ -1,0 +1,107 @@
+Relevant complete preparation outputs. Each section names its own source checkpoint. Counts overlap; do not add them. Superseded output, failed reproductions and prior manifests are preserved losslessly in history-checks.txt.gz as history, not current proof. The final native gate binds the final candidate.
+
+===== app-services-current | checkpoint 7fb8a50dec99a056c55a8dd394c7ab9c7b8120a6 =====
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-process-recovery
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+
+ Test Files  1 passed (1)
+      Tests  42 passed (42)
+   Start at  11:24:55
+   Duration  1.08s (transform 63ms, setup 15ms, import 74ms, tests 22ms, environment 0ms)
+
+
+===== policy-provenance-settlement | checkpoint 7fb8a50dec99a056c55a8dd394c7ab9c7b8120a6 =====
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-process-recovery
+
+···················································································(node:75298) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  3 passed (3)
+      Tests  84 passed (84)
+   Start at  11:32:18
+   Duration  2.57s (transform 911ms, setup 46ms, import 1.11s, tests 1.53s, environment 0ms)
+
+
+===== ordinary-flow-current | checkpoint 671128936a9fdb8e5661a3796591366c57b9b23b =====
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+···································(node:29035) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+········(node:29034) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  2 passed (2)
+      Tests  44 passed (44)
+   Start at  13:18:14
+   Duration  7.17s (transform 2.41s, setup 34ms, import 3.86s, tests 8.66s, environment 0ms)
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"671128936a9fdb8e5661a3796591366c57b9b23b","tree":"229be559e185863f36bf073239bbea339545135f","trackedClean":true}
+
+===== metadata-ui-current | checkpoint bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a =====
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+····························(node:70013) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  1 passed (1)
+      Tests  29 passed (29)
+   Start at  13:22:36
+   Duration  7.14s (transform 917ms, setup 15ms, import 1.11s, tests 5.89s, environment 0ms)
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"bee3843c5f1131fa442a3fc67bf00ff47f6e9e3a","tree":"685512ad6ed8f62e3705571d9e8b54a7f69073c1","trackedClean":true}
+
+===== retry-prompt-typecheck | checkpoint 3977ae76df8b3c1d6a02173faa2d72906cab4700 =====
+{"command":["npm","run","typecheck"],"source":"TypeScript source imports; no dist use in selected tests","configuration":{"path":"output/lead-review/vitest-builder-source.config.mjs","sha256":"1b40d75bf683d2d195b87edc427f5954d5f07295f02901ca74406bb7d407b0b6","preserved":"test/setup-state.ts, maxWorkers:4, testTimeout:30000, all other normal Vitest settings","omitted":"globalSetup test/ensure-build.ts only, as this audit forbids builds"},"startedAt":"2026-09-20T20:42:25.998Z"}
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+{"exitCode":0,"signal":null,"finishedAt":"2026-09-20T20:42:27.002Z"}
+
+===== retry-prompt-focused | checkpoint 3977ae76df8b3c1d6a02173faa2d72906cab4700 =====
+{"command":["npx","vitest","run","--config","output/lead-review/vitest-builder-source.config.mjs","src/builder.test.ts","-t","a retry's brief preserves|the brief states|proof preflight closure|a signed goal uses|recovered completed draft|interrupted partial draft|warm attempt|resum|proof-only correction|a receipt-only correction freezes|a rename in the sealed diff"],"source":"TypeScript source imports; no dist use in selected tests","configuration":{"path":"output/lead-review/vitest-builder-source.config.mjs","sha256":"1b40d75bf683d2d195b87edc427f5954d5f07295f02901ca74406bb7d407b0b6","preserved":"test/setup-state.ts, maxWorkers:4, testTimeout:30000, all other normal Vitest settings","omitted":"globalSetup test/ensure-build.ts only, as this audit forbids builds"},"startedAt":"2026-09-20T20:42:27.003Z"}
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-recovery-lead-release
+
+(node:72603) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  1 passed (1)
+      Tests  44 passed | 112 skipped (156)
+   Start at  13:42:27
+   Duration  5.16s (transform 1.20s, setup 24ms, import 1.44s, tests 3.58s, environment 0ms)
+
+{"exitCode":0,"signal":null,"finishedAt":"2026-09-20T20:42:33.060Z"}
+
+===== correction-build | checkpoint 3977ae76df8b3c1d6a02173faa2d72906cab4700 =====
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: {"head":"3977ae76df8b3c1d6a02173faa2d72906cab4700","tree":"16555c7a2a5ea8d4942f5ff22a5722657210d907","trackedClean":true}
+
+===== retry-prompt-audit | checkpoint 3977ae76df8b3c1d6a02173faa2d72906cab4700 =====
+{"configuration":{"path":"output/lead-review/vitest-builder-source.config.mjs","sha256":"1b40d75bf683d2d195b87edc427f5954d5f07295f02901ca74406bb7d407b0b6","reason":"Source-only builder tests; globalSetup ensure-build omitted because this bounded task prohibited builds. Original per-test isolation, maxWorkers4 and timeout30000 retained."},"promptAudit":[{"path":"build briefing at1397\u20131418","finding":"Canonical rubric suffix uses legacy proof-preflight only for strict empty rubric; routine wording directs lead/user to signed data."},{"path":"attended coordinator at1477\u20131496 and invokeAgent at1524\u20131538","finding":"Both receive the same common brief; warm resume changes session identity without replacing its instructions. Actual answered-park regression checks this prompt."},{"path":"brief recoveredDraft at3441\u20133452","finding":"Preserve completed/partial draft and write outcome/limitations, with no added proof requirement; retry matrix includes partial recovery and existing completed-draft case asserts no restatement."},{"path":"brief revision instructions at3466\u20133485","finding":"Optional evidence-observation protocol is unchanged; ordinary revision final-check guidance names lead/user, while strict independent-review wording remains."},{"path":"brief output at3517\u20133669 and retryBase at3727\u20133745","finding":"Short handoff/screenshot guidance applies to default quality regardless rubric, and existing strict nonempty-rubric direct assessment; full authored proof guidance appears only strict empty rubric. All retries preserve machine whole-branch capture."},{"path":"correctProofReceipt at2338\u20132470","finding":"Previously landed strict-only correction guard unchanged; existing strict/default correction tests passed."},{"path":"ingestPark/freshRepairPrompt at2911\u20133278","finding":"These repair malformed decision files, not proof receipts; no proof-restatement demand is added. Existing resume tests passed."},{"path":"brief optional plan revision at3684\u20133725","finding":"The phrase Proof shape specifies the existing optional plan document, not a completion proof or file inventory; no new receipt requirement."}],"scope":"Review notes, not executable test output. All cited functions are supplied as native exact-head source context."}

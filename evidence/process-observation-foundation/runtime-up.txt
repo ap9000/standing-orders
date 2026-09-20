@@ -507,3 +507,5 @@ async function upCommand(flags, context) {
     progress(`up: stopped cleanly — ${ticks} pass(es), ${built} with work. Run \`standing-orders up\` anywhere on this machine to reconnect every saved project.`);
     return EXIT.ok;
 }
+
+Current recovery review context: The recovery anchor relies on registration before the actual console and worker start; the complete function above establishes that ordering. This annotation grants no process-exit or settlement authority.

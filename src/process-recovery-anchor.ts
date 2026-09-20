@@ -94,6 +94,8 @@ const stateSql = `SELECT t.id target_id, t.started_at target_started, t.finished
  JOIN watch_episode e ON e.incarnation=w.owner AND e.runner=w.runner AND e.repo=w.repo
  JOIN runner n ON n.name=w.runner LEFT JOIN proof_verdict p ON p.run=a.parent_run WHERE t.id=?`;
 type State = Record<string, unknown> & { owner: string; generation: number; episode: number; registered: string; credential: string; heartbeat: string; expires: string };
+// Saved history alone is not a live anchor: collection also requires an unchanged
+// credential epoch/incarnation across an authenticated heartbeat and native identities.
 function readState(db: RecoveryReadDatabase, input: DarwinServiceAnchorInput, now: number): State {
   const row = db.prepare(stateSql).get(input.anchorReviewerRun, input.targetRun);
   if (!row || row["target_id"] !== input.targetRun || row["anchor_id"] !== input.anchorReviewerRun ||
