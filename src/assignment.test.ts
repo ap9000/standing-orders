@@ -450,12 +450,13 @@ describe("continuous assignments over existing task families", () => {
     expect(store.actionLedger({ repos: null }).filter(a => a.action === "assignment handoff checked")).toEqual([]);
   });
 
-  test("failed proof and an active earlier version never inherit an acknowledgment", () => {
+  test("new review findings return to the lead without inheriting the old acknowledgment", () => {
     const run = built(); reviewed(run); claimAssignment(store, "retry", lead, NOW, dir);
     const ready = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir).ok).toBe(true);
     store.saveProofVerdict(run, "refuted", ["The retry can be sent twice."], NOW, store.proofVerdictFor(run)!.matrix, "verified");
-    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision");
-    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir).ok).toBe(false);
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "ready-to-check", attention: ["The retry can be sent twice."] });
+    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
   });
 
   test("handoffs dedupe after restart; scoped cursors exclude foreign events and stale notices stay explicit", () => {
