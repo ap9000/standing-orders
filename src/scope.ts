@@ -1338,6 +1338,8 @@ export function routeParityProblem(
   return null;
 }
 
+// Recovery reuses this exact raw-terms check before considering saved evidence.
+// Decoding authority does not renew approval or authorize a process-custody write.
 export function scopeAuthorityOf(scope: Scope, env: ScopeAuthorityEnv = {}): ScopeAuthority {
   // THE RAW TERMS FIRST (raw authority repair): a row whose stored terms
   // or metadata do not read back exactly is no authority at all — not

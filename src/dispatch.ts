@@ -174,6 +174,8 @@ export function taskReadinessBlocker(store: Store, taskRef: number, now: Date): 
 /** The exact live approval predicate used by both the scheduler survey and
  * the atomic claim. Mode-backed approvals count only while their signer and
  * mode still stand. */
+// Recovery reads this same live predicate; a completed run does not grandfather
+// a revoked signer or mode, and this query never creates dispatch authority.
 export function scopeApprovedForDispatch(store: Store, taskRef: number, now: Date): boolean {
   const row = store.handle
     .prepare(

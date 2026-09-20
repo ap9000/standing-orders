@@ -333,3 +333,5 @@ async function startConsole(options) {
     const shown = options.host === "0.0.0.0" || options.host === "::" ? "localhost" : options.host;
     return { server, port, url: `http://${shown}:${port}/` };
 }
+
+Current recovery review context: The recovery anchor relies on a fresh closure-owned watch identity and authenticated lease renewal; the complete functions above establish that behavior. This annotation grants no process-exit or settlement authority.

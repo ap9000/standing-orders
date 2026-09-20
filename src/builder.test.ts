@@ -493,6 +493,10 @@ describe("the builder's gates", () => {
     expect(built).toMatchObject({ ok: true });
     expect(agentCalls.some(args => args.includes("--resume") && args.includes("sess-park-1"))).toBe(true);
     expect(store.getRun(first.runId as number)).toMatchObject({ parentRun: parked, sessionId: "sess-park-1" });
+    const warmPrompt = agentCalls[0]![agentCalls[0]!.indexOf("-p") + 1]!;
+    expect(warmPrompt).toContain("No criterion answers or self-reported file list are required");
+    expect(warmPrompt).not.toContain("restate that criterion");
+    expect(warmPrompt).not.toContain("pass --rubric");
 
     // A second attempt at the same park goes cold: one warm try per park,
     // because a dead session must never fail its way into a stall.
@@ -638,7 +642,9 @@ describe("the builder's gates", () => {
     }
   });
 
-  test("a retry's brief names the pinned first base, so its own \"changed\" claim can be cumulative (run 1465)", async () => {
+  test.each([
+    ["default", false], ["default", true], ["strict", false], ["strict", true],
+  ] as const)("a retry's brief preserves the pinned base without inventing proof requirements: %s rubric=%s", async (qualityMode, hasRubric) => {
     // Run 1465's proof read short: the sealed diff-stat is already pinned to
     // the branch's first builder base (run 1461, above), but nothing ever
     // TOLD the agent that — so its self-reported proof.changed[] listed only
@@ -665,7 +671,12 @@ describe("the builder's gates", () => {
     };
 
     claimIt();
-    approveScope();
+    propose(store, {
+      taskId: "t-1", goal: "add a guard on the payout path", now: T0,
+      qualityMode,
+      acceptance: hasRubric ? [{ id: "c1", statement: "the guard rejects a negative payout", evidence: ["check"] }] : [],
+    });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
 
     const first = request({ git: statefulGit });
     await build(store, first);
@@ -675,7 +686,7 @@ describe("the builder's gates", () => {
     // name, so the ordinary instructions stand unchanged.
     expect(firstPrompt).not.toContain("already carries earlier attempts");
 
-    const second = request({ git: statefulGit });
+    const second = request({ git: statefulGit, recoveredDraftRun: first.runId, recoveredDraftKind: "partial" });
     await build(store, second);
     expect(agentCalls).toHaveLength(2);
     const secondPrompt = agentCalls[1]?.[agentCalls[1]!.indexOf("-p") + 1] ?? "";
@@ -684,6 +695,24 @@ describe("the builder's gates", () => {
     // this attempt's own base_revision ("mid-sha").
     expect(secondPrompt).toContain("orig-sha");
     expect(secondPrompt).not.toContain("mid-sha");
+    expect(secondPrompt).toContain("write this attempt's own handoff with its outcome and limitations");
+    if (qualityMode !== "strict" || hasRubric) {
+      for (const prompt of [firstPrompt, secondPrompt]) {
+        expect(prompt).toContain("No criterion answers or self-reported file list are required");
+        expect(prompt).not.toContain('"changed" must');
+        expect(prompt).not.toContain("under the changed-list contract above");
+        expect(prompt).not.toContain("restate that criterion");
+        expect(prompt).not.toContain("pass --rubric");
+        if (qualityMode === "default") {
+          expect(prompt).toContain("Return the result and limitations to the lead or user for review");
+          expect(prompt).not.toContain("independent reviewer");
+        } else {
+          expect(prompt).toContain("One independent reviewer assesses that evidence");
+        }
+      }
+      expect(secondPrompt).toContain("The machine captures the whole branch from that revision");
+      return;
+    }
     expect(secondPrompt).toContain("git diff --name-only orig-sha");
     // The changed-list contract seals from the SAME pinned base on a retry,
     // never the first-attempt HEAD shorthand; the retry paragraph defers to
@@ -893,6 +922,12 @@ describe("what the builder tells the agent", () => {
       ...over,
     });
 
+  const legacyProofBrief = async () => {
+    propose(store, { taskId: "t-1", goal: "add a guard on the payout path", qualityMode: "strict", now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    await build1();
+  };
+
   test("quotes the scope, including what it is not", async () => {
     // A brief that says only what to do invites the agent to decide how far to
     // go, and how far to go is the thing that was actually agreed.
@@ -918,6 +953,8 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("reviewing the existing changes");
     expect(prompt).toContain("write this attempt's own handoff with its outcome and limitations");
     expect(prompt).toContain("Do not discard and recreate sound work");
+    expect(prompt).toContain("No criterion answers or self-reported file list are required");
+    expect(prompt).not.toContain("restate that criterion");
   });
 
   test("an interrupted partial draft is continued without pretending it was complete", async () => {
@@ -935,7 +972,7 @@ describe("what the builder tells the agent", () => {
     // ran over PROOF_LIMITS.criterionHow (500 bytes) — the whole proof was
     // refused. The brief must make the cap, a safe target, and the act of
     // measuring explicit, not just describe the field.
-    await build1();
+    await legacyProofBrief();
 
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
     expect(prompt).toContain('Each criterion\'s "how" has a hard cap of 500 bytes UTF-8');
@@ -956,7 +993,7 @@ describe("what the builder tells the agent", () => {
     await build1();
 
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
-    expect(prompt).toContain("One independent reviewer assesses that evidence against the signed goal");
+    expect(prompt).toContain("Return the result and limitations to the lead or user for review");
     expect(prompt).toContain("No criterion answers or self-reported file list are required");
     expect(prompt).not.toContain("signed criterion is answered by its exact id");
     expect(prompt).not.toContain("pass --rubric");
@@ -969,7 +1006,7 @@ describe("what the builder tells the agent", () => {
     // PROOF_LIMITS.caveat (300 bytes) — the whole proof was refused. The
     // brief must make the cap, a safe target, and the act of measuring
     // explicit, the same way it already does for a criterion's "how".
-    await build1();
+    await legacyProofBrief();
 
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
     expect(prompt).toContain("Each caveat has a hard cap of 300 bytes UTF-8");
@@ -982,7 +1019,7 @@ describe("what the builder tells the agent", () => {
     // the no-scope row and the routine page; the plane now refutes a
     // met criterion a caveat names, so the brief must say how a caveat
     // attaches to a criterion and that the preflight refuses the clash.
-    await build1();
+    await legacyProofBrief();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
     expect(prompt).toContain("EVERY caveat is an exception to a signed criterion and names that");
     expect(prompt).toContain("be marked not-met");
@@ -1002,7 +1039,7 @@ describe("what the builder tells the agent", () => {
     // evidence for a met criterion — a negative control read as a failed
     // check, and the plane failed the row. The brief must say what a
     // check ref on a met criterion is, and where a negative control goes.
-    await build1();
+    await legacyProofBrief();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
     expect(prompt).toContain("Check evidence for a met criterion is a durable current-tree command");
     expect(prompt).toContain("that exited zero");
@@ -1026,7 +1063,7 @@ describe("what the builder tells the agent", () => {
     // attempt (base HEAD), and must NOT hand out the unstaged recipe
     // (`diff --name-only HEAD` + `ls-files --others`) that yields both names
     // for an uncommitted `mv` — the steering's own repro.
-    await build1();
+    await legacyProofBrief();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
     expect(prompt).toContain("The changed list must equal the machine's sealed diff exactly");
     expect(prompt).toContain("machine commits your whole final tree (git add -A, leaving out the");
@@ -1055,7 +1092,7 @@ describe("what the builder tells the agent", () => {
   });
 
   test("the brief states EVERY proof and handoff cap the parsers hold the files to, and tells the agent to preflight each protocol file before it exits (raw authority repair)", async () => {
-    await build1();
+    await legacyProofBrief();
     const prompt = asked[asked.indexOf("-p") + 1] ?? "";
     // The proof: every remaining cap, named with the parser's own numbers.
     expect(prompt).toContain(`the whole file under ${PROOF_LIMITS.payload} bytes; at most ${PROOF_LIMITS.criteria} criteria, ${PROOF_LIMITS.checks} checks, ${PROOF_LIMITS.changed} changed`);

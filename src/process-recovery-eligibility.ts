@@ -32,6 +32,8 @@ function freeze<T>(value: T): Frozen<T> {
   return value as Frozen<T>;
 }
 
+// A successful digest is only a saved-state prerequisite. Settlement must separately
+// prove provenance and absence, then recheck this same binding inside its transaction.
 export function preparedCandidateObserverGapEligibility(store: Store, input: {
   runId: number; evidenceRoot: string; now: Date;
   /** Authenticated current kernel context supplied by the caller, not a row's

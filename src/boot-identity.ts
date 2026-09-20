@@ -38,6 +38,8 @@ export type BootIdentityReaders = {
 };
 
 /** Normalize a candidate token: exactly one UUID, lower-cased; anything else is malformed. */
+// Recovery may compare this normalized token only after its host/kernel origin is
+// authenticated; well-formed text alone supplies neither boot identity nor absence.
 export function normalizeBootId(raw: string): string | null {
   const trimmed = raw.trim();
   return UUID.test(trimmed) ? trimmed.toLowerCase() : null;
