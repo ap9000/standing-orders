@@ -65,11 +65,13 @@ export function assignmentSummaryHtml(assignment: AssignmentSnapshot, options: {
   const status = assignmentStatusOf(assignment, options.workStatus);
   const href = assignmentActionHref(assignment);
   const attention = [...new Set(assignment.attention)].filter(one => one !== assignment.detail);
-  const diagnostics = (options.diagnostics ?? []).filter(one => one.detail !== assignment.detail && !attention.includes(one.detail));
+  const ready = assignment.state === "ready-to-check" || assignment.state === "complete";
+  const diagnostics = (options.diagnostics ?? []).filter(one => one.detail !== assignment.detail && !attention.includes(one.detail) &&
+    !(ready && attention.length > 0 && one.token === "verification-needed"));
   return `<section class="${options.compact ? 'assignment-summary' : 'card assignment-summary'}" aria-label="assignment progress" data-assignment="${escape(assignment.rootId)}" data-work-status="${status.token}" data-tone="${status.tone}"${options.compact ? '' : ' data-task-status'}>` +
     (options.compact ? `<span class="status-line" data-work-status="${status.token}" data-tone="${status.tone}"><i class="status-dot" aria-hidden="true"></i><span class="status-label">${status.label}</span></span>` : `<h2 class="assignment-state">${status.label}</h2>`) +
     (options.hideAction || href === null ? '' : `<a class="${options.compact ? 'work-action' : 'button-link'}" href="${escape(href)}"${options.compact ? '' : ' data-primary-action'}>${escape(assignment.primaryAction!.label)}${options.compact ? ' →' : ''}</a>`) +
-    `<p class="${options.problem ? 'problem' : 'meta'} assignment-detail">${escape(assignment.detail)}</p>` +
+    `<p class="${options.problem && !ready ? 'problem' : 'meta'} assignment-detail">${escape(assignment.detail)}</p>` +
     attention.map(one => `<p class="problem">${escape(one)}</p>`).join('') +
     diagnostics.map(one => `<p class="${one.tone === 'problem' || one.tone === 'attention' ? 'problem' : 'meta'}" data-work-diagnostic="${escape(one.token)}">${escape(one.label)} · ${escape(one.detail)}</p>`).join('') +
     assignmentAttemptsHtml(assignment) + `</section>`;

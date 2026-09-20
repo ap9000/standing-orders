@@ -16,6 +16,7 @@ import { reviewContextBindingOf, parseReviewContext, reviewContextCustodyProblem
 import { maybeTriggerRepair } from "./dispose.js";
 import { modeDigestOf, modeTermsJson, presetTerms } from "./modes.js";
 import { taskWorkSummaryOf } from "./work-summary.js";
+import { assignmentSummaryHtml } from "./assignment-ui.js";
 import { requestResultChanges } from "./result-actions.js";
 import * as taskControl from "./task-control.js";
 import { assignmentOf, assignmentBrief, assignmentEvidenceIntact, assignmentUpdates, checkAssignment, claimAssignment, syncAssignmentHandoffs, type AssignmentOwner } from "./assignment.js";
@@ -173,6 +174,11 @@ describe("continuous assignments over existing task families", () => {
     claimAssignment(store, "retry", lead, NOW, dir);
     const ready = assignmentOf(store, "retry", NOW, access, dir)!;
     expect(ready).toMatchObject({ state: "ready-to-check", attention: ["The saved source inventory is truncated; a screenshot is missing."], receipt: { completionKind: "checked-build" } });
+    const html = assignmentSummaryHtml(ready, { problem: true, diagnostics: [{ token: "verification-needed", label: "Result saved — verification needed",
+      detail: "Required evidence is missing, so this result is not verified.", tone: "problem", action: null }] });
+    expect(html).toContain('class="meta assignment-detail">Checks passed.');
+    expect(html).toContain("The saved source inventory is truncated; a screenshot is missing.");
+    expect(html).not.toContain("Result saved — verification needed");
     const before = store.proofVerdictFor(run), runs = store.runsFor(store.lookupRef("retry")!.id);
     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
     expect(store.proofVerdictFor(run)).toEqual(before);
