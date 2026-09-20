@@ -3,6 +3,8 @@ import { skillsContext } from "./project-skills.js";
 import { failedVerificationEvidence, sealVerificationReceipt, verificationEvidence, reuseObservationVerification } from "./verification-evidence.js";
 import { learningContext } from "./project-learning.js";
 import { knowledgeContext } from "./project-knowledge.js";
+import { readCodingHandoff, verifyCodingHandoffBase } from "./coding-handoff.js";
+import { PREPARED_EVIDENCE_FILE, PREPARED_EVIDENCE_GIT, preparedScreenshotMatches, readPreparedEvidence, writePreparedEvidence, type PreparedEvidence } from "./prepared-evidence.js";
 /**
  * The first thing here that runs an agent.
  *
@@ -878,6 +880,23 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     };
   }
 
+  // A coding handoff must keep the native session's original base. Its
+  // immutable filing marker makes a missing receipt a refusal, never a
+  // fallback to an ordinary agent build or a newer default-branch base.
+  let codingHandoff: ReturnType<typeof readCodingHandoff>;
+  try {
+    codingHandoff = readCodingHandoff(store, taskId);
+    if (codingHandoff !== null) {
+      if (request.attended !== undefined) throw Error("This saved coding result must use its prepared review task.");
+      const head = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
+      const actual = await git(GIT, ["--no-optional-locks", "symbolic-ref", "--short", "HEAD"], { cwd: worktree });
+      if (head.code !== 0 || actual.code !== 0 || actual.stdout.trim() !== branch) throw Error("The coding review checkout no longer matches its assigned branch.");
+      verifyCodingHandoffBase(store, { taskId, taskRef, repo: leased.repo, branch, head: head.stdout.trim() });
+    }
+  } catch (error) {
+    return { ok: false, reason: "no-op", message: error instanceof Error ? error.message : "The coding handoff could not be verified." };
+  }
+
   // The approved worktree setup (M5.7): every rival worktree tool shipped
   // without this and got burned — a checkout without dependencies fails
   // every build in it. The command is operator-approved, digest-bound, and
@@ -890,9 +909,16 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // before the mailbox sweep: an unknown or stray commit refuses here, with
   // nothing in the worktree touched.
   const preparedCandidate = scope?.candidate ?? null;
+  let preparedEvidence: PreparedEvidence | null = null;
   if (preparedCandidate !== null) {
     const refusal = await proveCandidate(git, worktree, preparedCandidate, store.firstBuilderBase(taskRef, branch));
     if (refusal !== null) return { ok: false, reason: "no-op", message: refusal };
+    // Check the exact candidate before setup or the full gate spends anything.
+    const listed = await git(GIT, [...PREPARED_EVIDENCE_GIT, "ls-tree", "-z", preparedCandidate, "--", PREPARED_EVIDENCE_FILE], { cwd: worktree, maxBuffer: 2048 });
+    if (listed.code !== 0) return { ok: false, reason: "no-op", message: "The committed screenshot inventory could not be inspected. Restore the saved candidate before review." };
+    const required = scope?.acceptance.some(criterion => criterion.evidence.includes("screenshot")) ?? false;
+    try { if (required || listed.stdout.length > 0) preparedEvidence = readPreparedEvidence(worktree, preparedCandidate, required); }
+    catch (error) { return { ok: false, reason: "no-op", message: error instanceof Error ? error.message : "The committed screenshots could not be verified." }; }
   }
   const setupWanted = store.liveWorktreeSetup(leased.repo);
   const observeSpawn = request.onProviderSpawn;
@@ -1024,6 +1050,10 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     return { ok: false, reason: "git", message: `could not read the base revision in ${worktree}` };
   }
   const baseRevision = revision.stdout.trim();
+  if (codingHandoff !== null) {
+    try { verifyCodingHandoffBase(store, { taskId, taskRef, repo: leased.repo, branch, head: baseRevision }); }
+    catch (error) { return { ok: false, reason: "no-op", message: error instanceof Error ? error.message : "The coding review base changed before dispatch." }; }
+  }
   store.stampRun(request.runId, { baseRevision });
 
   // The warm resume (M6.9), narrowly: an answered park may hand its SESSION
@@ -1408,6 +1438,8 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       const pinned = store.firstBuilderBase(taskRef, branch) ?? baseRevision;
       const brought = await bringWorktreeTo(git, worktree, prepared);
       if (!brought.ok) return { ok: false, reason: "git", message: brought.message };
+      try { if (preparedEvidence) writePreparedEvidence(worktree, proof, preparedEvidence); }
+      catch (error) { return { ok: false, reason: "no-op", message: error instanceof Error ? error.message : "The checked-out screenshots no longer match the saved result." }; }
       const sinceHead = await git(GIT, ["--no-optional-locks", "diff", "--name-only", "-z", "--no-renames", "HEAD", prepared], { cwd: worktree });
       const sinceBase = await git(GIT, ["--no-optional-locks", "diff", "--name-only", "-z", "--no-renames", pinned, prepared], { cwd: worktree });
       if (sinceHead.code !== 0 || sinceBase.code !== 0) return { ok: false, reason: "git", message: firstLine(sinceHead.stderr || sinceBase.stderr) };
@@ -1424,6 +1456,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       const captured: CapturedBuild = {
         store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
         runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof, rubric,
+        ...(preparedEvidence ? { preparedEvidence } : {}),
         clock, fenced: () => fencedMidBuild,
         plan: { proposal, revision: planRevisionNumber, authority, progress: progressState },
       };
@@ -1629,6 +1662,7 @@ export type CapturedBuild = {
   /** The proof manifest's nonce-bound filename (Priority 2) — optional for
    * the agent to write, read the same way as the handoff once it finishes. */
   proof: string;
+  preparedEvidence?: PreparedEvidence;
   rubric?: string;
   clock: () => Date;
   fenced: () => boolean;
@@ -2317,7 +2351,7 @@ async function correctProofReceipt(
   // Without a parsed original there is no trustworthy inventory of checks
   // to freeze. Preserve it for inspection rather than manufacture evidence.
   if (!initial.ok) return unchanged;
-  if (artifactManifestOnly(initial.proof) && (store.getScope(request.taskId)?.acceptance.length ?? 0) > 0) return unchanged;
+  if (artifactManifestOnly(initial.proof) && (captured.preparedEvidence || (store.getScope(request.taskId)?.acceptance.length ?? 0) > 0)) return unchanged;
   const rubric = captured.scope?.acceptance ?? [];
   // The changed-list review against the sealed stat: only a recoverable
   // review (every discrepancy explained by the stat) asks for a turn, and
@@ -2470,6 +2504,10 @@ async function settleProof(
   // the diff (the commit already ran; this is belt-and-suspenders — the
   // git-add pathspec already excludes every STANDING-ORDERS-* name).
   const original = readMailbox(join(worktree, proofFile), PROOF_LIMITS.payload);
+  if (captured.preparedEvidence && (!original.ok || !original.raw.equals(Buffer.from(serializeProof(captured.preparedEvidence.proof))))) {
+    store.saveProofVerdict(runId, "refuted", ["The prepared screenshot receipt changed before capture. Restore the saved candidate and retry review."], now());
+    return;
+  }
   // The sealed diff-stat, restated for the correction boundary and for
   // adjudication — read once, here; a truncated or failed capture cannot
   // prove a claimed path absent and offers no correction either.
@@ -2529,6 +2567,7 @@ async function settleProof(
           if (!found.ok) {
             return { path: shot.path, ok: false, problem: found.missing ? "the file does not exist" : found.problem };
           }
+          if (captured.preparedEvidence && !preparedScreenshotMatches(captured.preparedEvidence, shot.path, found.raw)) return { path: shot.path, ok: false, problem: "the image no longer matches the saved candidate" };
           const checked = validateScreenshotBytes(found.raw);
           if (!checked.ok) return { path: shot.path, ok: false, problem: checked.problem };
           storeEvidence(
@@ -2547,6 +2586,11 @@ async function settleProof(
           return { path: shot.path, ok: true, bytes: found.raw.length, dims: imageDimensions(found.raw, checked.kind) };
         })
       : [];
+
+  if (captured.preparedEvidence && screenshots.some(shot => !shot.ok)) {
+    store.saveProofVerdict(runId, "short", ["The committed screenshots could not be captured. Restore the saved candidate and retry review."], now());
+    return;
+  }
 
   // The receipt and its screenshots are stored above whatever follows; a
   // sealed stat that changed while the receipt was being corrected refuses
