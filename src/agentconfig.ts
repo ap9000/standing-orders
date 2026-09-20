@@ -349,8 +349,14 @@ export function resolveRouteCandidates(store: Store, repo: string | null, pins: 
   const out: Partial<RouteCandidates> = {};
   for (const phase of ["plan", "build", "review"] as const) {
     const routine = exact(phase);
-    if (!routine.ok) return { ok: false, phase, problem: routine.problem };
     const strong = strongOf(phase);
+    // Retain the historical four-leg encoding, but retired reviewer settings
+    // cannot prevent a new task from planning or building. This leg never runs.
+    if (phase === "review" && (!routine.ok || !strong.ok)) {
+      out.review = out.plan!;
+      continue;
+    }
+    if (!routine.ok) return { ok: false, phase, problem: routine.problem };
     if (!strong.ok) return { ok: false, phase, problem: strong.problem };
     out[phase] = { routine: routine.routine, strong: strong.strong };
   }
@@ -545,7 +551,7 @@ export function agentChoicesFor(store: Store, repo: string | null, route: PhaseR
     return out;
   };
   const out: Record<Phase, AgentChoice[]> = { plan: [], build: [], repair: [], review: [] };
-  for (const phase of PHASES) {
+  for (const phase of PHASES.filter(one => one !== "review")) {
     const current = route === null ? null : legOf(route, phase);
     const offered = configuredFor(phase).map(one => ({ provider: one.provider, model: one.model, source: one.source, current: current !== null && sameSpec(current, one), selectable: true }));
     if (current !== null && !offered.some(one => sameSpec(one, current))) {

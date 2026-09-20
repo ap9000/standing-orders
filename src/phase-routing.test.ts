@@ -93,7 +93,7 @@ describe("tiering", () => {
     ]);
     expect(legOf(route, "build").reasons[0]).toBe("risk is routine, quality is default — the configured builder is economical enough");
     expect(postureWords(route)).toBe("everyday configured agents");
-    expect(agentsSummary(route)).toBe("claude · sonnet plans and builds; claude · haiku repairs; codex · gpt-5-codex reviews");
+    expect(agentsSummary(route)).toBe("claude · sonnet plans and builds; claude · haiku repairs");
     expect(routeProblems(route)).toEqual([]);
   });
 
@@ -108,7 +108,7 @@ describe("tiering", () => {
       ["review", "claude", "opus", "strong"],
     ]);
     expect(postureWords(route)).toBe("stronger configured agents");
-    expect(agentsSummary(route)).toBe("claude · opus plans, builds, repairs, and reviews");
+    expect(agentsSummary(route)).toBe("claude · opus plans, builds, and repairs");
   });
 
   test("strict quality reaches for the strong tier even at routine risk", () => {
@@ -329,15 +329,15 @@ describe("the shared projection", () => {
           ? { state: "unknown", reason: "no non-spending login check exists", runner: "mac-mini", observedAt: "2026-09-10T00:00:00.000Z" }
           : null,
     );
-    expect(projection.halted).toBe(true);
-    expect(projection.legs.map(leg => leg.readiness)).toEqual(["unknown", "unknown", "unknown", "unavailable"]);
+    expect(projection.halted).toBe(false);
+    expect(projection.legs.map(leg => leg.readiness)).toEqual(["unknown", "unknown", "unknown"]);
     const words = routeWords(projection);
     expect(words[0]).toBe(`  route        high risk · stronger configured agents · ${projection.digest}`);
-    expect(words[1]).toBe("               claude · opus plans, builds, and repairs; codex · gpt-5 reviews");
-    expect(projection.summary).toBe("claude · opus plans, builds, and repairs; codex · gpt-5 reviews");
+    expect(words[1]).toBe("               claude · opus plans, builds, and repairs");
+    expect(projection.summary).toBe("claude · opus plans, builds, and repairs");
     expect(words).toContain("               build  claude · opus  [recommended · strong] — readiness unknown — no non-spending login check exists");
-    expect(words).toContain("               review codex · gpt-5  [overridden] — UNAVAILABLE — not logged in");
-    expect(words.at(-1)).toContain("HALTED");
+    expect(words.join("\n")).not.toContain("review codex");
+    expect(words.join("\n")).not.toContain("HALTED");
     // Same projection, same bytes, every time.
     expect(routeWords(projectRoute(route, NO_READINESS))).toEqual(routeWords(projectRoute(route, NO_READINESS)));
     expect(projectRoute(route, NO_READINESS).legs[0]!.readinessReason).toBe("no runner has reported this provider yet");
@@ -357,10 +357,10 @@ describe("plain-English risk consequences and route stamp shape (v48)", () => {
     const base = { qualityMode: "default" as const, evidence: [] as const, publication: "none" as const, candidates: candidates(true), overrides: [] };
     const high = recommendRoute({ ...base, risk: "high" });
     expect(high.legs.every(leg => leg.tier === "strong")).toBe(true);
-    expect(riskConsequence("high")).toContain("every role");
+    expect(riskConsequence("high")).toContain("every active role");
     const elevated = recommendRoute({ ...base, risk: "elevated" });
     expect(elevated.legs.map(leg => leg.tier)).toEqual(["routine", "routine", "routine", "strong"]);
-    expect(riskConsequence("elevated")).toContain("the review runs on the strongest configured reviewer");
+    expect(riskConsequence("elevated")).not.toContain("reviewer");
     // …and stays TRUE when the work itself asks for more: strict quality or
     // screenshots strengthen the builder too, and the sentence says so.
     const elevatedStrict = recommendRoute({ ...base, risk: "elevated", qualityMode: "strict" });
@@ -398,4 +398,15 @@ describe("no legacy decoder", () => {
     expect(module["legacyRouteOf"]).toBeUndefined();
     expect(module["routeIsSigned"]).toBeUndefined();
   });
+});
+
+
+test("retired reviewer configuration never blocks active work or changes signed history", () => {
+  const route = recommendRoute(routine({ overrides: [{ phase: "review", provider: "gemini", model: "gemini-2.5-pro", by: "alex", at: "2026-09-10T00:00:00.000Z" }] }));
+  const before = canonicalRouteJson(route), digest = routeDigestOf(route);
+  expect(legOf(route, "review").problem).toContain("no isolation posture");
+  expect(routeProblems(route)).toEqual([]);
+  expect(projectRoute(route, () => null).legs.map(one => one.phase)).toEqual(["plan", "build", "repair"]);
+  expect(canonicalRouteJson(routeFromJson(before)!)).toBe(before);
+  expect(routeDigestOf(route)).toBe(digest);
 });

@@ -1,20 +1,13 @@
-# Task to review
+# Task to completion
 
-The default journey is **Task and context → Plan → Work → Ready for review → Complete**. One assignment owns the conversation, selected project knowledge, plan, revisions and result. The lead or user reviews the outcome. A second model review is an explicit choice; strict release tasks retain their signed review requirements.
+The flow is **Task and context → Plan → Work → Ready → Complete**. One assignment follows the saved plan, work, questions and revisions. Finished work returns to the watching lead or user; there is no separate model reviewer stage.
 
-Standing Orders already saves project knowledge snapshots, plans, result artifacts, revision ancestry and durable handoff updates. Reuse those records. The lead reads new status events and opens the result when needed, instead of repeatedly loading the entire history or resubmitting completed work.
+The lead reads durable updates, opens the exact saved result and checks its goal, plan, changes, agent report and check output. Full assignment reads include bounded, hash-verified saved excerpts; shortened or unavailable content is identified. Polls stay compact. Use concrete feedback to request a revision when work should change. Reading or acknowledging a result starts no model and grants no new execution authority.
 
-A finished build with an intact passing native check reaches the lead before an independent review. Missing proof reports, screenshots or a complete review inventory remain visible limitations; they do not require a rebuild or another agent turn. Routine builders are not asked to restate acceptance criteria in a proof report, and optional proof formatting does not trigger automatic correction turns. The result names its exact commit, check output, outcome and limitations. Marking the lead review complete does not change the machine verdict, accept an exception, publish or deploy. Failed checks, changed saved bytes, active work, unresolved questions and stopped processes remain visible and prevent false completion.
+A finished build with a candidate can be Ready even when checks failed, did not run, or cannot be verified. Those outcomes remain explicit before and after completion. Missing proof inventories, screenshots and other packaging limitations are visible; they do not trigger another turn. Failed attempts without a candidate, unresolved questions, active or unknown processes, holds and stale scope still block handoff. Changed or missing saved bytes are disclosed as unavailable; they do not require restoration before marking the result handled.
 
-Automatic review findings do not create correction tasks unless the project has explicitly authorized automatic repair. A lead can request a revision with concrete feedback using the existing result action. Missing evidence is an issue to inspect; it is not an instruction to rebuild working code.
+The admitted lead acknowledges the exact receipt digest, or the signed-in user selects **Mark complete** after inspecting it. Complete means that person handled this result. It never changes check outcomes, proof verdicts, recorded strict terms or existing exception acceptance. A changed result invalidates the acknowledgment. Publication and deployment remain separate authorized actions; deployment still requires a passing approved native check.
 
-## Delivery check
+The worker does not execute a separate model review. Historical reviews and signed settings remain recorded; they do not keep finished work waiting for another reviewer. Revisions require explicit feedback and the existing execution approval. Standing Orders does not automatically wake a Codex conversation: the lead polls durable assignment updates and saves its cursor after handling the page.
 
-- A routine task reaches the lead after its checks, with no independent-review request required.
-- Reading status, acknowledging a result and receiving feedback do not start another model or change approval authority.
-- Review feedback remains visible; real failed checks and damaged evidence cannot be relabeled successful.
-- Strict release and explicitly signed automation continue to follow their existing terms.
-- UI, CLI and agent tools refer to the same assignment, result and next action.
-- An update is complete only after the running UI, worker and CLI match the deployed build. Source changes alone are not deployment.
-
-Lead review checks the existing saved assignment history directly, without requiring a separate model-review manifest. Strict signed review continues to use that manifest and the existing release checks. The current implementation changes handoff readiness, routine builder instructions and automatic correction filing. It does not add arbitrary evidence attachment or change the native rule that a new commit needs fresh release verification. That remaining infrastructure limitation must be addressed directly, not through repeated manually authored evidence packages.
+UI, CLI and agent tools use the same fresh assignment projection. Deployment is complete only when the running UI, worker and CLI use the intended compatible build; merging source alone is not deployment.

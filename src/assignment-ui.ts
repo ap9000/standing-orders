@@ -6,20 +6,17 @@ import type { DisplayStatus, WorkStatus } from './workspace-ui.js';
 const escape = (value: string): string => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 const LABELS: Record<AssignmentSnapshot['state'], string> = {
   working: 'Working', checking: 'Checking', 'needs-decision': 'Needs your decision',
-  'ready-to-check': 'Ready for review', complete: 'Complete', cancelled: 'Cancelled',
+  'ready-to-check': 'Ready', complete: 'Complete', cancelled: 'Cancelled',
 };
 
 /** The existing verified receipt reader may discover damage after a verdict
- * was saved. Its finding can reduce readiness; it can never confer it. */
+ * was saved. Keep the limitation visible without inventing another work stage. */
 export function assignmentWithEvidence(assignment: AssignmentSnapshot, resultStatus: DisplayStatus | null, resultRunId: number | null = assignment.receipt?.runId ?? null): AssignmentSnapshot {
   if (resultStatus?.token !== 'evidence-damaged') return assignment;
-  const wasReady = ['ready-to-check', 'complete'].includes(assignment.state);
-  return { ...assignment, ...(wasReady ? { state: 'needs-decision' as const, detail: resultStatus.detail } : {}),
-    attempts: assignment.attempts.map(attempt => attempt.taskId === assignment.activeTaskId && resultRunId !== null && attempt.runId === resultRunId ? { ...attempt, label: resultStatus.label, detail: resultStatus.detail } : attempt),
+  return { ...assignment,
+    attempts: assignment.attempts.map(attempt => attempt.taskId === assignment.activeTaskId && resultRunId !== null && attempt.runId === resultRunId ? { ...attempt, detail: resultStatus.detail } : attempt),
     attention: [...new Set([...assignment.attention, resultStatus.detail])],
-    primaryAction: !wasReady || assignment.receipt === null ? assignment.primaryAction : {
-      code: 'open-result', label: 'Review evidence', target: { taskId: assignment.receipt.taskId, runId: assignment.receipt.runId, decisionId: null }, access: 'read', retry: 'read-again',
-    } };
+  };
 }
 
 type AssignmentWorkStatus = DisplayStatus & Partial<Pick<WorkStatus, 'views' | 'rank'>>;
@@ -77,9 +74,5 @@ export function assignmentSummaryHtml(assignment: AssignmentSnapshot, options: {
     assignmentAttemptsHtml(assignment) + `</section>`;
 }
 
-/** A fresh opt-in. Signing the resulting mode is still a separate ceremony. */
-export function reviewRetryChoiceHtml(checked = false): string {
-  return `<label class="assignment-mode-option"><input type="checkbox" name="review-retry-auto" value="1"${checked ? " checked" : ""}><span>Retry review service failures<span class="meta">Up to two retries. Stopped reviews and completed verdicts never retry.</span></span></label>`;
-}
-
-export const ASSIGNMENT_CSS = `.assignment-summary{min-width:0;overflow-wrap:anywhere}.assignment-summary .assignment-state{font-weight:600;margin:0}.assignment-summary h2.assignment-state{font-size:1.125rem;color:var(--foreground)}.assignment-summary>.assignment-attempts{border:0;box-shadow:none;padding:0;margin:.25rem 0 0}.assignment-summary>.button-link{margin-top:.7rem;min-height:44px}.assignment-summary>.work-action{display:inline-flex;margin-inline-start:.6rem;min-height:44px;align-items:center}.assignment-detail{margin:.55rem 0}.assignment-attempts summary{min-height:44px;display:list-item;align-content:center;cursor:pointer}.assignment-attempts ol{padding-left:1.4rem}.assignment-attempts li{margin:.4rem 0}.assignment-attempts li a{display:inline-flex;align-items:center;min-height:44px;margin-right:.7rem}.assignment-attempts li p{margin:0 0 .4rem}.assignment-mode-option{display:flex;align-items:center;gap:.65rem;min-height:44px}.assignment-mode-option input{width:20px;height:20px;flex:0 0 20px}.assignment-mode-option>span{min-width:0}.assignment-mode-option .meta{display:block;margin-top:.2rem}`;
+/** Shared assignment layout; actions remain comfortable on touch screens. */
+export const ASSIGNMENT_CSS = `.assignment-summary{min-width:0;overflow-wrap:anywhere}.assignment-summary .assignment-state{font-weight:600;margin:0}.assignment-summary h2.assignment-state{font-size:1.125rem;color:var(--foreground)}.assignment-summary>.assignment-attempts{border:0;box-shadow:none;padding:0;margin:.25rem 0 0}.assignment-summary>.button-link{margin-top:.7rem;min-height:44px}.assignment-summary>.work-action{display:inline-flex;margin-inline-start:.6rem;min-height:44px;align-items:center}.assignment-detail{margin:.55rem 0}.assignment-attempts summary{min-height:44px;display:list-item;align-content:center;cursor:pointer}.assignment-attempts ol{padding-left:1.4rem}.assignment-attempts li{margin:.4rem 0}.assignment-attempts li a{display:inline-flex;align-items:center;min-height:44px;margin-right:.7rem}.assignment-attempts li p{margin:0 0 .4rem}`;

@@ -22,7 +22,10 @@ import { register, recoverDead, DEFAULT_LIVENESS_MS } from "./runner.js";
 import { acquire } from "./claim.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { routeDigestOf } from "./phase-routing.js";
-import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
+import { presetTerms as currentPresetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
+// These fixtures exercise retained pre-retirement records, whose signed modes
+// explicitly enabled review. Current presets leave it off.
+const presetTerms: typeof currentPresetTerms = (...args) => ({ ...currentPresetTerms(...args), reviewAuto: true });
 import { maybeRequestAutoReview } from "./dispose.js";
 import { requestTaskStop, resumeTaskStop } from "./task-control.js";
 import { run as runCommand } from "./exec.js";
@@ -1580,8 +1583,9 @@ describe("the reviewer role in the store", () => {
         for (const road of ["mode", "strict"] as const) test(`replaying the ${road} producer after a failed root queues nothing and admits nothing; a fresh operator ask retries to success`, async () => {
           const source = road === "mode" ? (signStandard(), builtRun) : strictBuild().run;
           const strictSpec = road === "mode" ? spec : { ...spec, model: "sonnet" };
-          // The producer's one shot: the first ask, typed automatic.
-          maybeRequestAutoReview(store, REPO, source, true, false, T0);
+          // Seed the historical request explicitly; the retired producer itself does nothing.
+          const oldMode = store.activeMode(REPO, T0);
+          expect(store.requestReview(source, "alex", T0, road === "mode" ? { kind: "mode", digest: oldMode!.digest } : undefined, "automatic").ok).toBe(true);
           const first = store.openReviewRequests();
           expect(first).toMatchObject([{ run: source, origin: "automatic", basis: road === "mode" ? "mode" : "human" }]);
           // Replaying it while the ask is still queued adds nothing.
@@ -1635,7 +1639,7 @@ describe("the reviewer role in the store", () => {
           signStandard();
           const mode = store.activeMode(REPO, T0)!;
           // Attempt 1 through the real doors, failed.
-          maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
+          expect(store.requestReview(builtRun, "alex", T0, { kind: "mode", digest: store.activeMode(REPO, T0)!.digest }, "automatic").ok).toBe(true);
           const first = store.openReviewRequests()[0]!;
           const admitted = store.admitReview(first.id, spec, T0);
           if (!admitted.ok) throw new Error(admitted.reason);
@@ -1671,7 +1675,7 @@ describe("the reviewer role in the store", () => {
 
         test("an automatic ask before any attempt still runs; a first automatic ask after a spent-unrun ask is a replay too", async () => {
           signStandard();
-          maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
+          expect(store.requestReview(builtRun, "alex", T0, { kind: "mode", digest: store.activeMode(REPO, T0)!.digest }, "automatic").ok).toBe(true);
           const open = store.openReviewRequests();
           expect(open).toMatchObject([{ run: builtRun, origin: "automatic" }]);
           // A railed admission leaves the automatic ask OPEN — the same
@@ -1680,7 +1684,7 @@ describe("the reviewer role in the store", () => {
           expect(admitted).toMatchObject({ ok: true, attempt: 1 });
           // A second source: the producer's ask spent unrun, then replayed.
           const other = seedBuilt().runId;
-          maybeRequestAutoReview(store, REPO, other, true, false, T0);
+          expect(store.requestReview(other, "alex", T0, { kind: "mode", digest: store.activeMode(REPO, T0)!.digest }, "automatic").ok).toBe(true);
           const spent = store.openReviewRequests().find(one => one.run === other)!;
           store.consumeReviewRequest(spent.id, "route-changed", T0);
           maybeRequestAutoReview(store, REPO, other, true, false, new Date(T0.getTime() + 1_000));
@@ -2963,12 +2967,12 @@ describe("the reviewer role in the store", () => {
     }
   });
 
-  test("maybeRequestAutoReview: a live reviewAuto mode queues built-with-changes, and only that", () => {
+  test("retired automatic review ignores old signed reviewAuto modes and preserves results", () => {
     // No mode: nothing queued.
     maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
     expect(store.openReviewRequests()).toHaveLength(0);
 
-    const terms = presetTerms("standard", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString());
+    const terms = { ...presetTerms("standard", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString()), reviewAuto: true };
     store.signMode(
       { repo: REPO, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication },
       T0,
@@ -2980,13 +2984,10 @@ describe("the reviewer role in the store", () => {
 
     maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
     const open = store.openReviewRequests();
-    expect(open).toHaveLength(1);
-    expect(open[0]?.basis).toBe("mode");
-    expect(open[0]?.modeDigest).toBe(modeDigestOf(terms));
+    expect(open).toHaveLength(0);
+    expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(0);
 
-    // An explicitly disabled review policy queues nothing new. Fresh presets
-    // both keep reviews enabled; old signed terms remain unchanged.
-    store.consumeReviewRequest(open[0]?.id ?? -1, "test", T0);
+    // Neither old signed terms nor new presets schedule another agent.
     const handsOff = presetTerms("hands-off", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString());
     handsOff.reviewAuto = false;
     store.signMode(
@@ -2997,19 +2998,19 @@ describe("the reviewer role in the store", () => {
     expect(store.openReviewRequests()).toHaveLength(0);
   });
 
-  test.each(["missing", "failed", "settings-changed", "passed"] as const)("automatic review waits for usable project checks: %s", state => {
+  test.each(["missing", "failed", "settings-changed", "passed"] as const)("retired automatic review stays idle for every project check result: %s", state => {
     const terms = presetTerms("hands-off", new Date(T0.getTime() + 86_400_000).toISOString());
     store.signMode({ repo: REPO, name: "hands-off", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, T0);
     store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 600_000, approvedBy: "alex" }, new Date(T0.getTime() + (state === "settings-changed" ? 1000 : -1000)));
     if (state !== "missing") store.saveProofVerdict(builtRun, state === "failed" ? "refuted" : "verified", [], T0, []);
     maybeRequestAutoReview(store, REPO, builtRun, true, false, new Date(T0.getTime() + 2000));
-    expect(store.openReviewRequests()).toHaveLength(state === "passed" ? 1 : 0);
+    expect(store.openReviewRequests()).toHaveLength(0);
     expect(store.runsFor(taskRef).filter(run => run.role === "reviewer")).toHaveLength(0);
-    // An operator may still explicitly request a diagnostic review.
+    // Historical request rows remain readable; the worker retires them without a model call.
     if (state === "failed") expect(store.requestReview(builtRun, "alex", T0).ok).toBe(true);
   });
 
-  test("Strict / release queues its isolated reviewer from the signed scope; Default stays on the fast path", () => {
+  test("Strict and Default both finish without queuing an isolated reviewer", () => {
     maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
     expect(store.openReviewRequests()).toHaveLength(0);
 
@@ -3044,9 +3045,8 @@ describe("the reviewer role in the store", () => {
     store.finishRun(strictRun, { outcome: "built", committed: true, now: T0 });
 
     maybeRequestAutoReview(store, REPO, strictRun, true, false, T0);
-    expect(store.openReviewRequests()).toMatchObject([
-      { run: strictRun, requestedBy: "alex", basis: "human", modeDigest: null },
-    ]);
+    expect(store.openReviewRequests()).toHaveLength(0);
+    expect(store.getRun(strictRun)?.qualityMode).toBe("strict");
   });
 
   test("the pre-typed upgrade fails closed: open requests from before basis existed are spent as legacy-untyped", () => {

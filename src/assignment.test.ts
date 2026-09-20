@@ -19,7 +19,7 @@ import { taskWorkSummaryOf } from "./work-summary.js";
 import { assignmentSummaryHtml } from "./assignment-ui.js";
 import { requestResultChanges } from "./result-actions.js";
 import * as taskControl from "./task-control.js";
-import { assignmentOf, assignmentBrief, assignmentEvidenceIntact, assignmentUpdates, checkAssignment, claimAssignment, syncAssignmentHandoffs, type AssignmentOwner } from "./assignment.js";
+import { assignmentOf, assignmentBrief, assignmentEvidenceIntact, assignmentUpdates, checkAssignment, checkAssignmentAsOperator, claimAssignment, syncAssignmentHandoffs, type AssignmentOwner } from "./assignment.js";
 
 const NOW = new Date("2026-09-20T10:00:00Z");
 const REPO = "/repos/assignment";
@@ -132,7 +132,7 @@ describe("continuous assignments over existing task families", () => {
     expect(store.getScope(trigger.draftTaskId)?.approvedAt).not.toBeNull();
   });
 
-  test("a checked result reaches its lead before independent review; acknowledgment changes no authority", () => {
+  test("a checked result reaches its lead without a separate review; acknowledgment changes no authority", () => {
     const run = built();
     expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "ready-to-check", receipt: { completionKind: "checked-build" } });
     claimAssignment(store, "retry", lead, NOW, dir);
@@ -148,8 +148,30 @@ describe("continuous assignments over existing task families", () => {
     expect(store.publicationForRun(run)).toBeNull();
     expect(store.reviewRetryStateOf(run)?.state).toBe("unrequested");
     store.recordOutcomeFacts(run, { headRevision: "c".repeat(40) });
-    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision"); // Gate still binds the old head.
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "ready-to-check", receipt: { checks: { status: "unavailable" } } }); // Gate still binds the old head; no check success is claimed.
     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
+  });
+
+  test("full assignment reads expose bounded verified saved work while polling stays compact", () => {
+    const run = built();
+    const diff = storeEvidence(store, dir, run, "terminal-diff", "changes.patch", Buffer.from("x".repeat(9000)), "saved changes", NOW);
+    const shown = assignmentForCoordinator(store, leadToken, "show", { ref: "retry" }, NOW, dir);
+    expect(shown).toMatchObject({ ok: true, body: { savedContext: { goal: "Keep retry requests safe", excerpts: [
+      { artifactId: diff, runId: run, kind: "terminal-diff", shortened: true, problem: null },
+      { kind: "check-log", text: "1 retry test passed", shortened: false, problem: null },
+    ] } } });
+    const saved = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(saved.savedContext?.excerpts[0]?.text).toHaveLength(8000);
+    expect(assignmentBrief(saved)).not.toHaveProperty("savedContext");
+    const lines: string[] = [];
+    expect(runAssignmentCommand(["show", "retry"], new Map(), { store, now: NOW, json: false, evidenceRoot: dir, write: text => lines.push(text) })).toBe(0);
+    expect(lines[0]).toContain("Checks: Checks passed. (npm test)");
+    expect(lines[0]).toContain(`Saved terminal-diff #${diff}`);
+    writeFileSync(join(dir, store.getArtifact(diff)!.key), "changed output");
+    const damaged = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(damaged.savedContext?.excerpts[0]).toMatchObject({ text: null, problem: "Saved bytes are unavailable or changed." });
+    expect(damaged).toMatchObject({ state: "ready-to-check", attention: [expect.stringContaining("unavailable or changed")] });
+    expect(assignmentOf(store, "retry", NOW, { principal: "coordinator", repos: ["/private"] }, dir)).toBeNull();
   });
 
   test("semantic evidence gaps reach the lead once without changing checks or the review verdict", () => {
@@ -188,22 +210,29 @@ describe("continuous assignments over existing task families", () => {
     expect(store.proofAcceptance(run)).toBeNull();
   });
 
-  test("failed machine checks cannot become a completed lead review", () => {
-    built(task(), false, false, false, 1);
+  test.each(["default", "strict"] as const)("failed checks reach the lead without rerunning or relabeling success: %s", quality => {
+    store.setQualityDefault(quality, "operator", NOW);
+    const run = built(task(), false, false, false, 1);
     claimAssignment(store, "retry", lead, NOW, dir);
     const result = assignmentOf(store, "retry", NOW, access, dir)!;
-    expect(result.state).toBe("needs-decision");
-    expect(result.receipt?.completionKind).toBeNull();
-    expect(checkAssignment(store, "retry", result.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
-    expect(store.actionLedger({ repos: null }).filter(a => a.action === "assignment handoff checked")).toHaveLength(0);
+    expect(result).toMatchObject({ state: "ready-to-check", detail: "Checks failed (exit 1).",
+      receipt: { completionKind: "finished-build", checks: { status: "failed", exitCode: 1, command: "npm test" } } });
+    const proof = store.proofVerdictFor(run), runs = store.runsFor(store.lookupRef("retry")!.id);
+    expect(checkAssignment(store, "retry", result.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: {
+      state: "complete", detail: expect.stringContaining("Checks failed (exit 1)."), receipt: { checks: { status: "failed", exitCode: 1 } } } });
+    expect(store.proofVerdictFor(run)).toEqual(proof); expect(store.runsFor(store.lookupRef("retry")!.id)).toEqual(runs);
+    expect(store.proofAcceptance(run)).toBeNull(); expect(store.repairChainFor(run)).toBeNull();
   });
 
-  test("strict release keeps its requested independent review", () => {
+  test("strict terms remain recorded but do not require a separate reviewer for handoff", () => {
     store.setQualityDefault("strict", "operator", NOW);
     const run = built();
-    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision");
-    reviewed(run);
-    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("ready-to-check");
+    const before = store.getScope("retry"), ready = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(ready.state).toBe("ready-to-check");
+    const review = store.reviewRetryStateOf(run)!;
+    vi.spyOn(store, "reviewRetryStateOf").mockReturnValue({ ...review, state: "queued" });
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "ready-to-check", receipt: { digest: ready.receipt!.digest } });
+    expect(store.getScope("retry")).toEqual(before);
   });
 
   test("passing checks do not hide unresolved process custody", () => {
@@ -213,7 +242,31 @@ describe("continuous assignments over existing task families", () => {
       primaryAction: { code: "inspect-run", target: { runId: run } } });
   });
 
-  test("missing artifact bytes refuse acknowledgment, including replay of an earlier checked receipt", () => {
+  test("the authenticated user can handle a failed-check result without taking lead ownership or changing its outcome", () => {
+    const run = built(task(), false, false, false, 1);
+    claimAssignment(store, "retry", lead, NOW, dir);
+    const principal = verifyApproverStanding(store, "operator", store.accountOf("operator")!.generation, [REPO]);
+    if (!principal.ok) throw Error("operator fixture");
+    const ready = assignmentOf(store, "retry", NOW, access, dir)!, proof = store.proofVerdictFor(run), scope = store.getScope("retry");
+    expect(checkAssignmentAsOperator(store, "retry", "f".repeat(64), principal.who, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
+    expect(checkAssignmentAsOperator(store, "retry", ready.receipt!.digest, { ...principal.who }, NOW, dir)).toMatchObject({ ok: false, reason: "unauthenticated" });
+    const completed = checkAssignmentAsOperator(store, "retry", ready.receipt!.digest, principal.who, NOW, dir);
+    expect(completed).toMatchObject({ ok: true, assignment: { state: "complete", owner: { id: lead.id },
+      completion: { actor: "operator:operator", at: NOW.toISOString(), digest: ready.receipt!.digest },
+      receipt: { checks: { status: "failed", exitCode: 1 } } } });
+    expect(checkAssignmentAsOperator(store, "retry", ready.receipt!.digest, principal.who, NOW, dir).ok).toBe(true);
+    expect(store.actionLedger({ repos: null }).filter(one => one.action === "assignment handoff checked")).toHaveLength(1);
+    expect(store.proofVerdictFor(run)).toEqual(proof); expect(store.getScope("retry")).toEqual(scope);
+    expect(store.proofAcceptance(run)).toBeNull(); expect(store.reviewRetryStateOf(run)?.state).toBe("unrequested");
+    store.raw().prepare("UPDATE approver SET generation = generation + 1 WHERE name = 'operator'").run();
+    expect(checkAssignmentAsOperator(store, "retry", ready.receipt!.digest, principal.who, NOW, dir)).toMatchObject({ ok: false, reason: "unauthenticated" });
+    const fresh = verifyApproverStanding(store, "operator", store.accountOf("operator")!.generation, [REPO]);
+    if (!fresh.ok) throw Error("fresh principal");
+    store.raw().prepare("UPDATE approver SET projects_json = '[]' WHERE name = 'operator'").run();
+    expect(checkAssignmentAsOperator(store, "retry", ready.receipt!.digest, fresh.who, NOW, dir)).toMatchObject({ ok: false, reason: "not-found" });
+  });
+
+  test("unavailable artifact bytes refresh every surface and can be handled without resubmission", () => {
     const run = built(); reviewed(run); claimAssignment(store, "retry", lead, NOW, dir);
     const receipt = assignmentOf(store, "retry", NOW, access, dir)!.receipt!;
     expect(checkAssignment(store, "retry", receipt.digest, lead, NOW, dir).ok).toBe(true);
@@ -235,24 +288,32 @@ describe("continuous assignments over existing task families", () => {
     const original = readVerifiedArtifact(dir, artifact); if (!original.ok) throw Error("fixture bytes");
     writeFileSync(join(dir, artifact.key), "changed check output");
     const before = store.actionLedger({ repos: null });
-    for (const one of read()) expect(one).toMatchObject({ state: "needs-decision", handoff: { kind: "attention", acknowledged: false }, primaryAction: { label: "Review evidence", target: { runId: run } } });
+    for (const one of read()) {
+      expect(one).toMatchObject({ state: "ready-to-check", handoff: { kind: "result", acknowledged: false } });
+      expect(one.receipt ?? one.result).toMatchObject({ checks: { status: "unavailable" } });
+    }
     expect(store.actionLedger({ repos: null })).toEqual(before);
-    expect(assignmentForCoordinator(store, leadToken, "show", { ref: "retry" }, NOW)).toMatchObject({ ok: true, body: { state: "needs-decision" } });
+    expect(assignmentForCoordinator(store, leadToken, "show", { ref: "retry" }, NOW)).toMatchObject({ ok: true, body: { state: "ready-to-check" } });
     syncAssignmentHandoffs(store, NOW, [REPO], dir); syncAssignmentHandoffs(store, NOW, [REPO], dir);
     const updates = assignmentUpdates(store, NOW, access, { after: 0, limit: 50 }, dir).events;
     expect(updates).toHaveLength(2); expect(updates[0]?.superseded).toBe(true);
-    expect(updates[1]).toMatchObject({ superseded: false, assignment: { state: "needs-decision" } });
+    expect(updates[1]).toMatchObject({ superseded: false, assignment: { state: "ready-to-check" } });
     writeFileSync(join(dir, artifact.key), original.content);
     for (const one of read()) expect(one).toMatchObject({ state: "complete" });
     writeFileSync(join(dir, artifact.key), "changed check output");
-    expect(checkAssignment(store, "retry", receipt.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
+    expect(checkAssignment(store, "retry", receipt.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
+    const changed = assignmentOf(store, "retry", NOW, access, dir)!;
+    const runs = store.runsFor(store.lookupRef("retry")!.id);
+    expect(checkAssignment(store, "retry", changed.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete", receipt: { checks: { status: "unavailable" } } } });
+    for (const one of read()) expect(one).toMatchObject({ state: "complete" });
+    expect(store.runsFor(store.lookupRef("retry")!.id)).toEqual(runs);
     expect(store.proofAcceptance(run)).toBeNull();
   });
 
   test("a scoped research report can be checked without inventing a commit, proof or independent review", () => {
     const { ref, run } = research();
     const missing = assignmentOf(store, "research", NOW, access, dir)!;
-    expect(missing.state).toBe("needs-decision"); expect(missing.detail).toContain("report is missing or incomplete");
+    expect(missing.state).toBe("ready-to-check"); expect(missing.attention).toContain("The report artifact is missing or ambiguous.");
     const artifact = storeEvidence(store, dir, run, "report", "report.json", Buffer.from(JSON.stringify({ title: "Retries", summary: "Retries preserve identity.", report: "The request key remains unchanged.", followUps: [] })), "scout report", NOW, { captureStatus: "ok" });
     claimAssignment(store, "research", lead, NOW, dir);
     const ready = assignmentOf(store, "research", NOW, access, dir)!;
@@ -264,16 +325,16 @@ describe("continuous assignments over existing task families", () => {
     expect(checkAssignment(store, "research", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
     expect(store.proofAcceptance(run)).toBeNull(); expect(store.proofVerdictFor(run)).toBeNull();
     writeFileSync(join(dir, store.getArtifact(artifact)!.key), "changed report");
-    expect(assignmentOf(store, "research", NOW, access, dir)?.state).toBe("needs-decision");
+    expect(assignmentOf(store, "research", NOW, access, dir)).toMatchObject({ state: "ready-to-check", attention: [expect.stringContaining("unavailable or changed")] });
     expect(assignmentEvidenceIntact(store, dir, ready.receipt!)).toBe(false);
-    expect(checkAssignment(store, "research", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
+    expect(checkAssignment(store, "research", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
   });
 
-  test.each(["verified-build", "research-report", "accepted-exception"] as const)("an unresolved question blocks a completed %s until its normal answer", kind => {
+  test.each(["checked-build", "research-report", "accepted-exception"] as const)("an unresolved question blocks a completed %s until its normal answer", kind => {
     const id = kind === "research-report" ? "research" : "retry";
-    const run = kind === "research-report" ? research(true).run : built(task(), kind === "verified-build", false, true);
+    const run = kind === "research-report" ? research(true).run : built(task(), kind === "checked-build", false, true);
     if (kind === "research-report") storeEvidence(store, dir, run, "report", "report.json", Buffer.from(JSON.stringify({ title: "Retries", summary: "Keep request identity.", report: "The request key remains unchanged.", followUps: [] })), "scout report", NOW, { captureStatus: "ok" });
-    else if (kind === "verified-build") reviewed(run);
+    else if (kind === "checked-build") reviewed(run);
     else store.acceptProof(run, "operator", "Inspected the recorded limitations", NOW);
     claimAssignment(store, id, lead, NOW, dir);
     const decision = store.decisionForRun(run)!;
@@ -289,7 +350,7 @@ describe("continuous assignments over existing task families", () => {
       expect(taskWorkSummaryOf(store, id, NOW, access)?.primaryAction).toEqual(current.primaryAction);
       expect(checkAssignment(store, id, current.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "not-ready" });
     }
-    if (kind === "verified-build") {
+    if (kind === "checked-build") {
       const completed = store.reviewRetryStateOf(run)!;
       const review = vi.spyOn(store, "reviewRetryStateOf").mockReturnValue({ ...completed, state: "queued" });
       expect(assignmentOf(store, id, NOW, access, dir)).toMatchObject({ state: "needs-decision", primaryAction: { code: "answer-decision" } });
@@ -351,9 +412,9 @@ describe("continuous assignments over existing task families", () => {
     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
     const current = assignmentOf(store, "retry", NOW, access, dir)!;
     const saved = store.artifactsFor(run)[0]!; writeFileSync(join(dir, saved.key), "changed saved bytes");
-    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision");
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "ready-to-check", attention: expect.arrayContaining([expect.stringContaining("unavailable or changed")]) });
     expect(assignmentEvidenceIntact(store, dir, current.receipt!)).toBe(false);
-    expect(checkAssignment(store, "retry", current.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
+    expect(checkAssignment(store, "retry", current.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
   });
 
   test("acceptance cannot legitimize a failed or candidate-less builder result", () => {
@@ -372,7 +433,7 @@ describe("continuous assignments over existing task families", () => {
     expect(ready.receipt!.artifacts.find(a => a.id === diagnostic)?.complete).toBe(false);
     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
     writeFileSync(join(dir, store.getArtifact(diagnostic)!.key), "changed diagnostic");
-    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
+    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
   });
 
   test("a shortened check log retains its limitation without invalidating its sealed passing gate", () => {
@@ -383,7 +444,7 @@ describe("continuous assignments over existing task families", () => {
     expect(checkAssignment(store, "retry", receipt.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
     const log = store.artifactsFor(run).find(a => a.kind === "check-log")!;
     writeFileSync(join(dir, log.key), "changed retained output");
-    expect(checkAssignment(store, "retry", receipt.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
+    expect(checkAssignment(store, "retry", receipt.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
   });
 
   test("a recorded direct assessment uses its bound context, exact diff and gate without inventing builder proof", () => {
@@ -391,13 +452,13 @@ describe("continuous assignments over existing task families", () => {
     store.raw().prepare("DELETE FROM artifact WHERE run = ? AND kind = 'proof'").run(run);
     const previous = store.proofVerdictFor(run)!;
     const current = () => assignmentOf(store, "retry", NOW, access, dir)!.receipt!;
-    // An ordinary verified matrix cannot use absence as substitute proof.
-    expect(checkAssignment(store, "retry", current().digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
+    // The lead can inspect the saved result without authoring missing proof.
+    expect(checkAssignment(store, "retry", current().digest, lead, NOW, dir)).toMatchObject({ ok: true });
     store.saveProofVerdict(run, "verified", [], NOW, previous.matrix.map(row => ({ ...row, assessment: { evidenceState: "pass", detail: [] } })), "verified");
     storeEvidence(store, dir, run, "terminal-diff", "diff.txt", Buffer.from("diff --git a/src/retry.ts b/src/retry.ts\n+keep(request.key)\n"), "git diff", NOW, { captureStatus: "ok" });
     storeEvidence(store, dir, run, "diff-stat", "stat.json", Buffer.from(JSON.stringify({ schema: 1, head: "a".repeat(40), base: "b".repeat(40), filesTruncated: false, files: [{ path: "src/retry.ts" }], fileCount: 1 })), "git diff stat", NOW, { captureStatus: "ok" });
     const handoff = storeEvidence(store, dir, run, "handoff", "handoff.txt", Buffer.from("The retry keeps the request key."), "builder handoff", NOW, { captureStatus: "ok" });
-    expect(checkAssignment(store, "retry", current().digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
+    expect(checkAssignment(store, "retry", current().digest, lead, NOW, dir)).toMatchObject({ ok: true });
     const context = storeEvidence(store, dir, run, "review-context", "context.json", Buffer.from(JSON.stringify({ schema: 3, identities: [],
       bindings: [reviewContextBindingOf(store, run, true)], run, head: "a".repeat(40), base: "b".repeat(40),
       handoff: { artifact: handoff, sha256: store.getArtifact(handoff)!.sha256, content: "The retry keeps the request key." },
@@ -413,7 +474,7 @@ describe("continuous assignments over existing task families", () => {
     expect(checkAssignment(store, "retry", ready.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
     expect(store.artifactsFor(run).some(a => a.kind === "proof")).toBe(false);
     writeFileSync(join(dir, store.getArtifact(context)!.key), "changed context");
-    expect(checkAssignment(store, "retry", ready.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
+    expect(checkAssignment(store, "retry", ready.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
   });
 
   function revisionContext(run: number, original: number) {
@@ -425,7 +486,7 @@ describe("continuous assignments over existing task families", () => {
       limits: { itemBytes: 1024, aggregateBytes: 1024, items: 1 } })), "machine-captured review context", NOW, { captureStatus: "ok" });
   }
 
-  test.each(["verified-build", "checked-build"] as const)("a %s revision refuses damaged ancestor evidence before handoff acknowledgment", kind => {
+  test.each(["verified-build", "checked-build"] as const)("a %s revision discloses damaged ancestor evidence without requiring resubmission", kind => {
     const original = built();
     storeEvidence(store, dir, original, "terminal-diff", "changes.patch", Buffer.from("diff --git a/src/retry.ts b/src/retry.ts\n"), "saved changes", NOW);
     const revision = requestResultChanges(store, dir, { run: original, batch: "", source: store.getScope("retry")!.digest,
@@ -433,15 +494,17 @@ describe("continuous assignments over existing task families", () => {
     expect(revision.ok).toBe(true); if (!revision.ok) throw Error(revision.message);
     expect(approve(store, revision.id, "operator", NOW, store.getScope(revision.id)!.digest, token).ok).toBe(true);
     const run = built(revision.id); if (kind === "verified-build") reviewed(run); claimAssignment(store, "retry", lead, NOW, dir);
-    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe(kind === "verified-build" ? "needs-decision" : "ready-to-check");
+    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("ready-to-check");
     if (kind === "verified-build") revisionContext(run, original);
     const ready = assignmentOf(store, "retry", NOW, access, dir)!;
-    expect(ready).toMatchObject({ state: "ready-to-check", receipt: { runId: run, completionKind: kind } });
+    expect(ready).toMatchObject({ state: "ready-to-check", receipt: { runId: run, completionKind: "checked-build" } });
     const ancestorProof = store.artifactsFor(original).find(one => one.kind === "proof")!;
     writeFileSync(join(dir, ancestorProof.key), "changed ancestor proof");
-    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision");
-    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "evidence-unavailable" });
-    expect(store.actionLedger({ repos: null }).filter(a => a.action === "assignment handoff checked")).toEqual([]);
+    const current = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(current).toMatchObject({ state: "ready-to-check", attention: [expect.stringContaining("unavailable or changed")] });
+    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
+    expect(checkAssignment(store, "retry", current.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
+    expect(store.actionLedger({ repos: null }).filter(a => a.action === "assignment handoff checked")).toHaveLength(1);
   });
 
   test("cancellation sends one durable terminal handoff without a result acknowledgment", () => {
@@ -570,13 +633,14 @@ describe("assignment handoff audit regressions", () => {
     return run;
   }
 
-  test("a hash-valid failed evidence capture cannot be acknowledged as complete", () => {
+  test("a failed capture remains a visible limitation after acknowledgment", () => {
     const run = readyResult();
     storeEvidence(store, dir, run, "screenshot", "phone.png", Buffer.from("Screenshot capture failed: browser disconnected"), "phone capture", NOW, { captureStatus: "failed" });
     const current = assignmentOf(store, "checked-result", NOW, coordinator, dir)!;
     expect(current.receipt?.artifacts.some(one => !one.complete)).toBe(true);
     const checked = checkAssignment(store, "checked-result", current.receipt!.digest, owner, NOW, dir);
-    expect(checked).toMatchObject({ ok: false, reason: "evidence-unavailable" });
-    expect(store.actionLedger({ repos: null }).filter(one => one.action === "assignment handoff checked")).toHaveLength(0);
+    expect(checked).toMatchObject({ ok: true, assignment: { state: "complete", attention: [expect.stringContaining("failed capture")] } });
+    expect(store.artifactsFor(run).find(one => one.kind === "screenshot")?.captureStatus).toBe("failed");
+    expect(store.actionLedger({ repos: null }).filter(one => one.action === "assignment handoff checked")).toHaveLength(1);
   });
 });

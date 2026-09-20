@@ -43,7 +43,6 @@ import {
   parseCapabilityKey,
   verifiedAuthor,
   contestantProfileOf,
-  REVIEW_ROOT_ATTEMPTS,
   type Capability,
   type ReviewRetryState,
   type Store,
@@ -238,7 +237,6 @@ import { plan as planTask } from "./planner.js";
 import { attachTmux, elapsedWords, openInTmux, PEEK_TAIL_LINES, runPeek, snapshotLiveRuns } from "./peek-cli.js";
 import { scout as scoutTask } from "./scout.js";
 import { profileDigestOf, chainDigestOf, entryDigestOf } from "./scope.js";
-import { reviewPass } from "./reviewer.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, readAuthModeStrict, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import { run, terminateLiveProviders, run as execRun } from "./exec.js";
 import { containmentStatus, currentContainment, describeContainment, resolveContainment } from "./containment.js";
@@ -374,7 +372,7 @@ External trackers — build what a tracker nominates, under local approvals
   standing-orders task regate <id> --as <you> --token <t>
                                         run the approved check again on the
                                         last attempt's exact commit — a new
-                                        attempt, no agent, fresh review
+                                        attempt, no agent, saved result
   standing-orders config set budgets [--build-usd <n>] [--race-per-usd <n>]
       [--race-total-usd <n>] [--race-agents 2..4] --as <you> --token <t>
                                         spend defaults new filings pre-fill
@@ -441,9 +439,9 @@ Capabilities — what the work needs, recorded and probed, never valued
                                         the repo, asks you questions, and
                                         proposes a scope you approve
   standing-orders task route <id> [--risk routine|elevated|high]
-      [--phase plan|build|repair|review --provider <p> [--model <m>] | --clear-phase <phase>]
-      --as <you> --token <t>            which agent plans, builds, repairs, and
-                                        reviews this task, with the reason for
+      [--phase plan|build|repair --provider <p> [--model <m>] | --clear-phase <phase>]
+      --as <you> --token <t>            which agent plans, builds, and repairs
+                                        this task, with the reason for
                                         each; declare its risk or override a
                                         phase — approval seals the route
 
@@ -493,7 +491,7 @@ Agents — which provider and model each phase runs on
   standing-orders config show [--repo <path>]
   standing-orders config set <phase> --provider claude|codex|openrouter
       [--model <m>] [--repo <path>] --as <you> --token <t>
-                                        phases: plan | build | repair | review. The
+                                        phases: plan | build | repair. The
                                         repo form is a project override;
                                         without it, installation-wide.
                                         Repair's PROVIDER always inherits
@@ -1985,15 +1983,11 @@ class StaleAuthorization extends Error {}
 /** What happened to one task this pass looked at. */
 type TickOutcome = {
   id: string;
-  outcome: "built" | "planned" | "reported" | "parked" | "skipped" | "failed" | "contest" | "held" | "reviewed" | "review-failed" | "stopped";
+  outcome: "built" | "planned" | "reported" | "parked" | "skipped" | "failed" | "contest" | "held" | "stopped";
   /** Why it was skipped or how it failed; absent on a build. */
   reason?: string;
   /** The gap's own words, when the reason is a capability. */
   detail?: string;
-  /** v50: a review pass's root attempt ordinal, and — on a failed one —
-   * how many explicit retries the source run still admits. */
-  attempt?: number;
-  retriesRemaining?: number;
   committed?: boolean;
   branch?: string;
   worktree?: string;
@@ -4158,31 +4152,17 @@ async function tickCommand(
     }
   }
 
-  // THE REVIEW PASS (v29, R3/R4): open review asks — the operator's and a
-  // reviewAuto mode's — each get their ONE bounded attempt. Additive by
-  // law: a broken review is a visible typed run, never a broken tick.
-  {
-    const reviewed = await reviewPass(store, {
-      runner,
-      token,
-      ...(text(flags, "incarnation") === undefined ? {} : { watchIncarnation: text(flags, "incarnation") as string }),
-      now: clock(),
-      clock,
-      shouldStop: () => context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true,
-      ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),
-      ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
-    });
-    for (const one of reviewed) {
-      dispatched.push({
-        id: `review of run ${one.run}`,
-        outcome: one.outcome === "reviewed" ? "reviewed" : one.outcome === "failed" ? "review-failed" : "skipped",
-        reason: one.detail,
-        ...(one.attempt === undefined ? {} : { attempt: one.attempt }),
-        ...(one.retriesRemaining === undefined ? {} : { retriesRemaining: one.retriesRemaining }),
-      });
+  // Retire queued model-review work without creating a run or a passing verdict.
+  // Reauthenticate inside the write transaction and touch only admitted projects.
+  store.transact(() => {
+    const current = authenticate(store, runner, token);
+    if (!current.ok) return;
+    for (const request of store.openReviewRequests()) {
+      if (request.repo !== null && current.runner.repos.includes(request.repo)) {
+        store.consumeReviewRequest(request.id, "model-review-retired", clock());
+      }
     }
-  }
-
+  });
   // Existing worker pass owns durable lead handoffs; reads never create events.
   syncAssignmentHandoffs(store, clock(), auth.runner.repos, context.evidenceRoot);
 
@@ -4203,11 +4183,7 @@ async function tickCommand(
             : "no changes reported; see the result's proof status"
           : entry.outcome === "parked"
             ? `${entry.reason} — \`standing-orders decide\``
-            : entry.outcome === "review-failed" && entry.attempt !== undefined
-              ? `${entry.reason ?? ""} (attempt ${entry.attempt} of ${REVIEW_ROOT_ATTEMPTS}; ${entry.retriesRemaining === 0 ? "no retries left" : `${entry.retriesRemaining} explicit retr${entry.retriesRemaining === 1 ? "y" : "ies"} left — \`task review ${entry.id.replace("review of run ", "")}\``})`
-              : entry.outcome === "reviewed" && entry.attempt !== undefined && entry.attempt > 1
-                ? `${entry.reason ?? ""} (attempt ${entry.attempt} of ${REVIEW_ROOT_ATTEMPTS})`
-                : entry.reason ?? "";
+            : entry.reason ?? "";
       lines.push(`  ${entry.id.padEnd(24)} ${entry.outcome}  ${detail}`.trimEnd());
     }
     if (built > 0) {
@@ -4228,16 +4204,7 @@ async function tickCommand(
       routines,
     });
   }
-  const failedReviews = dispatched.filter(one => one.outcome === "review-failed").length;
-  if (failedReviews > 0) {
-    return fail(write, json, "tick", "review-failed", `${failedReviews} review(s) could not complete; built results are preserved`, EXIT.failed, {
-      considered, dispatched, routines,
-    });
-  }
-  // A pass whose only events were parks or drafted plans exits 0: nothing
-  // broke, nothing needs code — the questions and the plan are in the
-  // attention surface where they belong, which is the system working.
-  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned" || one.outcome === "reported" || one.outcome === "held" || one.outcome === "reviewed")) {
+  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned" || one.outcome === "reported" || one.outcome === "held")) {
     return succeed(write, json, "tick", { considered, dispatched, routines }, summary);
   }
   if (considered === 0) {
@@ -5066,16 +5033,7 @@ async function planTaskCommand(
   ]);
 }
 
-/**
- * `standing-orders task review <run-id>` — ask an agent to review one
- * finished run's sealed diff (v29, R3). Queued, not run here: the next
- * pass dispatches the reviewer with the review phase's configured agent,
- * and its comments land on the run page for YOU to prune and seal —
- * sealing stays human. One SUCCESSFUL review per run, ever; after a
- * failed or interrupted attempt this same command IS the explicit retry
- * (v50) — at most two, three root attempts in all — and every refusal
- * (queued, running, reviewed, exhausted) is typed, opening no run.
- */
+/** The retired command is a typed refusal, never a new provider request. */
 async function reviewTaskCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
@@ -5085,45 +5043,11 @@ async function reviewTaskCommand(
   const [runText] = positional;
   const runId = Number(runText ?? "");
   if (runText === undefined || !Number.isInteger(runId) || runId < 1) {
-    return fail(write, json, "task review", "usage", "`standing-orders task review <run-id> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "task review", "usage", "`standing-orders task review <run-id>`", EXIT.usage);
   }
-  const acting = await askCredentials(flags, context);
-  if (acting === null) {
-    return fail(write, json, "task review", "usage", "reviewing takes `--as <you> --token <t>` — it dispatches an agent that spends", EXIT.usage);
-  }
-  const authenticated = authenticateApprover(store, acting.name, acting.token);
-  if (!authenticated.ok) {
-    return fail(write, json, "task review", authenticated.reason, describeApproveFailure(authenticated.reason, String(runId)), EXIT.refused);
-  }
-  const asked = store.requestReview(runId, acting.name, clock());
-  if (!asked.ok) {
-    const state = store.reviewRetryStateOf(runId);
-    const cap = state?.cap ?? REVIEW_ROOT_ATTEMPTS;
-    const why: Record<string, string> = {
-      "no-run": `no run ${runId}`,
-      "not-reviewable": "that run IS a review — reviews review work, never each other",
-      unfinished: "that run is still going — review reads the sealed diff, which exists once it finishes",
-      "no-diff": "that run left no sealed diff to review",
-      "diff-capture-failed": "that run's diff capture failed — recapture it before asking for a review",
-      "diff-truncated": "that run's diff was truncated at capture — a partial patch cannot be honestly reviewed",
-      "already-reviewed": `that run already has its review${state?.succeeded === undefined || state.succeeded === null ? "" : ` (attempt ${state.succeeded.attempt} of ${cap})`} — a successful review is never retried; the comments are on its page`,
-      "review-running": `a review is running for that run right now (attempt ${state?.live?.attempt ?? "?"} of ${cap}) — one attempt at a time; a retry is only for a failed or interrupted one`,
-      "retries-exhausted": `that run has spent all ${cap} review attempts (${state?.attempts.map(one => `#${one.runId} ${one.reason ?? one.outcome ?? "open"}`).join(", ") ?? ""}) — nothing retries a fourth time; accept the result with an exception or file a revision`,
-      "already-requested": `a review is already queued for that run${state?.nextAttempt === undefined || state.nextAttempt === null ? "" : ` (attempt ${state.nextAttempt} of ${cap})`}`,
-    };
-    return fail(write, json, "task review", asked.reason, why[asked.reason] ?? asked.reason, EXIT.refused, {
-      run: runId,
-      ...(asked.detail === undefined ? {} : { detail: asked.detail }),
-      ...(state === null ? {} : { review: state }),
-    });
-  }
-  const state = store.reviewRetryStateOf(runId);
-  return succeed(write, json, "task review", { run: runId, request: asked.id, attempt: asked.attempt, cap: state?.cap ?? REVIEW_ROOT_ATTEMPTS, retriesRemaining: state?.retriesRemaining ?? 0, ...(state === null ? {} : { review: state }) }, () => [
-    asked.attempt === 1
-      ? `Run ${runId} will be reviewed: the next pass dispatches an agent over its sealed diff.`
-      : `Run ${runId} will be reviewed again — explicit retry, attempt ${asked.attempt} of ${state?.cap ?? REVIEW_ROOT_ATTEMPTS}; ${state?.retriesRemaining ?? 0} would remain after it. The next pass admits a fresh reviewer under the build's current sealed route and re-verifies every input; the failed attempt stays on record.`,
-    "Its comments land on the run page beside your own, for you to prune and seal into a revision task.",
-  ]);
+  return fail(write, json, "task review", "model-review-retired",
+    `Separate model review has been removed. Inspect run ${runId}'s saved work and checks, then give feedback or request a revision.`, EXIT.refused);
+
 }
 
 /**
@@ -5760,23 +5684,12 @@ async function modeCommand(
   if (text(flags, "publication") === "automerge") terms.publication = "automerge";
   if (text(flags, "publication") === "notify") terms.publication = "notify";
   if (flag(flags, "auto-approve")) terms.autoApproveFiling = true;
-  if (flag(flags, "review-auto")) terms.reviewAuto = true;
   if (flag(flags, "plan-auto")) terms.planAuto = true;
-  if (flag(flags, "review-retry-auto")) terms.reviewRetryAuto = true;
-  if (terms.reviewRetryAuto && !terms.reviewAuto) {
-    return fail(write, json, "mode set", "invalid", "--review-retry-auto requires agent reviews", EXIT.refused);
+  if (["review-auto", "review-retry-auto", "repair-auto", "repair-max-attempts"].some(name => flags.has(name))) {
+    return fail(write, json, "mode set", "invalid", "Separate model review and automatic correction loops have been removed; finished work goes to the lead or user.", EXIT.refused);
   }
-  const repairCap = text(flags, "repair-max-attempts");
-  if (flag(flags, "repair-auto")) {
-    const cap = Number(repairCap ?? "0");
-    if (!Number.isInteger(cap) || cap < 1 || cap > 3) return fail(write, json, "mode set", "invalid", "--repair-auto requires --repair-max-attempts from 1 to 3", EXIT.refused);
-    terms.repairAuto = true;
-    terms.repairMaxAttempts = cap;
-  } else if (repairCap !== undefined) {
-    return fail(write, json, "mode set", "invalid", "--repair-max-attempts requires --repair-auto", EXIT.refused);
-  }
-  if (terms.planAuto && (!terms.autoApproveFiling || !terms.reviewAuto)) {
-    return fail(write, json, "mode set", "invalid", "--plan-auto requires automatic filing approval and agent reviews", EXIT.refused);
+  if (terms.planAuto && !terms.autoApproveFiling) {
+    return fail(write, json, "mode set", "invalid", "--plan-auto requires automatic filing approval", EXIT.refused);
   }
   // The paid-fallback grant (R8): NEVER a preset default — only this
   // explicit flag lets an exhausted subscription switch to another account.
@@ -10080,7 +9993,7 @@ function showTask(positional: readonly string[], context: Context): number {
           ? [`  control: run #${detail.control.run} is stopping (asked by ${detail.control.stop.requestedBy} at ${detail.control.stop.requestedAt})${detail.control.unsettledRun ? " — its processes are not yet established gone" : " — the run ended but the stop is unsettled; needs attention"}`]
           : detail.control.kind === "paused"
             ? [`  control: paused — run #${detail.control.run} was stopped by ${detail.control.stop.requestedBy} (${detail.control.stop.settlement ?? "?"})${detail.control.committed ? "; its commit is on the branch" : ""}; work preserved${detail.control.worktree === null ? "" : ` in ${detail.control.worktree}`} — \`task resume ${task.id} --run ${detail.control.run} --as <you> --token <t>\``]
-            : [`  control: review #${detail.control.run} was stopped by ${detail.control.stop.requestedBy} — retry it explicitly with \`task review ${detail.control.sourceRun ?? "<run>"} --as <you> --token <t>\``]),
+            : [`  control: review #${detail.control.run} was stopped by ${detail.control.stop.requestedBy} — inspect its saved result and give feedback; separate model review has been removed`]),
     ...reviewStatusLines(detail.review, latestFinished?.id ?? null),
     ...(scope === null
       ? ["  no scope — nothing will build this until one is written and approved"]
@@ -10105,10 +10018,10 @@ function reviewStatusLines(review: ReviewRetryState | null, sourceRun: number | 
   if (review === null || sourceRun === null || review.state === "unrequested") return [];
   const word: Record<ReviewRetryState["state"], string> = {
     unrequested: "not requested",
-    queued: `retry queued — attempt ${review.nextAttempt ?? review.attempts.length + 1} of ${review.cap} waits for a worker${review.openRequest === null ? "" : ` (asked by ${review.openRequest.requestedBy})`}`,
+    queued: "legacy request retained; the worker will close it without running a model review",
     running: `running — attempt ${review.live?.attempt ?? review.attempts.length} of ${review.cap}`,
     succeeded: `succeeded on attempt ${review.succeeded?.attempt ?? 1} of ${review.cap}`,
-    retryable: `${review.latest?.outcome === "interrupted" || review.latest?.reason === "interrupted" ? "interrupted" : "failed"} on attempt ${review.latest?.attempt ?? review.attempts.length} of ${review.cap} — ${review.retriesRemaining === 1 ? "1 explicit retry" : `${review.retriesRemaining} explicit retries`} left: \`standing-orders task review ${sourceRun} --as <you> --token <t>\``,
+    retryable: `${review.latest?.outcome === "interrupted" || review.latest?.reason === "interrupted" ? "interrupted" : "failed"} on attempt ${review.latest?.attempt ?? review.attempts.length} of ${review.cap} — inspect the saved result; model reviews no longer retry`,
     exhausted: `exhausted — all ${review.cap} attempts ended without a review; nothing retries a fourth time`,
   };
   const first = review.state === "queued" && review.attempts.length === 0 ? "queued — waiting for a worker" : word[review.state];
@@ -11011,6 +10924,7 @@ async function routeTaskCommand(
   if (phase !== undefined && !(ROUTE_PHASES as readonly string[]).includes(phase)) {
     return fail(write, json, "task route", "usage", `--${phaseGiven !== undefined ? "phase" : "clear-phase"} is one of ${ROUTE_PHASES.join(", ")}`, EXIT.usage);
   }
+  if (phaseGiven === "review") return fail(write, json, "task route", "model-review-retired", "Separate model review has been removed; no reviewer route is needed.", EXIT.refused);
   if (phaseGiven !== undefined) {
     if (providerGiven === undefined || !isProviderId(providerGiven)) {
       return fail(write, json, "task route", "usage", `--provider is one of ${PROVIDER_IDS.join(", ")}`, EXIT.usage);
@@ -11020,9 +10934,7 @@ async function routeTaskCommand(
     }
     const valid = validateSpec({ provider: providerGiven, model: modelGiven });
     if (!valid.ok) return fail(write, json, "task route", "invalid", valid.problem, EXIT.usage);
-    if (phaseGiven === "review" && providerGiven === "gemini") {
-      return fail(write, json, "task route", "invalid", "gemini has no isolation posture for the review phase yet — choose claude or codex", EXIT.usage);
-    }
+
   }
   const edited = store.editTaskRoute(
     ref.id,
@@ -11579,7 +11491,7 @@ async function resumeTaskCommand(
   const resumed = resumeTaskStop(store, { taskId: id, runId, by: acting.name, via: "cli", occupied: path => worktrees.inUse(path) }, clock());
   if (!resumed.ok) {
     if (resumed.reason === "review") {
-      return fail(write, json, "task resume", "review", `${resumed.detail} — \`standing-orders task review <source-run> --as <you> --token <t>\``, EXIT.refused, { run: runId });
+      return fail(write, json, "task resume", "review", `${resumed.detail} — separate model review has been removed; inspect the saved source result`, EXIT.refused, { run: runId });
     }
     return fail(write, json, "task resume", resumed.reason, resumed.detail, EXIT.refused, { run: runId });
   }
