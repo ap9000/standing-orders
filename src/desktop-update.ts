@@ -9,14 +9,17 @@ import { run } from "./exec.js";
 import { readSchemaVersion, SCHEMA_VERSION, Store } from "./store.js";
 import { activeUpdateWork, freezeUpdateGate, installUpdateGate, removeUpdateGate, updateAdmissionPaused } from "./desktop-update-gate.js";
 import { currentDesktopAccess } from "./desktop-access.js";
+import { assertCodingUpdateStopped, backupCodingCatalog, codingCatalogExists } from "./coding-update.js";
 
 type Phase = "prepared" | "draining" | "backing-up" | "stopping" | "installing" | "verifying" | "rolling-back" | "releasing" | "complete" | "restored" | "cancelled" | "needs-attention";
 export type UpdateJournal = {
   version: 1; id: string; stateDir: string; workDir: string; label: string; databaseFile: string; configHash: string;
   old: DesktopBundle; next: DesktopBundle; phase: Phase; intended: "install" | "restore";
   startedAt: string; updatedAt: string; wasRunning: boolean; backupHash?: string; backupPath?: string;
+  codingBackupPath?: string; codingBackupHash?: string; codingCatalogExpected?: boolean;
   detail: string; error?: string; checkedAt?: string;
   serviceInterrupted?: boolean;
+  replacementOccurred?: boolean;
   retryableRecovery?: boolean;
 };
 type ServiceState = { state: string; stale?: boolean };
@@ -71,6 +74,9 @@ export function readUpdateJournal(stateDir: string, retainedReceipt?: string): U
   if (retainedReceipt && retainedReceipt !== join(j.workDir, "receipt.json")) throw Error("The retained recovery receipt is at the wrong path.");
   const validBundle = (b: DesktopBundle) => b && isAbsolute(b.path) && b.path.endsWith(".app") && /^[a-f0-9]{64}$/.test(b.hash) && /^[a-f0-9-]{36}$/.test(b.buildId) && /^\d+\.\d+\.\d+$/.test(b.version) && b.schemaVersion === SCHEMA_VERSION && b.bundleId === (b.development === true ? "com.standing-orders.desktop.development" : "com.standing-orders.desktop") && typeof b.providerBin === "string";
   if (!validBundle(j.old) || !validBundle(j.next) || j.old.bundleId !== j.next.bundleId || !isAbsolute(j.databaseFile) || !/^[a-f0-9]{64}$/.test(j.configHash) || typeof j.wasRunning !== "boolean" || (j.backupPath && (dirname(j.backupPath) !== j.workDir || !/^orders\.backup(?:\.[a-f0-9-]{36})?\.db$/.test(basename(j.backupPath)))) || (j.backupHash && !/^[a-f0-9]{64}$/.test(j.backupHash))) throw Error("The saved update paths or build identities are invalid. Nothing was changed.");
+  if (j.replacementOccurred !== undefined && typeof j.replacementOccurred !== "boolean") throw Error("The recorded replacement state is invalid. Nothing was changed.");
+  if (j.codingCatalogExpected !== undefined && typeof j.codingCatalogExpected !== "boolean") throw Error("The recorded coding catalog presence is invalid. Nothing was changed.");
+  if ((j.codingBackupPath === undefined) !== (j.codingBackupHash === undefined) || (j.codingBackupPath && (dirname(j.codingBackupPath) !== j.workDir || !/^coding\.backup(?:\.[a-f0-9-]{36})?\.sqlite$/.test(basename(j.codingBackupPath)))) || (j.codingBackupHash && !/^[a-f0-9]{64}$/.test(j.codingBackupHash))) throw Error("The retained coding backup paths or identity are invalid. Nothing was changed.");
   for (const directory of [dirname(j.workDir), j.workDir]) {
     const stat = lstatSync(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()))) throw Error("The update folder must be a private, owner-controlled directory.");
@@ -134,6 +140,7 @@ export async function previewDesktopUpdate(stateDir: string, installed: string, 
   if (old.bundleId !== next.bundleId) throw Error("A development preview cannot replace a release identity.");
   if (old.schemaVersion !== SCHEMA_VERSION || next.schemaVersion !== SCHEMA_VERSION) throw Error("This release needs a database migration. Use the separate verified migration procedure; the installed app is unchanged.");
   if (next.recoveryProtocol !== 1) throw Error("This candidate predates automatic update recovery. Choose a current build; the installed app is unchanged.");
+  const codingCatalogExpected = codingCatalogExists(`${config.databaseFile}.coding.sqlite`);
   const db = connect(config.databaseFile, true); let active;
   try { if (updateAdmissionPaused(db)) throw Error("An update still owns the admission pause. Open Update status to recover it before starting another update."); active = activeUpdateWork(db); } finally { db.close(); }
   const existing = readUpdateJournal(stateDir);
@@ -142,7 +149,7 @@ export async function previewDesktopUpdate(stateDir: string, installed: string, 
   if (await (hooks.otherControllers ?? otherControllers)(old, stateDir)) throw Error("Another installation is using this app. Stop its background service before updating this shared app.");
   const status = await (hooks.serviceStatus ?? serviceState)(old, { stateDir, label });
   if (status.stale && ["running", "loaded"].includes(status.state)) throw Error("The service does not match the installed app. Reconnect it with Start background service before updating.");
-  const plan = { old, next, configHash: fingerprint(config), label, stateDir: resolve(stateDir), databaseFile: config.databaseFile, wasRunning: ["running", "loaded"].includes(status.state) };
+  const plan = { old, next, configHash: fingerprint(config), label, stateDir: resolve(stateDir), databaseFile: config.databaseFile, codingCatalogExpected, wasRunning: ["running", "loaded"].includes(status.state) };
   return { ...plan, digest: digest(plan), active, message: "New work will wait while current work finishes. A verified private backup and the previous app will be kept. The database will not be migrated or restored automatically." };
 }
 
@@ -243,8 +250,14 @@ function snapshot(db: DatabaseSync): string {
   return digest(result);
 }
 async function verifiedBackup(j: UpdateJournal): Promise<void> {
+  assertCodingCatalogPresent(j);
   const file = join(j.workDir, "orders.backup.db");
-  if (j.backupHash) { if (!j.backupPath || fileHash(j.backupPath) !== j.backupHash) throw Error("The retained backup changed. It was not overwritten."); return; }
+  if (j.backupHash) {
+    if (!j.backupPath || fileHash(j.backupPath) !== j.backupHash) throw Error("The retained backup changed. It was not overwritten.");
+    await verifiedCodingBackup(j);
+    save(j, "backing-up", "Private database backups verified; saved tasks and coding sessions are retained.");
+    return;
+  }
   // A crashed partial attempt gets a fresh filename; no backup is overwritten.
   const backupPath = existsSync(file) ? join(j.workDir, `orders.backup.${randomUUID()}.db`) : file;
   const db = connect(j.databaseFile);
@@ -261,6 +274,7 @@ async function verifiedBackup(j: UpdateJournal): Promise<void> {
       if (copied.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok" || copied.prepare("PRAGMA foreign_key_check").all().length !== 0 || snapshot(copied) !== before) throw Error("Backup verification failed. The installed app is unchanged.");
       removeUpdateGate(copied, j.id);
     } finally { copied.close(); }
+    await verifiedCodingBackup(j);
     db.exec("COMMIT");
     for (const [source, name] of [[join(j.stateDir, "desktop.json"), "desktop.json"], [join(dirname(j.databaseFile), "repos.json"), "repos.json"], [join(dirname(j.databaseFile), "up-login.txt"), "up-login.txt"]]) {
       if (source && name && existsSync(source)) {
@@ -271,8 +285,41 @@ async function verifiedBackup(j: UpdateJournal): Promise<void> {
     }
     const fd = openSync(backupPath, "r"); try { fsyncSync(fd); } finally { closeSync(fd); }
     j.backupPath = backupPath; j.backupHash = fileHash(backupPath);
-    save(j, "backing-up", "Private database backup verified; saved tasks and evidence match.");
+    save(j, "backing-up", "Private database backups verified; saved tasks, evidence and coding sessions match.");
   } finally { db.close(); }
+}
+
+function assertCodingCatalogPresent(j: UpdateJournal): void {
+  const present = codingCatalogExists(`${j.databaseFile}.coding.sqlite`);
+  if ((j.codingCatalogExpected || j.codingBackupPath || j.codingBackupHash) && !present) throw Error("The live coding catalog disappeared during this update. Keep the app stopped and restore the catalog before continuing.");
+  if (present && !j.codingCatalogExpected) { j.codingCatalogExpected = true; save(j, j.phase, j.detail); }
+}
+
+function assertDesktopCodingStopped(j: UpdateJournal, db: DatabaseSync): void {
+  assertCodingCatalogPresent(j);
+  assertCodingUpdateStopped(db);
+}
+
+function assertCodingBackup(j: UpdateJournal): void {
+  assertCodingCatalogPresent(j);
+  if (j.codingBackupPath || j.codingBackupHash) {
+    const stat = j.codingBackupPath && existsSync(j.codingBackupPath) ? lstatSync(j.codingBackupPath) : null;
+    if (!stat?.isFile() || stat.isSymbolicLink() || !j.codingBackupPath || fileHash(j.codingBackupPath) !== j.codingBackupHash) throw Error("The retained coding backup is missing, linked or changed. It was not overwritten; the update remains paused.");
+  } else if (j.codingCatalogExpected) throw Error("The coding catalog has no verified update backup. The update remains paused.");
+}
+
+async function verifiedCodingBackup(j: UpdateJournal): Promise<void> {
+  assertCodingCatalogPresent(j);
+  if (j.codingBackupPath || j.codingBackupHash) { assertCodingBackup(j); return; }
+  const source = `${j.databaseFile}.coding.sqlite`;
+  if (!codingCatalogExists(source)) return;
+  const normal = join(j.workDir, 'coding.backup.sqlite');
+  const target = existsSync(normal) ? join(j.workDir, `coding.backup.${randomUUID()}.sqlite`) : normal;
+  await backupCodingCatalog(source, target, j.id);
+  assertCodingCatalogPresent(j);
+  j.codingBackupPath = target; j.codingBackupHash = fileHash(target);
+  assertCodingBackup(j);
+  save(j, j.phase, j.detail);
 }
 
 /** A SQLite OS lock releases on updater death. Each irreversible step has a
@@ -300,25 +347,58 @@ export async function runDesktopUpdate(stateDir: string, hooks: UpdateHooks = {}
   const waitHealthy = async (bundle: DesktopBundle) => {
     const since = new Date().toISOString();
     writeFileSync(join(j.stateDir, "project-access-request"), randomUUID(), { mode: 0o600 });
+    assertCodingCatalogPresent(j);
     await control("start", bundle, j);
+    assertCodingCatalogPresent(j);
     const deadline = Date.now() + (hooks.healthTimeoutMs ?? 60_000);
     do {
       if (updateStopRequested(j) || (j.intended === "install" && restoreRequested(j))) throw Error("The operator requested the previous app or stopped the service.");
-      if (await (hooks.healthy ?? healthy)(bundle, j, since)) { j.checkedAt = new Date().toISOString(); return; }
+      assertCodingCatalogPresent(j);
+      const ready = await (hooks.healthy ?? healthy)(bundle, j, since);
+      assertCodingCatalogPresent(j);
+      if (ready) { j.checkedAt = new Date().toISOString(); return; }
       await sleep(500);
     } while (Date.now() < deadline);
     throw new RetryableUpdateError("The worker did not confirm its build, project access and console connection. The update cannot be marked complete.");
   };
-  const release = (phase: "complete" | "restored" | "cancelled", message: string) => {
+  const recordReplacement = () => {
+    if (!j.replacementOccurred && bundleHash(j.old.path) === j.next.hash) {
+      j.replacementOccurred = true; save(j, j.phase, j.detail);
+    }
+  };
+  const release = async (phase: "complete" | "restored" | "cancelled", message: string) => {
     checkpoint("releasing", message);
-    const db = connect(j.databaseFile); try { removeUpdateGate(db, j.id); } finally { db.close(); }
+    const needsBackup = phase === "complete" || j.replacementOccurred;
+    if (needsBackup) await verifiedCodingBackup(j);
+    if ((needsBackup || j.serviceInterrupted) && (!j.wasRunning || updateStopRequested(j))) checkSwapQuiescence();
+    const db = connect(j.databaseFile);
+    try {
+      if (needsBackup) assertCodingBackup(j); else assertCodingCatalogPresent(j);
+      removeUpdateGate(db, j.id);
+    } finally { db.close(); }
     checkpoint(phase, message);
   };
+  const checkSwapQuiescence = () => {
+    const db = connect(j.databaseFile, true);
+    try {
+      if (Object.values(activeUpdateWork(db)).some(n => n !== 0) || db.prepare("SELECT 1 FROM watch_lease WHERE expires_at>? LIMIT 1").get(new Date().toISOString())) throw Error("A worker or active operation still uses this database. The update remains paused.");
+      const problem = lingeringWork(db); if (problem) throw Error(problem);
+      assertDesktopCodingStopped(j, db);
+    } finally { db.close(); }
+  };
+  const finishStopped = async (bundle: DesktopBundle) => {
+    await control("stop", bundle, j);
+    if (["running", "loaded"].includes((await status(bundle, j)).state)) throw Error("The background service did not stop. Work remains paused.");
+    checkSwapQuiescence();
+  };
   const restore = async () => {
+    recordReplacement();
     j.intended = "restore";
     checkpoint("rolling-back", "Restoring the previous app. The current task database will be kept.");
     assertConfig(j);
+    assertCodingCatalogPresent(j);
     if (await (hooks.otherControllers ?? otherControllers)(j.old, j.stateDir)) throw Error("Another installation is using this app. Stop that service before resuming recovery.");
+    assertCodingCatalogPresent(j);
     const db = connect(j.databaseFile);
     try { installUpdateGate(db, j.id); if (!freezeUpdateGate(db, j.id)) throw Error("Work is still active. The app will not be swapped until it finishes."); } finally { db.close(); }
     const actual = bundleHash(j.old.path);
@@ -326,41 +406,48 @@ export async function runDesktopUpdate(stateDir: string, hooks: UpdateHooks = {}
       await control("stop", atInstalled(j.next, j), j);
       if (["running", "loaded"].includes((await status(atInstalled(j.next, j), j)).state)) throw Error("The candidate service is still running. The previous app was not swapped in.");
       const checking = connect(j.databaseFile, true);
-      try { const problem = lingeringWork(checking); if (problem) throw Error(problem); } finally { checking.close(); }
+      try { const problem = lingeringWork(checking); if (problem) throw Error(problem); assertDesktopCodingStopped(j, checking); } finally { checking.close(); }
       if (bundleHash(standby(j)) !== j.old.hash) throw Error("The previous app backup changed. Nothing was replaced.");
+      await verifiedCodingBackup(j);
+      checkSwapQuiescence();
+      assertCodingBackup(j);
       await (hooks.swap ?? swap)(j);
     } else if (actual !== j.old.hash) throw Error("The installed app no longer matches either recorded build. Nothing was replaced.");
-    if (j.wasRunning && !updateStopRequested(j)) await waitHealthy(j.old); else await control("stop", j.old, j);
-    release("restored", "Previous app restored. Your current tasks and evidence were preserved." + (j.error ? ` Update stopped because: ${j.error}` : ""));
+    if (j.wasRunning && !updateStopRequested(j)) await waitHealthy(j.old); else await finishStopped(j.old);
+    await release("restored", "Previous app restored. Your current tasks and evidence were preserved." + (j.error ? ` Update stopped because: ${j.error}` : ""));
   };
   const cancel = async () => {
     // A resumed operation may already have swapped or stopped the service,
     // even though its new drain pass is now showing "draining".
-    if (bundleHash(j.old.path) === j.old.hash && !j.serviceInterrupted) release("cancelled", "Update cancelled. The installed app and current work are unchanged; any verified backup was kept.");
+    if (bundleHash(j.old.path) === j.old.hash && !j.serviceInterrupted) await release("cancelled", "Update cancelled. The installed app and current work are unchanged; any verified backup was kept.");
     else await restore();
   };
   try {
+    recordReplacement();
     const owner = installation.prepare("SELECT state FROM owner WHERE slot=1").get();
     if (owner?.state !== j.stateDir) throw Error("Another installation owns this app update. Its work was not interrupted.");
     assertConfig(j);
     if (bundleHash(payload(j)) !== j.next.hash) throw Error("The staged updater changed. Preserve the update folder and recover with a verified release.");
+    const db = connect(j.databaseFile);
+    try { installUpdateGate(db, j.id); } finally { db.close(); }
+    assertCodingCatalogPresent(j);
     if (j.intended === "restore" || restoreRequested(j) || updateStopRequested(j)) {
       if (j.intended !== "restore") { await cancel(); return; }
       await restore(); return;
     }
-    const db = connect(j.databaseFile);
-    try { installUpdateGate(db, j.id); } finally { db.close(); }
     checkpoint("draining", "Waiting for current work to finish. New work is paused; no task will be killed for this update.");
     for (;;) {
       if (restoreRequested(j) || updateStopRequested(j)) { await cancel(); return; }
       assertConfig(j);
+      assertCodingCatalogPresent(j);
       const checking = connect(j.databaseFile);
       try {
         const active = activeUpdateWork(checking);
         const lingering = Object.values(active).every(n => n === 0) ? lingeringWork(checking) : null;
         if (!lingering && Object.values(active).every(n => n === 0) && freezeUpdateGate(checking, j.id)) break;
-        save(j, "draining", lingering ? `Waiting for a worker to finish shutdown: ${lingering}. No process is being killed.` : `Waiting for current work: ${active.runs} runs, ${active.claims} leases, ${active.conversations} chat requests, ${active.sessions} sessions, ${active.stopping} shutdowns. Nothing is being cancelled.`);
+        save(j, "draining", lingering ? `Waiting for a worker to finish shutdown: ${lingering}. No process is being killed.` : `Waiting for current work: ${active.runs} runs, ${active.claims} leases, ${active.conversations} chat requests, ${active.sessions} sessions, ${active.stopping} shutdowns, ${active.coding} coding sessions, ${active.codingDeliveries} unconfirmed messages. Nothing is being cancelled.`);
       } finally { checking.close(); }
+      assertCodingCatalogPresent(j);
       await sleep(1000);
     }
     checkpoint("backing-up", "Creating and verifying a private backup of tasks, approvals and evidence.");
@@ -380,6 +467,7 @@ export async function runDesktopUpdate(stateDir: string, hooks: UpdateHooks = {}
     const afterStop = connect(j.databaseFile, true);
     try {
       if (Object.values(activeUpdateWork(afterStop)).some(n => n !== 0) || afterStop.prepare("SELECT 1 FROM watch_lease WHERE expires_at>? LIMIT 1").get(new Date().toISOString())) throw Error("A worker or active operation still uses this database. Stop the other controller before continuing the update.");
+      assertDesktopCodingStopped(j, afterStop);
     } finally { afterStop.close(); }
     assertConfig(j);
     if (await (hooks.otherControllers ?? otherControllers)(j.old, j.stateDir)) throw Error("Another installation is using this app. Stop its background service before continuing.");
@@ -389,13 +477,17 @@ export async function runDesktopUpdate(stateDir: string, hooks: UpdateHooks = {}
       const next = readDesktopBundle(standby(j));
       if (next.hash !== j.next.hash) throw Error("The staged app changed. The installed app was not replaced.");
       await (hooks.verify ?? verifyDesktopUpdateBundles)(j.old, next);
+      await verifiedCodingBackup(j);
+      checkSwapQuiescence();
+      assertCodingBackup(j);
       await (hooks.swap ?? swap)(j);
     } else if (bundleHash(standby(j)) !== j.old.hash) throw Error("The retained previous app no longer matches the update record.");
     if (bundleHash(j.old.path) !== j.next.hash) throw Error("The installed app did not match the approved update.");
+    recordReplacement();
     checkpoint("verifying", "Checking the new worker, project access and console connection. New work remains paused.");
     await waitHealthy(atInstalled(j.next, j));
-    if (!j.wasRunning) await control("stop", atInstalled(j.next, j), j);
-    release("complete", j.wasRunning ? "Update complete. The new worker is verified and queued work can resume." : "Update complete and verified. The service remains stopped, as it was before the update.");
+    if (!j.wasRunning) await finishStopped(atInstalled(j.next, j));
+    await release("complete", j.wasRunning ? "Update complete. The new worker is verified and queued work can resume." : "Update complete and verified. The service remains stopped, as it was before the update.");
   } catch (error) {
     if ((error as { simulatedCrash?: boolean }).simulatedCrash) throw error;
     j.error = (error instanceof Error ? error.message : String(error)).slice(0, 1500);
@@ -409,7 +501,7 @@ export async function runDesktopUpdate(stateDir: string, hooks: UpdateHooks = {}
       if (j.phase === "releasing") throw Error("Finishing the update record was interrupted. Resume to verify the installed app; no database rollback was attempted.");
       if (j.serviceInterrupted || bundleHash(j.old.path) === j.next.hash || ["stopping", "installing", "verifying", "rolling-back"].includes(j.phase)) await restore();
       else {
-        const db = connect(j.databaseFile); try { removeUpdateGate(db, j.id); } finally { db.close(); }
+        const db = connect(j.databaseFile); try { assertCodingCatalogPresent(j); removeUpdateGate(db, j.id); } finally { db.close(); }
         checkpoint("cancelled", "The update stopped before installation. The previous app and task database are unchanged. " + j.error);
       }
     } catch (recoveryError) {

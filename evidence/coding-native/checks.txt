@@ -1,0 +1,35 @@
+
+$ npm run typecheck
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+$ npx vitest run src/desktop-update.test.ts src/deploy-coding.test.ts --reporter=dot
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-native-custody
+
+(node:33469) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:33468) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+········································stderr | src/desktop-update.test.ts > Stop still disables automatic recovery when its intent cannot be saved
+The update stop request could not be recorded, so automatic update recovery was disabled. Preserve the update files and check Update status before restarting.
+
+······················································
+
+ Test Files  2 passed (2)
+      Tests  94 passed (94)
+   Start at  00:02:17
+   Duration  48.51s (transform 2.95s, setup 35ms, import 4.51s, tests 47.08s, environment 0ms)
+
+
+$ node --check scripts/deploy-browser.mjs
+
+$ node --check scripts/deploy-coding.mjs
+
+$ npm run build
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
