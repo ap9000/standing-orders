@@ -102,38 +102,21 @@ could starve assignments beyond the first page.
 
 ## Release boundary
 
-The original task base is foundation native output
-`82ae6aade7283b704b57f67a2abbd6538db5daaf`: builder 1920 passed the full gate;
-reviewer 1921 finished no-change with all three criteria upheld. This base is verified. Prior
-foundation attempts 1914/1915, 1916/1917 and 1918/1919 remain short; earlier workflow
-preparations stay preserved. No dispatched task's original base is moved.
+Start this corrective workflow from verified foundation
+`82ae6aade7283b704b57f67a2abbd6538db5daaf` (builder 1920; reviewer 1921 upheld
+all criteria), not failed workflow 1922/`3111152`. Prior attempts and complete
+historical records remain preserved; no existing task base moves.
 
-This reanchors `79168ee`'s exact workflow scope. Source, tests and build inputs
-remain byte-identical to preparation checkpoint
-`af4acd906edbd1876a563dcbd16551ca11278f26`; all 24 changed source files still
-match `96ccebe`. Inherited UI/deployment fixes and the single empty-work 44px rule
-remain intact. The foundation owns schema 70 and historical migration fixtures.
+The 24 workflow files and UI remain identical to `96ccebe`; this correction adds
+the missing assignment row in the envelope test. Inherited UI fixes remain intact.
+Two images and seven browser checks retain their stated reuse and Chromium-only
+limits: physical devices, software keyboards, screen readers and remote access
+are unverified. Complete reports and the UI1907 canary remain readable.
 
-The complete 51-check preparation log, typecheck/build output, worktree/time,
-commands, eight Git objects and aggregate before/after input record remain intact.
-No tests rerun during this reanchor. Those records describe their checkpoint;
-they do not claim independently sealed equivalence of all preparation inputs to
-the final native head. `REVIEW-VERIFICATION.json` and `REVIEW-CHECK-LOG.txt` will
-provide authoritative execution of the unchanged full command on that candidate.
+Focused logs record their preparation inputs. Final execution is established by
+the exact-candidate native `REVIEW-VERIFICATION.json` and `REVIEW-CHECK-LOG.txt`,
+not historical logs. All eight criteria and the full check command stay unchanged.
 
-All eight workflow criteria remain unchanged. Criterion 8 requires that current
-changed-source hashes match sealed files, the native full gate verifies the exact
-candidate, and preparation/browser reports identify their inputs and limitations.
-No approval, evidence, test or independent-review requirement is removed.
-
-The complete UI report and UI1907 saved-result canary JSON/script remain readable.
-Two desktop/phone images and seven affected-view checks are reused from identical
-source at `96ccebe`; no capture or provider turn repeats here. Earlier feedback,
-revision creation and keyboard checks stay labelled reuse. Complete prior logs,
-manifests, failures and repairs remain losslessly archived as historical evidence.
-
-The foundation verification does not verify this workflow candidate. Preflight
-the whole committed package against that exact original base before dispatch.
-Native verification, independent review and the normal matched UI/worker upgrade
-remain required. Chromium viewport evidence does not establish physical-device,
-software-keyboard, screen-reader or remote-access behavior.
+This workflow is not yet verified. Preflight the complete committed package
+against the original verified base before dispatch. Its own native gate,
+independent review and matched UI/worker upgrade remain required.
