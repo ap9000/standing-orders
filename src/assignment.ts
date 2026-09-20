@@ -64,6 +64,17 @@ function ownerOf(store: Store, rootId: string, repo: string | null): AssignmentS
     active: credential !== undefined && credential["revoked_at"] === null && repo !== null && Array.isArray(repos) && repos.includes(repo) };
 }
 
+// Goal-review evidence and actual check execution answer different questions.
+// A missing screenshot, inventory or model assessment must not force a rebuild.
+function passingNativeCheck(store: Store, root: string | undefined, runId: number): boolean {
+  if (root === undefined) return false;
+  try {
+    const gate = verificationEvidence(store, root, runId);
+    const receipt = gate.ok && gate.bytes !== null ? JSON.parse(gate.bytes) : null;
+    return receipt?.result?.ran === true && receipt.result.exitCode === 0;
+  } catch { return false; }
+}
+
 export function assignmentOf(store: Store, taskId: string, now: Date, access: AssignmentAccess, root?: string): AssignmentSnapshot | null {
   const family = store.taskFamilyOf(taskId, access.repos, access.principal === "operator" && access.includeUnplaced === true);
   if (family === null) return null;
@@ -104,8 +115,8 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   // Independent semantic review is a separate, optionally requested result;
   // it must not become a prerequisite for showing the work to its owner.
   const checkedBuild = result?.role === "builder" && (result.outcome === "built" || result.outcome === "no-change") &&
-    /^[a-f0-9]{40}$/.test(result.headRevision ?? "") && proof?.machineVerdict === "verified" &&
-    proof.verdict !== "refuted" && scope?.qualityMode !== "strict";
+    /^[a-f0-9]{40}$/.test(result.headRevision ?? "") &&
+    scope?.qualityMode !== "strict" && passingNativeCheck(store, root, result.id);
   const completionKind: AssignmentReceipt["completionKind"] = result?.role === "scout" && result.outcome === "built" &&
       reports.length === 1 && !reports[0]!.truncated && reports[0]!.captureStatus !== "failed" ? "research-report"
     : result?.role === "builder" && (result.outcome === "built" || result.outcome === "no-change") &&
@@ -280,13 +291,18 @@ export function assignmentEvidenceIntact(store: Store, root: string, receipt: As
       const needsContext = store.revisionSourceOf(source.taskRef) !== null || artifacts.some(a => a.kind === "review-context");
       const contextIntact = parsed?.ok === true && parsed.inventory.run === receipt.runId &&
         reviewContextCustodyProblem(store, root, parsed.inventory) === null;
-      if (needsContext && !contextIntact) return false;
       if (receipt.completionKind === "checked-build") {
-        // A lead review preserves semantic verdicts and release authority.
-        // Both handoff paths retain the exact native check and ancestor custody.
-        return savedBytesIntact && verification?.head === receipt.head && result?.ran === true &&
-          result.exitCode === 0 && receipt.proof?.machineVerdict === "verified";
+        // Lead review reads the durable assignment history directly. It does
+        // not need a separate model-review manifest, but damaged saved history
+        // still cannot be acknowledged as intact.
+        const family = store.taskFamilyOf(receipt.taskId, null, true);
+        const historyIntact = family !== null && family.problem === null && family.root.id === receipt.rootId &&
+          family.versions.every(version => store.runsFor(version.refId).every(run =>
+            store.artifactsFor(run.id).every(artifact => readVerifiedArtifact(root, artifact).ok)));
+        return savedBytesIntact && historyIntact && verification?.head === receipt.head && result?.ran === true &&
+          result.exitCode === 0;
       }
+      if (needsContext && !contextIntact) return false;
       const proof = readVerifiedProofForRun(store, root, receipt.runId);
       let goalEvidence = proof?.ok === true;
       if (proof === null && receipt.proof!.matrix.length > 0 && receipt.proof!.matrix.every(row =>

@@ -57,7 +57,7 @@ describe("continuous assignments over existing task families", () => {
       options: [{ id: "keep", label: "Keep the key", consequence: "Retries preserve request identity.", reversible: true }],
       recommendation: "keep", deadline: new Date(NOW.getTime() - 1).toISOString() }, NOW);
   }
-  function built(id = task(), verified = true, shortenedChecks = false, withQuestion = false) {
+  function built(id = task(), verified = true, shortenedChecks = false, withQuestion = false, checkExitCode = 0) {
     const ref = store.lookupRef(id)!;
     const authority = store.routeAuthorityFor(ref.id, "builder");
     if (!authority?.ok) throw new Error("route fixture");
@@ -72,7 +72,7 @@ describe("continuous assignments over existing task families", () => {
         detail: verified ? [] : ["Missing retry test."], answered: [], review: verified ? { judgement: "upholds", note: "The check covers request identity." } : null }], verified ? "verified" : "short");
     store.setVerifyCommand({ repo: ref.repo!, command: "npm test", timeoutMs: 300_000, approvedBy: "operator" }, NOW);
     storeEvidence(store, dir, run, "check-log", "checks.txt", shortenedChecks ? Buffer.alloc(200_000, 120) : Buffer.from("1 retry test passed"), "npm test", NOW, { captureStatus: "ok" });
-    sealVerificationReceipt(store, dir, run, "a".repeat(40), store.liveVerifyCommand(ref.repo!)!, { configured: true, ran: true, exitCode: 0 }, NOW);
+    sealVerificationReceipt(store, dir, run, "a".repeat(40), store.liveVerifyCommand(ref.repo!)!, { configured: true, ran: true, exitCode: checkExitCode }, NOW);
     storeEvidence(store, dir, run, "proof", "proof.json", Buffer.from(JSON.stringify({ version: 1,
       criteria: [{ id: "c1", statement: rubric[0]!.statement, verdict: "met", how: "The retry assertion passed.", evidence: [{ kind: "check", ref: "npm test" }] }],
       checks: [{ command: "npm test", exitCode: 0, summary: "1 passed" }], changed: ["src/retry.ts"], caveats: [], screenshots: [] })), "builder proof", NOW, { captureStatus: "ok" });
@@ -165,8 +165,25 @@ describe("continuous assignments over existing task families", () => {
     expect(store.repairChainFor(run)).toBeNull();
   });
 
+  test.each(["short", "refuted"] as const)("a %s goal-review record cannot force another build when the native check passed", verdict => {
+    const run = built(task(), false);
+    store.saveProofVerdict(run, verdict, ["The saved source inventory is truncated; a screenshot is missing."], NOW,
+      [{ id: "c1", statement: rubric[0]!.statement, requiredEvidence: ["check"], state: "missing", detail: ["Source inventory and screenshot unavailable."],
+        answered: [], review: null }], verdict);
+    claimAssignment(store, "retry", lead, NOW, dir);
+    const ready = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(ready).toMatchObject({ state: "ready-to-check", attention: ["The saved source inventory is truncated; a screenshot is missing."], receipt: { completionKind: "checked-build" } });
+    const before = store.proofVerdictFor(run), runs = store.runsFor(store.lookupRef("retry")!.id);
+    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
+    expect(store.proofVerdictFor(run)).toEqual(before);
+    expect(store.runsFor(store.lookupRef("retry")!.id)).toEqual(runs);
+    expect(store.reviewRetryStateOf(run)?.state).toBe("unrequested");
+    expect(store.repairChainFor(run)).toBeNull();
+    expect(store.proofAcceptance(run)).toBeNull();
+  });
+
   test("failed machine checks cannot become a completed lead review", () => {
-    built(task(), false);
+    built(task(), false, false, false, 1);
     claimAssignment(store, "retry", lead, NOW, dir);
     const result = assignmentOf(store, "retry", NOW, access, dir)!;
     expect(result.state).toBe("needs-decision");
@@ -410,8 +427,8 @@ describe("continuous assignments over existing task families", () => {
     expect(revision.ok).toBe(true); if (!revision.ok) throw Error(revision.message);
     expect(approve(store, revision.id, "operator", NOW, store.getScope(revision.id)!.digest, token).ok).toBe(true);
     const run = built(revision.id); if (kind === "verified-build") reviewed(run); claimAssignment(store, "retry", lead, NOW, dir);
-    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe("needs-decision");
-    revisionContext(run, original);
+    expect(assignmentOf(store, "retry", NOW, access, dir)?.state).toBe(kind === "verified-build" ? "needs-decision" : "ready-to-check");
+    if (kind === "verified-build") revisionContext(run, original);
     const ready = assignmentOf(store, "retry", NOW, access, dir)!;
     expect(ready).toMatchObject({ state: "ready-to-check", receipt: { runId: run, completionKind: kind } });
     const ancestorProof = store.artifactsFor(original).find(one => one.kind === "proof")!;
