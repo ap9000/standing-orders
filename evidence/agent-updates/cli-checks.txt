@@ -1,0 +1,30 @@
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit
+
+
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-agent-updates
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
+
+Build source: unavailable (no clean Git checkout)
+·······················(node:75369) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+··(node:75367) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:75368) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·······(node:75808) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·············································(node:75366) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·
+
+ Test Files  6 passed (6)
+      Tests  78 passed (78)
+   Start at  15:46:46
+   Duration  8.45s (transform 5.98s, setup 86ms, import 9.93s, tests 11.56s, environment 0ms)
+

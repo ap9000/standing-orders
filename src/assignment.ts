@@ -9,6 +9,7 @@ import { openWorkDecisionOf, taskWorkSummaryOf, workDecisionAction, type WorkAct
 import { evidenceRoot, readVerifiedArtifact, readVerifiedReport } from "./evidence.js";
 import { verificationEvidence } from "./verification-evidence.js";
 import { reproveApprover, type VerifiedApprover } from "./principal.js";
+import { noteAssignmentStatus } from "./assignment-status.js";
 
 export type AssignmentAccess = WorkSummaryAccess;
 export type AssignmentOwner = { kind: "coordinator"; id: string; label: string };
@@ -274,6 +275,7 @@ export function claimAssignment(store: Store, taskId: string, owner: AssignmentO
     }
     const assignment = admittedOwner(store, current.rootId, owner, now, root)!;
     noteAssignmentHandoff(store, assignment, now);
+    noteAssignmentStatus(store, assignment, now);
     return { ok: true, assignment };
   });
 }
@@ -303,7 +305,9 @@ function acknowledgeCurrent(store: Store, current: AssignmentSnapshot, receiptDi
       taskId: current.rootId, runId: receipt.runId, action: CHECK_ACTION, outcome: receiptDigest, source: "work" });
     store.bumpWake();
   }
-  return { ok: true, assignment: assignmentOf(store, current.rootId, now, access, root)! };
+  const assignment = assignmentOf(store, current.rootId, now, access, root)!;
+  noteAssignmentStatus(store, assignment, now);
+  return { ok: true, assignment };
 }
 
 export function checkAssignment(store: Store, taskId: string, receiptDigest: string, owner: AssignmentOwner, now: Date, root = evidenceRoot(homedir())): MutationResult {
@@ -349,7 +353,10 @@ export function syncAssignmentHandoffs(store: Store, now: Date, repos: readonly 
     ORDER BY t.id LIMIT 50`).all(JSON.stringify(repos), cursor, OWNER_ACTION);
   for (const row of rows) {
     const assignment = assignmentOf(store, String(row["external_id"]), now, { principal: "operator", repos }, root);
-    if (assignment !== null) noteAssignmentHandoff(store, assignment, now);
+    if (assignment !== null) {
+      noteAssignmentHandoff(store, assignment, now);
+      noteAssignmentStatus(store, assignment, now);
+    }
   }
   store.setServiceCursor(key, rows.length < 50 ? 0 : Number(rows.at(-1)!["id"]), now);
   });

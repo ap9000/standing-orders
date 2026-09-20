@@ -139,20 +139,27 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     flags: [jsonFlag, dbFlag, { name: "state", takesValue: true, meaning: "queued|running|done|failed|cancelled" }] },
   { invocation: "task show", synopsis: "one task in full", audience: "agent", agentMayInvoke: true, mutation: "none",
     positionals: [{ name: "id", required: true, meaning: "the task" }], flags: [jsonFlag, dbFlag], notableReasons: ["unknown-task"] },
-  ...(["show", "updates", "claim", "check"] as const).map(action => ({
+  ...(["show", "updates", "claim", "check", "brief", "inbox", "ack"] as const).map(action => ({
     invocation: `assignment ${action}`,
     synopsis: action === "show" ? "read the root, current work, owner and exact receipt"
       : action === "updates" ? "read durable updates after a cursor; save nextCursor after processing"
       : action === "claim" ? "record coordinator lead ownership; grants no approval or execution authority"
+      : action === "brief" ? "catch up from current assignments and project knowledge in the local database"
+      : action === "inbox" ? "receive or replay a saved batch of lead status updates"
+      : action === "ack" ? "acknowledge delivery of an inbox batch; leaves task completion unchanged"
       : "acknowledge the exact ready receipt as its lead; accepts no proof and deploys nothing",
     audience: "agent" as const, agentMayInvoke: true,
-    mutation: action === "claim" || action === "check" ? "identity-idempotent" as const : "none" as const,
-    ...(action === "updates" ? {} : { positionals: [{ name: "task", required: true, meaning: "any task in the assignment's existing correction chain" }] }),
+    mutation: action === "claim" || action === "check" || action === "inbox" || action === "ack" ? "identity-idempotent" as const : "none" as const,
+    ...(["show", "claim", "check"].includes(action) ? { positionals: [{ name: "task", required: true, meaning: "any task in the assignment's existing correction chain" }] } : {}),
     flags: [jsonFlag, dbFlag,
-      { name: "token-env", takesValue: true, meaning: "explicit environment variable containing a coordinator token; required for claim/check unless token-file is used" },
+      { name: "token-env", takesValue: true, meaning: "explicit environment variable containing a coordinator token; required for claim/check/inbox/ack unless token-file is used" },
       { name: "token-file", takesValue: true, meaning: "explicit coordinator token file; cannot be combined with token-env" },
       ...(action === "updates" ? [{ name: "after", takesValue: true, meaning: "last processed admitted update cursor; defaults to 0" }, { name: "limit", takesValue: true, meaning: "page size from 1 to 100; defaults to 50" }] : []),
       ...(action === "check" ? [{ name: "digest", takesValue: true, meaning: "exact current receipt digest from assignment show" }] : []),
+      ...(action === "brief" ? [{ name: "repo", takesValue: true, meaning: "project to include within the credential's access" }, { name: "limit", takesValue: true, meaning: "assignment count from 1 to 25; defaults to 10" }] : []),
+      ...(action === "inbox" || action === "ack" ? [{ name: "consumer", takesValue: true, meaning: "stable lowercase name for this lead's delivery cursor" }] : []),
+      ...(action === "inbox" ? [{ name: "limit", takesValue: true, meaning: "batch size from 1 to 100; defaults to 10" }] : []),
+      ...(action === "ack" ? [{ name: "batch", takesValue: true, meaning: "exact batch ID returned by assignment inbox" }] : []),
     ],
   })),
   operator("task state", "set a task's state by hand — an operator correction, not a workflow step"),
