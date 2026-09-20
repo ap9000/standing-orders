@@ -8295,7 +8295,8 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const options = html.indexOf('<details class="task-status-details" id="task-diagnostics"><summary>Task options</summary>');
     const identity = html.indexOf('<p class="meta task-identity">Task ID <span class="mono">t-shape</span>');
     const title = html.indexOf('<h1 class="task-main-title">shaped</h1>');
-    expect(html).toContain('data-task-status><h2>Builder disconnected</h2>');
+    expect(html).toContain('data-work-status="assignment-needs-decision"');
+    expect(html).toContain('Builder disconnected');
     expect(html).not.toContain('task-eyebrow');
     expect(html).toContain('<a class="item current" href="/t/t-shape"><span class="t">shaped</span></a>');
     const bar = html.indexOf('<div class="acts-bar">');
@@ -8317,7 +8318,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(rail).toContain('<span class="meta">publishes as</span>');
     expect(rail).toContain('<span class="meta">this attempt</span>');
     // Sections fold with counts: attempts open, spend folded, scope open and addressable.
-    expect(html).toContain('<details class="section" id="attempts" open><summary><h2>attempts <span class="lane-count">1</span></h2></summary>');
+    expect(html).toContain('<details class="section" id="attempts"><summary><h2>Build activity <span class="lane-count">1</span></h2></summary>');
     expect(html).toContain('<details class="section" id="usage"><summary><h2>usage</h2></summary>');
     expect(html).toContain('<details class="section" id="scope" open><summary><h2>scope</h2></summary>');
     // Cancel stays armed at the foot, after every section.
@@ -11627,8 +11628,18 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       expect(html).toContain("The explicit retry asked by alex is waiting for a worker;");
       expect(html).toContain("1 explicit retry left after it.");
     }
-    // Any other return shape lands on the task page's status card.
+    // A saved automatic-origin request names the signed mode, without
+    // claiming an operator asked for it or changing the attempt allowance.
     const request2 = store.openReviewRequests()[0]!.id;
+    store.raw().prepare("UPDATE review_request SET origin = 'automatic' WHERE id = ?").run(request2);
+    const automatic = await pages();
+    for (const html of [automatic.task, automatic.cockpit]) {
+      expect(html).toContain("The signed mode queued this retry. It is waiting for a worker;");
+      expect(html).toContain("1 retry left after it.");
+      expect(html).not.toContain("The explicit retry asked by alex");
+    }
+    store.raw().prepare("UPDATE review_request SET origin = 'operator' WHERE id = ?").run(request2);
+    // Any other return shape lands on the task page's status card.
     const second = store.admitReview(request2, { runner: "night-shift-1", token: "tok-night-shift-1", provider: "claude", model: "sonnet" }, T0);
     if (!second.ok) throw new Error(second.reason);
     store.finishRun(second.reviewerRunId, { outcome: "failed", reason: "interrupted", now: T0 });
@@ -11678,7 +11689,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const wonTask = await (await fetch(url("/t/t-won"), { headers: { cookie } })).text();
     expect(wonTask).toContain('data-review-state="succeeded" data-review-attempts="2" data-review-cap="3" data-review-remaining="0"');
     expect(wonTask).toContain("<strong>Reviewed · attempt 2 of 3</strong>");
-    expect(wonTask).toContain("landed after 1 explicit retry; a successful review is never retried.");
+    expect(wonTask).toContain("landed after 1 retry; a successful review is never retried.");
     expect(wonTask).toContain(">Reviewed</button>");
     expect(wonTask).not.toContain("/retry-review");
     const refusedWin = await post(cookie, "/t/t-won/retry-review", { csrf, run: String(wonRun) });
@@ -12584,6 +12595,20 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(shortTask).toContain("2 stored records were shortened at storage; their downloads hold only the stored part.");
     expect(shortTask).toContain('data-work-status="ready-to-review"');
     // The damaged result's task page box says the same as its receipt: a problem, never "ok".
+    // An existing exception permits deliberately shortened evidence, but
+    // never damaged stored bytes. The acceptance and verdict remain visible.
+    store.stampRun(shortRun, { scopeDigest: store.getScope("t-short")!.digest });
+    store.acceptProof(shortRun, "alex", "Inspected the stored part and accepted its limits.", T0);
+    const acceptedTask = await read("/t/t-short");
+    expect(acceptedTask).toContain('data-work-status="assignment-ready-to-check"');
+    expect(acceptedTask).toContain('data-work-status="accepted-exception"');
+    writeFileSync(join(evidenceRoot, shortLog.key), "changed after acceptance");
+    const acceptedDamagedTask = await read("/t/t-short");
+    expect(acceptedDamagedTask).toContain('data-work-status="assignment-needs-decision"');
+    expect(acceptedDamagedTask).not.toContain('data-work-status="assignment-ready-to-check"');
+    expect(acceptedDamagedTask).toContain('data-work-status="accepted-exception"');
+    expect(acceptedDamagedTask).toContain("The saved evidence no longer verifies.");
+    expect(store.proofAcceptance(shortRun)?.approver).toBe("alex");
     const damagedTask = await read("/t/t-log");
     expect(damagedTask).toContain('data-dispatch-status="evidence-damaged"');
     expect(damagedTask).toContain("The machine&#39;s verdict at completion is unchanged: the approved check passed against it then.");
@@ -12644,7 +12669,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const ref = seed("t-standing", "revision standing", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
     const run = build("t-standing", ref, RICH);
     store.stampRun(run, { scopeDigest: store.getScope("t-standing")!.digest });
-    await boot();
+    // Keep the worker stale but the one-hour claim below live.
+    await boot({ clock: () => new Date(T0.getTime() + 30 * 60_000) });
     const cookie = await login();
     const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
     const csrf = csrfOf(await read(`/r/${run}`));
@@ -12654,13 +12680,13 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const child = revisionIdOf(sealed.headers.get("location"));
     const childRef = store.lookupRef(child)!.id;
     const line = async () => /<p class="result-revision" data-result-revision="[^"]+" data-result-revision-approved="([01])" data-tone="([a-z]+)"><strong>Revision<\/strong> <a href="[^"]+">[^<]*<\/a> <span class="meta">· ([^<]*)<\/span><\/p>/.exec(await read(`/r/${run}`));
-    // The child's own Work row: the same projection, the same words.
+    // The Work row names the assignment; the selected result still names the exact revision state.
     const rowWords = async () => /<span class="status-label">([^<]*)<\/span>/.exec((await read("/work?view=all")).split(`data-task="t-standing"`)[1] ?? "")?.[1] ?? null;
-    // Unapproved: waits for a person, and the child's own Work row says the same words.
+    // Unapproved: the exact revision names approval; the root names the decision.
     const unapproved = await line();
     expect(unapproved?.[1]).toBe("0");
     expect(unapproved?.[3]).toBe("Needs your approval");
-    expect(unapproved?.[3]).toBe(await rowWords());
+    expect(await rowWords()).toBe("Needs your decision");
     // Approved exactly: no longer waiting for approval — and not "building"
     // either: nothing runs, and this fixture's builder is not heartbeating.
     const scope = store.getScope(child)!;
@@ -12669,13 +12695,13 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const approved = await line();
     expect(approved?.[1]).toBe("1");
     expect(approved?.[3]).not.toMatch(/building|approval/i);
-    expect(approved?.[3]).toBe(await rowWords());
+    expect(await rowWords()).toBe("Needs your decision");
     // Held after approval: on hold, never building.
     store.hold(childRef, "Wait for the column names to settle.", null, T0);
     const held = await line();
     expect(held?.[1]).toBe("1");
     expect(held?.[3]).toBe("On hold");
-    expect(held?.[3]).toBe(await rowWords());
+    expect(await rowWords()).toBe("Needs your decision");
     store.unhold(childRef, T0);
     // Rescoped after approval: the old stamp is no approval of the new terms.
     propose(store, { taskId: child, goal: `${scope.goal} — and also the header row`, outOfScope: scope.outOfScope, touches: scope.touches, acceptance: scope.acceptance, now: T0 });
@@ -12684,8 +12710,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const rescoped = await line();
     expect(rescoped?.[1]).toBe("0");
     expect(rescoped?.[3]).toBe("Needs your approval");
-    expect(rescoped?.[3]).toBe(await rowWords());
-    // Approved again, then running under a live claim, then paused by a stop: the row's words, then "Paused".
+    expect(await rowWords()).toBe("Needs your decision");
+    // A live claim makes the revision Revising and the root Working; a settled stop is Paused.
     const again = approve(store, child, "alex", T0, store.getScope(child)!.digest, approverToken);
     if (!again.ok) throw new Error(again.reason);
     const claim = acquire(store, childRef, "night-shift-1", { token: "tok-night-shift-1", now: T0, ttlMs: 3_600_000 });
@@ -12694,7 +12720,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     store.setTaskState(child, "running", T0);
     const running = await line();
     expect(running?.[1]).toBe("1");
-    expect(running?.[3]).toBe(await rowWords());
+    expect(running?.[3]).toBe("Revising");
+    expect(await rowWords()).toBe("Working");
     const stopped = store.requestRunStop({ runId: live, taskRef: childRef, by: "alex", via: "web" }, T0);
     if (!stopped.ok) throw new Error(stopped.reason);
     store.finishRun(live, { outcome: "interrupted", reason: "stopped", now: T0, stopSettlement: "interrupted" });
@@ -12703,7 +12730,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const paused = await line();
     expect(paused?.[1]).toBe("1");
     expect(paused?.[3]).toBe("Paused");
-    expect(paused?.[3]).toBe(await rowWords());
+    expect(await rowWords()).toBe("Needs your decision");
   });
 });
 
@@ -13134,10 +13161,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const cookie = await login();
     const work = await page(cookie, "/work");
     expect(work).toContain(`class="work-action" href="/d/${decision}">Answer question →</a>`);
-    expect(work).toContain('data-work-status="waiting-decision"');
+    expect(work).toContain('data-work-status="assignment-needs-decision"');
     expect(work).toContain('data-work-diagnostic="no-worker-online"');
     const task = await page(cookie, "/t/t-question");
-    expect(task).toContain('href="/t/t-question#task-questions" data-primary-action>Answer question</a>');
+    expect(task).toContain(`href="/d/${decision}" data-primary-action>Answer question</a>`);
     expect(task).toContain('id="task-questions"');
   });
 
@@ -13315,7 +13342,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const live = await page(cookie, "/t/family-root");
     expect(live).toContain('<a href="/runs">1 live</a><a href="/board?view=order">0 queued</a>');
     expect(live).toContain('data-history-version="newest-sibling"');
-    expect(live).toContain("1 earlier version is still waiting or running");
+    expect(live).toContain("1 earlier task version is still active");
     expect(await page(cookie, "/projects")).toContain('>1 running</a>');
     expect(countsOf(await page(cookie, "/work"))["Running"]).toBe(1);
     // A released or exactly expired lease cannot keep an orphaned run live.
@@ -13368,10 +13395,14 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     };
     const agree = async (taskId: string, token: string, action?: string): Promise<void> => {
       const work = await readStanding(await page(cookie, "/work"), taskId);
-      expect(work.token).toBe(token);
+      const assignmentState = ["ready", "waiting-dependency", "running"].includes(token) ? "working" : "needs-decision";
+      expect(work.token).toBe(`assignment-${assignmentState}`);
       if (action !== undefined) expect(work.action).toBe(action);
-      for (const path of [`/t/${taskId}`, `/chat?task=${taskId}`, `/chat/task-status?task=${taskId}`]) {
-        expect(await readStanding(await page(cookie, path)), path).toEqual(work);
+      expect(await readStanding(await page(cookie, `/t/${taskId}`))).toEqual(work);
+      for (const path of [`/chat?task=${taskId}`, `/chat/task-status?task=${taskId}`]) {
+        const exactTask = await readStanding(await page(cookie, path));
+        expect(exactTask.token, path).toBe(token);
+        expect(exactTask.action, path).toBe(work.action);
       }
     };
     await agree(id, "needs-approval", "Review plan");
@@ -13499,7 +13530,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const cookie = await login();
     await openProject(cookie, alpha);
     const work = await page(cookie, "/work");
-    expect(work).toContain('<a class="work-action" href="/t/t-held">Review hold →</a>');
+    expect(work).toContain('<a class="work-action" href="/t/t-held?version=t-held">Review hold →</a>');
     const chat = await page(cookie, "/chat?task=t-held");
     expect(chat).toContain('<a class="button-link task-journey-action" href="/t/t-held#task-actions" data-primary-action>Review hold</a>');
     const task = await page(cookie, "/t/t-held");
@@ -13511,7 +13542,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       expect(html).not.toContain("Open the next step");
     }
     // Viewing all three surfaces leaves the operator's hold intact.
-    expect(rowsOf(await page(cookie, "/work"))[0]?.token).toBe("held");
+    expect(rowsOf(await page(cookie, "/work"))[0]?.token).toBe("assignment-needs-decision");
     const response = await fetch(url("/t/t-held/unhold"), {
       method: "POST", headers: { cookie, origin: base },
       body: new URLSearchParams({ csrf: csrfOf(task) }), redirect: "manual",
@@ -13565,36 +13596,26 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const rows = rowsOf(all);
     const byId = Object.fromEntries(rows.map(row => [row.id, row]));
     expect(byId).toMatchObject({
-      "t-builder": { token: "ready", views: ["all"], label: "Ready to run" },
-      "t-chained": { token: "waiting-dependency", views: ["all"], label: "Waiting for another task" },
-      "t-held": { token: "held", views: ["all", "needs-you"], label: "On hold" },
-      "t-failed": { token: "failed", views: ["all", "needs-you"], label: "Needs a retry" },
-      "t-cancelled": { token: "cancelled", views: ["all"], label: "Cancelled" },
-      "t-live": { token: "running", views: ["all", "running"], label: "Running now" },
-      "t-checks": { token: "checks-failed", views: ["all", "needs-you", "completed"], label: "Changes saved, but checks failed" },
-      "t-mismatch": { token: "evidence-mismatch", views: ["all", "needs-you", "completed"], label: "Result saved, but its evidence does not match" },
-      "t-missing": { token: "verification-needed", views: ["all", "needs-you", "completed"], label: "Result saved — verification needed" },
-      "t-attested": { token: "agent-attested", views: ["all", "completed"], label: "Result saved — checks reported by the agent" },
-      "t-accepted": { token: "accepted-exception", views: ["all", "completed"], label: "Accepted with an exception" },
-      "t-verified": { token: "ready-to-review", views: ["all", "completed"], label: "Ready to review" },
-      "t-pr": { token: "pr-opened", views: ["all", "completed"], label: "PR opened" },
-      "t-merged": { token: "merge-observed", views: ["all", "completed"], label: "Merge observed" },
+      "t-builder": { token: "assignment-working", views: ["all", "running"], label: "Working" },
+      "t-chained": { token: "assignment-working", views: ["all", "running"], label: "Working" },
+      "t-held": { token: "assignment-needs-decision", views: ["all", "needs-you"], label: "Needs your decision" },
+      "t-failed": { token: "assignment-needs-decision", views: ["all", "needs-you"], label: "Needs your decision" },
+      "t-cancelled": { token: "assignment-cancelled", views: ["all"], label: "Cancelled" },
+      "t-live": { token: "assignment-working", views: ["all", "running"], label: "Working" },
+      ...Object.fromEntries(["t-checks", "t-mismatch", "t-missing", "t-attested", "t-accepted", "t-verified", "t-pr", "t-merged"].map(id => [id, { token: "assignment-needs-decision", views: ["all", "needs-you", "completed"], label: "Needs your decision" }])),
     });
     expect(rows.length).toBe(14);
     // All sorts what needs a person first, then live work, then queued
     // and waiting, then finished, then cancelled — and lists every one.
     const order = rows.map(row => row.token);
-    expect(order.indexOf("running")).toBeGreaterThan(order.lastIndexOf("checks-failed"));
-    expect(order.indexOf("waiting-dependency")).toBeGreaterThan(order.indexOf("running"));
-    expect(order.indexOf("ready")).toBeGreaterThan(order.indexOf("running"));
-    expect(order.indexOf("ready-to-review")).toBeGreaterThan(order.indexOf("waiting-dependency"));
-    expect(order.indexOf("cancelled")).toBe(order.length - 1);
-    // The counts are the same rows' view memberships.
-    expect(countsOf(all)).toEqual({ All: 14, "Needs you": 5, Running: 1, Completed: 8 });
+    expect(order.indexOf("assignment-working")).toBeGreaterThan(order.lastIndexOf("assignment-needs-decision"));
+    expect(order.indexOf("assignment-cancelled")).toBe(order.length - 1);
+    // Finished results still need independent review and owner acknowledgment.
+    expect(countsOf(all)).toEqual({ All: 14, "Needs you": 10, Running: 3, Completed: 8 });
     // Each view lists exactly its members, and marks itself active.
     for (const [view, expected] of [
-      ["needs-you", ["t-held", "t-failed", "t-checks", "t-mismatch", "t-missing"]],
-      ["running", ["t-live"]],
+      ["needs-you", ["t-held", "t-failed", "t-checks", "t-mismatch", "t-missing", "t-attested", "t-accepted", "t-verified", "t-pr", "t-merged"]],
+      ["running", ["t-builder", "t-chained", "t-live"]],
       ["completed", ["t-checks", "t-mismatch", "t-missing", "t-attested", "t-accepted", "t-verified", "t-pr", "t-merged"]],
     ] as const) {
       const html = await page(cookie, `/work?view=${view}`);
@@ -13651,7 +13672,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     };
     for (const [id, [token, label]] of Object.entries(expected)) {
       const row = rowsOf(work).find(one => one.id === id);
-      expect(row, id).toMatchObject({ token, label });
+      expect(row, id).toMatchObject({ token: "assignment-needs-decision", label: "Needs your decision" });
       const task = await page(cookie, `/t/${id}`);
       const chat = await page(cookie, `/chat?task=${id}`);
       const review = await page(cookie, `/review?result=${id}`);
@@ -13934,7 +13955,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       };
     };
     const agree = (seen: Record<string, { token: string | undefined; label: string | undefined }>, token: string, label: string): void => {
-      for (const [name, one] of Object.entries(seen)) expect(one, name).toEqual({ token, label });
+      for (const [name, one] of Object.entries(seen)) {
+        if (name === "work") expect(one, name).toEqual({ token: ["review-pending", "reviewing"].includes(token) ? "assignment-checking" : "assignment-needs-decision", label: ["review-pending", "reviewing"].includes(token) ? "Checking" : "Needs your decision" });
+        else expect(one, name).toEqual({ token, label });
+      }
     };
     // Before any review: the stored verdict everywhere.
     agree(await surfaces(), "checks-failed", "Changes saved, but checks failed");
@@ -13956,7 +13980,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // The receipt's criteria label still reads from the stored verdict.
     expect(queuedTask).toContain("cited by the agent — not verified");
     expect(await page(cookie, "/chat?task=t-rev")).toContain(`data-receipt-review="review-pending">The build finished and its requested independent review is waiting for a worker. ${history}`);
-    expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "needs-you", "completed"]);
+    expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "running", "completed"]);
     // The older run keeps its own verdict: nothing masks a selected result.
     const olderPage = await page(cookie, `/r/${older}`);
     expect(/<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("ready-to-review");
@@ -14024,17 +14048,15 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // The row: the status line, then the next act, then the diagnosis behind a native disclosure — never dropped.
     const row = /<article class="work-row" data-task="t-checks"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
     expect(row).toMatch(/^<div class="work-row-main"><a class="work-title" href="\/t\/t-checks">Escape quotes<\/a><p class="work-meta"><span>[^<]+<\/span><\/p><\/div>/);
-    expect(row).toMatch(/<div class="work-row-status"><span class="status-line" data-work-status="checks-failed"[^>]*>.*?<span class="status-label">Changes saved, but checks failed<\/span><\/span><a class="work-action" href="\/review\?result=t-checks&amp;run=\d+&amp;project=[^"]+">Review the failed check →<\/a><details class="work-details"><summary>Details<\/summary><p class="work-detail">The repository&#39;s approved check failed against this build \(exit 1\), so the result is not verified\.<\/p><p class="work-meta work-id">Task <span class="mono">t-checks<\/span><\/p><\/details><\/div>$/);
-    expect(work).not.toContain("<p class=\"work-detail\">The repository&#39;s approved check failed against this build (exit 1), so the result is not verified.</p></div>");
-    // A row with no next act still discloses its reason; every row has exactly one disclosure.
-    const queued = /<article class="work-row" data-task="t-queued"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
-    expect(queued).toMatch(/<details class="work-details"><summary>Details<\/summary><p class="work-detail">[^<]+<\/p><p class="work-meta work-id">Task <span class="mono">t-queued<\/span><\/p><\/details><\/div>$/);
+    expect(row).toContain('data-work-status="assignment-needs-decision"');
+    expect(row).toContain('class="problem assignment-detail">The repository&#39;s approved check failed against this build (exit 1)');
+    expect(row).toContain('Review the failed check →</a>');
+    expect(row).toContain('<details class="assignment-attempts"><summary>Attempts ');
+    // Every root has one native disclosure for internal attempts.
     expect(work.match(/<article class="work-row"/g)).toHaveLength(3);
-    expect(work.match(/<details class="work-details">/g)).toHaveLength(3);
-    // The disclosure is native and unstyled as a card: no script needed, the summary is its own control.
+    expect(work.match(/<details class="assignment-attempts">/g)).toHaveLength(3);
     const css = await stylesOf(work, base);
-    expect(css).toContain(".work-details > summary::-webkit-details-marker { display: none; }");
-    expect(css).toContain(".work-row-status { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .875rem; }");
+    expect(css).toContain('.assignment-attempts summary{min-height:44px;');
     // The receipt: an optional, unsettled review folds behind a disclosure; the machine verdict and the facts stay in the open.
     const task = await page(cookie, `/t/t-optional`);
     expect(task).toContain('<details class="receipt-coverage" data-semantic-coverage="secondary"><summary>Independent review</summary><ul><li>semantic coverage: 0/1 upheld by an independent reviewer — independent review is optional under default quality — none has settled</li></ul></details>');
@@ -14075,9 +14097,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const meta = /<p class="work-meta">([\s\S]*?)<\/p>/.exec(row)?.[1] ?? "";
     expect(meta).toMatch(/^<span>[^<]+<\/span>$/);
     expect(meta).not.toContain("t-checks");
-    expect(row).toContain('<details class="work-details"><summary>Details</summary><p class="work-detail">');
+    expect(row).toContain('<details class="assignment-attempts"><summary>Attempts ');
     expect(row).toContain('<p class="work-meta work-id">Task <span class="mono">t-checks</span></p></details>');
-    expect(row).toContain('<span class="status-label">Changes saved, but checks failed</span>');
+    expect(row).toContain('<span class="status-label">Needs your decision</span>');
+    expect(row).toContain('class="problem assignment-detail">The repository&#39;s approved check failed against this build (exit 1)');
     expect(row).toContain(`<a class="work-action" href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}">Review the failed check →</a>`);
     for (const id of ["t-rev", "t-queued"]) expect(work).toContain(`<p class="work-meta work-id">Task <span class="mono">${id}</span></p></details>`);
     // The task page: the status box leads with the result's words, the
@@ -14095,7 +14118,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // beneath answers a different question ("will this run?").
     const queued = await page(cookie, "/t/t-queued");
     expect(queued).toContain('<h1 class="task-main-title">Rework the ledger export</h1>');
-    expect(queued).toContain('data-task-status><h2>Needs a scope</h2>');
+    expect(queued).toContain('data-work-status="assignment-needs-decision"');
+    expect(queued).toContain('<h2 class="assignment-state">Needs your decision</h2>');
     // The selected older result keeps its own status on its run page.
     const olderPage = await page(cookie, `/r/${older}`);
     expect(/<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("ready-to-review");

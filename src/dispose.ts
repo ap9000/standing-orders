@@ -1,3 +1,4 @@
+// Assignment tracking grants no repair authority or attempts.
 import { originalTaskBase, focusedTestCommandSupported } from "./observations.js";
 /**
  * The build disposition service (Parity II Phase 2, v4 Q2 / v6 W1): the

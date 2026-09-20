@@ -139,6 +139,22 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     flags: [jsonFlag, dbFlag, { name: "state", takesValue: true, meaning: "queued|running|done|failed|cancelled" }] },
   { invocation: "task show", synopsis: "one task in full", audience: "agent", agentMayInvoke: true, mutation: "none",
     positionals: [{ name: "id", required: true, meaning: "the task" }], flags: [jsonFlag, dbFlag], notableReasons: ["unknown-task"] },
+  ...(["show", "updates", "claim", "check"] as const).map(action => ({
+    invocation: `assignment ${action}`,
+    synopsis: action === "show" ? "read the root, current work, owner and exact receipt"
+      : action === "updates" ? "read durable updates after a cursor; save nextCursor after processing"
+      : action === "claim" ? "record coordinator lead ownership; grants no approval or execution authority"
+      : "acknowledge the exact ready receipt as its lead; accepts no proof and deploys nothing",
+    audience: "agent" as const, agentMayInvoke: true,
+    mutation: action === "claim" || action === "check" ? "identity-idempotent" as const : "none" as const,
+    ...(action === "updates" ? {} : { positionals: [{ name: "task", required: true, meaning: "any task in the assignment's existing correction chain" }] }),
+    flags: [jsonFlag, dbFlag,
+      { name: "token-env", takesValue: true, meaning: "explicit environment variable containing a coordinator token; required for claim/check unless token-file is used" },
+      { name: "token-file", takesValue: true, meaning: "explicit coordinator token file; cannot be combined with token-env" },
+      ...(action === "updates" ? [{ name: "after", takesValue: true, meaning: "last processed admitted update cursor; defaults to 0" }, { name: "limit", takesValue: true, meaning: "page size from 1 to 100; defaults to 50" }] : []),
+      ...(action === "check" ? [{ name: "digest", takesValue: true, meaning: "exact current receipt digest from assignment show" }] : []),
+    ],
+  })),
   operator("task state", "set a task's state by hand — an operator correction, not a workflow step"),
   { invocation: "task block", synopsis: "make one task wait for another", audience: "agent", agentMayInvoke: true, mutation: "keyed",
     positionals: [{ name: "id", required: true, meaning: "the waiting task" }],

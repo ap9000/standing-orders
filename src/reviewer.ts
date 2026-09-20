@@ -1147,8 +1147,10 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
         },
       );
     } catch (error) {
-      const dirty = recheckScratch();
-      return dirty ?? { ok: false, reason: "agent", message: error instanceof Error ? error.message : String(error) };
+      const problem = recheckScratch() ?? recheckRunnerCustody(request.reviewerRunId);
+      // An unclassified invocation exception may be an authority invariant,
+      // not a provider outage. Only actual provider outcomes grant retries.
+      return problem ?? { ok: false, reason: "invocation", message: error instanceof Error ? error.message : String(error) };
     }
     let readCount = 0;
     let readBytes = 0;
@@ -1287,7 +1289,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
         // continues the live root in exactly its session, under its runner
         // and lease — one correction per parent, proved in the store.
         if (rootStamp === null) {
-          return { ok: false, reason: "agent", message: `reviewer run #${request.reviewerRunId} carries no route provenance — nothing corrects it` };
+          return { ok: false, reason: "stale-evidence", message: `reviewer run #${request.reviewerRunId} carries no route provenance — nothing corrects it` };
         }
         const admittedCorrection = store.admitCorrection({
           taskRef: rootReviewer.taskRef,
@@ -1301,7 +1303,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
           route: rootStamp,
         });
         if (!admittedCorrection.ok) {
-          return { ok: false, reason: "agent", message: admittedCorrection.problem };
+          return { ok: false, reason: "admission", message: admittedCorrection.problem };
         }
         const childRunId = admittedCorrection.runId;
 
@@ -1328,13 +1330,13 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
             },
           );
         } catch (error) {
-          const dirty = recheckScratch();
+          const problem = recheckScratch() ?? recheckRunnerCustody(childRunId);
           store.finishRun(childRunId, {
             outcome: "failed",
-            reason: dirty === null ? "reviewer-agent" : "reviewer-dirty-scratch",
+            reason: problem === null || problem.ok ? "reviewer-invocation" : `reviewer-${problem.reason}`,
             now: clock(),
           });
-          return dirty ?? { ok: false, reason: "agent", message: error instanceof Error ? error.message : String(error) };
+          return problem ?? { ok: false, reason: "invocation", message: error instanceof Error ? error.message : String(error) };
         }
 
         const dirty = recheckScratch();
@@ -1525,8 +1527,8 @@ export type ReviewPassReport = {
   /** v50: which root attempt this pass ran (1..REVIEW_ROOT_ATTEMPTS);
    * absent on a skipped request that opened no run. */
   attempt?: number;
-  /** v50: on a failed attempt, how many EXPLICIT retries the source run
-   * still admits (0 = exhausted) — the tick reports it, never acts on it. */
+  /** On a failed attempt, remaining unreserved retries after any signed
+   * retry was queued. The complete queue state lives in reviewRetryStateOf. */
   retriesRemaining?: number;
   /** v40: set when this pass folded at least one criterion judgement — the
    * tick's repair trigger reads this to decide whether a draft is owed. */
@@ -1535,8 +1537,9 @@ export type ReviewPassReport = {
 
 /**
  * The tick's review pass: consume open review requests, one bounded logical
- * review each (R4), with only the bounded same-session formatting
- * corrections above. Everything consequential happens inside the store's
+ * review each (R4), including narrowly authorized service retries queued
+ * for a later pass. Formatting corrections stay in the same session.
+ * Everything consequential happens inside the store's
  * ONE admission transaction (`admitReview`): the request is claimed, a
  * mode-derived request re-proves the EXACT digest it was queued under
  * (R-REVOKE: a renewal is a new signature and inherits nothing), the
@@ -1571,6 +1574,7 @@ export async function reviewPass(
 ): Promise<ReviewPassReport[]> {
   const clock = options.clock ?? (() => options.now);
   const reports: ReviewPassReport[] = [];
+  if (options.shouldStop?.() !== true) store.reconcileAutomaticReviewRetries(clock());
   for (const request of store.openReviewRequests()) {
     if (options.shouldStop?.() === true) break;
     // THE REVIEW LEG (v47): a task whose approval sealed a route reviews
@@ -1688,7 +1692,7 @@ export async function reviewPass(
     } else {
       // One logical attempt, spent (R4): review is additive — the task's outcome
       // already stands, so a broken pass is a visible typed run, never a
-      // block and never a retry loop. Run 1467's fix: a malformed-review
+      // block; a signed service retry is queued only after it ends. A malformed-review
       // failure carries its bounded, sanitized parse diagnostic into the
       // stored reason too — every other failure reason is unchanged.
       const storedReason =
@@ -1699,8 +1703,11 @@ export async function reviewPass(
         now: clock(),
       });
       store.stampReviewRequestOutcome(request.id, storedReason);
-      // The report names the attempt and what the operator may still do
-      // (v50): a retry is explicit, never this pass's own next move.
+      // Queue only under fresh signed retry authority; the snapshot above
+      // ensures the next attempt runs on a later ordinary pass. Recovery at
+      // pass start closes the crash gap after finishRun.
+      if (options.shouldStop?.() !== true) store.requestAutomaticReviewRetry(request.run, clock());
+      // Report the failed attempt honestly, even when a retry is queued.
       reports.push({
         requestId: request.id,
         run: request.run,
