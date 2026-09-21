@@ -34,6 +34,10 @@ To enable sending noninteractively, inspect the terms in the brief, then use `ch
 
 `lead create/update/member/transfer` and `conversation create/member/edit/withdraw/read/follow/stop` expose the same central operations. Membership edits and transfers require the current revision. Transfer keeps the task, approved scope, attempts and completed result; it changes the responsible lead.
 
+## Slack, Discord and Teams
+
+The same rules apply in Slack and Discord: each teammate pairs their own account under Settings, `status`, `task <id>` and `help` answer from the database, a channel follows one team conversation with `team` and `team <number>` from a conversation manager, and Mark complete confirms with a second tap on the card. See [Slack](slack.md) and [Teams](teams.md); Teams needs an internet-reachable messaging endpoint.
+
 ## Telegram on your phone
 
 Each teammate pairs their own private chat with the installation's bot: open Settings → Telegram, enter your password, and send the one-time `/pair` code to the bot within 10 minutes. The chat then answers as you, under your own project access and spending consent, and **Unpair my phone** ends it without touching anyone else's pairing. The installation operator still saves the bot token once on the settings page, or with `standing-orders bridge telegram token`.

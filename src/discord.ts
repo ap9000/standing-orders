@@ -15,6 +15,7 @@ import {
   deliverDiscordPart,
   planDiscordNotifications,
   type DiscordChatOptions,
+  planDiscordRooms,
 } from "./discord-chat.js";
 export function discordReadyMatches(
   raw: unknown,
@@ -72,7 +73,9 @@ export async function followDiscord(
         .run(message, credentials.installation, owner);
     const api = discordApi(credentials.botToken);
     const client = new Client({
-      intents: [GatewayIntentBits.DirectMessages],
+      // Guild messages and their content are needed for rooms; the Message
+      // Content intent must be enabled for the app in Discord's developer portal.
+      intents: [GatewayIntentBits.DirectMessages, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
       partials: [Partials.Channel],
       allowedMentions: { parse: [], repliedUser: false },
       rest: { timeout: 15_000, retries: 2 },
@@ -196,6 +199,7 @@ export async function followDiscord(
           continue;
         }
         await processDiscordEvent(chat);
+        if (same()) await planDiscordRooms(chat);
         if (same()) await deliverDiscordPart(chat);
         if (same() && options.notifications())
           await planDiscordNotifications(chat);

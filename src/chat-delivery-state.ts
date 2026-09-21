@@ -44,6 +44,23 @@ CREATE TABLE IF NOT EXISTS chat_runtime (
  problem TEXT, retry_at TEXT, notification INTEGER NOT NULL DEFAULT 0
 );
 `;
+/** v73: a chat's place in the shared team conversations — a channel follows one
+ * conversation, a DM may select one. Rows are revoked, never deleted. */
+const CHAT_ROOM_SCHEMA = `
+CREATE TABLE IF NOT EXISTS chat_room (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, installation TEXT NOT NULL, chat TEXT NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('group','private')), conversation TEXT NOT NULL,
+ binding INTEGER NOT NULL REFERENCES chat_binding(id),
+ bound_by TEXT NOT NULL, bound TEXT NOT NULL, cursor INTEGER NOT NULL DEFAULT 0,
+ revoked TEXT, revoked_by TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS chat_room_live ON chat_room(installation, chat) WHERE revoked IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS chat_room_group ON chat_room(conversation) WHERE revoked IS NULL AND kind='group';
+CREATE TABLE IF NOT EXISTS chat_meta (
+ installation TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated TEXT NOT NULL,
+ PRIMARY KEY(installation, key)
+);
+`;
 const CHAT_TABLES = [
   "chat_binding",
   "chat_pair",
@@ -101,8 +118,11 @@ export type ChatPart = {
   next_at: string | null;
   created: string;
 };
+export type ChatRoom = { id: number; installation: string; chat: string; kind: "group" | "private"; conversation: string; boundBy: string; binding: number; cursor: number };
 export type ChatContent = {
   text: string;
+  /** Where the part is sent when not the binding's own DM: a room's channel. */
+  channel?: string;
   proposal?: number;
   image?: { taskId: string; run: number; artifact: number; sha256: string };
   task?: string;
@@ -117,15 +137,68 @@ export const chatHash = (text: string): string =>
 export class ChatState {
   constructor(
     readonly store: Store,
-    readonly channel: "slack" | "discord",
+    readonly channel: "slack" | "discord" | "teams",
   ) {}
   prepare(sql: string) {
     return this.db.prepare(
       sql.replace(
-        /\bchat_(binding|pair|event|part|action|progress|runtime)\b/g,
+        /\bchat_(binding|pair|event|part|action|progress|runtime|room|meta)\b/g,
         `${this.channel}_$1`,
       ),
     );
+  }
+  /** Small transport facts a channel must remember per chat (a Teams service URL). Never credentials. */
+  meta(installation: string, key: string): string | null {
+    const row = this.prepare("SELECT value FROM chat_meta WHERE installation=? AND key=?").get(installation, key);
+    return row === undefined ? null : String(row.value);
+  }
+  setMeta(installation: string, key: string, value: string, now: Date): void {
+    this.prepare("INSERT INTO chat_meta(installation,key,value,updated) VALUES(?,?,?,?) ON CONFLICT(installation,key) DO UPDATE SET value=excluded.value,updated=excluded.updated").run(installation, key, value, now.toISOString());
+  }
+  // ---- rooms (v73) -----------------------------------------------------------
+  private readRoom(row: Record<string, unknown>): ChatRoom {
+    return { id: Number(row.id), installation: String(row.installation), chat: String(row.chat), kind: row.kind === "group" ? "group" : "private",
+      conversation: String(row.conversation), boundBy: String(row.bound_by), binding: Number(row.binding), cursor: Number(row.cursor) };
+  }
+  room(installation: string, chat: string): ChatRoom | null {
+    const row = this.prepare("SELECT * FROM chat_room WHERE installation=? AND chat=? AND revoked IS NULL").get(installation, chat);
+    return row === undefined ? null : this.readRoom(row as Record<string, unknown>);
+  }
+  rooms(installation: string): ChatRoom[] {
+    return (this.prepare("SELECT * FROM chat_room WHERE installation=? AND revoked IS NULL ORDER BY id").all(installation) as Record<string, unknown>[]).map(row => this.readRoom(row));
+  }
+  /** Point a chat at a conversation; an earlier choice for the same chat is revoked and delivery starts from now. */
+  bindRoom(args: { installation: string; chat: string; kind: "group" | "private"; conversation: string; by: string; binding: number }, now: Date): { ok: true } | { ok: false; reason: "group-taken" } {
+    return this.store.transact(() => {
+      const stamp = now.toISOString();
+      // Check the expected collision before revoking the current selection.
+      if (args.kind === "group") {
+        const group = this.prepare("SELECT installation, chat FROM chat_room WHERE conversation=? AND kind='group' AND revoked IS NULL").get(args.conversation);
+        if (group !== undefined && (group.installation !== args.installation || group.chat !== args.chat)) return { ok: false as const, reason: "group-taken" as const };
+      }
+      this.prepare("UPDATE chat_room SET revoked=?,revoked_by=? WHERE installation=? AND chat=? AND revoked IS NULL").run(stamp, args.by, args.installation, args.chat);
+      const thread = this.db.prepare("SELECT thread FROM team_conversation WHERE id=?").get(args.conversation);
+      if (thread === undefined) throw new Error("no such team conversation");
+      const cursor = Number(this.db.prepare("SELECT COALESCE(MAX(id),0) AS n FROM mate_message WHERE thread=?").get(Number(thread["thread"]))?.["n"] ?? 0);
+      this.prepare("INSERT INTO chat_room(installation,chat,kind,conversation,binding,bound_by,bound,cursor) VALUES(?,?,?,?,?,?,?,?)").run(args.installation, args.chat, args.kind, args.conversation, args.binding, args.by, stamp, cursor);
+      return { ok: true as const };
+    });
+  }
+  unbindRoom(installation: string, chat: string, by: string, now: Date): boolean {
+    return Number(this.prepare("UPDATE chat_room SET revoked=?,revoked_by=? WHERE installation=? AND chat=? AND revoked IS NULL").run(now.toISOString(), by, installation, chat).changes) > 0;
+  }
+  /** The shared rooms core's view of this installation's room records. */
+  roomBackend(installation: string, now: Date): import("./chat-rooms.js").RoomBackend {
+    const roomOf = (room: ChatRoom | null) => room === null ? null : { id: room.id, chatId: room.chat, kind: room.kind, conversation: room.conversation, boundBy: room.boundBy, binding: room.binding, cursor: room.cursor };
+    return {
+      room: chat => roomOf(this.room(installation, chat)),
+      bind: args => this.bindRoom({ installation, chat: args.chatId, kind: args.kind, conversation: args.conversation, by: args.by, binding: args.binding }, now),
+      unbind: (chat, by) => this.unbindRoom(installation, chat, by, now),
+      grant: id => { const binding = this.bindingById(id); return binding === null || !this.live(binding) ? null : { approver: binding.approver, generation: binding.generation, chatId: binding.channel }; },
+    };
+  }
+  advanceRoomCursor(id: number, messageId: number): boolean {
+    return Number(this.prepare("UPDATE chat_room SET cursor=? WHERE id=? AND cursor<? AND revoked IS NULL").run(messageId, id, messageId).changes) > 0;
   }
   get db() {
     return this.store.handle;
@@ -380,9 +453,9 @@ export class ChatState {
   }
 }
 
-export const chatSchema = (channel: "slack" | "discord"): string =>
-  CHAT_SCHEMA.replaceAll("chat_", `${channel}_`);
-export const chatTables = (channel: "slack" | "discord"): string[] =>
+export const chatSchema = (channel: "slack" | "discord" | "teams"): string =>
+  (CHAT_SCHEMA + CHAT_ROOM_SCHEMA).replaceAll("chat_", `${channel}_`);
+export const chatTables = (channel: "slack" | "discord" | "teams"): string[] =>
   CHAT_TABLES.map((name) => name.replace("chat_", `${channel}_`));
 export class ChatDeliveryError extends Error {
   constructor(

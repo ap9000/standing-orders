@@ -7,10 +7,9 @@ durable central conversations, individual membership and spending
 authorization are live; see [Shared leads for a team](team-leads.md). Finished
 work reaches a Ready state and a person or lead marks it complete or requests
 changes; there is no model-review, evidence-repair or resubmission loop
-([Task to completion](LEAD_REVIEW_FLOW.md)). Telegram still uses the personal
-conversation path; connecting it to the team API is the active work
-(per-person pairing, one group per team conversation, direct completion behind
-a confirmation). The sequence below is implementation history from the
+([Task to completion](LEAD_REVIEW_FLOW.md)). Telegram, Slack, Discord and Teams share one chat layer: per-person pairing,
+database-backed commands, rooms that follow a team conversation, and Mark
+complete behind a second tap. Teams needs an internet-reachable endpoint. The sequence below is implementation history from the
 13 September checkpoint, kept for its records, not a current plan.
 
 ### Next sequence

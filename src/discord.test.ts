@@ -34,6 +34,7 @@ import {
   planDiscordNotifications,
   discordCard,
   type DiscordChatOptions,
+  planDiscordRooms,
 } from "./discord-chat.js";
 import { Client } from "discord.js";
 import { followDiscord, discordReadyMatches } from "./discord.js";
@@ -42,6 +43,8 @@ import { resolveChannelMate } from "./chat-channel.js";
 import { prepareSharedAction } from "./chat-actions.js";
 import { verifyApproverStanding } from "./principal.js";
 import { assignmentOf } from "./assignment.js";
+import { TeamLeads } from "./team-leads.js";
+import { ceilingDigestOf } from "./principal.js";
 import { discordSettingsHtml } from "./discord-settings.js";
 import { effectivePrimary, savePrimary } from "./webhooks.js";
 import { createDecisionServer } from "./serve.js";
@@ -978,4 +981,48 @@ test("mark complete confirms behind a second tap in Discord and records the assi
   expect(store.proofAcceptance(run)).toBeNull();
   expect(sentText()).toContain("Marked complete.");
   expect(store.getMateProposal(c.proposal)?.outcome).toMatchObject({ ok: true, via: "discord" });
+});
+
+test("a Discord guild channel follows a team conversation: a manager binds it with team 1, paired members' messages enter the shared queue, and replies come back to the channel", async () => {
+  const sam = addApprover(store, "sam", now, { name: "alex", token: password });
+  if (!sam.ok) throw Error("sam");
+  const original = options.api;
+  const SAM = snow(), DSAM = snow(), GUILD = snow(), ROOM = snow();
+  options = { ...options, api: async (method, path, body = {}, file) => {
+    if (path === `/users/${SAM}`) return { id: SAM };
+    if (path === `/channels/${DSAM}`) return { id: DSAM, type: 1, recipients: [{ id: SAM }] };
+    if (method === "POST" && path === `/channels/${ROOM}/messages`) { calls.push({ method, path, body }); return { id: snow(), channel_id: ROOM, author: { id: BOT } }; }
+    return original(method, path, body, file);
+  } };
+  const samCode = state.pairing(ID.installation, "sam", store.accountOf("sam")!.generation, now);
+  expect(state.pair(ID, chatHash(samCode), SAM, DSAM, now)).not.toBeNull();
+  const domain = new TeamLeads(store, () => projects);
+  const actor = (name: string) => ({ name, generation: store.accountOf(name)!.generation });
+  const lead = domain.execute(actor("alex"), { operation: "create-lead", args: { name: "Engineering", instructions: "Keep it simple.", projects } }, now);
+  if (!lead.ok) throw Error(lead.message);
+  const made = domain.execute(actor("alex"), { operation: "create-conversation", args: { leadId: (lead.result as { leadId: string }).leadId, title: "Website launch", visibility: "team", projects } }, now);
+  if (!made.ok) throw Error(made.message);
+  const conversation = (made.result as { conversationId: string }).conversationId, thread = (made.result as { threadId: number }).threadId;
+  expect(domain.execute(actor("alex"), { operation: "member", args: { conversationId: conversation, account: "sam", role: "contributor", active: true, expectedRevision: 1, joinLead: true, expectedLeadRevision: 1 } }, now).ok).toBe(true);
+  for (const name of ["alex", "sam"]) store.mintTeamMateSession({ approver: name, approverGeneration: actor(name).generation, thread, credentialKey: "fixture", ceilingMicrousd: 0, ceilingDigest: ceilingDigestOf(projects), termsDigest: "t".repeat(64) }, now);
+  const inRoom = (text: string, user = MEMBER) => receive(text, { guild_id: GUILD, channel_id: ROOM, author: { id: user } });
+  const roomTexts = () => calls.filter(c => c.path === `/channels/${ROOM}/messages` && c.method === "POST").map(c => JSON.stringify(c.body.embeds ?? c.body.content ?? ""));
+  expect(inRoom("hello?")).toBe(false);
+  expect(inRoom("team 1")).toBe(true);
+  await processDiscordEvent(options); await drain();
+  expect(roomTexts().at(-1)).toContain("This room now follows Website launch (lead Engineering)");
+  expect(state.room(ID.installation, ROOM)).toMatchObject({ kind: "group", conversation, boundBy: "alex" });
+  expect(inRoom("Add a criterion for the footer", SAM)).toBe(true);
+  await processDiscordEvent(options); await drain();
+  const queued = store.handle.prepare("SELECT q.author, q.request_id, m.text FROM team_message q JOIN mate_message m ON m.id = q.message WHERE q.conversation = ? ORDER BY q.message").all(conversation);
+  expect(queued).toEqual([{ author: "sam", request_id: expect.stringMatching(new RegExp(`^discord:${ROOM}:`)), text: "Add a criterion for the footer" }]);
+  expect(options.subscriptionRunner).not.toHaveBeenCalled();
+  const claim = domain.claimNext("fixture-runner", now)!;
+  expect(domain.finish(claim, { status: "answered", text: "Added: the footer must show the current year." }, now)).toBe(true);
+  await planDiscordRooms(options); await drain();
+  expect(roomTexts().at(-1)).toContain("Added: the footer must show the current year.");
+  expect(roomTexts().some(text => text.includes("sam:"))).toBe(false);
+  expect(inRoom("team off")).toBe(true);
+  await processDiscordEvent(options); await drain();
+  expect(state.room(ID.installation, ROOM)).toBeNull();
 });

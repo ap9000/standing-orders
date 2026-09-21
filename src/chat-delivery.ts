@@ -27,6 +27,7 @@ import {
 } from "./chat-delivery-state.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView } from "./telegram-status.js";
+import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, type Store } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 export const chatObject = (v: unknown): Record<string, unknown> =>
@@ -186,6 +187,24 @@ export async function processChatEvent(
         state.plan(event.id, [{ text: view.text, ...(view.link === null ? {} : { link: view.link }) }], now_);
       }
       return true;
+    }
+    // The team layer: `/team` anywhere, everything in a followed room, and a
+    // DM that chose a conversation. Its replies are planned like any other.
+    const room = state.room(identity.installation, event.channel);
+    const isRoom = event.channel !== binding.channel;
+    if (isRoom || room !== null || roomCommand(text) !== null) {
+      const replies: ChatContent[] = [];
+      const registry = await options.readProjects();
+      const consumed = applyRoomInbound({
+        store, channel: state.channel, backend: state.roomBackend(identity.installation, now), chatId: event.channel, isGroup: isRoom,
+        sender: { approver: binding.approver, generation: binding.generation, binding: binding.id }, updateKey: event.id, text,
+        projects: registry, origin: options.origin(), now, report: { ignored: 0 },
+        say: (reply, link) => replies.push({ text: reply, ...(link ? { link } : {}), ...(isRoom ? { channel: event.channel } : {}) }),
+      });
+      if (consumed) {
+        state.plan(event.id, replies, now);
+        return true;
+      }
     }
     if (text.length > MATE_MESSAGE_MAX_CHARS) {
       state.plan(
@@ -442,7 +461,7 @@ export function applyChatAction(
       !options.current() ||
       !state.live(binding) ||
       event.member !== binding.member ||
-      event.channel !== binding.channel
+      (event.channel !== binding.channel && state.room(options.identity.installation, event.channel)?.kind !== "group")
     )
       return;
     const token = String(object(JSON.parse(event.payload)).token);
@@ -569,6 +588,53 @@ export function applyChatAction(
     state.finish(event.id);
   });
   for (const signal of signals) signal();
+}
+
+/**
+ * Carry new conversation messages to every room that follows one: the
+ * lead's replies, teammates' messages (never the room's own), and each
+ * reply's pending cards, as ordinary parts sent to the room's channel. A
+ * room is a grant from one exact pairing and is rechecked before each
+ * message; a room nobody paired can carry waits.
+ */
+export async function planRoomMessages(options: ChatDeliveryOptions): Promise<void> {
+  const state = options.state, { store, identity } = options, now = nowOf(options);
+  if (!state.owns(identity.installation, options.owner, now) || !options.current()) return;
+  const rooms = state.rooms(identity.installation);
+  if (rooms.length === 0) return;
+  const registry = await options.readProjects();
+  if (!state.owns(identity.installation, options.owner, nowOf(options)) || !options.current()) return;
+  const domain = teamDomain(store, registry);
+  const backend = state.roomBackend(identity.installation, now);
+  const live = state.bindings(identity.installation).filter(one => state.live(one));
+  for (const room of rooms) {
+    const asRoom = { id: room.id, chatId: room.chat, kind: room.kind, conversation: room.conversation, boundBy: room.boundBy, binding: room.binding, cursor: room.cursor };
+    if (!roomGrantAllowed(store, domain, backend, asRoom)) continue;
+    const row = conversationRow(store, room.conversation);
+    if (row === null) continue;
+    for (const message of roomMessagesAfter(store, row.thread, room.cursor)) {
+      const text = roomMessageText(message, state.channel, room.chat);
+      let carrier: ChatBinding | null = null;
+      if (room.kind === "private") carrier = live.find(one => one.channel === room.chat) ?? null;
+      else {
+        const approver = message.turn === null ? null : roomCardApprover(store, room.conversation, message.turn, live.map(one => one.approver));
+        const preferred = approver === null ? undefined : live.find(one => one.approver === approver);
+        carrier = preferred ?? live.find(one => one.id === room.binding) ?? null;
+      }
+      if (carrier === null) break;
+      const parts: ChatContent[] = [];
+      if (text !== null) parts.push({ text, channel: room.chat });
+      if (message.role === "assistant" && message.turn !== null)
+        for (const proposal of store.listMateProposals(row.thread, ["pending"]).filter(one => one.turn === message.turn)) parts.push({ text: "", proposal: proposal.id, channel: room.chat });
+      const id = chatHash(`${state.channel}:room:${room.id}:${message.id}`);
+      const target = carrier;
+      store.transact(() => {
+        if (parts.length > 0 && state.enqueue({ id, installation: identity.installation, binding: target.id, kind: "message", channel: room.chat, member: target.member, ts: "", thread: "", payload: "{}", created: now.toISOString() }))
+          state.plan(id, parts, now);
+        state.advanceRoomCursor(room.id, message.id);
+      });
+    }
+  }
 }
 
 /** One progress card per exact result; separate urgent facts retain their own review link. */

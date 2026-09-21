@@ -1,4 +1,5 @@
 import {loadDiscordCredentials} from "./discord-api.js";
+import { loadTeamsCredentials } from "./teams-api.js";
 import { loadSlackCredentials } from "./slack-api.js";
 /**
  * Legacy notification-only webhooks. Interactive Slack and Discord adapters
@@ -35,8 +36,8 @@ const FILE_OF: Record<WebhookKind, string> = {
 const CONSOLE_FILE = "console-url";
 const PRIMARY_FILE = "messaging-primary";
 
-export type MessagingChannel = "telegram" | "slack" | "discord";
-export const MESSAGING_CHANNELS: readonly MessagingChannel[] = ["telegram", "slack", "discord"];
+export type MessagingChannel = "telegram" | "slack" | "discord" | "teams";
+export const MESSAGING_CHANNELS: readonly MessagingChannel[] = ["telegram", "slack", "discord", "teams"];
 
 export function isMessagingChannel(value: string): value is MessagingChannel {
   return (MESSAGING_CHANNELS as readonly string[]).includes(value);
@@ -138,6 +139,7 @@ export function effectivePrimary(
     ...(telegramConfigured ? (["telegram"] as const) : []),
     ...(loadSlackCredentials(dir) !== null ? (["slack"] as const) : []),
     ...(loadDiscordCredentials(dir) !== null ? (["discord"] as const) : []),
+    ...(loadTeamsCredentials(dir) !== null ? (["teams"] as const) : []),
     ...targets.map(one => one.kind).filter(kind => (kind !== "slack" || loadSlackCredentials(dir) === null) && (kind !== "discord" || loadDiscordCredentials(dir) === null)),
   ];
   const chosen = loadPrimary(env, dir);

@@ -1,4 +1,5 @@
 /** Discord messages and buttons transport the shared assistant's saved actions. */
+import { roomCommand } from "./chat-rooms.js";
 import {
   ChatState,
   ChatDeliveryError,
@@ -13,6 +14,7 @@ import {
   channelAccess,
   chatObject as object,
   type ChatDeliveryOptions,
+  planRoomMessages,
 } from "./chat-delivery.js";
 import { chatResultHref } from "./chat-controls.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
@@ -50,6 +52,8 @@ export const discordDelivery = (
 });
 export const processDiscordEvent = (options: DiscordChatOptions) =>
   processChatEvent(discordDelivery(options));
+export const planDiscordRooms = (options: DiscordChatOptions) =>
+  planRoomMessages(discordDelivery(options));
 export const planDiscordNotifications = (options: DiscordChatOptions) =>
   planChatNotifications(discordDelivery(options));
 /** Save only normalized input. Interaction credentials and pairing codes never enter SQLite. */
@@ -61,8 +65,10 @@ export function receiveDiscord(
   now: Date,
 ): boolean {
   const body = object(raw);
-  if (body.guild_id !== undefined || body.webhook_id !== undefined)
-    return false;
+  if (body.webhook_id !== undefined) return false;
+  // A guild channel is a room: accepted only while it follows a conversation,
+  // or for the `/team` words that make it follow one.
+  const isRoom = body.guild_id !== undefined;
   let member: unknown,
     channel: unknown,
     id: unknown,
@@ -78,7 +84,7 @@ export function receiveDiscord(
       author.system === true ||
       ![0, 19].includes(Number(body.type)) ||
       typeof body.content !== "string" ||
-      ref.guild_id !== undefined
+      (!isRoom && ref.guild_id !== undefined)
     )
       return false;
     member = author.id;
@@ -108,13 +114,13 @@ export function receiveDiscord(
     if (
       body.type !== 3 ||
       body.application_id !== identity.app ||
-      object(body.channel).type !== 1 ||
+      (isRoom ? object(body.channel).type !== 0 : object(body.channel).type !== 1) ||
       object(message.author).id !== identity.bot ||
       message.channel_id !== body.channel_id ||
       !/^so_[a-f0-9]{32}$/.test(String(data.custom_id))
     )
       return false;
-    member = object(body.user).id;
+    member = isRoom ? object(object(body.member).user).id : object(body.user).id;
     channel = body.channel_id;
     id = body.id;
     ts = message.id;
@@ -131,13 +137,15 @@ export function receiveDiscord(
     member === identity.bot
   )
     return false;
+  const roomish = isRoom && (state.room(identity.installation, String(channel)) !== null || (kind === "message" && roomCommand(String(payload.text ?? "")) !== null));
+  if (isRoom && !roomish) return false;
   const binding = state.bindingFor(identity.installation, member);
   if (
     kind === "pair"
-      ? !!binding
+      ? !!binding || isRoom
       : !binding ||
         !state.live(binding) ||
-        binding.channel !== channel
+        (binding.channel !== channel && !roomish)
   )
     return false;
   return state.enqueue({
@@ -260,6 +268,7 @@ export async function deliverDiscordPart(
     if (event.kind === "notice" && options.canNotify?.() === false)
       return false;
     const content = JSON.parse(row.payload) as ChatContent;
+    const destination = content.channel ?? binding.channel;
     if (
       content.task &&
       !repos.includes(store.lookupRef(content.task)?.repo ?? "")
@@ -367,7 +376,7 @@ export async function deliverDiscordPart(
     if (row.uncertain && !target) {
       const recent = await options.api(
         "GET",
-        `/channels/${binding.channel}/messages?limit=100`,
+        `/channels/${destination}/messages?limit=100`,
       );
       const found = (Array.isArray(recent.items) ? recent.items : [])
         .map(object)
@@ -375,7 +384,7 @@ export async function deliverDiscordPart(
           (m) =>
             m.nonce === nonce &&
             object(m.author).id === identity.bot &&
-            m.channel_id === binding.channel &&
+            m.channel_id === destination &&
             discordId(m.id),
         );
       if (found) {
@@ -440,19 +449,19 @@ export async function deliverDiscordPart(
       if (discordId(event.thread))
         args.message_reference = {
           message_id: event.thread,
-          channel_id: binding.channel,
+          channel_id: destination,
           fail_if_not_exists: false,
         };
     }
     const answer = await options.api(
       target ? "PATCH" : "POST",
-      `/channels/${binding.channel}/messages${target ? `/${target}` : ""}`,
+      `/channels/${destination}/messages${target ? `/${target}` : ""}`,
       args,
       file,
     );
     if (
       !discordId(answer.id) ||
-      answer.channel_id !== binding.channel ||
+      answer.channel_id !== destination ||
       (target && answer.id !== target) ||
       object(answer.author).id !== identity.bot ||
       (file &&

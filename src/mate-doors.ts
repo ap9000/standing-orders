@@ -62,7 +62,7 @@ export type DoorOptions = {
   /** Which surface answered — recorded on the decision, the stop and the
    * proposal's outcome. Named by the caller, never defaulted (v3 review,
    * finding 1); `telegram` is the paired phone, never relabelled as the CLI. */
-  via: "web" | "cli" | "telegram" | "slack" | "discord";
+  via: "web" | "cli" | "telegram" | "slack" | "discord" | "teams";
   /**
    * A composing caller already inside a transaction (the Telegram bridge
    * applies a tap in the update's own transaction) hands the door its

@@ -31,12 +31,15 @@ import {
   planSlackNotifications,
   slackBlocks,
   type SlackChatOptions,
+  planSlackRooms,
 } from "./slack-chat.js";
 import { knowledgeView } from "./project-knowledge.js";
 import { resolveChannelMate, parityGaps } from "./chat-channel.js";
 import { prepareSharedAction } from "./chat-actions.js";
 import { verifyApproverStanding } from "./principal.js";
 import { assignmentOf } from "./assignment.js";
+import { TeamLeads } from "./team-leads.js";
+import { ceilingDigestOf } from "./principal.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { slackSettingsHtml } from "./slack-settings.js";
 import { effectivePrimary, savePrimary } from "./webhooks.js";
@@ -660,9 +663,7 @@ describe("Slack shared chat", () => {
     savePrimary(dir, "slack");
     expect(effectivePrimary({}, dir, true).channel).toBe("slack");
     expect(parityGaps()).toEqual([]);
-    expect(SLACK_MANIFEST.oauth_config.scopes.bot).not.toContain(
-      "channels:history",
-    );
+    expect(SLACK_MANIFEST.oauth_config.scopes.bot).toContain("channels:history");
   });
 
   test("switching notification channels does not send an old Slack alert or block an ordinary reply", async () => {
@@ -924,6 +925,68 @@ describe("Slack shared chat", () => {
     expect(store.proofAcceptance(run)).toBeNull();
     expect(String(sends().at(-1)?.args["text"])).toContain("Marked complete.");
     expect(store.getMateProposal(c.proposal)?.outcome).toMatchObject({ ok: true, via: "slack" });
+  });
+
+
+  test("a Slack channel follows a team conversation: a manager binds it with team 1, paired members' messages enter the shared queue, and replies and cards come back to the channel", async () => {
+    const sam = addApprover(store, "sam", now, { name: "alex", token: password });
+    if (!sam.ok) throw Error("sam");
+    const original = options.api;
+    options = { ...options, api: vi.fn(async (method, args = {}) => {
+      if (method === "users.info") return { user: { id: args.user, team_id: ID.team, deleted: false, is_bot: false } };
+      if (method === "conversations.info") return { channel: { id: args.channel, is_im: true, user: args.channel === "DSAM" ? "USAM" : MEMBER } };
+      return original(method, args);
+    }) };
+    const samCode = state.pairing(ID.installation, "sam", store.accountOf("sam")!.generation, now);
+    expect(state.pair(ID, slackHash(samCode), "USAM", "DSAM", now)).not.toBeNull();
+    const domain = new TeamLeads(store, () => projects);
+    const actor = (name: string) => ({ name, generation: store.accountOf(name)!.generation });
+    const lead = domain.execute(actor("alex"), { operation: "create-lead", args: { name: "Engineering", instructions: "Keep it simple.", projects } }, now);
+    if (!lead.ok) throw Error(lead.message);
+    const made = domain.execute(actor("alex"), { operation: "create-conversation", args: { leadId: (lead.result as { leadId: string }).leadId, title: "Website launch", visibility: "team", projects } }, now);
+    if (!made.ok) throw Error(made.message);
+    const conversation = (made.result as { conversationId: string }).conversationId, thread = (made.result as { threadId: number }).threadId;
+    expect(domain.execute(actor("alex"), { operation: "member", args: { conversationId: conversation, account: "sam", role: "contributor", active: true, expectedRevision: 1, joinLead: true, expectedLeadRevision: 1 } }, now).ok).toBe(true);
+    for (const name of ["alex", "sam"]) store.mintTeamMateSession({ approver: name, approverGeneration: actor(name).generation, thread, credentialKey: "fixture", ceilingMicrousd: 0, ceilingDigest: ceilingDigestOf(projects), termsDigest: "t".repeat(64) }, now);
+    const ROOM = "CROOM";
+    const inRoom = (text: string, user = MEMBER, ts = TS) => receive(text, { channel_type: "channel", channel: ROOM, user, ts });
+    // A channel the app merely sits in: nothing is saved.
+    expect(inRoom("hello?")).toBe(false);
+    // sam (contributor) sees nothing to bind; alex (manager) binds.
+    expect(inRoom("team", "USAM")).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(sends().at(-1)?.args).toMatchObject({ channel: ROOM });
+    expect(String(sends().at(-1)?.args["text"])).toContain("No team conversation you manage");
+    expect(inRoom("team 1")).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(String(sends().at(-1)?.args["text"])).toContain("This room now follows Website launch (lead Engineering)");
+    expect(state.room(ID.installation, ROOM)).toMatchObject({ kind: "group", conversation, boundBy: "alex" });
+    // sam's message in the channel is saved to the conversation as sam, once.
+    expect(inRoom("Add a criterion for the footer", "USAM", "1789700000.000777")).toBe(true);
+    await processSlackEvent(options); await drain();
+    const queued = () => store.handle.prepare("SELECT q.author, q.request_id, m.text FROM team_message q JOIN mate_message m ON m.id = q.message WHERE q.conversation = ? ORDER BY q.message").all(conversation);
+    expect(queued()).toEqual([{ author: "sam", request_id: expect.stringMatching(/^slack:CROOM:/), text: "Add a criterion for the footer" }]);
+    expect(runner).not.toHaveBeenCalled();
+    // The lead answers (the runtime's job, simulated); the next cycle carries the reply to the channel.
+    const claim = domain.claimNext("fixture-runner", now)!;
+    expect(domain.finish(claim, { status: "answered", text: "Added: the footer must show the current year." }, now)).toBe(true);
+    await planSlackRooms(options); await drain();
+    expect(sends().at(-1)?.args).toMatchObject({ channel: ROOM, text: "Added: the footer must show the current year." });
+    // alex's browser message echoes with its author; sam's own Slack message never did.
+    expect(domain.execute(actor("alex"), { operation: "send", args: { conversationId: conversation, requestId: "web-1", text: "Also check the phone layout." } }, now).ok).toBe(true);
+    await planSlackRooms(options); await drain();
+    expect(sends().at(-1)?.args).toMatchObject({ channel: ROOM, text: "alex: Also check the phone layout." });
+    expect(sends().some(call => String(call.args["text"]).startsWith("sam:"))).toBe(false);
+    const before = sends().length;
+    await planSlackRooms(options); await drain();
+    expect(sends().length).toBe(before);
+    // /team off by a contributor changes nothing; by the manager it stops the room.
+    expect(inRoom("team off", "USAM")).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(String(sends().at(-1)?.args["text"])).toBe("This room follows nothing you can change.");
+    expect(inRoom("team off")).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(state.room(ID.installation, ROOM)).toBeNull();
   });
 
 });

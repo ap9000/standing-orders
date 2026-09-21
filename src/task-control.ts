@@ -117,7 +117,7 @@ export type StopRequest = {
   taskId: string;
   runId: number;
   by: string;
-  via: "cli" | "web" | "telegram" | "slack" | "discord";
+  via: "cli" | "web" | "telegram" | "slack" | "discord" | "teams";
   /** The held-session supervisor in this process, when there is one: a
    * held attempt is fenced through its own handle the moment the request
    * is durable (the lapse interval would take the same road within
