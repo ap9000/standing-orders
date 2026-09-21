@@ -99,8 +99,8 @@ export async function telegramChannelProblem(
   } catch {
     return UNREADABLE_REGISTRY;
   }
-  const binding = store.liveTelegramBinding(expected.botId);
-  if (binding === null || binding.id !== expected.bindingId || binding.approverGeneration !== expected.approverGeneration) return "this chat is no longer paired";
+  const binding = store.liveTelegramBindingById(expected.bindingId);
+  if (binding === null || binding.botId !== expected.botId || binding.approverGeneration !== expected.approverGeneration) return "this chat is no longer paired";
   if (store.accountOf(binding.approver)?.role !== "approver") return "the paired account is no longer an approver";
   const repos = telegramConversationRepos(store, binding.approver, registry);
   const same = "repos" in expected
@@ -377,16 +377,16 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
   };
 
   // 1. The exact binding the message arrived under must still be the live one.
-  const binding = store.liveTelegramBinding(botId);
-  if (binding === null || binding.id !== row.binding || binding.approverGeneration !== row.approverGeneration || store.accountOf(binding.approver)?.role !== "approver") {
+  const binding = store.liveTelegramBindingById(row.binding);
+  if (binding === null || binding.botId !== botId || binding.approverGeneration !== row.approverGeneration || store.accountOf(binding.approver)?.role !== "approver") {
     finish({ state: "failed", outcome: "unpaired" });
     report.refused++;
     return;
   }
   const chatId = binding.chatId;
   const pairingProblem = (): string | null => {
-    const live = store.liveTelegramBinding(botId);
-    if (live === null || live.id !== binding.id || live.approverGeneration !== binding.approverGeneration) return "this chat is no longer paired";
+    const live = store.liveTelegramBindingById(binding.id);
+    if (live === null || live.approverGeneration !== binding.approverGeneration) return "this chat is no longer paired";
     if (store.accountOf(live.approver)?.role !== "approver") return "the paired account is no longer an approver";
     return null;
   };

@@ -104,7 +104,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
-export const SCHEMA_VERSION = 71;
+export const SCHEMA_VERSION = 72;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -2675,8 +2675,9 @@ CREATE TABLE IF NOT EXISTS approver (
 
 -- One Telegram chat speaking as one approver. Bindings are never deleted:
 -- revocation is a stamp, because "who could answer as whom, when" is an
--- audit question a DELETE cannot answer. The partial unique index is the
--- v1 rule that exactly one binding is live per bot at a time.
+-- audit question a DELETE cannot answer. The partial unique index (v72) is
+-- the rule that one Telegram user has one live binding per bot: several
+-- teammates pair their own private chats with the same bot.
 CREATE TABLE IF NOT EXISTS telegram_binding (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
   bot_id              TEXT NOT NULL,
@@ -2690,8 +2691,8 @@ CREATE TABLE IF NOT EXISTS telegram_binding (
   revoked_at          TEXT,
   revoked_by          TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS telegram_binding_live
-  ON telegram_binding (bot_id) WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_binding_live_user
+  ON telegram_binding (bot_id, user_id) WHERE revoked_at IS NULL;
 
 -- v61: destination receipts around the existing outbox, independent of its
 -- legacy shell/webhook receipt and of push_delivery. No second scheduler.
@@ -4341,6 +4342,10 @@ function migrate(db: Database, origin: number | null): void {
   // dispatched under.
   addColumn(db, "task_ref", "strikes", "INTEGER NOT NULL DEFAULT 0");
   addColumn(db, "claim", "incarnation", "TEXT");
+  // v72: one live Telegram binding per (bot, user) replaces one per bot, so
+  // several teammates can pair their own chats. The schema text already
+  // created the new index; the old rule is dropped here, idempotently.
+  db.exec("DROP INDEX IF EXISTS telegram_binding_live");
   rebuild(db);
   rebuildDecisionVia(db);
   // v4 CHECK widenings, each a copy-rename against an exactly recognized
@@ -19126,8 +19131,8 @@ export class Store {
           )
           .get(attempt.codeHash, attempt.chatId, attempt.userId, attempt.updateId);
         if (consumed !== undefined) {
-          const live = this.liveTelegramBinding(attempt.botId);
-          if (live !== null && live.chatId === attempt.chatId && live.userId === attempt.userId) {
+          const live = this.liveTelegramBindingFor(attempt.botId, attempt.userId);
+          if (live !== null && live.chatId === attempt.chatId) {
             return { ok: true as const, binding: live, replay: true };
           }
         }
@@ -19163,15 +19168,16 @@ export class Store {
             attempt.updateId,
           );
       } catch {
-        // The partial unique index said no: a live binding already exists.
+        // The partial unique index said no: this Telegram user already has a live binding.
         return { ok: false as const, reason: "already-bound" as const };
       }
-      // Every other outstanding code dies with this success.
-      this.db.prepare("DELETE FROM telegram_pairing WHERE consumed_at IS NULL").run();
+      // Every other outstanding code for this person dies with this success;
+      // a teammate's pending code is theirs and stays.
+      this.db.prepare("DELETE FROM telegram_pairing WHERE consumed_at IS NULL AND approver = ?").run(String(pairing["approver"]));
 
-      const binding = this.liveTelegramBinding(attempt.botId);
+      const binding = this.liveTelegramBindingFor(attempt.botId, attempt.userId);
       if (binding === null) throw new Error("the binding vanished inside its own transaction");
-      // A bot's FIRST pairing starts from now (Telegram task updates): every
+      // A person's FIRST pairing starts from now (Telegram task updates): every
       // ROUTINE fact already in the outbox is history for this destination —
       // settled here, in the pairing's own transaction, with a receipt that
       // says it was skipped, never sent as a backlog to a phone that just
@@ -19183,8 +19189,8 @@ export class Store {
       // no phone ever received still waits for whenever pairing happens.
       // Existing destinations are untouched.
       const priorPairing = this.db
-        .prepare("SELECT 1 AS hit FROM telegram_binding WHERE bot_id = ? AND id <> ? LIMIT 1")
-        .get(attempt.botId, binding.id);
+        .prepare("SELECT 1 AS hit FROM telegram_binding WHERE bot_id = ? AND user_id = ? AND id <> ? LIMIT 1")
+        .get(attempt.botId, attempt.userId, binding.id);
       if (priorPairing === undefined) {
         this.db
           .prepare(
@@ -19201,36 +19207,67 @@ export class Store {
   }
 
   /**
-   * The one live binding for a bot — and only while its approver's
-   * credential generation still matches. A rotation that somehow missed the
-   * sweep reads as no binding at all, which is the failure direction that
-   * fails closed.
+   * Every live binding for a bot, oldest first — and only while each
+   * approver's credential generation still matches. A rotation that
+   * somehow missed the sweep reads as no binding at all, which is the
+   * failure direction that fails closed. Several teammates may each hold
+   * one (v72); nothing here ranks them.
    */
-  liveTelegramBinding(botId: string): TelegramBinding | null {
+  liveTelegramBindings(botId: string): TelegramBinding[] {
+    return this.db
+      .prepare(
+        `SELECT telegram_binding.* FROM telegram_binding
+         JOIN approver ON approver.name = telegram_binding.approver
+          AND approver.generation = telegram_binding.approver_generation
+          AND approver.revoked_at IS NULL
+         WHERE bot_id = ? AND telegram_binding.revoked_at IS NULL
+         ORDER BY telegram_binding.id`,
+      )
+      .all(botId)
+      .map(readTelegramBinding);
+  }
+
+  /** The live binding one Telegram user holds with a bot, if any. */
+  liveTelegramBindingFor(botId: string, userId: string): TelegramBinding | null {
+    return this.liveTelegramBindings(botId).find(binding => binding.userId === userId) ?? null;
+  }
+
+  /** The exact binding, if it is still live under its approver's current generation. */
+  liveTelegramBindingById(id: number): TelegramBinding | null {
     const row = this.db
       .prepare(
         `SELECT telegram_binding.* FROM telegram_binding
          JOIN approver ON approver.name = telegram_binding.approver
           AND approver.generation = telegram_binding.approver_generation
           AND approver.revoked_at IS NULL
-         WHERE bot_id = ? AND telegram_binding.revoked_at IS NULL`,
+         WHERE telegram_binding.id = ? AND telegram_binding.revoked_at IS NULL`,
       )
-      .get(botId);
+      .get(id);
     return row === undefined ? null : readTelegramBinding(row);
   }
 
-  /** Revoke a bot's live binding and everything it could still do. */
+  /** The oldest live binding for a bot — the single-person reading kept for
+   * status lines and fixtures; delivery and inbound handling read
+   * `liveTelegramBindings` / `liveTelegramBindingFor` instead. */
+  liveTelegramBinding(botId: string): TelegramBinding | null {
+    return this.liveTelegramBindings(botId)[0] ?? null;
+  }
+
+  /** Revoke every live binding one person holds with a bot, and everything
+   * those chats could still do. Teammates' bindings are untouched. */
   unpairTelegram(botId: string, by: string, now: Date): boolean {
     return this.transact(() => {
-      const live = this.liveTelegramBinding(botId);
-      if (live === null) return false;
+      const mine = this.liveTelegramBindings(botId).filter(binding => binding.approver === by);
+      if (mine.length === 0) return false;
       const stamp = now.toISOString();
-      this.db
-        .prepare("UPDATE telegram_binding SET revoked_at = ?, revoked_by = ? WHERE id = ?")
-        .run(stamp, by, live.id);
-      this.db
-        .prepare("UPDATE telegram_action SET consumed_at = ? WHERE binding = ? AND consumed_at IS NULL")
-        .run(stamp, live.id);
+      for (const live of mine) {
+        this.db
+          .prepare("UPDATE telegram_binding SET revoked_at = ?, revoked_by = ? WHERE id = ?")
+          .run(stamp, by, live.id);
+        this.db
+          .prepare("UPDATE telegram_action SET consumed_at = ? WHERE binding = ? AND consumed_at IS NULL")
+          .run(stamp, live.id);
+      }
       return true;
     });
   }
@@ -22595,8 +22632,8 @@ export class Store {
 
   /** Synchronous final fence, called AFTER each asynchronous enrollment read. */
   telegramDeliveryProblem(row: TelegramDelivery, binding: TelegramBinding, owner: string, projects: readonly string[], now: Date, batch: readonly number[] = [row.id]): string | null {
-    const live = this.liveTelegramBinding(binding.botId);
-    if (live?.id !== binding.id || live.approverGeneration !== binding.approverGeneration ||
+    const live = this.liveTelegramBindingById(binding.id);
+    if (live === null || live.approverGeneration !== binding.approverGeneration ||
         this.accountOf(binding.approver)?.role !== "approver") return TELEGRAM_HOLD_REASONS.authority;
     if (row.destination !== this.telegramDestination(live)) return TELEGRAM_HOLD_REASONS.destination;
     if (!this.telegramClaimHeld(row, owner, now)) return TELEGRAM_HOLD_REASONS.claim;
@@ -22645,7 +22682,7 @@ export class Store {
     outcome: { ok: true; receipt: string | null } | { ok: false; error: string; retryAt?: string }, now: Date): boolean {
     return this.transact(() => {
       if (!this.telegramClaimHeld(row, owner, now) || row.destination !== this.telegramDestination(binding)) return false;
-      if (outcome.ok && (this.liveTelegramBinding(binding.botId)?.id !== binding.id || this.accountOf(binding.approver)?.role !== "approver")) return false;
+      if (outcome.ok && (this.liveTelegramBindingById(binding.id) === null || this.accountOf(binding.approver)?.role !== "approver")) return false;
       // A `skipped:` receipt settles the row without a delivery: nothing
       // reached the phone, so delivered_at stays empty exactly as it does
       // for the pairing skip (TELEGRAM_UNSETTLED treats both as settled).

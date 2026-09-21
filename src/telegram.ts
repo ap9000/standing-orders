@@ -506,8 +506,8 @@ async function deliverOutbox(
   clock: () => Date, report: BridgeReport, readProjects?: TelegramReadProjects,
   canDeliver?: () => boolean, phoneOrigin?: () => string | null, evidenceRoot?: string,
 ): Promise<void> {
-  const binding = store.liveTelegramBinding(botId);
-  if (binding === null) {
+  const bindings = store.liveTelegramBindings(botId);
+  if (bindings.length === 0) {
     // Routine progress facts are not a problem to fix: a first pairing
     // starts from now and settles them as history. Anything else pending
     // is named, once per pass, as before.
@@ -517,6 +517,17 @@ async function deliverOutbox(
   const digest = store.telegramDigest();
   const now = clock();
   const digestDue = digest.everyMs === null || digest.lastSentAt === null || now.getTime() >= new Date(digest.lastSentAt).getTime() + digest.everyMs;
+  // Every paired person is a destination of their own: each binding claims
+  // and settles its own rows under its own ceiling, in turn.
+  for (const binding of bindings) await deliverOutboxTo(store, botId, binding, transport, owner, clock, report, digest, digestDue, readProjects, canDeliver, phoneOrigin, evidenceRoot);
+}
+
+async function deliverOutboxTo(
+  store: Store, botId: string, binding: TelegramBinding, transport: TelegramTransport, owner: string,
+  clock: () => Date, report: BridgeReport, digest: ReturnType<Store["telegramDigest"]>, digestDue: boolean,
+  readProjects?: TelegramReadProjects, canDeliver?: () => boolean, phoneOrigin?: () => string | null, evidenceRoot?: string,
+): Promise<void> {
+  const now = clock();
   const claimed = store.claimTelegramDeliveries(binding, owner, DELIVERY_CLAIM_MS, now, digestDue ? "all" : "urgent");
 
   // Preserve ID order, flushing earlier routine facts before an urgent task
@@ -1005,9 +1016,9 @@ async function drainUpdates(
 async function projectsForTap(context: Context, update: Update): Promise<readonly string[] | null> {
   const callback = update.callback_query;
   if (callback === undefined || context.conversation === undefined || context.readProjects === undefined) return null;
-  const binding = context.store.liveTelegramBinding(context.botId);
+  const binding = callback.from === undefined ? null : context.store.liveTelegramBindingFor(context.botId, String(callback.from.id));
   if (
-    binding === null || callback.from === undefined || String(callback.from.id) !== binding.userId ||
+    binding === null || callback.from === undefined ||
     callback.message?.chat === undefined || String(callback.message.chat.id) !== binding.chatId ||
     context.store.getTelegramProposalAction(callback.data ?? "") === null
   ) return null;
@@ -1059,7 +1070,7 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
     // A reply to a decision message this bot sent is a note, exactly as
     // before. Everything else that is ordinary text talks to the shared
     // assistant when a conversation is configured; otherwise silence.
-    const binding = store.liveTelegramBinding(botId);
+    const binding = store.liveTelegramBindingFor(botId, String(from.id));
     const repliedDecision = binding !== null && message.reply_to_message !== undefined
       ? store.decisionForTelegramMessage(binding.id, binding.chatId, String(message.reply_to_message.message_id))
       : null;
@@ -1123,11 +1134,11 @@ function applyConversation(context: Context, update: Update, effects: Effect[]):
   const message = update.message as NonNullable<Update["message"]>;
   const chat = message.chat;
   const from = message.from;
-  const binding = store.liveTelegramBinding(botId);
+  const binding = from === undefined ? null : store.liveTelegramBindingFor(botId, String(from.id));
   if (
     binding === null || store.accountOf(binding.approver)?.role !== "approver" ||
     chat === undefined || chat.type !== "private" || String(chat.id) !== binding.chatId ||
-    from === undefined || String(from.id) !== binding.userId ||
+    from === undefined ||
     message.text === undefined ||
     message.forward_origin !== undefined || message.forward_date !== undefined ||
     message.via_bot !== undefined || message.sender_chat !== undefined || message.caption !== undefined
@@ -1190,11 +1201,11 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
   const message = update.message!;
   const command = phoneCommand(message.text ?? "");
   if (command === null) return false;
-  const binding = store.liveTelegramBinding(botId);
+  const binding = message.from === undefined ? null : store.liveTelegramBindingFor(botId, String(message.from.id));
   if (
     binding === null || store.accountOf(binding.approver)?.role !== "approver" ||
     message.chat?.type !== "private" || String(message.chat.id) !== binding.chatId ||
-    message.from === undefined || String(message.from.id) !== binding.userId ||
+    message.from === undefined ||
     message.forward_origin !== undefined || message.forward_date !== undefined ||
     message.via_bot !== undefined || message.sender_chat !== undefined || message.caption !== undefined
   ) {
@@ -1205,8 +1216,8 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
   // was consumed. A crash or send failure cannot turn replay into a new action.
   effects.push(async () => {
     const stillPaired = (): boolean => {
-      const live = store.liveTelegramBinding(botId);
-      return live?.id === binding.id && live.approverGeneration === binding.approverGeneration && store.accountOf(binding.approver)?.role === "approver";
+      const live = store.liveTelegramBindingById(binding.id);
+      return live !== null && live.approverGeneration === binding.approverGeneration && store.accountOf(binding.approver)?.role === "approver";
     };
     if (!stillPaired()) return;
     let response = PHONE_HELP;
@@ -1269,7 +1280,7 @@ function applyNote(context: Context, update: Update, effects: Effect[]): void {
   const message = update.message as NonNullable<Update["message"]>;
   const chat = message.chat;
   const from = message.from;
-  const binding = store.liveTelegramBinding(botId);
+  const binding = from === undefined ? null : store.liveTelegramBindingFor(botId, String(from.id));
 
   const say = (text: string): void => {
     effects.push(async () => {
@@ -1287,7 +1298,6 @@ function applyNote(context: Context, update: Update, effects: Effect[]): void {
     chat === undefined || chat.type !== "private" ||
     from === undefined ||
     String(chat.id) !== binding.chatId ||
-    String(from.id) !== binding.userId ||
     message.reply_to_message === undefined ||
     message.text === undefined ||
     message.forward_origin !== undefined ||
@@ -1396,11 +1406,10 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
   // callback with no accessible message (inline mode, too-old messages) is
   // out; so is a tap from anyone but the exact paired user id — usernames
   // change hands, immutable ids do not.
-  const binding = store.liveTelegramBinding(botId);
+  const binding = from === undefined ? null : store.liveTelegramBindingFor(botId, String(from.id));
   if (
     binding === null ||
     from === undefined ||
-    String(from.id) !== binding.userId ||
     message === undefined ||
     message.chat === undefined ||
     String(message.chat.id) !== binding.chatId

@@ -8699,7 +8699,8 @@ async function bridgeCommand(
   const source = loadBotToken(process.env, context.telegramTokenFile);
 
   if (action === "status") {
-    const binding = source === null ? null : store.liveTelegramBinding(source.botId);
+    const bindings = source === null ? [] : store.liveTelegramBindings(source.botId);
+    const binding = bindings[0] ?? null;
     const pending = store.listNotifications("pending").length;
     const digest = store.telegramDigest();
     if (json) {
@@ -8711,6 +8712,7 @@ async function bridgeCommand(
             token: source === null ? null : { source: source.source, botId: source.botId, redacted: redactToken(source.token) },
             paired: binding !== null,
             approver: binding?.approver ?? null,
+            people: bindings.map(one => one.approver),
             outboxPending: pending,
             digest: { everyMs: digest.everyMs, lastSentAt: digest.lastSentAt, held: digest.everyMs === null ? 0 : store.countRoutinePending() },
           },
@@ -8721,7 +8723,7 @@ async function bridgeCommand(
     write(source === null
       ? `No bot token. Set ${TOKEN_ENV}, run \`standing-orders bridge telegram token <t>\`, or use the serve settings card.`
       : `Token ${redactToken(source.token)} (${source.source}), bot ${source.botId}.`);
-    write(binding === null ? "No chat is paired." : `Paired: chat answers as ${binding.approver}.`);
+    write(binding === null ? "No chat is paired." : `Paired: ${bindings.length === 1 ? `chat answers as ${binding.approver}` : `${bindings.length} chats answer as ${bindings.map(one => one.approver).join(", ")}`}.`);
     write(`Outbox pending: ${pending}.`);
     write(digest.everyMs === null ? "Digest off." : `Digest every ${digestWords(digest.everyMs)}; ${store.countRoutinePending()} routine fact(s) held.`);
     return EXIT.ok;
