@@ -153,13 +153,16 @@ export function readKnowledgeSnapshot(store:Store,runId:number): KnowledgeSelect
   return selection;
 }
 /** Freeze at provider admission. Reviewers see the builder's exact project context. */
-export function knowledgeContext(store:Store,runId:number,cacheRoot?:string):string {
+export function knowledgeContext(store:Store,runId:number,cacheRoot?:string,validatedBuilderBase?:string):string {
   if (!store.schemaCurrent()) throw Error('Project knowledge needs the current database version.');
   return store.transact(()=>{
     const run = store.getRun(runId), ref = run && store.refForId(run.taskRef), repo = ref?.repo;
     if (!run || !repo || run.outcome !== null) throw Error('Project context is unavailable for this run.');
     const runner = store.getRunner(run.runner)?.runner;
     if (!runner || runner.retiredAt !== null || !runner.repos.includes(repo)) throw Error('This runner cannot access project knowledge.');
+    // A prepared coding handoff validates its base before capturing context,
+    // but records it only after setup passes the original-base guard.
+    const contextBase = run.baseRevision || (run.role === 'builder' ? validatedBuilderBase : undefined);
     // Projects without configured knowledge retain artifact-only review: do
     // not require an available checkout merely to supply an empty addition.
     let selection = readKnowledgeSnapshot(store,runId);
@@ -171,13 +174,13 @@ export function knowledgeContext(store:Store,runId:number,cacheRoot?:string):str
       const configured = !!store.handle.prepare('SELECT 1 FROM project_knowledge WHERE repo=?').get(repo);
       // A legacy source without a snapshot did not receive this feature's
       // context. Never give its reviewer newly configured project guidance.
-      selection = inherited ? {...inherited,inheritedFrom:parent!.id} : !configured || parent ? {version:1,revision:0,instructions:'',references:[],omitted:[],inheritedFrom:parent?.id??null} : select(store,repo,learningIdentity(repo),`${store.getTask(ref.externalId)?.title ?? ''} ${scope?.goal ?? ''} ${(scope?.touches ?? []).join(' ')}`, run.baseRevision || git(repo,['rev-parse','HEAD']));
+      selection = inherited ? {...inherited,inheritedFrom:parent!.id} : !configured || parent ? {version:1,revision:0,instructions:'',references:[],omitted:[],inheritedFrom:parent?.id??null} : select(store,repo,learningIdentity(repo),`${store.getTask(ref.externalId)?.title ?? ''} ${scope?.goal ?? ''} ${(scope?.touches ?? []).join(' ')}`, contextBase || git(repo,['rev-parse','HEAD']));
       // Optional source selection is captured once from this crew's actual
       // checkout. It is reused with the immutable run snapshot on resume.
       // Index/source failure stays context metadata, never an admission gate.
-      if (!parent && run.worktree && run.baseRevision) {
+      if (!parent && run.worktree && contextBase) {
         const available = 24000 - Buffer.byteLength(JSON.stringify(selection)) - 30;
-        if (available >= 3000) selection.repository = repositoryContextRead({ repo:run.worktree, project:repo, baseRevision:run.baseRevision, audience:'crew', maxBytes:Math.min(6000,available), ...(cacheRoot === undefined ? {} : {cacheRoot}), query:`${store.getTask(ref.externalId)?.title ?? ''} ${scope?.goal ?? ''} ${(scope?.touches ?? []).join(' ')}` });
+        if (available >= 3000) selection.repository = repositoryContextRead({ repo:run.worktree, project:repo, baseRevision:contextBase, audience:'crew', maxBytes:Math.min(6000,available), ...(cacheRoot === undefined ? {} : {cacheRoot}), query:`${store.getTask(ref.externalId)?.title ?? ''} ${scope?.goal ?? ''} ${(scope?.touches ?? []).join(' ')}` });
         else selection.omitted.push({title:'Repository context',reason:'Context size limit'});
       }
       const payload=JSON.stringify(selection);

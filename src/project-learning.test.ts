@@ -125,7 +125,10 @@ describe('quiet learning', () => {
     expect(store.liveDiffComments(c.source)).toEqual([]); queueLearning(store,c.source,c.reviewer,[c.c],c.c.evidence,now); recoverLearning(store,evidence,repo,now);
     expect(view().lessons).toHaveLength(1); expect(view().events).toEqual(first.events);
     expect(snapshot(start()).lessons).toEqual([]); change('adopt'); expect(snapshot(start()).lessons).toEqual([]); change('enable');
-    const run=start(), supplied=learningContext(store,evidence,run,'build',now); expect(JSON.parse(supplied.trim().split('\n').at(-1)!).lessons[0]).toMatchObject({id:first.lessons[0]!.id,version:2,source:c.source,...parseLearning([c.c])[0]});
+    const run=start(), supplied=learningContext(store,evidence,run,'build',now,'f'.repeat(40)); expect(JSON.parse(supplied.trim().split('\n').at(-1)!).lessons[0]).toMatchObject({id:first.lessons[0]!.id,version:2,source:c.source,...parseLearning([c.c])[0]});
+    const unstamped=start(); store.handle.prepare('UPDATE run SET base_revision=NULL WHERE id=?').run(unstamped);
+    expect(JSON.parse(learningContext(store,evidence,unstamped,'build',now,head).trim().split('\n').at(-1)!).lessons).toHaveLength(1);
+    expect(store.getRun(unstamped)?.baseRevision).toBeNull();
     expect(store.handle.prepare('SELECT payload FROM learning_snapshot WHERE run=?').get(run)?.['payload']).toBe(supplied);
     change('disable'); expect(learningContext(store,evidence,run,'build',now)).toBe(supplied); expect(snapshot(start()).lessons).toEqual([]);
     expect(()=>store.handle.prepare("UPDATE learning_snapshot SET payload='changed' WHERE run=?").run(run)).toThrow(/immutable/);

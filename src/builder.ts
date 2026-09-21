@@ -1060,7 +1060,10 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     try { verifyCodingHandoffBase(store, { taskId, taskRef, repo: leased.repo, branch, head: baseRevision }); }
     catch (error) { return { ok: false, reason: "no-op", message: error instanceof Error ? error.message : "The coding review base changed before dispatch." }; }
   }
-  store.stampRun(request.runId, { baseRevision });
+  // Prepared coding handoffs run setup after loading the candidate tree.
+  // Do not establish their first recorded base until that setup has finished
+  // and the original-base guard has read HEAD again at the same boundary.
+  if (codingHandoff === null) store.stampRun(request.runId, { baseRevision });
 
   // The warm resume (M6.9), narrowly: an answered park may hand its SESSION
   // to this attempt — but only when every condition re-proves right here.
@@ -1399,8 +1402,9 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // the whole branch; the agent never needs to recreate its file inventory.
   const pinnedBase = store.firstBuilderBase(taskRef, branch);
   const retryBase = pinnedBase !== null && pinnedBase !== baseRevision ? pinnedBase : null;
-  const lessonContext = learningContext(store, root, request.runId, "build", clock());
-  const briefText = projectSkillContext + knowledgeContext(store, request.runId, join(root, '..', 'repository-context')) + lessonContext + brief(
+  const contextBase = codingHandoff !== null ? baseRevision : undefined;
+  const lessonContext = learningContext(store, root, request.runId, "build", clock(), contextBase);
+  const briefText = projectSkillContext + knowledgeContext(store, request.runId, join(root, '..', 'repository-context'), contextBase) + lessonContext + brief(
     scope as Scope,
     branch,
     mailbox,
@@ -1449,6 +1453,15 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       // checkout. A setup stamp for another tree cannot establish them.
       const setupFailure = await runApprovedSetup(true);
       if (setupFailure !== null) return setupFailure;
+      if (codingHandoff !== null) {
+        const afterSetup = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
+        if (afterSetup.code !== 0) return { ok: false, reason: "git", message: "The coding review base could not be read after setup." };
+        const afterSetupHead = afterSetup.stdout.trim();
+        try { verifyCodingHandoffBase(store, { taskId, taskRef, repo: leased.repo, branch, head: afterSetupHead }); }
+        catch (error) { return { ok: false, reason: "no-op", message: error instanceof Error ? error.message : "The coding review base changed during setup." }; }
+        if (afterSetupHead !== baseRevision) return { ok: false, reason: "no-op", message: "The coding review checkout moved during setup. Its work is preserved; the attempt's base was not recorded." };
+        store.stampRun(request.runId, { baseRevision });
+      }
       const exact = await git(GIT, ["--no-optional-locks", "diff", "--quiet", prepared, "--"], { cwd: worktree });
       if (exact.code !== 0) return { ok: false, reason: "setup", message: exact.code === 1
         ? "The approved setup changed the prepared candidate's tracked files. The checkout is preserved; no candidate was committed or checked."
