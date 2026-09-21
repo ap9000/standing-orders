@@ -1,0 +1,48 @@
+{
+  "sourceSha256": {
+    "scripts/deploy-browser.mjs": "337affc048a50b38bc6a687334b8d06c9850245abc84328ab03701451291ba9e",
+    "src/containment-windows.test.ts": "2758c937bd8f3314d085fdcac24ecb36717c0c8db87413a7b3fba7b0d7776607",
+    "src/deploy-coding.test.ts": "42948e30868b1484761112ca28c6979ab0dda6b3558145a2891b4058721a9f6b",
+    "src/exec.ts": "ded1c93ab90cc9d2d59897fcf41bf4d3a93daa285543dd39ece7b6b78c9c06d9",
+    "src/invoke.ts": "e9d90f12de4022e63c530379f68fa990a1b2242ecfbf2a3a5c54e297b39a7ec0",
+    "src/process-custody.ts": "469cc01833096243e76cc919d028781bc2b6b2a194c04246ab7aa9ef85394a5b",
+    "src/process-tree.test.ts": "47f299db0cadcd84ddc7500587139161c1b70195a0bb2a348e50b675d1d3d7b1",
+    "src/process-tree.ts": "7688eef681b3b9eaa3394eed0d71f01d885daf1869b35937e2a7b05369b79623",
+    "src/serve.test.ts": "005047468c9b1507ac19379d7ad2db357d3523fbeacff10adaf6b9b41258990b",
+    "src/task-control-adversarial.test.ts": "0ec1cc0e72a543baf51782c66b9fe47ce1dd049a082221ef5f78ec6a1496f046"
+  },
+  "originalBase": "e9e1125bc9992a0accde172a9ee0e7c51e22497f",
+  "focusedChecks": [
+    {
+      "command": "npm run typecheck",
+      "result": "passed",
+      "coverage": "Current process, deployment and fixture changes."
+    },
+    {
+      "command": "npx vitest run src/process-tree.test.ts src/task-control-adversarial.test.ts src/containment.test.ts src/invoke.test.ts",
+      "result": "97 passed",
+      "coverage": "Process-preservation implementation at18ce558; those source and test files are unchanged."
+    },
+    {
+      "command": "npx vitest run src/deploy-coding.test.ts src/deploy-candidate.test.ts",
+      "result": "26 passed",
+      "coverage": "Exact deployment helper: writer contention, update owner checks, snapshot consistency and candidate acceptance."
+    },
+    {
+      "command": "Focused /work pagination and membership regression, Node22.22.0 and Node24.20.0",
+      "result": "passed on both",
+      "coverage": "Same task fixtures and assertions; batch commits reduce setup writes."
+    },
+    {
+      "command": "npx vitest run src/containment-windows.test.ts on Darwin",
+      "result": "1 passed,4 native platform skips",
+      "coverage": "Compilation and platform baseline only; Windows CI must run native Job Object assertions."
+    }
+  ],
+  "limitations": [
+    "No claim that the historical unidentified process exited. The explicitly authorized one-record deployment exception is retained separately in the live database audit and run note.",
+    "Full unchanged repository verification is reserved for the native machine gate; this report is not that gate.",
+    "Windows hosted startup failure now reports its real helper outcome; no unproven production race was patched."
+  ],
+  "deploymentHelper": "Resumes only the preparing phase; later incomplete backup or swap states still require inspection."
+}
