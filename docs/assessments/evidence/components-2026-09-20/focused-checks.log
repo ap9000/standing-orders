@@ -1,0 +1,54 @@
+--- serve-tests-final.log ---
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-components
+
+(node:43768) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  1 passed (1)
+      Tests  348 passed (348)
+   Start at  20:20:10
+   Duration  71.15s (transform 2.80s, setup 22ms, import 3.17s, tests 67.79s, environment 0ms)
+
+
+--- serve-project-filter.log ---
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-components
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/browser-build.mjs && node scripts/postbuild.mjs
+
+
+  dist/browser/workspace.js   292.5kb
+  dist/browser/workspace.css   21.1kb
+
+⚡ Done in 59ms
+Build source: unavailable (no clean Git checkout)
+(node:92911) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 347 skipped (348)
+   Start at  20:24:08
+   Duration  4.29s (transform 1.97s, setup 16ms, import 2.64s, tests 196ms, environment 0ms)
+
+
+--- component-tests-final.log ---
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-components
+
+(node:12289) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  3 passed (3)
+      Tests  34 passed (34)
+   Start at  20:25:46
+   Duration  2.35s (transform 1.20s, setup 74ms, import 1.71s, tests 1.11s, environment 303ms)
+
+
+--- typecheck-project-filter.log ---
+
+> standing-orders@0.4.3 typecheck
+> tsc --noEmit && tsc -p tsconfig.browser.json
+

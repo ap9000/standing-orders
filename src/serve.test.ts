@@ -55,6 +55,19 @@ async function stylesOf(html: string, base: string): Promise<string> {
   return response.text();
 }
 
+/** The JSON snapshot is inert transport, not a second rendered copy. Keep
+ * visible-copy assertions on the fallback and inspect snapshot admission
+ * separately; never strip it from whole-response secret/XSS assertions. */
+function renderedHtmlOf(html: string): string {
+  return html.replace(/<script type="application\/json" id="standing-orders-workspace-data"[^>]*>[\s\S]*?<\/script>/, '');
+}
+
+function workspaceOf(html: string): import('./browser-workspace.js').BrowserWorkspace {
+  const json = /<script type="application\/json" id="standing-orders-workspace-data"[^>]*>([\s\S]*?)<\/script>/.exec(html)?.[1];
+  expect(json, 'authenticated browser workspace snapshot').toBeDefined();
+  return JSON.parse(json!);
+}
+
 /** The revision form's own binding (repair 2026-09-14): the exact note
  * batch and source terms a rendered page displays. A seal posts these —
  * a bare `{ csrf }` is an out-of-date form and is refused. */
@@ -3652,7 +3665,9 @@ describe("the roll-up inbox — every project, one ceiling, links only", () => {
       expect(detail.status).toBe(200);
       const detailHtml = await detail.text();
       expect(detailHtml).toContain("approve exactly this:");
-      expect(detailHtml).not.toContain("t-side"); // no list pane leaking other projects
+      expect(renderedHtmlOf(detailHtml)).not.toContain("t-side"); // no cross-project native list pane
+      expect(workspaceOf(detailHtml).crew.map(one => one.id).sort()).toEqual(['t-main', 't-side']);
+      expect(detailHtml).not.toContain('t-secret'); // neither fallback nor admitted crew leaks foreign work
       expect((await fetch(`${base}/t/t-secret`, { headers: { cookie } })).status).toBe(404);
 
       // Everything else still requires opening a project.
@@ -6276,7 +6291,8 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     const page = await (await fetch(url("/projects/github"), { headers: { cookie } })).text();
     // Neither local directory mapped: both rows offer the clone ceremony.
     expect(page).not.toContain("add + open");
-    expect((page.match(/clone here/g) ?? []).length).toBe(2);
+    expect((renderedHtmlOf(page).match(/clone here/g) ?? []).length).toBe(2);
+    expect((workspaceOf(page).pageHtml!.match(/clone here/g) ?? []).length).toBe(2);
     // The hostile description reached the page dead, not live.
     expect(page).not.toContain("<script>alert(1)</script>");
     expect(page).toContain("&lt;script&gt;");
@@ -6430,7 +6446,8 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     const cookie = await login();
     const listMode = await (await fetch(url("/projects"), { headers: { cookie } })).text();
     expect(listMode).toContain("--project-root");
-    expect(listMode.match(/--project-root/g)).toHaveLength(1);
+    expect(renderedHtmlOf(listMode).match(/--project-root/g)).toHaveLength(1);
+    expect(workspaceOf(listMode).pageHtml!.match(/--project-root/g)).toHaveLength(1);
     expect(listMode).not.toContain('<h2>add a repository</h2>');
     expect(listMode).not.toContain('action="/projects/onboard-preview"');
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -8362,7 +8379,8 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const html = await (await fetch(url("/t/t-verbs"), { headers: { cookie } })).text();
     expect(html).toContain("<button type=\"submit\">hold next attempt</button>");
     // Said once (commit-3 review, finding 3), and only where a retry applies.
-    expect(html.split("retry becomes available after this attempt finishes").length - 1).toBe(1);
+    expect(renderedHtmlOf(html).split("retry becomes available after this attempt finishes").length - 1).toBe(1);
+    expect(workspaceOf(html).pageHtml!.split("retry becomes available after this attempt finishes").length - 1).toBe(1);
     expect(html).not.toContain('action="/t/t-verbs/requeue"');
 
     // A healthy live task offers no retry and says nothing about one.
@@ -8888,6 +8906,81 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
   const sendJson = (cookie: string, fields: Record<string, string>) =>
     fetch(url("/chat"), { method: "POST", headers: { cookie, origin: base, accept: "application/json" }, body: new URLSearchParams(fields), redirect: "manual" });
 
+  test('React workspace reads the saved conversation and receipt without replaying work', async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    const initial = await fetch(url('/chat'), { headers: { cookie } });
+    const initialHtml = await initial.text();
+    const module = /<script type="module" src="(\/assets\/workspace.js)" nonce="([^"]+)"><\/script>/.exec(initialHtml);
+    expect(module).not.toBeNull();
+    expect(initial.headers.get('content-security-policy')).toContain(`script-src 'nonce-${module![2]}'`);
+    expect(initial.headers.get('content-security-policy')).not.toContain("script-src 'self'");
+    expect(initialHtml).toContain('standing-orders:workspace-rendered');
+    expect((await fetch(url(module![1]!))).headers.get('content-type')).toContain('javascript');
+    expect((await fetch(url('/assets/workspace.css'), { method: 'HEAD' })).status).toBe(200);
+    expect((await fetch(url('/assets/unknown.js'), { redirect: 'manual' })).status).not.toBe(200);
+    const read = async (query = '') => {
+      const response = await fetch(url(`/chat?format=workspace${query}`), { headers: { cookie } });
+      expect(response.headers.get('content-type')).toContain('application/json');
+      return response.json() as Promise<import('./browser-workspace.js').BrowserWorkspace>;
+    };
+    const before = await read();
+    expect(before).toMatchObject({ version: 1, user: 'alex', csrf, conversation: { messages: [], taskId: null } });
+    expect(before.crew.map(one => one.id).sort()).toEqual(['a', 'b']);
+    expect(before.crew.every(one => one.href.startsWith('/chat?task='))).toBe(true);
+    const request = before.conversation!.requestId;
+    script.push(() => answer([{ type: 'text', text: 'Inspect <script>unsafe</script> as text.' }]));
+    expect((await sendJson(cookie, { csrf, message: 'Summarize current work', request, 'request-session': String(before.conversation!.sessionId) })).status).toBe(202);
+    await settle();
+    const after = await read(`&request=${request}`);
+    expect(after.receipt).toEqual({ request, received: true });
+    expect(after.conversation!.messages.map(one => one.role)).toEqual(['operator', 'assistant']);
+    expect(after.conversation!.messages.at(-1)!.html).toContain('&lt;script&gt;unsafe&lt;/script&gt;');
+    await read(`&request=${request}`);
+    expect(store.recentMateTurns('alex', 10)).toHaveLength(1);
+    expect((await fetch(url('/chat?format=workspace'), { headers: { authorization: `Bearer alex:${approverToken}` } })).status).toBe(403);
+    expect((await fetch(url('/chat?format=workspace'), { redirect: 'manual' })).status).toBe(303);
+  });
+
+  test('React project links narrow reads without changing the selected project', async () => {
+    const cookie = await login();
+    const target = `/work?project=${encodeURIComponent(repoDir)}&format=workspace`;
+    const response = await fetch(url(target), { headers: { cookie } });
+    expect(response.status).toBe(200);
+    const data = await response.json() as import('./browser-workspace.js').BrowserWorkspace;
+    expect(data.crew.map(one => one.id).sort()).toEqual(['a', 'b']);
+    expect(data.path).toBe(`/work?project=${encodeURIComponent(repoDir)}`);
+    const window = new Window();
+    try {
+      window.document.body.innerHTML = data.pageHtml!;
+      const views = [...window.document.querySelectorAll<HTMLAnchorElement>('.work-views a')]
+        .map(link => new URL(link.getAttribute('href')!, base));
+      expect(views.map(link => link.searchParams.get('view') ?? 'all')).toEqual(['all', 'needs-you', 'running', 'completed']);
+      for (const link of views) {
+        expect(link.pathname).toBe('/work');
+        expect(link.searchParams.get('project')).toBe(repoDir);
+      }
+      const running = views.find(link => link.searchParams.get('view') === 'running')!;
+      running.searchParams.set('format', 'workspace');
+      const filteredResponse = await fetch(running, { headers: { cookie } });
+      expect(filteredResponse.status).toBe(200);
+      const filtered = await filteredResponse.json() as import('./browser-workspace.js').BrowserWorkspace;
+      const filteredPath = new URL(filtered.path, base);
+      expect(filteredPath.searchParams.get('project')).toBe(repoDir);
+      expect(filteredPath.searchParams.get('view')).toBe('running');
+      expect(filtered.crew.every(one => one.project === repoDir)).toBe(true);
+      window.document.body.innerHTML = filtered.pageHtml!;
+      expect(window.document.querySelector('[data-work-empty="running"]')).not.toBeNull();
+      const allWork = window.document.querySelector<HTMLAnchorElement>('[data-work-empty="running"] a')!;
+      expect(allWork.textContent).toBe('See all work →');
+      const allPath = new URL(allWork.getAttribute('href')!, base);
+      expect(allPath.pathname).toBe('/work');
+      expect(allPath.searchParams.get('project')).toBe(repoDir);
+      expect(allPath.searchParams.has('view')).toBe(false);
+    } finally { await window.happyDOM.close(); }
+    expect((await fetch(url('/work?project=%2Fforeign&format=workspace'), { headers: { cookie } })).status).toBe(404);
+    expect((await fetch(url(`/work?project=${encodeURIComponent(repoDir)}&project=%2Fforeign&format=workspace`), { headers: { cookie } })).status).toBe(404);
+  });
+
   test("automatic crew updates are explicit, scoped to this conversation, and pausable without a new thread", async () => {
     const cookie = await login(), before = await page(cookie);
     expect(before).toContain('aria-label="Project catch-up"');
@@ -8924,9 +9017,13 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toContain('class="chat-workspace"');
     expect(thread).toContain('class="chat-projects"');
     expect(thread).toContain('id="chat-project-panel"');
-    expect(thread).toContain('class="side-toggle" aria-label="collapse sidebar"');
+    expect(thread).toMatch(/<script type="module" src="\/assets\/workspace.js" nonce="[^"]+"><\/script>/);
+    const workspace = workspaceOf(thread);
+    expect(workspace).toMatchObject({ csrf, user: 'alex', conversation: { sessionId: session!.id, pendingTurnId: null, taskId: null } });
+    expect(workspace.navigation.filter(one => one.active).map(one => one.label)).toEqual(['Chat']);
+    expect(workspace.projects.map(one => one.path)).toContain(repoDir);
     expect(thread).toContain('class="chat-project-toggle quiet" aria-controls="chat-project-panel"');
-    expect(thread).toContain("standing-orders:chat-projects");
+    expect(workspace.controlsHtml).not.toContain('name="token"');
     const css = await stylesOf(thread, base);
     expect(css).toContain('.chat-workspace .composer { position: static; width: 100%; box-shadow: var(--shadow); }');
     expect(css).toContain('position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));');
@@ -9034,10 +9131,17 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(pending).toContain('class="card composer"');
     expect(pending).toContain("draft your next message");
     expect(pending).not.toMatch(/<meta http-equiv="refresh" content="5">/);
-    expect(pending).toContain("/chat/mate/status");
     const turn = store.liveMateTurnFor("alex")!.id;
+    const workspace = workspaceOf(pending);
+    expect(workspace.refreshUrl).toBe('/chat?format=workspace');
+    expect(workspace.conversation).toMatchObject({ pendingTurnId: turn, taskId: null });
+    const refreshed = await (await fetch(url(workspace.refreshUrl), { headers: { cookie } })).json();
+    expect(refreshed.conversation).toMatchObject({ sessionId: workspace.conversation!.sessionId, pendingTurnId: turn });
+    expect(refreshed.conversation.messages).toEqual(workspace.conversation!.messages);
+    expect(store.recentMateTurns('alex', 10)).toHaveLength(1);
     await post(cookie, "/chat/mate/stop", { csrf, turn: String(turn) });
     finish(answer([{ type: "text", text: "Stopped." }])); await settle();
+    expect((await (await fetch(url(workspace.refreshUrl), { headers: { cookie } })).json()).conversation.pendingTurnId).toBeNull();
   });
 
   test("a task's Ask view stays in the unified thread and confirms guidance without losing context", async () => {
@@ -9471,7 +9575,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const window = new Window({ width: 390, height: 844 });
     try {
       window.document.body.innerHTML = before;
-      const script = window.document.querySelector('script[nonce]')?.textContent ?? "";
+      const script = window.document.querySelector('script[nonce]:not([type])')?.textContent ?? "";
       const start = script.indexOf('(function(){var workspace=');
       expect(start).toBeGreaterThanOrEqual(0);
       const end = script.indexOf('})();', start);
@@ -11252,7 +11356,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(html).toContain("Needs your decision");
     expect(html).not.toContain("More evidence needed");
     expect(html).toContain(`data-result-run="${run}"`);
-    expect(html.split(note)).toHaveLength(2);
+    expect(renderedHtmlOf(html).split(note)).toHaveLength(2);
+    expect(workspaceOf(html).pageHtml!.split(note)).toHaveLength(2);
     expect(html).not.toContain("At completion:");
   });
 
@@ -11613,6 +11718,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
 
   test("mark complete binds the exact saved result and preserves check failures and publication authority", async () => {
     const ref = seed("t-complete", "Keep the payout total accurate");
+    const historical = build("t-complete", ref, { patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-before\n+earlier\n", handoff: { conclusion: "Saved the earlier payout correction." } });
     const run = build("t-complete", ref, { patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", handoff: { conclusion: "Saved the payout correction." }, verdict: { verdict: "refuted", reasons: ["the repository's approved verification command exited 1"] } });
     await boot();
     store.stampRun(run, { scopeDigest: store.getScope("t-complete")!.digest });
@@ -11626,11 +11732,26 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(queueOf(html)).not.toContain('conflicting evidence');
     expect(html).toContain('1 needs your attention');
     expect(html).toContain('Mark complete</button>');
-    expect(html).toContain('does not change check results, approve execution, publish, or deploy');
+    expect(html).toContain('Checks stay unchanged; nothing is published or deployed.');
     const receipt = /name="receipt" value="([a-f0-9]{64})"/.exec(html)?.[1];
     expect(receipt).toBeDefined();
     const csrf = csrfOf(html);
+    const chatResult = await (await fetch(url(`/chat?task=t-complete&result=${run}`), { headers: { cookie } })).text();
+    const completionForm = /<form[^>]*action="\/t\/t-complete\/complete"[^>]*>[\s\S]*?<\/form>/.exec(chatResult)?.[0];
+    expect(completionForm).toBeDefined();
+    expect(completionForm).toContain(`name="csrf" value="${csrf}"`);
+    expect(completionForm).toContain(`name="receipt" value="${receipt}"`);
+    expect(completionForm).toContain(`name="run" value="${run}"`);
+    expect(completionForm).toContain('Mark complete</button>');
+    expect(completionForm).toContain('Checks stay unchanged; nothing is published or deployed.');
+    const historicalChat = await (await fetch(url(`/chat?task=t-complete&result=${historical}`), { headers: { cookie } })).text();
+    expect(historicalChat).toContain(`data-result-run="${historical}"`);
+    expect(historicalChat).not.toContain('Mark complete</button>');
+    expect(historicalChat).not.toContain('/t/t-complete/complete');
     const before = store.proofVerdictFor(run);
+    const approvedBefore = store.getScope('t-complete');
+    const runsBefore = store.runsFor(ref);
+    const publicationBefore = store.publicationForRun(run);
     expect((await post(cookie, "/t/t-complete/complete", { run: String(run), receipt: receipt! })).status).toBe(403);
     expect((await post(cookie, "/t/t-complete/complete", { csrf, run: "999", receipt: receipt! })).status).toBe(409);
     expect((await post(cookie, "/t/t-complete/complete", { csrf, run: String(run), receipt: "0".repeat(64) })).status).toBe(409);
@@ -11638,11 +11759,15 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(done.status).toBe(303);
     expect(done.headers.get("location")).toContain(`run=${run}`);
     expect(store.proofVerdictFor(run)).toEqual(before);
+    expect(store.getScope('t-complete')).toEqual(approvedBefore);
+    expect(store.runsFor(ref)).toEqual(runsBefore);
+    expect(store.publicationForRun(run)).toEqual(publicationBefore);
     expect(store.openReviewRequests()).toEqual([]);
     const after = await (await fetch(url(done.headers.get("location")!), { headers: { cookie } })).text();
     expect(after).toContain('>Complete</span>');
     expect(after).toContain('Marked complete by alex');
     expect(after).not.toContain('Mark complete</button>');
+    expect(await (await fetch(url(`/chat?task=t-complete&result=${run}`), { headers: { cookie } })).text()).not.toContain('Mark complete</button>');
     expect(after).toContain('data-actual-checks="failed"');
     expect(after).toContain('Checks failed (exit 1).');
     expect(queueOf(after)).toContain('data-work-status="assignment-complete"');
@@ -11891,7 +12016,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(scout).toContain('<article class="result-report" data-result-report="ok"><h3>Where the drift lives</h3><pre class="recap plan-doc">');
     // The outcome line is the summary's first sentence; the full summary is said once, behind the agent's disclosure.
     expect(scout).toContain('<details class="result-notes" data-result-notes-agent><summary>What the agent reported</summary><p class="recap">Two rounding sites disagree. The footer sums unrounded rows while the ledger rounds each line.</p></details>');
-    expect(scout.split("The footer sums unrounded rows while the ledger rounds each line.").length - 1).toBe(1);
+    expect(renderedHtmlOf(scout).split("The footer sums unrounded rows while the ledger rounds each line.").length - 1).toBe(1);
+    expect(workspaceOf(scout).pageHtml!.split("The footer sums unrounded rows while the ledger rounds each line.").length - 1).toBe(1);
     expect(scout).toContain("&lt;script&gt;alert(1)&lt;/script&gt; is text here.");
     expect(scout).not.toContain("<script>alert(1)</script>");
     expect(scout).toContain(`/evidence/${store.artifactsFor(scoutRun).find(one => one.kind === "report")?.id}">Download the report</a>`);
@@ -13453,7 +13579,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const window = new Window();
     try {
       window.document.body.innerHTML = html;
-      const source = window.document.querySelector('script[nonce]')!.textContent!;
+      const source = window.document.querySelector('script[nonce]:not([type])')!.textContent!;
       const start = source.indexOf('var taskLive=');
       const end = source.indexOf('var box=', start);
       expect(start).toBeGreaterThan(0);
@@ -13822,7 +13948,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(rollup).toContain('data-work-bound="200"');
     expect(rollup).toContain('<span class="project-label">beta</span>');
     // The chrome's needs-you badge reads the same bounded, admitted page.
-    expect(rollup).toMatch(/<a class="scope-count" href="\/work\?view=needs-you">\d+ needs you<\/a>|needs you/);
+    const waitingBadge = /<a href="\/work"[^>]*data-waiting="([0-9]+)"/.exec(rollup);
+    expect(waitingBadge).not.toBeNull();
+    expect(Number(waitingBadge![1])).toBe(countsOf(rollup)['Needs you']);
+    expect(workspaceOf(rollup).crew.every(one => !one.id.startsWith('foreign-'))).toBe(true);
 
     // A project-scoped account admitted to alpha alone sees alpha's newest
     // 200, nothing foreign, nothing from beta — with no project selected.

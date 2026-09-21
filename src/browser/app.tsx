@@ -1,0 +1,442 @@
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
+import { createRoot } from "react-dom/client";
+import type { BrowserCrewItem, BrowserWorkspace } from "../browser-workspace.js";
+import {
+  Alert, Artifact, ArtifactContent, Badge, Button, Conversation, ConversationContent,
+  ConversationEmptyState, ConversationScrollButton, Dialog, DialogClose, DialogContent,
+  DialogDescription, DialogTitle, DialogTrigger, Disclosure, Input, Label, Message, MessageContent, Textarea,
+} from "./ui/index.js";
+import {
+  carryDraft, editDraft, emptyDraft, isWorkspace, readWorkspace, receiveDraft, rejectDraft,
+  restoreDraft, sameConversation, saveDraft, sendMessage, submitDraft, WorkspaceAuthError,
+} from "./workspace-client.js";
+import type { ChatDraft, DraftScope, DraftStorage } from "./workspace-client.js";
+import "./workspace.css";
+
+let renderNoticeQueued = false;
+function notifyWorkspaceRendered() {
+  if (renderNoticeQueued) return;
+  renderNoticeQueued = true;
+  // Native controls initialize only after the entire React commit has placed
+  // every guarded fragment, including the selected result, in the document.
+  queueMicrotask(() => {
+    renderNoticeQueued = false;
+    window.dispatchEvent(new CustomEvent("standing-orders:workspace-rendered"));
+  });
+}
+
+function Icon({ name }: { name: "menu" | "chat" | "tasks" | "projects" | "knowledge" | "settings" | "arrow" | "close" | "send" | "tools" }) {
+  const paths: Record<typeof name, ReactNode> = {
+    menu: <path d="M4 6h16M4 12h16M4 18h16" />,
+    chat: <path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z" />,
+    tasks: <><path d="m3 6 2 2 4-4m-6 9 2 2 4-4m-6 9 2 2 4-4M13 6h8M13 13h8M13 20h8" /></>,
+    projects: <path d="M3 7V5a2 2 0 0 1 2-2h5l3 4h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />,
+    knowledge: <path d="M12 5c-3-2-7-2-10-1v15c3-1 7-1 10 1 3-2 7-2 10-1V4c-3-1-7-1-10 1Zm0 0v15" />,
+    settings: <><path d="M4 6h16M4 12h16M4 18h16" /><path d="M8 3v6M16 9v6M10 15v6" /></>,
+    arrow: <path d="m10 6-6 6 6 6M4 12h16" />,
+    close: <path d="m6 6 12 12M6 18 18 6" />,
+    send: <path d="m12 19 0-14m-6 6 6-6 6 6" />,
+    tools: <><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z" /></>,
+  };
+  return <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
+}
+
+function browserStorage(): DraftStorage {
+  try { return window.sessionStorage; } catch {
+    return { getItem: () => null, removeItem: () => undefined, setItem: () => { throw new Error("Storage unavailable"); } };
+  }
+}
+
+function scopeOf(workspace: BrowserWorkspace): DraftScope | null {
+  return workspace.conversation ? { user: workspace.user, session: workspace.conversation.sessionId, task: workspace.conversation.taskId } : null;
+}
+
+function useWorkspace(initial: BrowserWorkspace) {
+  const [workspace, setWorkspace] = useState(initial);
+  const scope = scopeOf(initial);
+  const [draft, setDraft] = useState<ChatDraft>(() => initial.conversation && scope
+    ? restoreDraft(browserStorage(), scope, initial.conversation.requestId, initial.conversation.maxChars)
+    : emptyDraft(""));
+  const [notice, setNotice] = useState("");
+  const [storageAvailable, setStorageAvailable] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [stale, setStale] = useState(false);
+  const [offline, setOffline] = useState(() => navigator.onLine === false);
+  const state = useRef({ workspace, draft, stale, sending });
+  state.current = { workspace, draft, stale, sending };
+  const polling = useRef(false);
+  const mounted = useRef(true);
+  const sendLatch = useRef(false);
+
+  const updateDraft = useCallback((next: ChatDraft) => {
+    state.current.draft = next;
+    setDraft(next);
+    const owner = scopeOf(initial);
+    if (owner) setStorageAvailable(saveDraft(browserStorage(), owner, next));
+  }, [initial]);
+
+  const check = useCallback(async () => {
+    if (polling.current || state.current.stale || !initial.conversation || document.hidden) return;
+    polling.current = true;
+    const asked = state.current.draft.pending?.request ?? null;
+    try {
+      const next = await readWorkspace(state.current.workspace, asked);
+      if (!mounted.current) return;
+      if (!sameConversation(initial, next)) {
+        state.current.stale = true;
+        setStale(true);
+        setNotice("This conversation changed or ended. Reconnect to continue with your draft.");
+        return;
+      }
+      const received = receiveDraft(state.current.draft, asked, next.receipt);
+      if (received !== state.current.draft) updateDraft(received);
+      state.current.workspace = next;
+      setWorkspace(next);
+      setNotice(received.pending ? "Delivery is not confirmed. Check again before sending another message." : "");
+    } catch (error) {
+      if (!mounted.current) return;
+      if (error instanceof WorkspaceAuthError) { state.current.stale = true; setStale(true); }
+      setNotice(error instanceof Error ? error.message : "Updates are unavailable. Your work is still saved.");
+    } finally { polling.current = false; }
+  }, [initial, updateDraft]);
+
+  useEffect(() => {
+    mounted.current = true;
+    if (!initial.conversation) return;
+    void check();
+    const timer = window.setInterval(() => { void check(); }, 5_000);
+    const visible = () => { if (!document.hidden) void check(); };
+    const online = () => { setOffline(false); void check(); };
+    const offlineNow = () => setOffline(true);
+    document.addEventListener("visibilitychange", visible);
+    window.addEventListener("online", online);
+    window.addEventListener("offline", offlineNow);
+    return () => {
+      mounted.current = false;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", visible);
+      window.removeEventListener("online", online);
+      window.removeEventListener("offline", offlineNow);
+    };
+  }, [check, initial.conversation]);
+
+  const send = async (event: FormEvent) => {
+    event.preventDefault();
+    const current = state.current;
+    if (sendLatch.current || current.stale || navigator.onLine === false || current.draft.pending
+      || current.workspace.conversation?.pendingTurnId !== null || !current.draft.text.trim()) return;
+    const next = submitDraft(current.draft);
+    if (!next.pending) return;
+    sendLatch.current = true;
+    setSending(true);
+    updateDraft(next);
+    setNotice("");
+    try {
+      const result = await sendMessage(current.workspace, next.pending);
+      if (!mounted.current) return;
+      if (result.refused) {
+        updateDraft(rejectDraft(state.current.draft, next.pending.request));
+        setNotice(result.message ?? "Message not sent. Your draft is saved.");
+      } else {
+        setNotice("Checking delivery…");
+        void check();
+      }
+    } catch (error) {
+      if (!mounted.current) return;
+      if (error instanceof WorkspaceAuthError) { state.current.stale = true; setStale(true); }
+      setNotice(error instanceof WorkspaceAuthError ? error.message : "Delivery is not confirmed. Check again before sending another message.");
+      void check();
+    } finally {
+      sendLatch.current = false;
+      if (mounted.current) setSending(false);
+    }
+  };
+
+  const reconnect = () => {
+    const owner = scopeOf(initial);
+    if (owner) carryDraft(browserStorage(), owner, state.current.draft.text);
+    window.location.reload();
+  };
+
+  // Server-owned prompt buttons retain normal native submission. Bind their
+  // receipt to this conversation without attaching the old composer script.
+  useEffect(() => {
+    const onSubmit = (event: SubmitEvent) => {
+      const form = event.target;
+      if (!(form instanceof HTMLFormElement) || form.dataset.workspaceComposer !== undefined || form.getAttribute("action") !== "/chat") return;
+      const current = state.current;
+      if (!current.workspace.conversation) return;
+      if (current.stale || sendLatch.current || current.draft.pending || navigator.onLine === false || current.workspace.conversation.pendingTurnId !== null) {
+        event.preventDefault();
+        setNotice("Wait for the current message before sending another.");
+        return;
+      }
+      if (form.getAttribute("aria-busy") === "true") { event.preventDefault(); return; }
+      const bind = (name: string, value: string) => {
+        if (form.querySelector(`[name="${name}"]`)) return;
+        const input = document.createElement("input"); input.type = "hidden"; input.name = name; input.value = value; form.append(input);
+      };
+      bind("request", current.workspace.conversation.requestId);
+      bind("request-session", String(current.workspace.conversation.sessionId));
+      if (current.workspace.conversation.taskId) bind("task", current.workspace.conversation.taskId);
+      if (current.workspace.conversation.resultRunId !== null) bind("result", String(current.workspace.conversation.resultRunId));
+      if (event.defaultPrevented) return;
+      sendLatch.current = true;
+      form.setAttribute("aria-busy", "true");
+    };
+    const restored = () => {
+      sendLatch.current = false;
+      document.querySelectorAll('form[action="/chat"][aria-busy="true"]:not([data-workspace-composer])').forEach(form => form.removeAttribute("aria-busy"));
+      void check();
+    };
+    document.addEventListener("submit", onSubmit);
+    window.addEventListener("pageshow", restored);
+    return () => { document.removeEventListener("submit", onSubmit); window.removeEventListener("pageshow", restored); };
+  }, [check]);
+
+  return { workspace, draft, notice, storageAvailable, sending, stale, offline, send, check, reconnect,
+    edit: (text: string) => updateDraft(editDraft(state.current.draft, text)) };
+}
+
+export function regionIsEditing(region: HTMLElement): boolean {
+  return region.contains(document.activeElement) && document.activeElement?.matches("input, textarea, select, [contenteditable=true]") === true
+    || region.querySelector("form.approve-form, details[open] form") !== null;
+}
+
+/** Native forms own their exact nonces and feedback. React never recreates a
+ * result for the same run, nor overwrites a form being edited during a read. */
+export function GuardedHtml({ html, immutable = false, className = "" }: { html: string; immutable?: boolean; className?: string }) {
+  const region = useRef<HTMLDivElement>(null);
+  const installed = useRef<string | null>(null);
+  const dirty = useRef(false);
+  const [revision, setRevision] = useState(0);
+  const [staleApproval, setStaleApproval] = useState(false);
+  const [deferred, setDeferred] = useState(false);
+
+  useEffect(() => {
+    const node = region.current;
+    const toggled = () => setRevision(value => value + 1);
+    node?.addEventListener("toggle", toggled, true);
+    return () => node?.removeEventListener("toggle", toggled, true);
+  }, []);
+
+  useLayoutEffect(() => {
+    const node = region.current;
+    if (!node || installed.current === html || (immutable && installed.current !== null)) return;
+    if (installed.current !== null && (dirty.current || regionIsEditing(node))) {
+      const approval = node.querySelector<HTMLElement>("[data-approval]");
+      const next = new DOMParser().parseFromString(html, "text/html").querySelector<HTMLElement>("[data-approval]");
+      const changed = !!node.querySelector("form.approve-form") && approval?.dataset.approval !== next?.dataset.approval;
+      if (changed) {
+        setStaleApproval(true);
+        node.querySelectorAll<HTMLButtonElement>('form.approve-form button[type="submit"], form.approve-form input[type="submit"]').forEach(button => { button.disabled = true; });
+      } else if (!node.querySelector("form.approve-form")) setDeferred(true);
+      return;
+    }
+    node.innerHTML = html;
+    installed.current = html;
+    setDeferred(false);
+    notifyWorkspaceRendered();
+  }, [html, immutable, revision]);
+
+  return <div className={`so-native-region ${className}`} data-workspace-native>
+    {staleApproval && <Alert tone="error">The plan changed. <a href={window.location.href}>Review the current plan</a> before approving.</Alert>}
+    {deferred && <p className="so-deferred" role="status">Updates are available. Your form is preserved. <a href={window.location.href}>Reload</a></p>}
+    <div ref={region} onInput={() => { dirty.current = true; }} onChange={() => { dirty.current = true; }}
+      onBlur={() => setRevision(value => value + 1)} />
+  </div>;
+}
+
+function badgeTone(tone: BrowserCrewItem["tone"]) {
+  return tone === "problem" ? "danger" : tone === "attention" ? "warning" : tone === "done" || tone === "ready" ? "success" : tone === "live" ? "info" : "neutral";
+}
+
+function Crew({ workspace }: { workspace: BrowserWorkspace }) {
+  return <section className="so-crew" aria-labelledby="crew-title" data-workspace-crew>
+    <div className="so-section-heading"><h2 id="crew-title">Crew</h2><a href="/work">All tasks</a></div>
+    {workspace.crew.length === 0 ? <div className="so-crew-empty"><p>No tasks yet.</p><p>Work you start with the lead appears here.</p></div> :
+      <ul className="so-work-list">{workspace.crew.map(item => <li key={item.id} data-workspace-task={item.id} data-work-status={item.state}>
+        <a className="so-work-row" href={item.resultHref ?? item.href} aria-current={workspace.focus?.id === item.id ? "page" : undefined}>
+          <div className="so-work-heading"><span className="so-work-title">{item.title}</span><Badge tone={badgeTone(item.tone)}>{item.label}</Badge></div>
+          {item.project && <span className="so-work-project">{workspace.projects.find(project => project.path === item.project)?.name ?? item.project.split(/[\\/]/).filter(Boolean).pop()}</span>}
+        </a>
+        {item.action && item.action.href !== (item.resultHref ?? item.href) && <a className="so-work-action" href={item.action.href}>{item.action.label}</a>}
+      </li>)}</ul>}
+    {workspace.crewTruncated && <a className="so-all-work" href="/work">View more tasks</a>}
+  </section>;
+}
+
+function Navigation({ workspace }: { workspace: BrowserWorkspace }) {
+  const projectId = useId();
+  const currentProject = workspace.projects.find(project => new URL(workspace.path, window.location.origin).searchParams.get("project") === project.path
+    || new URL(workspace.path, window.location.origin).searchParams.get("repo") === project.path
+    || workspace.crew.find(task => task.id === workspace.focus?.id)?.project === project.path);
+  return <div className="so-navigation-content">
+    <a href="/chat" className="so-wordmark"><span className="so-brand-mark" aria-hidden="true"><i /><i /><i /></span>Standing Orders</a>
+    {workspace.projects.length > 0 && <div className="so-project-switch">
+      <Label htmlFor={projectId}>Project</Label>
+      <select id={projectId} value={currentProject?.href ?? "/work"} onChange={event => { window.location.assign(event.target.value); }}>
+        <option value="/work">All projects</option>
+        {workspace.projects.map(project => <option key={project.path} value={project.href}>{project.name}</option>)}
+      </select>
+    </div>}
+    <nav aria-label="Workspace" className="so-primary-navigation">{workspace.navigation.filter(item => item.href !== "/menu").map(item => {
+      const name = item.label.toLowerCase() as "chat" | "tasks" | "projects" | "knowledge" | "settings";
+      return <a key={item.href} href={item.href} aria-current={item.active ? "page" : undefined}><Icon name={["chat", "tasks", "projects", "knowledge", "settings"].includes(name) ? name : "tools"} /><span>{item.label}</span></a>;
+    })}</nav>
+    {currentProject && <a className="so-project-knowledge" href={currentProject.knowledgeHref}>Project knowledge</a>}
+    <div className="so-navigation-bottom"><a href="/menu"><Icon name="tools" />Workspace tools</a>
+      <div className="so-account"><span title={workspace.user}>{workspace.user}</span><form method="post" action="/logout"><input type="hidden" name="csrf" value={workspace.csrf} /><Button variant="ghost" size="sm" type="submit">Sign out</Button></form></div>
+    </div>
+  </div>;
+}
+
+export function workspaceCommands(workspace: BrowserWorkspace, query = "") {
+  const entries = [
+    ...workspace.navigation.map(item => ({ label: item.label, detail: "Page", href: item.href })),
+    ...workspace.projects.map(item => ({ label: item.name, detail: "Project", href: item.href })),
+    ...workspace.crew.map(item => ({ label: item.title, detail: item.label, href: item.resultHref ?? item.href })),
+  ];
+  const seen = new Set<string>();
+  return entries.filter(item => {
+    if (seen.has(item.href)) return false;
+    seen.add(item.href);
+    return `${item.label} ${item.detail}`.toLowerCase().includes(query.trim().toLowerCase());
+  });
+}
+
+export function CommandMenu({ workspace }: { workspace: BrowserWorkspace }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const searchId = useId();
+  const searchInput = useRef<HTMLInputElement>(null);
+  const results = useRef<HTMLUListElement>(null);
+  const changeOpen = (next: boolean) => { setOpen(next); setQuery(""); };
+  useEffect(() => {
+    if (workspace.sensitive) return;
+    const shortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "k"
+        || event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')) return;
+      event.preventDefault(); setOpen(value => !value); setQuery("");
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, [workspace.sensitive]);
+  if (workspace.sensitive) return null;
+  const entries = workspaceCommands(workspace, query);
+  return <Dialog open={open} onOpenChange={changeOpen}>
+    <DialogTrigger asChild><Button variant="ghost" size="sm" className="so-command-trigger">Search<span className="so-command-hint" aria-hidden="true">⌘ / Ctrl K</span></Button></DialogTrigger>
+    <DialogContent className="so-command-dialog" data-workspace-command onOpenAutoFocus={event => { event.preventDefault(); searchInput.current?.focus(); }}>
+      <div className="so-command-heading"><DialogTitle>Go to</DialogTitle><DialogClose asChild><Button variant="ghost" size="icon" aria-label="Close search"><Icon name="close" /></Button></DialogClose></div>
+      <DialogDescription className="so-sr-only">Search pages, projects, and tasks. Use Tab or the arrow keys to choose a link.</DialogDescription>
+      <Label htmlFor={searchId} className="so-sr-only">Search workspace</Label>
+      <Input ref={searchInput} id={searchId} type="search" placeholder="Search workspace…" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => {
+        if (event.key === "ArrowDown") { event.preventDefault(); results.current?.querySelector("a")?.focus(); }
+      }} />
+      <ul ref={results} className="so-command-results" onKeyDown={event => {
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        const links = Array.from(results.current?.querySelectorAll("a") ?? []);
+        const index = links.indexOf(document.activeElement as HTMLAnchorElement);
+        if (index < 0) return;
+        event.preventDefault(); links[(index + (event.key === "ArrowDown" ? 1 : -1) + links.length) % links.length]?.focus();
+      }}>{entries.map(item => <li key={item.href}><a href={item.href}><span>{item.label}</span><small>{item.detail}</small></a></li>)}</ul>
+      {entries.length === 0 && <p className="so-command-empty" role="status">No matches.</p>}
+    </DialogContent>
+  </Dialog>;
+}
+
+function PhoneNavigation({ workspace }: { workspace: BrowserWorkspace }) {
+  return <Dialog><DialogTrigger asChild><Button variant="ghost" size="icon" className="so-mobile-menu" aria-label="Open navigation"><Icon name="menu" /></Button></DialogTrigger>
+    <DialogContent className="so-navigation-dialog"><DialogTitle className="so-sr-only">Workspace navigation</DialogTitle><DialogDescription className="so-sr-only">Choose a project or a workspace page.</DialogDescription>
+      <DialogClose asChild><Button variant="ghost" size="icon" className="so-navigation-close" aria-label="Close navigation"><Icon name="close" /></Button></DialogClose><Navigation workspace={workspace} />
+    </DialogContent></Dialog>;
+}
+
+function LeadChat({ controller }: { controller: ReturnType<typeof useWorkspace> }) {
+  const { workspace, draft, notice, storageAvailable, sending, stale, offline } = controller;
+  const chat = workspace.conversation!;
+  const box = useRef<HTMLTextAreaElement>(null);
+  const busy = chat.pendingTurnId !== null;
+  const disabled = sending || stale || offline || busy || draft.pending !== null || !draft.text.trim();
+  useLayoutEffect(() => { if (box.current) { box.current.style.height = "auto"; box.current.style.height = `${Math.min(180, Math.max(48, box.current.scrollHeight))}px`; } }, [draft.text]);
+  const delivery = offline ? "Offline. Your draft stays in this tab." : sending ? "Sending…" : notice;
+  return <div className="so-lead-chat" data-workspace-chat>
+    <Conversation className="so-conversation"><ConversationContent className="so-conversation-content">
+      {workspace.catchUpHtml && <GuardedHtml html={workspace.catchUpHtml} className="so-catch-up" />}
+      {chat.messages.length === 0 && <ConversationEmptyState title="What would you like to work on?" description="Plan the work with your lead. Your crew’s tasks and results stay beside the conversation." />}
+      <div id="chat-thread" data-chat-region="thread">{chat.messages.map(message => <Message from={message.role === "operator" ? "user" : "assistant"} key={message.id} data-message-id={message.id}>
+        <div className="so-message-label">{message.role === "operator" ? "You" : "Lead"}</div>
+        <MessageContent><GuardedHtml html={message.html} />{message.activity && <Disclosure summary="Activity"><p className="so-activity-copy">{message.activity}</p></Disclosure>}
+          {message.cardsHtml && <GuardedHtml html={message.cardsHtml} className="so-message-cards" />}
+        </MessageContent>
+      </Message>)}</div>
+      {busy && <div className="so-working" role="status"><span className="so-live-dot" />Lead is working</div>}
+    </ConversationContent><ConversationScrollButton /></Conversation>
+    <div className="so-composer-area">
+      {delivery && <div className="so-connection" role={stale ? "alert" : "status"}><span>{delivery}</span>
+        {stale ? <Button variant="secondary" size="sm" onClick={controller.reconnect}>Reconnect</Button> : !sending && !offline && <Button variant="ghost" size="sm" onClick={() => { void controller.check(); }}>Check again</Button>}
+      </div>}
+      <form onSubmit={controller.send} action="/chat" method="post" data-workspace-composer aria-busy={sending}>
+        <Label htmlFor="lead-message" className="so-sr-only">Message your lead</Label>
+        <Textarea ref={box} id="lead-message" name="message" rows={2} maxLength={chat.maxChars} placeholder="Message your lead…" value={draft.text}
+          onChange={event => controller.edit(event.target.value)} onKeyDown={event => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!disabled) event.currentTarget.form?.requestSubmit(); }
+          }} aria-describedby="composer-hint" />
+        <div className="so-composer-actions"><span id="composer-hint">{!storageAvailable ? "Draft stays on this page only." : draft.text.length > chat.maxChars - 200 ? `${draft.text.length} / ${chat.maxChars}` : "Shift + Enter for a new line"}</span>
+          <Button type="submit" disabled={disabled} aria-label="Send message"><Icon name="send" /><span>Send</span></Button>
+        </div>
+      </form>
+      {workspace.controlsHtml && <Disclosure summary="Conversation settings" className="so-conversation-settings"><GuardedHtml html={workspace.controlsHtml} immutable /></Disclosure>}
+    </div>
+  </div>;
+}
+
+export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
+  const controller = useWorkspace(initial);
+  const { workspace } = controller;
+  const [phoneView, setPhoneView] = useState<"chat" | "work">(workspace.result || workspace.focus ? "work" : "chat");
+  const hasWork = workspace.focus !== null || workspace.result !== null;
+  const selectedTask = workspace.crew.find(item => item.id === workspace.focus?.id);
+  const isChat = workspace.navigation.some(item => item.label === "Chat" && item.active);
+  useEffect(notifyWorkspaceRendered, []);
+  return <div className="so-workspace" data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
+    <a href="#workspace-main" className="so-skip-link">Skip to content</a>
+    <aside className="so-sidebar"><Navigation workspace={workspace} /></aside>
+    <div className={`so-main-column${isChat ? " so-main-column--chat" : ""}`}>
+      <header className="so-workspace-header"><PhoneNavigation workspace={workspace} /><h1>{isChat ? "Lead" : workspace.title === "work" ? "Tasks" : workspace.title}</h1>
+        {workspace.focus && isChat && <span className="so-focus-label" title={workspace.focus.title}>{workspace.focus.title}</span>}
+        <CommandMenu workspace={workspace} />
+        {isChat && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => setPhoneView("work")}>{hasWork ? "Open work" : "Crew"}</Button>}
+      </header>
+      {workspace.notices.length > 0 && <div className="so-workspace-notices">{workspace.notices.map((notice, index) => <Alert key={index}>{notice}</Alert>)}</div>}
+      <main id="workspace-main" className="so-main-content" tabIndex={-1}>
+        {workspace.conversation ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page><GuardedHtml html={initial.pageHtml ?? ""} immutable /></div>}
+      </main>
+    </div>
+    <aside className={`so-supporting-panel${hasWork ? " so-supporting-panel--detail" : ""}`} data-workspace-detail>
+      <div className="so-work-panel-header"><Button variant="ghost" size="sm" className="so-phone-back" onClick={() => setPhoneView("chat")}><Icon name="arrow" />{isChat ? "Back to chat" : "Back"}</Button>
+        {hasWork && <><h2>{workspace.result ? "Result" : "Task"}</h2>{workspace.result && selectedTask && <Badge tone={badgeTone(selectedTask.tone)} className="so-current-task-state" data-workspace-current-task-state>Task: {selectedTask.label}</Badge>}<a href="/chat" className="so-close-work" aria-label="Close work and return to the main chat"><Icon name="close" /></a></>}
+      </div>
+      {hasWork ? <div className="so-work-detail-content">
+        {workspace.focus && (workspace.result
+          ? <Disclosure summary="Task details" className="so-result-task-details"><GuardedHtml key={workspace.focus.id} html={workspace.focus.html} className="so-task-context" /></Disclosure>
+          : <GuardedHtml key={workspace.focus.id} html={workspace.focus.html} className="so-task-context" />)}
+        {workspace.result && <Artifact data-workspace-result={workspace.result.runId}><ArtifactContent><GuardedHtml key={workspace.result.runId} html={workspace.result.html} immutable /></ArtifactContent></Artifact>}
+      </div> : <Crew workspace={workspace} />}
+    </aside>
+  </div>;
+}
+
+const mount = document.getElementById("standing-orders-workspace");
+const data = document.getElementById("standing-orders-workspace-data");
+if (mount && data) {
+  try {
+    const initial: unknown = JSON.parse(data.textContent ?? "null");
+    if (!isWorkspace(initial)) throw new Error("Workspace data is incomplete");
+    createRoot(mount).render(<WorkspaceApp initial={initial} />);
+  } catch {
+    // The server-rendered fallback remains usable if mounting cannot start.
+    mount.setAttribute("data-workspace-unavailable", "true");
+  }
+}
