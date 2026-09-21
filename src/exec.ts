@@ -614,6 +614,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         ...(options.owner === undefined ? {} : { owner: options.owner }),
         ...(options.beforeSpawn === undefined ? {} : { beforeSpawn: options.beforeSpawn }),
         ...(options.onDescendant === undefined ? {} : { onDescendant: options.onDescendant }),
+        ...(options.onDescendantWriteFailure === undefined ? {} : { onDescendantWriteFailure: options.onDescendantWriteFailure }),
         ...(options.onDescendantExit === undefined ? {} : { onDescendantExit: options.onDescendantExit }),
         ...(options.onUnknown === undefined ? {} : { onUnknown: options.onUnknown }),
         ...(options.onObservationFailure === undefined ? {} : { onObservationFailure: options.onObservationFailure }),

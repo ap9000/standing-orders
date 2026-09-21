@@ -25,7 +25,7 @@ import { runOwnerTag, startClaudeHeldSession } from "./exec.js";
 import { currentContainment } from "./containment.js";
 import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
-import { witnessedRunner, recordProcessObservationFailure } from "./process-custody.js";
+import { witnessedRunner, recordProcessObservationFailure, preserveObservedProcesses } from "./process-custody.js";
 import { underStopWatch } from "./task-control.js";
 import { CHILD_DATABASE_ENV as AGENT_DATABASE_ENV, isolatedChildDatabase, removeChildDatabase as removeAgentDatabase } from "./child-database.js";
 
@@ -706,6 +706,8 @@ export async function invokeHeldAgent(
         store.recordRunProcess(runId, pid, clock(), group);
         runOptions.onDescendant?.(pid, group);
       },
+      onDescendantWriteFailure: rows => runOptions.onDescendant === undefined
+        && preserveObservedProcesses(store, runId, clock(), rows),
       onDescendantExit: (pid, group) => {
         store.recordRunProcessExits(runId, clock(), { pid, group });
         runOptions.onDescendantExit?.(pid, group);

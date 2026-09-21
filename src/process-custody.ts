@@ -1,4 +1,4 @@
-import type { ProcessObservationFailure } from "./process-tree.js";
+import type { ObservedProcess, ProcessObservationFailure } from "./process-tree.js";
 import type { Store } from "./store.js";
 import type { ExecResult, RunOptions } from "./exec.js";
 
@@ -9,6 +9,21 @@ export function recordProcessObservationFailure(store: Store, runId: number, now
   store.recordAction({ at: now.toISOString(), actor: run?.runner ?? "system", repo: ref?.repo ?? null,
     taskId: ref?.externalId ?? null, runId, action: "process observation failed", source: "work",
     outcome: JSON.stringify(failure) });
+}
+
+/** Preserve observed IDs through the existing serialized write boundary. This
+ * writes process facts only; it does not declare exit or replay observers. */
+export function preserveObservedProcesses(store: Store, runId: number, now: Date, rows: readonly ObservedProcess[]): boolean {
+  const first = rows[0];
+  if (!first) return false;
+  // Reserve BEFORE waiting for the batch transaction. A crash/rollback leaves
+  // this new guard intact; no old unknown witness is reused or cleared.
+  const witness = store.reserveRunProcess(runId, now, first.group);
+  store.transact(() => {
+    store.recordRunProcess(runId, first.pid, now, first.group, witness);
+    for (const row of rows.slice(1)) store.recordRunProcess(runId, row.pid, now, row.group);
+  });
+  return true;
 }
 
 type Runner = (file: string, args: readonly string[], options?: RunOptions) => Promise<ExecResult>;
@@ -30,6 +45,10 @@ export function witnessedRunner(store: Store, runId: number, clock: () => Date, 
         store.recordRunProcess(runId, pid, clock(), group);
         options.onDescendant?.(pid, group);
       },
+      // External custody callbacks retain the conservative failure path;
+      // replaying them could repeat non-idempotent side effects.
+      onDescendantWriteFailure: rows => options.onDescendant === undefined
+        && preserveObservedProcesses(store, runId, clock(), rows),
       onDescendantExit: (pid, group) => {
         store.recordRunProcessExits(runId, clock(), { pid, group });
         options.onDescendantExit?.(pid, group);

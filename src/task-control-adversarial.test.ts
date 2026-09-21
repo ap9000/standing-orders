@@ -9,7 +9,7 @@ import { acquire } from "./claim.js";
 import { disposeBuildOutcome } from "./dispose.js";
 import { run, runOwnerTag } from "./exec.js";
 import { requestTaskStop, resumeTaskStop, taskControlOf, underStopWatch } from "./task-control.js";
-import { witnessedRunner } from "./process-custody.js";
+import { witnessedRunner, preserveObservedProcesses } from "./process-custody.js";
 import { WorktreePool } from "./worktree.js";
 import { storeEvidence } from "./evidence.js";
 
@@ -98,6 +98,24 @@ describe("operator review: cancellation cannot cross custody boundaries", () => 
     const exited = new Promise<void>(resolve => child.once("close", resolve)); child.stdin!.end(); await exited;
     expect(f.store.recordRunProcessExits(f.id, new Date())).toBe(1);
     expect(witnesses()[0]!.exited_at).not.toBeNull();
+  });
+
+  test("known descendant fallback commits all IDs without changing an older unknown witness", () => {
+    const f = fixture();
+    const old = f.store.reserveRunProcess(f.id, new Date());
+    expect(preserveObservedProcesses(f.store, f.id, new Date(), [{ pid: 100, group: true }, { pid: 200, group: false }])).toBe(true);
+    const rows = f.store.raw().prepare("SELECT id,pid,process_group,exited_at FROM run_process WHERE run=? ORDER BY id").all(f.id);
+    expect(rows).toEqual([
+      { id: old, pid: null, process_group: 1, exited_at: null },
+      { id: expect.any(Number), pid: 100, process_group: 1, exited_at: null },
+      { id: expect.any(Number), pid: 200, process_group: 0, exited_at: null },
+    ]);
+  });
+
+  test("a failed fallback transaction leaves its fresh guard and rolls back every partial identity", () => {
+    const f = fixture();
+    expect(() => preserveObservedProcesses(f.store, f.id, new Date(), [{ pid: 100, group: true }, { pid: -1, group: false }])).toThrow("valid spawned PID");
+    expect(f.store.raw().prepare("SELECT pid,exited_at FROM run_process WHERE run=?").all(f.id)).toEqual([{ pid: null, exited_at: null }]);
   });
 
   test("all unspawned transient retries settle when their transport returns", async () => {
@@ -224,8 +242,17 @@ describe("operator review: cancellation cannot cross custody boundaries", () => 
     expect(resumeTaskStop(f.store, { taskId: "draft", runId: f.id, by: "operator", via: "cli" }, new Date()).ok).toBe(true);
   });
 
-  test.skipIf(process.platform === "win32")("recovery retains an observed detached descendant after its harness dies", async () => {
+  test.skipIf(process.platform === "win32").each(["normal", "failed-write"])("recovery retains an observed detached descendant after its harness dies (%s)", async mode => {
     const f = fixture();
+    const record = f.store.recordRunProcess.bind(f.store);
+    let injected = false;
+    f.store.recordRunProcess = (runId, pid, now, group, witness) => {
+      if (mode === "failed-write" && witness === undefined && !injected) {
+        injected = true;
+        throw Object.assign(new Error("fixture database busy"), { code: "ERR_SQLITE_ERROR", errcode: 5 });
+      }
+      record(runId, pid, now, group, witness);
+    };
     const ready = join(f.root, "detached.json"), release = join(f.root, "release");
     const helper = "const fs=require('node:fs');fs.writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{if(fs.existsSync(process.argv[2]))process.exit(0)},20)";
     const parent = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(helper)},process.argv[1],process.argv[2]],{detached:true,stdio:'ignore'}).unref();setInterval(()=>{},50)`;
@@ -243,6 +270,12 @@ describe("operator review: cancellation cannot cross custody boundaries", () => 
       }
       expect(helperPid).toBeGreaterThan(0);
       expect(f.store.raw().prepare("SELECT id FROM run_process WHERE run = ? AND pid = ?").get(f.id, helperPid)).toBeDefined();
+      if (mode === "failed-write") {
+        expect(injected).toBe(true);
+        expect(f.store.raw().prepare("SELECT id FROM run_process WHERE run=? AND pid IS NULL").all(f.id)).toEqual([]);
+        const failure = f.store.actionLedger({ repos: null }).find(one => one.action === "process observation failed");
+        expect(JSON.parse(failure!.outcome)).toMatchObject({ operation: "descendant-write", code: "SQLITE_BUSY", identityUnknown: false });
+      }
       // Deliberately kill only the known harness handle's PID. Its separately
       // grouped child survives exactly as it does after an external crash.
       process.kill(rootPid, "SIGKILL");
