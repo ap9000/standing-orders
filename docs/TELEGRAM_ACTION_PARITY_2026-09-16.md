@@ -1,7 +1,9 @@
 # Telegram action parity
 
 One row per mate tool in `MATE_TOOL_SCHEMAS`, sourced from
-`TELEGRAM_ACTION_PARITY` in [telegram-mate.ts](../src/telegram-mate.ts).
+`CHAT_ACTION_PARITY` in [chat-channel.ts](../src/chat-channel.ts), re-exported
+as `TELEGRAM_ACTION_PARITY` in [telegram-mate.ts](../src/telegram-mate.ts).
+Telegram and Slack invoke the same tools through the shared assistant engine.
 `src/telegram-mate.test.ts` refuses a tool this table does not name and
 checks every row below against that constant column for column — support,
 how, and remaining gap — so the code and this document cannot drift apart
@@ -23,12 +25,15 @@ Meaning of the support column:
 - **missing** — no phone path. None today; a new tool without a row fails
   the suite.
 
-Fixture tests only: every row below was exercised against a scripted Bot
-API and a scripted membership harness. This is not a live Telegram trial;
-that waits for the operator's bot configuration and pairing.
+The Test column distinguishes shared implementation tests from scripted
+transport journeys; catalogue coverage alone does not prove a channel journey.
+This is not a live Telegram trial; that waits for the operator's bot
+configuration and pairing. Slack transport tests also use scripted responses.
 
 | Tool | Support | How the phone reaches it | Test | Remaining gap |
 | --- | --- | --- | --- | --- |
+| `get_brief` | direct | Reads current tasks, decisions, results and project knowledge from the local database through the shared engine, within the enrolled projects. | Shared scoped DB brief regression (`lead-follow.test.ts`); catalogue parity checks | Dedicated Telegram and Slack journeys for this tool and live channel rendering remain unverified. |
+| `get_project_context` | direct | Reads bounded source excerpts or advisory import impact in an accessible enrolled project through the shared engine, with source-search fallback when its index is unavailable. | Source retrieval and fallback (`repository-context.test.ts`), MCP scope checks (`mcp.test.ts`); catalogue parity checks | Index refresh uses the local CLI. Dedicated Telegram and Slack journeys for this tool and live channel rendering remain unverified. |
 | `get_action_status` | direct | Reads the exact saved shared action and its outcome, including completion through secure review. | Shared action lifecycle and secure-review regressions (`chat-actions.test.ts`) | none |
 | `get_actions` | direct | Lists the shared action catalogue and required inputs. | Shared action lifecycle and secure-review regressions (`chat-actions.test.ts`) | none |
 | `propose_action` | direct | Prepares exact shared skill, knowledge, approval, acceptance, review, cancel and resume actions. Short ordinary changes confirm here; protected or long changes use one secure review and record the result on the same proposal. | Shared action lifecycle and secure-review regressions (`chat-actions.test.ts`) | Secure review requires a working HTTPS console connection. Real transport verification is required. |
