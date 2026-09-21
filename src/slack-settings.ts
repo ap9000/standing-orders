@@ -14,11 +14,13 @@ export function slackSettingsHtml(
   store: Store,
   dir: string,
   csrf: string,
-  options: { code?: string; problem?: string; now?: Date } = {},
+  options: { code?: string; problem?: string; now?: Date; who?: string } = {},
 ): string {
   const credentials = loadSlackCredentials(dir),
     state = new SlackState(store),
-    binding = credentials ? state.binding(credentials.installation) : null;
+    bindings = credentials ? state.bindings(credentials.installation).filter(one => state.live(one)) : [],
+    binding = options.who === undefined ? null : bindings.find(one => one.approver === options.who) ?? null,
+    others = bindings.length - (binding === null ? 0 : 1);
   const runtime = credentials
     ? state.db
         .prepare(
@@ -76,7 +78,7 @@ export function slackSettingsHtml(
           .get(binding.id)?.n ?? 0,
       );
       content +=
-        `<p>Paired to ${escape(binding.approver)}.${pending ? ` ${pending} replies waiting to send.` : ""}${failed ? ` ${failed} replies could not be delivered. Open the saved chat to recover them.` : ""}</p>` +
+        `<p>Your Slack account is paired.${others ? ` ${others} teammate${others === 1 ? " is" : "s are"} paired too.` : ""}${pending ? ` ${pending} replies waiting to send.` : ""}${failed ? ` ${failed} replies could not be delivered. Open the saved chat to recover them.` : ""}</p>` +
         "<p>Try “What needs my attention?” or “Show the evidence for the latest result.”</p>" +
         '<p><a href="/chat">Open saved chat</a></p>' +
         (loadPrimary(process.env, dir) === "slack"
@@ -88,11 +90,17 @@ export function slackSettingsHtml(
     } else {
       content += post(
         "pair",
-        "<h2>Pair your account</h2><p>Your paired Slack account can read your connected projects and confirm proposed changes. Password approvals still open in Standing Orders.</p>" +
+        "<h2>Pair your account</h2><p>Your paired Slack account can read your connected projects and confirm proposed changes. Password approvals still open in Standing Orders." +
+          (others ? ` ${others} teammate${others === 1 ? " is" : "s are"} already paired.` : "") + "</p>" +
           password +
           '<button type="submit">Create pairing code</button>',
       );
     }
+    if (binding && state.live(binding) && !options.code)
+      content += post(
+        "unpair",
+        password + '<p class="meta">Unpairing ends every open button in your chat. Teammates are unaffected.</p><button type="submit">Unpair my account</button>',
+      );
     content +=
       "<details><summary>Connection settings</summary>" +
       post(

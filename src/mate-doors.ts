@@ -62,7 +62,7 @@ export type DoorOptions = {
   /** Which surface answered — recorded on the decision, the stop and the
    * proposal's outcome. Named by the caller, never defaulted (v3 review,
    * finding 1); `telegram` is the paired phone, never relabelled as the CLI. */
-  via: "web" | "cli" | "telegram" | "slack" | "discord";
+  via: "web" | "cli" | "telegram" | "slack" | "discord" | "teams";
   /**
    * A composing caller already inside a transaction (the Telegram bridge
    * applies a tap in the update's own transaction) hands the door its
@@ -130,7 +130,7 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
       if (proposal.state !== "pending") return {ok:false,kind:proposal.kind,reason:"not-pending",said:"This proposal was already acted on."} as const;
       const action = sharedActionPayload(proposal.payload);
       if (action === null) return { ok: false, kind: proposal.kind, reason: "refused", said: "This action is incomplete." } as const;
-      const challenged = options.via === "telegram" && options.confirm === true && sharedActionAllowsChallenge(action);
+      const challenged = options.via !== "web" && options.via !== "cli" && options.confirm === true && sharedActionAllowsChallenge(action);
       if (sharedActionNeedsReview(action) && !challenged && (options.via !== "web" || options.actionReview === undefined || options.confirm !== true)) return { ok: false, kind: proposal.kind, reason: "needs-confirm", said: "Review this action in the secure confirmation screen." } as const;
     }
     // An irreversible answer takes the explicit field BEFORE the CAS: a

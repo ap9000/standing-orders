@@ -23,3 +23,10 @@ The first Discord transport supports **one paired person in a private bot DM per
 Automated Discord responses and model replies are scripted. Browser evidence covers the actual console at desktop and phone-sized Chrome viewports, including empty setup, failure, long names, acceptance and feedback creating an unapproved revision. It does not establish native Discord rendering or physical-phone acceptance. A live trial follows connection of a real app.
 
 Protocol references: [Gateway and intents](https://docs.discord.com/developers/events/gateway), [interaction acknowledgement](https://docs.discord.com/developers/interactions/receiving-and-responding), and [message nonces and attachments](https://docs.discord.com/developers/resources/message).
+
+## Teammates and channels (2026-09-21)
+
+Every teammate pairs their own Discord account from **Settings → Discord**; unpairing yourself leaves everyone else connected. Send `status`, `task <id>` or `help` for a database-backed answer without a model turn.
+
+A server channel can follow one team conversation: add the app to the server with the **Message Content** intent enabled, then a conversation manager sends `team` in the channel and `team <number>` to pick the conversation; `team off` stops it. Paired members' messages there are saved to the conversation under their own names and consent, and replies and cards come back to the channel. Marking a result complete confirms with a second tap on the card.
+

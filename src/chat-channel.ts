@@ -5,6 +5,7 @@ import {
   sharedActionNeedsReview,
   sharedActionReviewPath,
   sharedActionAllowsChallenge,
+  CHAT_ACTIONS,
 } from "./chat-actions.js";
 import { isDirectChatProvider, subscriptionCredentialKey } from "./converse.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
@@ -246,11 +247,32 @@ function taskLink(
  * Confirm/Dismiss buttons alone — a second button on a card that acts is a
  * choice the operator did not need.
  */
+/** A chat transport that renders cards and confirms them in place. The
+ * console ("web") and the terminal are not chat channels. */
+export type ChatChannelName = "telegram" | "slack" | "discord" | "teams";
+
+/** The card text once its challenge is armed: an irreversible answer or a
+ * challenge action, in the same words on every channel. */
+export function armedCardText(proposal: MateProposal, previewText: string): string {
+  const body = previewText.split("\n\nConfirm or Dismiss below")[0] ?? previewText;
+  if (proposal.kind === "action") return `${body}\n\nThis records that you handled this exact result. Confirm?`;
+  return `⚠ This answer is IRREVERSIBLE.\n\n${body}\n\nConfirm?`;
+}
+
+/** The "yes" button's label for an armed card. */
+export function armedYesLabel(proposal: MateProposal): string {
+  if (proposal.kind === "action") {
+    const action = sharedActionPayload(proposal.payload);
+    return `Yes, ${(action === null ? "confirm" : CHAT_ACTIONS[action.operation].label).toLowerCase()}`;
+  }
+  return "Yes, answer";
+}
+
 export function proposalLink(
   store: Store,
   proposal: MateProposal,
   repos: readonly string[],
-  channel: "telegram" | null = null,
+  channel: ChatChannelName | null = null,
 ): PhoneLink | null {
   const payload = proposal.payload;
   if (proposal.kind === "action") {
@@ -258,7 +280,7 @@ export function proposalLink(
     return action &&
       repos.includes(action.repo) &&
       sharedActionNeedsReview(action) &&
-      !(channel === "telegram" && sharedActionAllowsChallenge(action))
+      !(channel !== null && sharedActionAllowsChallenge(action))
       ? { label: "Review action", path: sharedActionReviewPath(proposal.id) }
       : null;
   }
@@ -325,7 +347,7 @@ export function proposalPreview(
   store: Store,
   proposal: MateProposal,
   repos: readonly string[],
-  channel: "telegram" | null = null,
+  channel: ChatChannelName | null = null,
 ): { text: string; buttons: boolean } {
   const payload = proposal.payload;
   const t = (key: string, cap = 200): string =>
@@ -369,7 +391,7 @@ export function proposalPreview(
     case "action": {
       const action = sharedActionPayload(payload);
       if (!action) return handoff("This action is unavailable.");
-      if (channel === "telegram" && sharedActionAllowsChallenge(action))
+      if (channel !== null && sharedActionAllowsChallenge(action))
         return card(
           phoneText(action.title, 200),
           action.terms.map((term) => phoneText(term, 1200)),

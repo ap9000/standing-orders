@@ -1,15 +1,19 @@
+import { roomCommand } from "./chat-rooms.js";
 import {
   processChatEvent,
   applyChatAction,
   planChatNotifications,
   channelAccess,
   type ChatDeliveryOptions,
+  planRoomMessages,
 } from "./chat-delivery.js";
 /** Slack is a transport for the same saved assistant and confirmation doors. */
 import {
   proposalPreview,
   proposalLink,
   proposalOutcomeText,
+  armedCardText,
+  armedYesLabel,
 } from "./chat-channel.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import { type DoorOptions } from "./mate-doors.js";
@@ -90,9 +94,9 @@ export function receiveSlack(
   }
   if (type === "events_api" && event.type === "user_change") {
     const user = object(event.user),
-      binding = state.binding(identity.installation);
-    if (binding?.member === user.id && user.deleted === true)
-      state.revoke(identity.installation, now);
+      binding = typeof user.id === "string" ? state.bindingFor(identity.installation, user.id) : null;
+    if (binding !== null && user.deleted === true)
+      state.revokeBinding(binding, now);
     return true;
   }
   let member: unknown,
@@ -106,7 +110,7 @@ export function receiveSlack(
     if (
       event.subtype !== undefined ||
       event.bot_id !== undefined ||
-      event.channel_type !== "im" ||
+      !["im", "channel", "group"].includes(String(event.channel_type)) ||
       typeof event.text !== "string"
     )
       return false;
@@ -152,22 +156,26 @@ export function receiveSlack(
   } else return false;
   if (
     !slackId(member, "UW") ||
-    !slackId(channel, "D") ||
+    !slackId(channel, "DCG") ||
     !slackTs(ts) ||
     !slackTs(thread) ||
     member === identity.bot
   )
     return false;
-  const binding = state.binding(identity.installation);
+  // A channel or private group is a room: accepted only while it follows a
+  // conversation, or for the `/team` words that make it follow one.
+  const isRoom = !slackId(channel, "D");
+  const roomish = isRoom && (state.room(identity.installation, String(channel)) !== null || (kind === "message" && roomCommand(String(payload.text ?? "")) !== null));
+  if (isRoom && !roomish) return false;
+  const binding = state.bindingFor(identity.installation, member);
   if (
     kind !== "pair" &&
     (!binding ||
       !state.live(binding) ||
-      binding.member !== member ||
-      binding.channel !== channel)
+      (binding.channel !== channel && !roomish))
   )
     return false;
-  if (kind === "pair" && binding) return false;
+  if (kind === "pair" && (binding || isRoom)) return false;
   return state.enqueue({
     id,
     installation: identity.installation,
@@ -199,6 +207,8 @@ export const applySlackAction = (
 ) => applyChatAction(delivery(options), event, binding, repos);
 export const planSlackNotifications = (options: SlackChatOptions) =>
   planChatNotifications(delivery(options));
+export const planSlackRooms = (options: SlackChatOptions) =>
+  planRoomMessages(delivery(options));
 const access = (
   options: SlackChatOptions,
   binding: SlackBinding,
@@ -282,8 +292,8 @@ export async function deliverSlackPart(
     ) as SlackPart | undefined;
   if (!row) return false;
   const event = state.event(row.event)!,
-    binding = state.binding(identity.installation);
-  if (!binding || binding.id !== event.binding) {
+    binding = event.binding === null ? null : state.bindingById(event.binding);
+  if (!binding) {
     state.db
       .prepare(
         "UPDATE slack_part SET state='dropped',problem='Chat access changed' WHERE id=?",
@@ -306,6 +316,7 @@ export async function deliverSlackPart(
     if (event.kind === "notice" && options.canNotify?.() === false)
       return false;
     const content = JSON.parse(row.payload) as SlackContent;
+    const destination = content.channel ?? binding.channel;
     let text = content.text,
       buttons: Record<string, unknown>[] = [];
     if (
@@ -372,8 +383,8 @@ export async function deliverSlackPart(
               (await options.api("files.info", { file })).file,
             ),
             shares = object(object(remote.shares).private);
-          const receipts = Array.isArray(shares[binding.channel])
-            ? (shares[binding.channel] as unknown[])
+          const receipts = Array.isArray(shares[destination])
+            ? (shares[destination] as unknown[])
             : [];
           const found = receipts
             .map(object)
@@ -401,7 +412,7 @@ export async function deliverSlackPart(
               ),
             },
           ],
-          channel_id: binding.channel,
+          channel_id: destination,
           thread_ts: event.thread,
           initial_comment: safeResultImageCaption(
             content.text,
@@ -430,10 +441,10 @@ export async function deliverSlackPart(
       else if (proposal.state !== "pending")
         text = proposalOutcomeText(proposal);
       else {
-        const preview = proposalPreview(store, proposal, repos);
+        const preview = proposalPreview(store, proposal, repos, "slack");
         text =
           content.phase === "armed"
-            ? `⚠️ Irreversible choice\n${preview.text.split("\n\nConfirm or Dismiss below")[0]}\n\nConfirm this answer?`
+            ? armedCardText(proposal, preview.text)
             : preview.text.replace(
                 "\n\nConfirm or Dismiss below. Nothing changes until you confirm.",
                 "",
@@ -450,7 +461,7 @@ export async function deliverSlackPart(
               type: "plain_text",
               text:
                 action.phase === "yes"
-                  ? "Yes, answer"
+                  ? armedYesLabel(proposal)
                   : action.phase === "cancel"
                     ? "Cancel"
                     : action.phase === "dismiss"
@@ -484,7 +495,7 @@ export async function deliverSlackPart(
     } else buttons = linkButton(options.origin(), content.link);
     const target = content.edit ?? row.message;
     const args = {
-      channel: binding.channel,
+      channel: destination,
       text: text
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")

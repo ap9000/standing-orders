@@ -10,6 +10,7 @@ import {
   deliverSlackPart,
   planSlackNotifications,
   type SlackChatOptions,
+  planSlackRooms,
 } from "./slack-chat.js";
 
 /** The bot and socket tokens must belong to the same app, including after reconnect. */
@@ -188,6 +189,7 @@ export async function followSlack(
           continue;
         }
         await processSlackEvent(chat);
+        if (same()) await planSlackRooms(chat);
         if (same()) await deliverSlackPart(chat);
         if (same() && options.notifications())
           await planSlackNotifications(chat);

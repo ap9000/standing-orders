@@ -1,5 +1,6 @@
 import { maybeTriggerRepair } from "./dispose.js";
 import {followDiscord} from "./discord.js";
+import { followTeams } from "./teams.js";
 import {loadDiscordCredentials} from "./discord-api.js";
 import { loadSlackCredentials } from "./slack-api.js";
 import { followSlack } from "./slack.js";
@@ -7571,6 +7572,14 @@ async function runWatchLoop(args: {
     notifications:()=>effectivePrimary(process.env,dirname(context.databaseFile),loadBotToken(process.env,context.telegramTokenFile)!==null).channel==="slack",
   }).catch(()=>progress("watch: Slack stopped. Check Slack settings before reconnecting."));
 
+  const teamsFollower = followTeams({store,dir:dirname(context.databaseFile),signal:followController.signal,
+    readProjects:telegramReadProjects(context),evidenceRoot:context.evidenceRoot,
+    ...(context.mateSeams?.subscriptionRunner ? {subscriptionRunner:context.mateSeams.subscriptionRunner} : {}),
+    ...(context.heldCoordinator ? {held:context.heldCoordinator} : {}),
+    origin:()=>phoneOrigin(process.env,dirname(context.databaseFile),{serverOrigin:text(flags,"public-url")??null}),
+    notifications:()=>effectivePrimary(process.env,dirname(context.databaseFile),loadBotToken(process.env,context.telegramTokenFile)!==null).channel==="teams",
+  }).catch(()=>progress("watch: Teams stopped. Check Teams settings before reconnecting."));
+
   const discordFollower = followDiscord({store,dir:dirname(context.databaseFile),signal:followController.signal,
     readProjects:telegramReadProjects(context),evidenceRoot:context.evidenceRoot,
     ...(context.mateSeams?.subscriptionRunner ? {subscriptionRunner:context.mateSeams.subscriptionRunner} : {}),
@@ -7764,6 +7773,7 @@ async function runWatchLoop(args: {
     followController.abort();
     if (follower !== null) await follower;
     await slackFollower;
+    await teamsFollower;
     await discordFollower;
     store.endWatchEpisode(incarnation, { ticks, built, broke: brokeCount }, new Date());
     store.releaseWatchLease(runner, repo, incarnation, new Date());

@@ -566,7 +566,7 @@ export function mintSharedActionReview(
   return { payload: live, nonce };
 }
 export type SharedActionOptions = {
-  via: "web" | "cli" | "telegram" | "slack" | "discord";
+  via: "web" | "cli" | "telegram" | "slack" | "discord" | "teams";
   root?: string;
   review?: { nonce: string; password: string };
   confirm?: boolean;
@@ -618,7 +618,8 @@ export function executeSharedAction(
   const config = CHAT_ACTIONS[live.operation],
     req = live.request;
   const challenged =
-    options.via === "telegram" &&
+    options.via !== "web" &&
+    options.via !== "cli" &&
     options.confirm === true &&
     sharedActionAllowsChallenge(payload);
   if (sharedActionNeedsReview(payload) && !challenged) {

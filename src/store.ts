@@ -104,7 +104,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
-export const SCHEMA_VERSION = 72;
+export const SCHEMA_VERSION = 74;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -756,7 +756,7 @@ export type RunStop = {
 };
 
 /** Which surface asked for a stop or a resume — named by the caller, never defaulted. */
-export type StopVia = "cli" | "web" | "telegram" | "slack" | "discord";
+export type StopVia = "cli" | "web" | "telegram" | "slack" | "discord" | "teams";
 
 /** One ROOT review attempt of a source run (v50): the reviewer run, its
  * ordinal, how it ended, and the request it was spent on. */
@@ -1081,7 +1081,7 @@ export type Decision = {
   createdAt: string;
   answeredAt: string | null;
   answeredBy: string | null;
-  answeredVia: "cli" | "web" | "telegram" | "slack" | "discord" | null;
+  answeredVia: "cli" | "web" | "telegram" | "slack" | "discord" | "teams" | null;
   choice: string | null;
   note: string | null;
 };
@@ -4043,6 +4043,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(SKILLS_SCHEMA);
   db.exec(SLACK_SCHEMA);
   db.exec(chatSchema("discord"));
+  db.exec(chatSchema("teams"));
   db.exec(TEAM_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "approver", "projects_json", "TEXT");
@@ -4385,6 +4386,10 @@ function migrate(db: Database, origin: number | null): void {
   // several teammates can pair their own chats. The schema text already
   // created the new index; the old rule is dropped here, idempotently.
   db.exec("DROP INDEX IF EXISTS telegram_binding_live");
+  // v73: the same rule for Slack and Discord — one binding per (installation,
+  // member) instead of one per installation.
+  db.exec("DROP INDEX IF EXISTS slack_one_binding");
+  db.exec("DROP INDEX IF EXISTS discord_one_binding");
   rebuild(db);
   rebuildDecisionVia(db);
   // v4 CHECK widenings, each a copy-rename against an exactly recognized
@@ -5190,6 +5195,7 @@ function migrate(db: Database, origin: number | null): void {
   rebuildRunStopForV62(db);
   rebuildSlackAuditForV67(db);
   rebuildDiscordAuditForV68(db);
+  rebuildTeamsAuditForV74(db);
 
   // v64 (result screenshots on demand): telegram_conversation_part admits
   // 'image' and carries typed media identity through the same exact-
@@ -5706,13 +5712,29 @@ const DECISION_V67_DDL = (name: string): string => DECISION_V66_DDL(name).replac
 const RUN_STOP_V67_DDL = (name: string): string => RUN_STOP_V62_DDL(name).replaceAll("'cli','web','telegram'", "'cli','web','telegram','slack'");
 const DECISION_V68_DDL = (name:string):string => DECISION_V67_DDL(name).replace("'cli','web','telegram','slack'", "'cli','web','telegram','slack','discord'");
 const RUN_STOP_V68_DDL = (name:string):string => RUN_STOP_V67_DDL(name).replaceAll("'cli','web','telegram','slack'", "'cli','web','telegram','slack','discord'");
+/** v74: Microsoft Teams joins the recorded surfaces a stop or an answer names. */
+export const DECISION_V74_DDL = (name:string):string => DECISION_V68_DDL(name).replace("'cli','web','telegram','slack','discord'", "'cli','web','telegram','slack','discord','teams'");
+export const RUN_STOP_V74_DDL = (name:string):string => RUN_STOP_V68_DDL(name).replaceAll("'cli','web','telegram','slack','discord'", "'cli','web','telegram','slack','discord','teams'");
+function isTeamsAudit(db:Database,table:"decision"|"run_stop"):boolean {
+ const row=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table);
+ return row!==undefined&&canonicalDdl(String(row.sql))===canonicalDdl((table==="decision"?DECISION_V74_DDL:RUN_STOP_V74_DDL)(table));
+}
+export function rebuildTeamsAuditForV74(db:Database):void {
+ if(!isTeamsAudit(db,"decision")) rebuildExact(db,"decision",DECISION_V68_DDL,DECISION_V74_DDL,["id","run","urgency","state","recap","question","options","recommendation","assignee","deadline","created_at","answered_at","answered_by","contestant","closed_reason","answered_via","choice","note","session_turn","delivered_turn"]);
+ if(!isTeamsAudit(db,"run_stop")) rebuildExact(db,"run_stop",RUN_STOP_V68_DDL,RUN_STOP_V74_DDL,["run","task_ref","requested_by","requested_via","requested_at","settled_at","settlement","resumed_at","resumed_by","resumed_via"]);
+ db.exec("CREATE INDEX IF NOT EXISTS run_stop_by_task ON run_stop (task_ref, requested_at DESC)");
+}
 function isDiscordAudit(db:Database,table:"decision"|"run_stop"):boolean {
+ if(isTeamsAudit(db,table)) return true;
  const row=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table);
  return row!==undefined&&canonicalDdl(String(row.sql))===canonicalDdl((table==="decision"?DECISION_V68_DDL:RUN_STOP_V68_DDL)(table));
 }
+export const DECISION_V68_DDL_FOR_TESTS = (name:string):string => DECISION_V68_DDL(name);
+export const RUN_STOP_V68_DDL_FOR_TESTS = (name:string):string => RUN_STOP_V68_DDL(name);
 export function rebuildDiscordAuditForV68(db:Database):void {
- rebuildExact(db,"decision",DECISION_V67_DDL,DECISION_V68_DDL,["id","run","urgency","state","recap","question","options","recommendation","assignee","deadline","created_at","answered_at","answered_by","contestant","closed_reason","answered_via","choice","note","session_turn","delivered_turn"]);
- rebuildExact(db,"run_stop",RUN_STOP_V67_DDL,RUN_STOP_V68_DDL,["run","task_ref","requested_by","requested_via","requested_at","settled_at","settlement","resumed_at","resumed_by","resumed_via"]);
+ if(isTeamsAudit(db,"decision")&&isTeamsAudit(db,"run_stop")) return;
+ if(!isTeamsAudit(db,"decision")) rebuildExact(db,"decision",DECISION_V67_DDL,DECISION_V68_DDL,["id","run","urgency","state","recap","question","options","recommendation","assignee","deadline","created_at","answered_at","answered_by","contestant","closed_reason","answered_via","choice","note","session_turn","delivered_turn"]);
+ if(!isTeamsAudit(db,"run_stop")) rebuildExact(db,"run_stop",RUN_STOP_V67_DDL,RUN_STOP_V68_DDL,["run","task_ref","requested_by","requested_via","requested_at","settled_at","settlement","resumed_at","resumed_by","resumed_via"]);
  db.exec("CREATE INDEX IF NOT EXISTS run_stop_by_task ON run_stop (task_ref, requested_at DESC)");
 }
 function isSlackAudit(db: Database, table: "decision" | "run_stop"): boolean {
@@ -18842,7 +18864,7 @@ export class Store {
    * is not negotiable, and neither is "decided".
    */
   answerDecision(
-    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram" | "slack" | "discord"; note?: string },
+    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram" | "slack" | "discord" | "teams"; note?: string },
     now: Date,
     mutation: Mutation = {},
   ):
@@ -18864,7 +18886,7 @@ export class Store {
    * claims and only the second one authorizes anything.
    */
   answerDecisionLocked(
-    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram" | "slack" | "discord"; note?: string },
+    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram" | "slack" | "discord" | "teams"; note?: string },
     now: Date,
   ):
     | { ok: true; decision: Decision; duplicate?: boolean }

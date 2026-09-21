@@ -21,3 +21,12 @@ The first Slack transport supports one paired person in private messages and thr
 Incoming messages are saved before acknowledgement. Engine request receipts and action tokens prevent replaying a model request or applying a confirmed change twice. Replies retry with Slack’s rate-limit delay. A lost message acknowledgement can produce a duplicate message; its actions still apply once. Unsent replies expire after a day and remain visible as delivery failures in Settings; the assistant’s saved conversation remains available in the console.
 
 Automated transport tests use scripted Slack responses. The browser proof labels its synthetic setup and checks actual desktop and phone-sized console viewports. These do not establish native Slack rendering or live workspace acceptance; finish that trial after connecting a workspace.
+
+## Teammates and channels (2026-09-21)
+
+Every teammate pairs their own Slack account from **Settings → Slack**; one person, one Slack identity, and unpairing yourself leaves everyone else connected. Send `status`, `task <id>` or `help` (with or without the slash) for a database-backed answer without a model turn.
+
+A channel can follow one team conversation. Invite the app to the channel, then a conversation manager sends `team` there and `team <number>` to pick the conversation; `team off` stops it. Paired members' messages in that channel are saved to the conversation under their own names and spending consent, and the lead's replies, teammates' messages from other surfaces and each reply's cards are posted back to the channel. Everyone in the channel reads those replies, so follow a conversation only where its whole audience may see it. The reinstalled app manifest adds `channels:history`, `groups:history` and the matching read scopes. In a direct message, `team <number>` makes your DM talk in a conversation instead of your private assistant.
+
+Marking a result complete confirms with a second tap on the card, as on Telegram; password approvals still open the console.
+

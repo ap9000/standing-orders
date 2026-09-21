@@ -248,7 +248,7 @@ export async function uploadSlackBytes(
   }
 }
 
-/** Personal DM scopes only. Shared channels need a separate visibility design. */
+/** DM scopes plus channel history for rooms that follow a team conversation. */
 export const SLACK_MANIFEST = {
   display_information: {
     name: "Standing Orders",
@@ -269,6 +269,10 @@ export const SLACK_MANIFEST = {
         "chat:write",
         "im:history",
         "im:read",
+        "channels:history",
+        "channels:read",
+        "groups:history",
+        "groups:read",
         "users:read",
         "files:read",
         "files:write",
@@ -279,6 +283,8 @@ export const SLACK_MANIFEST = {
     event_subscriptions: {
       bot_events: [
         "message.im",
+        "message.channels",
+        "message.groups",
         "app_uninstalled",
         "tokens_revoked",
         "user_change",

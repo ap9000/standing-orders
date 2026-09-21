@@ -31,10 +31,15 @@ import {
   planSlackNotifications,
   slackBlocks,
   type SlackChatOptions,
+  planSlackRooms,
 } from "./slack-chat.js";
 import { knowledgeView } from "./project-knowledge.js";
 import { resolveChannelMate, parityGaps } from "./chat-channel.js";
 import { prepareSharedAction } from "./chat-actions.js";
+import { verifyApproverStanding } from "./principal.js";
+import { assignmentOf } from "./assignment.js";
+import { TeamLeads } from "./team-leads.js";
+import { ceilingDigestOf } from "./principal.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { slackSettingsHtml } from "./slack-settings.js";
 import { effectivePrimary, savePrimary } from "./webhooks.js";
@@ -658,9 +663,7 @@ describe("Slack shared chat", () => {
     savePrimary(dir, "slack");
     expect(effectivePrimary({}, dir, true).channel).toBe("slack");
     expect(parityGaps()).toEqual([]);
-    expect(SLACK_MANIFEST.oauth_config.scopes.bot).not.toContain(
-      "channels:history",
-    );
+    expect(SLACK_MANIFEST.oauth_config.scopes.bot).toContain("channels:history");
   });
 
   test("switching notification channels does not send an old Slack alert or block an ordinary reply", async () => {
@@ -864,6 +867,128 @@ describe("Slack shared chat", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+  /** A Ready result of the fixture task: approved scope, a finished attempt with a recorded head, the task done. */
+  function ready() {
+    const { ref, run } = source();
+    store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), handoff: "Progress is clear." });
+    store.setTaskState("sample", "done", now);
+    return { ref, run };
+  }
+  test("teammates pair their own Slack accounts, and status, task and help answer from the database without a model", async () => {
+    const sam = addApprover(store, "sam", now, { name: "alex", token: password });
+    if (!sam.ok) throw Error("sam");
+    const original = options.api;
+    options = { ...options, api: vi.fn(async (method, args = {}) => {
+      if (method === "users.info") return { user: { id: args.user, team_id: ID.team, deleted: false, is_bot: false } };
+      if (method === "conversations.info") return { channel: { id: args.channel, is_im: true, user: args.channel === "DSAM" ? "USAM" : MEMBER } };
+      return original(method, args);
+    }) };
+    const code = state.pairing(ID.installation, "sam", store.accountOf("sam")!.generation, now);
+    expect(state.pair(ID, slackHash(code), "USAM", "DSAM", now)).toMatchObject({ approver: "sam", member: "USAM" });
+    expect(state.bindings(ID.installation).map(one => one.approver)).toEqual(["alex", "sam"]);
+    // alex cannot pair a second Slack identity; sam cannot pair alex's member id.
+    const again = state.pairing(ID.installation, "alex", store.accountOf("alex")!.generation, now);
+    expect(state.pair(ID, slackHash(again), "UALEX2", "DALEX2", now)).toBeNull();
+    expect(receive("status")).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    expect(String(sends().at(-1)?.args["channel"])).toBe(CHANNEL);
+    expect(String(sends().at(-1)?.args["text"])).toContain("Recent work");
+    expect(receive("/help", { user: "USAM", channel: "DSAM" })).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    expect(String(sends().at(-1)?.args["channel"])).toBe("DSAM");
+    expect(String(sends().at(-1)?.args["text"])).toContain("Standing Orders in chat");
+    expect(runner).not.toHaveBeenCalled();
+    // Unpairing sam leaves alex's binding live.
+    state.revokeBinding(state.bindingFor(ID.installation, "USAM")!, now);
+    expect(state.bindings(ID.installation).map(one => one.approver)).toEqual(["alex"]);
+    expect(receive("status", { user: "USAM", channel: "DSAM" })).toBe(false);
+  });
+  test("mark complete confirms behind a second tap in Slack and records the assignment check for the exact result", async () => {
+    const { run } = ready();
+    const who = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, projects);
+    if (!who.ok) throw Error("who");
+    const payload = prepareSharedAction(store, who.who, "result_accept", { task: "sample", run }, join(dir, "evidence"), now);
+    draft({ ...payload });
+    await drain();
+    const c = latestCard();
+    expect(String(sends().at(-1)?.args["text"])).toContain("Mark complete: Clarify Slack progress");
+    await tap(c.token, c.ts);
+    const armed = sends().at(-1)!;
+    expect(String(armed.args["text"])).toContain("This records that you handled this exact result. Confirm?");
+    expect(JSON.stringify(armed.args["blocks"])).toContain("Yes, mark complete");
+    expect(assignmentOf(store, "sample", now, { principal: "operator", repos: projects }, join(dir, "evidence"))?.state).toBe("ready-to-check");
+    const yes = state.db.prepare("SELECT token FROM slack_action WHERE part=? AND phase='yes' AND consumed IS NULL").get(c.id)!;
+    await tap(String(yes.token), c.ts);
+    expect(assignmentOf(store, "sample", now, { principal: "operator", repos: projects }, join(dir, "evidence"))).toMatchObject({ state: "complete", completion: { actor: "operator:alex" } });
+    expect(store.proofAcceptance(run)).toBeNull();
+    expect(String(sends().at(-1)?.args["text"])).toContain("Marked complete.");
+    expect(store.getMateProposal(c.proposal)?.outcome).toMatchObject({ ok: true, via: "slack" });
+  });
+
+
+  test("a Slack channel follows a team conversation: a manager binds it with team 1, paired members' messages enter the shared queue, and replies and cards come back to the channel", async () => {
+    const sam = addApprover(store, "sam", now, { name: "alex", token: password });
+    if (!sam.ok) throw Error("sam");
+    const original = options.api;
+    options = { ...options, api: vi.fn(async (method, args = {}) => {
+      if (method === "users.info") return { user: { id: args.user, team_id: ID.team, deleted: false, is_bot: false } };
+      if (method === "conversations.info") return { channel: { id: args.channel, is_im: true, user: args.channel === "DSAM" ? "USAM" : MEMBER } };
+      return original(method, args);
+    }) };
+    const samCode = state.pairing(ID.installation, "sam", store.accountOf("sam")!.generation, now);
+    expect(state.pair(ID, slackHash(samCode), "USAM", "DSAM", now)).not.toBeNull();
+    const domain = new TeamLeads(store, () => projects);
+    const actor = (name: string) => ({ name, generation: store.accountOf(name)!.generation });
+    const lead = domain.execute(actor("alex"), { operation: "create-lead", args: { name: "Engineering", instructions: "Keep it simple.", projects } }, now);
+    if (!lead.ok) throw Error(lead.message);
+    const made = domain.execute(actor("alex"), { operation: "create-conversation", args: { leadId: (lead.result as { leadId: string }).leadId, title: "Website launch", visibility: "team", projects } }, now);
+    if (!made.ok) throw Error(made.message);
+    const conversation = (made.result as { conversationId: string }).conversationId, thread = (made.result as { threadId: number }).threadId;
+    expect(domain.execute(actor("alex"), { operation: "member", args: { conversationId: conversation, account: "sam", role: "contributor", active: true, expectedRevision: 1, joinLead: true, expectedLeadRevision: 1 } }, now).ok).toBe(true);
+    for (const name of ["alex", "sam"]) store.mintTeamMateSession({ approver: name, approverGeneration: actor(name).generation, thread, credentialKey: "fixture", ceilingMicrousd: 0, ceilingDigest: ceilingDigestOf(projects), termsDigest: "t".repeat(64) }, now);
+    const ROOM = "CROOM";
+    const inRoom = (text: string, user = MEMBER, ts = TS) => receive(text, { channel_type: "channel", channel: ROOM, user, ts });
+    // A channel the app merely sits in: nothing is saved.
+    expect(inRoom("hello?")).toBe(false);
+    // sam (contributor) sees nothing to bind; alex (manager) binds.
+    expect(inRoom("team", "USAM")).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(sends().at(-1)?.args).toMatchObject({ channel: ROOM });
+    expect(String(sends().at(-1)?.args["text"])).toContain("No team conversation you manage");
+    expect(inRoom("team 1")).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(String(sends().at(-1)?.args["text"])).toContain("This room now follows Website launch (lead Engineering)");
+    expect(state.room(ID.installation, ROOM)).toMatchObject({ kind: "group", conversation, boundBy: "alex" });
+    // sam's message in the channel is saved to the conversation as sam, once.
+    expect(inRoom("Add a criterion for the footer", "USAM", "1789700000.000777")).toBe(true);
+    await processSlackEvent(options); await drain();
+    const queued = () => store.handle.prepare("SELECT q.author, q.request_id, m.text FROM team_message q JOIN mate_message m ON m.id = q.message WHERE q.conversation = ? ORDER BY q.message").all(conversation);
+    expect(queued()).toEqual([{ author: "sam", request_id: expect.stringMatching(/^slack:CROOM:/), text: "Add a criterion for the footer" }]);
+    expect(runner).not.toHaveBeenCalled();
+    // The lead answers (the runtime's job, simulated); the next cycle carries the reply to the channel.
+    const claim = domain.claimNext("fixture-runner", now)!;
+    expect(domain.finish(claim, { status: "answered", text: "Added: the footer must show the current year." }, now)).toBe(true);
+    await planSlackRooms(options); await drain();
+    expect(sends().at(-1)?.args).toMatchObject({ channel: ROOM, text: "Added: the footer must show the current year." });
+    // alex's browser message echoes with its author; sam's own Slack message never did.
+    expect(domain.execute(actor("alex"), { operation: "send", args: { conversationId: conversation, requestId: "web-1", text: "Also check the phone layout." } }, now).ok).toBe(true);
+    await planSlackRooms(options); await drain();
+    expect(sends().at(-1)?.args).toMatchObject({ channel: ROOM, text: "alex: Also check the phone layout." });
+    expect(sends().some(call => String(call.args["text"]).startsWith("sam:"))).toBe(false);
+    const before = sends().length;
+    await planSlackRooms(options); await drain();
+    expect(sends().length).toBe(before);
+    // /team off by a contributor changes nothing; by the manager it stops the room.
+    expect(inRoom("team off", "USAM")).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(String(sends().at(-1)?.args["text"])).toBe("This room follows nothing you can change.");
+    expect(inRoom("team off")).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(state.room(ID.installation, ROOM)).toBeNull();
+  });
+
 });
 
 test("Socket Mode validates the app on every hello and preserves Slack's real envelope shape", async () => {
@@ -939,4 +1064,5 @@ test("Slack wire errors omit secrets, honor Retry-After, and never follow upload
   expect(fetcher).not.toHaveBeenCalled();
   const blocks = slackBlocks("Result\n<!channel> <https://evil.example|click>");
   expect(JSON.stringify(blocks)).not.toContain('"mrkdwn"');
+
 });
