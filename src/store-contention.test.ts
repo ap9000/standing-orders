@@ -3,31 +3,20 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { backup, DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { openStore, openStoreNoMigrate, openStoreReadOnly, type Database, type Store } from "./store.js";
+import { writeStoreSeed } from "../test/store-seed.js";
 
 const roots: string[] = [];
 const children: ChildProcess[] = [];
 let templateRoot: string | undefined;
 let templateFile: string;
 beforeAll(async () => {
-  // These tests exercise contention on an existing installation, not fresh
-  // schema creation. Initialize the real schema once in memory: hundreds of
-  // unrelated DDL disk commits can otherwise consume the test timeout on
-  // shared Windows runners before the competing writer even starts.
   templateRoot = mkdtempSync(join(tmpdir(), "so-contention-template-"));
   templateFile = join(templateRoot, "orders.db");
-  const memory = new DatabaseSync(":memory:");
-  const store = openStore(":memory:", { connect: () => memory });
-  try {
+  await writeStoreSeed(templateFile, store => {
     store.createTask({ id: "shared", title: "Before writer" }, new Date());
-    await backup(memory, templateFile);
-  } finally { store.close(); }
-  const disk = new DatabaseSync(templateFile);
-  try { disk.exec("PRAGMA journal_mode = WAL"); }
-  finally { disk.close(); }
-  // Closing checkpoints the seed. Each test copies only this complete file
-  // and still uses independent real WAL connections and subprocess locks.
+  });
 });
 afterAll(() => { if (templateRoot !== undefined) rmSync(templateRoot, { recursive: true, force: true }); });
 afterEach(async () => {

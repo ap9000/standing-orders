@@ -24,7 +24,7 @@
     "src/migration-v72-telegram-people.test.ts": "2be817f8659bee09733c13ac53f357ccad7fe574ad7958491a884486b658926f",
     "src/operate.ts": "8af040b507a7924624fe7c662af063ae0b9df773e48e51da1fb04c520dbb9723",
     "src/proof.ts": "ff7478f166d5a950e5b3c828840806d238e5e4b4176381af1293eb164f14e058",
-    "src/recipe-creator.test.ts": "0d953023c39d6482aae72df15a43a1bb78351fdd40cf9807161da5f7f1349c9f",
+    "src/recipe-creator.test.ts": "f3c7a7e9e4ab768fe701365681c44bad9f3fc7525d73e6deeb1e321161a26272",
     "src/recipes.ts": "11c6937de48d8911c9d62b0d4ae8f7e6899b2666905971a5568046ce4a5f093b",
     "src/result-review.ts": "0527b0c7af83a032b0561a79cecbf4bfc395fec7c81bdaf5b0785d219fc8e2aa",
     "src/review-context-e2e.test.ts": "5677fb3dcc562ccad677b62207ffa8c60023bfa035c3cff41d665a0951d9e431",
@@ -32,9 +32,10 @@
     "src/serve.test.ts": "949e37bf35f738a401eef44199eb224f563cfc4cac7c8ff7693011bd6c6f5af4",
     "src/serve.ts": "8efb0257c30678815efcb8d2fce6cd407da6a10f9fb27546440b0cc4332f3878",
     "src/slack.test.ts": "74a0147f71f8e013fadb0126ac9492216b9d31b575a40b5a8718b9d219043759",
-    "src/store-contention.test.ts": "2b945596c6afaf67329c7b99214fe3e444fb8d03a11a88cf8dacedfba0f18a81",
+    "src/store-contention.test.ts": "97714ab7f7ff926f1398a85e4ba4c67703f6567b6e5ecffd96e4bb5e127e117a",
     "src/store-telegram-team.test.ts": "fa6532dfd1bc367e019397f9f9920aaf29a69f892df80dbf6a2b403f6d81701f",
     "src/store.ts": "e619dcb11088af5a575799e50ec90041694b21b252fc859be0c69263c6107f38",
+    "src/task-control-adversarial.test.ts": "8dc1e9885327783792ff6c2296aa278f3db97dfda9841e059fbb4d986566c4ad",
     "src/task-control.test.ts": "0c18cb5ad409cce2983013931567b483820c9eaa2c77bfe67c9d1ab5a94f831f",
     "src/task-notifications.test.ts": "cc8fda9e6a1fd424dc49d0d13aca6164b5be5698dba8b85ba164d035dcb91328",
     "src/telegram-mate.test.ts": "1798b52db4efd887de38d47197608e5b1934021151aaed047dcc88639b5d9382",
@@ -49,15 +50,16 @@
     "src/telegram.test.ts": "758d50c6c5b1cb3a36b596ac5661bc07e0b1072284a73419c0e66df0796d6521",
     "src/telegram.ts": "070f13a26f98a246c5f3157da183b815c5351a59cbb5ec24efe84fbfb7be04ce",
     "src/workspace-ui.test.ts": "e50fb2514de75b9080eed494213882d802a82dd06c55b4b03b24294b4617f969",
-    "src/workspace-ui.ts": "2f5655bfad3fd0b5e5c209512d226daaec06da18719bca2e0c555584ec0349fa"
+    "src/workspace-ui.ts": "2f5655bfad3fd0b5e5c209512d226daaec06da18719bca2e0c555584ec0349fa",
+    "test/store-seed.ts": "2c43684b2f65112d0d4e33e20af4eb4efbb9e183cf10dca9514bc898a9c71e1a"
   },
   "focusedTests": {
     "log": "checks.log.gz",
     "logEncoding": "gzip",
-    "logSha256": "b8d9c112fc281122d290df2ce14657344825257ede399bdfd5107e75b48c95ef",
-    "decodedSha256": "f2b2dd2fcd8f8e59ceeda1654daa016eefcc3ae12fb469c70ca22f87722d3064",
-    "decodedBytes": 6543,
-    "scope": "The initial batch passed six files and found three new team-test helper failures. The final team-only run replaces that file; all other passing checks cover unchanged source. Final typecheck and the native gate cover the integrated candidate."
+    "logSha256": "6eb3fbd2ebaaa87e0b853a1cb1518aa6d6e08de67db0be26253f78fc1cdcdfb8",
+    "decodedSha256": "aa86c3a1fc3dd8f9ca27c5ebd2e6de95d0f7cbd7c726bd910bc217705cf835f6",
+    "decodedBytes": 7351,
+    "scope": "The initial batch passed six files and found three new team-test helper failures. The final team-only run replaces that file; all other passing checks cover unchanged source. The Windows fixture log covers only the test setup changes made after native run 1969; that earlier passing full run is historical for the updated candidate. Final typecheck and the fresh native gate cover the integrated candidate."
   },
   "uiReport": "ui-report.json",
   "browserChecks": 5,
@@ -65,5 +67,5 @@
     "Physical Telegram group/private transport and a second real user were not exercised; tests use synthetic transports.",
     "See the UI report for physical-phone and keyboard limits."
   ],
-  "historicalCI": "PR head 1d268cfa had seven passing jobs and a Windows24 timeout in repeated fresh-schema setup. That fixture now reuses a real SQLite seed; all original lock timing assertions remain. New CI must pass for this release commit."
+  "historicalCI": "PR head 1d268cfa had seven passing jobs and a Windows24 timeout in repeated fresh-schema setup. That fixture now reuses a real SQLite seed; all original lock timing assertions remain. Later Windows runs timed out in adversarial and recipe fixture setup; these now share the same real initialized SQLite seed. No timeouts, assertions, platform coverage or production behavior were changed. New CI must pass for this release commit."
 }
