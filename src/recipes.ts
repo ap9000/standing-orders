@@ -284,7 +284,7 @@ export function workflowSteps(document: RecipeDocument): { title: string; detail
       { title: "Build", detail: "Work in an isolated branch within the agreed scope." },
       { title: "Verify", detail: "Check each success criterion and retain its evidence." },
     ]),
-    { title: "Review result", detail: "See the report or change, evidence, and unresolved questions. Agent review follows your project policy; publishing requires separate authority." },
+    { title: "Open result", detail: "See the report or change, its checks, and unresolved questions. Agent review follows your project policy; publishing requires separate authority." },
   ];
 }
 export function recipeScheduleWords(document: RecipeDocument, now: Date): string {

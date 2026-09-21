@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "recordedAt": "2026-09-21T18:54:06.566767+00:00",
+  "base": "33d686f89dadc7eb130be99b88efe676f448c7d2",
+  "sourceHashes": {
+    "src/telegram-settings.ts": "ae5c48312fa91af3f0a73633e268a15a26b53ea9ab255f16f6e1ccd00b23219c"
+  },
+  "result": "No remaining UI blocker found in inspected settings card. Root owns final authority regression and release checks.",
+  "changes": [
+    "Replaced nonexistent People settings group-connection instruction with the actual manager /team command flow and explicit group audience.",
+    "Replaced open button jargon with the concrete effect: phone access ends and existing Telegram buttons stop working."
+  ],
+  "browser": {
+    "tool": "CUA native Google Chrome, temporary window; in-app/browser surfaces unavailable",
+    "synthetic": true,
+    "fixtures": "Three isolated in-memory stores with fake bot token and no Telegram bridge/network messages; final copy confirmation rendered current source through tsx.",
+    "viewports": [
+      {
+        "width": 1280,
+        "height": 800,
+        "mode": "Chrome responsive toolbar",
+        "states": [
+          "No configured bot",
+          "Already paired with one other teammate"
+        ]
+      },
+      {
+        "width": 390,
+        "height": 844,
+        "mode": "Chrome responsive toolbar",
+        "states": [
+          "Wrong-password error",
+          "One-use pairing code",
+          "Already paired with one other teammate"
+        ]
+      }
+    ],
+    "additionalChecks": [
+      "Native desktop unpaired form and final simplified paired explanation.",
+      "Actual wrong-password submission retained a usable password form.",
+      "Actual Pair my phone submission displayed one-use code, 10-minute expiry and sign-in sensitivity notice.",
+      "Phone form controls and code remained inside viewport; short CTA labels stayed on one line.",
+      "Visual screenshots inspected through tool output; no screenshots committed."
+    ],
+    "limits": [
+      "Physical Telegram and real bot transport were not exercised; no Telegram messages sent.",
+      "Physical phone Safari, software keyboard, and measured CSS contrast/geometry were not tested through native accessibility API.",
+      "Final shorter unpair helper was confirmed in normal desktop rendering; the last responsive confirmation encountered Chrome emulation scaling after a transient 1px width, so the earlier valid 390x844 paired capture establishes layout, not the final helper wording.",
+      "No full suite, native release gate or deployment run by this child."
+    ],
+    "screenshots": []
+  },
+  "cleanup": "Both owned fixture processes stopped; device toolbar and DevTools restored closed; only owned temporary Chrome window closed.",
+  "implementationChecks": [
+    {
+      "command": "npm test -- --run src/telegram-settings.test.ts --reporter=dot",
+      "result": "passed",
+      "files": 1,
+      "tests": 1,
+      "time": "2026-09-21 11:46:45 local",
+      "scope": "Integrated pairing/unpairing journey plus corrected group instructions; before final helper-text-only simplification and root scoped-account regression."
+    },
+    {
+      "command": "build invoked by focused test",
+      "result": "passed"
+    },
+    {
+      "command": "direct final telegramSettingsHtml render",
+      "result": "passed",
+      "scope": "Final helper text present"
+    }
+  ],
+  "source": {
+    "src/telegram-settings.ts": "ae5c48312fa91af3f0a73633e268a15a26b53ea9ab255f16f6e1ccd00b23219c"
+  },
+  "checks": [
+    {
+      "name": "1280x800: No configured bot",
+      "ok": true
+    },
+    {
+      "name": "1280x800: Already paired with one other teammate",
+      "ok": true
+    },
+    {
+      "name": "390x844: Wrong-password error",
+      "ok": true
+    },
+    {
+      "name": "390x844: One-use pairing code",
+      "ok": true
+    },
+    {
+      "name": "390x844: Already paired with one other teammate",
+      "ok": true
+    }
+  ]
+}

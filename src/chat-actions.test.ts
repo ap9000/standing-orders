@@ -31,6 +31,7 @@ import { register } from "./runner.js";
 import { acquire, finalizeInterruptedFenced } from "./claim.js";
 import { approve } from "./scope.js";
 import { storeEvidence } from "./evidence.js";
+import { assignmentOf } from "./assignment.js";
 const bareLegacy = (
   phase: "build",
   provider: string,
@@ -396,30 +397,62 @@ describe("shared chat action lifecycle", () => {
     ).toMatchObject({ ok: false, reason: "stale" });
     expect(store.getScope(id)?.approvedDigest).toBeNull();
   });
-  test("human acceptance names the exact result, records a note and never changes machine judgement", () => {
+  /** A Ready result: approved scope, a finished builder attempt stamped with
+   * that scope and a recorded head, and the task marked done. */
+  function ready(id: string) {
+    propose(store, { now, taskId: id, goal: "Make acceptance clearer" });
+    const scope = store.getScope(id)!;
+    const approved = approve(store, id, who.name, now, scope.digest, password);
+    if (!approved.ok) throw Error(approved.reason);
+    const run = attempt(id, scope.digest);
+    store.setTaskState(id, "done", now);
+    return run;
+  }
+  /** One finished builder attempt on an approved task, stamped with its scope and a recorded head. */
+  function attempt(id: string, scopeDigest: string) {
+    const ref = store.lookupRef(id)!.id;
+    const authority = store.routeAuthorityFor(ref, "builder");
+    if (!authority?.ok) throw Error("route fixture");
+    const run = store.startRun({ taskRef: ref, leaseId: `ready-${id}-${++serial}`, runner: "fixture", branch: "fixture", worktree: repo, route: authority.stamp, now });
+    store.stampRun(run, { scopeDigest, baseRevision: "b".repeat(40) });
+    store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), handoff: "Done." });
+    store.finishRun(run, { outcome: "built", committed: true, now });
+    return run;
+  }
+  const assignment = (id: string) => assignmentOf(store, id, now, { principal: "operator", repos: [repo] }, root);
+  test("marking complete from the phone asks once more, records the assignment check for the exact result and never changes the recorded checks", () => {
     const id = task(),
-      run = result(id),
-      before = store.proofVerdictFor(run),
-      action = proposal("result_accept", {
-        task: id,
-        run,
-        note: "I reviewed the wording and remaining steps.",
-      });
-    expect(confirm(action)).toMatchObject({
-      ok: false,
-      reason: "needs-confirm",
-    });
-    expect(store.proofAcceptance(run)).toBeNull();
-    expect(confirm(action, true)).toMatchObject({ ok: true });
-    expect(store.proofAcceptance(run)?.note).toContain("reviewed the wording");
+      run = ready(id);
+    expect(assignment(id)?.state).toBe("ready-to-check");
+    const action = proposal("result_accept", { task: id, run });
+    expect(store.getMateProposal(action)?.payload["terms"]).toEqual(expect.arrayContaining([expect.stringContaining("Marks this exact result complete")]));
+    expect(confirm(action)).toMatchObject({ ok: false, reason: "needs-confirm" });
+    expect(assignment(id)?.state).toBe("ready-to-check");
+    const before = store.proofVerdictFor(run);
+    expect(confirmMateProposal(store, who, action, now, { via: "telegram", evidenceRoot: root, confirm: true })).toMatchObject({ ok: true, said: "Marked complete. The recorded checks are unchanged." });
+    expect(assignment(id)).toMatchObject({ state: "complete", completion: { actor: "operator:operator" } });
     expect(store.proofVerdictFor(run)).toEqual(before);
+    expect(store.proofAcceptance(run)).toBeNull();
+    expect(confirm(action)).toMatchObject({ ok: false, reason: "not-pending" });
   });
-  test("a successor result invalidates acceptance, without accepting either run", () => {
+  test("the secure console screen still marks a result complete, and a cancel never gets the phone challenge", () => {
     const id = task(),
-      run = result(id),
+      run = ready(id),
+      action = proposal("result_accept", { task: id, run });
+    expect(confirm(action, true)).toMatchObject({ ok: true });
+    expect(assignment(id)?.state).toBe("complete");
+    expect(() => proposal("result_accept", { task: id, run })).toThrow("already marked complete");
+    const other = task(),
+      cancel = proposal("task_cancel", { task: other });
+    expect(confirmMateProposal(store, who, cancel, now, { via: "telegram", evidenceRoot: root, confirm: true })).toMatchObject({ ok: false, reason: "needs-confirm" });
+    expect(store.getTask(other)?.state).not.toBe("cancelled");
+  });
+  test("a successor result invalidates completion, without completing either run", () => {
+    const id = task(),
+      run = ready(id),
       action = proposal("result_accept", { task: id, run }),
       review = mintSharedActionReview(store, who, action, root, now),
-      next = result(id);
+      next = attempt(id, store.getScope(id)!.digest);
     expect(
       confirmMateProposal(store, who, action, now, {
         via: "web",
@@ -428,6 +461,7 @@ describe("shared chat action lifecycle", () => {
         actionReview: { nonce: review.nonce, password: "" },
       }),
     ).toMatchObject({ ok: false, reason: "stale" });
+    expect(assignment(id)?.state).not.toBe("complete");
     expect(store.proofAcceptance(run)).toBeNull();
     expect(store.proofAcceptance(next)).toBeNull();
     expect(store.getMateProposal(action)?.state).toBe("refused");
@@ -586,7 +620,7 @@ describe("shared chat action lifecycle", () => {
       now,
       { captureStatus: "ok" },
     );
-    expect(() => proposal("result_review", { task: id, run })).toThrow("Separate model review has been removed");
+    expect(() => proposal("result_review" as never, { task: id, run })).toThrow("Choose an available action.");
     expect(
       store.handle
         .prepare("SELECT COUNT(*) AS n FROM review_request WHERE run=?")

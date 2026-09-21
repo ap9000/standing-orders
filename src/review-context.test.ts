@@ -1053,7 +1053,8 @@ describe("inherited review context (v51)", () => {
       // All upheld satisfies both; nothing reviewed is unsettled, not satisfied.
       expect(semanticCoverage(rows({ c1: "upholds" }, { c1: "context" }), "strict")).toMatchObject({ satisfied: true });
       expect(semanticCoverage(rows({ c1: null }, { c1: "context" }), "strict")).toMatchObject({ satisfied: null, unreviewed: ["c1"] });
-      expect(coverageWords(semanticCoverage(rows({ c1: null }, { c1: "context" }), "strict"))[0]).toMatch(/no independent review has settled yet/);
+      // Nothing folded: no waiting line (model review is retired), only sealed context gaps would print.
+      expect(coverageWords(semanticCoverage(rows({ c1: null }, { c1: "context" }), "strict"))).toEqual([]);
       expect(coverageWords(semanticCoverage([], "strict"))).toEqual([]);
       // The fold preserves coverage rows and still never raises a verdict.
       const folded = foldReview({ verdict: "short", reasons: ["x"], matrix: rows({ c1: null }, { c1: "gap" }) }, [{ id: "c1", judgement: "upholds", note: "ctx-1", author: "reviewer:codex" }]);

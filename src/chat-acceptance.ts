@@ -10,16 +10,16 @@ import { manualReviewOnly, type CriterionMatrixRow } from "./proof.js";
 export const ACCEPTANCE_PAGE_SIZE = 3;
 
 export function acceptanceStatus(proof: { verdict: string; reasons: readonly string[]; matrix: readonly CriterionMatrixRow[] } | null, accepted: boolean): string {
-  if (accepted) return manualReviewOnly(proof) ? "Accepted after human review" : "Accepted with an exception";
-  if (manualReviewOnly(proof)) return "Awaiting human review";
-  return proof === null ? "No verification recorded" : ({ verified: "Checks verified", attested: "Agent-reported evidence", short: "Evidence needs attention", refuted: "Checks or evidence conflict" }[proof.verdict] ?? "Evidence needs attention");
+  if (accepted) return manualReviewOnly(proof) ? "Accepted by a person" : "Accepted with an exception";
+  if (manualReviewOnly(proof)) return "Ready to inspect";
+  return proof === null ? "No checks recorded" : ({ verified: "Checks passed", attested: "Checks reported by the agent", short: "Some required material is missing", refuted: "Saved result conflicts with the approved scope" }[proof.verdict] ?? "Some required material is missing");
 }
 
 export function readAcceptanceEvidence(store: Store, who: VerifiedApprover, root: string | undefined, task: string, runId?: number, offset = 0) {
   const ref = store.lookupRef(task);
   if (ref?.repo == null || !who.repos.includes(ref.repo)) return { ok: false as const, message: "That task is not in your projects." };
   const family = store.taskFamilyOf(task, who.repos, false);
-  if (family === null || family.problem !== null) return { ok: false as const, message: "This task's revision history needs repair." };
+  if (family === null || family.problem !== null) return { ok: false as const, message: "This task's revision history needs attention." };
   if (runId === undefined && family.current.id !== task) return { ok: false as const, message: "A newer revision is current. Choose the exact result before requesting its evidence." };
   const run = runId === undefined ? store.runsFor(ref.id).find(one => one.finishedAt !== null && ["builder", "repair", "scout"].includes(one.role)) : store.getRun(runId);
   if (run == null || run.taskRef !== ref.id || run.finishedAt === null || run.outcome === null || !["builder", "repair", "scout"].includes(run.role)) return { ok: false as const, message: "Choose a finished result belonging to that task." };
@@ -30,13 +30,13 @@ export function readAcceptanceEvidence(store: Store, who: VerifiedApprover, root
   const artifacts = store.artifactsFor(run.id);
   const problems: string[] = [];
   const notices: string[] = [];
-  if (root === undefined) problems.push("This chat cannot read the saved evidence files.");
+  if (root === undefined) problems.push("This chat cannot read the saved result files.");
   for (const artifact of artifacts.filter(one => ["proof", "terminal-diff", "diff-stat", "check-log", "review-context", "report", "handoff", "screenshot"].includes(one.kind))) {
     if (root === undefined) break;
     const read = readVerifiedArtifact(root, artifact);
-    if (!read.ok || artifact.captureStatus === "failed") problems.push(`Saved ${artifact.kind} evidence #${artifact.id} is unavailable or changed.`);
-    if (artifact.truncated) notices.push(`Saved ${artifact.kind} evidence #${artifact.id} was shortened; omitted content is unavailable.`);
-    if (artifact.redacted) notices.push(`Sensitive content was removed from ${artifact.kind} evidence #${artifact.id}; it cannot support a claim.`);
+    if (!read.ok || artifact.captureStatus === "failed") problems.push(`Saved ${artifact.kind} #${artifact.id} is unavailable or changed.`);
+    if (artifact.truncated) notices.push(`Saved ${artifact.kind} #${artifact.id} was shortened; omitted content is unavailable.`);
+    if (artifact.redacted) notices.push(`Sensitive content was removed from ${artifact.kind} #${artifact.id}; it cannot support a claim.`);
   }
   const proof = root === undefined ? null : readVerifiedProofForRun(store, root, run.id);
   if (proof === null) problems.push("No readable saved proof is available.");
@@ -52,7 +52,7 @@ export function readAcceptanceEvidence(store: Store, who: VerifiedApprover, root
   // Full statements, caveats and references remain on the authenticated screen.
   const brief = (text: string | null | undefined, cap = 600) => {
     if (text == null) return null;
-    if (scanForSecrets(text).length > 0 || /\b\d{5,}:[A-Za-z0-9_-]{20,}\b/.test(text)) return "[Sensitive text hidden; inspect the original evidence in Standing Orders]";
+    if (scanForSecrets(text).length > 0 || /\b\d{5,}:[A-Za-z0-9_-]{20,}\b/.test(text)) return "[Sensitive text hidden; inspect the original result in Standing Orders]";
     const clean = text.replace(/(?:[A-Za-z]:[\\/]|\\\\)[^\s"'<>]+/g, "[path]").replace(/(^|[\s"'`(<[=:,])\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+/g, "$1[path]");
     return clean.length <= cap ? clean : `${clean.slice(0, cap)}… [shortened; open the result for the full text]`;
   };
@@ -72,8 +72,8 @@ export function readAcceptanceEvidence(store: Store, who: VerifiedApprover, root
     })),
     caveats: proof?.ok ? proof.proof.caveats.map(one => brief(one)) : [],
     problems, notices,
-    nextStep: acceptance !== null ? "Acceptance is already recorded. No further acceptance is needed for this result." : "Inspect the evidence, then use the signed-in acceptance screen. Opening a link or requesting images accepts nothing.",
-    disclosure: "Conversation summary only. Review the complete requirements, risks and acceptance terms on the result screen before accepting.",
+    nextStep: acceptance !== null ? "Acceptance is already recorded. No further acceptance is needed for this result." : "Inspect the saved result, then mark it complete or request changes. Opening a link or requesting images changes nothing.",
+    disclosure: "Conversation summary only. Inspect the complete result, its checks and its terms on the result screen before marking it complete.",
   } };
 }
 
@@ -96,11 +96,11 @@ export function acceptanceEvidenceText(store: Store, who: VerifiedApprover, root
     `Project checks: ${String(packet.gate["status"])}${packet.gate["logShortened"] === true ? " (saved log shortened)" : ""}`,
     ...criteria.map(row => [
       `${row.id}: ${row.requirement} — ${row.state === "pass" ? "passed" : row.state}`,
-      row.reviewer === null ? "No independent judgement recorded." : `Reviewer ${row.reviewer.judgement === "upholds" ? "supports this finding" : row.reviewer.judgement === "contradicts" ? "disputes this finding" : "could not confirm this finding"}: ${row.reviewer.note ?? "No note saved."}`,
+      ...(row.reviewer === null ? [] : [`Earlier assessment ${row.reviewer.judgement === "upholds" ? "supported this finding" : row.reviewer.judgement === "contradicts" ? "disputed this finding" : "could not confirm this finding"}: ${row.reviewer.note ?? "No note saved."}`]),
       ...row.coverageGaps.map(gap => `Coverage gap: ${gap}`),
     ].join("\n")),
     ...packet.caveats.map(caveat => `Limitation: ${caveat}`),
-    ...packet.problems.map(problem => `Evidence problem: ${problem}`),
+    ...packet.problems.map(problem => `Saved material problem: ${problem}`),
     ...packet.notices,
     packet.disclosure,
   ];

@@ -34,6 +34,16 @@ To enable sending noninteractively, inspect the terms in the brief, then use `ch
 
 `lead create/update/member/transfer` and `conversation create/member/edit/withdraw/read/follow/stop` expose the same central operations. Membership edits and transfers require the current revision. Transfer keeps the task, approved scope, attempts and completed result; it changes the responsible lead.
 
+## Telegram on your phone
+
+Each teammate pairs their own private chat with the installation's bot: open Settings → Telegram, enter your password, and send the one-time `/pair` code to the bot within 10 minutes. The chat then answers as you, under your own project access and spending consent, and **Unpair my phone** ends it without touching anyone else's pairing. The installation operator still saves the bot token once on the settings page, or with `standing-orders bridge telegram token`.
+
+Send `/team` in your private chat to list the conversations you are in and `/team <number>` to talk in one; the chat then saves your messages to that conversation as you, and the lead's replies and teammates' messages come back to you. `/team off` returns to your private assistant. Your private history is never copied into a team conversation.
+
+For a shared room, add the bot to a Telegram group and have a conversation manager send `/team` there, then `/team <number>` to make the group follow one team conversation. Paired members' messages are saved to it under their own names and consent; everyone in the group reads the lead's replies, so bind a group only where its whole audience may see that conversation. Unpaired members are told how to pair when they try a command; their other chatter is ignored. One group follows one conversation, and `/team off` stops it. Enable chat for the conversation once in Standing Orders before your first message; the group tells you if that is still needed.
+
+A Ready result reaches your chat as a card with **Open result**. Ask the assistant to mark it complete and confirm the card; the phone asks once more before recording that you handled that exact result. Request changes the same way; the revision keeps the task's identity. Password approvals, cancelling and publishing still open the console.
+
 ## Boundaries of this release
 
 Shared coordination uses existing task execution and approval controls. Direct native coding sessions remain private to the installation operator; team membership does not make the host filesystem or native provider login shareable. External agent wake adapters and automatic cross-lead delegation are not enabled. The paused external Codex watcher stays paused.

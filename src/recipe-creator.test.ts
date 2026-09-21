@@ -1,12 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openStore, openStoreNoMigrate, SCHEMA_VERSION, type Store } from "./store.js";
 import { addApprover, hashPassword } from "./scope.js";
 import { createWorkflowPreview, exportRecipe, findRecipe, importRecipe, launchWorkflow, parseRecipe, prepareRecipeRun, recipeDigest, resolveRecipe, savedRecipes, saveWorkflowRecipe, starterRecipes, type RecipeDocument } from "./recipes.js";
+import { writeStoreSeed } from "../test/store-seed.js";
 
 const now = new Date("2026-09-12T23:00:00Z");
 const definition = (): RecipeDocument & { version: 2 } => ({
@@ -53,8 +54,17 @@ test("answers expand once as literal text, with defaults and final scope limits 
 
 describe("saved recipe creation and repeated use", () => {
   let root: string, repo: string, other: string, file: string, store: Store;
+  let templateRoot: string | undefined;
+  let templateFile: string;
+  beforeAll(async () => {
+    templateRoot = mkdtempSync(join(tmpdir(), "so-creator-template-"));
+    templateFile = join(templateRoot, "orders.db");
+    await writeStoreSeed(templateFile);
+  });
+  afterAll(() => { if (templateRoot !== undefined) rmSync(templateRoot, { recursive: true, force: true }); });
   beforeEach(() => {
     root = realpathSync(mkdtempSync(join(tmpdir(), "so-creator-"))); repo = join(root, "project"); other = join(root, "other"); mkdirSync(repo); mkdirSync(other); file = join(root, "state.db");
+    copyFileSync(templateFile, file);
     store = openStore(file);
     // Only the complete fixture is observed; avoid one disk commit per row.
     store.transact(() => {
@@ -124,7 +134,7 @@ describe("saved recipe creation and repeated use", () => {
     store.close(); const old = new DatabaseSync(file); old.exec("DROP TABLE service_cursor; DROP INDEX workflow_preview_source; UPDATE schema_version SET version=56"); old.close();
     expect(openStoreNoMigrate(file)).toMatchObject({ ok: false, reason: "version" });
     store = openStore(file);
-    expect(SCHEMA_VERSION).toBe(71);
+    expect(SCHEMA_VERSION).toBe(72);
     expect(["workflow_recipe", "workflow_preview"].map(table => store.handle.prepare(`SELECT * FROM ${table}`).all())).toEqual(rows);
     expect(recipeDigest(findRecipe(store, "owner", repo, recipe.id)!.document)).toBe(digest);
     expect(exportRecipe(findRecipe(store, "owner", repo, recipe.id)!.document)).toBe(exportRecipe(d));

@@ -239,7 +239,8 @@ import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, readProviderK
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus, ReviewRetryState, RevisionLineage } from "./store.js";
-import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
+import { hashPairingCode, loadBotToken, mintPairingCode, PAIRING_TTL_MS, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
+import { telegramSettingsHtml } from "./telegram-settings.js";
 import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
 import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { runMateTurn, MATE_MESSAGE_MAX_CHARS } from "./mate.js";
@@ -1130,6 +1131,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         if ((snapshot.leads.length > 0 || url.searchParams.get('team') === '1') && (!snapshot.selected || snapshot.selected.projects.every(visible))) return true;
       } catch { refuse(response, who, 404, 'This conversation is unavailable.', '/projects'); return false; }
     }
+    // Personal pairing changes only the signed-in person's phone. The route
+    // separately proves cookie, approver standing and password; instance bot
+    // settings remain outside this exact allowlist.
+    if ((request.method === "GET" && path === "/settings/telegram") ||
+      (request.method === "POST" && ["/settings/telegram/pair", "/settings/telegram/unpair"].includes(path))) return true;
     // Coding routes require an instance operator, then prove saved ownership and project access.
     if (path === "/code" || path.startsWith("/code/")) return true;
     if((request.method==='GET'&&/^\/chat\/action\/[0-9]{1,15}$/.test(path))||(request.method==='POST'&&/^\/chat\/proposal\/[0-9]{1,15}\/(confirm|dismiss)$/.test(path))){
@@ -2978,6 +2984,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return sendScreen(response, 200, screen("Learning", `<p><a href="/settings">Settings</a></p><h1>Learning</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
+    if (url.pathname === "/settings/telegram") {
+      // Any approver pairs their OWN phone here; the bot token stays on /settings.
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver can pair their own phone.", "/settings");
+      const botId = options.telegramTokenFile === undefined ? null : loadBotToken(process.env, options.telegramTokenFile)?.botId ?? null;
+      return sendScreen(response, 200, screen("Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf), { chrome: chromeFor(project, "settings"), forceSensitive: true }));
+    }
     if (url.pathname === "/settings/discord") {
       if(who.via!=="cookie"||who.role!=="approver"||restricted()||!options.configDir) return refuse(response,who,403,"An installation approver can connect Discord.","/settings");
       return sendScreen(response,200,screen("Discord",discordSettingsHtml(store,options.configDir,who.session.csrf),{chrome:chromeFor(project,"settings"),forceSensitive:true}));
@@ -2992,7 +3004,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/settings" && (options.telegramTokenFile === undefined || restricted())) {
-      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
+      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
     }
 
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
@@ -5090,6 +5102,27 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response,200,screen("Pair Slack",slackSettingsHtml(store,dir,who.session.csrf,{code}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
       }
       return redirect(response,"/settings/slack");
+    }
+
+    if (url.pathname === "/settings/telegram/pair" || url.pathname === "/settings/telegram/unpair") {
+      // The person's own pairing, under their password: a code minted for
+      // them alone, or their own chats revoked. Teammates' pairings are
+      // never touched from here.
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver can pair their own phone.", "/settings");
+      const botId = options.telegramTokenFile === undefined ? null : loadBotToken(process.env, options.telegramTokenFile)?.botId ?? null;
+      const show = (problem: string, status = 400) => sendScreen(response, status, screen("Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf, { problem }), { chrome: chromeFor(projectOf(who, request) ?? null, "settings"), forceSensitive: true }));
+      if (body.getAll("password").length > 1) return show("Submit one value for each field.");
+      if (botId === null) return show("Connect the Telegram bot first.", 409);
+      const pairingIdentity = authenticateAccount(store, who.name, body.get("password") ?? "");
+      if (!pairingIdentity.ok || pairingIdentity.role !== "approver" || pairingIdentity.generation !== who.session.generation) return show("Enter your Standing Orders password to change your phone pairing.", 403);
+      if (url.pathname.endsWith("/unpair")) {
+        store.unpairTelegram(botId, who.name, now);
+        return redirect(response, "/settings/telegram");
+      }
+      if (store.liveTelegramBindings(botId).some(binding => binding.approver === who.name)) return show("Your phone is already paired. Unpair it before pairing another.", 409);
+      const code = mintPairingCode();
+      store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: who.name, by: who.name, ttlMs: PAIRING_TTL_MS }, now);
+      return sendScreen(response, 200, screen("Pair Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf, { code }), { chrome: chromeFor(projectOf(who, request) ?? null, "settings"), forceSensitive: true }));
     }
 
     if (["connect","pair","disconnect","alerts"].some(action=>url.pathname===`/settings/discord/${action}`)) {
@@ -7985,7 +8018,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const stop = store.stopOf(runId);
     const run = store.getRun(runId);
     if (stop === null || run === null || stop.taskRef !== ref.id) return taskScreen(response, who, taskId, `run #${runId} is not a stopped attempt of this task`, 409);
-    if (run.role === "reviewer") return taskScreen(response, who, taskId, `run #${runId} is a review — a stopped review is retried with Review again, which keeps its bounded attempts`, 409);
+    if (run.role === "reviewer") return taskScreen(response, who, taskId, `run #${runId} is a historical review run — nothing reruns it; open the saved result instead`, 409);
     if (stop.resumedAt !== null) return taskScreen(response, who, taskId, `run #${runId} was already resumed by ${escape(stop.resumedBy ?? "?")}`, 409);
     const control = taskControlOf(store, ref.id, now);
     if (control.kind !== "paused" || control.run !== runId) {
@@ -20989,7 +21022,7 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return screen("settings", [
     "<h1>settings</h1>",
-    '<p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/slack">Slack</a> · <a href="/settings/discord">Discord</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
+    '<p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a> · <a href="/settings/slack">Slack</a> · <a href="/settings/discord">Discord</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
     permissionCard,
     qualityCard,
     pushCard,

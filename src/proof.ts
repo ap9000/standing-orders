@@ -1374,6 +1374,12 @@ export function semanticCoverage(matrix: readonly CriterionMatrixRow[], policy: 
 export function coverageWords(coverage: SemanticCoverage): string[] {
   if (coverage.total === 0) return [];
   const lines: string[] = [];
+  // No review has folded: nothing is waited for (model review is retired),
+  // so only sealed context gaps are worth a line.
+  if (coverage.satisfied === null) {
+    for (const gap of coverage.contextGaps) lines.push(`context gap ${gap.id}: ${gap.gaps.join("; ")}`);
+    return lines;
+  }
   const standing =
     coverage.satisfied === null
       ? coverage.required ? "required under strict quality — no independent review has settled yet" : "independent review is optional under default quality — none has settled"

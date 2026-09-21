@@ -1,3 +1,4 @@
+import { CHAT_ACTIONS, sharedActionAllowsChallenge, sharedActionPayload } from "./chat-actions.js";
 import { taskInCeiling, channelRepos as telegramConversationRepos, resolveChannelMate as resolveTelegramMate, tooLongText, whichTaskText, replyContextFor, NO_PHONE_LINK, NO_TASK_LINK, proposalLink, confirmedLink, proposalPreview, proposalOutcomeText, handoffCardText, confirmedCardText, type PhoneLink } from "./chat-channel.js";
 export { channelRepos as telegramConversationRepos, resolveChannelMate as resolveTelegramMate, tooLongText, whichTaskText, replyContextFor, NO_PHONE_LINK, NO_TASK_LINK, proposalLink, confirmedLink, proposalPreview, proposalOutcomeText, handoffCardText, confirmedCardText, CHAT_ACTION_PARITY as TELEGRAM_ACTION_PARITY, parityGaps, type PhoneLink, type ResolvedMate, type ParitySupport } from "./chat-channel.js";
 /**
@@ -28,6 +29,7 @@ import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
 import type { MateProposal, Store, TelegramBinding, TelegramConversation } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { phoneText } from "./telegram-status.js";
+import { TeamLeads } from "./team-leads.js";
 import { chatResultHref } from "./chat-controls.js";
 import { resultImageFileName, safeResultImageCaption, verifyResultImage } from "./chat-evidence.js";
 import type { TelegramTransport, TelegramUpload } from "./telegram.js";
@@ -98,8 +100,8 @@ export async function telegramChannelProblem(
   } catch {
     return UNREADABLE_REGISTRY;
   }
-  const binding = store.liveTelegramBinding(expected.botId);
-  if (binding === null || binding.id !== expected.bindingId || binding.approverGeneration !== expected.approverGeneration) return "this chat is no longer paired";
+  const binding = store.liveTelegramBindingById(expected.bindingId);
+  if (binding === null || binding.botId !== expected.botId || binding.approverGeneration !== expected.approverGeneration) return "this chat is no longer paired";
   if (store.accountOf(binding.approver)?.role !== "approver") return "the paired account is no longer an approver";
   const repos = telegramConversationRepos(store, binding.approver, registry);
   const same = "repos" in expected
@@ -137,11 +139,11 @@ type Keyboard = InlineButton[][];
 type CallbackKeyboard = { text: string; callback_data: string }[][];
 
 /** Mint the card's tokens before the send, so a tap can never name a token that does not exist. */
-export function mintCardTokens(store: Store, binding: TelegramBinding, proposal: number, now: Date, messageId?: string): { keyboard: CallbackKeyboard; tokens: string[] } {
+export function mintCardTokens(store: Store, binding: TelegramBinding, proposal: number, now: Date, messageId?: string, chatId = binding.chatId): { keyboard: CallbackKeyboard; tokens: string[] } {
   const confirm = randomBytes(16).toString("hex");
   const dismiss = randomBytes(16).toString("hex");
   for (const [token, phase] of [[confirm, "confirm"], [dismiss, "dismiss"]] as const) {
-    store.createTelegramProposalAction({ token, binding: binding.id, proposal, phase, chatId: binding.chatId, ttlMs: CARD_TTL_MS, ...(messageId === undefined ? {} : { messageId }) }, now);
+    store.createTelegramProposalAction({ token, binding: binding.id, proposal, phase, chatId, ttlMs: CARD_TTL_MS, ...(messageId === undefined ? {} : { messageId }) }, now);
   }
   return { keyboard: [[{ text: "Confirm", callback_data: confirm }, { text: "Dismiss", callback_data: dismiss }]], tokens: [confirm, dismiss] };
 }
@@ -163,7 +165,7 @@ export function applyProposalTap(
   store: Store,
   binding: TelegramBinding,
   token: string,
-  message: { message_id: number },
+  message: { message_id: number; chat?: { id: number } },
   repos: readonly string[] | null,
   options: TelegramConversationOptions,
   now: Date,
@@ -172,7 +174,17 @@ export function applyProposalTap(
   const ack = (text: string): void => { effects.push({ kind: "ack", text }); };
   const edit = (text: string, keyboard?: Keyboard): void => { effects.push({ kind: "edit", text, ...(keyboard === undefined ? {} : { keyboard }) }); };
   const action = store.getTelegramProposalAction(token);
-  if (action === null || action.binding !== binding.id || action.chatId !== binding.chatId || (action.messageId !== null && action.messageId !== String(message.message_id))) {
+  // The tap must land where the card was placed. In a paired private chat
+  // that is the tapper's own binding; in a group that follows a team
+  // conversation any paired member may tap, and the door then proves that
+  // person's own membership and consent.
+  const tapChatId = message.chat === undefined ? binding.chatId : String(message.chat.id);
+  const selected = store.telegramTeamChat(binding.botId, tapChatId);
+  const groupCard = tapChatId !== binding.chatId && selected?.kind === "group";
+  if (action === null || action.chatId !== tapChatId ||
+    (tapChatId !== binding.chatId && !groupCard) ||
+    (action.binding !== binding.id && (!groupCard || action.phase === "yes" || action.phase === "cancel")) ||
+    (action.messageId !== null && action.messageId !== String(message.message_id))) {
     ack("that button is stale — send /status to see what still waits");
     return { effects, confirmed: false, ignored: true };
   }
@@ -183,6 +195,30 @@ export function applyProposalTap(
     edit("This card no longer exists.");
     return { effects, confirmed: false, ignored: true };
   }
+  // A card belongs to the selected conversation, not merely the same
+  // Telegram group. Check the tapper before rendering even an outcome or a
+  // challenge: a paired outsider must learn none of the proposal's details.
+  let actionRepos = repos;
+  const shared = store.handle.prepare("SELECT id FROM team_conversation WHERE thread = ?").get(proposal.thread);
+  if (groupCard || shared !== undefined) {
+    let allowed = false;
+    if (repos !== null && selected !== null && shared !== undefined && String(shared["id"]) === selected.conversation) {
+      try {
+        const domain = new TeamLeads(store, () => repos);
+        const member = domain.access({ name: binding.approver, generation: binding.approverGeneration }, selected.conversation, "contributor");
+        actionRepos = member.conversation.projects;
+        const grant = store.liveTelegramBindingById(selected.binding);
+        if (grant !== null && grant.botId === binding.botId && grant.approver === selected.boundBy) {
+          const audience = domain.access({ name: grant.approver, generation: grant.approverGeneration }, selected.conversation, groupCard ? "manager" : "viewer");
+          allowed = groupCard ? audience.conversation.visibility === "team" : grant.id === binding.id;
+        }
+      } catch { /* Refuse without disclosing a proposal outside current access. */ }
+    }
+    if (!allowed) {
+      ack("that button is no longer available in this conversation");
+      return { effects, confirmed: false, ignored: true };
+    }
+  }
   if (proposal.state !== "pending") {
     // Already acted on — here, on the console, or from the terminal. The
     // card shows the recorded outcome; nothing runs twice.
@@ -191,18 +227,18 @@ export function applyProposalTap(
     edit(proposalOutcomeText(proposal));
     return { effects, confirmed: false, ignored: true };
   }
-  if (repos === null) {
+  if (actionRepos === null) {
     // The registry could not be read: the token stays live for a retry.
     ack("project access could not be read — tap again in a moment");
     return { effects, confirmed: false, ignored: true };
   }
-  const verified = verifyApproverStanding(store, binding.approver, binding.approverGeneration, repos);
+  const verified = verifyApproverStanding(store, binding.approver, binding.approverGeneration, actionRepos);
   if (!verified.ok) {
     ack("this chat no longer answers as an approver");
     return { effects, confirmed: false, ignored: true };
   }
   const who = verified.who;
-  const preview = proposalPreview(store, proposal, repos);
+  const preview = proposalPreview(store, proposal, actionRepos, "telegram");
   const origin = options.phoneOrigin?.() ?? null;
 
   if (action.phase === "dismiss") {
@@ -217,7 +253,7 @@ export function applyProposalTap(
     // Cancel means cancelled: the armed yes dies with it and the card is restored.
     store.consumeTelegramProposalAction(token, now);
     store.consumeTelegramProposalActions(proposal.id, now, ["yes", "cancel"]);
-    const fresh = mintCardTokens(store, binding, proposal.id, now, String(message.message_id));
+    const fresh = mintCardTokens(store, binding, proposal.id, now, String(message.message_id), tapChatId);
     ack("cancelled");
     edit(preview.text, fresh.keyboard);
     return { effects, confirmed: false, ignored: false };
@@ -226,28 +262,42 @@ export function applyProposalTap(
     // A forged keyboard on a handoff card: nothing acts; the card is
     // repainted with its current link (or the honest absence of one).
     store.consumeTelegramProposalActions(proposal.id, now);
-    const wanted = proposalLink(store, proposal, repos);
+    const wanted = proposalLink(store, proposal, actionRepos, "telegram");
     const link = phoneLinkButton(origin, wanted);
     ack(link === null ? "this step finishes on the computer" : "open the button below to finish this step");
     edit(handoffCardText(preview.text, linkNote(origin, wanted)), keyboardWith(null, link));
     return { effects, confirmed: false, ignored: true };
   }
   const irreversible = proposal.kind === "answer" && proposal.payload["reversible"] === false;
-  if (action.phase === "confirm" && irreversible) {
-    // The arm: two fresh one-time tokens make a real challenge, exactly as
-    // a decision button does. Nothing is answered here.
-    if (!store.consumeTelegramProposalAction(token, now)) { ack("that button was already used"); return { effects, confirmed: false, ignored: true }; }
+  const sharedAction = proposal.kind === "action" ? sharedActionPayload(proposal.payload) : null;
+  const challenged = sharedAction !== null && sharedActionAllowsChallenge(sharedAction);
+  // The arm: two fresh one-time tokens make a real challenge, exactly as a
+  // decision button does. Nothing is answered or recorded here.
+  const arm = (): void => {
     store.consumeTelegramProposalActions(proposal.id, now, ["yes", "cancel"]);
     const yes = randomBytes(16).toString("hex");
     const cancel = randomBytes(16).toString("hex");
     const placedOn = String(message.message_id);
-    store.createTelegramProposalAction({ token: yes, binding: binding.id, proposal: proposal.id, phase: "yes", chatId: binding.chatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
-    store.createTelegramProposalAction({ token: cancel, binding: binding.id, proposal: proposal.id, phase: "cancel", chatId: binding.chatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
+    store.createTelegramProposalAction({ token: yes, binding: binding.id, proposal: proposal.id, phase: "yes", chatId: tapChatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
+    store.createTelegramProposalAction({ token: cancel, binding: binding.id, proposal: proposal.id, phase: "cancel", chatId: tapChatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
+    const body = preview.text.split("\n\nConfirm or Dismiss below")[0];
+    if (challenged) {
+      ack("confirm it");
+      edit(`${body}\n\nThis records that you handled this exact result. Confirm?`, [
+        [{ text: `✓ Yes, ${CHAT_ACTIONS[sharedAction!.operation].label.toLowerCase()}`, callback_data: yes }],
+        [{ text: "Cancel", callback_data: cancel }],
+      ]);
+      return;
+    }
     ack("irreversible — confirm it");
-    edit(`⚠ This answer is IRREVERSIBLE.\n\n${preview.text.split("\n\nConfirm or Dismiss below")[0]}\n\nConfirm?`, [
+    edit(`⚠ This answer is IRREVERSIBLE.\n\n${body}\n\nConfirm?`, [
       [{ text: "⚠ Yes, answer it", callback_data: yes }],
       [{ text: "Cancel", callback_data: cancel }],
     ]);
+  };
+  if (action.phase === "confirm" && (irreversible || challenged)) {
+    if (!store.consumeTelegramProposalAction(token, now)) { ack("that button was already used"); return { effects, confirmed: false, ignored: true }; }
+    arm();
     return { effects, confirmed: false, ignored: false };
   }
   if (!store.consumeTelegramProposalAction(token, now)) {
@@ -263,21 +313,12 @@ export function applyProposalTap(
   });
   if (!outcome.ok && outcome.reason === "needs-confirm") {
     // Not armed yet (a card drafted without the reversible mark): arm now, the tap is not lost.
-    const yes = randomBytes(16).toString("hex");
-    const cancel = randomBytes(16).toString("hex");
-    const placedOn = String(message.message_id);
-    store.createTelegramProposalAction({ token: yes, binding: binding.id, proposal: proposal.id, phase: "yes", chatId: binding.chatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
-    store.createTelegramProposalAction({ token: cancel, binding: binding.id, proposal: proposal.id, phase: "cancel", chatId: binding.chatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
-    ack("irreversible — confirm it");
-    edit(`⚠ This answer is IRREVERSIBLE.\n\n${preview.text.split("\n\nConfirm or Dismiss below")[0]}\n\nConfirm?`, [
-      [{ text: "⚠ Yes, answer it", callback_data: yes }],
-      [{ text: "Cancel", callback_data: cancel }],
-    ]);
+    arm();
     return { effects, confirmed: false, ignored: false };
   }
   store.consumeTelegramProposalActions(proposal.id, now);
   ack(outcome.ok ? "✓ done" : "not done");
-  const wanted = confirmedLink(store, outcome, proposal, repos);
+  const wanted = confirmedLink(store, outcome, proposal, actionRepos);
   const link = phoneLinkButton(origin, wanted);
   edit(confirmedCardText(store, outcome, proposal, linkNote(origin, wanted)), keyboardWith(null, link));
   return { effects, confirmed: outcome.ok, ignored: false };
@@ -293,7 +334,7 @@ export const PART_RETRY_MS = [5_000, 15_000, 60_000, 300_000] as const;
 /** Unsent parts are retried this long after the message arrived (the card's own lifetime); then the row fails, explicitly unsent. */
 export const DELIVERY_MAX_AGE_MS = CARD_TTL_MS;
 
-function splitParts(text: string): string[] {
+export function splitParts(text: string): string[] {
   if (text.length <= PART_CAP) return [text];
   const parts: string[] = [];
   for (let at = 0; at < text.length;) {
@@ -371,16 +412,16 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
   };
 
   // 1. The exact binding the message arrived under must still be the live one.
-  const binding = store.liveTelegramBinding(botId);
-  if (binding === null || binding.id !== row.binding || binding.approverGeneration !== row.approverGeneration || store.accountOf(binding.approver)?.role !== "approver") {
+  const binding = store.liveTelegramBindingById(row.binding);
+  if (binding === null || binding.botId !== botId || binding.approverGeneration !== row.approverGeneration || store.accountOf(binding.approver)?.role !== "approver") {
     finish({ state: "failed", outcome: "unpaired" });
     report.refused++;
     return;
   }
   const chatId = binding.chatId;
   const pairingProblem = (): string | null => {
-    const live = store.liveTelegramBinding(botId);
-    if (live === null || live.id !== binding.id || live.approverGeneration !== binding.approverGeneration) return "this chat is no longer paired";
+    const live = store.liveTelegramBindingById(binding.id);
+    if (live === null || live.approverGeneration !== binding.approverGeneration) return "this chat is no longer paired";
     if (store.accountOf(live.approver)?.role !== "approver") return "the paired account is no longer an approver";
     return null;
   };
@@ -472,7 +513,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
           // file repaired meanwhile is sent and one still wrong is refused
           // again. The row is never done while the notice is unconfirmed.
           report.problems.push(`telegram chat image for update ${row.updateId} was not sent: ${image.problem}`);
-          const link = part.taskId !== null && part.run !== null && taskInCeiling(store, part.taskId, repos) ? { label: "Review result", path: chatResultHref(part.taskId, part.run) } : null;
+          const link = part.taskId !== null && part.run !== null && taskInCeiling(store, part.taskId, repos) ? { label: "Open result", path: chatResultHref(part.taskId, part.run) } : null;
           const button = phoneLinkButton(options.phoneOrigin?.() ?? null, link);
           const problem = image.problem;
           method = "sendMessage";
@@ -559,7 +600,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
         const selected = store.getMateTurn(turn)?.state === "answered" ? store.listMateTurnEvidence(turn) : [];
         for (const image of selected) parts.push({ kind: "image", text: image.caption, taskId: image.taskId, run: image.run, artifact: image.artifact, sha256: image.sha256 });
         for (const proposal of proposals) {
-          const preview = proposalPreview(store, proposal, repos);
+          const preview = proposalPreview(store, proposal, repos, "telegram");
           const keyboard = preview.buttons ? mintCardTokens(store, binding, proposal.id, now).keyboard : null;
           parts.push({ kind: "card", text: preview.text, proposal: proposal.id, keyboard });
         }

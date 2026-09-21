@@ -1,13 +1,24 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openStore, openStoreNoMigrate, openStoreReadOnly, type Database, type Store } from "./store.js";
+import { writeStoreSeed } from "../test/store-seed.js";
 
 const roots: string[] = [];
 const children: ChildProcess[] = [];
+let templateRoot: string | undefined;
+let templateFile: string;
+beforeAll(async () => {
+  templateRoot = mkdtempSync(join(tmpdir(), "so-contention-template-"));
+  templateFile = join(templateRoot, "orders.db");
+  await writeStoreSeed(templateFile, store => {
+    store.createTask({ id: "shared", title: "Before writer" }, new Date());
+  });
+});
+afterAll(() => { if (templateRoot !== undefined) rmSync(templateRoot, { recursive: true, force: true }); });
 afterEach(async () => {
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) {
@@ -73,9 +84,7 @@ function fixture(): string {
   const root = mkdtempSync(join(tmpdir(), "so-contention-"));
   roots.push(root);
   const file = join(root, "orders.db");
-  const store = openStore(file);
-  store.createTask({ id: "shared", title: "Before writer" }, new Date());
-  store.close();
+  copyFileSync(templateFile, file);
   return file;
 }
 

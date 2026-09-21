@@ -12,6 +12,7 @@ import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { startFixture } from "./ui-polish-fixture.mjs";
 import { prepareSharedAction } from "../dist/chat-actions.js";
+import { assignmentOf } from "../dist/assignment.js";
 import { verifyApproverStanding } from "../dist/principal.js";
 import { subscriptionCredentialKey } from "../dist/converse.js";
 import { knowledgeView } from "../dist/project-knowledge.js";
@@ -108,7 +109,7 @@ try {
     ["desktop", { width: 1440, height: 900 }],
     ["phone", { width: 390, height: 844 }],
   ]) {
-    const f = await startFixture({ sameTaskRevisions: true, secondProject: true }),
+    const f = await startFixture({ sameTaskRevisions: true, secondProject: true, assignmentPresentation: true }),
       store = f.store,
       root = join(f.repos.main, "..", "evidence");
     const context = await browser.newContext({
@@ -209,7 +210,6 @@ try {
       const action = proposal("result_accept", {
         task: f.tasks.done,
         run: f.runId,
-        note: "Synthetic review: the result keeps the next action clear. Live channel behavior is still untested.",
       });
       await page.goto(f.url + "/chat");
       await page
@@ -243,23 +243,23 @@ try {
         );
       } else await page.locator("[name=confirm]").check();
       await page
-        .getByRole("button", { name: "Accept result", exact: true })
+        .getByRole("button", { name: "Mark complete", exact: true })
         .scrollIntoViewIfNeeded();
       await shot(page, name + "-confirm");
       await click(
         page,
-        page.getByRole("button", { name: "Accept result", exact: true }),
+        page.getByRole("button", { name: "Mark complete", exact: true }),
       );
       await page
         .getByText(
-          "Human acceptance recorded. Machine and reviewer findings are unchanged.",
+          "Marked complete. The recorded checks are unchanged.",
           { exact: true },
         )
         .waitFor();
       check(
         name + " shared receipt records actual completion",
         store.getMateProposal(action)?.state === "confirmed" &&
-          store.proofAcceptance(f.runId) !== null,
+          assignmentOf(store, f.tasks.done, new Date(), { principal: "operator", repos: null, includeUnplaced: true })?.state === "complete",
       );
       await shot(page, name + "-receipt");
       await page.goto(f.url + `/chat?task=${f.tasks.done}&result=${f.runId}`);

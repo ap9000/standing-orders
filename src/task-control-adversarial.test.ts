@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
@@ -12,11 +12,20 @@ import { requestTaskStop, resumeTaskStop, taskControlOf, underStopWatch } from "
 import { witnessedRunner, preserveObservedProcesses } from "./process-custody.js";
 import { WorktreePool } from "./worktree.js";
 import { storeEvidence } from "./evidence.js";
+import { writeStoreSeed } from "../test/store-seed.js";
 
 const roots: string[] = [];
 const stores: Store[] = [];
 const children: ChildProcess[] = [];
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+let templateRoot: string | undefined;
+let templateFile: string;
+beforeAll(async () => {
+  templateRoot = mkdtempSync(join(tmpdir(), "so-stop-template-"));
+  templateFile = join(templateRoot, "orders.db");
+  await writeStoreSeed(templateFile);
+});
+afterAll(() => { if (templateRoot !== undefined) rmSync(templateRoot, { recursive: true, force: true }); });
 
 afterEach(async () => {
   for (const child of children.splice(0)) {
@@ -33,7 +42,9 @@ afterEach(async () => {
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "so-stop-adversarial-")));
   roots.push(root);
-  const store = openStore(join(root, "orders.db"));
+  const file = join(root, "orders.db");
+  copyFileSync(templateFile, file);
+  const store = openStore(file);
   stores.push(store);
   const now = new Date();
   register(store, { name: "worker", host: "fixture", capacity: 2, repos: [root], now, newToken: () => "fixture-only" });

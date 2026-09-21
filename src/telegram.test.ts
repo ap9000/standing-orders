@@ -49,6 +49,7 @@ describe("destination-bound authorized outbox", () => {
   let file: string;
   let now: Date;
   let projects: string[];
+  let alexToken = "";
   const OTHER = "/test/other";
   const pair = (chat = CHAT) => {
     const code = mintPairingCode();
@@ -78,10 +79,38 @@ describe("destination-bound authorized outbox", () => {
     now = T0;
     projects = [REPO, OTHER];
     store = openStore(file);
-    expect(addApprover(store, "alex", now).ok).toBe(true);
+    const alex = addApprover(store, "alex", now);
+    expect(alex.ok).toBe(true);
+    alexToken = alex.ok ? alex.token : "";
     pair();
   });
   afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  test("two paired people each receive a fact once, under their own project ceiling, and a revoked person's chat goes quiet", async () => {
+    // sam: an approver limited to the second project, paired from their own chat.
+    expect(addApprover(store, "sam", now, { name: "alex", token: alexToken }).ok).toBe(true);
+    expect(store.setAccountProjects("sam", [OTHER], "alex", now).ok).toBe(true);
+    const code = mintPairingCode();
+    store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "sam", by: "sam", ttlMs: PAIRING_TTL_MS }, now);
+    expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: BOT, chatId: "8800", userId: "8800", updateId: 8800 }, now).ok).toBe(true);
+    const alexBinding = store.liveTelegramBindingFor(BOT, String(USER))!, samBinding = store.liveTelegramBindingFor(BOT, "8800")!;
+    const a = task("a", REPO), b = task("b", OTHER);
+    enqueue("a-ready", a); enqueue("b-ready", b);
+    const script = scriptedTransport();
+    // sam's copy of the first-project fact is held under sam's own ceiling and named once.
+    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 3, problems: [expect.stringContaining("not currently authorized")] } });
+    const byChat = (chat: string) => sends(script).filter(call => String(call.params["chat_id"]) === chat).map(call => call.params["text"]);
+    expect(byChat(String(CHAT))).toEqual(["project / a · a-ready\n\na-ready", "other / b · b-ready\n\nb-ready"]);
+    expect(byChat("8800")).toEqual(["other / b · b-ready\n\nb-ready"]);
+    expect(store.telegramDeliveries(samBinding).find(row => row.dedupeKey === "a-ready")).toMatchObject({ deliveredAt: null, lastError: expect.stringContaining("project") });
+    expect(store.telegramDeliveries(alexBinding).filter(row => row.deliveredAt !== null)).toHaveLength(2);
+    // Revoking sam ends sam's deliveries only; alex's next fact still arrives.
+    expect(store.unpairTelegram(BOT, "sam", now)).toBe(true);
+    enqueue("b-again", b);
+    expect(await pass(script.transport)).toMatchObject({ ok: true, report: { sent: 1 } });
+    expect(byChat("8800")).toHaveLength(1);
+    expect(byChat(String(CHAT)).at(-1)).toBe("other / b · b-again\n\nb-again");
+  });
 
   test("two projects carry trusted task identities; forged text and links cannot authorize legacy data", async () => {
     const a = task("a", REPO), b = task("b", OTHER);
@@ -552,7 +581,7 @@ describe("the telegram bridge", () => {
     expect(String(reply?.params["text"])).toContain("answers as alex");
   });
 
-  test("a wrong code, a group chat, and a second pairing all get silence", async () => {
+  test("a wrong code, a group chat, and a second pairing by the same person all get silence; a teammate pairs beside", async () => {
     const script = scriptedTransport();
     const code = mintPairingCode();
     store.createTelegramPairing(
@@ -575,16 +604,34 @@ describe("the telegram bridge", () => {
     await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(2_000) });
     expect(store.liveTelegramBinding(BOT)).not.toBeNull();
 
-    // …and a second code cannot bind a second chat while the first lives.
+    // …a second code for the SAME Telegram user cannot bind a second chat
+    // while the first lives (silence, nothing changes)…
     const second = mintPairingCode();
     store.createTelegramPairing(
       { codeHash: hashPairingCode(second), approver: "alex", by: "alex", ttlMs: PAIRING_TTL_MS },
       later(2_000),
     );
-    script.updates.push([privatePair(4, second, { chat: { id: 999, type: "private" }, from: { id: 999 } })]);
+    script.updates.push([privatePair(4, second, { chat: { id: 999, type: "private" }, from: { id: USER } })]);
     const third = await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(3_000) });
     expect(third).toMatchObject({ ok: true, report: { paired: 0 } });
-    expect(store.liveTelegramBinding(BOT)?.chatId).toBe(String(CHAT));
+    expect(store.liveTelegramBindings(BOT).map(one => one.chatId)).toEqual([String(CHAT)]);
+    expect(script.calls.filter(call => call.method === "sendMessage")).toHaveLength(1);
+
+    // …while a teammate's own code, from their own private chat, pairs a
+    // second binding beside the first (v72): each person answers as themselves.
+    expect(addApprover(store, "sam", later(3_000), { name: "alex", token: approverToken }).ok).toBe(true);
+    const sams = mintPairingCode();
+    store.createTelegramPairing(
+      { codeHash: hashPairingCode(sams), approver: "sam", by: "sam", ttlMs: PAIRING_TTL_MS },
+      later(3_000),
+    );
+    script.updates.push([privatePair(5, sams, { chat: { id: 999, type: "private" }, from: { id: 999 } })]);
+    expect(await bridgePass(store, { readProjects, botId: BOT, transport: script.transport, clock: () => later(4_000) })).toMatchObject({ ok: true, report: { paired: 1 } });
+    expect(store.liveTelegramBindings(BOT).map(one => [one.approver, one.chatId, one.userId])).toEqual([["alex", String(CHAT), String(USER)], ["sam", "999", "999"]]);
+    expect(script.calls.filter(call => call.method === "sendMessage").at(-1)?.params["text"]).toContain("this chat now answers as sam");
+    // Unpairing one person leaves the other's chat live.
+    expect(store.unpairTelegram(BOT, "alex", later(5_000))).toBe(true);
+    expect(store.liveTelegramBindings(BOT).map(one => one.approver)).toEqual(["sam"]);
   });
 
   test("an expired code is a wrong code", async () => {

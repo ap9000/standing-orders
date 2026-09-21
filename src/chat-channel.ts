@@ -4,6 +4,7 @@ import {
   sharedActionPayload,
   sharedActionNeedsReview,
   sharedActionReviewPath,
+  sharedActionAllowsChallenge,
 } from "./chat-actions.js";
 import { isDirectChatProvider, subscriptionCredentialKey } from "./converse.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
@@ -249,13 +250,15 @@ export function proposalLink(
   store: Store,
   proposal: MateProposal,
   repos: readonly string[],
+  channel: "telegram" | null = null,
 ): PhoneLink | null {
   const payload = proposal.payload;
   if (proposal.kind === "action") {
     const action = sharedActionPayload(payload);
     return action &&
       repos.includes(action.repo) &&
-      sharedActionNeedsReview(action)
+      sharedActionNeedsReview(action) &&
+      !(channel === "telegram" && sharedActionAllowsChallenge(action))
       ? { label: "Review action", path: sharedActionReviewPath(proposal.id) }
       : null;
   }
@@ -322,6 +325,7 @@ export function proposalPreview(
   store: Store,
   proposal: MateProposal,
   repos: readonly string[],
+  channel: "telegram" | null = null,
 ): { text: string; buttons: boolean } {
   const payload = proposal.payload;
   const t = (key: string, cap = 200): string =>
@@ -365,6 +369,12 @@ export function proposalPreview(
     case "action": {
       const action = sharedActionPayload(payload);
       if (!action) return handoff("This action is unavailable.");
+      if (channel === "telegram" && sharedActionAllowsChallenge(action))
+        return card(
+          phoneText(action.title, 200),
+          action.terms.map((term) => phoneText(term, 1200)),
+          "Confirm asks once more before anything is recorded.",
+        );
       return sharedActionNeedsReview(action)
         ? handoff(phoneText(action.title, 200), [
             "Review the full details and confirm this exact action.",
@@ -619,7 +629,7 @@ export const CHAT_ACTION_PARITY: Record<
   },
   propose_action: {
     support: "direct",
-    how: "Prepares exact shared skill, knowledge, approval, acceptance, review, cancel and resume actions. Short ordinary changes confirm here; protected or long changes use one secure review and record the result on the same proposal.",
+    how: "Prepares exact shared skill, knowledge, approval, acceptance, cancel and resume actions (the separate review request was removed on 2026-09-21). Short ordinary changes confirm here; protected or long changes use one secure review and record the result on the same proposal.",
     gap: "Secure review requires a working HTTPS console connection. Real transport verification is required.",
   },
   recap: {
@@ -665,8 +675,8 @@ export const CHAT_ACTION_PARITY: Record<
   get_controls: { support: "direct", how: "Read during a turn.", gap: null },
   get_acceptance_evidence: {
     support: "direct",
-    how: "Shared read-only acceptance packet: exact result, criterion states, gate, reviewer findings, caveats and recorded human acceptance. Screenshot files use get_result_images; acceptance uses the signed-in console.",
-    gap: "Human acceptance still requires the secure console screen.",
+    how: "Shared read-only acceptance packet: exact result, criterion states, gate, reviewer findings, caveats and recorded human acceptance. Screenshot files use get_result_images; marking complete is a propose_action result_accept confirmed behind the phone's own yes/cancel challenge or on the signed-in console.",
+    gap: "A physical-phone completion has not been exercised.",
   },
   show_control: {
     support: "handoff",
