@@ -33,9 +33,10 @@ function openDeploymentDatabase(file, options = {}, waitMs = 5000) {
   catch (error) { db.close(); throw error; }
 }
 
-async function snapshotBackup(original, target) {
+async function snapshotBackup(original, target, validate = () => {}) {
   original.exec("BEGIN");
   try {
+    validate(original);
     const before = snapshot(original, true);
     // Keep one read view through the copy. Larger steps avoid repeated small
     // backup batches while a live service continues unrelated heartbeats.
@@ -248,6 +249,19 @@ async function ensureCodingBackup(runtime, r) {
   verifyCodingBackup(runtime, r);
 }
 
+// Validate authority against the same read view as the saved rows, and again
+// against live state after asynchronous copying. Admission remains enforced by
+// the frozen SQL triggers; heartbeats do not need to stop to copy history.
+function verifyPreparedDatabase(db, r) {
+  requireTrue(db.prepare("SELECT version FROM schema_version").get().version === r.schema &&
+    oldRt.gate.updateGateOwned(db, r.id), "The preparation schema or admission owner changed.");
+  quiet(db);
+  const current = facts(db);
+  requireTrue(current.completion.digest === r.completion.digest && current.gateDigest === r.gateDigest &&
+    current.taskId === r.task && current.repo === r.repo && current.scopeDigest === r.scopeDigest,
+    "The completed result or its passing check changed during backup.");
+}
+
 async function prepare(staged) {
   // A failure to acquire the admission lock can leave the original preparing
   // journal intact. Reuse its identity; never delete it or mint a second gate.
@@ -285,17 +299,19 @@ async function prepare(staged) {
     oldRt.gate.installUpdateGate(db, r.id); save(r, "admission-paused");
     requireTrue(oldRt.gate.freezeUpdateGate(db, r.id), "Work raced admission; let it finish and rerun.");
     quiet(db); observeCodingDeployment(oldRt.coding, database, r); save(r, "frozen");
-    db.exec("BEGIN IMMEDIATE");
+    // Gate installation/freezing above commits its short write transaction.
+    // Do not hold a writer reservation while scanning, copying or hashing.
     const original = openDeploymentDatabase(database, { readOnly: true });
     let before;
-    try { before = await snapshotBackup(original, r.backup); } finally { original.close(); }
+    try { before = await snapshotBackup(original, r.backup, view => verifyPreparedDatabase(view, r)); } finally { original.close(); }
     chmodSync(r.backup, 0o600);
     const copied = openDeploymentDatabase(r.backup, { readOnly: true });
     try { assertPreserved(copied, before); } finally { copied.close(); }
     await ensureCodingBackup(oldRt.coding, r);
-    db.exec("COMMIT");
     const fd = openSync(r.backup, "r"); try { fsyncSync(fd); } finally { closeSync(fd); }
     r.backupSha256 = sha(readFileSync(r.backup)); r.snapshotSha256 = sha(JSON.stringify(before));
+    db.exec("BEGIN");
+    try { verifyPreparedDatabase(db, r); } finally { db.exec("ROLLBACK"); }
     save(r, "backup-verified");
   } finally { db.close(); }
 }

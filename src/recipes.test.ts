@@ -36,10 +36,13 @@ describe("reusable recipes on the existing work engine", () => {
     root = realpathSync(mkdtempSync(join(tmpdir(), "so-recipes-")));
     repo = join(root, "project"); other = join(root, "other"); mkdirSync(repo); mkdirSync(other);
     file = join(root, "state.db"); store = openStore(file);
-    const added = addApprover(store, "owner", now); if (!added.ok) throw Error("no owner"); token = added.token;
-    for (const phase of ["plan", "build", "review"]) store.setPhaseConfig("installation", phase, "claude", "sonnet", "owner", now);
-    const invite = store.mintInvite("approver", "owner", now, undefined, [repo]);
-    store.consumeInviteAndCreateAccount({ tokenValue: invite.token, name: "member", credentialHash: hashPassword("member-password") }, now);
+    // Only the complete fixture is observed; avoid one disk commit per row.
+    store.transact(() => {
+      const added = addApprover(store, "owner", now); if (!added.ok) throw Error("no owner"); token = added.token;
+      for (const phase of ["plan", "build", "review"]) store.setPhaseConfig("installation", phase, "claude", "sonnet", "owner", now);
+      const invite = store.mintInvite("approver", "owner", now, undefined, [repo]);
+      store.consumeInviteAndCreateAccount({ tokenValue: invite.token, name: "member", credentialHash: hashPassword("member-password") }, now);
+    });
     document = starterRecipes().find(one => one.id === "lint-sweep")!.document;
   });
   afterEach(() => { store.close(); rmSync(root, { recursive: true, force: true }); });

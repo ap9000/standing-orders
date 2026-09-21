@@ -3948,6 +3948,19 @@ function initializeStore(db: Database, file: string): Store {
 CREATE INDEX IF NOT EXISTS decision_attention ON decision (run, id) WHERE state IN ('open','expired');
 CREATE INDEX IF NOT EXISTS incident_attention ON incident (run, id) WHERE resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS task_ref_repo ON task_ref (repo, id);
+-- Metadata-only family lists: history stays append-only, while each task's
+-- current lease/result and exact recorded completion are indexed lookups.
+CREATE INDEX IF NOT EXISTS work_family_parent ON task_ref (backend, revision_of, repo, id);
+CREATE INDEX IF NOT EXISTS work_result ON run (task_ref, id DESC, role, outcome, head_revision, scope_digest, finished_at) WHERE finished_at IS NOT NULL AND role IN ('builder','scout');
+CREATE INDEX IF NOT EXISTS work_spawned_run ON run (task_ref, id) WHERE provider_started_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS work_unsettled_custody ON run_process (run) WHERE exited_at IS NULL AND container_empty_at IS NULL;
+CREATE INDEX IF NOT EXISTS work_unfinished ON run (task_ref, id DESC) WHERE outcome IS NULL;
+CREATE INDEX IF NOT EXISTS work_live_claim ON claim (task_ref, lease_generation DESC, expires_at) WHERE released_at IS NULL;
+CREATE INDEX IF NOT EXISTS work_runner_claim ON claim (runner, expires_at) WHERE released_at IS NULL;
+CREATE INDEX IF NOT EXISTS work_completion ON action_ledger (task_id, action, source, run_id, id DESC);
+CREATE INDEX IF NOT EXISTS work_task_ledger ON action_ledger (task_id, id DESC);
+CREATE INDEX IF NOT EXISTS work_artifact_run ON artifact (run, created_at);
+CREATE INDEX IF NOT EXISTS work_open_decision ON decision (run, id DESC) WHERE state <> 'answered' AND answered_at IS NULL;
 CREATE INDEX IF NOT EXISTS run_task_outcome ON run (task_ref, outcome, id DESC);
 CREATE INDEX IF NOT EXISTS task_done_recent ON task (updated_at DESC, id DESC) WHERE state = 'done';
 CREATE INDEX IF NOT EXISTS run_started ON run (started_at, id);
@@ -12523,7 +12536,7 @@ export class Store {
   private taskFamilyProjection(admitted: readonly string[] | null, includeUnplaced: boolean) {
     return {
       params: [BUILT_IN, includeUnplaced ? 1 : 0, admitted === null ? 1 : 0, ...(admitted ?? [])],
-      sql: `WITH RECURSIVE admitted AS (
+      sql: `WITH RECURSIVE admitted AS MATERIALIZED (
         SELECT task_ref.id AS ref_id, task_ref.external_id AS id, task_ref.repo,
           task_ref.revision_of, task_ref.revision_brief_artifact,
           task.state, task.created_at, task.updated_at
@@ -12539,11 +12552,11 @@ export class Store {
         JOIN artifact brief ON brief.id = child.revision_brief_artifact AND brief.kind = 'revision-brief'
         JOIN run source_run ON source_run.id = brief.run AND source_run.task_ref = parent.ref_id
         WHERE lineage.depth < 63
-      ), members AS (
+      ), members AS MATERIALIZED (
         SELECT admitted.*, COALESCE(lineage.root_ref, admitted.ref_id) AS root_ref,
           lineage.ref_id IS NULL AS broken
         FROM admitted LEFT JOIN lineage ON lineage.ref_id = admitted.ref_id
-      ), ordered AS (
+      ), ordered AS MATERIALIZED (
         SELECT members.*, ROW_NUMBER() OVER (PARTITION BY root_ref
           ORDER BY (ref_id = root_ref), created_at DESC, ref_id DESC) AS version_rank
         FROM members
@@ -12567,7 +12580,7 @@ export class Store {
     options: { limit?: number; states?: readonly TaskState[]; order?: "created" | "updated" } = {}): TaskFamily[] {
     const projection = this.taskFamilyProjection(admitted, includeUnplaced);
     const order = options.order === "updated" ? "updated_at" : "created_at";
-    const rows = this.db.prepare(`${projection.sql}, selected AS (
+    const rows = this.db.prepare(`${projection.sql}, selected AS MATERIALIZED (
         SELECT * FROM ordered WHERE version_rank = 1
           ${options.states === undefined ? "" : `AND state IN (${options.states.map(() => "?").join(",")})`}
         ORDER BY ${order} DESC, ref_id DESC LIMIT ?
@@ -24501,7 +24514,7 @@ function readAcceptance(value: unknown): AcceptanceCriterion[] {
  * every term the digest binds and every metadata word an authority reads,
  * proved exactly — or the words. See `Scope.termsProblem`.
  */
-function scopeTermsProblem(row: Record<string, unknown>): string | null {
+export function scopeTermsProblem(row: Record<string, unknown>): string | null {
   const touches = exactStringList(row["touches"], "touches");
   if (!touches.ok) return touches.problem;
   const acceptance = exactAcceptance(row["acceptance_json"]);

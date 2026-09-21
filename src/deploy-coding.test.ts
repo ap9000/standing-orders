@@ -7,7 +7,7 @@ import { DatabaseSync, backup } from 'node:sqlite';
 import { spawn } from 'node:child_process';
 import { openStore } from './store.js';
 import { CodingWorkspace } from './coding-workspace.js';
-import { installUpdateGate, updateGateOwned } from './desktop-update-gate.js';
+import { installUpdateGate, freezeUpdateGate, removeUpdateGate, updateGateOwned } from './desktop-update-gate.js';
 import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped } from '../scripts/deploy-coding.mjs';
 
 function fixture() {
@@ -168,7 +168,10 @@ test('browser phase wiring verifies the coding backup before stop and custody be
   expect(prepare.lastIndexOf('observeCodingDeployment(', frozen)).toBeGreaterThan(prepare.indexOf('freezeUpdateGate('));
   expect(frozen).toBeLessThan(prepare.indexOf('await snapshotBackup(original'));
   expect(prepare.indexOf('await ensureCodingBackup(')).toBeGreaterThan(prepare.indexOf('await snapshotBackup(original'));
-  expect(prepare.indexOf('await ensureCodingBackup(')).toBeLessThan(prepare.indexOf('db.exec("COMMIT")'));
+  expect(prepare).not.toContain('BEGIN IMMEDIATE');
+  expect(prepare).toContain('view => verifyPreparedDatabase(view, r)');
+  expect(prepare.indexOf('await ensureCodingBackup(')).toBeLessThan(prepare.lastIndexOf('verifyPreparedDatabase(db, r)'));
+  expect(prepare.lastIndexOf('verifyPreparedDatabase(db, r)')).toBeLessThan(prepare.indexOf('save(r, "backup-verified")'));
   const swap = source.slice(source.indexOf('async function swap('), source.indexOf('async function finish('));
   expect(swap.indexOf('await ensureCodingBackup(')).toBeLessThan(swap.indexOf('save(r, "stopping")'));
   expect(swap.indexOf('r.stoppingService = service(priorDist)')).toBeLessThan(swap.indexOf('save(r, "stopping")'));
@@ -206,7 +209,7 @@ function browserDatabaseHelpers(snapshot: (db: DatabaseSync) => unknown = () => 
   const functions = source.slice(source.indexOf('function openDeploymentDatabase('), source.indexOf('const args = process.argv.slice(2);'));
   return new Function('DatabaseSync', 'snapshot', 'backup', functions + '\nreturn { openDeploymentDatabase, snapshotBackup };')(DatabaseSync, snapshot, copy) as {
     openDeploymentDatabase(file: string, options?: { readOnly?: boolean }, waitMs?: number): DatabaseSync;
-    snapshotBackup(db: DatabaseSync, target: string): Promise<unknown>;
+    snapshotBackup(db: DatabaseSync, target: string, validate?: (db: DatabaseSync) => void): Promise<unknown>;
   };
 }
 
@@ -237,16 +240,78 @@ test('browser deployment waits through a competing writer before installing its 
 test('browser backup preserves its read snapshot across concurrent WAL writes and releases it afterward', async () => {
   const f = fixture(), target = join(f.stage, 'orders.backup.db');
   f.store.raw().exec('CREATE TABLE snapshot_probe(value INTEGER); INSERT INTO snapshot_probe VALUES(1)');
+  installUpdateGate(f.store.raw(), f.record.id);
+  expect(freezeUpdateGate(f.store.raw(), f.record.id)).toBe(true);
+  f.store.raw().prepare('INSERT INTO watch_lease VALUES(?,?,?,?,?,?,?)').run('worker', '/repo', 'incarnation', 1, 'before', 'later', 'before');
   const helpers = browserDatabaseHelpers(db => db.prepare('SELECT value FROM snapshot_probe').all(), async (db, path, options) => {
     expect(options?.rate).toBe(100000);
-    f.store.raw().exec('INSERT INTO snapshot_probe VALUES(2)');
+    // A real concurrent worker connection may still renew its watch while
+    // the frozen deployment copies a consistent older view of the database.
+    f.store.raw().exec("INSERT INTO snapshot_probe VALUES(2); UPDATE watch_lease SET heartbeat_at='after'");
+    expect(updateGateOwned(f.store.raw(), f.record.id)).toBe(true);
     return backup(db, path, options);
   });
   const original = helpers.openDeploymentDatabase(f.database, { readOnly: true });
   try {
-    expect(await helpers.snapshotBackup(original, target)).toEqual([{ value: 1 }]);
+    let validations = 0;
+    expect(await helpers.snapshotBackup(original, target, view => {
+      validations++;
+      expect(updateGateOwned(view, f.record.id)).toBe(true);
+      expect(view.prepare('SELECT heartbeat_at FROM watch_lease').get()?.heartbeat_at).toBe('before');
+    })).toEqual([{ value: 1 }]);
+    expect(validations).toBe(1);
     const copy = helpers.openDeploymentDatabase(target, { readOnly: true });
-    try { expect(copy.prepare('SELECT value FROM snapshot_probe').all()).toEqual([{ value: 1 }]); } finally { copy.close(); }
+    try {
+      expect(copy.prepare('SELECT value FROM snapshot_probe').all()).toEqual([{ value: 1 }]);
+      expect(copy.prepare('SELECT heartbeat_at FROM watch_lease').get()?.heartbeat_at).toBe('before');
+      expect(updateGateOwned(copy, f.record.id)).toBe(true);
+    } finally { copy.close(); }
     expect(original.prepare('SELECT value FROM snapshot_probe').all()).toEqual([{ value: 1 }, { value: 2 }]);
+    expect(original.prepare('SELECT heartbeat_at FROM watch_lease').get()?.heartbeat_at).toBe('after');
+  } finally { original.close(); f.close(); }
+});
+
+
+function preparedDatabaseGuard(facts: (db: DatabaseSync) => unknown, quiet: (db: DatabaseSync) => void) {
+  const source = readFileSync(resolve('scripts/deploy-browser.mjs'), 'utf8');
+  const body = source.slice(source.indexOf('function verifyPreparedDatabase('), source.indexOf('async function prepare('));
+  return new Function('oldRt', 'facts', 'quiet', 'requireTrue', body + '\nreturn verifyPreparedDatabase;')(
+    { gate: { updateGateOwned } }, facts, quiet, (okay: unknown, message: string) => { if (!okay) throw Error(message); },
+  ) as (db: DatabaseSync, record: Record<string, unknown>) => void;
+}
+
+test.each(['gate', 'schema', 'completion', 'check', 'scope', 'active-work'])('browser backup refuses a changed %s after copying without reserving the writer', async change => {
+  const f = fixture(), target = join(f.stage, 'orders.backup.db');
+  const current = { completion: { digest: 'complete' }, gateDigest: 'check', taskId: 'task', repo: '/repo', scopeDigest: 'scope' };
+  const record = { ...f.record, schema: Number(f.store.raw().prepare('SELECT version FROM schema_version').get()?.version),
+    completion: { ...current.completion }, gateDigest: current.gateDigest, task: current.taskId, repo: current.repo, scopeDigest: current.scopeDigest };
+  let active = false;
+  const guard = preparedDatabaseGuard(() => current, () => { if (active) throw Error('Current work must finish first'); });
+  installUpdateGate(f.store.raw(), record.id); expect(freezeUpdateGate(f.store.raw(), record.id)).toBe(true);
+  const helpers = browserDatabaseHelpers(() => [], async (db, path, options) => {
+    const result = await backup(db, path, options);
+    if (change === 'gate') removeUpdateGate(f.store.raw(), record.id);
+    if (change === 'schema') f.store.raw().exec('UPDATE schema_version SET version=version+1');
+    if (change === 'completion') current.completion.digest = 'changed';
+    if (change === 'check') current.gateDigest = 'changed';
+    if (change === 'scope') current.scopeDigest = 'changed';
+    if (change === 'active-work') active = true;
+    return result;
+  });
+  const original = helpers.openDeploymentDatabase(f.database, { readOnly: true });
+  try {
+    await helpers.snapshotBackup(original, target, view => guard(view, record));
+    expect(() => guard(f.store.raw(), record)).toThrow(/preparation schema|completed result|Current work/);
+  } finally { original.close(); f.close(); }
+});
+
+test('refused snapshot authority releases the read transaction without creating a backup', async () => {
+  const f = fixture(), target = join(f.stage, 'orders.backup.db'), helpers = browserDatabaseHelpers();
+  const original = helpers.openDeploymentDatabase(f.database, { readOnly: true });
+  try {
+    await expect(helpers.snapshotBackup(original, target, () => { throw Error('stale candidate'); })).rejects.toThrow('stale candidate');
+    expect(existsSync(target)).toBe(false);
+    original.exec('BEGIN'); original.exec('ROLLBACK');
+    f.store.raw().exec('CREATE TABLE heartbeat_probe(value INTEGER)');
   } finally { original.close(); f.close(); }
 });

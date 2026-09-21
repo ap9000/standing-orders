@@ -60,14 +60,21 @@ function readAssignment(store: Store, operation: "show" | "updates" | "brief", a
 export function assignmentForCoordinator(store: Store, token: string, operation: AssignmentOperation, args: Args, now: Date, evidenceRoot?: string) {
   const problem = assignmentArgumentProblem(operation, args);
   if (problem !== null) return failure("usage", problem);
-  return store.transact(() => {
+  // Authenticate before maintenance, then authenticate again inside delivery.
+  // Reconciliation owns one short transaction per family and cannot sit under
+  // the delivery transaction's writer reservation.
+  if (operation === 'inbox') {
+    const authenticated = authenticateCoordinator(store, token);
+    if (!authenticated.ok) return failure('unauthenticated', 'The coordinator credential is unavailable or revoked.');
+    syncAssignmentStatuses(store, now, authenticated.who.repos, evidenceRoot);
+  }
+  const project = () => {
     const authenticated = authenticateCoordinator(store, token);
     if (!authenticated.ok) return failure("unauthenticated", "The coordinator credential is unavailable or revoked.");
     const { who } = authenticated;
     if (operation === "show" || operation === "updates" || operation === "brief") return readAssignment(store, operation, args, now, { principal: "coordinator", repos: who.repos }, evidenceRoot);
     const owner = { kind: "coordinator" as const, id: who.cid, label: who.name };
     if (operation === "inbox" || operation === "ack") {
-      if (operation === "inbox") syncAssignmentStatuses(store, now, who.repos, evidenceRoot);
       const delivered = operation === "inbox"
         ? assignmentInbox(store, owner, { consumer: String(args["consumer"]), ...(args["limit"] === undefined ? {} : { limit: Number(args["limit"]) }) }, now)
         : acknowledgeAssignmentDelivery(store, owner, { consumer: String(args["consumer"]), batchId: String(args["batchId"]) }, now);
@@ -77,7 +84,9 @@ export function assignmentForCoordinator(store: Store, token: string, operation:
       ? claimAssignment(store, String(args["ref"]), owner, now, evidenceRoot)
       : checkAssignment(store, String(args["ref"]), String(args["digest"]), owner, now, evidenceRoot);
     return result.ok ? { ok: true as const, body: result.assignment } : result;
-  });
+  };
+  return operation === 'show' || operation === 'updates' || operation === 'brief'
+    ? store.savepoint(project) : store.transact(project);
 }
 
 export type AssignmentCliContext = {

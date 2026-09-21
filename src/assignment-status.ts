@@ -106,19 +106,23 @@ export function noteAssignmentStatus(store: Store, snapshot: AssignmentSnapshot,
  * pass cycles back, so changes below the cursor are eventually observed too. */
 export function syncAssignmentStatuses(store: Store, now: Date, repos: readonly string[], root?: string): void {
   if (repos.length === 0) return;
-  store.transact(() => {
-    const allowed = [...new Set(repos)].sort();
-    const key = `assignment-status:${hash(allowed)}`;
-    const rows = store.handle.prepare(`SELECT t.id,t.external_id FROM task_ref t
-      WHERE t.backend='built-in' AND t.revision_of IS NULL
-      AND t.repo IN (SELECT value FROM json_each(?)) AND t.id>?
-      AND (t.coordinator_cid IS NOT NULL OR EXISTS
-        (SELECT 1 FROM action_ledger a WHERE a.task_id=t.external_id AND a.action='assignment claimed' AND a.source='work'))
-      ORDER BY t.id LIMIT 50`).all(JSON.stringify(allowed), store.serviceCursor(key));
-    for (const row of rows) {
-      const snapshot = assignmentOf(store, String(row["external_id"]), now, { principal: "coordinator", repos: allowed }, root);
+  const allowed = [...new Set(repos)].sort();
+  const key = `assignment-status:${hash(allowed)}`;
+  const rows = store.handle.prepare(`SELECT t.id,t.external_id FROM task_ref t
+    WHERE t.backend='built-in' AND t.revision_of IS NULL
+    AND t.repo IN (SELECT value FROM json_each(?)) AND t.id>?
+    AND (t.coordinator_cid IS NOT NULL OR EXISTS
+      (SELECT 1 FROM action_ledger a WHERE a.task_id=t.external_id AND a.action='assignment claimed' AND a.source='work'))
+    ORDER BY t.id LIMIT 50`).all(JSON.stringify(allowed), store.serviceCursor(key));
+  // Release the writer between families. Each observation and its durable
+  // position still commit together; an interrupted sweep resumes after the
+  // last committed family instead of holding every heartbeat behind a batch.
+  if (rows.length === 0) store.setServiceCursor(key, 0, now);
+  for (const [index, row] of rows.entries()) {
+    store.transact(() => {
+      const snapshot = assignmentOf(store, String(row['external_id']), now, { principal: 'coordinator', repos: allowed }, root);
       if (snapshot !== null) noteAssignmentStatus(store, snapshot, now);
-    }
-    store.setServiceCursor(key, rows.length < 50 ? 0 : Number(rows.at(-1)!["id"]), now);
-  });
+      store.setServiceCursor(key, index === rows.length - 1 && rows.length < 50 ? 0 : Number(row['id']), now);
+    });
+  }
 }
