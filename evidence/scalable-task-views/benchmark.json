@@ -1,0 +1,89 @@
+{
+  "synthetic": true,
+  "projects": 100,
+  "tasks": 10000,
+  "runs": 30000,
+  "artifacts": 90000,
+  "databaseBytes": 188637184,
+  "pagination": "passed",
+  "permissions": "passed",
+  "providerCalls": 0,
+  "timings": {
+    "all": {
+      "coldMs": 546,
+      "p50Ms": 280,
+      "p95Ms": 546,
+      "bytes": 60160,
+      "samples": 12
+    },
+    "needsYou": {
+      "coldMs": 294,
+      "p50Ms": 294,
+      "p95Ms": 656,
+      "bytes": 60166,
+      "samples": 12
+    },
+    "project": {
+      "coldMs": 32,
+      "p50Ms": 21,
+      "p95Ms": 32,
+      "bytes": 41802,
+      "samples": 12
+    },
+    "projectCounts": {
+      "coldMs": 280,
+      "p50Ms": 304,
+      "p95Ms": 771,
+      "bytes": 18661,
+      "samples": 12
+    },
+    "crew": {
+      "coldMs": 317,
+      "p50Ms": 323,
+      "p95Ms": 640,
+      "bytes": 16397,
+      "samples": 12
+    },
+    "catchUp": {
+      "coldMs": 302,
+      "p50Ms": 320,
+      "p95Ms": 367,
+      "bytes": 7795,
+      "samples": 12
+    }
+  },
+  "http": {
+    "chatFresh": {
+      "status": 200,
+      "coldMs": 1545,
+      "p50Ms": 1375,
+      "p95Ms": 1615,
+      "bytes": 145148,
+      "samples": 12
+    },
+    "chatUnchanged": {
+      "status": 304,
+      "coldMs": 8,
+      "p50Ms": 4,
+      "p95Ms": 8,
+      "bytes": 0,
+      "samples": 12
+    },
+    "workWorkspace": {
+      "status": 200,
+      "coldMs": 299,
+      "p50Ms": 295,
+      "p95Ms": 570,
+      "bytes": 89140,
+      "samples": 12
+    },
+    "workHtml": {
+      "status": 200,
+      "coldMs": 297,
+      "p50Ms": 315,
+      "p95Ms": 511,
+      "bytes": 211521,
+      "samples": 12
+    }
+  }
+}

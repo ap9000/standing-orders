@@ -1,0 +1,74 @@
+{
+  "synthetic": true,
+  "method": "Manual CUA browser inspection and read-only DOM measurements in the Codex in-app browser. Screenshots were inspected in the conversation; no image files are claimed here.",
+  "viewports": [
+    {
+      "width": 1280,
+      "height": 720
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "coverageNote": "Full feedback-to-revision journeys ran during implementation. After the final index and copy/CSS changes, the rebuilt UI was checked again for task navigation, long content, empty views, invalid-cursor recovery, header, tap targets and keyboard focus. Native mobile Safari and a physical phone were not tested.",
+  "checks": [
+    {
+      "name": "desktop-journey",
+      "ok": true,
+      "observation": "At 1280\u00d7720, opened an older saved result, inspected two changed files, submitted realistic payout rounding feedback, and saw the saved unapproved revision (Attempts 2)."
+    },
+    {
+      "name": "phone-journey",
+      "ok": true,
+      "observation": "At 390\u00d7844, opened the date-range result, inspected changes and the explicit missing-check/path-mismatch state, submitted boundary-case feedback, and saw the saved unapproved revision (Attempts 2)."
+    },
+    {
+      "name": "pagination",
+      "ok": true,
+      "observation": "The synthetic 92-family fixture showed exact counts and pages of 40, 40 and 12 without overlap; the last page omitted Next page."
+    },
+    {
+      "name": "phone-long-content",
+      "ok": true,
+      "observation": "Long synthetic titles wrapped without horizontal overflow; final document width equaled 390px."
+    },
+    {
+      "name": "desktop-long-content",
+      "ok": true,
+      "observation": "Long titles wrapped inside the desktop row; final document width equaled 1280px."
+    },
+    {
+      "name": "tap-targets",
+      "ok": true,
+      "observation": "Final rebuilt task-list actions measured 44px high on desktop and phone."
+    },
+    {
+      "name": "empty-view",
+      "ok": true,
+      "observation": "Phone Complete 0 showed a concise empty state and See all tasks; desktop empty project showed zero counts and Start in chat."
+    },
+    {
+      "name": "invalid-cursor",
+      "ok": true,
+      "observation": "An invalid page cursor showed an explicit expired-page message with a working Back link, without a server error or blank view."
+    },
+    {
+      "name": "keyboard",
+      "ok": true,
+      "observation": "Tab on the final desktop build visibly focused Skip to content with an outline."
+    },
+    {
+      "name": "simplicity",
+      "ok": true,
+      "observation": "Removed duplicate generic task/scope instructions from list rows; shortened the phone task header from the internal ID to Task. Rebuilt and visually inspected both repairs."
+    }
+  ],
+  "screenshots": [],
+  "source": {
+    "src/browser-workspace.ts": "e357dd2a54ebe7ec3d5ddcc82fc41164ee08dbb807c34fabea5411492f0e0a54",
+    "src/browser/app.tsx": "c454bf8b7f1c6b8ef1687c4328df141c2bdc23698ac0b131b8fc5e3655b87713",
+    "src/browser/workspace-client.ts": "da461664fbb160eed88d4dc78a1095def333d9b68061349ced423bc0727719be",
+    "src/serve.ts": "aa1f3c710d620578e50152c131eb70b0bef65b9d8809b6cb08e3731a379e06f4"
+  }
+}

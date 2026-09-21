@@ -129,7 +129,9 @@ export async function authorizedProject(
  */
 export function rowVisible(ceiling: ProjectCeiling, repo: string | null): boolean {
   if (repo === null || unscoped(ceiling)) return true;
-  if (ceiling.repos.some(one => sameRepo(one, repo))) return true;
+  // Exact saved identities are common. Check the whole set before resolving
+  // aliases, so the hundredth project does not stat the other99 directories.
+  if (ceiling.repos.includes(repo) || ceiling.repos.some(one => sameRepo(one, repo))) return true;
   const canonical = canonicalProject(repo) ?? repo;
   return ceiling.roots.some(root => canonical.startsWith(root + sep));
 }

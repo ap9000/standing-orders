@@ -1,0 +1,48 @@
+{
+  "sourceSha256": {
+    "scripts/benchmark-workspace.ts": "54d906a507705ecafec4caccb09f87204dbf90a26f40cb3563d30214c9c9b02c",
+    "scripts/deploy-browser.mjs": "8c4cae06b1389ffa5b2b71bd95013cd1186f645363b09f31e0a65b37b3e0f5ad",
+    "src/assignment-adapters.ts": "79911b790f733603196dc72f37582e0a35fa75ae8be406a601ffb61daf671b74",
+    "src/assignment-brief.test.ts": "11fa8b0518f020c8d4b74b29781dc98dba9a5fe9e73b476b30b6d25f05ebbce7",
+    "src/assignment-brief.ts": "c1363c453878ab1e09c1f5a28624432a74c0dca6b68655a8362f9a740cce3335",
+    "src/assignment-status.test.ts": "4e84496e484733fdfb87454f88040942f09720be50132cbba1465af7d9eb01a9",
+    "src/assignment-status.ts": "16cee7311570ec9b523b479dd2fe2cf52171b04216ceb985f332ba17f373229a",
+    "src/browser-workspace.test.ts": "810e83422afe839015ee54c92bb24dd06e63b3878dfbe9caf5635a2420de6517",
+    "src/browser-workspace.ts": "e357dd2a54ebe7ec3d5ddcc82fc41164ee08dbb807c34fabea5411492f0e0a54",
+    "src/browser/app.tsx": "c454bf8b7f1c6b8ef1687c4328df141c2bdc23698ac0b131b8fc5e3655b87713",
+    "src/browser/workspace-client.test.ts": "411fb67352b275fe918425cd8c0fb80a1b3ecb290689c40f2d1639f292d32f09",
+    "src/browser/workspace-client.ts": "da461664fbb160eed88d4dc78a1095def333d9b68061349ced423bc0727719be",
+    "src/deploy-coding.test.ts": "b714653d56509da8cec76a498e10f68201c12c13224fc1b8f5df836d1f247239",
+    "src/operate.test.ts": "bd54c22ab2823d2d08105bea9106700da0db9be42672da8285321f0da0f57826",
+    "src/operate.ts": "5450b3d550d4c9f7f27c8f825170a1e9835c9f1fce4bfe44f2c623eb0ed61179",
+    "src/project.ts": "9b9a4a38c4d0bcbb25bccb502dbc68a38f4ed4a456942500e66c57a2d88352f9",
+    "src/serve.test.ts": "ded00921c77a25f3841462ee36df3c19bf37e6511beb22a41187b83179e2f36a",
+    "src/serve.ts": "aa1f3c710d620578e50152c131eb70b0bef65b9d8809b6cb08e3731a379e06f4",
+    "src/store.ts": "7f71397bb87c7cedd54ff560e146b49999467374a62bd71bbf1addada7589e55",
+    "src/surface.ts": "81eb14632b7b2534806724111bc4acc8dbfcc3699d3bcde0fdbb62a4d877d266",
+    "src/work-index.test.ts": "4e84eca0737faaa775b3333403ccddd7266eee9330902dc38b8450e445599ade",
+    "src/work-index.ts": "d763e65c8d4e2972706a6926a58e3cc3c002f5f4b3c8c3c99be1f8f1060dd28d",
+    "src/workspace-refresh.test.ts": "b54964e73c73b3cb7e8af0847273991421e5072253205283f5650feb03c708d9",
+    "src/workspace-revision.test.ts": "06f5b2a5f7eb935b2e985d7212865c3333c6777d2e8e41b4be5581605131527c",
+    "src/workspace-revision.ts": "790d1773ecdea3b5471239b4dc0e004b9ca132eccdd3dd92ee7d32dec919219b",
+    "src/worktree-notices.test.ts": "22d8fcd5cb634fa561799661cb2b1e6da902c8c47aab66d458efde5cb3656b9c",
+    "src/worktree-notices.ts": "5f8978c919253a6a78640c2d1218f3c1882d2085091a52375499ce402eb9ed2c"
+  },
+  "focusedTests": {
+    "log": "focused-tests.txt",
+    "passed": 601,
+    "files": 17,
+    "notSelected": 112,
+    "note": "The 112 unrelated Store tests were excluded by line selectors, not disabled. This consolidated run preceded the final optional-index compatibility repair; its 14 focused cases and typecheck subsequently passed. The native full command will verify the exact final candidate."
+  },
+  "compatibilityFollowup": {
+    "passed": 14,
+    "typecheck": "passed",
+    "scope": "Missing optional index hints on a same-schema openStoreNoMigrate reader. Indexed SQL unchanged; benchmark remains the measurement of that query."
+  },
+  "typecheckLog": "typecheck.txt",
+  "uiReport": "ui.json",
+  "browserChecks": 10,
+  "benchmark": "benchmark.json",
+  "nativeGate": "Pending on the committed candidate; no full check or deployment is claimed by this preparation manifest."
+}
