@@ -23,7 +23,7 @@ import { changeKnowledge, knowledgeView, knowledgeVersion, readKnowledgeSnapshot
 import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS } from "./knowledge-ui.js";
 import { learningHtml } from "./workspace-ui.js";
 import { createSessionEndpoint } from './session-server.js';
-import { prepareWorkspaceRevision } from "./workspace-revision.js";
+import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-revision.js";
 import { workIndexPage, workCountsByProject, WorkIndexCursorError, type WorkIndexPage, type WorkIndexItem } from "./work-index.js";
 import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
@@ -510,7 +510,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   const clock = options.clock ?? (() => new Date());
   const workspaceRevision = prepareWorkspaceRevision(store);
   const workspaceIncarnation = randomBytes(16).toString('hex');
-  const workspaceValidators = new Map<string, { etag: string; revision: string; expiresAt: number }>();
+  const workspaceValidators = new WorkspaceValidatorCache();
   const providerHome = options.connectionHome ?? homedir();
   const connectionCheck = createConnectionChecker({ home: providerHome, clock, ...(options.connectionProbe === undefined ? {} : { probe: options.connectionProbe }) });
   const modelCatalog = openRouterModelsCache(options.modelCatalogFetcher);
@@ -3438,7 +3438,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (requestFacts.workspaceRead) {
         const validator = requestFacts.workspaceValidator;
         if (status === 200 && validator !== undefined) {
-          if (workspaceValidators.size >= 256) workspaceValidators.delete(workspaceValidators.keys().next().value!);
           workspaceValidators.set(validator.key, validator);
           response.setHeader('ETag', validator.etag);
         }

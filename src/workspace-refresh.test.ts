@@ -135,12 +135,3 @@ test('revoked credentials and changed account access are revalidated before a co
   const revoked = await read(renewedCookie, renewed.etag);
   expect(revoked.status).toBe(303); expect(revoked.headers.get('location')).toContain('/login');
 });
-
-test('conditional response metadata is bounded to 256 distinct request keys', async () => {
-  const cookie = await login(); const first = await fresh(cookie, CHAT + '&view=0');
-  let last = first;
-  for (let index = 1; index <= 256; index++) last = await fresh(cookie, CHAT + '&view=' + index);
-  expect((await read(cookie, last.etag, CHAT + '&view=256')).status).toBe(304);
-  // The oldest key was evicted, even though its content and deadline still match.
-  expect((await read(cookie, first.etag, CHAT + '&view=0')).status).toBe(200);
-});

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore, type Store } from './store.js';
 import { addApprover } from './scope.js';
-import { prepareWorkspaceRevision, type WorkspaceRevision } from './workspace-revision.js';
+import { prepareWorkspaceRevision, WorkspaceValidatorCache, type WorkspaceRevision } from './workspace-revision.js';
 
 const NOW = new Date('2026-09-21T12:00:00.000Z');
 const at = (ms: number): string => new Date(NOW.getTime() + ms).toISOString();
@@ -20,6 +20,26 @@ function task() { store.createTask({ id: 'task', title: 'Original title' }, NOW)
 function runner(heartbeat = at(0)) {
   store.raw().prepare(`INSERT INTO runner(name,host,credential_hash,capacity,registered_at,heartbeat_at) VALUES ('worker','host','hash',1,?,?)`).run(at(0), heartbeat);
 }
+
+test('conditional response metadata retains 256 keys and evicts in insertion order without refreshing reads', () => {
+  const cache = new WorkspaceValidatorCache();
+  const validators = Array.from({ length: 257 }, (_, index) => ({
+    etag: `"tag-${index}"`, revision: `v1:${index}`, expiresAt: NOW.getTime() + index,
+  }));
+  expect(cache.get('missing')).toBeUndefined();
+  for (let index = 0; index < 256; index++) cache.set(String(index), validators[index]!);
+  // A read of the oldest key does not promote it or extend its deadline.
+  expect(cache.get('0')).toBe(validators[0]);
+  expect(cache.get('255')).toBe(validators[255]);
+  cache.set('256', validators[256]!);
+  expect(cache.get('0')).toBeUndefined();
+  for (let index = 1; index <= 256; index++) expect(cache.get(String(index))).toBe(validators[index]);
+  // Preserve the server's existing write-at-capacity semantics for repeated keys.
+  cache.set('256', validators[0]!);
+  expect(cache.get('1')).toBeUndefined();
+  expect(cache.get('2')).toBe(validators[2]);
+  expect(cache.get('256')).toBe(validators[0]);
+});
 
 test('source writes, external writers and deletes invalidate; no-op updates and rolled-back writes do not', () => {
   const initial = revision.current(); task();

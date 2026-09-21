@@ -16,15 +16,17 @@
     "src/operate.test.ts": "bd54c22ab2823d2d08105bea9106700da0db9be42672da8285321f0da0f57826",
     "src/operate.ts": "5450b3d550d4c9f7f27c8f825170a1e9835c9f1fce4bfe44f2c623eb0ed61179",
     "src/project.ts": "9b9a4a38c4d0bcbb25bccb502dbc68a38f4ed4a456942500e66c57a2d88352f9",
+    "src/recipe-creator.test.ts": "70dfaf91cf2523bac0ad05ec9999378bffd0cbc62766e15dcc5cdf035c42dfe3",
+    "src/recipes.test.ts": "b393cf58e53dd0c881cd9610aaf55306a43fcee03cf027d8eb8c8518b9d54eb6",
     "src/serve.test.ts": "ded00921c77a25f3841462ee36df3c19bf37e6511beb22a41187b83179e2f36a",
-    "src/serve.ts": "aa1f3c710d620578e50152c131eb70b0bef65b9d8809b6cb08e3731a379e06f4",
+    "src/serve.ts": "1f331e6202bd23117c90a3f7fd690befa284182378e3d79010e09b86c02d7afe",
     "src/store.ts": "7f71397bb87c7cedd54ff560e146b49999467374a62bd71bbf1addada7589e55",
     "src/surface.ts": "81eb14632b7b2534806724111bc4acc8dbfcc3699d3bcde0fdbb62a4d877d266",
     "src/work-index.test.ts": "4e84eca0737faaa775b3333403ccddd7266eee9330902dc38b8450e445599ade",
     "src/work-index.ts": "d763e65c8d4e2972706a6926a58e3cc3c002f5f4b3c8c3c99be1f8f1060dd28d",
-    "src/workspace-refresh.test.ts": "b54964e73c73b3cb7e8af0847273991421e5072253205283f5650feb03c708d9",
-    "src/workspace-revision.test.ts": "06f5b2a5f7eb935b2e985d7212865c3333c6777d2e8e41b4be5581605131527c",
-    "src/workspace-revision.ts": "790d1773ecdea3b5471239b4dc0e004b9ca132eccdd3dd92ee7d32dec919219b",
+    "src/workspace-refresh.test.ts": "800e97d6c595aab3ff507d025638eeb757ac4ab6ab0340bf3c8dbc9cdefb4340",
+    "src/workspace-revision.test.ts": "ad23b681bea7151f6b9645ca6e0b191c36f585f2823c1628d241d8043ac524cf",
+    "src/workspace-revision.ts": "a05d2efa7a23be4614a98f0f63827c503e887692dbbb083df2ba7f82a72af5e5",
     "src/worktree-notices.test.ts": "22d8fcd5cb634fa561799661cb2b1e6da902c8c47aab66d458efde5cb3656b9c",
     "src/worktree-notices.ts": "5f8978c919253a6a78640c2d1218f3c1882d2085091a52375499ce402eb9ed2c"
   },
@@ -33,7 +35,21 @@
     "passed": 601,
     "files": 17,
     "notSelected": 112,
-    "note": "The 112 unrelated Store tests were excluded by line selectors, not disabled. This consolidated run preceded the final optional-index compatibility repair; its 14 focused cases and typecheck subsequently passed. The native full command will verify the exact final candidate."
+    "note": "The 112 unrelated Store tests were excluded by line selectors, not disabled. The601-case run preceded the14-case optional-index compatibility check and final13-case cache/HTTP and15-case fixture checks below. The native full command verifies the exact final candidate.",
+    "followups": [
+      {
+        "passed": 13,
+        "files": 2,
+        "scope": "Cache eviction and HTTP refresh/auth behavior",
+        "durationSeconds": 3.73
+      },
+      {
+        "passed": 15,
+        "files": 2,
+        "scope": "Recipe fixture batching; behavior and assertions retained",
+        "durationSeconds": 3.54
+      }
+    ]
   },
   "compatibilityFollowup": {
     "passed": 14,
@@ -44,5 +60,11 @@
   "uiReport": "ui.json",
   "browserChecks": 10,
   "benchmark": "benchmark.json",
-  "nativeGate": "Pending on the committed candidate; no full check or deployment is claimed by this preparation manifest."
+  "nativeGate": "Pending on the committed candidate; no full check or deployment is claimed by this preparation manifest.",
+  "historicalNativeRun": {
+    "id": 1965,
+    "head": "abbf8bd6ffcf7ffbc23e1c3f1517301a817b9320",
+    "nativeCheck": "4213 passed;23 existing platform skips;typecheck/build passed",
+    "limitation": "Superseded candidate; its CI found cache-test and Windows fixture timeouts. It is retained as history and does not verify this corrected candidate."
+  }
 }

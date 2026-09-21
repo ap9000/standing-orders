@@ -11,7 +11,7 @@
       "height": 844
     }
   ],
-  "coverageNote": "Full feedback-to-revision journeys ran during implementation. After the final index and copy/CSS changes, the rebuilt UI was checked again for task navigation, long content, empty views, invalid-cursor recovery, header, tap targets and keyboard focus. Native mobile Safari and a physical phone were not tested.",
+  "coverageNote": "Full feedback-to-revision journeys ran during implementation. After the final index and copy/CSS changes, the rebuilt UI was checked again for task navigation, long content, empty views, invalid-cursor recovery, header, tap targets and keyboard focus. Native mobile Safari and a physical phone were not tested. The final cache extraction preserves the tested get/set/eviction behavior;13 focused cache/HTTP tests passed after that extraction. No visual or navigation behavior changed.",
   "checks": [
     {
       "name": "desktop-journey",
@@ -69,6 +69,6 @@
     "src/browser-workspace.ts": "e357dd2a54ebe7ec3d5ddcc82fc41164ee08dbb807c34fabea5411492f0e0a54",
     "src/browser/app.tsx": "c454bf8b7f1c6b8ef1687c4328df141c2bdc23698ac0b131b8fc5e3655b87713",
     "src/browser/workspace-client.ts": "da461664fbb160eed88d4dc78a1095def333d9b68061349ced423bc0727719be",
-    "src/serve.ts": "aa1f3c710d620578e50152c131eb70b0bef65b9d8809b6cb08e3731a379e06f4"
+    "src/serve.ts": "1f331e6202bd23117c90a3f7fd690befa284182378e3d79010e09b86c02d7afe"
   }
 }

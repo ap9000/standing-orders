@@ -17,6 +17,21 @@ const identifier = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 
 export type WorkspaceRevision = { current(): string; expiresAt(now: Date): number };
 
+type WorkspaceValidator = { etag: string; revision: string; expiresAt: number };
+
+/** Per-server response metadata. Reads preserve insertion order; writes at
+ * capacity discard the oldest key before storing the supplied validator. */
+export class WorkspaceValidatorCache {
+  private readonly entries = new Map<string, WorkspaceValidator>();
+
+  get(key: string): WorkspaceValidator | undefined { return this.entries.get(key); }
+
+  set(key: string, validator: WorkspaceValidator): void {
+    if (this.entries.size >= 256) this.entries.delete(this.entries.keys().next().value!);
+    this.entries.set(key, validator);
+  }
+}
+
 export function prepareWorkspaceRevision(store: Store): WorkspaceRevision {
   const db = store.raw();
   const bump = `INSERT INTO service_cursor(key,value,updated_at) VALUES ('${KEY}',1,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
