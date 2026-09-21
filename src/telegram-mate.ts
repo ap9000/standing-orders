@@ -138,11 +138,11 @@ type Keyboard = InlineButton[][];
 type CallbackKeyboard = { text: string; callback_data: string }[][];
 
 /** Mint the card's tokens before the send, so a tap can never name a token that does not exist. */
-export function mintCardTokens(store: Store, binding: TelegramBinding, proposal: number, now: Date, messageId?: string): { keyboard: CallbackKeyboard; tokens: string[] } {
+export function mintCardTokens(store: Store, binding: TelegramBinding, proposal: number, now: Date, messageId?: string, chatId = binding.chatId): { keyboard: CallbackKeyboard; tokens: string[] } {
   const confirm = randomBytes(16).toString("hex");
   const dismiss = randomBytes(16).toString("hex");
   for (const [token, phase] of [[confirm, "confirm"], [dismiss, "dismiss"]] as const) {
-    store.createTelegramProposalAction({ token, binding: binding.id, proposal, phase, chatId: binding.chatId, ttlMs: CARD_TTL_MS, ...(messageId === undefined ? {} : { messageId }) }, now);
+    store.createTelegramProposalAction({ token, binding: binding.id, proposal, phase, chatId, ttlMs: CARD_TTL_MS, ...(messageId === undefined ? {} : { messageId }) }, now);
   }
   return { keyboard: [[{ text: "Confirm", callback_data: confirm }, { text: "Dismiss", callback_data: dismiss }]], tokens: [confirm, dismiss] };
 }
@@ -164,7 +164,7 @@ export function applyProposalTap(
   store: Store,
   binding: TelegramBinding,
   token: string,
-  message: { message_id: number },
+  message: { message_id: number; chat?: { id: number } },
   repos: readonly string[] | null,
   options: TelegramConversationOptions,
   now: Date,
@@ -173,7 +173,13 @@ export function applyProposalTap(
   const ack = (text: string): void => { effects.push({ kind: "ack", text }); };
   const edit = (text: string, keyboard?: Keyboard): void => { effects.push({ kind: "edit", text, ...(keyboard === undefined ? {} : { keyboard }) }); };
   const action = store.getTelegramProposalAction(token);
-  if (action === null || action.binding !== binding.id || action.chatId !== binding.chatId || (action.messageId !== null && action.messageId !== String(message.message_id))) {
+  // The tap must land where the card was placed. In a paired private chat
+  // that is the tapper's own binding; in a group that follows a team
+  // conversation any paired member may tap, and the door then proves that
+  // person's own membership and consent.
+  const tapChatId = message.chat === undefined ? binding.chatId : String(message.chat.id);
+  const groupCard = action !== null && action.chatId !== binding.chatId && store.telegramTeamChat(binding.botId, action.chatId)?.kind === "group";
+  if (action === null || action.chatId !== tapChatId || (action.binding !== binding.id && !groupCard) || (action.messageId !== null && action.messageId !== String(message.message_id))) {
     ack("that button is stale — send /status to see what still waits");
     return { effects, confirmed: false, ignored: true };
   }
@@ -218,7 +224,7 @@ export function applyProposalTap(
     // Cancel means cancelled: the armed yes dies with it and the card is restored.
     store.consumeTelegramProposalAction(token, now);
     store.consumeTelegramProposalActions(proposal.id, now, ["yes", "cancel"]);
-    const fresh = mintCardTokens(store, binding, proposal.id, now, String(message.message_id));
+    const fresh = mintCardTokens(store, binding, proposal.id, now, String(message.message_id), tapChatId);
     ack("cancelled");
     edit(preview.text, fresh.keyboard);
     return { effects, confirmed: false, ignored: false };
@@ -243,8 +249,8 @@ export function applyProposalTap(
     const yes = randomBytes(16).toString("hex");
     const cancel = randomBytes(16).toString("hex");
     const placedOn = String(message.message_id);
-    store.createTelegramProposalAction({ token: yes, binding: binding.id, proposal: proposal.id, phase: "yes", chatId: binding.chatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
-    store.createTelegramProposalAction({ token: cancel, binding: binding.id, proposal: proposal.id, phase: "cancel", chatId: binding.chatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
+    store.createTelegramProposalAction({ token: yes, binding: binding.id, proposal: proposal.id, phase: "yes", chatId: tapChatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
+    store.createTelegramProposalAction({ token: cancel, binding: binding.id, proposal: proposal.id, phase: "cancel", chatId: tapChatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
     const body = preview.text.split("\n\nConfirm or Dismiss below")[0];
     if (challenged) {
       ack("confirm it");
@@ -299,7 +305,7 @@ export const PART_RETRY_MS = [5_000, 15_000, 60_000, 300_000] as const;
 /** Unsent parts are retried this long after the message arrived (the card's own lifetime); then the row fails, explicitly unsent. */
 export const DELIVERY_MAX_AGE_MS = CARD_TTL_MS;
 
-function splitParts(text: string): string[] {
+export function splitParts(text: string): string[] {
   if (text.length <= PART_CAP) return [text];
   const parts: string[] = [];
   for (let at = 0; at < text.length;) {

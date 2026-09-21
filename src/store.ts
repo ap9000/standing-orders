@@ -1172,6 +1172,17 @@ export type TelegramDigest = {
 };
 
 /** One Telegram chat allowed to answer as one approver. Revoked, never deleted. */
+export type TelegramTeamChat = {
+  id: number;
+  botId: string;
+  chatId: string;
+  kind: "group" | "private";
+  conversation: string;
+  boundBy: string;
+  boundAt: string;
+  cursor: number;
+};
+
 export type TelegramBinding = {
   id: number;
   botId: string;
@@ -2693,6 +2704,28 @@ CREATE TABLE IF NOT EXISTS telegram_binding (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS telegram_binding_live_user
   ON telegram_binding (bot_id, user_id) WHERE revoked_at IS NULL;
+
+-- v72: a Telegram chat's place in the shared team conversations. A group
+-- follows exactly one team conversation (and a conversation has at most one
+-- group); a private chat may select one conversation to talk in instead of
+-- its personal assistant. The cursor is the last conversation message this
+-- chat received. Rows are revoked, never deleted.
+CREATE TABLE IF NOT EXISTS telegram_team_chat (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id       TEXT NOT NULL,
+  chat_id      TEXT NOT NULL,
+  kind         TEXT NOT NULL CHECK (kind IN ('group','private')),
+  conversation TEXT NOT NULL REFERENCES team_conversation(id) ON DELETE RESTRICT,
+  bound_by     TEXT NOT NULL,
+  bound_at     TEXT NOT NULL,
+  cursor       INTEGER NOT NULL DEFAULT 0,
+  revoked_at   TEXT,
+  revoked_by   TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_team_chat_live
+  ON telegram_team_chat (bot_id, chat_id) WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_team_chat_group
+  ON telegram_team_chat (conversation) WHERE revoked_at IS NULL AND kind = 'group';
 
 -- v61: destination receipts around the existing outbox, independent of its
 -- legacy shell/webhook receipt and of push_delivery. No second scheduler.
@@ -19206,6 +19239,54 @@ export class Store {
     });
   }
 
+  // ---- team chats (v72) -------------------------------------------------------
+
+  /** The live team-conversation row for one chat, group or private. */
+  telegramTeamChat(botId: string, chatId: string): TelegramTeamChat | null {
+    const row = this.db.prepare("SELECT * FROM telegram_team_chat WHERE bot_id = ? AND chat_id = ? AND revoked_at IS NULL").get(botId, chatId);
+    return row === undefined ? null : readTelegramTeamChat(row);
+  }
+
+  listTelegramTeamChats(botId: string): TelegramTeamChat[] {
+    return this.db.prepare("SELECT * FROM telegram_team_chat WHERE bot_id = ? AND revoked_at IS NULL ORDER BY id").all(botId).map(readTelegramTeamChat);
+  }
+
+  /**
+   * Point a chat at a team conversation: an earlier choice for the same chat
+   * is revoked in the same transaction, and delivery starts from now — the
+   * conversation's history is read in the console, never replayed into a
+   * chat that just arrived. A group already following another conversation
+   * elsewhere, or a conversation already followed by another group, refuses.
+   */
+  bindTelegramTeamChat(args: { botId: string; chatId: string; kind: "group" | "private"; conversation: string; by: string }, now: Date):
+    { ok: true; chat: TelegramTeamChat } | { ok: false; reason: "group-taken" } {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      this.db.prepare("UPDATE telegram_team_chat SET revoked_at = ?, revoked_by = ? WHERE bot_id = ? AND chat_id = ? AND revoked_at IS NULL").run(stamp, args.by, args.botId, args.chatId);
+      const thread = this.db.prepare("SELECT thread FROM team_conversation WHERE id = ?").get(args.conversation);
+      if (thread === undefined) throw new Error("no such team conversation");
+      const cursor = Number(this.db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM mate_message WHERE thread = ?").get(Number(thread["thread"]))?.["n"] ?? 0);
+      try {
+        this.db.prepare("INSERT INTO telegram_team_chat (bot_id, chat_id, kind, conversation, bound_by, bound_at, cursor) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .run(args.botId, args.chatId, args.kind, args.conversation, args.by, stamp, cursor);
+      } catch {
+        return { ok: false as const, reason: "group-taken" as const };
+      }
+      return { ok: true as const, chat: this.telegramTeamChat(args.botId, args.chatId)! };
+    });
+  }
+
+  unbindTelegramTeamChat(botId: string, chatId: string, by: string, now: Date): boolean {
+    const { changes } = this.db.prepare("UPDATE telegram_team_chat SET revoked_at = ?, revoked_by = ? WHERE bot_id = ? AND chat_id = ? AND revoked_at IS NULL").run(now.toISOString(), by, botId, chatId);
+    return Number(changes) > 0;
+  }
+
+  /** Forward only: a cursor never moves back, and a revoked row keeps its last position. */
+  advanceTelegramTeamCursor(id: number, messageId: number): boolean {
+    const { changes } = this.db.prepare("UPDATE telegram_team_chat SET cursor = ? WHERE id = ? AND cursor < ? AND revoked_at IS NULL").run(messageId, id, messageId);
+    return Number(changes) > 0;
+  }
+
   /**
    * Every live binding for a bot, oldest first — and only while each
    * approver's credential generation still matches. A rotation that
@@ -23556,6 +23637,19 @@ function readRunCheckpoint(row: Record<string, unknown>): RunCheckpoint {
     planRevision: Number(row["plan_revision"]),
     snapshot: JSON.parse(String(row["snapshot_json"])) as ProgressSnapshot,
     createdAt: String(row["created_at"]),
+  };
+}
+
+function readTelegramTeamChat(row: Record<string, unknown>): TelegramTeamChat {
+  return {
+    id: Number(row["id"]),
+    botId: String(row["bot_id"]),
+    chatId: String(row["chat_id"]),
+    kind: row["kind"] === "group" ? "group" : "private",
+    conversation: String(row["conversation"]),
+    boundBy: String(row["bound_by"]),
+    boundAt: String(row["bound_at"]),
+    cursor: Number(row["cursor"]),
   };
 }
 

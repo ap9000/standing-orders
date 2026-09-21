@@ -27,6 +27,7 @@ import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
 import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
+import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
 import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import {
@@ -283,6 +284,7 @@ export async function bridgePass(
   try {
     if (options.deliver !== false) {
       await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin, options.conversation?.evidenceRoot);
+      await deliverTeam(store, botId, transport, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin);
     }
     await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report, 0, undefined, options.readProjects, options.conversation);
     if (options.conversation !== undefined && options.readProjects !== undefined) {
@@ -425,6 +427,7 @@ export async function followBridge(
       const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
       if (options.deliver !== false) {
         await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin, options.conversation?.evidenceRoot);
+        await deliverTeam(store, botId, transport, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin);
       }
       await drainUpdates(
         store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal, options.readProjects, options.conversation,
@@ -499,6 +502,21 @@ function factLinkLabel(path: string): string {
   if (/^\/(?:chat\?task=|t\/)/.test(path)) return "Open task";
   if (/^\/d\//.test(path)) return "Open decision";
   return "Open console";
+}
+
+/** Team-conversation traffic to the chats that follow one — after the outbox, under the same delivery switch, never a problem to raise when nothing follows anything. */
+async function deliverTeam(
+  store: Store, botId: string, transport: TelegramTransport, clock: () => Date, report: BridgeReport,
+  readProjects?: TelegramReadProjects, canDeliver?: () => boolean, phoneOrigin?: () => string | null,
+): Promise<void> {
+  if (store.listTelegramTeamChats(botId).length === 0) return;
+  try { if (canDeliver !== undefined && !canDeliver()) return; } catch { return; }
+  let projects: readonly string[];
+  try { projects = await readProjects?.() ?? []; } catch { report.problems.push("team chats: current project access could not be read"); return; }
+  const team = { sent: 0, problems: [] as string[] };
+  await deliverTeamChats(store, botId, transport, clock, team, projects, phoneOrigin);
+  report.sent += team.sent;
+  report.problems.push(...team.problems);
 }
 
 async function deliverOutbox(
@@ -993,7 +1011,7 @@ async function drainUpdates(
       // enrolled ceiling, and the registry is a file read: it happens
       // before the update's transaction, and only once the envelope has
       // proved the exact paired sender and chat — a stranger reads nothing.
-      context.projects = await projectsForTap(context, update);
+      context.projects = update.message !== undefined ? await enrolledForMessage(context, update) : await projectsForTap(context, update);
       const effects = applyUpdate(context, update);
       // Effects are Telegram-side conveniences — acks, edits, replies. They
       // retry-or-drop; they never decide whether the cursor moves, because
@@ -1011,6 +1029,28 @@ async function drainUpdates(
   }
   // The budget ran out with Telegram still holding pages: said, not hidden.
   report.backlog = true;
+}
+
+/** The enrolled registry, read before a message is applied: the team layer
+ * scopes leads and conversations to it (each person's own access is checked
+ * inside the domain). Unreadable reads as null, and the personal paths stay
+ * exactly as they were. */
+async function enrolledForMessage(context: Context, update: Update): Promise<readonly string[] | null> {
+  const message = update.message;
+  if (message?.chat === undefined || message.from === undefined || message.text === undefined || context.readProjects === undefined) return null;
+  // An untrusted envelope reads nothing: the sender must be paired, the
+  // text plain and direct, and the chat either that person's own private
+  // chat or a group that follows (or is being pointed at) a conversation.
+  if (message.forward_origin !== undefined || message.forward_date !== undefined || message.via_bot !== undefined || message.sender_chat !== undefined || message.caption !== undefined) return null;
+  const binding = context.store.liveTelegramBindingFor(context.botId, String(message.from.id));
+  if (binding === null) return null;
+  const chatId = String(message.chat.id);
+  const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
+  const trusted = isGroup
+    ? context.store.telegramTeamChat(context.botId, chatId)?.kind === "group" || teamCommand(message.text) !== null
+    : message.chat.type === "private" && chatId === binding.chatId;
+  if (!trusted) return null;
+  try { return await context.readProjects(); } catch { return null; }
 }
 
 async function projectsForTap(context: Context, update: Update): Promise<readonly string[] | null> {
@@ -1064,6 +1104,19 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
   const pair = /^\/pair\s+([0-9a-f]{32})\s*$/.exec(message.text ?? "");
 
   if (pair === null && chat !== undefined && from !== undefined) {
+    // The team layer first: `/team` anywhere, everything in a followed
+    // group, and a private chat that chose a conversation. Its replies ride
+    // the same post-commit effects as every other answer.
+    const consumed = applyTeamInbound({
+      store, botId, now: clock(), report, projects: context.projects, phoneOrigin: context.conversation?.phoneOrigin, updateId: update.update_id, message,
+      say: (chatId, text, keyboard) => {
+        effects.push(async () => {
+          await transport("sendMessage", { chat_id: chatId, text, link_preview_options: { is_disabled: true }, reply_parameters: { message_id: message.message_id },
+            ...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }) });
+        });
+      },
+    });
+    if (consumed) return;
     // Replies to decisions retain their existing note meaning, even if the
     // note starts with a slash. New read commands are direct messages only.
     if (message.reply_to_message === undefined && applyPhoneRead(context, update, effects)) return;
@@ -1407,12 +1460,14 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
   // out; so is a tap from anyone but the exact paired user id — usernames
   // change hands, immutable ids do not.
   const binding = from === undefined ? null : store.liveTelegramBindingFor(botId, String(from.id));
+  const tapChat = message?.chat === undefined ? null : String(message.chat.id);
+  const followedGroup = tapChat !== null && binding !== null && tapChat !== binding.chatId && store.telegramTeamChat(botId, tapChat)?.kind === "group";
   if (
     binding === null ||
     from === undefined ||
     message === undefined ||
     message.chat === undefined ||
-    String(message.chat.id) !== binding.chatId
+    (tapChat !== binding.chatId && !followedGroup)
   ) {
     report.ignored++;
     return;
