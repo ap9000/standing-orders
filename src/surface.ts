@@ -1,3 +1,4 @@
+import { KNOWLEDGE_DESCRIPTORS } from "./knowledge-cli.js";
 /**
  * The declared command guide (arc 5): the agent-facing surface as data,
  * dumped by `contract --commands`. This is DOCUMENTATION with a stable
@@ -99,7 +100,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   { invocation: "graph", synopsis: "report which work graph is already here", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag] },
   { invocation: "repos", synopsis: "list connected repositories", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag] },
   operator("proposals", "what coordinators proposed over the MCP gateway — list, confirm <id> [--yes], dismiss <id>; confirming runs the plane's own door under your password"),
-  operator("chat", "talk to the mate — one conversation across your projects; the password mints a spending session once; it reads and proposes, you confirm each card"),
+  operator("chat", "share the lead conversation with the browser; --follow enables automatic crew updates within its limits, --no-follow pauses them; proposed actions retain their approval requirements"),
   operator("repos add", "connect a repository to the installation"),
   operator("repos remove", "disconnect a repository"),
   operator("repos add-from-github", "preview, clone from GitHub, and connect - the console onboarding ceremony as a CLI verb"),
@@ -120,9 +121,11 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     flags: Object.entries(sessionCliFlags(spec)).map(([name, arity]) => ({ name, takesValue: arity === 'value', meaning: name === 'key' ? 'keep the same key when reconciling; inspect after unknown delivery, never blind-retry' : `see session ${spec.operation} --help` })),
   })),
 
+  ...KNOWLEDGE_DESCRIPTORS.map(spec => ({ invocation: `knowledge ${spec.action}`, synopsis: spec.synopsis, audience: "agent" as const, agentMayInvoke: true, mutation: spec.mutation, flags: spec.flags, ...(spec.takesQuery ? { positionals: [{ name: "query", required: true, meaning: "search text or source file for impact" }] } : {}) })),
+
   // ---- the queue (agent surface) ----
   { invocation: "ready", synopsis: "what could be dispatched right now (rows carry reservedFor)", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
-  { invocation: "brief", synopsis: "the standing brief: what happened, what waits", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
+  { invocation: "brief", synopsis: "read-only local DB catch-up; --history selects the older operational report", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "gaps", synopsis: "requirement gaps blocking dispatch", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag, repoFlag] },
   { invocation: "grants", synopsis: "list authority grants", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "sync", synopsis: "refresh external-tracker mirrors and deliver write-backs — safe to run; fails closed", audience: "agent", agentMayInvoke: true, mutation: "identity-idempotent",
@@ -139,6 +142,20 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     flags: [jsonFlag, dbFlag, { name: "state", takesValue: true, meaning: "queued|running|done|failed|cancelled" }] },
   { invocation: "task show", synopsis: "one task in full", audience: "agent", agentMayInvoke: true, mutation: "none",
     positionals: [{ name: "id", required: true, meaning: "the task" }], flags: [jsonFlag, dbFlag], notableReasons: ["unknown-task"] },
+  { invocation: "project show", synopsis: "show the saved local project and optional credential-file reference", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
+  { invocation: "project use", synopsis: "select an exact saved checkout; grants no project or execution authority", audience: "agent", agentMayInvoke: true, mutation: "identity-idempotent",
+    positionals: [{ name: "path", required: true, meaning: "exact saved project checkout path" }], flags: [jsonFlag, dbFlag, { name: "token-file", takesValue: true, meaning: "optional existing scoped coordinator credential file; saves only its path" }] },
+  ...(['complete', 'revise'] as const).map(action => ({
+    invocation: `task ${action}`, synopsis: action === 'complete' ? 'mark the exact inspected result complete; checks and permissions remain unchanged' : 'request a same-task revision using explicit feedback; existing approval terms apply',
+    audience: 'agent' as const, agentMayInvoke: true, mutation: 'identity-idempotent' as const,
+    positionals: [{ name: 'task', required: true, meaning: 'task or assignment id' }],
+    flags: [jsonFlag, dbFlag,
+      { name: 'token-env', takesValue: true, meaning: 'scoped coordinator credential environment variable' },
+      { name: 'token-file', takesValue: true, meaning: 'scoped coordinator credential file; defaults to selected project reference' },
+      ...(action === 'complete' ? [{ name: 'digest', takesValue: true, meaning: 'exact receipt from assignment show; required for JSON or scoped agents' }]
+        : [{ name: 'feedback', takesValue: true, meaning: 'specific requested change' }, { name: 'run', takesValue: true, meaning: 'exact result run; defaults to current result' }, { name: 'source', takesValue: true, meaning: 'exact scope digest; defaults to current terms' }, { name: 'key', takesValue: true, meaning: '32 hexadecimal characters for exact replay; defaults to a stable feedback identity' }]),
+    ],
+  })),
   ...(["show", "updates", "claim", "check", "brief", "inbox", "ack"] as const).map(action => ({
     invocation: `assignment ${action}`,
     synopsis: action === "show" ? "read the root, current work, owner and exact receipt"
@@ -212,11 +229,11 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     notableReasons: ["unknown-task"] },
   operator("task approve", "the yes — nothing builds without one; binds to the scope digest"),
   operator("task requeue", "exit a stall: incidents resolved, strikes cleared, queued again"),
-  operator("task regate", "run the approved check again on the last attempt's exact commit — no agent, fresh review"),
-  operator("task review", "ask an agent to review a finished run's sealed diff — its comments land for you to prune and seal"),
-  operator("task accept", "accept a short or refuted proof anyway — the one act that lets a task read done despite incomplete evidence"),
-  operator("task repair", "show the repair a short/refuted run's review drafted, or --yes to approve it — the first CLI road to a revision at all"),
-  operator("task route", "which agent plans, builds, repairs, and reviews this task and why; declare its risk or override a phase — approval seals the route"),
+  operator("task regate", "explicitly rerun the approved check on the last exact commit — no agent or automatic retry"),
+  operator("task review", "retired compatibility command; inspect the saved result and explicitly complete or revise it"),
+  operator("task accept", "record an explicit acceptance with limitations; does not change checks or prove deployment"),
+  operator("task repair", "inspect or approve an existing historical repair draft; use task revise for new feedback"),
+  operator("task route", "which configured agents plan, build and repair this task; phase and risk changes require renewed approval"),
   operator("task reopen", "resume external work its tracker closed and has been SEEN open again"),
   operator("task stop", "stop ONE exact live attempt (--run <id>): durable before any process is signalled, answers 'stopping' until its own processes are established gone; work, branch, and evidence preserved; no strike, no retry"),
   operator("task resume", "resume the exact stopped attempt (--run <id>): refuses until it is quiescent, lifts only that stop's hold, approves nothing — the next pass re-proves the scope and inherits the draft with fresh proof"),

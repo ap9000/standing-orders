@@ -597,6 +597,16 @@ export const CHAT_ACTION_PARITY: Record<
   string,
   { support: ParitySupport; how: string; gap: string | null }
 > = {
+  get_brief: {
+    support: "direct",
+    how: "Reads current tasks, decisions, results and project knowledge from the local database through the shared engine, within the enrolled projects.",
+    gap: "Dedicated Telegram and Slack journeys for this tool and live channel rendering remain unverified.",
+  },
+  get_project_context: {
+    support: "direct",
+    how: "Reads bounded source excerpts or advisory import impact in an accessible enrolled project through the shared engine, with source-search fallback when its index is unavailable.",
+    gap: "Index refresh uses the local CLI. Dedicated Telegram and Slack journeys for this tool and live channel rendering remain unverified.",
+  },
   get_action_status: {
     support: "direct",
     how: "Reads the exact saved shared action and its outcome, including completion through secure review.",

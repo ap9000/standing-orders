@@ -80,6 +80,7 @@
   "dependencies": {
     "@slack/socket-mode": "3.0.1",
     "discord.js": "14.27.0",
+    "typescript-parser": "npm:typescript@6.0.3",
     "yaml": "^2.9.1"
   }
 }

@@ -145,6 +145,8 @@ describe("the machine envelope", () => {
       outbox: ["list", "--json"],
       peek: ["--json"],
       brief: ["--json"],
+      project: ["show", "--json"],
+      knowledge: ["--json"],
       decide: ["--json"],
       incident: ["list", "--json"],
       serve: ["--port", "99999999", "--json"], // invalid port: throws into the catch-all, which must envelope

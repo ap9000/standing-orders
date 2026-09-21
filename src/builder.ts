@@ -919,55 +919,62 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     try { if (required || listed.stdout.length > 0) preparedEvidence = readPreparedEvidence(worktree, preparedCandidate, required); }
     catch (error) { return { ok: false, reason: "no-op", message: error instanceof Error ? error.message : "The committed screenshots could not be verified." }; }
   }
-  const setupWanted = store.liveWorktreeSetup(leased.repo);
   const observeSpawn = request.onProviderSpawn;
   request = { ...request, onProviderSpawn: pid => {
     recordWorktreeProcess(store, worktree, runner, pid, leased.leaseEpoch);
     observeSpawn?.(pid);
   } };
-  if (setupWanted !== null && leased.setupDigest !== setupWanted.digest) {
-    // Setup is a process spawn like any other (review finding 4): the
-    // runner tuple is re-proven against LIVE rows immediately before it —
-    // a takeover between the claim and this instant runs nothing here.
-    if (!store.proveRunnerCustodyForSpawn(request.runId, (request.clock ?? (() => now))())) {
-      return {
-        ok: false,
-        reason: "runner-custody",
-        message: "runner custody lapsed before the setup spawn — the lease, the runner, or its repo binding no longer stands",
-      };
+  const runApprovedSetup = async (force = false): Promise<BuildResult | null> => {
+    const setupWanted = store.liveWorktreeSetup(leased.repo);
+    if (setupWanted !== null && (force || leased.setupDigest !== setupWanted.digest)) {
+      // Setup is a process spawn like any other (review finding 4): the
+      // runner tuple is re-proven against LIVE rows immediately before it —
+      // a takeover between the claim and this instant runs nothing here.
+      if (!store.proveRunnerCustodyForSpawn(request.runId, (request.clock ?? (() => now))())) {
+        return {
+          ok: false,
+          reason: "runner-custody",
+          message: "runner custody lapsed before the setup spawn — the lease, the runner, or its repo binding no longer stands",
+        };
+      }
+      const runSetup = request.setup ?? run;
+      const shell = approvedCommandShell(setupWanted.command);
+      // Setup runs under the stop watch (v52), owned by this run: an
+      // operator's stop ends the setup's process group and the attempt
+      // settles as interrupted below, never as a setup failure.
+      const made = await underStopWatch(store, request.runId, () => runWithIsolatedDatabase(witnessedRunner(store, request.runId, request.clock ?? (() => now), runSetup), shell.file, shell.args, {
+        cwd: worktree,
+        timeoutMs: setupWanted.timeoutMs,
+        processGroup: true,
+        owner: runOwnerTag(store, request.runId),
+        beforeSpawn: () => !stopRequestedFor(store, request.runId, request.shouldStop),
+        onSpawn: pid => {
+          request.onProviderSpawn?.(pid);
+          if (stopRequestedFor(store, request.runId, request.shouldStop)) throw new Error("the attempt was stopped before spawn custody completed");
+        },
+        envAllowlist: SETUP_ENV_ALLOWLIST,
+        omitEnv: SETUP_ENV_DENYLIST,
+      }));
+      if (stopRequestedFor(store, request.runId, request.shouldStop)) {
+        return { ok: false, reason: "stopped", message: stopWords(store, request.runId, worktree, `the operator stopped this watch during setup — the checkout is preserved in ${worktree}`) };
+      }
+      if (made.timedOut || made.code !== 0) {
+        // Setup stderr can carry registry tokens and credentialed URLs
+        // (Codex M5-M8 audit, IV-5): what reaches the database and the
+        // outbox is a REDACTED, bounded diagnostic, never raw tool output.
+        return {
+          ok: false,
+          reason: "setup",
+          message: `the approved setup for ${leased.repo} ${made.timedOut ? `ran past ${Math.round(setupWanted.timeoutMs / 60_000)}m` : `exited ${made.code}`} — ${redactSecretText(firstLine(made.stderr)) || "no stderr"}; no agent spawns in a checkout whose setup failed`,
+        };
+      }
+      store.stampWorktreeSetup(worktree, setupWanted.digest);
     }
-    const runSetup = request.setup ?? run;
-    const shell = approvedCommandShell(setupWanted.command);
-    // Setup runs under the stop watch (v52), owned by this run: an
-    // operator's stop ends the setup's process group and the attempt
-    // settles as interrupted below, never as a setup failure.
-    const made = await underStopWatch(store, request.runId, () => runWithIsolatedDatabase(witnessedRunner(store, request.runId, request.clock ?? (() => now), runSetup), shell.file, shell.args, {
-      cwd: worktree,
-      timeoutMs: setupWanted.timeoutMs,
-      processGroup: true,
-      owner: runOwnerTag(store, request.runId),
-      beforeSpawn: () => !stopRequestedFor(store, request.runId, request.shouldStop),
-      onSpawn: pid => {
-        request.onProviderSpawn?.(pid);
-        if (stopRequestedFor(store, request.runId, request.shouldStop)) throw new Error("the attempt was stopped before spawn custody completed");
-      },
-      envAllowlist: SETUP_ENV_ALLOWLIST,
-      omitEnv: SETUP_ENV_DENYLIST,
-    }));
-    if (stopRequestedFor(store, request.runId, request.shouldStop)) {
-      return { ok: false, reason: "stopped", message: stopWords(store, request.runId, worktree, `the operator stopped this watch during setup — the checkout is preserved in ${worktree}`) };
-    }
-    if (made.timedOut || made.code !== 0) {
-      // Setup stderr can carry registry tokens and credentialed URLs
-      // (Codex M5-M8 audit, IV-5): what reaches the database and the
-      // outbox is a REDACTED, bounded diagnostic, never raw tool output.
-      return {
-        ok: false,
-        reason: "setup",
-        message: `the approved setup for ${leased.repo} ${made.timedOut ? `ran past ${Math.round(setupWanted.timeoutMs / 60_000)}m` : `exited ${made.code}`} — ${redactSecretText(firstLine(made.stderr)) || "no stderr"}; no agent spawns in a checkout whose setup failed`,
-      };
-    }
-    store.stampWorktreeSetup(worktree, setupWanted.digest);
+    return null;
+  };
+  if (preparedCandidate === null || attended !== undefined) {
+    const setupFailure = await runApprovedSetup();
+    if (setupFailure !== null) return setupFailure;
   }
 
   // And git is asked what branch is actually checked out there, because the
@@ -1053,7 +1060,10 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     try { verifyCodingHandoffBase(store, { taskId, taskRef, repo: leased.repo, branch, head: baseRevision }); }
     catch (error) { return { ok: false, reason: "no-op", message: error instanceof Error ? error.message : "The coding review base changed before dispatch." }; }
   }
-  store.stampRun(request.runId, { baseRevision });
+  // Prepared coding handoffs run setup after loading the candidate tree.
+  // Do not establish their first recorded base until that setup has finished
+  // and the original-base guard has read HEAD again at the same boundary.
+  if (codingHandoff === null) store.stampRun(request.runId, { baseRevision });
 
   // The warm resume (M6.9), narrowly: an answered park may hand its SESSION
   // to this attempt — but only when every condition re-proves right here.
@@ -1392,8 +1402,9 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // the whole branch; the agent never needs to recreate its file inventory.
   const pinnedBase = store.firstBuilderBase(taskRef, branch);
   const retryBase = pinnedBase !== null && pinnedBase !== baseRevision ? pinnedBase : null;
-  const lessonContext = learningContext(store, root, request.runId, "build", clock());
-  const briefText = projectSkillContext + knowledgeContext(store, request.runId) + lessonContext + brief(
+  const contextBase = codingHandoff !== null ? baseRevision : undefined;
+  const lessonContext = learningContext(store, root, request.runId, "build", clock(), contextBase);
+  const briefText = projectSkillContext + knowledgeContext(store, request.runId, join(root, '..', 'repository-context'), contextBase) + lessonContext + brief(
     scope as Scope,
     branch,
     mailbox,
@@ -1424,18 +1435,37 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // stays streaming across the whole hold). build() returns WITHOUT
   // settling: the run, the lease, and the worktree are the coordinator's.
   // THE PREPARED-CANDIDATE ROAD (v69): the scope names a commit, proved
-  // above before setup ran. The machine brings the worktree to its exact
+  // above before anything moved. The machine brings the worktree to its exact
   // tree — uncommitted, as an agent would leave it — writes the handoff
   // itself, and settles through the SAME state machine every agent attempt
   // settles through: commit, sealed diff from the pinned base, the approved
-  // gate, the review. No provider is spawned; the lease heartbeat keeps
+  // gate. No provider is spawned; the lease heartbeat keeps
   // running until settlement returns, exactly as it does around a provider.
   const prepared = scope?.candidate ?? null;
   if (prepared !== null && attended === undefined) {
     try {
+      if (stopRequestedFor(store, request.runId, request.shouldStop)) return { ok: false, reason: "stopped", message: stopWords(store, request.runId, worktree, "The attempt was stopped before the prepared candidate was loaded.") };
+      if (!store.proveRunnerCustodyForSpawn(request.runId, clock())) return { ok: false, reason: "runner-custody", message: "Runner custody lapsed before the prepared candidate was loaded; the checkout is unchanged." };
       const pinned = store.firstBuilderBase(taskRef, branch) ?? baseRevision;
       const brought = await bringWorktreeTo(git, worktree, prepared);
       if (!brought.ok) return { ok: false, reason: "git", message: brought.message };
+      // Dependencies belong to this candidate's manifests, not the base
+      // checkout. A setup stamp for another tree cannot establish them.
+      const setupFailure = await runApprovedSetup(true);
+      if (setupFailure !== null) return setupFailure;
+      if (codingHandoff !== null) {
+        const afterSetup = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
+        if (afterSetup.code !== 0) return { ok: false, reason: "git", message: "The coding review base could not be read after setup." };
+        const afterSetupHead = afterSetup.stdout.trim();
+        try { verifyCodingHandoffBase(store, { taskId, taskRef, repo: leased.repo, branch, head: afterSetupHead }); }
+        catch (error) { return { ok: false, reason: "no-op", message: error instanceof Error ? error.message : "The coding review base changed during setup." }; }
+        if (afterSetupHead !== baseRevision) return { ok: false, reason: "no-op", message: "The coding review checkout moved during setup. Its work is preserved; the attempt's base was not recorded." };
+        store.stampRun(request.runId, { baseRevision });
+      }
+      const exact = await git(GIT, ["--no-optional-locks", "diff", "--quiet", prepared, "--"], { cwd: worktree });
+      if (exact.code !== 0) return { ok: false, reason: "setup", message: exact.code === 1
+        ? "The approved setup changed the prepared candidate's tracked files. The checkout is preserved; no candidate was committed or checked."
+        : "The prepared candidate could not be verified after setup. The checkout is preserved." };
       try { if (preparedEvidence) writePreparedEvidence(worktree, proof, preparedEvidence); }
       catch (error) { return { ok: false, reason: "no-op", message: error instanceof Error ? error.message : "The checked-out screenshots no longer match the saved result." }; }
       const sinceHead = await git(GIT, ["--no-optional-locks", "diff", "--name-only", "-z", "--no-renames", "HEAD", prepared], { cwd: worktree });
@@ -2096,7 +2126,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     };
   }
   store.setRunPhase(request.runId, "committing");
-  const made = await commit(git, worktree, branch, taskId, scope as Scope, handoff.conclusion);
+  const made = await commit(git, worktree, branch, taskId, scope as Scope, handoff.conclusion, request.attended === undefined ? scope?.candidate ?? null : null);
   if (made.ok && made.parked === undefined && made.committed) {
     const newHead = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
     if (newHead.code === 0) {
@@ -3498,6 +3528,7 @@ async function commit(
   taskId: string,
   scope: Scope,
   summary: string,
+  preparedCandidate: string | null = null,
 ): Promise<BuildResult> {
   const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain"], { cwd: worktree });
   if (status.code !== 0) {
@@ -3526,6 +3557,16 @@ async function commit(
     { cwd: worktree },
   );
   if (add.code !== 0) return { ok: false, reason: "commit-failure", message: firstLine(add.stderr) };
+
+  // Setup can create untracked files as well as edit tracked manifests.
+  // Re-prove the whole staged tree after the normal path exclusions, before
+  // committing, so neither can widen an exact prepared candidate.
+  if (preparedCandidate !== null) {
+    const exact = await git(GIT, ["--no-optional-locks", "diff", "--cached", "--quiet", preparedCandidate, "--"], { cwd: worktree });
+    if (exact.code !== 0) return { ok: false, reason: "commit-failure", message: exact.code === 1
+      ? "The staged files no longer match the approved prepared candidate. The checkout is preserved; nothing was committed."
+      : "The staged prepared candidate could not be verified. The checkout is preserved; nothing was committed." };
+  }
 
   // The subject comes from the agreed goal, not from the agent's own prose.
   // An agent asked for a summary writes a report, and its first line is a

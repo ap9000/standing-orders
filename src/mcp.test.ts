@@ -98,7 +98,7 @@ describe("the MCP stdio server", () => {
     h.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: modernMeta } });
     const listed = h.last()["result"] as Record<string, unknown>;
     expect(listed["resultType"]).toBe("complete");
-    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(24);
+    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(25);
     // No outputSchema: it describes structuredContent, which these tools
     // do not return (round-2 finding 1).
     expect((listed["tools"] as { outputSchema?: unknown }[])[0]?.outputSchema).toBeUndefined();
@@ -329,6 +329,19 @@ describe("the MCP stdio server", () => {
     expect((status["repos"] as unknown[]).length).toBe(0); // nothing filed in OUR repo yet
   });
 
+  test("repository context checks project scope before source access and missing indexing does not block", () => {
+    const h = harness(store, token);
+    const call = (repo: string) => h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: modernMeta, name: "get_project_context", arguments: { repo, query: "export" } } });
+    call("/repo/private");
+    const denied = h.last()["result"] as { isError?: boolean; content: { text: string }[] };
+    expect(denied.isError).toBe(true);
+    expect(denied.content[0]?.text).toContain("outside your access");
+    call(REPO);
+    const allowed = h.last()["result"] as { isError?: boolean; content: { text: string }[] };
+    expect(allowed.isError).toBeUndefined();
+    expect(JSON.parse(allowed.content[0]!.text)).toMatchObject({ index: { status: "unavailable" }, excerpts: [] });
+  });
+
   test("revocation mid-session: the next call refuses and the server exits — tools/list visibility was never authorization", () => {
     const h = harness(store, token);
     h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: modernMeta, name: "list_repos", arguments: {} } });
@@ -420,6 +433,10 @@ describe("the MCP stdio server", () => {
     // whole line is pinned, byte-for-byte, against JSON.stringify of the
     // expected object.
     const tools = [
+      {
+        name: 'get_project_context', description: 'Read bounded source excerpts or advisory static import impact in an admitted project. Falls back to text search without an index.',
+        inputSchema: { type: 'object', properties: { repo: { type: 'string', minLength: 1, maxLength: 4096 }, query: { type: 'string', minLength: 1, maxLength: 1000 }, mode: { type: 'string', enum: ['search', 'impact'] } }, required: ['repo', 'query'], additionalProperties: false },
+      },
       {
         name: "get_assignment", description: "Read one assignment's root, current execution, owner, exact result and handoff receipt. Approval, proof and deployment remain separate facts.",
         inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 } }, required: ["ref"], additionalProperties: false },

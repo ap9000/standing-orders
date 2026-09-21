@@ -4,7 +4,10 @@ import {loadDiscordCredentials} from "./discord-api.js";
 import { loadSlackCredentials } from "./slack-api.js";
 import { followSlack } from "./slack.js";
 import { validateScopeText } from "./task-text.js";
+import { runKnowledgeCommand } from "./knowledge-cli.js";
 import { runAssignmentCommand } from "./assignment-adapters.js";
+import { applyProjectProfile, runProjectCommand } from "./project-cli.js";
+import { runTaskOutcomeCommand } from "./task-outcome-cli.js";
 /**
  * The commands that actually move work: authoring tasks, and the claim loop.
  *
@@ -298,6 +301,10 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task add <title>          queue work
   standing-orders task list [--state <s>]   everything, or one state
   standing-orders task show <id>
+  standing-orders project use <path>        remember a saved project (optional --token-file)
+  standing-orders project show              show the current project and credential reference
+  standing-orders task complete <id>        mark the current result complete (--digest for JSON/agents)
+  standing-orders task revise <id> --feedback "requested change"
   standing-orders assignment show <task>    root, current work and exact handoff
   standing-orders assignment updates        durable updates (--after <cursor>)
   standing-orders assignment brief          catch up from the local database
@@ -600,7 +607,7 @@ type Args = {
 export const TASK_ACTIONS = [
   "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "regate", "plan",
-  "review", "accept", "repair", "route", "stop", "resume",
+  "review", "accept", "repair", "route", "stop", "resume", "complete", "revise",
 ] as const;
 export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
@@ -630,12 +637,12 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   "phase", "risk", "tier", "clear-phase",
   "run", "containment",
-  "token-env", "after", "repair-max-attempts", "consumer", "batch",
+  "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
-  "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
+  "json", "yes", "all", "local", "history", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
-  "no-open", "no-verify", "end", "report", "off", "tmux",
+  "no-open", "no-verify", "no-follow", "end", "report", "off", "tmux",
   "self-heal", "plan-auto", "repair-auto", "review-retry-auto",
 ]);
 
@@ -720,6 +727,8 @@ export async function runOperate(
 
   const file = text(flags, "db") ?? options.databaseFile ?? databasePath(process.env, homedir());
   const now = options.now ?? new Date();
+  try { applyProjectProfile(command, positional, flags, file); }
+  catch (error) { return fail(write, json, command, "configuration", describe(error), EXIT.refused); }
 
   // THE CONTAINMENT POLICY, pinned for this process before any database
   // opens (OS containment plan): `--containment observed|preferred|required`,
@@ -895,8 +904,12 @@ async function dispatch(
       return readyCommand(flags, context);
     case "task":
       return taskCommand(positional, flags, context);
+    case "project":
+      return runProjectCommand(positional, flags, context);
     case "assignment":
       return runAssignmentCommand(positional, flags, context);
+    case "knowledge":
+      return runKnowledgeCommand(positional, flags, { ...context, now: context.clock() });
     case "claim":
       return claimCommand(positional, flags, context);
     case "heartbeat":
@@ -926,7 +939,8 @@ async function dispatch(
     case "peek":
       return peekCommand(positional, flags, context);
     case "brief":
-      return briefCommand(flags, context);
+      if (["history", "local", "since", "latest-watch"].some(flag => flags.has(flag))) return briefCommand(flags, context);
+      return runAssignmentCommand(["brief"], flags, { ...context, commandName: "brief" });
     case "decide":
       return decideCommand(positional, flags, context);
     case "incident":
@@ -4473,7 +4487,7 @@ async function briefCommand(
 
   // Deadlines are swept wherever decisions are shown, so "overdue" is a fact
   // the brief computes rather than one it hopes somebody else computed.
-  store.expireOverdueDecisions(clock());
+  // A report never expires or changes a saved decision.
   const decisions = store.listDecisions("unanswered");
   // No time window on incidents: a task held by a malformed park last
   // Tuesday is still held, and a brief that let it age out of view would
@@ -9496,6 +9510,14 @@ function taskCommand(
   }
 
   switch (action) {
+    case "complete":
+    case "revise":
+      return runTaskOutcomeCommand(action, rest, flags, { ...context, operator: async () => {
+        const acting = await askCredentials(flags, context);
+        if (acting === null) return null;
+        const authenticated = verifyApproverByPassword(context.store, acting.name, acting.token, context.store.knownRepos().filter(repo => context.store.accountCanAccess(acting.name, repo)));
+        return authenticated.ok ? authenticated.who : null;
+      } });
     case "add":
       return addTask(rest, flags, context);
     case "list":
@@ -11215,6 +11237,7 @@ async function proposalsCommand(positional: readonly string[], flags: Map<string
  */
 async function chatCommand(flags: Map<string, string | true>, context: Context): Promise<number> {
   const { store, write, json } = context;
+  if (flags.has("follow") && flags.has("no-follow")) return fail(write, json, "chat", "usage", "Choose --follow or --no-follow.", EXIT.usage);
   const credentials = await askCredentials(flags, context);
   if (credentials === null) {
     return fail(write, json, "chat", "usage", "the mate takes your name and password — `--as <you>` and the hidden prompt; `--token <t>` only where a script must (it lands in shell history)", EXIT.usage);
@@ -11240,6 +11263,7 @@ async function chatCommand(flags: Map<string, string | true>, context: Context):
     repos,
     say: text(flags, "say"),
     end: flags.has("end"),
+    ...(flags.has("follow") || flags.has("no-follow") ? { follow: flags.has("follow") && !flags.has("no-follow") } : {}),
     ceilingUsd: ceilingGiven === undefined ? undefined : Number(ceilingGiven),
     ...(context.mateSeams === undefined ? {} : { seams: { ...context.mateSeams, clock: context.mateSeams.clock ?? context.clock } }),
     ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),

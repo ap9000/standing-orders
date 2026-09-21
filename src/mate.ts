@@ -25,7 +25,6 @@ import {
   MATE_MAX_STEPS,
   MATE_TOOL_RESULT_CAP_BYTES,
   TURN_WALL_CLOCK_MS,
-  buildDataDocument,
   composeMateRequest,
   credentialKeyOf,
   isDirectChatProvider,
@@ -41,7 +40,7 @@ import { MATE_CONTRACT } from "./mate-contract.js";
 import { MATE_MAX_PROPOSALS_PER_TURN, MATE_TOOL_SCHEMAS, executeMateTool, isMateTool, mateViewContextFor, redactForMate, toolResultBytes } from "./mate-tools.js";
 import type { ReviewSnapshot } from "./chat-review.js";
 import { composeSubscriptionMatePrompt, performSubscriptionMateRequest, type SubscriptionMateRunner } from "./subscription-chat.js";
-import { withDispatchDiagnoses } from "./dispatch.js";
+import { leadContext } from './lead-context.js';
 
 export const MATE_MESSAGE_MAX_CHARS = 2_000;
 /** The thread's recent history the model sees, most recent first until the cap. */
@@ -132,7 +131,7 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
   channel: "this conversation's connection changed — reconnect it before sending again",
 };
 
-const READ_TOOLS = new Set(["get_actions", "get_action_status", "get_skills", "get_acceptance_evidence", "recap", "list_repos", "list_tasks", "get_task", "get_result", "get_result_images", "get_controls", "get_agents", "get_project_knowledge", "list_decisions", "get_decision", "queue"]);
+const READ_TOOLS = new Set(["get_brief", "get_project_context", "get_actions", "get_action_status", "get_skills", "get_acceptance_evidence", "recap", "list_repos", "list_tasks", "get_task", "get_result", "get_result_images", "get_controls", "get_agents", "get_project_knowledge", "list_decisions", "get_decision", "queue"]);
 
 /** The last messages of the thread as provider-neutral history, newest kept first until the byte cap. */
 export function historyFor(store: Store, thread: number): MateHistoryMessage[] {
@@ -209,11 +208,8 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   store.sweepStaleMateTurns(now);
 
   const view = mateViewContextFor(store, who);
-  const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(who.repos, now), now);
-  const families = snapshot.tasks.map(one => ({ task: one.rootId ?? one.id, currentExecution: one.id,
-    otherActive: one.otherActive ?? [], historyProblem: one.historyProblem ?? null }));
-  const document = redactForMate(`${buildDataDocument(snapshot).document}\nTask identities (read exact currentExecution before proposing new actions; prior proposals retain their targets): ${JSON.stringify(families)}`, view);
-  const historyMessage = input.context === undefined ? message : `${input.context}\n\n${message}`;
+  const document = redactForMate(leadContext(store, who.repos, now, input.evidenceRoot), view);
+  const historyMessage = input.context === undefined ? message : `${redactForMate(input.context, view)}\n\n${message}`;
   const history: MateHistoryMessage[] = [...historyFor(store, thread.id), { role: "operator", text: historyMessage }];
   const composeDirect = (key: string): { url: string; headers: Record<string, string>; body: string } => {
     if (!direct) throw new Error("not a direct chat provider");
@@ -225,7 +221,18 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   // a worst-case dollar reservation; subscription traffic records zero.
   const base = direct ? composeDirect("").body : composeSubscription();
   if (scanForSecrets(base).length > 0) return refuse("secret-in-context");
-  const reserved = direct ? mateWorstCaseForPrice(price as NonNullable<typeof price>, Buffer.byteLength(base, "utf8")) : 0;
+  // Fit the bounded tool loop to the already-authorized remaining allowance.
+  // Context/history growth must not demand a larger budget for a simple reply.
+  // Each chosen step retains the same worst-case call/output accounting.
+  let maxSteps = MATE_MAX_STEPS;
+  const baseBytes = Buffer.byteLength(base, "utf8");
+  const reserveFor = (steps: number) => direct ? mateWorstCaseForPrice(price as NonNullable<typeof price>, baseBytes, { steps }) : 0;
+  if (direct) {
+    const remaining = Math.min(liveSession.ceilingMicrousd - liveSession.spentMicrousd,
+      config.weeklyCeilingMicrousd - store.chatWeeklySpendMicrousd(credentialKey, now));
+    while (maxSteps > 1 && reserveFor(maxSteps) > remaining) maxSteps--;
+  }
+  const reserved = reserveFor(maxSteps);
 
   const admitted = store.transact(() => {
     const existing = request === undefined ? null : store.mateRequestReceipt(session.id, request);
@@ -307,7 +314,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   let reply: string | null = null;
   let stoppedAtCap = false;
   let lastText = "";
-  while (steps < MATE_MAX_STEPS) {
+  while (steps < maxSteps) {
     const blocked = guard(input.revalidate === undefined ? { ok: true } : await input.revalidate());
     if (blocked !== null) return blocked;
     now = clock();
@@ -434,7 +441,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   }
   if (reply === null) {
     stoppedAtCap = true;
-    reply = `${lastText.trim() === "" ? "" : `${lastText.trim()}\n\n`}(stopped after ${MATE_MAX_STEPS} steps)`;
+    reply = `${lastText.trim() === "" ? "" : `${lastText.trim()}\n\n`}(stopped after ${maxSteps} steps${maxSteps < MATE_MAX_STEPS ? " within this conversation’s remaining allowance" : ""})`;
   }
   // Ruling 11: model text is scanned before it becomes durable.
   if (scanForSecrets(reply).length > 0) return fail("secret-refused", "the model's reply contained something credential-shaped and was discarded", false);

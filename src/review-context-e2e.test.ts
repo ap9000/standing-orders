@@ -13,7 +13,6 @@ import { openStore } from "./store.js";
 import { register } from "./runner.js";
 import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
 import { parseReviewContext, reviewContextManifest, reviewContextFileName } from "./review-context.js";
-import { REVIEW_CONTEXT_NAME, reviewPass } from "./reviewer.js";
 import type { Runner } from "./builder.js";
 import { createHash } from "node:crypto";
 
@@ -40,15 +39,6 @@ describe("inherited review context and historical ingestion (v51)", () => {
     return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now: T0, agentRunner: runner });
   };
   const payload = () => JSON.parse(lines.join("\n"));
-  const historicalReview = async (runId: number, runnerToken: string, agentRunner: Runner) => {
-    const store = openStore(db);
-    try {
-      expect(store.requestReview(runId, "alex", T0).ok).toBe(true);
-      const reports = await reviewPass(store, { runner: "builder-1", token: runnerToken,
-        now: T0, clock: () => T0, evidenceRoot: join(base, "evidence"), agent: agentRunner });
-      lines = [JSON.stringify({ dispatched: reports.map(report => ({ id: `review of run ${report.run}`, outcome: report.outcome })) })];
-    } finally { store.close(); }
-  };
   const nameIn = (args: readonly string[], prefix: string): string | undefined => {
     const prompt = args[args.indexOf("-p") + 1] ?? "";
     return new RegExp(`${prefix}[0-9a-f]{16}\\.json`).exec(prompt)?.[0];
@@ -148,21 +138,9 @@ describe("inherited review context and historical ingestion (v51)", () => {
       expect(parsed.ok && parsed.inventory.coverage.every(row => !row.inherited)).toBe(true);
       store.close();
     }
-    // The first reviewer gets complete files before any revision exists.
+    // Retired commands cannot create another provider run from this saved result.
     expect(await run(["task", "review", String(sourceRun), "--as", "alex", "--token", approverToken, "--json"], none)).not.toBe(0);
-    let firstReviewCalls = 0;
-    await historicalReview(sourceRun, runnerToken, async (_file, args, options) => {
-      firstReviewCalls++;
-      const manifest = JSON.parse(readFileSync(join(options!.cwd!, REVIEW_CONTEXT_NAME), "utf8"));
-      expect(manifest.head).toBe(sourceHead);
-      expect(args[args.indexOf("-p") + 1]).toContain("first-review context");
-      for (const [path, content] of Object.entries({ "src/limit.ts": LIMIT_TS, "src/guard.ts": GUARD_TS, "src/report.ts": REPORT_TS })) {
-        expect(readFileSync(join(options!.cwd!, manifest.items.find((item: { path: string }) => item.path === path).file), "utf8")).toBe(content);
-      }
-      return { ...OK, stdout: JSON.stringify({ result: JSON.stringify({ version: 1, comments: [], criteria: STATEMENTS.map((_, index) => ({ id: `c${index + 1}`, judgement: "cannot-tell", note: "Complete source is available; runtime behavior has not been demonstrated." })) }) }) };
-    });
-    expect(firstReviewCalls).toBe(1);
-    expect(payload().dispatched).toEqual(expect.arrayContaining([expect.objectContaining({ id: `review of run ${sourceRun}`, outcome: "reviewed" })]));
+    expect(payload().reason).toBe("model-review-retired");
 
     // A revision starts from its recorded source without landing that
     // feature on main or overriding the dispatcher's base manually.
@@ -242,31 +220,27 @@ describe("inherited review context and historical ingestion (v51)", () => {
     expect(lines.join("\n")).toContain("context: judged from this run's own patch");
     expect(lines.join("\n")).toMatch(/semantic coverage: 0\/3 upheld by an independent reviewer — independent review is optional under default quality — none has settled/);
 
-    // 4. The independent review: asked explicitly, run by the tick, judged
-    // by citing the sealed provenance — and bound to it at ingestion.
-    let sawContextFile = false;
-    let reviewPrompt = "";
-    const reviewer: Runner = async (_file, args, options) => {
-      const cwd = options?.cwd ?? "";
-      sawContextFile = readFileSync(join(cwd, REVIEW_CONTEXT_NAME), "utf8") === manifest;
-      expect(readFileSync(join(cwd, reviewContextFileName(itemIdFor("src/limit.ts"))), "utf8")).toBe(LIMIT_TS);
-      reviewPrompt = args[args.indexOf("-p") + 1] ?? "";
-      const review = {
-        version: 1,
-        comments: [],
-        criteria: [
-          { id: "c1", judgement: "upholds", note: `${itemIdFor("src/limit.ts")}: limiter() returns 3 at the sealed head` },
-          { id: "c2", judgement: "cannot-tell", note: "the sealed guard shows n < 3 but nothing shows a fourth attempt being made" },
-          { id: "c3", judgement: "upholds", note: "src/report.ts names the outcome in the patch" },
-        ],
-      };
-      return { ...OK, stdout: JSON.stringify({ result: JSON.stringify(review), session_id: "review-session" }) };
-    };
-    await historicalReview(revisionRun, runnerToken, reviewer);
-    expect(payload().dispatched).toEqual(expect.arrayContaining([expect.objectContaining({ id: `review of run ${revisionRun}`, outcome: "reviewed" })]));
-    expect(sawContextFile).toBe(true);
-    expect(reviewPrompt).toContain("REVISES an earlier build");
-    expect(reviewPrompt).toContain(`c1: inherited — sealed context ${itemIdFor!("src/limit.ts")}`);
+    // 4. Retained historical judgements still bind to the exact source context.
+    // Seed through the store boundary; the retired model runner is not executable.
+    {
+      const store = openStore(db);
+      const requested = store.requestReview(revisionRun, "alex", T0);
+      if (!requested.ok) throw new Error(requested.reason);
+      const admitted = store.admitReview(requested.id, { runner: "builder-1", token: runnerToken, provider: "claude", model: "sonnet" }, T0);
+      if (!admitted.ok) throw new Error(admitted.reason);
+      store.stampProviderStart(admitted.reviewerRunId, T0);
+      const run = store.getRun(revisionRun)!;
+      const artifacts = store.artifactsFor(revisionRun);
+      const diff = artifacts.find(one => one.kind === "terminal-diff")!;
+      const proof = artifacts.find(one => one.kind === "proof")!;
+      const context = artifacts.find(one => one.kind === "review-context")!;
+      store.ingestReview({ reviewerRunId: admitted.reviewerRunId, runId: revisionRun, artifactId: diff.id, evidenceRoot: join(base, "evidence"), author: "reviewer:claude·sonnet", comments: [],
+        judgements: [{ id: "c1", judgement: "upholds", note: itemIdFor("src/limit.ts") + ": limiter() returns 3 at the sealed head" },
+          { id: "c2", judgement: "cannot-tell", note: "The guard is retained; runtime behavior remains unverified." },
+          { id: "c3", judgement: "upholds", note: "src/report.ts names the outcome in the patch" }],
+        bindings: { diffSha: diff.sha256, scopeDigest: run.scopeDigest, headSha: run.headRevision, proof: { artifactId: proof.id, sha256: proof.sha256 }, checkLog: null, screenshots: [], context: { artifactId: context.id, sha256: context.sha256 } } }, T0);
+      store.close();
+    }
     {
       const store = openStore(db);
       const judged = store.criterionReviewsFor(revisionRun);

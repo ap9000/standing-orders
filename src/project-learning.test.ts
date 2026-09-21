@@ -8,7 +8,7 @@ import { addApprover, propose, approve } from './scope.js';
 import { register } from './runner.js';
 import { storeEvidence } from './evidence.js';
 import { storeStructuredAttempt } from './structured-output.js';
-import { parseReview, reviewPass } from './reviewer.js';
+import { parseReview } from './reviewer.js';
 import { changeLearning, learningContext, learningView, recoverLearning, parseLearning, queueLearning, type LearningCandidate } from './project-learning.js';
 import { learningHtml } from './workspace-ui.js';
 import { createDecisionServer } from './serve.js';
@@ -125,7 +125,10 @@ describe('quiet learning', () => {
     expect(store.liveDiffComments(c.source)).toEqual([]); queueLearning(store,c.source,c.reviewer,[c.c],c.c.evidence,now); recoverLearning(store,evidence,repo,now);
     expect(view().lessons).toHaveLength(1); expect(view().events).toEqual(first.events);
     expect(snapshot(start()).lessons).toEqual([]); change('adopt'); expect(snapshot(start()).lessons).toEqual([]); change('enable');
-    const run=start(), supplied=learningContext(store,evidence,run,'build',now); expect(JSON.parse(supplied.trim().split('\n').at(-1)!).lessons[0]).toMatchObject({id:first.lessons[0]!.id,version:2,source:c.source,...parseLearning([c.c])[0]});
+    const run=start(), supplied=learningContext(store,evidence,run,'build',now,'f'.repeat(40)); expect(JSON.parse(supplied.trim().split('\n').at(-1)!).lessons[0]).toMatchObject({id:first.lessons[0]!.id,version:2,source:c.source,...parseLearning([c.c])[0]});
+    const unstamped=start(); store.handle.prepare('UPDATE run SET base_revision=NULL WHERE id=?').run(unstamped);
+    expect(JSON.parse(learningContext(store,evidence,unstamped,'build',now,head).trim().split('\n').at(-1)!).lessons).toHaveLength(1);
+    expect(store.getRun(unstamped)?.baseRevision).toBeNull();
     expect(store.handle.prepare('SELECT payload FROM learning_snapshot WHERE run=?').get(run)?.['payload']).toBe(supplied);
     change('disable'); expect(learningContext(store,evidence,run,'build',now)).toBe(supplied); expect(snapshot(start()).lessons).toEqual([]);
     expect(()=>store.handle.prepare("UPDATE learning_snapshot SET payload='changed' WHERE run=?").run(run)).toThrow(/immutable/);
@@ -237,29 +240,6 @@ describe('quiet learning', () => {
     expect(()=>change('adopt')).toThrow(/cannot take/);change('enable');expect(snapshot(start()).lessons).toEqual([]);
     capture(1, (candidate: LearningCandidate) => [{...candidate,evidence:candidate.evidence.map(e=>({...e,excerpt:'This text was never supplied.'}))}]);
     expect(view().lessons).toHaveLength(1);expect(view().events.some(e=>e.action==='failure'&&e.reason.includes('excerpt'))).toBe(true);
-  });
-  test('the existing reviewer call captures optional learning without another model turn and receives its exact snapshot', async () => {
-    capture(); change('adopt'); change('enable');
-    const source=start(), patch='diff --git a/f0.ts b/f0.ts\n--- a/f0.ts\n+++ b/f0.ts\n+export const n=0;';
-    const artifact=storeEvidence(store,evidence,source,'terminal-diff','later.patch',Buffer.from(patch),'fixture',now,{captureStatus:'ok'});
-    store.recordOutcomeFacts(source,{headRevision:head});store.finishRun(source,{outcome:'built',committed:true,now});
-    const ask=store.requestReview(source,'alex',now);expect(ask.ok).toBe(true);
-    let calls=0, brief='';
-    const report=await reviewPass(store,{runner:'runner',token:'runner-token',now,evidenceRoot:evidence,scratchRoot:root,agent:async (_file,args)=>{
-      calls++; brief=String(args[args.indexOf('-p')+1]);
-      return {code:0,stdout:JSON.stringify({result:JSON.stringify({version:1,comments:[],learningAssessment:{decision:'propose',reason:'The boundary applies to other callers.'},learning:[{kind:'project',observation:'The boundary remains explicit.',action:'Keep the boundary regression.',paths:['f0.ts'],phases:['build'],evidence:[{artifactId:artifact,sha256:store.getArtifact(artifact)!.sha256,excerpt:'+export const n=0;'}]}]})}),stderr:'',timedOut:false,notFound:false};
-    }});
-    expect(report[0]?.outcome).toBe('reviewed');expect(calls).toBe(1);expect(view().lessons).toHaveLength(2);
-    expect(view().events.find(e=>e.action==='assessment'&&e.after==='propose')).toMatchObject({reason:'The boundary applies to other callers.'});
-    const row=store.handle.prepare("SELECT s.payload FROM learning_snapshot s JOIN run r ON r.id=s.run WHERE r.role='reviewer' ORDER BY r.id DESC LIMIT 1").get();
-    expect(brief).toContain(String(row?.['payload']));expect(brief).toContain('Learning check:');
-    expect(brief).toContain('"learning": []');
-    expect(brief).toContain('"learningAssessment"');
-    expect(brief).toContain('a concrete reason');
-    expect(brief).toContain('DIFFERENT future task');
-    expect(brief).not.toContain('message must be exactly this JSON');
-    expect(brief.match(/Learning check:/g)).toHaveLength(1);
-    expect(JSON.parse(String(row?.['payload']).trim().split('\n').at(-1)!).lessons).toHaveLength(1);
   });
   test('real HTTP Settings without notifications, project admission, CSRF, viewer and stale forms',async()=>{
     capture(); const server=createDecisionServer({store,evidenceRoot:evidence,repo});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
