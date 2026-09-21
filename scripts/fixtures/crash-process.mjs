@@ -44,17 +44,13 @@ const session = args.includes("--resume") ? args[args.indexOf("--resume") + 1] :
 const output = event => console.log(JSON.stringify(event));
 output({ type: "system", subtype: "init", session_id: session });
 const speak = value => output({ type: "result", subtype: "success", is_error: false, session_id: session, result: typeof value === "string" ? value : JSON.stringify(value), num_turns: 1 });
-const phase = prompt.includes("You are a REVIEWER") || prompt.includes("previous REVIEWER reply") ? "review" : /STANDING-ORDERS-DONE-[a-f0-9]{16}\.json/.test(prompt) ? "build" : "plan";
+const phase = /STANDING-ORDERS-DONE-[a-f0-9]{16}\.json/.test(prompt) ? "build" : "plan";
 const initial = existsSync(join(control, "checkpoint.json")) ? JSON.parse(readFileSync(join(control, "checkpoint.json"), "utf8")) : null;
 if (["build", "plan"].includes(phase) && initial !== null && initial.pid !== process.pid && !existsSync(join(control, "released")) && alive(initial.pid)) {
   event("overlapping-writer", { original: initial.pid, stage: initial.stage });
 }
 event("provider-start", { phase, session });
-if (phase === "review") {
-  await checkpoint("review");
-  const rubric = JSON.parse(readFileSync("REVIEW-RUBRIC.json", "utf8"));
-  speak({ version: 1, comments: [], criteria: rubric.map(one => ({ id: one.id, judgement: "upholds", note: "The deterministic fixture matches its sealed evidence." })) });
-} else if (phase === "plan") {
+if (phase === "plan") {
   await checkpoint("planning");
   const file = /STANDING-ORDERS-PLAN-[a-f0-9]{16}\.json/.exec(prompt)?.[0];
   if (!file) throw new Error("Missing plan nonce");

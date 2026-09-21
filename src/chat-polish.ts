@@ -4,11 +4,11 @@ const escape = (value: string): string => value.replace(/[&<>"']/g, char => ({'&
 
 /** Presentation only. These are recorded completions, not a claim that
  * work happened since the user last visited, or that every result passed. */
-export function completedWorkHtml(snapshot: ChatSnapshot, projectLabels: readonly string[]): string {
-  const completed = snapshot.tasks.filter(task => task.state === 'done'
+export function completedWorkHtml(snapshot: ChatSnapshot, projectLabels: readonly string[], assignments?: Readonly<Record<string, { state: string }>>): string {
+  const completed = snapshot.tasks.filter(task => assignments === undefined ? task.state === 'done'
     && task.proofVerdict !== 'short' && task.proofVerdict !== 'refuted'
     && !task.historyProblem && !task.otherActive?.length
-    && task.dispatch?.condition !== 'waiting').slice(0, 3);
+    && task.dispatch?.condition !== 'waiting' : assignments[task.id]?.state === 'complete').slice(0, 3);
   if (!completed.length) return '';
   return `<section class="chat-completed" aria-label="Completed work"><h3>Completed work</h3>` + completed.map(task => {
     return `<a class="chat-overview-item" href="/t/${encodeURIComponent(task.rootId ?? task.id)}"><span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectLabels[task.repoIndex] ?? `Project ${task.repoIndex + 1}`)}</span></span><span class="chat-completed-action">Open task <span aria-hidden="true">→</span></span></a>`;

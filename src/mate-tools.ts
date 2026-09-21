@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { dirname, join } from 'node:path';
+import { repositoryContextRead } from './repository-context.js';
+import { assignmentCatchUp } from './assignment-brief.js';
 import { CHAT_ACTIONS, CHAT_ACTION_FIELDS, isChatAction, prepareSharedAction, sharedActionNeedsReview, sharedActionPayload } from './chat-actions.js';
 import { conversationSkills, skillsView } from "./project-skills.js";
 import { readAcceptanceEvidence } from "./chat-acceptance.js";
@@ -402,6 +405,26 @@ export function agentsOver(store: Store, taskId: string, now: Date): Record<stri
 }
 
 export const MATE_TOOLS: MateTool[] = [
+  {
+    name: 'get_brief', description: 'Read current tasks, decisions, results and project knowledge from the local database. No model or mutation.',
+    inputSchema: schema({ repo: REPO_ARG }),
+    handle: (ctx, args) => {
+      const repo = args['repo'] === undefined ? null : repoPathOf(ctx.who, args['repo']);
+      if (args['repo'] !== undefined && repo === null) return { ok: false, message: 'Choose a project from list_repos.' };
+      return { ok: true, body: assignmentCatchUp(ctx.store, ctx.now, { principal: 'operator', repos: ctx.who.repos }, repo === null ? {} : { repo }, ctx.evidenceRoot) };
+    },
+  },
+  {
+    name: 'get_project_context', description: 'Find source excerpts or advisory import impact. Read-only; unavailable indexing falls back to source search.',
+    inputSchema: schema({ repo: REPO_ARG, query: { type: 'string', minLength: 1, maxLength: 1000 }, mode: { type: 'string', enum: ['search', 'impact'] } }, ['repo', 'query']),
+    handle: (ctx, args) => {
+      const repo = repoPathOf(ctx.who, args['repo']);
+      if (!repo || !ctx.store.accountCanAccess(ctx.who.name, repo)) return { ok: false, message: 'Choose an available project from list_repos.' };
+      if (typeof args['query'] !== 'string' || !args['query'].trim() || args['query'].length > 1000 || args['mode'] !== undefined && !['search', 'impact'].includes(String(args['mode']))) return { ok: false, message: 'Choose search or impact and a short query.' };
+      return { ok: true, body: repositoryContextRead({ repo, query: args['query'], mode: args['mode'] === 'impact' ? 'impact' : 'search', audience: 'lead', maxBytes: 4000,
+        ...(ctx.evidenceRoot === undefined ? {} : { cacheRoot: join(dirname(ctx.evidenceRoot), 'repository-context') }) }) };
+    },
+  },
   {
     name: "get_action_status",
     description: "Read the saved proposal outcome after confirmation. Opening a link proves no completion.",

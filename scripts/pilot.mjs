@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Twenty real subscription tasks under preapproved fixture contracts, with automatic independent review. */
+/** Twenty real subscription tasks under preapproved fixture contracts, with explicit lead completion. */
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createHash,randomUUID} from 'node:crypto';
@@ -8,7 +8,7 @@ import {join,dirname,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {scenario,scenarioIds} from './fixtures/pilot-scenarios.mjs';
-import {assertReviewedCriteria} from './canary-assertions.mjs';
+import {createFixtureLead,completeFixtureAssignment} from './canary-assertions.mjs';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 let output=resolve('output/certification/pilot.json'), concurrency=4, playwright=null, selected=scenarioIds, providers=['claude','codex'];
 for(let i=2;i<process.argv.length;i++) {
@@ -64,8 +64,8 @@ async function one(id,provider,wave) {
     const password='pilot-'+randomUUID(),auth=['--as','pilot','--token',password];
     await cli('isolated fixture approver',['approver','add','pilot','--password',password]);
     const registered=await cli('repository-bound worker',['runner','register','worker','--repo',repo,...auth]);
-    for(const phase of ['plan','build','repair','review']) await cli('route '+phase,['config','set',phase,'--provider',provider,'--model',model,...auth]);
-    await cli('automatic independent review',['mode','set','--repo',repo,'--name','standard','--days','1',...auth]);
+    for(const phase of ['plan','build','repair']) await cli('route '+phase,['config','set',phase,'--provider',provider,'--model',model,...auth]);
+    await cli('bounded standing mode',['mode','set','--repo',repo,'--name','standard','--days','1',...auth]);
     if(spec.dependency) await cli('approved offline setup',['setup','set','--repo',repo,'--command','npm ci --offline --ignore-scripts','--timeout-seconds','120','--yes',...auth]);
     await cli('approved verification',['verify','set','--repo',repo,'--command','npm test','--timeout-seconds','120','--yes',...auth]);
     const title='Pilot '+id+': implement the approved scope in '+spec.paths.join(', ')+'. Run npm test before writing proof. Do not modify verification, package, or vendor files.';
@@ -79,24 +79,23 @@ async function one(id,provider,wave) {
     const preview=await cli('read scope',['task','show','work']);
     await cli('approve exact fixture scope',['task','approve','work','--yes','--digest',preview.scope.digest,...auth]);
     await writeFile(join(dir,'runner-token'),registered.token,{mode:0o600});
-    console.log(name+': starting unattended build, check, and review');
+    console.log(name+': starting unattended build and check');
     const start=Date.now();
     const worker=await run(process.execPath,[join(root,'dist/bin.js'),'watch','--runner','worker','--token-file',join(dir,'runner-token'),'--repo',repo,'--pool',pool,'--for','1000','--tick-every','200','--reconcile-every','1000','--bridge-every','3600000','--db',db,'--json']);
     await writeFile(join(dir,'watch-result.json'),JSON.stringify(worker,null,2));
-    steps.push({label:'unattended watch build and review',durationMs:Date.now()-start,exitCode:worker.code});
+    steps.push({label:'unattended watch build and check',durationMs:Date.now()-start,exitCode:worker.code});
     final=await cli('read final result',['task','show','work']);
     record.final=final;
     assert.equal(worker.code,0,'watch failed');
     assert.equal(final.task.state,'done','task did not complete');
-    assert.equal(final.proofVerdict,'verified','proof was '+final.proofVerdict);
-    assertReviewedCriteria(final.proofMatrix,preview.scope.acceptance.map(c=>c.id),provider,model);
     const build=final.runs.find(r=>r.role==='builder'&&r.outcome==='built'); assert(build,'missing completed build');
-    assert(final.runs.some(r=>r.role==='reviewer'&&r.outcome==='no-change'),'missing completed independent review');
     assert(final.runs.every(r=>r.outcome!==null),'open orphan run');
     const head=await git(['rev-parse',build.branch]); assert.notEqual(head,baseSha);
     const changed=(await git(['diff','--name-only',baseSha,head])).split('\n').filter(Boolean).sort();
     assert.deepEqual(changed,[...spec.paths].sort(),'unexpected or missing changed paths');
     assert.equal(await git(['rev-parse','main']),baseSha,'default branch changed');
+    const leadFile=await createFixtureLead(args=>cli('scope fixture lead',args),{repo,auth,tokenFile:join(dir,'lead.token')});
+    record.completion=await completeFixtureAssignment(args=>cli('inspect and handle result',args),'work',leadFile,{head,runId:build.id});
     const duplicate=await cli('duplicate dispatch',['tick','--runner','worker','--token',registered.token,'--repo',repo,'--pool',pool],[3]);assert.equal(duplicate.reason,'empty');
     assert.deepEqual(await identity(),runtime);
     record.commit=head;record.changed=changed;record.duplicateDispatch='refused-empty';record.passed=true;
@@ -116,7 +115,7 @@ for(let wave=1;wave<=2;wave++) {
 }
 const times=results.map(r=>r.durationSeconds).sort((a,b)=>a-b), percentile=p=>times[Math.ceil(times.length*p)-1]??null;
 const report={version:1,passed:results.every(r=>r.passed),runtime,runtimeUnchanged:JSON.stringify(await identity())===JSON.stringify(runtime),startedAt:startedAt.toISOString(),finishedAt:new Date().toISOString(),platform:process.platform,node:process.versions.node,retainedAt:base,total:results.length,completed:results.filter(r=>r.passed).length,p50Seconds:percentile(.5),p95Seconds:percentile(.95),manualInterventions:0,results,
- scope:'Real subscription builds, approved checks, and automatic independent reviews in disposable repositories across two sequential batches. Contracts are fixed and approved before unattended dispatch. Failed cases receive no manual rescue.',
+ scope:'Real subscription builds, approved checks, and explicit lead completion in disposable repositories across two sequential batches. Contracts are fixed and approved before unattended dispatch. Failed cases receive no manual rescue.',
  exclusions:['provider-authored planning (separately exercised by certify:provider)','mid-flight human revision or approval','direct-provider latency comparison','Windows','actual subscription exhaustion','production publication']};
 report.passed&&=report.runtimeUnchanged;
 await mkdir(dirname(output),{recursive:true});await writeFile(output,JSON.stringify(report,null,2)+'\n');console.log('Pilot: '+output+' ('+report.completed+'/'+report.total+')');if(!report.passed)process.exitCode=1;

@@ -81,6 +81,7 @@ export function assignmentForCoordinator(store: Store, token: string, operation:
 }
 
 export type AssignmentCliContext = {
+  commandName?: string;
   store: Store;
   write: (line: string) => void;
   json: boolean;
@@ -165,7 +166,7 @@ function resultLines(body: AssignmentBody): string[] {
 
 /** Explicit secret source only. Never print secret values or discover default
  * files. A bad explicit credential must not fall back to a local read. */
-function coordinatorToken(flags: Map<string, string | true>, env: NodeJS.ProcessEnv): { token: string | null } | Failure {
+export function coordinatorToken(flags: Map<string, string | true>, env: NodeJS.ProcessEnv): { token: string | null } | Failure {
   const envName = flags.get("token-env"), path = flags.get("token-file");
   if (envName !== undefined && path !== undefined) return failure("usage", "Choose either --token-env NAME or --token-file PATH.");
   if (envName === undefined && path === undefined) return { token: null };
@@ -187,7 +188,7 @@ function coordinatorToken(flags: Map<string, string | true>, env: NodeJS.Process
 
 export function runAssignmentCommand(positional: readonly string[], flags: Map<string, string | true>, context: AssignmentCliContext): number {
   const operation = positional[0] as AssignmentOperation;
-  const command = ASSIGNMENT_ACTIONS.includes(operation) ? `assignment ${operation}` : "assignment";
+  const command = context.commandName ?? (ASSIGNMENT_ACTIONS.includes(operation) ? `assignment ${operation}` : "assignment");
   const emit = (result: { ok: true; body: AssignmentBody } | Failure): number => {
     if (context.json) context.write(envelopeJson(result.ok ? { ok: true, command, result: result.body } : { ...result, command }));
     else if (!result.ok) context.write(result.message);

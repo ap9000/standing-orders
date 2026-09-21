@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { openStore, type Store, type RunStop } from "./store.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { mintCoordinator, revokeCoordinator, authenticateCoordinator, taskDetailFor } from "./coordinator.js";
@@ -17,7 +17,13 @@ import { maybeTriggerRepair } from "./dispose.js";
 import { modeDigestOf, modeTermsJson, presetTerms } from "./modes.js";
 import { taskWorkSummaryOf } from "./work-summary.js";
 import { assignmentSummaryHtml } from "./assignment-ui.js";
+import { GOAL_ASSESSMENT_PENDING } from "./proof.js";
+import { createDecisionServer } from "./serve.js";
+import { Window } from "happy-dom";
 import { requestResultChanges } from "./result-actions.js";
+import { runTaskOutcomeCommand } from "./task-outcome-cli.js";
+import { main } from "./cli.js";
+import { writeLoginFileDurably } from "./operate.js";
 import * as taskControl from "./task-control.js";
 import { assignmentOf, assignmentBrief, assignmentEvidenceIntact, assignmentUpdates, checkAssignment, checkAssignmentAsOperator, claimAssignment, syncAssignmentHandoffs, type AssignmentOwner } from "./assignment.js";
 
@@ -85,6 +91,60 @@ describe("continuous assignments over existing task families", () => {
       ...actual(id)!, state: "succeeded", succeeded: { runId: run + 100, requestId: 1, attempt: 1, runner: "reviewer", outcome: "no-change", reason: null, startedAt: NOW.toISOString(), finishedAt: NOW.toISOString() },
     } : actual(id));
   }
+
+  test("everyday CLI completion and revision keep exact receipts, scoped authority, history and replay identity", async () => {
+    const run = built();
+    storeEvidence(store, dir, run, "terminal-diff", "changes.patch", Buffer.from("diff --git a/src/retry.ts b/src/retry.ts\n"), "saved changes", NOW);
+    const who = verifyApproverStanding(store, "operator", store.accountOf("operator")!.generation, [REPO]);
+    if (!who.ok) throw Error("operator fixture");
+    const lines: string[] = [];
+    const context = { store, evidenceRoot: dir, json: true, now: NOW, write: (line: string) => lines.push(line), operator: async () => who.who };
+    const call = async (action: "complete" | "revise", flags: Record<string, string>, id = "retry") => {
+      const code = await runTaskOutcomeCommand(action, [id], new Map(Object.entries(flags)), context);
+      return { code, body: JSON.parse(lines.at(-1)!) };
+    };
+    const receipt = assignmentOf(store, "retry", NOW, access, dir)!.receipt!;
+    expect((await call("complete", {})).body).toMatchObject({ ok: false, reason: "usage" });
+    expect((await call("complete", { digest: "f".repeat(64) })).body).toMatchObject({ ok: false, reason: "stale" });
+    const credentialFile = join(dir, "lead-token"); writeFileSync(credentialFile, leadToken);
+    expect((await call("complete", { digest: receipt.digest, "token-file": credentialFile })).body).toMatchObject({ ok: false, reason: "not-owner" });
+    claimAssignment(store, "retry", lead, NOW, dir);
+    expect((await call("complete", { digest: receipt.digest, "token-file": credentialFile })).body).toMatchObject({ ok: true, command: "task complete", result: { state: "complete" } });
+    expect(store.proofAcceptance(run)).toBeNull();
+    const source = store.getScope("retry")!.digest, scopeBefore = store.getScope("retry");
+    const request = { feedback: "Preserve the key after another retry.", run: String(run), source, key: "d".repeat(32) };
+    expect((await call("revise", { ...request, source: "e".repeat(32) })).body).toMatchObject({ ok: false, reason: "stale-result" });
+    expect(store.allDiffComments(run)).toHaveLength(0);
+    const made = await call("revise", request);
+    expect(made, JSON.stringify(made.body)).toMatchObject({ code: 0, body: { command: "task revise", result: { rootId: "retry", sourceRun: run, approved: false } } });
+    const child = made.body.result.id;
+    expect(store.getScope(child)?.approvedDigest).toBeNull();
+    expect(store.getScope("retry")).toEqual(scopeBefore);
+    expect((await call("revise", request)).body.result.id).toBe(child);
+    expect((await call("revise", { ...request, feedback: "Different feedback", key: "e".repeat(32) })).body).toMatchObject({ ok: false, reason: "stale-result" });
+    expect(store.revisionsFromRun(run)).toHaveLength(1);
+    expect(store.allDiffComments(run)).toHaveLength(1);
+    writeFileSync(credentialFile, "not-a-credential");
+    expect((await call("complete", { digest: receipt.digest, "token-file": credentialFile })).body).toMatchObject({ ok: false, reason: "unauthenticated" });
+  });
+
+  test("public task commands use the existing local sign-in and report the exact handled result", async () => {
+    const run = built();
+    storeEvidence(store, dir, run, "terminal-diff", "changes.patch", Buffer.from("diff --git a/src/retry.ts b/src/retry.ts\n"), "saved changes", NOW);
+    const root = join(dir, 'evidence');
+    for (const artifact of store.artifactsFor(run)) {
+      const target = join(root, artifact.key); mkdirSync(dirname(target), { recursive: true }); copyFileSync(join(dir, artifact.key), target);
+    }
+    writeLoginFileDurably(join(dir, 'up-login.txt'), 'operator', token);
+    const args = ['--db', join(dir, 'orders.db')]; const lines: string[] = [];
+    const write = (line: string) => lines.push(line);
+    expect(await main(['task', 'complete', 'retry', ...args], write, { operate: { now: NOW } })).toBe(0);
+    expect(lines.join('\n')).toContain(`run ${run} · ${'a'.repeat(40)}`);
+    expect(assignmentOf(store, 'retry', NOW, access, root)?.state).toBe('complete');
+    expect(await main(['task', 'revise', 'retry', '--feedback', 'Keep the key on another retry.', '--json', ...args], write, { operate: { now: NOW } })).toBe(0);
+    expect(JSON.parse(lines.at(-1)!)).toMatchObject({ ok: true, command: 'task revise', result: { rootId: 'retry', sourceRun: run, approved: false } });
+    expect(store.revisionsFromRun(run)).toHaveLength(1);
+  });
   function research(withQuestion = false) {
     store.createTask({ id: "research", title: "Explain retry behavior", deliverable: "report" }, NOW);
     const ref = store.lookupRef("research")!; store.placeTask(ref.id, REPO);
@@ -188,6 +248,48 @@ describe("continuous assignments over existing task families", () => {
     expect(store.repairChainFor(run)).toBeNull();
   });
 
+  test("shared current status keeps the retired assessment in history across task, result, work and chat", async () => {
+    const run = built();
+    store.saveProofVerdict(run, "short", [GOAL_ASSESSMENT_PENDING], NOW, store.proofVerdictFor(run)!.matrix.map(row => ({ ...row, review: null })), "verified");
+    claimAssignment(store, "retry", lead, NOW, dir);
+    const ready = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(ready.attention).not.toContain(GOAL_ASSESSMENT_PENDING);
+    expect(ready.receipt!.proof!.reasons).toContain(GOAL_ASSESSMENT_PENDING);
+    const before = ready.receipt!.digest;
+    expect(checkAssignment(store, "retry", before, lead, NOW, dir).ok).toBe(true);
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "complete", receipt: { digest: before }, completion: { digest: before } });
+    const server = createDecisionServer({ store, evidenceRoot: dir, clock: () => NOW });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); if (address === null || typeof address === "string") throw Error("fixture port");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const login = await fetch(`${base}/login`, { method: "POST", body: new URLSearchParams({ name: "operator", token }), redirect: "manual" });
+      expect(login.status).toBe(303);
+      const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+      const home = await fetch(`${base}/`, { headers: { cookie }, redirect: "manual" });
+      expect(home.headers.get("location")).toBe("/chat");
+      for (const path of ["/t/retry", `/r/${run}`, `/review?result=retry&run=${run}`, `/chat?task=retry`, `/chat?task=retry&result=${run}`]) {
+        const response = await fetch(base + path, { headers: { cookie } });
+        expect(response.status, path).toBe(200);
+        const window = new Window();
+        try {
+          window.document.body.innerHTML = await response.text();
+          const headlines = [...window.document.querySelectorAll('.assignment-state,.status-label')].map(one => one.textContent);
+          expect(headlines, path).toContain("Complete");
+          expect(headlines.join(" "), path).not.toMatch(/verification needed|review needed|missing evidence/i);
+          const currentProblems = [...window.document.querySelectorAll('.assignment-summary>.problem,.result-attention,.receipt-caveats')].map(one => one.textContent).join(" ");
+          expect(currentProblems, path).not.toContain(GOAL_ASSESSMENT_PENDING);
+          expect([...window.document.querySelectorAll('a,button')].map(one => one.textContent).join(" "), path).not.toContain("Review the missing evidence");
+        } finally { await window.happyDOM.close(); }
+      }
+      const work = await (await fetch(`${base}/work`, { headers: { cookie } })).text();
+      expect(work).toContain('data-work-status="assignment-complete" data-work-views="all completed"');
+      const inbox = await (await fetch(`${base}/inbox`, { headers: { cookie } })).text();
+      expect(inbox).not.toContain('badge-failed">missing evidence');
+      expect(store.proofVerdictFor(run)!.reasons).toEqual([GOAL_ASSESSMENT_PENDING]);
+    } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+
   test.each(["short", "refuted"] as const)("a %s goal-review record cannot force another build when the native check passed", verdict => {
     const run = built(task(), false);
     store.saveProofVerdict(run, verdict, ["The saved source inventory is truncated; a screenshot is missing."], NOW,
@@ -217,6 +319,11 @@ describe("continuous assignments over existing task families", () => {
     const result = assignmentOf(store, "retry", NOW, access, dir)!;
     expect(result).toMatchObject({ state: "ready-to-check", detail: "Checks failed (exit 1).",
       receipt: { completionKind: "finished-build", checks: { status: "failed", exitCode: 1, command: "npm test" } } });
+    const currentHtml = assignmentSummaryHtml(result, { diagnostics: [{ token: "checks-failed", label: "Changes saved, but checks failed",
+      detail: "The repository's approved check failed against this build (exit 1), so the result is not verified.", tone: "problem" }] }).split("<details")[0]!;
+    expect(currentHtml.match(/Checks failed \(exit 1\)/g)).toHaveLength(1);
+    expect(currentHtml).not.toContain("Changes saved, but checks failed");
+    expect(currentHtml).toContain("Inspect failed check");
     const proof = store.proofVerdictFor(run), runs = store.runsFor(store.lookupRef("retry")!.id);
     expect(checkAssignment(store, "retry", result.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: {
       state: "complete", detail: expect.stringContaining("Checks failed (exit 1)."), receipt: { checks: { status: "failed", exitCode: 1 } } } });

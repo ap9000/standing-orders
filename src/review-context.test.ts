@@ -3,7 +3,7 @@ import { executeMateTool, MATE_TOOLS } from "./mate-tools.js";
 import { applyChatTaskAction, CHAT_TASK_ACTIONS } from "./chat-task-actions.js";
 import { CHAT_CONTROLS } from "./chat-controls.js";
 import { createDecisionServer } from "./serve.js";
-import { assessmentFromSavedEvidence, verificationEvidence, REVIEW_GATE_NAME, sealVerificationReceipt } from "./verification-evidence.js";
+import { verificationEvidence, sealVerificationReceipt } from "./verification-evidence.js";
 import { verifyApproverByPassword } from "./principal.js";
 /**
  * Inherited review context (v51, contract handoff task 3), end to end
@@ -12,15 +12,14 @@ import { verifyApproverByPassword } from "./principal.js";
  * earlier build implemented, every item bound to source run, commit,
  * path, and digest; changed criteria, changed code, stale ancestry,
  * tampered ancestors, byte limits, binaries, and secrets all read as
- * named gaps or invalid support; both subscription reviewers receive the
- * identical sealed bytes; and judgements on inherited criteria must cite
+ * named gaps or invalid support; historical judgements on inherited criteria must cite
  * supplied provenance. Nothing here reads a working tree as evidence.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -30,27 +29,12 @@ import { budgetedStatJson, captureTerminalDiff, parseNumstat, readVerifiedArtifa
 import { addApprover, approve, propose } from "./scope.js";
 import { register } from "./runner.js";
 import { adjudicate, changedListProblems, coverageWords, foldReview, matrixWords, semanticCoverage, type CriterionMatrixRow } from "./proof.js";
-import {
-  captureReviewContext,
-  citesSuppliedProvenance,
-  deriveReviewContext,
-  parseReviewContext,
-  REVIEW_CONTEXT_LIMITS,
-  LEGACY_REVIEW_CONTEXT_LIMITS,
-  reviewContextFileName,
-  reviewContextManifest,
-  reviewContextRules,
-  reviewContextCustodyProblem,
-  serializeReviewContext,
-  type ReviewContextInventory,
-} from "./review-context.js";
-import { parseReview, reviewPass, REVIEW_CONTEXT_NAME, REVIEW_PATCH_NAME, REVIEW_RUBRIC_NAME, REVIEW_PROOF_NAME } from "./reviewer.js";
-import { evidenceRange, evidenceRequest, isEvidenceOnlyReply, REVIEW_READ_LIMITS } from "./review-evidence.js";
-import { sealedDiffStatFacts, type Runner } from "./builder.js";
+import { captureReviewContext, citesSuppliedProvenance, parseReviewContext, REVIEW_CONTEXT_LIMITS, LEGACY_REVIEW_CONTEXT_LIMITS, reviewContextRules, reviewContextCustodyProblem, serializeReviewContext, type ReviewContextInventory } from "./review-context.js";
+import { parseReview } from "./reviewer.js";
+import { evidenceRange, evidenceRequest, isEvidenceOnlyReply } from "./review-evidence.js";
+import { sealedDiffStatFacts } from "./builder.js";
 
 const T0 = new Date("2026-09-11T12:00:00.000Z");
-const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
-const spoken = (payload: unknown): string => JSON.stringify({ result: JSON.stringify(payload) });
 const sha256 = (text: string | Buffer): string => createHash("sha256").update(text).digest("hex");
 
 const GIT_ENV = {
@@ -308,8 +292,7 @@ describe("inherited review context (v51)", () => {
     const login = verifyApproverByPassword(f.store, "alex", f.approverToken, [f.repo]);
     if (!login.ok) throw new Error("login");
     const ask = () => f.store.requestReview(f.sourceRun, "alex", T0);
-    const pass = (agent: Runner) => reviewPass(f.store, { runner: "builder-1", token: "tok-builder-1", now: T0, evidenceRoot: f.evidenceRoot, scratchRoot: temp("first-review-scratch-"), agent });
-    return { ...f, databaseFile, ask, pass, who: login.who };
+    return { ...f, databaseFile, ask, who: login.who };
   };
   const firstVerdict = (judgement = "upholds") => ({ version: 1, comments: [], criteria: RUBRIC.map(c => ({ id: c.id, judgement: c.id === "c4" ? "cannot-tell" : judgement, note: c.id === "c4" ? "The unrelated fixture is redacted; its lines remain unavailable." : `src/${c.id === "c1" ? "limit" : c.id === "c2" ? "guard" : "report"}.ts supplies the criterion's complete source.` })) });
 
@@ -329,60 +312,6 @@ describe("inherited review context (v51)", () => {
     expect(reviewContextCustodyProblem(f.store, f.evidenceRoot, result!.inventory)).toMatch(/builder notes no longer verify/);
   });
 
-  test("a fresh review assesses a pre-upgrade missing-proof result without replacing evidence or rerunning checks", async () => {
-    const f = await seed({ rootOnly: true, omitProof: true, machineGate: true, priorJudgements: [], handoff: "The retry limit is implemented" });
-    const matrix = RUBRIC.map(c => ({ id: c.id, statement: c.statement, requiredEvidence: [...c.evidence], state: "missing" as const, detail: ["no proof was written"], answered: [], review: null }));
-    f.store.saveProofVerdict(f.sourceRun, "short", ["no proof was written"], T0, matrix);
-    const command = f.store.liveVerifyCommand(f.repo)!;
-    sealVerificationReceipt(f.store, f.evidenceRoot, f.sourceRun, f.shas.source, command, { configured: true, ran: true, exitCode: 0 }, T0);
-    await captureReviewContext(f.store, exec, { runId: f.sourceRun, taskRef: f.sourceTaskRef, head: f.shas.source, base: f.shas.base,
-      rubric: RUBRIC, patchPaths: new Set(["src/limit.ts", "src/guard.ts", "src/report.ts"]), worktree: f.repo, root: f.evidenceRoot, now: () => T0 });
-    const before = f.store.artifactsFor(f.sourceRun).map(row => ({ row, bytes: readFileSync(join(f.evidenceRoot, row.key)) }));
-    expect(assessmentFromSavedEvidence(f.store, f.evidenceRoot, f.sourceRun)).toMatchObject({ verdict: "short", machineVerdict: "verified" });
-    expect(f.store.requestReview(f.sourceRun, "alex", T0).ok).toBe(true);
-    const reports = await reviewPass(f.store, { runner: "builder-1", token: "tok-builder-1", now: T0, evidenceRoot: f.evidenceRoot,
-      scratchRoot: temp("proofless-review-"), agent: async (_file, _args, options) => {
-        expect(readFileSync(join(options!.cwd!, "REVIEW-BUILDER-NOTES.json"), "utf8")).toContain("retry boundary");
-        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: RUBRIC.map(c => ({ id: c.id, judgement: "upholds", note: "src/limit.ts, src/guard.ts, src/report.ts and REVIEW-VERIFICATION.json demonstrate the criterion" })) }) };
-      } });
-    expect(reports[0]).toMatchObject({ outcome: "reviewed", verdict: "verified" });
-    expect(f.store.proofVerdictFor(f.sourceRun)).toMatchObject({ verdict: "verified", machineVerdict: "verified" });
-    for (const a of before) { expect(f.store.getArtifact(a.row.id)).toEqual(a.row); expect(readFileSync(join(f.evidenceRoot, a.row.key))).toEqual(a.bytes); }
-    expect(f.store.runsFor(f.sourceTaskRef).filter(r => r.role !== "reviewer")).toHaveLength(1);
-  });
-
-  test("first review: legacy null proof capture and 14572/100541 log retain full source/tests without rebuilding", async () => {
-    const f = await firstReady();
-    expect(f.store.getArtifact(f.sourceProofArtifact)!.captureStatus).toBeNull();
-    const log = f.store.artifactsFor(f.sourceRun).find(a => a.kind === "check-log")!;
-    expect(log).toMatchObject({ bytesStored: 14572, bytesOriginal: 100541, truncated: true });
-    const before = f.store.artifactsFor(f.sourceRun).map(a => ({ row: a, bytes: readFileSync(join(f.evidenceRoot, a.key)) }));
-    expect(f.ask().ok).toBe(true);
-    let calls = 0;
-    const reports = await f.pass(async (_file, _args, options) => {
-      calls++;
-      const manifest = JSON.parse(readFileSync(join(options!.cwd!, REVIEW_CONTEXT_NAME), "utf8"));
-      const receipt = JSON.parse(readFileSync(join(options!.cwd!, REVIEW_GATE_NAME), "utf8"));
-      expect(receipt).toMatchObject({ source: "legacy machine log header", head: f.shas.source, result: { exitCode: 0 }, log: { bytesStored: 14572, bytesOriginal: 100541 } });
-      for (const path of ["src/telegram.ts", "src/telegram.test.ts", "src/guard.ts"]) {
-        const item = manifest.items.find((i: {path: string}) => i.path === path);
-        expect(readFileSync(join(options!.cwd!, item.file), "utf8")).toBe(git(f.repo, "show", `${f.shas.source}:${path}`) + "\n");
-        expect(item.redacted).toBe(false);
-      }
-      expect(manifest.coverage.find((c: {id: string}) => c.id === "c2").gaps).toEqual([]);
-      expect(JSON.stringify(manifest)).not.toContain("AKIAABCDEFGHIJKLMNOP");
-      return { ...OK, stdout: spoken(firstVerdict()) };
-    });
-    expect(reports[0]).toMatchObject({ outcome: "reviewed" }); expect(calls).toBe(1);
-    for (const a of before) { expect(f.store.getArtifact(a.row.id)).toEqual(a.row); expect(readFileSync(join(f.evidenceRoot, a.row.key))).toEqual(a.bytes); }
-    expect(f.store.runsFor(f.sourceTaskRef).filter(r => r.role !== "reviewer")).toHaveLength(1);
-    expect(f.store.criterionReviewsFor(f.sourceRun)).toHaveLength(4);
-    expect(f.ask()).toMatchObject({ ok: false, reason: "already-reviewed" });
-    const context = f.store.artifactsFor(f.sourceRun).find(a => a.kind === "review-context")!;
-    const parsed = parseReviewContext(readFileSync(join(f.evidenceRoot, context.key), "utf8"));
-    expect(parsed.ok && reviewContextCustodyProblem(f.store, f.evidenceRoot, parsed.inventory)).toBeNull();
-  });
-
   test("first review: two connections still admit one reviewer and cannot request a second successful review", async () => {
     const f = await firstReady(); const other = openStore(f.databaseFile); stores.push(other);
     const asked = f.ask(); expect(asked.ok).toBe(true); if (!asked.ok) throw new Error(asked.reason);
@@ -396,10 +325,18 @@ describe("inherited review context (v51)", () => {
     // Deployed schema 60 on a reviewed run: exactly one root reviewer, no
     // open request. Every surface below is the real one (operate.ts, the
     // mate tools, the decision server), not a grep over source text.
-    const f = await firstReady(); expect(f.ask().ok).toBe(true);
-    let calls = 0;
-    const reports = await f.pass(async () => { calls++; return { ...OK, stdout: spoken(firstVerdict()) }; });
-    expect(calls).toBe(1); expect(reports[0]).toMatchObject({ outcome: "reviewed" });
+    const f = await firstReady();
+    const asked = f.ask(); if (!asked.ok) throw new Error(asked.reason);
+    const admitted = f.store.admitReview(asked.id, { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: "sonnet" }, T0);
+    if (!admitted.ok) throw new Error(admitted.reason);
+    const diff = f.store.getArtifact(f.sourceDiffArtifact)!;
+    const proof = f.store.getArtifact(f.sourceProofArtifact)!;
+    const log = f.store.artifactsFor(f.sourceRun).find(one => one.kind === "check-log")!;
+    f.store.stampProviderStart(admitted.reviewerRunId, T0);
+    f.store.ingestReview({ reviewerRunId: admitted.reviewerRunId, runId: f.sourceRun, artifactId: diff.id, author: "reviewer:claude·sonnet", comments: [],
+      judgements: firstVerdict().criteria as { id: string; judgement: "upholds" | "cannot-tell"; note: string }[],
+      bindings: { diffSha: diff.sha256, scopeDigest: f.store.getScope("feat")!.digest, headSha: f.shas.source,
+        proof: { artifactId: proof.id, sha256: proof.sha256 }, checkLog: { artifactId: log.id, sha256: log.sha256 }, screenshots: [] } }, T0);
     const reviewers = () => f.store.runsFor(f.sourceTaskRef).filter(r => r.role === "reviewer");
     expect(reviewers()).toHaveLength(1);
     expect(f.store.openReviewRequests()).toEqual([]);
@@ -449,8 +386,8 @@ describe("inherited review context (v51)", () => {
       }
       expect(pages.chat.html).toContain(`data-result-run="${f.sourceRun}"`);
       for (const html of [pages.task.html, pages.cockpit.html]) {
-        expect(html).toContain('data-review-state="succeeded"');
-        expect(html).toContain('Previous assessments');
+        expect(html).toContain('data-work-status="assignment-ready-to-check"');
+        // Historical judgements remain stored below; they are not a current stage.
         expect(html).not.toContain('<button type="button" class="review-retry-button"');
       }
       const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(pages.task.html)?.[1] ?? "";
@@ -464,58 +401,6 @@ describe("inherited review context (v51)", () => {
     expect(f.ask()).toMatchObject({ ok: false, reason: "already-reviewed" });
     expect(reviewers()).toHaveLength(1); expect(f.store.openReviewRequests()).toEqual([]);
     expect(f.store.criterionReviewsFor(f.sourceRun)).toHaveLength(4);
-  });
-
-  test.each(["head", "scope", "route", "gate", "proof", "approval", "failed-capture", "context", "missing-log"] as const)("first-review preflight: %s drift refuses without a provider", async change => {
-    const f = await firstReady(); expect(f.ask().ok).toBe(true);
-    await capture(f);
-    if (change === "head") f.store.recordOutcomeFacts(f.sourceRun, { headRevision: "f".repeat(40) });
-    if (change === "scope") f.store.raw().prepare("UPDATE run SET scope_digest = 'changed' WHERE id = ?").run(f.sourceRun);
-    if (change === "route") f.store.raw().prepare("UPDATE task_scope SET approved_route_json = '{}' WHERE task_id = ?").run("feat");
-    if (change === "approval") f.store.clearVerifyCommand(f.repo, "alex", T0);
-    if (change === "failed-capture") f.store.raw().prepare("UPDATE artifact SET capture_status = 'failed' WHERE id = ?").run(f.sourceProofArtifact);
-    if (change === "gate" || change === "proof" || change === "missing-log") { const a = f.store.artifactsFor(f.sourceRun).find(a => a.kind === (change === "proof" ? "proof" : "check-log"))!; if (change === "missing-log") rmSync(join(f.evidenceRoot, a.key)); else writeFileSync(join(f.evidenceRoot, a.key), "tampered"); }
-    if (change === "context") storeEvidence(f.store, f.evidenceRoot, f.sourceRun, "review-context", "changed.json", Buffer.from("{}"), "test", T0);
-    let calls = 0;
-    const result = await f.pass(async () => { calls++; return { ...OK, stdout: spoken(firstVerdict()) }; });
-    expect(calls).toBe(0); expect(result.every(r => r.outcome !== "reviewed")).toBe(true);
-    expect(f.store.criterionReviewsFor(f.sourceRun)).toEqual([]);
-  });
-
-  test("first-review preflight: a candidate whose own ancestry the machine could not validate refuses; a truthful gap does not", async () => {
-    const f = await firstReady(); expect(f.ask().ok).toBe(true);
-    // Capture where git cannot prove the candidate head: the sealed
-    // inventory records that as a capture failure, not a guess.
-    const broken: typeof exec = (file, args, options) => args.includes("merge-base")
-      ? Promise.resolve({ ...OK, code: 128, stderr: "fatal: simulated object store outage" })
-      : exec(file, args, options);
-    const run = f.store.getRun(f.sourceRun)!;
-    const stored = await captureReviewContext(f.store, broken, {
-      runId: f.sourceRun, taskRef: f.sourceTaskRef, head: f.shas.source, base: run.baseRevision,
-      rubric: RUBRIC.map(one => ({ id: one.id, statement: one.statement, evidence: one.evidence })),
-      patchPaths: patchPathsOf(f.repo, run.baseRevision!, f.shas.source), worktree: f.repo, root: f.evidenceRoot, now: () => T0,
-    });
-    expect(stored!.inventory).toMatchObject({ source: { run: f.sourceRun }, ancestry: { verified: false, detail: expect.stringMatching(/git exit 128/) } });
-    expect(stored!.inventory.gaps.some(one => one.reason === "capture-failed" && one.path === null)).toBe(true);
-    let calls = 0;
-    const reports = await f.pass(async () => { calls++; return { ...OK, stdout: spoken(firstVerdict()) }; });
-    expect(calls).toBe(0);
-    expect(reports[0]).toMatchObject({ outcome: "failed", detail: "evidence", attempt: 1 });
-    expect(f.store.getRun(f.store.runsFor(f.sourceTaskRef).find(one => one.role === "reviewer")!.id)!.reason).toMatch(/^reviewer-evidence/);
-    expect(f.store.criterionReviewsFor(f.sourceRun)).toEqual([]);
-  });
-
-  test.each(["gate", "custody", "route"] as const)("first review: %s lost during evidence delivery cannot be ingested", async change => {
-    const f = await firstReady(); expect(f.ask().ok).toBe(true);
-    let calls = 0;
-    await f.pass(async () => {
-      calls++;
-      if (change === "gate") f.store.clearVerifyCommand(f.repo, "alex", T0);
-      if (change === "route") f.store.raw().prepare("UPDATE task_scope SET approved_route_json = '{}' WHERE task_id = ?").run("feat");
-      if (change === "custody") register(f.store, { name: "builder-1", host: "replacement", capacity: 9, repos: [f.repo], now: new Date(T0.getTime() + 1), newToken: () => "replacement" });
-      return { ...OK, stdout: JSON.stringify({ session_id: "first-session", result: JSON.stringify({ version: 1, readEvidence: { file: REVIEW_GATE_NAME, sha256: "a".repeat(64), offset: 0, length: 10 } }) }) };
-    });
-    expect(calls).toBe(1); expect(f.store.criterionReviewsFor(f.sourceRun)).toEqual([]);
   });
 
   test.each(["legacy-header-missing", "failed-check", "receipt", "receipt-tampered", "new-grant"] as const)("machine gate receipt: %s never invents or waives historical evidence", async variant => {
@@ -542,15 +427,6 @@ describe("inherited review context (v51)", () => {
       const failure = verificationEvidence(f.store, f.evidenceRoot, f.sourceRun);
       expect(failure.ok && JSON.parse(failure.bytes!).result.exitCode).toBe(1);
     }
-  });
-
-  test.each(["contradicts", "cannot-tell"])("first substantive %s verdict is ingested once and never retried for approval", async judgement => {
-    const f = await firstReady(); expect(f.ask().ok).toBe(true);
-    let calls = 0;
-    expect((await f.pass(async () => { calls++; return { ...OK, stdout: spoken(firstVerdict(judgement)) }; }))[0]?.outcome).toBe("reviewed");
-    expect(calls).toBe(1);
-    expect(f.store.criterionReviewsFor(f.sourceRun)[0]?.judgement).toBe(judgement);
-    expect(f.ask()).toMatchObject({ ok: false, reason: "already-reviewed" });
   });
 
   test.each(["intact", "tampered", "missing", "failed", "changed-scope"] as const)("shortened check log: %s keeps integrity separate from completeness", async variant => {
@@ -1116,10 +992,6 @@ describe("inherited review context (v51)", () => {
   });
 
   describe("c3 and c4: the reviewer pass over a revision", () => {
-    let scratchRoot: string;
-    beforeEach(() => {
-      scratchRoot = temp("so-ctx-scratch-");
-    });
 
     /** Seal the inventory and the matrix the builder would have stored, then ask for a review. */
     const readyForReview = async (options: Parameters<typeof seed>[0] = {}) => {
@@ -1130,290 +1002,12 @@ describe("inherited review context (v51)", () => {
       if (!asked.ok) throw new Error(`requestReview: ${asked.reason}`);
       return { ...f, inventory: captured.inventory, contextArtifact: captured.artifactId };
     };
-    const passOnce = (f: Fixture, agent: Runner) =>
-      reviewPass(f.store, { runner: "builder-1", token: "tok-builder-1", now: T0, evidenceRoot: f.evidenceRoot, scratchRoot, agent });
     const judgements = (c1: { judgement: string; note: string }, rest: { judgement: string; note: string } = { judgement: "cannot-tell", note: "not settled by the sealed files" }) => [
       { id: "c1", ...c1 },
       { id: "c2", ...rest },
       { id: "c3", judgement: "upholds", note: "src/report.ts now names the outcome" },
       { id: "c4", ...rest },
     ];
-
-    test("Claude reads REVIEW-CONTEXT.json from the sealed scratch, cites ctx-<n> provenance for an inherited criterion, and the judgement binds the context artifact at ingestion", async () => {
-      const f = await readyForReview();
-      let sealedBytes: Buffer | null = null;
-      let prompt = "";
-      const agent: Runner = async (_file, args, options) => {
-        const cwd = options?.cwd ?? "";
-        sealedBytes = readFileSync(join(cwd, REVIEW_CONTEXT_NAME));
-        prompt = String(args[args.indexOf("-p") + 1] ?? "");
-        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: `${f.inventory.items.find(one => one.path === "src/limit.ts")!.id} (src/limit.ts at the sealed head) returns 3` }) }) };
-      };
-      const reports = await passOnce(f, agent);
-      expect(reports[0]).toMatchObject({ outcome: "reviewed", attempt: 1, detail: "0 comment(s), 4 judgement(s)" });
-      expect(sealedBytes).not.toBeNull();
-      const artifact = f.store.getArtifact(f.contextArtifact)!;
-      expect(sealedBytes!.toString("utf8")).toBe(reviewContextManifest(f.inventory));
-      expect(prompt).toContain("REVISES an earlier build");
-      expect(prompt).toContain(`c1: inherited — sealed context ${f.inventory.items.find(one => one.path === "src/limit.ts")!.id}`);
-      expect(prompt).toContain("context, never your answer");
-      expect(prompt).toContain("MUST cite the provenance");
-      const saved = f.store.criterionReviewsFor(f.revisionRun);
-      expect(saved).toHaveLength(4);
-      for (const row of saved) expect(row.context).toEqual({ artifact: artifact.id, sha256: artifact.sha256 });
-      // The fold keeps the coverage on every row; the verdict never rises.
-      const verdict = f.store.proofVerdictFor(f.revisionRun)!;
-      expect(verdict.matrix.find(row => row.id === "c1")).toMatchObject({ review: { judgement: "upholds" }, coverage: { state: "context", items: [f.inventory.items.find(one => one.path === "src/limit.ts")!.id] } });
-      expect(verdict.matrix.find(row => row.id === "c2")).toMatchObject({ review: { judgement: "cannot-tell" }, coverage: { state: "context" } });
-    });
-
-    test("Codex receives the same compact manifest and complete file declarations as Claude", async () => {
-      const f = await readyForReview({ provider: "codex" });
-      let inlineContext: { name: string; sha256: string; content: string } | undefined;
-      const agent: Runner = async (_file, args, options) => {
-        expect(args).toEqual(expect.arrayContaining(["features.shell_tool=false", "features.unified_exec=false"]));
-        const promptText = options?.stdin ?? "";
-        const encoded = promptText.split("\n").find(line => line.startsWith('[{"name":"REVIEW-DIFF.patch"'));
-        const bundle = JSON.parse(encoded!) as { name: string; sha256: string; content: string }[];
-        expect(bundle.map(one => one.name)).toEqual([REVIEW_PATCH_NAME, REVIEW_RUBRIC_NAME, REVIEW_CONTEXT_NAME, ...f.inventory.items.map(one => reviewContextFileName(one.id))]);
-        inlineContext = bundle.find(one => one.name === REVIEW_CONTEXT_NAME);
-        for (const one of bundle.filter(one => one.content !== undefined)) expect(one.content).toBe(readFileSync(join(options!.cwd!, one.name), "utf8"));
-        expect(promptText).toContain("MUST cite the provenance");
-        const answer = JSON.stringify({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: `${f.inventory.items.find(one => one.path === "src/limit.ts")!.id} shows limiter() returning 3` }) });
-        return { ...OK, stdout: [
-          { type: "thread.started", thread_id: "codex-ctx-fixture" },
-          { type: "item.completed", item: { type: "agent_message", text: answer } },
-          { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 10 } },
-        ].map(one => JSON.stringify(one)).join("\n") };
-      };
-      const reports = await passOnce(f, agent);
-      expect(reports[0]?.outcome).toBe("reviewed");
-      const artifact = f.store.getArtifact(f.contextArtifact)!;
-      // Both transports use the same compact projection of the sealed artifact.
-      expect(inlineContext?.sha256).toBe(sha256(reviewContextManifest(f.inventory)));
-      expect(inlineContext!.content).toBe(reviewContextManifest(f.inventory));
-      expect(f.store.criterionReviewsFor(f.revisionRun).every(row => row.context?.sha256 === artifact.sha256)).toBe(true);
-      expect(f.store.criterionReviewsFor(f.revisionRun)[0]?.author).toBe("reviewer:codex·gpt-5.6-sol");
-    });
-
-    test.each(["claude", "codex"] as const)("%s ingests clean sections from redacted artifacts with truthful gaps and current judgements only", async provider => {
-      const padding = "// existing code\n".repeat(Math.ceil(REVIEW_CONTEXT_LIMITS.itemBytes / 17));
-      const f = await readyForReview({ provider, shortenedLog: true, baseFiles: { "src/guard.ts": padding + GUARD_TS.replace("n < 3", "n < 9") }, guardSource: padding + GUARD_TS, extraSourceFiles: { "src/mate.test.ts": "// AKIAABCDEFGHIJKLMNOP\n" } });
-      expect(f.store.getArtifact(f.sourceDiffArtifact)?.redacted).toBe(true);
-      const item = f.inventory.items.find(one => one.path === "src/guard.ts")!;
-      expect(item.patch?.coverage).toBe("partial");
-      expect(f.inventory.coverage.find(one => one.id === "c2")?.priorSupport).toBe("eligible");
-      const reports = await passOnce(f, async (_file, argv, options) => {
-        const prompt = provider === "claude" ? String(argv[argv.indexOf("-p") + 1]) : options?.stdin ?? "";
-        expect(prompt).toContain("it is NOT a full file");
-        expect(prompt).toContain("c2: inherited — CONTEXT GAP");
-        const raw = readFileSync(join(options!.cwd!, REVIEW_CONTEXT_NAME), "utf8");
-        expect(raw).toBe(reviewContextManifest(f.inventory));
-        if (provider === "codex") {
-          const bundle = JSON.parse(prompt.split("\n").find(line => line.startsWith('[{"name":"REVIEW-DIFF.patch"'))!);
-          expect(bundle.find((one: { name: string }) => one.name === REVIEW_CONTEXT_NAME).content).toBe(raw);
-        }
-        const answer = { version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: `${f.inventory.items.find(one => one.path === "src/limit.ts")!.id} returns 3` }, { judgement: "cannot-tell", note: "Only partial context is available." }) };
-        return { ...OK, stdout: provider === "claude" ? spoken(answer) : [
-          { type: "thread.started", thread_id: "partial-context" },
-          { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(answer) } },
-          { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 10 } },
-        ].map(one => JSON.stringify(one)).join("\n") };
-      });
-      expect(reports[0]?.outcome).toBe("reviewed");
-      expect(f.store.criterionReviewsFor(f.revisionRun).find(one => one.criterionId === "c2")?.judgement).toBe("cannot-tell");
-      expect(f.store.proofVerdictFor(f.revisionRun)!.matrix.find(one => one.id === "c2")?.coverage?.state).toBe("gap");
-    });
-
-    test.each(["claude", "codex"] as const)("%s reads complete 62 KiB tests and 1.1 MiB source beyond the prompt and former item count", async provider => {
-      const sized = (bytes: number, marker: string) => "// evidence line\n".repeat(Math.floor((bytes - marker.length - 1) / 17)) + marker + "\n";
-      const source = sized(1100 * 1024, "// SOURCE END café 🔎");
-      const tests = sized(62 * 1024, "// TEST END restart rate-limit");
-      const files = { "src/store.ts": source, "src/telegram.test.ts": tests,
-        ...Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`src/context-${i}.ts`, "// new\n"])) };
-      const f = await readyForReview({ provider,
-        baseFiles: Object.fromEntries(Object.entries(files).map(([path, content]) => [path, content + "// old\n"])), extraSourceFiles: files });
-      expect(f.inventory.items.length).toBeGreaterThan(24);
-      expect(f.inventory.gaps).toEqual([]);
-      expect(f.inventory.items.reduce((total, item) => total + item.bytes, 0)).toBeGreaterThan(1024 * 1024);
-      expect(parseReviewContext(serializeReviewContext(f.inventory))).toEqual({ ok: true, inventory: f.inventory });
-      const targets = ["src/telegram.test.ts", "src/store.ts"].map(path => f.inventory.items.find(one => one.path === path)!);
-      for (const item of targets) {
-        expect(item.patch).toBeUndefined();
-        expect(item.content).toBe(files[item.path as keyof typeof files]);
-        expect(item.blob).toBe(git(f.repo, "rev-parse", `${f.shas.revision}:${item.path}`));
-      }
-      let calls = 0;
-      let target = 0;
-      let offset = 0;
-      const collected = ["", ""];
-      const answer = { version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: `${f.inventory.items.find(one => one.path === "src/limit.ts")!.id} returns 3` }, { judgement: "cannot-tell", note: "Evidence inspected; no automatic prior verdict." }) };
-      const reports = await passOnce(f, async (_file, args, options) => {
-        calls++;
-        const prompt = provider === "claude" ? args[args.indexOf("-p") + 1]! : options!.stdin!;
-        expect(Buffer.byteLength(prompt)).toBeLessThan(1024 * 1024);
-        let reply: unknown = answer;
-        if (provider === "claude") {
-          expect(args).toEqual(expect.arrayContaining(["--tools", "Read", "--restricted", "--safe-mode"]));
-          expect(prompt).toContain("at most 200 lines per read");
-          expect(prompt).not.toContain("SOURCE END");
-          const manifest = JSON.parse(readFileSync(join(options!.cwd!, REVIEW_CONTEXT_NAME), "utf8"));
-          expect(manifest.items.every((one: { content?: string }) => one.content === undefined)).toBe(true);
-          // The native Read tool opens these exact files. Exercise bounded
-          // line reads against its declared scratch inputs, no checkout.
-          for (const [i, item] of targets.entries()) {
-            const lines = readFileSync(join(options!.cwd!, reviewContextFileName(item.id)), "utf8").split("\n");
-            const chunks: string[] = [];
-            for (let start = 0; start < lines.length; start += 200) chunks.push(lines.slice(start, start + 200).join("\n"));
-            collected[i] = chunks.join("\n");
-          }
-        } else {
-          expect(args).toEqual(expect.arrayContaining(["features.shell_tool=false", "features.unified_exec=false"]));
-          if (calls === 1) {
-            expect(prompt).not.toContain("SOURCE END");
-            expect(prompt).not.toContain("TEST END");
-            expect(prompt).toContain(reviewContextFileName(targets[1]!.id));
-          } else {
-            expect(args).toEqual(expect.arrayContaining(["resume", "range-session"]));
-            const response = JSON.parse(prompt.split("\n").at(-1)!);
-            expect(response.offset).toBe(offset);
-            expect(response.bytes).toBeLessThanOrEqual(REVIEW_READ_LIMITS.bytes);
-            expect(Buffer.byteLength(response.content)).toBe(response.bytes);
-            collected[target] += response.content;
-            offset = response.nextOffset;
-            if (response.eof) { target++; offset = 0; }
-          }
-          if (target < targets.length) reply = { version: 1, readEvidence: {
-            file: reviewContextFileName(targets[target]!.id), sha256: targets[target]!.sha256, offset, length: REVIEW_READ_LIMITS.bytes,
-          } };
-        }
-        return { ...OK, stdout: provider === "claude" ? spoken(reply) : [
-          { type: "thread.started", thread_id: "range-session" },
-          { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(reply) } },
-          { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 10 } },
-        ].map(one => JSON.stringify(one)).join("\n") };
-      });
-      expect(reports[0]).toMatchObject({ outcome: "reviewed" });
-      expect(collected).toEqual([tests, source]);
-      const reviewer = f.store.runsFor(f.revisionTaskRef).find(one => one.role === "reviewer")!;
-      if (provider === "codex") {
-        expect(calls).toBeGreaterThan(18);
-        expect(reviewer.tokensOut).toBe(calls * 10);
-        const receipts = f.store.artifactsFor(reviewer.id).filter(one => one.capture === "machine-served sealed evidence range");
-        expect(receipts).toHaveLength(calls - 1);
-        expect(receipts.every(one => readVerifiedArtifact(f.evidenceRoot, one).ok)).toBe(true);
-      }
-      // A cannot-tell is a completed review, so this candidate cannot be
-      // silently re-reviewed or supplied a second context under old authority.
-      expect(f.store.requestReview(f.revisionRun, "alex", T0)).toMatchObject({ ok: false, reason: "already-reviewed" });
-      expect(f.store.artifactsFor(f.revisionRun).filter(one => one.kind === "review-context")).toHaveLength(1);
-    });
-
-    test("Claude can use the same byte-range channel for long lines without enabling another tool", async () => {
-      const text = 'const quoted = "' + 'café 🔎 \\"'.repeat(9000) + '";\n';
-      const f = await readyForReview({ baseFiles: { "src/guard.ts": text + "// old\n" }, guardSource: text });
-      const item = f.inventory.items.find(one => one.path === "src/guard.ts")!;
-      let calls = 0;
-      let offset = 0;
-      let received = "";
-      const reports = await passOnce(f, async (_file, args) => {
-        calls++;
-        expect(args).toEqual(expect.arrayContaining(["--tools", "Read", "--restricted", "--safe-mode"]));
-        const prompt = args[args.indexOf("-p") + 1]!;
-        if (calls > 1) {
-          expect(args).toEqual(expect.arrayContaining(["--resume", "claude-range-session"]));
-          const response = JSON.parse(prompt.split("\n").at(-1)!);
-          expect(response.offset).toBe(offset);
-          received += response.content;
-          offset = response.nextOffset;
-        }
-        const reply = offset < item.bytes ? { version: 1, readEvidence: { file: reviewContextFileName(item.id), sha256: item.sha256, offset, length: 65536 } } :
-          { version: 1, comments: [], criteria: judgements({ judgement: "cannot-tell", note: "Only the declared long line was inspected." }) };
-        return { ...OK, stdout: JSON.stringify({ session_id: "claude-range-session", structured_output: reply, usage: { input_tokens: 10, output_tokens: 10 }, total_cost_usd: 0.01 }) };
-      });
-      expect(reports[0]).toMatchObject({ outcome: "reviewed" });
-      expect(received).toBe(text);
-      expect(calls).toBeGreaterThan(2);
-      expect(f.store.runsFor(f.revisionTaskRef).find(one => one.role === "reviewer")!.costUsd).toBeCloseTo(calls * 0.01);
-    });
-
-    test.each(["transient", "exhausted", "malformed-range", "authority", "negative"] as const)("same-session evidence delivery recovery: %s", async variant => {
-      const f = await readyForReview();
-      const item = f.inventory.items.find(i => i.path === "src/limit.ts")!;
-      let calls = 0;
-      let delivered = "";
-      const reports = await passOnce(f, async (_file, args) => {
-        calls++;
-        const prompt = args[args.indexOf("-p") + 1]!;
-        if (calls > 1) expect(args).toEqual(expect.arrayContaining(["--resume", "delivery-session"]));
-        let reply: unknown;
-        if (calls === 1 || (variant === "malformed-range" && calls === 2)) {
-          if (calls === 2) expect(prompt).toContain("EVIDENCE DELIVERY ERROR");
-          reply = { version: 1, readEvidence: { file: reviewContextFileName(item.id), sha256: item.sha256, offset: 0, length: variant === "malformed-range" && calls === 1 ? 999999 : 65536 } };
-        } else if (variant === "exhausted" || ((variant === "transient" || variant === "authority") && calls === 2)) {
-          if (variant === "authority") f.store.raw().prepare("UPDATE task_scope SET approved_route_json = '{}' WHERE task_id = ?").run(f.revisionTaskId);
-          return { ...OK, code: 1, stdout: JSON.stringify({ session_id: "delivery-session" }), stderr: "connection closed during evidence delivery" };
-        } else {
-          const range = JSON.parse(prompt.split("\n").at(-1)!); delivered = range.content;
-          reply = { version: 1, comments: [], criteria: judgements({ judgement: variant === "negative" ? "contradicts" : "cannot-tell", note: `${item.id} was delivered; this is the final finding.` }) };
-        }
-        return { ...OK, stdout: JSON.stringify({ session_id: "delivery-session", result: JSON.stringify(reply) }) };
-      });
-      if (variant === "authority" || variant === "exhausted") {
-        expect(reports[0]?.outcome).not.toBe("reviewed");
-        expect(f.store.criterionReviewsFor(f.revisionRun)).toEqual([]);
-        expect(calls).toBe(variant === "authority" ? 2 : 4);
-      } else {
-        expect(reports[0]?.outcome).toBe("reviewed");
-        expect(delivered).toBe(item.content);
-        expect(calls).toBe(variant === "negative" ? 2 : 3);
-      }
-      expect(f.store.runsFor(f.revisionTaskRef).filter(r => r.role === "reviewer")).toHaveLength(1);
-      expect(f.store.runsFor(f.revisionTaskRef).filter(r => r.role !== "reviewer")).toHaveLength(1);
-    });
-
-    test.each(["path", "hash", "range", "scratch", "symlink", "artifact", "head", "session", "custody"] as const)("inline ranges refuse %s drift without accepting a review", async variant => {
-      const f = await readyForReview({ provider: "codex" });
-      let calls = 0;
-      const item = f.inventory.items[0]!;
-      const name = reviewContextFileName(item.id);
-      const reports = await passOnce(f, async (_file, _args, options) => {
-        calls++;
-        if (calls === 1) {
-          if (variant === "scratch") writeFileSync(join(options!.cwd!, name), "changed");
-          if (variant === "symlink") { rmSync(join(options!.cwd!, name)); symlinkSync(join(f.repo, item.path), join(options!.cwd!, name)); }
-          if (variant === "artifact") writeFileSync(join(f.evidenceRoot, f.store.getArtifact(f.contextArtifact)!.key), "changed");
-          if (variant === "head") f.store.raw().prepare("UPDATE run SET head_revision = ? WHERE id = ?").run("f".repeat(40), f.revisionRun);
-          if (variant === "custody") register(f.store, { name: "builder-1", host: "test", capacity: 9, repos: [f.repo], now: T0, newToken: () => "rotated" });
-        }
-        const reply = calls === 1 ? { version: 1, readEvidence: {
-          file: variant === "path" ? "../../etc/passwd" : name,
-          sha256: variant === "hash" ? "0".repeat(64) : item.sha256,
-          offset: variant === "range" ? item.bytes + 1 : 0, length: 65536,
-        } } : { version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: `${item.id} supports c1` }) };
-        return { ...OK, stdout: [
-          { type: "thread.started", thread_id: calls > 1 && variant === "session" ? "wrong-session" : "range-session" },
-          { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(reply) } },
-          { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 10 } },
-        ].map(one => JSON.stringify(one)).join("\n") };
-      });
-      expect(calls).toBe(variant === "session" ? 2 : 1);
-      expect(reports[0]?.outcome).not.toBe("reviewed");
-      expect(f.store.criterionReviewsFor(f.revisionRun)).toEqual([]);
-    });
-
-    test("an upholds on an inherited criterion that cites no supplied provenance is refused, the attempt is preserved as failed, and explicit retries remain", async () => {
-      const f = await readyForReview();
-      const reports = await passOnce(f, async () => ({ ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: "looks fine to me" }) }) }));
-      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "malformed-review", attempt: 1, retriesRemaining: 2 });
-      expect(f.store.criterionReviewsFor(f.revisionRun)).toEqual([]);
-      const retry = f.store.reviewRetryStateOf(f.revisionRun)!;
-      expect(retry.state).toBe("retryable");
-      expect(retry.attempts[0]).toMatchObject({ attempt: 1, outcome: "failed", reason: expect.stringMatching(/must cite supplied provenance/) });
-      // The failed root is on record; a second explicit ask opens attempt 2.
-      const again = f.store.requestReview(f.revisionRun, "alex", T0);
-      expect(again).toMatchObject({ ok: true, attempt: 2 });
-    });
 
     test("the parser rules: a contradicts may cite a patch path or a sealed file, cannot-tell needs nothing, and a patch criterion is unchanged", async () => {
       const f = await readyForReview();
@@ -1431,108 +1025,6 @@ describe("inherited review context (v51)", () => {
       expect(parse([{ id: "c1", judgement: "cannot-tell", note: "unsettled" }, { id: "c2", judgement: "cannot-tell", note: "unsettled" }, { id: "c3", judgement: "upholds", note: "fine" }, { id: "c4", judgement: "contradicts", note: "REVIEW-CHECK-LOG.txt shows the gate is red" }]).ok).toBe(true);
       expect(parse([{ id: "c1", judgement: "cannot-tell", note: "unsettled" }, { id: "c2", judgement: "upholds", note: "fine" }, { id: "c3", judgement: "upholds", note: "fine" }, { id: "c4", judgement: "upholds", note: "fine" }])).toMatchObject({ ok: false, problems: expect.arrayContaining([{ reason: expect.stringMatching(/"c2" is outside the reviewed patch/) }]) });
       expect(citesSuppliedProvenance("see ctx-12", { itemIds: new Set(["ctx-1"]), patchPaths: new Set(), sealedFiles: new Set() })).toBe(false);
-    });
-
-    test("c3: scratch tamper of the sealed context after the agent ran refuses the whole pass and preserves the failed attempt", async () => {
-      const f = await readyForReview();
-      const reports = await passOnce(f, async (_file, _args, options) => {
-        const cwd = options?.cwd ?? "";
-        const forged = JSON.parse(readFileSync(join(cwd, REVIEW_CONTEXT_NAME), "utf8"));
-        forged.items[0].content += "\n// planted";
-        writeFileSync(join(cwd, REVIEW_CONTEXT_NAME), JSON.stringify(forged, null, 1));
-        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: "ctx-2 returns 3" }) }) };
-      });
-      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "dirty-scratch", attempt: 1 });
-      expect(f.store.criterionReviewsFor(f.revisionRun)).toEqual([]);
-      expect(f.store.reviewRetryStateOf(f.revisionRun)?.attempts[0]).toMatchObject({ outcome: "failed", reason: "reviewer-dirty-scratch" });
-    });
-
-    test("c3: the inventory is re-verified before spend — a tampered artifact file refuses before any agent runs", async () => {
-      const f = await readyForReview();
-      const artifact = f.store.getArtifact(f.contextArtifact)!;
-      writeFileSync(join(f.evidenceRoot, artifact.key), serializeReviewContext({ ...f.inventory, items: [] }));
-      let calls = 0;
-      const reports = await passOnce(f, async () => { calls++; return { ...OK, stdout: spoken({ version: 1, comments: [] }) }; });
-      expect(calls).toBe(0);
-      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "evidence", attempt: 1, retriesRemaining: 2 });
-      expect(f.store.reviewRetryStateOf(f.revisionRun)?.attempts[0]).toMatchObject({ outcome: "failed", reason: "reviewer-evidence" });
-    });
-
-    test("c3: missing revision context refuses before spend, and removed context refuses at ingestion", async () => {
-      const added = await readyForReview();
-      added.store.raw().prepare("DELETE FROM artifact WHERE id = ?").run(added.contextArtifact);
-      let calls = 0;
-      const addedReports = await passOnce(added, async () => {
-        calls++;
-        return { ...OK, stdout: spoken({ version: 1, comments: [] }) };
-      });
-      expect(calls).toBe(0);
-      expect(addedReports[0]).toMatchObject({ outcome: "failed", detail: "evidence" });
-      expect(added.store.criterionReviewsFor(added.revisionRun)).toEqual([]);
-
-      // Removed: the inventory the reviewer was sealed disappears before ingest.
-      const removed = await readyForReview();
-      const removedReports = await passOnce(removed, async () => {
-        removed.store.raw().prepare("DELETE FROM artifact WHERE id = ?").run(removed.contextArtifact);
-        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: "ctx-2 returns 3" }) }) };
-      });
-      expect(removedReports[0]).toMatchObject({ outcome: "failed", detail: "stale-evidence", attempt: 1, retriesRemaining: 2 });
-      expect(removed.store.criterionReviewsFor(removed.revisionRun)).toEqual([]);
-      expect(removed.store.getRun(removed.store.reviewRetryStateOf(removed.revisionRun)!.attempts[0]!.runId)?.outcome).toBe("failed");
-    });
-
-    test("an unrelated context item cannot justify an inherited criterion", async () => {
-      const f = await readyForReview();
-      const guard = f.inventory.items.find(one => one.path === "src/guard.ts")!;
-      const reports = await passOnce(f, async () => ({ ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: `${guard.id} proves the limiter` }) }) }));
-      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "malformed-review" });
-      expect(f.store.criterionReviewsFor(f.revisionRun)).toEqual([]);
-    });
-
-    test.each(["check-log", "screenshot", "proof-bytes", "reviewer-lineage", "partial-patch-bytes"] as const)("source %s changes while the reviewer runs refuse atomic ingestion", async kind => {
-      const padding = "// existing code\n".repeat(Math.ceil(REVIEW_CONTEXT_LIMITS.itemBytes / 17));
-      const f = await readyForReview(kind === "partial-patch-bytes" ? { baseFiles: { "src/guard.ts": padding + "old\n" }, guardSource: padding + GUARD_TS, extraSourceFiles: { "src/mate.test.ts": "// AKIAABCDEFGHIJKLMNOP\n" } } : {});
-      if (kind === "partial-patch-bytes") expect(f.inventory.items.find(one => one.path === "src/guard.ts")?.patch?.coverage).toBe("partial");
-      const reports = await passOnce(f, async () => {
-        if (kind === "proof-bytes") writeFileSync(join(f.evidenceRoot, f.store.getArtifact(f.sourceProofArtifact)!.key), "tampered");
-        else if (kind === "partial-patch-bytes") {
-          const path = join(f.evidenceRoot, f.store.getArtifact(f.sourceDiffArtifact)!.key);
-          writeFileSync(path, readFileSync(path, "utf8").replace("return n < 3", "return n < 9"));
-        }
-        else if (kind === "reviewer-lineage") {
-          const reviewer = f.store.criterionReviewsFor(f.sourceRun)[0]!.reviewerRun;
-          f.store.raw().prepare("UPDATE run SET parent_run = NULL WHERE id = ?").run(reviewer);
-        } else storeEvidence(f.store, f.evidenceRoot, f.sourceRun, kind, `late-${kind}`, Buffer.from("late evidence"), "late", T0, { captureStatus: "ok" });
-        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: judgements({ judgement: "upholds", note: `${f.inventory.items.find(one => one.path === "src/limit.ts")!.id} returns 3` }) }) };
-      });
-      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "stale-evidence" });
-      expect(f.store.criterionReviewsFor(f.revisionRun)).toEqual([]);
-    });
-
-    test("source evidence drift after capture refuses before provider spend", async () => {
-      const f = await readyForReview();
-      storeEvidence(f.store, f.evidenceRoot, f.sourceRun, "check-log", "late-log", Buffer.from("late"), "late", T0);
-      let calls = 0;
-      const reports = await passOnce(f, async () => { calls++; return OK; });
-      expect(calls).toBe(0);
-      expect(reports[0]).toMatchObject({ outcome: "failed", detail: "evidence" });
-    });
-
-    test("c4: reviewer isolation and retry bounds are untouched — a second inventory is ambiguous and refused, and three failed roots exhaust the allowance", async () => {
-      const f = await readyForReview();
-      storeEvidence(f.store, f.evidenceRoot, f.revisionRun, "review-context", "review-context-2.json", Buffer.from(serializeReviewContext(f.inventory), "utf8"), "dup", T0, { captureStatus: "ok" });
-      let calls = 0;
-      const first = await passOnce(f, async () => { calls++; return { ...OK, stdout: spoken({ version: 1, comments: [] }) }; });
-      expect(calls).toBe(0);
-      expect(first[0]).toMatchObject({ outcome: "failed", detail: "evidence", attempt: 1, retriesRemaining: 2 });
-      for (const attempt of [2, 3]) {
-        expect(f.store.requestReview(f.revisionRun, "alex", T0)).toMatchObject({ ok: true, attempt });
-        const again = await passOnce(f, async () => ({ ...OK, stdout: spoken({ version: 1, comments: [] }) }));
-        expect(again[0]).toMatchObject({ outcome: "failed", attempt, retriesRemaining: 3 - attempt });
-      }
-      expect(f.store.requestReview(f.revisionRun, "alex", T0)).toMatchObject({ ok: false, reason: "retries-exhausted" });
-      expect(f.store.reviewRetryStateOf(f.revisionRun)?.state).toBe("exhausted");
-      expect(f.store.reviewRetryStateOf(f.revisionRun)?.attempts.map(one => one.outcome)).toEqual(["failed", "failed", "failed"]);
     });
   });
 

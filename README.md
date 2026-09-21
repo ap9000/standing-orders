@@ -27,7 +27,7 @@ interrupted only for decisions that genuinely need a human.**
 Tell Standing Orders what outcome you want. Its planner reads the repository,
 drafts the scope and proof rubric, and asks only when an answer would materially
 change the work. You approve the exact contract once; long-running agents can
-build, review, and repair it while the control plane handles queues, dependencies,
+build it while the control plane handles queues, dependencies,
 crashes, and decisions. The result comes back with the diff, checks, screenshots,
 and a criterion-by-criterion verdict.
 
@@ -42,6 +42,52 @@ boundaries, evidence requirements, model, and permissions.
   &nbsp;
   <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/scope-approval.png" alt="Desktop scope approval card showing the goal, boundaries, evidence requirement, model, permissions, and approval action." width="640">
 </div>
+
+### One lead, durable crew work
+
+Start in **Chat**, inspect work in **Tasks**, and manage guidance in **Projects**.
+Browser and CLI chat share the lead conversation. A local database catch-up shows
+current decisions and results before you authorize any model usage.
+
+Crew work ends at **Ready**. Open the result, mark it **Complete**, or request a
+specific revision of the same task. Actual checks remain visible; there is no
+separate model reviewer or automatic evidence resubmission loop. Deployment is
+reported separately and still requires the exact passing native machine check.
+
+Enable **Automatic crew updates** in a conversation, or use `standing-orders chat
+--follow`. Meaningful updates reach the same lead within its saved permissions
+and limits. Idle scanning uses no model. Restart recovery reuses saved responses;
+a failed response does not rerun a task. `--no-follow` pauses automatic responses.
+This wakes Standing Orders' own lead, not an unrelated external agent session.
+
+`standing-orders brief` reads the local database. `knowledge search`, `knowledge
+impact`, and `knowledge refresh` add bounded source retrieval; see
+[repository context](docs/REPOSITORY_CONTEXT.md). Curated knowledge stays in the
+database, and crew context stays attached to its original run.
+
+Select a saved checkout once, then use the same task records from the terminal:
+
+```sh
+standing-orders project use /path/to/project
+standing-orders project show
+standing-orders brief
+standing-orders assignment show <task>
+standing-orders task complete <task>
+standing-orders task revise <task> --feedback "Keep the filter selected after reload."
+```
+
+Completion and revisions use the local sign-in already saved by `up`. Completion
+reports the exact run, commit and check outcome it handled. Agents use a scoped
+credential (`project use /path/to/project --token-file /path/to/credential`) and
+complete only with the exact `--digest` from `assignment show`; JSON completion
+also requires that digest. The profile stores a file reference, never a secret,
+and grants no additional access. It supplies defaults for database briefs,
+knowledge commands, assignment commands, and these two task actions.
+
+For an exact revision replay, reuse `--run`, `--source` and `--key` from its JSON
+result. A revision keeps the original task history and approval boundaries; a
+stale result cannot create another current version. Actual failed checks remain
+failed when a result is marked complete.
 
 ### What is in the current build
 
@@ -76,11 +122,11 @@ boundaries, evidence requirements, model, and permissions.
   show the same live progress, the same revision, and the same pending
   decision.
 - **Structured handoffs repair their shape, not their meaning.** A malformed
-  planner or reviewer reply gets conservative syntax normalization, then at
+  planner reply gets conservative syntax normalization, then at
   most two correction turns in the same session with the exact validation
   errors. Corrections cannot invent scope or criteria; every reply is sealed
   for audit, including replies rejected by provider or session checks, and
-  workspace or review-input integrity is re-proved
+  workspace integrity is re-proved
   after each turn.
 - **Long-running, recoverable execution.** There is no arbitrary task
   countdown. Installed workers survive terminal closure and reboot, recover
@@ -92,27 +138,20 @@ boundaries, evidence requirements, model, and permissions.
 - **Per-task autonomy with a global default.** Choose **Auto** or **Full
   access** for the installation, then override it on any task. The exact
   provider permission mode is sealed into the approved scope.
-- **Two quality paths.** **Default** returns deterministic proof quickly.
-  **Strict / release** adds isolated semantic review and a bounded repair loop
-  without silently widening scope or authority. Semantic coverage is reported
-  apart from the machine proof: under strict it is required and only an
-  independent *upholds* satisfies it — a reviewer's *cannot-tell* never counts
-  as covered.
-- **Revisions carry sealed context.** A revision's reviewer sees, beside the
-  revision's own patch, the source files relevant to the inherited criteria —
-  read from git at the exact sealed head, bound to the source run, commit,
-  path, and digest — and must cite that provenance. Anything that could not be
-  sealed (oversized, binary, redacted, stale ancestry, changed criterion) is a
-  named context gap on the task, result, chat, and CLI; an earlier review is
-  context, never an inherited verdict.
-- **Evidence-backed completion.** Every signed criterion resolves to checks,
-  changed paths, screenshots, or manual review. Missing or contradictory proof
-  says **needs verification** instead of pretending the task is done.
+- **Explicit quality choices.** Default uses configured everyday agents;
+  Strict / release requests stronger configured agents. The repository check
+  remains authoritative for checks. Quality never starts a reviewer loop.
+- **Revisions retain context.** Feedback, source result and selected project
+  context remain attached to the task. Each requested revision receives its
+  own scope and approval; earlier results remain available.
+- **Honest completion.** Ready results include actual checks and saved work.
+  The lead or user marks Complete after inspection. Failed checks stay failed;
+  absent optional historical assessments do not block completion.
 
 <div align="center">
   <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/verified-result.png" alt="A verified Standing Orders result card with checks, follow-up notes, and evidence-backed completion details." width="720">
   <br>
-  <sub>Completion is a proof bundle and a closed verdict—not an agent saying “done.”</sub>
+  <sub>Inspect the saved result and actual checks, then mark Complete or request changes.</sub>
 </div>
 
 ## Install
@@ -192,19 +231,10 @@ for people splitting those parts across machines.
    decision — question, options, consequences, which are reversible. It
    arrives in the inbox, on `/next`, and on your phone if Telegram is
    paired; one tap answers it and the build resumes.
-6. **Collect the result.** A build lands in *done recently* with its diff,
-   its evidence bundle — a matrix answering your signed rubric by exact
-   criterion id, pass/missing/failed/manual-review, checks, screenshots
-   for UI-facing work — and a closed verdict: *verified* when the repository's
-   approved verification command passed, *attested* when none is
-   configured and nothing contradicts the proof, *missing evidence* when
-   a requirement lacks support, or *conflicting evidence* when an independent
-   check contradicts the result. Neither
-   state hides the work — the branch and diff stay reviewable, and you can
-   accept with a recorded exception after reviewing it. A scout's report lands on its task page with follow-ups you can
-   file in one tap. Publishing to a branch and a pull request happens only
-   under a publication grant whose terms you approved on the **system**
-   page.
+6. **Collect the result.** A build becomes Ready with its saved diff, checks,
+   available screenshots and limitations. Open the result to mark Complete or
+   request a specific revision. A scout returns a report. Publication requires
+   its own approved grant; task completion alone never publishes or deploys.
 
    Verification can recover one common environment failure without hiding it.
    Run `standing-orders verify set ... --self-heal` without `--yes` first. The
@@ -217,25 +247,12 @@ for people splitting those parts across machines.
    the setup or project check changes, setup fails, files change, the checkout
    moves, unchanged files cannot be confirmed, the worker loses custody, or
    the executable is still missing.
-7. **Review it without the transcript.** The **review** view of builds is a
-   cockpit over completed work: a queue ranked by *review priority* (a
-   labeled, deterministic aid — conflicting or missing evidence, reviewer
-   contradictions, and observed CI failures first; it never rewrites the
-   stored verdict), and one selected result showing the approved goal and
-   boundary, every signed criterion with its adjudicated state and the
-   evidence it cited, the machine's re-run and the agent's own checks
-   labeled apart, reviewer findings, validated screenshots, caveats, the
-   sealed diff with changed files ordered by priority and flagged when they
-   fall outside the signed touches (matched gitignore-style, so `src/**`
-   with `/*.ts` covers nested files), and what the publication watcher
-   actually saw. The queue shows the newest 100 completions; an older
-   result still opens by its own link. The next act sits under the header: review evidence,
-   annotate the diff and create a revision, compare a tournament, or
-   open the pull request — each through the road that already owns it. A
-   task marked done by hand, or built before proofs existed, says so
-   plainly instead of pretending to a verdict.
+7. **Inspect without the transcript.** Open the task's result for its summary,
+   changes and checks. Annotate exact lines and request a revision when needed.
+   Saved history and diagnostics remain available without becoming another
+   mandatory review step. Older results retain their own links.
 
-Everything else is under **more**: the activity ledger, the review cockpit,
+Specialized views remain in **Tools** and **Settings**: the activity ledger, the review cockpit,
 routines (standing orders that file themselves on a schedule), the fleet,
 people (invite a second approver), the operating mode (a signed, expiring
 envelope that pre-approves your own filings), and **chat** — the mate, one
@@ -439,31 +456,20 @@ existing scope or approval.
 
 ### Quality modes
 
-The console's **Settings → quality mode** control chooses how deeply new
-tasks validate their output. **Default** is the streamlined path: the agent
-builds once, returns the signed acceptance matrix, checks, screenshots, and
-diff, and Standing Orders applies its deterministic verdict. A separately
-signed operating mode can still request semantic review on this path.
-
-**Strict / release** signs one additional promise into the task scope: after a
-changed build completes, its hash-verified evidence bundle and sealed diff are
-sent through the isolated reviewer. Reviewer findings are folded back into the
-criterion matrix. A bounded repair task is drafted only when the separately
-approved operating-mode terms authorize repair; Strict never silently expands
-agent permissions or autonomy.
-
-The same selector appears when a task is created and while its scope is still
-editable. The concrete choice is stamped on every run, survives global setting
-changes, and is visible on the task, approval, run-list, and run-detail views.
+The **quality mode** setting selects routine or stronger configured agents.
+**Strict / release** requests the stronger tier; it does not start an isolated
+reviewer or automatic repair. The choice is signed into each scope, survives
+later global changes, and remains visible in approval and run details.
+Repository checks still run through the approved verifier. Publication and
+deployment require their own authority and checks.
 
 ### Explainable phase routing
 
-Which agent plans, builds, repairs, and reviews a task is decided once, from
+Which agent plans, builds, and repairs a task is decided once, from
 signed facts, and written down with its reasons. The route reads the task's
 declared **risk** (routine, elevated, high), its quality mode, what the
 acceptance rubric demands (screenshots, manual review), how far a live
-operating mode may carry the result unattended (an automerge mode strengthens
-the reviewer), and the agents you configured for each phase. Strength is never
+operating mode may carry the result unattended, and the agents you configured for each phase. Strength is never
 inferred from a model's name: the ordinary phase row is the routine tier, and
 `config set <phase> --tier strong --provider <p> --model <m>` names the agent
 high-risk, strict, screenshot-proof, and automerge routes reach for. With no
@@ -472,15 +478,15 @@ strong row, a demanding task keeps the default and says so.
 ```
 standing-orders task scope <id> --goal … --acceptance … --risk high
 standing-orders task route <id>                     # every leg, its reason, its readiness
-standing-orders task route <id> --phase review --provider codex --model gpt-5-codex --as you --token <t>
-standing-orders task route <id> --clear-phase review --as you --token <t>
+standing-orders task route <id> --phase build --provider codex --model gpt-5-codex --as you --token <t>
+standing-orders task route <id> --clear-phase build --as you --token <t>
 standing-orders providers --report --runner <name> --token <t>   # this machine's readiness
 ```
 
 Every leg is **exact**: approvals bind a provider *and* a model id for the
-planner, builder, repair, and reviewer alike, so each phase names its model
+planner, builder, and repair alike, so each phase names its model
 once (`config set plan --provider claude --model <m>`, and the same for
-`build` and `review`; repair inherits the build's model unless a same-provider
+`build`; repair inherits the build's model unless a same-provider
 repair row names another). A phase without an exact model, a repair row on
 another provider, or an unknown provider files the scope **unresolved** with
 the words to fix it — nothing is guessed or substituted. Every override names
@@ -502,8 +508,7 @@ on a timer — and the task page, the chat, and `task show` say **ready**,
 agents, outside what the approval signs; an unavailable provider halts before
 any claim and is never substituted, except that an unavailable primary under
 an approved fallback chain moves to the exact approved next entry (and only
-under a live mode that allows paid fallback). Reviewer admission and fallback
-admission re-check readiness and the exact leg inside their transactions.
+under a live mode that allows paid fallback). Fallback admission re-check readiness and the exact leg inside their transactions.
 Every run is stamped with its route and the actual provider and model at
 admission — set once; a run that would spend as anything else refuses.
 
@@ -699,7 +704,7 @@ terminal dependency, guide a task's next attempt, cancel, or suggest an answer t
 proposal is a card you confirm, with
 every consequence and the builder's recommendation shown beside the
 mate's pick; a scope the mate wrote never seals under an operating mode.
-It never sees a path, a digest, or an account name. Direct API use spends
+Absolute paths, internal digests and account names are redacted; source context includes relative file citations. Direct API use spends
 against a ceiling you set per conversation. The console keeps a live pulse for every
 admitted project beside that shared thread, with one-click fleet questions
 and a direct road to each project's board.
@@ -708,7 +713,7 @@ Every task has an **Overview / Ask** switch. **Ask** opens a focused companion
 to that task without creating another conversation: Standing Orders attaches
 the current task to each new message, keeps the live status beside the thread,
 and offers plain-language starters for status, scope revision, steering, and
-proof review. Proposed guidance is inert until you confirm its card, then it
+result inspection. Proposed guidance is inert until you confirm its card, then it
 reaches the next attempt without interrupting work already running.
 
 New work starts the same way: describe the outcome once in ordinary language.
@@ -720,10 +725,10 @@ choices when you say **use your judgment**. The task card says whether Standing
 Orders will inspect the repository and draft a plan before asking you to
 approve anything.
 
-When a task finishes, both views lead with the same **result receipt**: what
-shipped, proof level, acceptance pass count, sealed diff size, validated UI
-screenshots, and any caveats. Open the full evidence ledger or discuss and
-request changes from there; chat cannot rewrite the stored result.
+When a task finishes, both views lead with the same Ready status and result.
+Open the work and its actual checks, then mark Complete or request changes.
+Historical diagnostics remain available in details; optional missing assessments
+do not create another review stage. Chat cannot rewrite the stored result.
 
 The evidence page opens the sealed patch in a clean **View** mode. Switch to
 **Annotate** only when you need a change: select the exact line, leave plain-
