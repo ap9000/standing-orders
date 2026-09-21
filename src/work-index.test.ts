@@ -69,16 +69,16 @@ describe('indexed work families', () => {
     expect(workIndexPage(store,NOW,{principal:'coordinator',repos:[]}).items).toEqual([]);
     expect(workIndexPage(store,NOW,{principal:'operator',repos:[],includeUnplaced:true}).items.map(i=>i.rootId)).toEqual(['unplaced']);
   });
-  test('Ready is distinct from exact current completion; revoked and foreign actors cannot complete', () => {
+  test('Ready is distinct from historical completion; signer access changes do not reopen accepted work', () => {
     const result=built('done');
     expect(workIndexPage(store,NOW,access).items[0]).toMatchObject({assignmentState:'ready-to-check',resultRunId:result,status:{label:'Ready'}});
     checked('done',result);
     expect(workIndexPage(store,NOW,access).items[0]).toMatchObject({assignmentState:'complete',completion:{actor:'operator:operator'}});
     expect(assignmentOf(store,'done',NOW,access)!.state).toBe('complete');
     store.handle.prepare("UPDATE approver SET projects_json='[\"/private\"]' WHERE name='operator'").run();
-    expect(workIndexPage(store,NOW,access).totals.completed).toBe(0);
+    expect(workIndexPage(store,NOW,access).totals.completed).toBe(1);
     store.handle.prepare("UPDATE approver SET projects_json=NULL,revoked_at=? WHERE name='operator'").run(STAMP);
-    expect(workIndexPage(store,NOW,access).totals.completed).toBe(0);
+    expect(workIndexPage(store,NOW,access).totals.completed).toBe(1);
   });
   test('new exact results, changed scope approval and changed proof invalidate an older recorded completion', () => {
     const result=built('done');checked('done',result);
@@ -165,18 +165,20 @@ describe('indexed work families', () => {
     store.handle.prepare('UPDATE run_process SET exited_at=? WHERE id=?').run(STAMP,process);
     expect(workIndexPage(store,NOW,access).items[0]!.assignmentState).toBe('complete');
   });
-  test('coordinator completion remains bound to the currently active lead and its exact project', () => {
+  test('recorded completion survives coordinator handoff and revocation, retaining original provenance', () => {
     const result=built('owned');
     for(const id of ['first','second']) store.handle.prepare(`INSERT INTO coordinator_credential(cid,name,credential_hash,repos,per_hour,created_by,created_at)
       VALUES(?,?,?, ?,10,'operator',?)`).run(id,id,'unused',JSON.stringify([REPO]),STAMP);
     const own=(id:string)=>store.recordAction({at:STAMP,actor:`coordinator:${id}`,repo:REPO,taskId:'owned',runId:null,action:'assignment claimed',outcome:'owner',source:'work'});
     own('first');checked('owned',result,'coordinator:first');
     expect(workIndexPage(store,NOW,access).totals.completed).toBe(1);
-    own('second');expect(workIndexPage(store,NOW,access).totals.completed).toBe(0);
-    checked('owned',result,'coordinator:second');
+    own('second');expect(workIndexPage(store,NOW,access).totals.completed).toBe(1);
+    expect(workIndexPage(store,NOW,access).items[0]?.completion?.actor).toBe('coordinator:first');
     expect(workIndexPage(store,NOW,access).totals.completed).toBe(1);
-    store.handle.prepare("UPDATE coordinator_credential SET repos='{}' WHERE cid='second'").run();
-    expect(workIndexPage(store,NOW,access).totals.completed).toBe(0);
+    store.handle.prepare("UPDATE coordinator_credential SET repos='{}',revoked_at=? WHERE cid IN ('first','second')").run(STAMP);
+    expect(workIndexPage(store,NOW,access).totals.completed).toBe(1);
+    expect(assignmentOf(store,'owned',NOW,access)?.state).toBe('complete');
+    expect(workIndexPage(store,NOW,{principal:'coordinator',repos:[]}).totals.completed).toBe(0);
   });
   test('same-schema non-migrating readers work without optional indexes and do not create them', () => {
     const directory=mkdtempSync(join(tmpdir(),'so-work-index-legacy-')),file=join(directory,'orders.db');

@@ -1,0 +1,47 @@
+# Shared leads for a team
+
+One installation owns the database and runs the agents. Teammates connect through the browser or CLI using their own accounts. A lead has a stable name, project scope and working instructions; each conversation has its own audience and history.
+
+## Start in the browser
+
+Open Chat, choose **Team chat**, and create a lead for the projects it should handle. Create a Team conversation and use **People** to add existing installation accounts. The add-person form shows the lead's project scope before granting access. An installation operator manages account invitations and project access in People.
+
+Each participant enables chat for themselves after reviewing the configured provider and spending limits. Membership does not grant a spending allowance or approval authority. Send saves a message immediately. Teammates see the author and either **Queued** or **Working**. An author can edit or withdraw a queued message; **Stop** affects the named running turn.
+
+Open a proposed action to inspect its existing terms and confirm it with your own authority. Tasks filed from a shared conversation belong to its lead. Open the saved result, inspect its actual checks, and mark it complete or explicitly request changes. There is no additional model reviewer or automatic repair loop.
+
+Enable automatic updates only in conversations where the lead should summarize new results and decisions. People watching the same conversation share one delivery; each person keeps their own read position. Idle checks make no model calls. A failed response remains visible, and delivery does not rerun its task.
+
+Previous private chat stays private and remains available from Conversations. Creating or joining a team conversation does not copy that history. Lead settings, new conversations and additional leads live under Conversations.
+
+## Connect the CLI
+
+On the installation host, reuse the existing local sign-in without putting its password in shell history:
+
+```sh
+standing-orders connect https://your-server --local-login
+standing-orders lead list --json
+standing-orders conversation list --lead LEAD_ID --json
+standing-orders brief --conversation CONVERSATION_ID --json
+standing-orders chat --conversation CONVERSATION_ID --follow
+```
+
+On another machine, use `connect ... --as ACCOUNT --token-stdin` or a private `--token-file`. Profiles are saved privately. The connection is HTTPS; credentials never travel in URLs. A saved profile makes `chat` and `brief` use the central service. Existing administrative commands remain local; `--local` explicitly selects the previous local chat or brief.
+
+`brief` returns scoped messages, task summaries, proposals and chat terms from the server database. It starts no agent work. `chat --follow` reads changes and is distinct from `conversation follow --enabled true`, which authorizes automatic summaries within the person's existing chat allowance.
+
+To enable sending noninteractively, inspect the terms in the brief, then use `chat --conversation CONVERSATION_ID --authorize --terms-digest DIGEST`. Use `--say TEXT` to send a message and `--request-id` to retain a caller-chosen identity. If delivery is unconfirmed, use `brief --conversation CONVERSATION_ID --request-id REQUEST_ID`; do not invent another request ID and repeat the work. The brief explicitly reports when an older receipt is outside its bounded history page.
+
+`lead create/update/member/transfer` and `conversation create/member/edit/withdraw/read/follow/stop` expose the same central operations. Membership edits and transfers require the current revision. Transfer keeps the task, approved scope, attempts and completed result; it changes the responsible lead.
+
+## Boundaries of this release
+
+Shared coordination uses existing task execution and approval controls. Direct native coding sessions remain private to the installation operator; team membership does not make the host filesystem or native provider login shareable. External agent wake adapters and automatic cross-lead delegation are not enabled. The paused external Codex watcher stays paused.
+
+Conversation project scopes are fixed. Create a fresh conversation when the audience needs a different scope. Legacy coordinator ownership remains readable and can be explicitly transferred; legacy private history is not automatically turned into shared lead history.
+
+The queue admits up to four conversations per runtime and two per lead. One conversation has one writer. Human messages take priority over recent automatic summaries; waiting summaries gain priority without interrupting active work. Budget exhaustion preserves queued messages. Changed provider terms need fresh consent. Unknown delivery blocks another writer until the recorded activity is inspected; a timeout never counts as permission to repeat work.
+
+Shared updates consume existing assignment-status records with a durable cursor. Some older task producers still use bounded reconciliation, so this is delivery of recorded observations, not a guarantee that every intermediate task transition is captured. Browser streams carry cheap refresh hints. CLI follow uses bounded read polling. Neither is a scheduled model conversation.
+
+See [the load measurements](team-leads-load.md) for the synthetic 10,000-task fixture and its network and browser limitations.

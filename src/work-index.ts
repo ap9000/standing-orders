@@ -31,7 +31,7 @@ export type WorkIndexItem = {
   completion: { actor: string; at: string; digest: string } | null;
   evidence: 'recorded';
 };
-export type WorkIndexOptions = { view?: WorkView; limit?: number; cursor?: string | null; project?: string | null; state?: TaskState };
+export type WorkIndexOptions = { view?: WorkView; limit?: number; cursor?: string | null; project?: string | null; state?: TaskState; leadId?: string };
 export type WorkIndexPage = { items: WorkIndexItem[]; totals: WorkIndexCounts; projects: WorkProjectCounts[]; nextCursor: string | null; limit: number; view: WorkView };
 export type WorkProjectCounts = { repo: string | null; totals: WorkIndexCounts; queued: number; doneRecently: number };
 
@@ -174,11 +174,7 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
     AND a.action='assignment handoff checked' AND a.source='work' AND a.repo IS f.repo
     AND length(a.outcome)=64 AND a.outcome NOT GLOB '*[^a-f0-9]*'
     AND a.at>=f.family_updated AND a.at>=f.finished_at AND a.at>=f.approved_at AND a.at>=f.proposed_at
-    AND (EXISTS(SELECT 1 FROM approver person WHERE a.actor='operator:'||person.name AND person.role='approver' AND person.revoked_at IS NULL
-      AND so_work_operator_access(person.projects_json,f.repo))
-      OR EXISTS(SELECT 1 FROM coordinator_credential lead WHERE lead.cid=f.owner_id AND a.actor='coordinator:'||lead.cid AND lead.revoked_at IS NULL
-        AND CASE WHEN json_valid(lead.repos) THEN json_type(lead.repos)='array' ELSE 0 END
-        AND EXISTS(SELECT 1 FROM json_each(CASE WHEN json_valid(lead.repos) THEN lead.repos ELSE '[]' END) WHERE value=f.repo)))
+    AND (a.actor GLOB 'operator:?*' OR a.actor GLOB 'coordinator:?*' OR a.actor GLOB 'lead:?*')
     AND (cm.changed_id IS NULL OR a.id>=cm.changed_id) AND (cm.artifact_at IS NULL OR a.at>=cm.artifact_at)
     AND NOT EXISTS(SELECT 1 FROM proof_verdict p WHERE p.run=f.result_id AND p.decided_at>a.at)
     AND NOT EXISTS(SELECT 1 FROM proof_acceptance p WHERE p.run=f.result_id AND p.accepted_at>a.at)
@@ -226,7 +222,7 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
       WHEN code IN ('updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') THEN 2 ELSE 0 END rank,
     CASE WHEN code='complete' THEN completed.at ELSE family_updated END sort_at,
     completed.actor checked_actor,completed.at checked_at,completed.outcome checked_digest
-  FROM classified c LEFT JOIN action_ledger completed ON completed.id=c.checked_id WHERE ($state IS NULL OR c.state=$state)
+  FROM classified c LEFT JOIN action_ledger completed ON completed.id=c.checked_id WHERE ($state IS NULL OR c.state=$state) AND ($leadId IS NULL OR EXISTS(SELECT 1 FROM team_task_owner own WHERE own.task_ref=c.root_ref AND own.lead=$leadId))
 )`;
 
 const registered = new WeakMap<object, string>();
@@ -260,7 +256,7 @@ function parameters(now: Date, access: WorkSummaryAccess, options: WorkIndexOpti
   return { $now: now.toISOString(), $alive: new Date(now.getTime() - 180_000).toISOString(),
     $all: access.repos === null ? 1 : 0, $repos: JSON.stringify(access.repos ?? []),
     $unplaced: access.principal === 'operator' && access.includeUnplaced === true ? 1 : 0,
-    $projectSet: options.project != null ? 1 : 0, $project: options.project ?? null, $state: options.state ?? null };
+    $projectSet: options.project != null ? 1 : 0, $project: options.project ?? null, $state: options.state ?? null, $leadId: options.leadId ?? null };
 }
 function counts(row: Row): WorkIndexCounts {
   return { all: n(row, 'all_count'), 'needs-you': n(row, 'needs_count'), running: n(row, 'running_count'), completed: n(row, 'completed_count') };
@@ -276,7 +272,7 @@ function cursorScope(access: WorkSummaryAccess, options: WorkIndexOptions, view:
   return createHash('sha256').update(JSON.stringify({ principal: access.principal,
     repos: access.repos === null ? null : [...new Set(access.repos)].sort(),
     unplaced: access.principal === 'operator' && access.includeUnplaced === true,
-    project: options.project ?? null, state: options.state ?? null, view })).digest('hex');
+    leadId: options.leadId ?? null, project: options.project ?? null, state: options.state ?? null, view })).digest('hex');
 }
 function readCursor(value: string | null | undefined, scope: string): Cursor | null {
   if (value == null) return null;

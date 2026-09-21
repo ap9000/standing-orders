@@ -24,7 +24,7 @@ const fail = (reason: Failure["reason"], message: string): Failure => ({ ok: fal
 const actor = (owner: AssignmentOwner) => `coordinator:${owner.id}`;
 const keyFor = (owner: AssignmentOwner, consumer: string) => createHash("sha256").update(JSON.stringify([owner.id, consumer])).digest("hex");
 const validConsumer = (value: unknown): value is string => typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(value);
-const ownerSql = `COALESCE((SELECT a.actor FROM action_ledger a WHERE a.task_id = t.external_id
+const ownerSql = `COALESCE((SELECT 'lead:'||o.lead FROM team_task_owner o WHERE o.task_ref=t.id),(SELECT a.actor FROM action_ledger a WHERE a.task_id = t.external_id
   AND a.action = 'assignment claimed' AND a.source = 'work' ORDER BY a.id DESC LIMIT 1),
   'coordinator:' || t.coordinator_cid)`;
 

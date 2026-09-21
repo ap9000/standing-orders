@@ -17,6 +17,7 @@ import { executeSharedAction, sharedActionPayload, sharedActionNeedsReview, type
 import { verifiedAuthor, type CoordinatorProposal, type MateProposal, type Store } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
 import { isVerifiedApprover, reproveApprover } from "./principal.js";
+import { TeamLeads } from './team-leads.js';
 import { fileTaskProposal } from "./proposal.js";
 import { proposeGuarded } from "./scope.js";
 import { isRiskLevel, PHASES, riskTitle, specWords } from "./phase-routing.js";
@@ -108,8 +109,9 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
     const proposal = store.getMateProposal(proposalId);
     if (proposal === null) return { ok: false, kind: null, reason: "not-yours", said: "no such proposal" } as const;
     const thread = store.getMateThread(proposal.thread);
-    if (thread === null || thread.approver !== who.name) return { ok: false, kind: null, reason: "not-yours", said: "no such proposal" } as const;
-    const session = store.activeMateSession(who.name);
+    const shared = thread !== null && store.handle.prepare("SELECT id,lead FROM team_conversation WHERE thread=?").get(thread.id);
+    if (thread === null || (shared ? !store.canUseTeamMateThread(who.name, who.generation, thread.id) : thread.approver !== who.name)) return { ok: false, kind: null, reason: "not-yours", said: "no such proposal" } as const;
+    const session = shared ? store.teamMateSession(who.name, thread.id) : store.activeMateSession(who.name);
     if (session === null || session.approverGeneration !== who.generation) {
       return { ok: false, kind: proposal.kind, reason: "session-ended", said: "the mate session this was proposed in has ended — its cards cannot be confirmed" } as const;
     }
@@ -147,6 +149,10 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
     // The recorded outcome names the surface that confirmed — the audit a
     // card shows on every other surface afterwards.
     store.casMateProposal(proposalId, "confirming", outcome.ok ? "confirmed" : "refused", who.name, { ...outcome, via: options.via }, now);
+    if(shared){
+      if(outcome.ok&&outcome.kind==='task'&&outcome.taskId) new TeamLeads(store,()=>store.handle.prepare('SELECT project FROM team_lead_project WHERE lead=?').all(shared['lead']).map(row=>String(row['project']))).recordTaskOwner(outcome.taskId,String(shared['lead']),String(shared['id']),{name:who.name,generation:who.generation},now);
+      store.handle.prepare('INSERT INTO team_event(lead,conversation,kind,actor,created_at) VALUES(?,?,?,?,?)').run(shared['lead'],shared['id'],'proposal-changed',who.name,now.toISOString());
+    }
     return outcome;
   });
   for (const signal of signals) signal();
@@ -160,8 +166,11 @@ export function dismissMateProposal(store: Store, who: VerifiedApprover, proposa
     if (!reproveApprover(store, who).ok) return false;
     const proposal = store.getMateProposal(proposalId);
     const thread = proposal === null ? null : store.getMateThread(proposal.thread);
-    if (proposal === null || thread === null || thread.approver !== who.name) return false;
-    return store.casMateProposal(proposalId, "pending", "dismissed", who.name, null, now);
+    const shared=thread&&store.handle.prepare('SELECT id,lead FROM team_conversation WHERE thread=?').get(thread.id);
+    if (proposal === null || thread === null || (shared ? !store.canUseTeamMateThread(who.name, who.generation, thread.id) : thread.approver !== who.name)) return false;
+    const changed=store.casMateProposal(proposalId, "pending", "dismissed", who.name, null, now);
+    if(changed&&shared)store.handle.prepare('INSERT INTO team_event(lead,conversation,kind,actor,created_at) VALUES(?,?,?,?,?)').run(shared['lead'],shared['id'],'proposal-changed',who.name,now.toISOString());
+    return changed;
   });
 }
 

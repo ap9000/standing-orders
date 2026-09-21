@@ -18,6 +18,7 @@ import {
 import { OPERATE_COMMANDS, TOP_LEVEL_COMMANDS, SKILLS_ACTIONS, SKILLS_FLAGS, CONTRACT_FLAGS, main } from "./cli.js";
 import { DOCUMENTED_REASONS } from "./envelope.js";
 import { SESSION_CLI_ACTIONS, sessionCliFlags } from './session-cli.js';
+import { TEAM_CLI_ACTIONS } from './team-cli.js';
 import { sessionDescriptor } from './session-contract.js';
 import { ASSIGNMENT_ACTIONS } from './assignment-adapters.js';
 
@@ -57,6 +58,7 @@ describe("the declared command guide, held to the code", () => {
     expect([...subs("keys")].sort()).toEqual([...KEYS_ACTIONS].sort());
     expect([...subs("skills")].sort()).toEqual([...SKILLS_ACTIONS].sort());
     expect([...subs('session')].sort()).toEqual([...SESSION_CLI_ACTIONS].sort());
+    for (const root of ['lead', 'conversation']) expect([...subs(root)].sort()).toEqual(TEAM_CLI_ACTIONS.filter(action => action.startsWith(`${root} `)).map(action => action.split(' ')[1]).sort());
     expect([...subs('assignment')].sort()).toEqual([...ASSIGNMENT_ACTIONS].sort());
   });
 

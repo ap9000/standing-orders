@@ -1,6 +1,8 @@
 # Team leads on one central installation
 
-Design proposal · 21 September 2026 · implementation has not started.
+Accepted design · 21 September 2026 · shared coordination implemented; release verification pending.
+
+The shipped command contract and deliberately deferred capabilities are documented in [Shared leads for a team](../team-leads.md). The examples and targets below preserve the accepted design, rather than claiming every future adapter or performance target is implemented.
 
 The confirmed audience is a team using one central Standing Orders installation. Preserve Chat, Tasks and Projects. Default to one shared team lead; add specialist leads only when their responsibilities, project access or working instructions differ. People connect to the central service through browser or CLI. The service owns the database, execution sessions and delivery bookkeeping.
 

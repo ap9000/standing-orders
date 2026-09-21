@@ -3,7 +3,7 @@
  * are append-only actions; handoffs use the existing durable outbox. */
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import type { Store, ProofVerdictRow, ProofAcceptanceRow, Artifact } from "./store.js";
+import { readSchemaVersion, type Store, type ProofVerdictRow, type ProofAcceptanceRow, type Artifact } from "./store.js";
 import { approvalOf } from "./scope.js";
 import { openWorkDecisionOf, taskWorkSummaryOf, workDecisionAction, type WorkAction, type WorkSummaryAccess } from "./work-summary.js";
 import { evidenceRoot, readVerifiedArtifact, readVerifiedReport } from "./evidence.js";
@@ -13,7 +13,7 @@ import { noteAssignmentStatus } from "./assignment-status.js";
 import { historicalAssessmentReason } from "./assignment-presentation.js";
 
 export type AssignmentAccess = WorkSummaryAccess;
-export type AssignmentOwner = { kind: "coordinator"; id: string; label: string };
+export type AssignmentOwner = { kind: "coordinator" | "lead"; id: string; label: string };
 export type AssignmentChecks = {
   status: "passed" | "failed" | "not-run" | "unavailable";
   exitCode: number | null; command: string | null; logArtifactId: number | null; detail: string;
@@ -62,9 +62,18 @@ export function assignmentBrief(assignment: AssignmentSnapshot | null) {
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const OWNER_ACTION = "assignment claimed";
 const CHECK_ACTION = "assignment handoff checked";
-const actorOf = (owner: AssignmentOwner) => `coordinator:${owner.id}`;
+const actorOf = (owner: AssignmentOwner) => `${owner.kind}:${owner.id}`;
 
 function ownerOf(store: Store, rootId: string, repo: string | null): AssignmentSnapshot["owner"] {
+  // The release verifier reads the new projection against the still-running
+  // v70 Store before migrating a backup. That read cannot invent team tables.
+  const hasTeam = store.handle.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='team_task_owner'").get() !== undefined;
+  if (!hasTeam) {
+    const version = readSchemaVersion(store.handle);
+    if (!version.ok || version.version !== 70) throw new Error("Team ownership history is missing; refusing to recreate it.");
+  }
+  const team = hasTeam ? store.handle.prepare("SELECT l.id,l.name,l.status FROM team_task_owner o JOIN team_lead l ON l.id=o.lead JOIN task_ref r ON r.id=o.task_ref WHERE r.backend='built-in' AND r.external_id=? AND r.repo IS ?").get(rootId,repo) : undefined;
+  if (team) return { kind: "lead", id: String(team["id"]), label: String(team["name"]), active: team["status"] === "active" };
   const claim = store.handle.prepare("SELECT actor FROM action_ledger WHERE task_id = ? AND action = ? AND source = 'work' ORDER BY id DESC LIMIT 1").get(rootId, OWNER_ACTION);
   const origin = store.lookupRef(rootId)?.coordinatorCid;
   const id = claim === undefined ? origin : String(claim["actor"]).replace(/^coordinator:/, "");
@@ -189,16 +198,15 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
       : receipt.checks.detail;
     primaryAction = { code: "open-result", label: completionKind === "research-report" ? "Read report" : receipt.checks.status === "failed" ? "Inspect failed check" : completionKind === "accepted-exception" ? "Review acceptance" : "Open result", target: { taskId: current.id, runId: result!.id, decisionId: null }, access: "read", retry: "read-again" };
     const checked = store.handle.prepare("SELECT actor,at FROM action_ledger WHERE task_id = ? AND run_id = ? AND action = ? AND outcome = ? AND source = 'work' ORDER BY id DESC")
-      .all(family.root.id, result!.id, CHECK_ACTION, receipt.digest).find(row => {
-        const actor = String(row["actor"]);
-        return owner?.active && actor === actorOf(owner) || actor.startsWith("operator:") &&
-          store.accountOf(actor.slice(9))?.role === "approver" && store.accountCanAccess(actor.slice(9), current.repo);
-      });
+      .all(family.root.id, result!.id, CHECK_ACTION, receipt.digest).find(row => /^(operator|coordinator|lead):.+/.test(String(row["actor"])));
+    // This ledger fact was authorized when written. Credential rotation,
+    // membership changes and ownership transfer cannot revoke past completion.
+    // The exact result digest still fences changes to work, scope and history.
     if (checked !== undefined) {
       completion = { actor: String(checked["actor"]), at: String(checked["at"]), digest: receipt.digest };
       state = "complete";
       primaryAction = { ...primaryAction, label: completionKind === "research-report" ? "Read report" : "Open result" };
-      const label = completion.actor.startsWith("operator:") ? completion.actor.slice(9) : owner!.label;
+      const label = completion.actor.startsWith("operator:") ? completion.actor.slice(9) : owner && completion.actor === actorOf(owner) ? owner.label : "the previous lead";
       detail = completionKind === "research-report" ? `Research report checked by ${label}. No deployment is implied.`
         : `Handled by ${label}. ${receipt.checks.detail} Publication and deployment are separate.`;
     }
@@ -228,7 +236,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   }
   if (state !== "complete") completion = null;
   if (current.state !== "cancelled") attention.push(...questions.map(question => question.decision.question));
-  if (owner !== null && !owner.active) attention.push("The previous lead no longer has access. Another lead can claim this assignment.");
+  if (owner !== null && !owner.active) attention.push(owner.kind === "lead" ? "This lead is paused. A manager can resume it or transfer responsibility." : "The previous lead no longer has access. Another lead can claim this assignment.");
   const handoff = state === "ready-to-check" || state === "complete" ? { kind: "result" as const, digest: receipt!.digest, acknowledged: state === "complete" }
     : state === "cancelled" ? { kind: "attention" as const, digest: digest({ root: family.root.id, current: current.id, state }), acknowledged: false }
     : state === "needs-decision" ? { kind: primaryAction?.target.decisionId != null ? "decision" as const : "attention" as const,
@@ -258,6 +266,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
 
 type MutationResult = { ok: true; assignment: AssignmentSnapshot } | { ok: false; reason: string; message: string };
 function admittedOwner(store: Store, taskId: string, owner: AssignmentOwner, now: Date, root?: string): AssignmentSnapshot | null {
+  if (owner.kind !== "coordinator") return null; // A stable lead is identity, not a bearer credential.
   const row = store.handle.prepare("SELECT repos, revoked_at FROM coordinator_credential WHERE cid = ?").get(owner.id);
   if (row === undefined || row["revoked_at"] !== null) return null;
   let repos: unknown;
@@ -269,7 +278,7 @@ export function claimAssignment(store: Store, taskId: string, owner: AssignmentO
   return store.transact(() => {
     const current = admittedOwner(store, taskId, owner, now, root);
     if (current === null) return { ok: false, reason: "not-found", message: "No assignment is available in your projects." };
-    if (current.owner?.active && current.owner.id !== owner.id) return { ok: false, reason: "owned", message: "Another lead already owns this assignment." };
+    if (current.owner?.kind === "lead" || current.owner?.active && current.owner.id !== owner.id) return { ok: false, reason: "owned", message: "Another lead already owns this assignment." };
     if (current.owner?.id !== owner.id) {
       store.recordAction({ at: now.toISOString(), actor: actorOf(owner), repo: current.repo,
         taskId: current.rootId, runId: null, action: OWNER_ACTION, outcome: "owner", source: "work" });
@@ -316,7 +325,7 @@ export function checkAssignment(store: Store, taskId: string, receiptDigest: str
   return store.transact(() => {
     const current = admittedOwner(store, taskId, owner, now, root);
     if (current === null) return { ok: false, reason: "not-found", message: "No assignment is available in your projects." };
-    if (current.owner?.id !== owner.id || !current.owner.active) return { ok: false, reason: "not-owner", message: "Claim this assignment before checking its handoff." };
+    if (current.owner?.kind !== owner.kind || current.owner.id !== owner.id || !current.owner.active) return { ok: false, reason: "not-owner", message: "Claim this assignment before checking its handoff." };
     return acknowledgeCurrent(store, current, receiptDigest, actorOf(owner), now, root, { principal: "coordinator", repos: [current.repo!] });
   });
 }
@@ -351,7 +360,7 @@ export function syncAssignmentHandoffs(store: Store, now: Date, repos: readonly 
   const cursor = store.serviceCursor(key);
   const rows = store.handle.prepare(`SELECT t.id,t.external_id FROM task_ref t WHERE t.backend = 'built-in' AND t.revision_of IS NULL
     AND t.repo IN (SELECT value FROM json_each(?)) AND t.id > ?
-    AND (t.coordinator_cid IS NOT NULL OR EXISTS (SELECT 1 FROM action_ledger a WHERE a.task_id = t.external_id AND a.action = ?))
+    AND (t.coordinator_cid IS NOT NULL OR EXISTS(SELECT 1 FROM team_task_owner o WHERE o.task_ref=t.id) OR EXISTS (SELECT 1 FROM action_ledger a WHERE a.task_id = t.external_id AND a.action = ?))
     ORDER BY t.id LIMIT 50`).all(JSON.stringify(repos), cursor, OWNER_ACTION);
   for (const row of rows) {
     const assignment = assignmentOf(store, String(row["external_id"]), now, { principal: "operator", repos }, root);
